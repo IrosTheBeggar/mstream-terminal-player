@@ -110,7 +110,7 @@ fn engine_error(e: EngineError, fallback: &str) -> Resp {
         EngineError::OutOfBounds => error_response("Index out of bounds"),
         EngineError::EndOfQueue => error_response("Already at end of queue"),
         EngineError::Seek(_) => error_response(&e.to_string()),
-        EngineError::Unplayable => error_response(fallback),
+        EngineError::Unplayable(_) => error_response(fallback),
     }
 }
 
@@ -188,7 +188,7 @@ pub fn run(opts: ServeOptions) -> Result<(), String> {
         let response = match (method, path.as_str()) {
             (Method::Post, "/play") => match body.as_deref() {
                 Some(b) => match parse::<PlayRequest>(b) {
-                    Ok(req) => match engine.play_file(req.file) {
+                    Ok(req) => match engine.play_source(req.file, None) {
                         Ok(()) => ok_resp(),
                         Err(e) => engine_error(e, "Failed to play file"),
                     },

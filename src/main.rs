@@ -1,4 +1,5 @@
 mod engine;
+mod play_cmd;
 mod serve;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -23,6 +24,8 @@ struct Cli {
 enum Command {
     /// Run the headless server-audio engine (jukebox mode)
     Serve(ServeArgs),
+    /// Play one source and exit — end-to-end streaming/seek smoke test
+    Play(play_cmd::PlayArgs),
 }
 
 #[derive(Args)]
@@ -53,6 +56,9 @@ fn main() {
     let cli = Cli::parse();
 
     let serve_args = match (cli.command, cli.port) {
+        (Some(Command::Play(args)), _) => {
+            std::process::exit(play_cmd::run(args));
+        }
         (Some(Command::Serve(args)), _) => Some(args),
         // Legacy spawn contract: bare `--port N`.
         (None, Some(port)) => Some(ServeArgs {

@@ -7,13 +7,15 @@ description = "Terminal player and headless server-audio engine for mStream"
 repository = "https://github.com/IrosTheBeggar/mstream-terminal-player"
 
 [dependencies]
-rodio = { version = "0.20", features = ["symphonia-all"] }
+rodio = { version = "0.22", features = ["symphonia-all"] }
 tiny_http = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 symphonia = { version = "0.5", features = ["all"] }
 clap = { version = "4", features = ["derive", "env"] }
 fastrand = "2"
+stream-download = "0.24.2"
+tokio = { version = "1.53.1", features = ["rt-multi-thread"] }
 
 [profile.release]
 strip = true

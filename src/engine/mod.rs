@@ -5,6 +5,13 @@
 //! across track changes, manual next/previous bypass loop-one, device failures are
 //! errors instead of panics, and removing the current queue entry while stopped no
 //! longer starts playback.
+//!
+//! Phase 2: sources may be local paths or http(s) URLs. URLs stream through
+//! stream-download (buffered Read+Seek over range requests — see http.rs).
+//! Queue entries carry an optional duration hint so remote tracks don't need
+//! a costly second fetch to probe duration.
+
+pub(crate) mod http;
 
 use std::fmt;
 use std::fs::File;
@@ -12,7 +19,8 @@ use std::io::BufReader;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
+use rodio::mixer::Mixer;
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 use serde::Serialize;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
@@ -51,8 +59,10 @@ impl LoopMode {
 pub enum EngineError {
     /// Output device could not be opened (missing, removed, or busy).
     NoDevice(String),
-    /// File could not be opened or decoded.
-    Unplayable,
+    /// Source could not be opened, fetched, or decoded. Carries the reason
+    /// for logs/CLI; the serve API maps this to its historical route-specific
+    /// message regardless.
+    Unplayable(String),
     OutOfBounds,
     EndOfQueue,
     Seek(String),
@@ -62,7 +72,7 @@ impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EngineError::NoDevice(e) => write!(f, "Audio device unavailable: {}", e),
-            EngineError::Unplayable => write!(f, "File could not be played"),
+            EngineError::Unplayable(e) => write!(f, "Source could not be played: {}", e),
             EngineError::OutOfBounds => write!(f, "Index out of bounds"),
             EngineError::EndOfQueue => write!(f, "Already at end of queue"),
             EngineError::Seek(e) => write!(f, "Seek failed: {}", e),
@@ -74,9 +84,23 @@ impl std::error::Error for EngineError {}
 
 // ── Queue bookkeeping (kept free of audio handles so it unit-tests without a device) ──
 
+#[derive(Debug, Clone)]
+pub struct QueueEntry {
+    pub path: String,
+    /// Known duration in seconds (e.g. from mStream's DB). Spares remote
+    /// sources a second fetch just to probe duration.
+    pub duration_hint: Option<f64>,
+}
+
+impl QueueEntry {
+    pub fn new(path: String) -> Self {
+        QueueEntry { path, duration_hint: None }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct QueueState {
-    pub queue: Vec<String>,
+    pub queue: Vec<QueueEntry>,
     pub index: usize,
     pub shuffle: bool,
     pub loop_mode: LoopMode,
@@ -163,8 +187,16 @@ pub struct QueueSnapshot {
 
 // ── Player state ────────────────────────────────────────────────────────────
 
+/// A decoded source ready to attach to a fresh sink. Two concrete decoder
+/// types (local file vs HTTP reader) — kept as an enum so both open paths
+/// share the sink-swap tail without generic-bound gymnastics.
+enum Opened {
+    Local(Decoder<BufReader<File>>),
+    Http(Decoder<http::HttpReader>),
+}
+
 struct State {
-    sink: Sink,
+    sink: Player,
     current_file: String,
     duration: f64,
     stopped: bool,
@@ -175,33 +207,76 @@ struct State {
 
 impl State {
     /// Start playing q.queue[q.index]. Opens and decodes BEFORE touching the
-    /// running sink, so a bad file leaves current playback untouched (same
+    /// running sink, so a bad source leaves current playback untouched (same
     /// ordering as the original).
-    fn start_current(&mut self, handle: &OutputStreamHandle) -> Result<(), EngineError> {
+    ///
+    /// The decoder is always given `byte_len` when we know it (file metadata
+    /// or HTTP Content-Length): symphonia's FLAC reader needs the total
+    /// length for binary-search seeking on files without a SEEKTABLE block —
+    /// rodio 0.20 hardcoded byte_len to None, which made those files
+    /// unseekable (audit finding #13).
+    fn start_current(&mut self, mixer: &Mixer) -> Result<(), EngineError> {
         if self.q.index >= self.q.queue.len() {
             return Err(EngineError::OutOfBounds);
         }
-        let path = self.q.queue[self.q.index].clone();
-        let file = File::open(&path).map_err(|e| {
-            eprintln!("[engine] open failed for {}: {}", path, e);
-            EngineError::Unplayable
-        })?;
-        let source = Decoder::new(BufReader::new(file)).map_err(|e| {
-            eprintln!("[engine] decode failed for {}: {}", path, e);
-            EngineError::Unplayable
-        })?;
-        let duration = probe_duration(&path);
+        let entry = self.q.queue[self.q.index].clone();
+        let path = entry.path;
+
+        let (opened, duration) = if http::is_http_url(&path) {
+            let redacted = http::redact_source(&path);
+            let opener = http::opener().map_err(|e| {
+                eprintln!("[engine] {}", e);
+                EngineError::Unplayable(e)
+            })?;
+            let (reader, content_length) = opener.open(&path).map_err(|e| {
+                eprintln!("[engine] open failed for {}: {}", redacted, e);
+                EngineError::Unplayable(e)
+            })?;
+            if content_length.is_none() {
+                eprintln!(
+                    "[engine] {}: no content length — seek limited to downloaded data",
+                    redacted
+                );
+            }
+            let mut builder = Decoder::builder().with_data(reader).with_seekable(true);
+            if let Some(len) = content_length {
+                builder = builder.with_byte_len(len);
+            }
+            let decoder = builder.build().map_err(|e| {
+                eprintln!("[engine] decode failed for {}: {}", redacted, e);
+                EngineError::Unplayable(e.to_string())
+            })?;
+            let duration = entry
+                .duration_hint
+                .or_else(|| decoder.total_duration().map(|d| d.as_secs_f64()))
+                .unwrap_or(0.0);
+            (Opened::Http(decoder), duration)
+        } else {
+            let file = File::open(&path).map_err(|e| {
+                eprintln!("[engine] open failed for {}: {}", path, e);
+                EngineError::Unplayable(e.to_string())
+            })?;
+            let byte_len = file.metadata().ok().map(|m| m.len());
+            let mut builder =
+                Decoder::builder().with_data(BufReader::new(file)).with_seekable(true);
+            if let Some(len) = byte_len {
+                builder = builder.with_byte_len(len);
+            }
+            let decoder = builder.build().map_err(|e| {
+                eprintln!("[engine] decode failed for {}: {}", path, e);
+                EngineError::Unplayable(e.to_string())
+            })?;
+            let duration = entry.duration_hint.unwrap_or_else(|| probe_duration(&path));
+            (Opened::Local(decoder), duration)
+        };
 
         self.sink.stop();
-        let sink = match Sink::try_new(handle) {
-            Ok(s) => s,
-            Err(e) => {
-                self.stopped = true;
-                return Err(EngineError::NoDevice(e.to_string()));
-            }
-        };
+        let sink = Player::connect_new(mixer);
         sink.set_volume(self.volume);
-        sink.append(source);
+        match opened {
+            Opened::Local(d) => sink.append(d),
+            Opened::Http(d) => sink.append(d),
+        }
         self.sink = sink;
         self.current_file = path;
         self.duration = duration;
@@ -217,16 +292,18 @@ impl State {
 }
 
 pub struct Engine {
-    _stream: OutputStream,
-    handle: OutputStreamHandle,
+    // Field order matters: `state` (and the Players inside it) must drop
+    // before the device sink that owns the output stream.
     state: Arc<Mutex<State>>,
+    device: MixerDeviceSink,
 }
 
 impl Engine {
     pub fn new() -> Result<Self, EngineError> {
-        let (stream, handle) =
-            OutputStream::try_default().map_err(|e| EngineError::NoDevice(e.to_string()))?;
-        let sink = Sink::try_new(&handle).map_err(|e| EngineError::NoDevice(e.to_string()))?;
+        let mut device = DeviceSinkBuilder::open_default_sink()
+            .map_err(|e| EngineError::NoDevice(e.to_string()))?;
+        device.log_on_drop(false);
+        let sink = Player::connect_new(device.mixer());
 
         let state = Arc::new(Mutex::new(State {
             sink,
@@ -242,16 +319,16 @@ impl Engine {
             },
         }));
 
-        Ok(Engine { _stream: stream, handle, state })
+        Ok(Engine { state, device })
     }
 
-    /// Clear the queue, add one file, play it.
-    pub fn play_file(&self, path: String) -> Result<(), EngineError> {
+    /// Clear the queue, add one source (path or URL), play it.
+    pub fn play_source(&self, source: String, duration_hint: Option<f64>) -> Result<(), EngineError> {
         let mut s = self.state.lock().unwrap();
         s.q.queue.clear();
-        s.q.queue.push(path);
+        s.q.queue.push(QueueEntry { path: source, duration_hint });
         s.q.index = 0;
-        s.start_current(&self.handle)
+        s.start_current(self.device.mixer())
     }
 
     pub fn pause(&self) {
@@ -289,8 +366,11 @@ impl Engine {
         let s = self.state.lock().unwrap();
         let is_empty = s.sink.empty();
         let is_paused = s.sink.is_paused();
+        // `stopped` is ours and set synchronously; sink.empty() lags a stop()
+        // by one audio callback, which made /status report playing=true for a
+        // few ms after /stop (audit finding #12, inherited from the original).
         Status {
-            playing: !is_empty && !is_paused,
+            playing: !is_empty && !is_paused && !s.stopped,
             paused: is_paused,
             position: s.sink.get_pos().as_secs_f64(),
             duration: s.duration,
@@ -308,7 +388,7 @@ impl Engine {
         match pick_next(&s.q, true) {
             Some(idx) => {
                 s.q.index = idx;
-                s.start_current(&self.handle)
+                s.start_current(self.device.mixer())
             }
             None => Err(EngineError::EndOfQueue),
         }
@@ -319,14 +399,14 @@ impl Engine {
         if s.q.index == 0 {
             if s.q.loop_mode == LoopMode::All && !s.q.queue.is_empty() {
                 s.q.index = s.q.queue.len() - 1;
-                s.start_current(&self.handle)
+                s.start_current(self.device.mixer())
             } else {
                 let _ = s.sink.try_seek(Duration::ZERO);
                 Ok(())
             }
         } else {
             s.q.index -= 1;
-            s.start_current(&self.handle)
+            s.start_current(self.device.mixer())
         }
     }
 
@@ -340,25 +420,29 @@ impl Engine {
         s.q.loop_mode
     }
 
-    /// Append one file; if the queue was empty and nothing is playing, start.
+    /// Append one source; if the queue was empty and nothing is playing, start.
     /// Failure to start is deliberately not an error (matches the original).
     pub fn queue_add(&self, file: String) {
+        self.queue_add_entry(QueueEntry::new(file));
+    }
+
+    pub fn queue_add_entry(&self, entry: QueueEntry) {
         let mut s = self.state.lock().unwrap();
         let was_empty = s.q.queue.is_empty();
-        s.q.queue.push(file);
+        s.q.queue.push(entry);
         if was_empty && s.sink.empty() {
             s.q.index = 0;
-            let _ = s.start_current(&self.handle);
+            let _ = s.start_current(self.device.mixer());
         }
     }
 
     pub fn queue_add_many(&self, files: Vec<String>) {
         let mut s = self.state.lock().unwrap();
         let was_empty = s.q.queue.is_empty();
-        s.q.queue.extend(files);
+        s.q.queue.extend(files.into_iter().map(QueueEntry::new));
         if was_empty && s.sink.empty() && !s.q.queue.is_empty() {
             s.q.index = 0;
-            let _ = s.start_current(&self.handle);
+            let _ = s.start_current(self.device.mixer());
         }
     }
 
@@ -368,7 +452,7 @@ impl Engine {
             return Err(EngineError::OutOfBounds);
         }
         s.q.index = index;
-        s.start_current(&self.handle)
+        s.start_current(self.device.mixer())
     }
 
     pub fn queue_remove(&self, index: usize) -> Result<(), EngineError> {
@@ -386,7 +470,7 @@ impl Engine {
                 // playing; the original started audio as a side effect of
                 // removing a track while stopped.
                 if !s.stopped {
-                    let _ = s.start_current(&self.handle);
+                    let _ = s.start_current(self.device.mixer());
                 }
             }
             RemoveOutcome::RemovedBeforeCurrent | RemoveOutcome::RemovedAfterCurrent => {}
@@ -404,7 +488,10 @@ impl Engine {
 
     pub fn queue_snapshot(&self) -> QueueSnapshot {
         let s = self.state.lock().unwrap();
-        QueueSnapshot { queue: s.q.queue.clone(), current_index: s.q.index }
+        QueueSnapshot {
+            queue: s.q.queue.iter().map(|e| e.path.clone()).collect(),
+            current_index: s.q.index,
+        }
     }
 
     /// Advance to the next track if the current one finished. Called from the
@@ -420,13 +507,8 @@ impl Engine {
             match pick_next(&s.q, false) {
                 Some(idx) => {
                     s.q.index = idx;
-                    match s.start_current(&self.handle) {
+                    match s.start_current(self.device.mixer()) {
                         Ok(()) => break,
-                        Err(EngineError::NoDevice(e)) => {
-                            eprintln!("[engine] audio device lost during advance: {}", e);
-                            s.clear_current();
-                            break;
-                        }
                         Err(_) => {
                             attempts += 1;
                             if attempts >= s.q.queue.len() {
@@ -445,7 +527,7 @@ impl Engine {
     }
 }
 
-// ── Duration detection via symphonia ────────────────────────────────────────
+// ── Duration detection via symphonia (local files only) ────────────────────
 
 fn probe_duration(path: &str) -> f64 {
     let file = match File::open(path) {
@@ -495,7 +577,7 @@ mod tests {
 
     fn q(len: usize, index: usize) -> QueueState {
         QueueState {
-            queue: (0..len).map(|i| format!("t{}", i)).collect(),
+            queue: (0..len).map(|i| QueueEntry::new(format!("t{}", i))).collect(),
             index,
             shuffle: false,
             loop_mode: LoopMode::None,
@@ -578,7 +660,7 @@ mod tests {
         assert_eq!(apply_remove(&mut state, 1), RemoveOutcome::RemovedCurrent);
         // Index unchanged — it now points at the track that followed.
         assert_eq!(state.index, 1);
-        assert_eq!(state.queue[1], "t2");
+        assert_eq!(state.queue[1].path, "t2");
     }
 
     #[test]

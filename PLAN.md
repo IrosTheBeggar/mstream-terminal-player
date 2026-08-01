@@ -60,13 +60,21 @@ tag-driven GitHub Releases with a sha256 `manifest.json` instead of committing b
 **Done when:** the new binary, dropped into mStream's `bin/` path under the old name, passes a
 jukebox + `/server-remote` smoke test unchanged.
 
-### Phase 2 — HTTP streaming source (the risk phase, done early)
+### Phase 2 — HTTP streaming source (the risk phase, done early) ✅ DONE 2026-07-31
 `Source::Local | Source::Http` via `stream-download` + reqwest (buffered `Read + Seek` over range
 requests) into the same rodio decoder. Duration hint accepted from callers (remote probing costs a
-fetch; the TUI knows durations from the mStream API). Throwaway smoke command:
-`mstream-player play --server <url> --token <jwt> <vpath>`.
-**Done when:** FLAC and MP3 stream *and seek* from a live mStream server on Windows, and
-`/transcode` seek behavior is characterized (fallback: seek disabled on transcodes in v1).
+fetch; the TUI knows durations from the mStream API). Smoke command:
+`mstream-player play [--url <url-or-path> | --server <url> --token <jwt> <vpath>] [--seek-to N]`.
+
+**DoD met** — verified against a live mStream (throwaway instance, Windows):
+- MP3 and FLAC stream and **seek** over HTTP (`/media/...?token=...`); required the rodio 0.22
+  upgrade to pass `byte_len` through to symphonia (audit finding #13).
+- `/transcode` characterized: first hit is chunked (no Content-Length) — streams fine, duration
+  unknown, and seeking *works* as long as ffmpeg outruns playback (symphonia's forward scan just
+  waits for bytes); cached hits serve full length and seek cleanly. Server-default codec is opus,
+  which symphonia can't decode → clients must pin `codec=mp3`/`aac` (finding #14).
+- Engine open path holds the state lock with a 5s connect timeout on the HTTP client — a dead
+  server stalls the control API for at most ~5s (documented tradeoff; revisit if it bites).
 
 ### Phase 3 — mStream API client
 `src/api/`: login + token cache (OS config dir), `/api/v1/ping` bootstrap, file-explorer, DB
@@ -126,3 +134,6 @@ album art (ratatui-image), media keys (MPRIS/SMTC), scrobbling hooks, brew/scoop
 | 9 | Shuffle has no history: `previous` can't retrace shuffled order; shuffle never ends under loop=none | semantics quirk | deferred to Phase 4 (queue UX pass) |
 | 10 | mp3 without duration metadata (no Xing header) reports `duration: 0` | known limitation | documented |
 | 11 | Negative or non-finite `/seek` position reaches `Duration::from_secs_f64`, which panics — and a panic while holding the state mutex poisons it, wedging every later request | crash bug (found during port) | fixed in port: positions validated before conversion |
+| 12 | `/status` reports `playing: true` for a few ms after `/stop` — `sink.empty()` only flips on the next audio callback, so the old `playing` expression raced the audio thread | cosmetic race (found in Phase 2 testing; present in original) | fixed: `playing` also consults the engine's own synchronously-set `stopped` flag |
+| 13 | FLAC files without a SEEKTABLE block (typical for ffmpeg-encoded FLACs) are **unseekable** — rodio 0.20's decoder wrapper hardcoded `byte_len: None`, so symphonia couldn't binary-search. Applies to the shipped jukebox with local files too, not just HTTP | seek bug, latent in original (found in Phase 2 testing) | fixed: upgraded to rodio 0.22 and its `DecoderBuilder` — engine now passes `byte_len` from file metadata / HTTP Content-Length + `with_seekable(true)`. Also fixed wrong duration estimates over HTTP (was reporting 64.29s for a 60s file) |
+| 14 | mStream's default transcode codec is **opus**, which symphonia cannot decode — a client naively requesting `/transcode/...` with server defaults gets an unplayable stream | client-design constraint (found in Phase 2 testing) | Phase 3 requirement: the API client must always pin `codec=mp3` (or `aac`) in transcode URLs, never rely on the server default |

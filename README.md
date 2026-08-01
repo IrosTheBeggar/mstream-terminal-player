@@ -2,9 +2,16 @@
 
 Terminal player and headless audio engine for [mStream](https://github.com/IrosTheBeggar/mStream).
 
-**Status: Phase 1** — the playback engine (ported from mStream's `rust-server-audio`) with its
-JSON control API. The interactive TUI lands in Phase 4. See [PLAN.md](PLAN.md) for the roadmap
-and the control-API contract.
+**Status: Phase 2** — the playback engine (ported from mStream's `rust-server-audio`) now
+streams over HTTP with working range-request seeking, verified against a live mStream server.
+The interactive TUI lands in Phase 4. See [PLAN.md](PLAN.md) for the roadmap and the
+control-API contract.
+
+```
+# end-to-end streaming smoke test / debug tool
+mstream-player play --server http://localhost:3000 --token <jwt> "lib/Artist/song.flac" --seek-to 45
+mstream-player play --url C:\music\song.mp3
+```
 
 ## Serve mode (jukebox engine)
 
