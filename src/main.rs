@@ -2,10 +2,12 @@ mod api;
 mod cmd_library;
 mod cmd_play;
 mod engine;
+mod player;
 mod runtime;
 mod serve;
+mod tui;
 
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
@@ -25,6 +27,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Launch the interactive terminal player (the default)
+    Tui(cmd_library::ConnArgs),
     /// Run the headless server-audio engine (jukebox mode)
     Serve(ServeArgs),
     /// Play one source and exit — end-to-end streaming/seek smoke test
@@ -73,6 +77,9 @@ fn main() {
     let cli = Cli::parse();
 
     let serve_args = match (cli.command, cli.port) {
+        (Some(Command::Tui(conn)), _) => {
+            std::process::exit(tui::run(conn.server, conn.token));
+        }
         (Some(Command::Play(args)), _) => std::process::exit(cmd_play::run(args)),
         (Some(Command::Login(args)), _) => std::process::exit(cmd_library::login(args)),
         (Some(Command::Logout), _) => std::process::exit(cmd_library::logout()),
@@ -105,11 +112,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        None => {
-            let _ = Cli::command().print_help();
-            println!();
-            println!("The interactive terminal player arrives in a later phase (see PLAN.md).");
-            println!("For the headless jukebox engine: mstream-player serve --help");
-        }
+        // Bare `mstream-player` launches the player.
+        None => std::process::exit(tui::run(None, None)),
     }
 }

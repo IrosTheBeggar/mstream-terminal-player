@@ -108,11 +108,34 @@ token scoping, file-explorer, tag browsing, search, playlists, and end-to-end pl
 session-resolved FLAC with a server-supplied duration hint plus a mid-track seek — direct and
 transcoded.
 
-### Phase 4 — TUI
-ratatui + crossterm. v1 screens: connect/login, **file explorer** (the mStream-identity feature),
-playlists, search, queue pane, transport bar with position ticker. Vim keys + arrows, help overlay,
-TOML config with multiple saved servers. `PlayerCtl` trait in front of the engine so a different
-backend (e.g. mpv) could swap in if engine gaps ever bite.
+### Phase 4 — TUI ✅ DONE 2026-07-31
+ratatui 0.30 + crossterm. Screens: connect/login (with a separate "reconnecting" view so a saved
+session never flashes a password prompt), **file explorer**, playlists, search, queue pane, and a
+transport bar with a live position gauge. Vim keys and arrows, help overlay on `?`.
+
+Architecture:
+- **Three threads.** The UI thread only renders and reads keys. An *audio* thread owns the engine
+  (created on its own thread, since audio handles aren't portable across threads) and ticks it;
+  an *api* thread owns the client. Neither the network nor the audio device can stall a redraw.
+- **Track-end detection lives in the audio thread**, which sees every status transition and can
+  tell "the track finished" from "the user pressed stop" — the UI would have to guess by polling.
+- **`app.rs` is I/O-free.** Actions and worker events go in; state changes and `Effect`s come out,
+  and only the run loop touches channels. That is what makes navigation, queue advancement and
+  repeat/shuffle testable without a terminal or a server (30+ tests do exactly that).
+- **The queue lives in the TUI**, not in the engine, so rows can carry real metadata and ordering;
+  the engine plays one track at a time. Repeat/shuffle reuse the engine's rule that a *manual*
+  skip is never trapped by repeat-one.
+- **`PlayerCtl`** (`src/player.rs`) is the seam an mpv backend would slot into.
+- Rendering is covered by ratatui's `TestBackend`: every screen is drawn to a buffer and asserted
+  on, including a password-masking check and a "doesn't panic in a 20×8 terminal" case.
+
+Verified against a live mStream on Windows: the binary connects from a saved session, lists
+libraries, and draws the full layout.
+
+**Deferred from this phase:** the "TOML config with multiple saved servers" item. Single-server
+`session.json` (Phase 3) covers the common case; a server picker is a self-contained follow-up
+and was not worth half-building here. Tag-based browsing (artists → albums) exists in the CLI
+(`browse`) but is not yet a TUI tab.
 
 ### Phase 5 — Release & install
 Tag-driven releases (binaries + `manifest.json` with per-file sha256). README install matrix.

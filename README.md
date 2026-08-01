@@ -2,10 +2,32 @@
 
 Terminal player and headless audio engine for [mStream](https://github.com/IrosTheBeggar/mStream).
 
-**Status: Phase 3** — the playback engine (ported from mStream's `rust-server-audio`) streams
-over HTTP with working range-request seeking, and there is now a full mStream API client with a
-command-line front end. The interactive TUI lands in Phase 4. See [PLAN.md](PLAN.md) for the
-roadmap and the control-API contract.
+**Status: Phase 4** — the interactive player works: browse your libraries, queue tracks, and
+play them with seeking, all from the terminal. See [PLAN.md](PLAN.md) for the roadmap and the
+control-API contract.
+
+## The player
+
+```
+mstream-player
+```
+
+Launches the TUI. It reconnects from a saved session, or shows a connect screen (leave the
+username empty for a server in public mode).
+
+| Key | |
+|---|---|
+| `j` `k` / `↓` `↑` | move · `g` / `G` first / last |
+| `Enter` / `l` | open a folder, or play from the highlighted track |
+| `h` | go back |
+| `a` | add the highlighted track to the queue |
+| `Tab` | switch between browser and queue |
+| `1` `2` `3` | Files / Playlists / Search · `/` search |
+| `Space` | play or pause · `n` / `p` next / previous |
+| `[` `]` | seek 5s · `-` `+` volume |
+| `d` / `C` | remove from queue / clear queue |
+| `r` / `s` | repeat / shuffle |
+| `?` | help · `q` quit |
 
 ## Library commands
 
