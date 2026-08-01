@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, 
 use crate::cmd_library::fmt_duration;
 
 use super::app::{App, Entry, Focus, MessageKind, Tab};
+use super::worker::LibraryNode;
 
 const ACCENT: Color = Color::Cyan;
 const DIM: Color = Color::DarkGray;
@@ -91,6 +92,7 @@ fn render_browser(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let state = match app.tab {
         Tab::Files => &mut app.files.state,
+        Tab::Library => &mut app.library.state,
         Tab::Playlists => &mut app.playlists.state,
         Tab::Search => &mut app.search.state,
     };
@@ -99,6 +101,7 @@ fn render_browser(frame: &mut Frame, area: Rect, app: &mut App) {
     if empty {
         let hint = match app.tab {
             Tab::Files => "(empty directory)",
+            Tab::Library => "loading…",
             Tab::Playlists => "(no playlists)",
             Tab::Search => "type a query and press Enter",
         };
@@ -118,6 +121,16 @@ fn browser_title(app: &App) -> String {
                 format!(" /{} ", app.path)
             }
         }
+        Tab::Library => match app.library_node() {
+            LibraryNode::Root => " Library ".to_string(),
+            LibraryNode::Artists => " Artists ".to_string(),
+            LibraryNode::Artist(artist) => format!(" Artist: {artist} "),
+            LibraryNode::Albums => " Albums ".to_string(),
+            LibraryNode::Album { name, .. } => format!(" Album: {name} "),
+            LibraryNode::Genres => " Genres ".to_string(),
+            LibraryNode::Genre(genre) => format!(" Genre: {genre} "),
+            LibraryNode::Recent => " Recently Added ".to_string(),
+        },
         Tab::Playlists => match &app.playlist_open {
             Some(name) => format!(" Playlist: {name} "),
             None => " Playlists ".to_string(),
@@ -138,6 +151,10 @@ fn entry_line(entry: &Entry) -> Line<'static> {
         Entry::Parent => Line::from(Span::styled("..", Style::new().fg(DIM))),
         Entry::Dir { label, .. } => Line::from(Span::styled(
             format!("{label}/"),
+            Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+        )),
+        Entry::Node { label, .. } => Line::from(Span::styled(
+            label.clone(),
             Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
         )),
         Entry::Playlist { name } => Line::from(format!("♪ {name}")),
@@ -368,7 +385,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ("h", "go back"),
         ("a", "add track to queue"),
         ("Tab", "switch browser / queue"),
-        ("1 2 3", "Files / Playlists / Search"),
+        ("1 2 3 4", "Files / Library / Playlists / Search"),
         ("/", "search"),
         ("Space", "play or pause"),
         ("n / p", "next / previous track"),
@@ -543,6 +560,36 @@ mod tests {
     }
 
     #[test]
+    fn library_tab_renders_the_mode_menu_and_drill_down_titles() {
+        use crate::tui::worker::{LibraryData, LibraryNode};
+        let mut app = connected_app();
+        app.handle_action(Action::SelectTab(1));
+
+        let text = draw(&mut app);
+        assert!(text.contains("2:Library"), "the tab is offered");
+        assert!(text.contains("Artists"));
+        assert!(text.contains("Genres"));
+        assert!(text.contains("Recently Added"));
+
+        app.library_stack = vec![LibraryNode::Root, LibraryNode::Genre("Ambient".into())];
+        app.apply_event(crate::tui::worker::Event::Library {
+            node: LibraryNode::Genre("Ambient".into()),
+            data: LibraryData::Tracks(vec![Track {
+                filepath: "lib/a.mp3".into(),
+                metadata: TrackMetadata {
+                    title: Some("Drift".into()),
+                    duration: Some(95.0),
+                    ..Default::default()
+                },
+            }]),
+        });
+        let text = draw(&mut app);
+        assert!(text.contains("Genre: Ambient"), "the title tracks the drill-down");
+        assert!(text.contains("Drift"));
+        assert!(text.contains("[1:35]"));
+    }
+
+    #[test]
     fn help_overlay_lists_bindings() {
         let mut app = connected_app();
         app.handle_action(Action::ToggleHelp);
@@ -563,7 +610,7 @@ mod tests {
     #[test]
     fn search_tab_shows_the_query_and_result_summary() {
         let mut app = connected_app();
-        app.handle_action(Action::SelectTab(2));
+        app.handle_action(Action::SelectTab(3));
         for c in "moon".chars() {
             app.handle_action(Action::Input(c));
         }

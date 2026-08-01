@@ -121,6 +121,19 @@ pub struct ArtistsResponse {
     pub artists: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Genre {
+    pub name: String,
+    pub track_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct GenresResponse {
+    pub genres: Vec<Genre>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct AlbumsResponse {

@@ -8,11 +8,11 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 
-use crate::api::types::{DirListing, Track, TrackMetadata};
+use crate::api::types::{Album, DirListing, Genre, Track, TrackMetadata};
 use crate::api::urls;
 use crate::player::PlayerStatus;
 
-use super::worker::{ApiCmd, AudioCmd, Event};
+use super::worker::{ApiCmd, AudioCmd, Event, LibraryData, LibraryNode};
 
 const SEEK_STEP: f64 = 5.0;
 const VOLUME_STEP: f32 = 0.05;
@@ -29,16 +29,18 @@ pub enum Effect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Files,
+    Library,
     Playlists,
     Search,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Files, Tab::Playlists, Tab::Search];
+    pub const ALL: [Tab; 4] = [Tab::Files, Tab::Library, Tab::Playlists, Tab::Search];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Files => "Files",
+            Tab::Library => "Library",
             Tab::Playlists => "Playlists",
             Tab::Search => "Search",
         }
@@ -125,6 +127,8 @@ pub enum Action {
 pub enum Entry {
     Parent,
     Dir { label: String, path: String },
+    /// A step deeper into the tag-based library (an artist, album, genre…).
+    Node { label: String, node: LibraryNode },
     Playlist { name: String },
     Track { label: String, track: Box<Track> },
 }
@@ -347,6 +351,10 @@ pub struct App {
 
     pub path: String,
     pub files: Pane,
+    pub library: Pane,
+    /// Breadcrumb through the tag hierarchy; the last element is the view on
+    /// screen. Always non-empty once the Library tab has been opened.
+    pub library_stack: Vec<LibraryNode>,
     pub playlists: Pane,
     pub playlist_open: Option<String>,
     pub search: Pane,
@@ -380,6 +388,8 @@ impl App {
             focus: Focus::Browser,
             path: String::new(),
             files: Pane::default(),
+            library: Pane::default(),
+            library_stack: Vec::new(),
             playlists: Pane::default(),
             playlist_open: None,
             search: Pane::default(),
@@ -422,6 +432,7 @@ impl App {
     pub fn pane(&self) -> &Pane {
         match self.tab {
             Tab::Files => &self.files,
+            Tab::Library => &self.library,
             Tab::Playlists => &self.playlists,
             Tab::Search => &self.search,
         }
@@ -430,9 +441,15 @@ impl App {
     fn pane_mut(&mut self) -> &mut Pane {
         match self.tab {
             Tab::Files => &mut self.files,
+            Tab::Library => &mut self.library,
             Tab::Playlists => &mut self.playlists,
             Tab::Search => &mut self.search,
         }
+    }
+
+    /// The library view currently on screen.
+    pub fn library_node(&self) -> &LibraryNode {
+        self.library_stack.last().unwrap_or(&LibraryNode::Root)
     }
 
     fn info(&mut self, text: impl Into<String>) {
@@ -638,6 +655,11 @@ impl App {
 
         // Load a tab's contents the first time it's opened.
         match tab {
+            Tab::Library if self.library_stack.is_empty() => {
+                self.library_stack.push(LibraryNode::Root);
+                self.library.set(library_root_entries());
+                Vec::new()
+            }
             Tab::Playlists if self.playlists.entries.is_empty() => {
                 vec![Effect::Api(ApiCmd::Playlists)]
             }
@@ -680,6 +702,12 @@ impl App {
                 self.path = path.clone();
                 vec![Effect::Api(ApiCmd::Browse(path))]
             }
+            Entry::Node { node, label } => {
+                self.library_stack.push(node.clone());
+                self.library.set(Vec::new());
+                self.info(format!("loading {label}…"));
+                vec![Effect::Api(ApiCmd::Library(node))]
+            }
             Entry::Playlist { name } => {
                 self.info(format!("loading playlist {name}…"));
                 vec![Effect::Api(ApiCmd::LoadPlaylist(name))]
@@ -709,6 +737,22 @@ impl App {
                 };
                 self.path = parent.clone();
                 vec![Effect::Api(ApiCmd::Browse(parent))]
+            }
+            Tab::Library => {
+                if self.library_stack.len() <= 1 {
+                    return Vec::new(); // already at the mode menu
+                }
+                self.library_stack.pop();
+                match self.library_node().clone() {
+                    LibraryNode::Root => {
+                        self.library.set(library_root_entries());
+                        Vec::new()
+                    }
+                    node => {
+                        self.library.set(Vec::new());
+                        vec![Effect::Api(ApiCmd::Library(node))]
+                    }
+                }
             }
             Tab::Playlists if self.playlist_open.is_some() => {
                 self.playlist_open = None;
@@ -870,6 +914,16 @@ impl App {
                 self.files.set(entries_from_listing(&listing));
                 Vec::new()
             }
+            Event::Library { node, data } => {
+                // Drop a reply for a view the user has already navigated away
+                // from, so a slow request can't overwrite the current screen.
+                if self.library_node() != &node {
+                    return Vec::new();
+                }
+                self.library.set(entries_from_library(data));
+                self.message = None;
+                Vec::new()
+            }
             Event::Playlists(playlists) => {
                 self.playlist_open = None;
                 self.playlists.set(
@@ -941,6 +995,62 @@ impl App {
     }
 }
 
+/// The Library tab's mode menu — static, so opening the tab costs no request.
+fn library_root_entries() -> Vec<Entry> {
+    [
+        ("Artists", LibraryNode::Artists),
+        ("Albums", LibraryNode::Albums),
+        ("Genres", LibraryNode::Genres),
+        ("Recently Added", LibraryNode::Recent),
+    ]
+    .into_iter()
+    .map(|(label, node)| Entry::Node { label: label.to_string(), node })
+    .collect()
+}
+
+fn album_label(album: &Album) -> String {
+    let name = album.name.as_deref().unwrap_or("(untitled album)");
+    let year = album.year.map(|y| format!(" ({y})")).unwrap_or_default();
+    match album.artist.as_deref() {
+        Some(artist) if !artist.is_empty() => format!("{artist} — {name}{year}"),
+        _ => format!("{name}{year}"),
+    }
+}
+
+fn genre_label(genre: &Genre) -> String {
+    match genre.track_count {
+        Some(count) => format!("{} ({count})", genre.name),
+        None => genre.name.clone(),
+    }
+}
+
+/// Rows for a loaded library view. Every one of these sits below the mode
+/// menu, so they all get a ".." to climb back out.
+fn entries_from_library(data: LibraryData) -> Vec<Entry> {
+    let mut entries = vec![Entry::Parent];
+    match data {
+        LibraryData::Artists(artists) => entries.extend(artists.into_iter().map(|name| {
+            Entry::Node { label: name.clone(), node: LibraryNode::Artist(name) }
+        })),
+        LibraryData::Albums(albums) => entries.extend(albums.into_iter().map(|album| {
+            let label = album_label(&album);
+            let node = LibraryNode::Album {
+                name: album.name.unwrap_or_default(),
+                artist: album.artist,
+            };
+            Entry::Node { label, node }
+        })),
+        LibraryData::Genres(genres) => entries.extend(genres.into_iter().map(|genre| {
+            let label = genre_label(&genre);
+            Entry::Node { label, node: LibraryNode::Genre(genre.name) }
+        })),
+        LibraryData::Tracks(tracks) => entries.extend(tracks.into_iter().map(|track| {
+            Entry::Track { label: track.display_name(), track: Box::new(track) }
+        })),
+    }
+    entries
+}
+
 /// Join a directory prefix and an entry name into a library path.
 fn qualify(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
@@ -997,7 +1107,7 @@ pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
         KeyCode::Char('?') => Some(Action::ToggleHelp),
         KeyCode::Esc => Some(Action::Cancel),
         KeyCode::Tab => Some(Action::CycleFocus),
-        KeyCode::Char(c @ '1'..='3') => Some(Action::SelectTab(c as usize - '1' as usize)),
+        KeyCode::Char(c @ '1'..='4') => Some(Action::SelectTab(c as usize - '1' as usize)),
 
         KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
@@ -1363,7 +1473,7 @@ mod tests {
     #[test]
     fn opening_the_playlists_tab_loads_them_once() {
         let mut app = connected_app();
-        let effects = app.handle_action(Action::SelectTab(1));
+        let effects = app.handle_action(Action::SelectTab(2));
         assert_eq!(effects, vec![Effect::Api(ApiCmd::Playlists)]);
 
         app.apply_event(Event::Playlists(vec![crate::api::types::PlaylistSummary {
@@ -1371,13 +1481,13 @@ mod tests {
         }]));
         // Already loaded: switching back doesn't refetch.
         app.handle_action(Action::SelectTab(0));
-        assert!(app.handle_action(Action::SelectTab(1)).is_empty());
+        assert!(app.handle_action(Action::SelectTab(2)).is_empty());
     }
 
     #[test]
     fn playlist_tracks_open_and_close() {
         let mut app = connected_app();
-        app.handle_action(Action::SelectTab(1));
+        app.handle_action(Action::SelectTab(2));
         app.apply_event(Event::Playlists(vec![crate::api::types::PlaylistSummary {
             name: "Roadtrip".into(),
         }]));
@@ -1395,6 +1505,183 @@ mod tests {
         let effects = app.handle_action(Action::Back);
         assert_eq!(effects, vec![Effect::Api(ApiCmd::Playlists)]);
         assert!(app.playlist_open.is_none());
+    }
+
+    #[test]
+    fn library_tab_opens_on_a_static_menu_without_a_request() {
+        let mut app = connected_app();
+        let effects = app.handle_action(Action::SelectTab(1));
+        assert!(effects.is_empty(), "the mode menu costs no round-trip");
+        assert_eq!(app.library.entries.len(), 4);
+        assert_eq!(app.library_node(), &LibraryNode::Root);
+
+        let labels: Vec<&str> = app
+            .library
+            .entries
+            .iter()
+            .map(|e| match e {
+                Entry::Node { label, .. } => label.as_str(),
+                _ => "?",
+            })
+            .collect();
+        assert_eq!(labels, ["Artists", "Albums", "Genres", "Recently Added"]);
+    }
+
+    #[test]
+    fn drilling_from_artists_to_an_album_of_tracks() {
+        let mut app = connected_app();
+        app.handle_action(Action::SelectTab(1));
+
+        // Artists
+        let effects = app.handle_action(Action::Activate);
+        assert_eq!(effects, vec![Effect::Api(ApiCmd::Library(LibraryNode::Artists))]);
+        app.apply_event(Event::Library {
+            node: LibraryNode::Artists,
+            data: LibraryData::Artists(vec!["Signal Chain".into(), "Terminal Test".into()]),
+        });
+        assert_eq!(app.library.entries.len(), 3); // ".." + two artists
+
+        // One artist's albums
+        let effects = app.handle_action(Action::Activate);
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCmd::Library(LibraryNode::Artist("Signal Chain".into())))]
+        );
+        app.apply_event(Event::Library {
+            node: LibraryNode::Artist("Signal Chain".into()),
+            data: LibraryData::Albums(vec![Album {
+                name: Some("Second Album".into()),
+                artist: Some("Signal Chain".into()),
+                year: Some(2025),
+                album_art_file: None,
+            }]),
+        });
+
+        // That album's tracks
+        let effects = app.handle_action(Action::Activate);
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCmd::Library(LibraryNode::Album {
+                name: "Second Album".into(),
+                artist: Some("Signal Chain".into()),
+            }))]
+        );
+        app.apply_event(Event::Library {
+            node: LibraryNode::Album {
+                name: "Second Album".into(),
+                artist: Some("Signal Chain".into()),
+            },
+            data: LibraryData::Tracks(vec![track("testlib/a.mp3"), track("testlib/b.mp3")]),
+        });
+
+        // Playing from here queues the album and starts at the selected track.
+        let effects = app.handle_action(Action::Activate);
+        assert_eq!(app.queue.items.len(), 2);
+        assert!(matches!(effects[0], Effect::Audio(AudioCmd::Play { .. })));
+    }
+
+    #[test]
+    fn back_walks_the_library_stack_to_the_menu() {
+        let mut app = connected_app();
+        app.handle_action(Action::SelectTab(1));
+        app.handle_action(Action::Activate); // → Artists
+        app.apply_event(Event::Library {
+            node: LibraryNode::Artists,
+            data: LibraryData::Artists(vec!["Solo".into()]),
+        });
+        app.handle_action(Action::Activate); // → Artist("Solo")
+
+        let effects = app.handle_action(Action::Back);
+        assert_eq!(effects, vec![Effect::Api(ApiCmd::Library(LibraryNode::Artists))]);
+
+        let effects = app.handle_action(Action::Back);
+        assert!(effects.is_empty(), "returning to the static menu needs no request");
+        assert_eq!(app.library_node(), &LibraryNode::Root);
+        assert_eq!(app.library.entries.len(), 4);
+
+        // Already at the top.
+        assert!(app.handle_action(Action::Back).is_empty());
+    }
+
+    #[test]
+    fn a_reply_for_an_abandoned_view_is_discarded() {
+        let mut app = connected_app();
+        app.handle_action(Action::SelectTab(1));
+        app.handle_action(Action::Activate); // asked for Artists
+        app.handle_action(Action::Back); // …then changed our mind
+
+        app.apply_event(Event::Library {
+            node: LibraryNode::Artists,
+            data: LibraryData::Artists(vec!["Ghost".into()]),
+        });
+        assert_eq!(app.library_node(), &LibraryNode::Root);
+        assert_eq!(app.library.entries.len(), 4, "the menu is untouched by the late reply");
+    }
+
+    #[test]
+    fn genres_show_track_counts_and_lead_to_songs() {
+        let mut app = connected_app();
+        app.tab = Tab::Library;
+        app.library_stack = vec![LibraryNode::Root, LibraryNode::Genres];
+        app.apply_event(Event::Library {
+            node: LibraryNode::Genres,
+            data: LibraryData::Genres(vec![
+                Genre { name: "Ambient".into(), track_count: Some(2) },
+                Genre { name: "Electronic".into(), track_count: None },
+            ]),
+        });
+
+        assert_eq!(
+            app.library.entries[1],
+            Entry::Node { label: "Ambient (2)".into(), node: LibraryNode::Genre("Ambient".into()) }
+        );
+        assert_eq!(
+            app.library.entries[2],
+            Entry::Node { label: "Electronic".into(), node: LibraryNode::Genre("Electronic".into()) }
+        );
+
+        let effects = app.handle_action(Action::Activate);
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCmd::Library(LibraryNode::Genre("Ambient".into())))]
+        );
+    }
+
+    #[test]
+    fn albums_without_an_artist_still_resolve() {
+        // The all-albums endpoint omits the artist field; the album name alone
+        // has to be enough to fetch tracks.
+        let mut app = connected_app();
+        app.library_stack = vec![LibraryNode::Root, LibraryNode::Albums];
+        app.apply_event(Event::Library {
+            node: LibraryNode::Albums,
+            data: LibraryData::Albums(vec![Album {
+                name: Some("Phase Three".into()),
+                artist: None,
+                year: Some(2026),
+                album_art_file: None,
+            }]),
+        });
+
+        assert_eq!(
+            app.library.entries[1],
+            Entry::Node {
+                label: "Phase Three (2026)".into(),
+                node: LibraryNode::Album { name: "Phase Three".into(), artist: None },
+            }
+        );
+    }
+
+    #[test]
+    fn recently_added_lists_tracks_directly() {
+        let mut app = connected_app();
+        app.library_stack = vec![LibraryNode::Root, LibraryNode::Recent];
+        app.apply_event(Event::Library {
+            node: LibraryNode::Recent,
+            data: LibraryData::Tracks(vec![track("testlib/new.mp3")]),
+        });
+        assert_eq!(app.library.entries.len(), 2); // ".." + the track
+        assert!(matches!(app.library.entries[1], Entry::Track { .. }));
     }
 
     #[test]

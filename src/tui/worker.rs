@@ -13,7 +13,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
-use crate::api::types::{DirListing, Ping, PlaylistSummary, SearchResults, Track};
+use crate::api::types::{Album, DirListing, Genre, Ping, PlaylistSummary, SearchResults, Track};
 use crate::api::{ApiError, Client};
 use crate::engine::Engine;
 use crate::player::{PlayerCtl, PlayerStatus};
@@ -39,11 +39,39 @@ pub enum ApiCmd {
     Connect { server: String, token: Option<String> },
     Login { server: String, username: String, password: String },
     Browse(String),
+    Library(LibraryNode),
     Playlists,
     LoadPlaylist(String),
     Search(String),
     Shutdown,
 }
+
+/// A position in the tag-based library hierarchy. Doubles as the request (what
+/// to fetch) and the identity of a view (what a response belongs to), so a
+/// slow reply for a screen the user already left can be discarded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibraryNode {
+    /// The mode menu — static, needs no request.
+    Root,
+    Artists,
+    Artist(String),
+    Albums,
+    Album { name: String, artist: Option<String> },
+    Genres,
+    Genre(String),
+    Recent,
+}
+
+#[derive(Debug)]
+pub enum LibraryData {
+    Artists(Vec<String>),
+    Albums(Vec<Album>),
+    Genres(Vec<Genre>),
+    Tracks(Vec<Track>),
+}
+
+/// How many tracks "Recently Added" asks for.
+const RECENT_LIMIT: u32 = 100;
 
 #[derive(Debug)]
 pub enum Event {
@@ -59,6 +87,8 @@ pub enum Event {
         ping: Box<Ping>,
     },
     Listing(Box<DirListing>),
+    /// Contents of a library view, tagged with the node they belong to.
+    Library { node: LibraryNode, data: LibraryData },
     Playlists(Vec<PlaylistSummary>),
     PlaylistTracks { name: String, tracks: Vec<Track> },
     SearchResults(Box<SearchResults>),
@@ -186,6 +216,10 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 c.file_explorer(&path).map(|l| Event::Listing(Box::new(l)))
             }),
 
+            ApiCmd::Library(node) => with_client(client.as_ref(), |c| {
+                load_library(c, &node).map(|data| Event::Library { node: node.clone(), data })
+            }),
+
             ApiCmd::Playlists => {
                 with_client(client.as_ref(), |c| c.playlists().map(Event::Playlists))
             }
@@ -260,6 +294,22 @@ fn login(
         }
         Err(e) => Some(Event::Error(e.to_string())),
     }
+}
+
+fn load_library(client: &Client, node: &LibraryNode) -> Result<LibraryData, ApiError> {
+    Ok(match node {
+        // The mode menu is static; the UI fills it in without asking.
+        LibraryNode::Root => LibraryData::Artists(Vec::new()),
+        LibraryNode::Artists => LibraryData::Artists(client.artists()?),
+        LibraryNode::Artist(artist) => LibraryData::Albums(client.artist_albums(artist)?),
+        LibraryNode::Albums => LibraryData::Albums(client.albums()?),
+        LibraryNode::Album { name, artist } => {
+            LibraryData::Tracks(client.album_songs(name, artist.as_deref())?)
+        }
+        LibraryNode::Genres => LibraryData::Genres(client.genres()?),
+        LibraryNode::Genre(genre) => LibraryData::Tracks(client.genre_songs(genre)?),
+        LibraryNode::Recent => LibraryData::Tracks(client.recently_added(RECENT_LIMIT)?),
+    })
 }
 
 /// Run a request against the connected client, mapping failures onto events.

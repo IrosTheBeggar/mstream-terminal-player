@@ -253,6 +253,25 @@ impl Client {
         self.post("api/v1/db/album-songs", body)
     }
 
+    pub fn genres(&self) -> Result<Vec<Genre>, ApiError> {
+        let r: GenresResponse = self.get("api/v1/db/genres")?;
+        Ok(r.genres)
+    }
+
+    /// Tracks in a genre.
+    ///
+    /// Deliberately the flat song list rather than albums-in-a-genre: the
+    /// `/api/v1/db/genre/albums` route lives in mStream's velvet-stubs module
+    /// and is only mounted when the server runs `ui: velvet`, so a general
+    /// client cannot depend on it. Same story for the decade endpoints.
+    pub fn genre_songs(&self, genre: &str) -> Result<Vec<Track>, ApiError> {
+        self.post("api/v1/db/genre-songs", serde_json::json!({ "genre": genre }))
+    }
+
+    pub fn recently_added(&self, limit: u32) -> Result<Vec<Track>, ApiError> {
+        self.post("api/v1/db/recent/added", serde_json::json!({ "limit": limit }))
+    }
+
     /// Metadata for one track — used to fill the engine's duration hint
     /// without making it probe the remote stream.
     pub fn metadata(&self, filepath: &str) -> Result<Track, ApiError> {

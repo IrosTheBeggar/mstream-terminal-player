@@ -15,6 +15,10 @@ mstream-player
 Launches the TUI. It reconnects from a saved session, or shows a connect screen (leave the
 username empty for a server in public mode).
 
+**Files** browses folders as they sit on disk. **Library** browses by tags — artists, albums,
+genres, and recently added — and **Search** and **Playlists** do what they say. `Enter` on a
+track queues everything visible and starts there; `a` queues just that one.
+
 | Key | |
 |---|---|
 | `j` `k` / `↓` `↑` | move · `g` / `G` first / last |
@@ -22,7 +26,7 @@ username empty for a server in public mode).
 | `h` | go back |
 | `a` | add the highlighted track to the queue |
 | `Tab` | switch between browser and queue |
-| `1` `2` `3` | Files / Playlists / Search · `/` search |
+| `1` `2` `3` `4` | Files / Library / Playlists / Search · `/` search |
 | `Space` | play or pause · `n` / `p` next / previous |
 | `[` `]` | seek 5s · `-` `+` volume |
 | `d` / `C` | remove from queue / clear queue |
@@ -37,7 +41,10 @@ echo "$PASSWORD" | mstream-player login --server http://localhost:3000 --user al
 
 mstream-player info                          # server capabilities + session
 mstream-player ls "music/Artist/Album"       # browse folders
-mstream-player browse "Artist" "Album"       # browse by tags
+mstream-player browse                        # artists · --albums · --genres
+mstream-player browse "Artist" "Album"       # an artist's albums, then its tracks
+mstream-player browse --genre Ambient        # tracks in a genre
+mstream-player browse --recent --limit 25    # recently added
 mstream-player search "moon"
 mstream-player playlists [name]
 mstream-player logout

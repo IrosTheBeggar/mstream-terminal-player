@@ -75,6 +75,22 @@ pub struct BrowseArgs {
     #[arg(long, conflicts_with_all = ["artist", "album"])]
     pub albums: bool,
 
+    /// List genres
+    #[arg(long, conflicts_with_all = ["artist", "album", "albums"])]
+    pub genres: bool,
+
+    /// List the tracks in one genre
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["artist", "album", "albums", "genres"])]
+    pub genre: Option<String>,
+
+    /// List recently added tracks
+    #[arg(long, conflicts_with_all = ["artist", "album", "albums", "genres", "genre"])]
+    pub recent: bool,
+
+    /// How many tracks --recent returns
+    #[arg(long, default_value_t = 25, requires = "recent")]
+    pub limit: u32,
+
     #[command(flatten)]
     pub conn: ConnArgs,
 }
@@ -327,6 +343,39 @@ pub fn browse(args: BrowseArgs) -> i32 {
         }
     };
 
+    if args.genres {
+        return match client.genres() {
+            Ok(genres) if genres.is_empty() => {
+                println!("(no genres — are the files tagged?)");
+                0
+            }
+            Ok(genres) => {
+                for g in genres {
+                    match g.track_count {
+                        Some(n) => println!("{} ({n})", g.name),
+                        None => println!("{}", g.name),
+                    }
+                }
+                0
+            }
+            Err(e) => fail(e),
+        };
+    }
+
+    if let Some(genre) = &args.genre {
+        return match client.genre_songs(genre) {
+            Ok(tracks) => print_tracks(&tracks),
+            Err(e) => fail(e),
+        };
+    }
+
+    if args.recent {
+        return match client.recently_added(args.limit) {
+            Ok(tracks) => print_tracks(&tracks),
+            Err(e) => fail(e),
+        };
+    }
+
     match (args.albums, args.artist.as_deref(), args.album.as_deref()) {
         // Every album in the library.
         (true, _, _) => match client.albums() {
@@ -424,6 +473,24 @@ pub fn playlists(args: PlaylistArgs) -> i32 {
             Err(e) => fail(e),
         },
     }
+}
+
+/// Print a track list as "display name [duration]" followed by its path.
+fn print_tracks(tracks: &[crate::api::types::Track]) -> i32 {
+    if tracks.is_empty() {
+        println!("(no tracks)");
+        return 0;
+    }
+    for t in tracks {
+        let dur = t
+            .metadata
+            .duration
+            .map(|d| format!("  [{}]", fmt_duration(d)))
+            .unwrap_or_default();
+        println!("{}{dur}", t.display_name());
+        println!("    {}", t.filepath);
+    }
+    0
 }
 
 pub fn fmt_duration(seconds: f64) -> String {

@@ -132,10 +132,16 @@ Architecture:
 Verified against a live mStream on Windows: the binary connects from a saved session, lists
 libraries, and draws the full layout.
 
+**Library tab** (added in the first iteration pass): a second tab browsing by tags, entered from a
+static mode menu that costs no request — **Artists** → an artist's albums → tracks, **Albums** →
+tracks, **Genres** → tracks, **Recently Added** → tracks. Navigation is a `LibraryNode` stack, and
+because every response is tagged with the node it belongs to, a slow reply for a screen the user
+already left is discarded instead of overwriting the current one. Genres drill straight to tracks
+rather than albums because the albums-in-a-genre route is velvet-only (finding #15).
+
 **Deferred from this phase:** the "TOML config with multiple saved servers" item. Single-server
 `session.json` (Phase 3) covers the common case; a server picker is a self-contained follow-up
-and was not worth half-building here. Tag-based browsing (artists → albums) exists in the CLI
-(`browse`) but is not yet a TUI tab.
+and was not worth half-building here.
 
 ### Phase 5 — Release & install
 Tag-driven releases (binaries + `manifest.json` with per-file sha256). README install matrix.
@@ -187,3 +193,4 @@ album art (ratatui-image), media keys (MPRIS/SMTC), scrobbling hooks, brew/scoop
 | 12 | `/status` reports `playing: true` for a few ms after `/stop` — `sink.empty()` only flips on the next audio callback, so the old `playing` expression raced the audio thread | cosmetic race (found in Phase 2 testing; present in original) | fixed: `playing` also consults the engine's own synchronously-set `stopped` flag |
 | 13 | FLAC files without a SEEKTABLE block (typical for ffmpeg-encoded FLACs) are **unseekable** — rodio 0.20's decoder wrapper hardcoded `byte_len: None`, so symphonia couldn't binary-search. Applies to the shipped jukebox with local files too, not just HTTP | seek bug, latent in original (found in Phase 2 testing) | fixed: upgraded to rodio 0.22 and its `DecoderBuilder` — engine now passes `byte_len` from file metadata / HTTP Content-Length + `with_seekable(true)`. Also fixed wrong duration estimates over HTTP (was reporting 64.29s for a 60s file) |
 | 14 | mStream's default transcode codec is **opus**, which symphonia cannot decode — a client naively requesting `/transcode/...` with server defaults gets an unplayable stream | client-design constraint (found in Phase 2 testing) | Phase 3 requirement: the API client must always pin `codec=mp3` (or `aac`) in transcode URLs, never rely on the server default |
+| 15 | Several library routes documented in `docs/openapi.yaml` — `db/genre/albums`, `db/genre/songs`, `db/genre-groups`, `db/decades`, `db/decade/albums`, `db/decade/songs` — live in `src/api/velvet-stubs.js` and are **only mounted when `config.ui === 'velvet'`**. On a default-UI server they 404, and `/api/v1/ping` gives a client no way to tell which UI mode the server runs | client-design constraint (found in Phase 4 testing) | Library browsing uses only core routes: `db/genres` + `db/genre-songs` (so Genres drills straight to tracks, not to albums), `db/artists`, `db/artists-albums`, `db/albums`, `db/album-songs`, `db/recent/added`. Decade browsing is not offered at all |
