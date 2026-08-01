@@ -125,3 +125,4 @@ album art (ratatui-image), media keys (MPRIS/SMTC), scrobbling hooks, brew/scoop
 | 8 | Between-tracks the 250 ms advance poll reports `playing: false` transiently; inter-track gap is audible (no gapless) | known limitation | deferred (Phase 7 gapless) |
 | 9 | Shuffle has no history: `previous` can't retrace shuffled order; shuffle never ends under loop=none | semantics quirk | deferred to Phase 4 (queue UX pass) |
 | 10 | mp3 without duration metadata (no Xing header) reports `duration: 0` | known limitation | documented |
+| 11 | Negative or non-finite `/seek` position reaches `Duration::from_secs_f64`, which panics — and a panic while holding the state mutex poisons it, wedging every later request | crash bug (found during port) | fixed in port: positions validated before conversion |
