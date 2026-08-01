@@ -224,11 +224,7 @@ impl State {
 
         let (opened, duration) = if http::is_http_url(&path) {
             let redacted = http::redact_source(&path);
-            let opener = http::opener().map_err(|e| {
-                eprintln!("[engine] {}", e);
-                EngineError::Unplayable(e)
-            })?;
-            let (reader, content_length) = opener.open(&path).map_err(|e| {
+            let (reader, content_length) = http::open(&path).map_err(|e| {
                 eprintln!("[engine] open failed for {}: {}", redacted, e);
                 EngineError::Unplayable(e)
             })?;

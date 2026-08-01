@@ -1031,6 +1031,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "fastrand",
+ "reqwest",
  "rodio",
  "serde",
  "serde_json",

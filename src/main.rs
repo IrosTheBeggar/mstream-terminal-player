@@ -1,5 +1,8 @@
+mod api;
+mod cmd_library;
+mod cmd_play;
 mod engine;
-mod play_cmd;
+mod runtime;
 mod serve;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -25,7 +28,21 @@ enum Command {
     /// Run the headless server-audio engine (jukebox mode)
     Serve(ServeArgs),
     /// Play one source and exit — end-to-end streaming/seek smoke test
-    Play(play_cmd::PlayArgs),
+    Play(cmd_play::PlayArgs),
+    /// Authenticate against an mStream server and save the session
+    Login(cmd_library::LoginArgs),
+    /// Forget the saved session
+    Logout,
+    /// Show server capabilities and the current session
+    Info(cmd_library::ConnArgs),
+    /// List a library directory
+    Ls(cmd_library::LsArgs),
+    /// Browse by tags: artists, an artist's albums, or an album's tracks
+    Browse(cmd_library::BrowseArgs),
+    /// Search the library
+    Search(cmd_library::SearchArgs),
+    /// List playlists, or show one playlist's tracks
+    Playlists(cmd_library::PlaylistArgs),
 }
 
 #[derive(Args)]
@@ -42,7 +59,7 @@ struct ServeArgs {
     /// Require this token in the x-auth-token header on every route except
     /// GET /version. Prefer the env var so the token stays out of the
     /// process list.
-    #[arg(long, env = "MSTREAM_AUDIO_TOKEN")]
+    #[arg(long, env = "MSTREAM_AUDIO_TOKEN", hide_env_values = true)]
     auth_token: Option<String>,
 
     /// Exit when stdin reaches EOF. Pass this only when the parent process
@@ -56,9 +73,14 @@ fn main() {
     let cli = Cli::parse();
 
     let serve_args = match (cli.command, cli.port) {
-        (Some(Command::Play(args)), _) => {
-            std::process::exit(play_cmd::run(args));
-        }
+        (Some(Command::Play(args)), _) => std::process::exit(cmd_play::run(args)),
+        (Some(Command::Login(args)), _) => std::process::exit(cmd_library::login(args)),
+        (Some(Command::Logout), _) => std::process::exit(cmd_library::logout()),
+        (Some(Command::Info(conn)), _) => std::process::exit(cmd_library::info(conn)),
+        (Some(Command::Ls(args)), _) => std::process::exit(cmd_library::ls(args)),
+        (Some(Command::Browse(args)), _) => std::process::exit(cmd_library::browse(args)),
+        (Some(Command::Search(args)), _) => std::process::exit(cmd_library::search(args)),
+        (Some(Command::Playlists(args)), _) => std::process::exit(cmd_library::playlists(args)),
         (Some(Command::Serve(args)), _) => Some(args),
         // Legacy spawn contract: bare `--port N`.
         (None, Some(port)) => Some(ServeArgs {
@@ -79,7 +101,7 @@ fn main() {
                 exit_with_parent: args.exit_with_parent,
             };
             if let Err(e) = serve::run(opts) {
-                eprintln!("mstream-player: {}", e);
+                eprintln!("mstream-player: {e}");
                 std::process::exit(1);
             }
         }

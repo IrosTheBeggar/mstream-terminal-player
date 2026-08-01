@@ -76,10 +76,37 @@ fetch; the TUI knows durations from the mStream API). Smoke command:
 - Engine open path holds the state lock with a 5s connect timeout on the HTTP client — a dead
   server stalls the control API for at most ~5s (documented tradeoff; revisit if it bites).
 
-### Phase 3 — mStream API client
-`src/api/`: login + token cache (OS config dir), `/api/v1/ping` bootstrap, file-explorer, DB
-browse (artists/albums/genres/search/random), playlists, stream + transcode URL builders.
-Types hand-written against mStream `docs/openapi.yaml`.
+### Phase 3 — mStream API client ✅ DONE 2026-07-31
+`src/api/`: `mod.rs` (client, auth, error mapping), `types.rs`, `urls.rs`, `session.rs`.
+Endpoints: login, ping, file-explorer, db/artists, db/artists-albums, db/albums, db/album-songs,
+db/metadata, db/search, playlist/getall, playlist/load. Types hand-written against
+`docs/openapi.yaml` and pinned to live responses by unit tests.
+
+Design points that matter downstream:
+- **Auth split.** The JWT goes in an `x-access-token` header for API calls (never the query
+  string, so it stays out of server logs); only *stream* URLs carry `?token=`, which is what
+  makes them self-contained enough to hand to the engine.
+- **Public mode is a first-class case.** Servers with no users authenticate everything, so a
+  token-less client is valid — not an error path.
+- **Codec pinning is type-level.** `TranscodeCodec` has no `opus` variant, so finding #14 cannot
+  be violated by construction; `--transcode opus` is rejected at argument-parse time.
+- **Tolerant deserialization.** Every struct is `#[serde(default)]` with unknown fields ignored
+  and `null` accepted for documented-nullable objects; only `filepath` is load-bearing. A client
+  built against one server version keeps working against another.
+- **Session token reuse is server-scoped** — a saved token is never sent to a different server URL.
+- Shared `src/runtime.rs`: one process-lifetime tokio runtime for both the API client and the
+  streaming source, still lazily built so local-only serve mode never starts tokio.
+
+Debug CLI over the client (the test harness, as `play` was for Phase 2): `login` (password via
+`MSTREAM_PASSWORD` or `--password-stdin`, never persisted — only the JWT is), `logout`, `info`,
+`ls`, `browse`, `search`, `playlists`. `play` now takes a library path and resolves the server,
+token, stream URL, and duration hint from the saved session.
+
+**Verified against a live mStream** (throwaway instance, Windows) in both public and
+authenticated mode: login success/failure exit codes, auth enforcement, session persistence and
+token scoping, file-explorer, tag browsing, search, playlists, and end-to-end playback of a
+session-resolved FLAC with a server-supplied duration hint plus a mid-track seek — direct and
+transcoded.
 
 ### Phase 4 — TUI
 ratatui + crossterm. v1 screens: connect/login, **file explorer** (the mStream-identity feature),

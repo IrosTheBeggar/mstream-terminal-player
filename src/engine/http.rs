@@ -1,19 +1,18 @@
-//! HTTP source support: a lazily-initialized tokio runtime + reqwest client
-//! feeding stream-download readers (buffered `Read + Seek` over HTTP range
-//! requests, spooled to a temp file).
+//! HTTP source support: a reqwest client feeding stream-download readers
+//! (buffered `Read + Seek` over HTTP range requests, spooled to a temp file).
 //!
-//! The runtime lives in a process-lifetime static so download tasks can never
-//! outlive it; it is only spun up on the first HTTP source, so pure-local
-//! serve mode (the jukebox) never starts tokio at all.
+//! Async work runs on the shared runtime in `crate::runtime`.
 
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use stream_download::http::reqwest::{Client, Url};
 use stream_download::http::HttpStream;
+use stream_download::http::reqwest::{Client, Url};
 use stream_download::source::SourceStream;
 use stream_download::storage::temp::TempStorageProvider;
 use stream_download::{Settings, StreamDownload};
+
+use crate::runtime;
 
 pub(crate) type HttpReader = StreamDownload<TempStorageProvider>;
 
@@ -23,53 +22,37 @@ pub(crate) type HttpReader = StreamDownload<TempStorageProvider>;
 /// don't need a timeout.)
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) struct HttpOpener {
-    runtime: tokio::runtime::Runtime,
-    client: Client,
-}
-
-impl HttpOpener {
-    fn new() -> Result<Self, String> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("mstream-http")
-            .enable_all()
-            .build()
-            .map_err(|e| format!("failed to start async runtime: {}", e))?;
-        let client = Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .build()
-            .map_err(|e| format!("failed to build http client: {}", e))?;
-        Ok(HttpOpener { runtime, client })
-    }
-
-    /// Open a URL as a seekable reader. Returns the reader plus the reported
-    /// Content-Length (None means the server streamed a response of unknown
-    /// size — seekable only within what has already downloaded).
-    pub(crate) fn open(&self, url_str: &str) -> Result<(HttpReader, Option<u64>), String> {
-        let url: Url = url_str.parse().map_err(|e| format!("invalid URL: {}", e))?;
-        self.runtime.block_on(async {
-            let stream = HttpStream::new(self.client.clone(), url)
-                .await
-                .map_err(|e| format!("request failed: {}", e))?;
-            let content_length = stream.content_length();
-            let reader =
-                StreamDownload::from_stream(stream, TempStorageProvider::new(), Settings::default())
-                    .await
-                    .map_err(|e| format!("stream init failed: {}", e))?;
-            Ok((reader, content_length))
+fn client() -> Result<&'static Client, String> {
+    static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()
+                .map_err(|e| format!("failed to build http client: {e}"))
         })
-    }
-}
-
-/// Process-lifetime opener. An init failure (no runtime / no client) is
-/// unrecoverable, so caching the error is fine.
-pub(crate) fn opener() -> Result<&'static HttpOpener, String> {
-    static OPENER: OnceLock<Result<HttpOpener, String>> = OnceLock::new();
-    OPENER
-        .get_or_init(HttpOpener::new)
         .as_ref()
         .map_err(|e| e.clone())
+}
+
+/// Open a URL as a seekable reader. Returns the reader plus the reported
+/// Content-Length (None means the server streamed a response of unknown size —
+/// seekable only within what has already been downloaded, which is what
+/// mStream's `/transcode` does on a cache miss).
+pub(crate) fn open(url_str: &str) -> Result<(HttpReader, Option<u64>), String> {
+    let url: Url = url_str.parse().map_err(|e| format!("invalid URL: {e}"))?;
+    let client = client()?.clone();
+    runtime::block_on(async move {
+        let stream = HttpStream::new(client, url)
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+        let content_length = stream.content_length();
+        let reader =
+            StreamDownload::from_stream(stream, TempStorageProvider::new(), Settings::default())
+                .await
+                .map_err(|e| format!("stream init failed: {e}"))?;
+        Ok((reader, content_length))
+    })?
 }
 
 pub(crate) fn is_http_url(source: &str) -> bool {
