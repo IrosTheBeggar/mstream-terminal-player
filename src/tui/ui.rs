@@ -256,7 +256,7 @@ fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let [message_area, modes_area] =
-        Layout::horizontal([Constraint::Min(10), Constraint::Length(38)]).areas(area);
+        Layout::horizontal([Constraint::Min(10), Constraint::Length(48)]).areas(area);
 
     let message = match &app.message {
         Some(m) => Span::styled(
@@ -271,10 +271,11 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(message)), message_area);
 
     let modes = format!(
-        "vol {:>3}%  repeat {}  shuffle {}",
+        "vol {:>3}%  repeat {}  shuffle {}  dj {}",
         (app.volume * 100.0).round() as u32,
         app.queue.repeat.label(),
-        if app.queue.shuffle { "on" } else { "off" }
+        if app.queue.shuffle { "on" } else { "off" },
+        app.autodj.label()
     );
     frame.render_widget(
         Paragraph::new(Span::styled(modes, Style::new().fg(DIM))).alignment(Alignment::Right),
@@ -393,6 +394,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ("- / +", "volume"),
         ("d / C", "remove from queue / clear queue"),
         ("r / s", "repeat / shuffle"),
+        ("A", "auto-dj: off / similar / tempo+key"),
         ("? / Esc", "toggle this help"),
         ("q", "quit"),
     ];
@@ -542,6 +544,7 @@ mod tests {
         assert!(text.contains("0:50 / 3:20"), "elapsed and total are shown");
         assert!(text.contains("vol 100%"));
         assert!(text.contains("repeat off"));
+        assert!(text.contains("dj off"));
         assert!(text.contains("▶"), "the queue marks the current track");
     }
 

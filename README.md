@@ -30,7 +30,7 @@ track queues everything visible and starts there; `a` queues just that one.
 | `Space` | play or pause · `n` / `p` next / previous |
 | `[` `]` | seek 5s · `-` `+` volume |
 | `d` / `C` | remove from queue / clear queue |
-| `r` / `s` | repeat / shuffle |
+| `r` / `s` | repeat / shuffle · `A` auto-dj |
 | `?` | help · `q` quit |
 
 ## Library commands
@@ -52,6 +52,27 @@ mstream-player logout
 
 Servers running in public mode (no users configured) need no login — just pass
 `--server <url>`.
+
+## Auto-DJ
+
+Press `A` to cycle Auto-DJ: **off → similar → tempo+key**. When the queue has
+nothing left after the track that's playing, it quietly adds one more.
+
+- **similar** uses the server's audio-embedding index (`discovery`), so picks
+  sound like what you're listening to rather than merely sharing a tag.
+- **tempo+key** matches harmonically: the seed's key is converted to its
+  Camelot code and matched against its wheel neighbours and relative
+  major/minor, with tempo windows at the same, half and double time.
+
+If similarity is switched off server-side, or the track hasn't been analysed
+yet, it falls back to tempo+key and says so instead of going quiet.
+
+To see what it would pick without launching the player:
+
+```
+mstream-player dj "music/Artist/Album/01.flac" --mode similar
+mstream-player dj "music/Artist/Album/01.flac" --mode tempo
+```
 
 ## Playback
 

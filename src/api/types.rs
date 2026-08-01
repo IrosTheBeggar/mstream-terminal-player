@@ -8,6 +8,7 @@
 
 use serde::Deserialize;
 use serde::Deserializer;
+use serde::Serialize;
 
 /// Accept an explicit JSON `null` where the server documents a nullable object,
 /// yielding `T::default()` instead of failing the whole response.
@@ -210,6 +211,70 @@ pub struct SearchTrack {
     /// enrichment.
     #[serde(deserialize_with = "null_default")]
     pub metadata: TrackMetadata,
+}
+
+// ── Auto-DJ ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct BpmWindow {
+    pub min: f64,
+    pub max: f64,
+}
+
+/// Request body for `POST /api/v1/db/random-songs`, which returns a single
+/// track. Empty fields are omitted so the server's filter waterfall only sees
+/// constraints we actually mean.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RandomSongRequest {
+    /// Round-trip cursor: echo back what the previous response returned, and
+    /// the server keeps the session from repeating itself.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignore_list: Vec<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bpm_ranges: Vec<BpmWindow>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bpm_ranges_wide: Vec<BpmWindow>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub musical_keys: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignore_artists: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct RandomSongsResponse {
+    pub songs: Vec<Track>,
+    #[serde(rename = "ignoreList")]
+    pub ignore_list: Vec<u32>,
+}
+
+/// `POST /api/v1/discovery/local/similar/tracks` — nearest neighbours in the
+/// embedding space the discovery worker builds.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SimilarTracksResponse {
+    /// True when the seed exists but hasn't been embedded yet. Transient, not
+    /// an error — the results list is simply empty.
+    #[serde(rename = "notAnalyzed")]
+    pub not_analyzed: bool,
+    pub results: Vec<SimilarTrack>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SimilarTrack {
+    pub filepath: String,
+    /// Cosine similarity to the seed, 0..1.
+    pub similarity: f64,
+    #[serde(deserialize_with = "null_default")]
+    pub metadata: TrackMetadata,
+}
+
+impl SimilarTrack {
+    pub fn into_track(self) -> Track {
+        Track { filepath: self.filepath, metadata: self.metadata }
+    }
 }
 
 // ── Playlists ───────────────────────────────────────────────────────────────

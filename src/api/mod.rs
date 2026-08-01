@@ -32,6 +32,11 @@ pub enum ApiError {
     Network(String),
     /// 401 — no token, expired token, or bad credentials.
     Unauthorized,
+    /// 403 — authenticated but not allowed. mStream also uses this for
+    /// "feature disabled" and for request-validation failures, so it must not
+    /// be confused with [`ApiError::Unauthorized`]: it never means "log in
+    /// again".
+    Forbidden(String),
     NotFound(String),
     /// Any other non-2xx, with the server's `error` message when it sent one.
     Server { status: u16, message: String },
@@ -47,6 +52,7 @@ impl fmt::Display for ApiError {
             ApiError::Unauthorized => {
                 write!(f, "not authorized — run `mstream-player login` (or the token expired)")
             }
+            ApiError::Forbidden(what) => write!(f, "not permitted: {what}"),
             ApiError::NotFound(what) => write!(f, "not found: {what}"),
             ApiError::Server { status, message } => write!(f, "server error {status}: {message}"),
             ApiError::Decode { endpoint, message } => {
@@ -175,7 +181,8 @@ impl Client {
         .map_err(ApiError::Network)??;
 
         match status {
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => return Err(ApiError::Unauthorized),
+            StatusCode::UNAUTHORIZED => return Err(ApiError::Unauthorized),
+            StatusCode::FORBIDDEN => return Err(ApiError::Forbidden(extract_error(&text))),
             StatusCode::NOT_FOUND => return Err(ApiError::NotFound(path.to_string())),
             s if !s.is_success() => {
                 return Err(ApiError::Server {
@@ -251,6 +258,42 @@ impl Client {
             body["artist"] = serde_json::Value::String(artist.to_string());
         }
         self.post("api/v1/db/album-songs", body)
+    }
+
+    /// Ask the Auto-DJ picker for one track matching the given constraints.
+    ///
+    /// The server answers 400 when nothing survives its fallback waterfall;
+    /// that's an ordinary "no pick", so it comes back as an empty `songs`
+    /// list rather than an error.
+    pub fn random_song(
+        &self,
+        request: &RandomSongRequest,
+    ) -> Result<RandomSongsResponse, ApiError> {
+        let body = serde_json::to_value(request)
+            .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?;
+        match self.post("api/v1/db/random-songs", body) {
+            Ok(response) => Ok(response),
+            Err(ApiError::Server { status: 400, .. }) => Ok(RandomSongsResponse::default()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Tracks that sound like `filepath`, nearest first.
+    ///
+    /// Returns `None` when the server has discovery collection switched off —
+    /// it answers 403 by house convention for a disabled feature, which is a
+    /// configuration state rather than a failure the user can act on.
+    pub fn similar_tracks(
+        &self,
+        filepath: &str,
+        limit: u32,
+    ) -> Result<Option<SimilarTracksResponse>, ApiError> {
+        let body = serde_json::json!({ "filePath": filepath, "limit": limit });
+        match self.post("api/v1/discovery/local/similar/tracks", body) {
+            Ok(response) => Ok(Some(response)),
+            Err(ApiError::Forbidden(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn genres(&self) -> Result<Vec<Genre>, ApiError> {

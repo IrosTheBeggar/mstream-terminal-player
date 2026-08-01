@@ -1,6 +1,7 @@
 mod api;
 mod cmd_library;
 mod cmd_play;
+mod dj;
 mod engine;
 mod player;
 mod runtime;
@@ -45,6 +46,8 @@ enum Command {
     Browse(cmd_library::BrowseArgs),
     /// Search the library
     Search(cmd_library::SearchArgs),
+    /// Show what Auto-DJ would play next, and why
+    Dj(cmd_library::DjArgs),
     /// List playlists, or show one playlist's tracks
     Playlists(cmd_library::PlaylistArgs),
 }
@@ -87,6 +90,7 @@ fn main() {
         (Some(Command::Ls(args)), _) => std::process::exit(cmd_library::ls(args)),
         (Some(Command::Browse(args)), _) => std::process::exit(cmd_library::browse(args)),
         (Some(Command::Search(args)), _) => std::process::exit(cmd_library::search(args)),
+        (Some(Command::Dj(args)), _) => std::process::exit(cmd_library::dj(args)),
         (Some(Command::Playlists(args)), _) => std::process::exit(cmd_library::playlists(args)),
         (Some(Command::Serve(args)), _) => Some(args),
         // Legacy spawn contract: bare `--port N`.

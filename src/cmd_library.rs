@@ -104,6 +104,148 @@ pub struct PlaylistArgs {
     pub conn: ConnArgs,
 }
 
+#[derive(Args)]
+pub struct DjArgs {
+    /// Seed track (library path). Omit for an unseeded random pick.
+    pub seed: Option<String>,
+
+    /// "similar" for sonic similarity, "tempo" for tempo/key matching
+    #[arg(long, default_value = "similar")]
+    pub mode: String,
+
+    /// How many candidates to show
+    #[arg(long, default_value_t = 10)]
+    pub count: u32,
+
+    #[command(flatten)]
+    pub conn: ConnArgs,
+}
+
+/// Show what Auto-DJ would queue next, and why — the scriptable view of what
+/// the player does when Auto-DJ is switched on.
+pub fn dj(args: DjArgs) -> i32 {
+    let client = match connect(&args.conn) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+
+    match args.mode.to_ascii_lowercase().as_str() {
+        "similar" => {
+            let Some(seed) = &args.seed else {
+                eprintln!("error: --mode similar needs a seed track");
+                return 2;
+            };
+            match client.similar_tracks(seed, args.count) {
+                Ok(None) => {
+                    println!("similarity is switched off on this server");
+                    println!("(the player falls back to tempo/key matching)");
+                    0
+                }
+                Ok(Some(found)) if found.not_analyzed => {
+                    println!("that track hasn't been analysed yet — no embedding to compare");
+                    println!("(the player falls back to tempo/key matching)");
+                    0
+                }
+                Ok(Some(found)) if found.results.is_empty() => {
+                    println!("(nothing similar found)");
+                    0
+                }
+                Ok(Some(found)) => {
+                    for r in found.results {
+                        println!("{:.3}  {}", r.similarity, r.filepath);
+                    }
+                    0
+                }
+                Err(e) => fail(e),
+            }
+        }
+
+        "tempo" | "tempo+key" | "bpm" => {
+            // Resolve the seed's tags first — they're what the windows and
+            // key set are derived from.
+            let seed_meta = match &args.seed {
+                Some(path) => match client.metadata(path) {
+                    Ok(track) => Some(track),
+                    Err(e) => return fail(e),
+                },
+                None => None,
+            };
+
+            let mut request = crate::api::types::RandomSongRequest::default();
+            if let Some(seed) = &seed_meta {
+                println!(
+                    "seed: {}  bpm {}  key {}",
+                    seed.display_name(),
+                    seed.metadata.bpm.map(|b| b.to_string()).unwrap_or("—".into()),
+                    seed.metadata.musical_key.as_deref().unwrap_or("—")
+                );
+                if let Some(bpm) = seed.metadata.bpm {
+                    let to_window = |r: crate::dj::BpmRange| crate::api::types::BpmWindow {
+                        min: r.min,
+                        max: r.max,
+                    };
+                    request.bpm_ranges =
+                        crate::dj::bpm_windows(f64::from(bpm), crate::dj::TIGHT_TOLERANCE)
+                            .into_iter()
+                            .map(to_window)
+                            .collect();
+                    request.bpm_ranges_wide =
+                        crate::dj::bpm_windows(f64::from(bpm), crate::dj::WIDE_TOLERANCE)
+                            .into_iter()
+                            .map(to_window)
+                            .collect();
+                }
+                request.musical_keys =
+                    crate::dj::compatible_keys(seed.metadata.musical_key.as_deref());
+
+                let windows: Vec<String> = request
+                    .bpm_ranges
+                    .iter()
+                    .map(|w| format!("{:.1}-{:.1}", w.min, w.max))
+                    .collect();
+                println!(
+                    "matching: bpm [{}]  keys [{}]",
+                    if windows.is_empty() { "none".into() } else { windows.join(", ") },
+                    if request.musical_keys.is_empty() {
+                        "none".to_string()
+                    } else {
+                        request.musical_keys.join(", ")
+                    }
+                );
+            }
+
+            // The endpoint returns one track per call, so ask repeatedly and
+            // echo the cursor back the way the player does.
+            for _ in 0..args.count {
+                match client.random_song(&request) {
+                    Ok(response) if response.songs.is_empty() => {
+                        println!("(no more matches)");
+                        break;
+                    }
+                    Ok(response) => {
+                        for t in &response.songs {
+                            println!(
+                                "  {}  bpm {}  key {}",
+                                t.display_name(),
+                                t.metadata.bpm.map(|b| b.to_string()).unwrap_or("—".into()),
+                                t.metadata.musical_key.as_deref().unwrap_or("—")
+                            );
+                        }
+                        request.ignore_list = response.ignore_list;
+                    }
+                    Err(e) => return fail(e),
+                }
+            }
+            0
+        }
+
+        other => {
+            eprintln!("error: unknown --mode '{other}' — use 'similar' or 'tempo'");
+            2
+        }
+    }
+}
+
 /// Turn an `ApiError` into a printed message plus an exit code.
 fn fail(e: ApiError) -> i32 {
     eprintln!("error: {e}");

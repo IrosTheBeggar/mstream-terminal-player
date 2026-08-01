@@ -13,8 +13,12 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
-use crate::api::types::{Album, DirListing, Genre, Ping, PlaylistSummary, SearchResults, Track};
+use crate::api::types::{
+    Album, BpmWindow, DirListing, Genre, Ping, PlaylistSummary, RandomSongRequest, SearchResults,
+    Track,
+};
 use crate::api::{ApiError, Client};
+use crate::dj;
 use crate::engine::Engine;
 use crate::player::{PlayerCtl, PlayerStatus};
 
@@ -40,6 +44,8 @@ pub enum ApiCmd {
     Login { server: String, username: String, password: String },
     Browse(String),
     Library(LibraryNode),
+    /// Ask for the next Auto-DJ track, seeded on what's playing now.
+    AutoDj { mode: AutoDjMode, seed: Option<Box<Track>>, ignore_list: Vec<u32> },
     Playlists,
     LoadPlaylist(String),
     Search(String),
@@ -70,8 +76,42 @@ pub enum LibraryData {
     Tracks(Vec<Track>),
 }
 
+/// How Auto-DJ chooses what comes next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutoDjMode {
+    #[default]
+    Off,
+    /// Nearest neighbours in the server's audio-embedding space.
+    Similar,
+    /// Harmonically and rhythmically compatible: Camelot-adjacent keys and
+    /// tempo windows around the current track (including half/double time).
+    BpmKey,
+}
+
+impl AutoDjMode {
+    pub fn next(self) -> Self {
+        match self {
+            AutoDjMode::Off => AutoDjMode::Similar,
+            AutoDjMode::Similar => AutoDjMode::BpmKey,
+            AutoDjMode::BpmKey => AutoDjMode::Off,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AutoDjMode::Off => "off",
+            AutoDjMode::Similar => "similar",
+            AutoDjMode::BpmKey => "tempo+key",
+        }
+    }
+}
+
 /// How many tracks "Recently Added" asks for.
 const RECENT_LIMIT: u32 = 100;
+
+/// Candidates to request from the similarity index. More than one because the
+/// nearest neighbour is often already sitting in the queue.
+const SIMILAR_LIMIT: u32 = 15;
 
 #[derive(Debug)]
 pub enum Event {
@@ -89,6 +129,9 @@ pub enum Event {
     Listing(Box<DirListing>),
     /// Contents of a library view, tagged with the node they belong to.
     Library { node: LibraryNode, data: LibraryData },
+    /// Auto-DJ candidates, best first. `note` explains any fallback that had
+    /// to happen so the UI can say so out loud.
+    AutoDjPick { candidates: Vec<Track>, ignore_list: Vec<u32>, note: Option<String> },
     Playlists(Vec<PlaylistSummary>),
     PlaylistTracks { name: String, tracks: Vec<Track> },
     SearchResults(Box<SearchResults>),
@@ -220,6 +263,16 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 load_library(c, &node).map(|data| Event::Library { node: node.clone(), data })
             }),
 
+            ApiCmd::AutoDj { mode, seed, ignore_list } => with_client(client.as_ref(), |c| {
+                autodj_pick(c, mode, seed.as_deref(), ignore_list).map(
+                    |(candidates, ignore_list, note)| Event::AutoDjPick {
+                        candidates,
+                        ignore_list,
+                        note,
+                    },
+                )
+            }),
+
             ApiCmd::Playlists => {
                 with_client(client.as_ref(), |c| c.playlists().map(Event::Playlists))
             }
@@ -312,6 +365,92 @@ fn load_library(client: &Client, node: &LibraryNode) -> Result<LibraryData, ApiE
     })
 }
 
+type AutoDjResult = Result<(Vec<Track>, Vec<u32>, Option<String>), ApiError>;
+
+/// Choose what Auto-DJ should play next.
+///
+/// Similarity is best-effort: the server may have discovery switched off, or
+/// simply not have embedded this track yet. Rather than stalling, both cases
+/// fall through to tempo/key matching and say why.
+fn autodj_pick(
+    client: &Client,
+    mode: AutoDjMode,
+    seed: Option<&Track>,
+    ignore_list: Vec<u32>,
+) -> AutoDjResult {
+    match mode {
+        AutoDjMode::Off => Ok((Vec::new(), ignore_list, None)),
+
+        AutoDjMode::BpmKey => pick_by_tempo_and_key(client, seed, ignore_list, None),
+
+        AutoDjMode::Similar => {
+            let Some(seed) = seed else {
+                return pick_by_tempo_and_key(client, None, ignore_list, None);
+            };
+            match client.similar_tracks(&seed.filepath, SIMILAR_LIMIT)? {
+                None => pick_by_tempo_and_key(
+                    client,
+                    Some(seed),
+                    ignore_list,
+                    Some("similarity is switched off on this server — matching tempo and key"),
+                ),
+                Some(found) if found.not_analyzed => pick_by_tempo_and_key(
+                    client,
+                    Some(seed),
+                    ignore_list,
+                    Some("this track hasn't been analysed yet — matching tempo and key"),
+                ),
+                Some(found) if found.results.is_empty() => pick_by_tempo_and_key(
+                    client,
+                    Some(seed),
+                    ignore_list,
+                    Some("nothing sounded similar — matching tempo and key"),
+                ),
+                Some(found) => Ok((
+                    found.results.into_iter().map(|r| r.into_track()).collect(),
+                    ignore_list,
+                    None,
+                )),
+            }
+        }
+    }
+}
+
+fn pick_by_tempo_and_key(
+    client: &Client,
+    seed: Option<&Track>,
+    ignore_list: Vec<u32>,
+    note: Option<&str>,
+) -> AutoDjResult {
+    let mut request = RandomSongRequest { ignore_list, ..Default::default() };
+    let mut note = note.map(str::to_string);
+
+    if let Some(seed) = seed {
+        if let Some(bpm) = seed.metadata.bpm {
+            let to_window = |r: dj::BpmRange| BpmWindow { min: r.min, max: r.max };
+            request.bpm_ranges = dj::bpm_windows(f64::from(bpm), dj::TIGHT_TOLERANCE)
+                .into_iter()
+                .map(to_window)
+                .collect();
+            request.bpm_ranges_wide = dj::bpm_windows(f64::from(bpm), dj::WIDE_TOLERANCE)
+                .into_iter()
+                .map(to_window)
+                .collect();
+        }
+        request.musical_keys = dj::compatible_keys(seed.metadata.musical_key.as_deref());
+
+        // Be honest when there was nothing to match on: the pick is really
+        // just random, and the user should know that rather than assume the
+        // tempo matching is broken.
+        if request.bpm_ranges.is_empty() && request.musical_keys.is_empty() && note.is_none() {
+            note = Some("no tempo or key tags on this track — picking at random".to_string());
+        }
+    }
+
+    let response = client.random_song(&request)?;
+    Ok((response.songs, response.ignore_list, note))
+}
+
 /// Run a request against the connected client, mapping failures onto events.
 fn with_client<F>(client: Option<&Client>, f: F) -> Option<Event>
 where
@@ -322,6 +461,8 @@ where
     };
     match f(client) {
         Ok(event) => Some(event),
+        // Only 401 means the session is no good; 403 is a permission or
+        // feature-flag answer that shouldn't bounce the user to a login form.
         Err(ApiError::Unauthorized) => Some(Event::Unauthorized),
         Err(e) => Some(Event::Error(e.to_string())),
     }

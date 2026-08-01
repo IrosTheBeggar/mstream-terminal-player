@@ -139,6 +139,25 @@ because every response is tagged with the node it belongs to, a slow reply for a
 already left is discarded instead of overwriting the current one. Genres drill straight to tracks
 rather than albums because the albums-in-a-genre route is velvet-only (finding #15).
 
+**Auto-DJ** (second iteration pass): `A` cycles off → similar → tempo+key, and when the queue has
+nothing after the current track the player quietly requests one more, seeded on what's playing.
+- *similar* uses `POST /api/v1/discovery/local/similar/tracks` (audio embeddings). Two states are
+  not failures and are handled as fallbacks with an explanation on screen: the server answers 403
+  when discovery collection is off, and `notAnalyzed: true` when the seed has no embedding yet.
+- *tempo+key* uses `POST /api/v1/db/random-songs`. `src/dj.rs` converts whatever the tagger wrote
+  ("A minor", "Am", "8A", "Gbm", "F♯m") into a Camelot code, then asks for the wheel neighbours
+  and the relative major/minor; tempo windows are built at the same, half and double time, since
+  a 140 BPM track mixes into 70. Implausible centres (outside 40–220) are dropped.
+- The `ignoreList` cursor is round-tripped so a session doesn't repeat itself, and picks are
+  deduped against the queue before being appended.
+- Verified live: a 128 BPM / Am seed produced windows `120.3–135.7` + `60.2–67.8` and keys
+  `8A, 7A, 9A, 8B`, matched the 126 BPM Em and 124 BPM C tracks, and correctly excluded the
+  90 BPM F♯m one. Similarity ranked three sine tones above pink noise.
+
+Splitting `ApiError::Forbidden` out of `Unauthorized` was a prerequisite: mStream uses 403 for
+"feature disabled", per-user permissions, and request-validation failures, none of which should
+bounce a user to a login screen.
+
 **Deferred from this phase:** the "TOML config with multiple saved servers" item. Single-server
 `session.json` (Phase 3) covers the common case; a server picker is a self-contained follow-up
 and was not worth half-building here.

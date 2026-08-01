@@ -12,7 +12,7 @@ use crate::api::types::{Album, DirListing, Genre, Track, TrackMetadata};
 use crate::api::urls;
 use crate::player::PlayerStatus;
 
-use super::worker::{ApiCmd, AudioCmd, Event, LibraryData, LibraryNode};
+use super::worker::{ApiCmd, AudioCmd, AutoDjMode, Event, LibraryData, LibraryNode};
 
 const SEEK_STEP: f64 = 5.0;
 const VOLUME_STEP: f32 = 0.05;
@@ -114,6 +114,7 @@ pub enum Action {
     ClearQueue,
     ToggleRepeat,
     ToggleShuffle,
+    ToggleAutoDj,
     StartSearch,
     Input(char),
     Backspace,
@@ -363,6 +364,11 @@ pub struct App {
     pub search_summary: Option<String>,
 
     pub queue: Queue,
+    pub autodj: AutoDjMode,
+    /// Round-trip cursor the random-songs picker uses to avoid repeats.
+    autodj_ignore: Vec<u32>,
+    /// A request is in flight; don't pile on another.
+    autodj_pending: bool,
     pub status: PlayerStatus,
     pub volume: f32,
     pub now_playing: Option<Track>,
@@ -397,6 +403,9 @@ impl App {
             editing_query: false,
             search_summary: None,
             queue: Queue::default(),
+            autodj: AutoDjMode::Off,
+            autodj_ignore: Vec::new(),
+            autodj_pending: false,
             status: PlayerStatus::default(),
             volume: 1.0,
             now_playing: None,
@@ -552,6 +561,16 @@ impl App {
                     if self.queue.shuffle { "on" } else { "off" }
                 ));
                 Vec::new()
+            }
+            Action::ToggleAutoDj => {
+                self.autodj = self.autodj.next();
+                self.info(format!("auto-dj: {}", self.autodj.label()));
+                if self.autodj == AutoDjMode::Off {
+                    // Any reply still in flight is no longer wanted.
+                    self.autodj_pending = false;
+                    return Vec::new();
+                }
+                self.maybe_autodj()
             }
 
             Action::StartSearch => {
@@ -812,7 +831,34 @@ impl App {
         self.queue.state.select(Some(index));
         let hint = track.metadata.duration;
         self.now_playing = Some(track);
-        vec![Effect::Audio(AudioCmd::Play { url, duration_hint: hint })]
+
+        let mut effects = vec![Effect::Audio(AudioCmd::Play { url, duration_hint: hint })];
+        effects.extend(self.maybe_autodj());
+        effects
+    }
+
+    /// Ask Auto-DJ for another track once the queue has nothing left after the
+    /// one playing — early enough that it lands before the current track ends.
+    fn maybe_autodj(&mut self) -> Vec<Effect> {
+        if self.autodj == AutoDjMode::Off || self.autodj_pending {
+            return Vec::new();
+        }
+        let needs_more = match self.queue.current {
+            Some(index) => index + 1 >= self.queue.items.len(),
+            // Nothing playing: only step in if there's nothing queued either,
+            // so switching it on doesn't jump a queue the user just built.
+            None => self.queue.items.is_empty(),
+        };
+        if !needs_more {
+            return Vec::new();
+        }
+
+        self.autodj_pending = true;
+        vec![Effect::Api(ApiCmd::AutoDj {
+            mode: self.autodj,
+            seed: self.now_playing.clone().map(Box::new),
+            ignore_list: self.autodj_ignore.clone(),
+        })]
     }
 
     fn play_pause(&mut self) -> Vec<Effect> {
@@ -922,6 +968,40 @@ impl App {
                 }
                 self.library.set(entries_from_library(data));
                 self.message = None;
+                Vec::new()
+            }
+            Event::AutoDjPick { candidates, ignore_list, note } => {
+                self.autodj_pending = false;
+                self.autodj_ignore = ignore_list;
+                let explained = note.is_some();
+                if let Some(note) = note {
+                    self.info(note);
+                }
+                if self.autodj == AutoDjMode::Off {
+                    return Vec::new(); // switched off while the request was out
+                }
+
+                let queued: std::collections::HashSet<String> =
+                    self.queue.items.iter().map(|t| t.filepath.clone()).collect();
+                let Some(pick) = candidates.into_iter().find(|t| !queued.contains(&t.filepath))
+                else {
+                    if !explained {
+                        self.info("auto-dj: nothing new to add");
+                    }
+                    return Vec::new();
+                };
+
+                let label = pick.display_name();
+                // If the queue already ran dry, this pick should start playing
+                // rather than sit there.
+                let start_it = self.queue.current.is_none() && self.status.is_idle();
+                self.queue.push(pick);
+                if !explained {
+                    self.info(format!("auto-dj: {label}"));
+                }
+                if start_it {
+                    return self.play_index(self.queue.items.len() - 1);
+                }
                 Vec::new()
             }
             Event::Playlists(playlists) => {
@@ -1132,6 +1212,7 @@ pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
         KeyCode::Char('C') => Some(Action::ClearQueue),
         KeyCode::Char('r') => Some(Action::ToggleRepeat),
         KeyCode::Char('s') => Some(Action::ToggleShuffle),
+        KeyCode::Char('A') => Some(Action::ToggleAutoDj),
         KeyCode::Char('/') => Some(Action::StartSearch),
         _ => None,
     }
@@ -1682,6 +1763,133 @@ mod tests {
         });
         assert_eq!(app.library.entries.len(), 2); // ".." + the track
         assert!(matches!(app.library.entries[1], Entry::Track { .. }));
+    }
+
+    fn autodj_effect(effects: &[Effect]) -> Option<&ApiCmd> {
+        effects.iter().find_map(|e| match e {
+            Effect::Api(cmd @ ApiCmd::AutoDj { .. }) => Some(cmd),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn autodj_cycles_through_its_modes() {
+        let mut app = connected_app();
+        assert_eq!(app.autodj, AutoDjMode::Off);
+        app.handle_action(Action::ToggleAutoDj);
+        assert_eq!(app.autodj, AutoDjMode::Similar);
+        app.handle_action(Action::ToggleAutoDj);
+        assert_eq!(app.autodj, AutoDjMode::BpmKey);
+        app.handle_action(Action::ToggleAutoDj);
+        assert_eq!(app.autodj, AutoDjMode::Off);
+    }
+
+    #[test]
+    fn switching_autodj_on_with_an_empty_queue_starts_it() {
+        let mut app = connected_app();
+        let effects = app.handle_action(Action::ToggleAutoDj);
+        assert_eq!(
+            autodj_effect(&effects),
+            Some(&ApiCmd::AutoDj {
+                mode: AutoDjMode::Similar,
+                seed: None,
+                ignore_list: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn switching_autodj_on_does_not_jump_a_queue_the_user_built() {
+        let mut app = connected_app();
+        app.queue.replace(vec![track("a"), track("b")]);
+        let effects = app.handle_action(Action::ToggleAutoDj);
+        assert!(autodj_effect(&effects).is_none(), "there are tracks waiting already");
+    }
+
+    #[test]
+    fn autodj_requests_only_once_the_queue_has_nothing_after_the_current_track() {
+        let mut app = connected_app();
+        app.autodj = AutoDjMode::BpmKey;
+        app.queue.replace(vec![track("a"), track("b")]);
+
+        let effects = app.play_index(0);
+        assert!(autodj_effect(&effects).is_none(), "one track still waiting");
+
+        let effects = app.play_index(1);
+        let cmd = autodj_effect(&effects).expect("the last track should pull in another");
+        match cmd {
+            ApiCmd::AutoDj { mode, seed, .. } => {
+                assert_eq!(*mode, AutoDjMode::BpmKey);
+                assert_eq!(seed.as_ref().unwrap().filepath, "b", "seeded on what's playing");
+            }
+            other => panic!("unexpected command {other:?}"),
+        }
+
+        // A second trigger while the first is unanswered must not pile on.
+        assert!(app.maybe_autodj().is_empty());
+    }
+
+    #[test]
+    fn autodj_picks_are_appended_and_deduped() {
+        let mut app = connected_app();
+        app.autodj = AutoDjMode::Similar;
+        app.queue.replace(vec![track("a")]);
+        app.play_index(0);
+
+        app.apply_event(Event::AutoDjPick {
+            // The first candidate is already queued, so the second wins.
+            candidates: vec![track("a"), track("b")],
+            ignore_list: vec![7],
+            note: None,
+        });
+        assert_eq!(app.queue.items.len(), 2);
+        assert_eq!(app.queue.items[1].filepath, "b");
+        assert_eq!(app.autodj_ignore, vec![7], "the cursor is kept for the next request");
+        assert!(!app.autodj_pending);
+    }
+
+    #[test]
+    fn an_autodj_pick_starts_playing_when_the_queue_ran_dry() {
+        let mut app = connected_app();
+        app.autodj = AutoDjMode::Similar;
+        // Nothing playing, nothing queued.
+        let effects = app.apply_event(Event::AutoDjPick {
+            candidates: vec![track("fresh")],
+            ignore_list: Vec::new(),
+            note: None,
+        });
+        assert_eq!(app.queue.items.len(), 1);
+        assert!(matches!(effects[0], Effect::Audio(AudioCmd::Play { .. })));
+        assert_eq!(app.queue.current, Some(0));
+    }
+
+    #[test]
+    fn a_pick_arriving_after_autodj_is_switched_off_is_dropped() {
+        let mut app = connected_app();
+        app.autodj = AutoDjMode::Similar;
+        app.autodj_pending = true;
+        app.autodj = AutoDjMode::Off;
+
+        let effects = app.apply_event(Event::AutoDjPick {
+            candidates: vec![track("late")],
+            ignore_list: Vec::new(),
+            note: None,
+        });
+        assert!(app.queue.items.is_empty());
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn a_fallback_note_is_surfaced_instead_of_the_track_name() {
+        let mut app = connected_app();
+        app.autodj = AutoDjMode::Similar;
+        app.apply_event(Event::AutoDjPick {
+            candidates: vec![track("x")],
+            ignore_list: Vec::new(),
+            note: Some("this track hasn't been analysed yet — matching tempo and key".into()),
+        });
+        let message = app.message.as_ref().unwrap();
+        assert!(message.text.contains("analysed"), "the user learns why it fell back");
     }
 
     #[test]
