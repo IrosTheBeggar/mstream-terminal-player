@@ -14,6 +14,61 @@ use super::worker::LibraryNode;
 const ACCENT: Color = Color::Cyan;
 const DIM: Color = Color::DarkGray;
 
+/// The mStream wordmark, character for character as the server prints it at
+/// boot (cli-boot-wrapper.js).
+const BANNER: [&str; 5] = [
+    r"               ____  _",
+    r"     _ __ ___ / ___|| |_ _ __ ___  __ _ _ __ ___",
+    r"    | '_ ` _ \\___ \| __| '__/ _ \/ _` | '_ ` _ \",
+    r"    | | | | | |___) | |_| | |  __/ (_| | | | | | |",
+    r"    |_| |_| |_|____/ \__|_|  \___|\__,_|_| |_| |_|",
+];
+
+/// Widest banner line; below this the art is dropped rather than wrapped.
+const BANNER_WIDTH: u16 = 49;
+
+/// Banner lines, or nothing when the terminal is too small to hold it without
+/// mangling the art.
+fn banner_lines(area: Rect) -> Vec<Line<'static>> {
+    if area.width < BANNER_WIDTH + 2 || area.height < 18 {
+        return Vec::new();
+    }
+    let mut lines: Vec<Line<'static>> =
+        BANNER.iter().map(|l| Line::from(Span::styled(*l, Style::new().fg(ACCENT)))).collect();
+    lines.push(Line::raw(""));
+    lines
+}
+
+/// Draw a block of pre-laid-out lines centred on the area, with no border —
+/// the startup screens are a splash, not a dialog, so the art keeps its own
+/// internal alignment and the whole block is centred as one unit.
+fn render_centered_block(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
+    let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let width = width.clamp(1, area.width);
+    let height = (lines.len() as u16).clamp(1, area.height);
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, rect);
+    frame.render_widget(Paragraph::new(lines), rect);
+}
+
+/// The trailing status line shared by every connect screen.
+fn connect_message(app: &App) -> Option<Line<'static>> {
+    app.message.as_ref().map(|message| {
+        Line::from(Span::styled(
+            message.text.clone(),
+            match message.kind {
+                MessageKind::Error => Style::new().fg(Color::Red),
+                MessageKind::Info => Style::new().fg(DIM),
+            },
+        ))
+    })
+}
+
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
@@ -287,83 +342,21 @@ fn render_connect(frame: &mut Frame, area: Rect, app: &App) {
     // Reconnecting from a saved session: don't flash a login form (and a
     // password field) at someone who never asked to sign in.
     if app.connecting && !app.connect.submitting {
-        render_connecting(frame, area, app);
-        return;
+        return render_connecting(frame, area, app);
     }
-
     match app.connect.stage {
-        ConnectStage::Choosing => return render_connect_choice(frame, area, app),
-        ConnectStage::QuickConnect => return render_connect_quick(frame, area, app),
-        ConnectStage::Direct => {}
+        ConnectStage::Choosing => render_connect_choice(frame, area, app),
+        ConnectStage::QuickConnect => render_connect_quick(frame, area, app),
+        ConnectStage::Direct => render_connect_direct(frame, area, app),
     }
-
-    let box_area = centered_rect(70, 13, area);
-    frame.render_widget(Clear, box_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(ACCENT))
-        .title(" Connect to mStream ");
-    let inner = block.inner(box_area);
-    frame.render_widget(block, box_area);
-
-    let field = |index: usize, label: &str, value: String| -> Line<'static> {
-        let marker = if app.connect.field == index { "> " } else { "  " };
-        let style = if app.connect.field == index {
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
-        } else {
-            Style::new()
-        };
-        Line::from(vec![
-            Span::styled(format!("{marker}{label:<10}"), style),
-            Span::raw(value),
-            Span::styled(if app.connect.field == index { "▏" } else { "" }, style),
-        ])
-    };
-
-    let mut lines = vec![
-        field(0, "Server", app.connect.server.clone()),
-        field(1, "Username", app.connect.username.clone()),
-        field(2, "Password", "•".repeat(app.connect.password.chars().count())),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "Leave the username empty for a server in public mode.",
-            Style::new().fg(DIM),
-        )),
-        Line::from(Span::styled(
-            "Tab/↑↓ switch fields · Enter connects · Esc back · Ctrl+C quits",
-            Style::new().fg(DIM),
-        )),
-    ];
-
-    if app.connecting {
-        lines.push(Line::from(Span::styled("connecting…", Style::new().fg(ACCENT))));
-    }
-    if let Some(message) = &app.message {
-        lines.push(Line::from(Span::styled(
-            message.text.clone(),
-            match message.kind {
-                MessageKind::Error => Style::new().fg(Color::Red),
-                MessageKind::Info => Style::new().fg(DIM),
-            },
-        )));
-    }
-
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 /// Step one: how do you want to reach the server?
 fn render_connect_choice(frame: &mut Frame, area: Rect, app: &App) {
-    let box_area = centered_rect(66, 11, area);
-    frame.render_widget(Clear, box_area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(ACCENT))
-        .title(" Connect to mStream ");
-    let inner = block.inner(box_area);
-    frame.render_widget(block, box_area);
+    let mut lines = banner_lines(area);
+    lines.push(Line::from("How do you want to connect?"));
+    lines.push(Line::raw(""));
 
-    let mut lines = vec![Line::from("How do you want to connect?"), Line::raw("")];
     for (i, (name, blurb)) in CONNECT_METHODS.iter().enumerate() {
         let selected = app.connect.choice == i;
         let style = if selected {
@@ -376,33 +369,56 @@ fn render_connect_choice(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled((*blurb).to_string(), Style::new().fg(DIM)),
         ]));
     }
+
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "↑↓ choose · Enter continue · Ctrl+C quits",
         Style::new().fg(DIM),
     )));
-    if let Some(message) = &app.message {
-        lines.push(Line::from(Span::styled(
-            message.text.clone(),
-            match message.kind {
-                MessageKind::Error => Style::new().fg(Color::Red),
-                MessageKind::Info => Style::new().fg(DIM),
-            },
-        )));
+    lines.extend(connect_message(app));
+    render_centered_block(frame, area, lines);
+}
+
+/// Step two, direct branch: address and credentials.
+fn render_connect_direct(frame: &mut Frame, area: Rect, app: &App) {
+    let mut lines = banner_lines(area);
+
+    let field = |index: usize, label: &str, value: String| -> Line<'static> {
+        let focused = app.connect.field == index;
+        let style = if focused {
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        };
+        Line::from(vec![
+            Span::styled(format!("{} {label:<10}", if focused { ">" } else { " " }), style),
+            Span::raw(value),
+            Span::styled(if focused { "▏" } else { "" }, style),
+        ])
+    };
+
+    lines.push(field(0, "Server", app.connect.server.clone()));
+    lines.push(field(1, "Username", app.connect.username.clone()));
+    lines.push(field(2, "Password", "•".repeat(app.connect.password.chars().count())));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "Leave the username empty for a server in public mode.",
+        Style::new().fg(DIM),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Tab/↑↓ switch fields · Enter connects · Esc back",
+        Style::new().fg(DIM),
+    )));
+    if app.connecting {
+        lines.push(Line::from(Span::styled("connecting…", Style::new().fg(ACCENT))));
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+    lines.extend(connect_message(app));
+    render_centered_block(frame, area, lines);
 }
 
 /// Step two, Quick Connect branch: paste the pairing code.
 fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
-    let box_area = centered_rect(72, 12, area);
-    frame.render_widget(Clear, box_area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(ACCENT))
-        .title(" Quick Connect ");
-    let inner = block.inner(box_area);
-    frame.render_widget(block, box_area);
+    let mut lines = banner_lines(area);
 
     let code = app.connect.code.trim();
     // The code is a few hundred characters — show enough to recognise it,
@@ -414,58 +430,40 @@ fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
         Span::raw(format!("{head}…  ({} characters)", code.chars().count()))
     };
 
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "Paste the pairing code from your server's admin page.",
-            Style::new().fg(DIM),
-        )),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("> ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
-            shown,
-        ]),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "The code opens a tunnel — you'll still sign in afterwards.",
-            Style::new().fg(DIM),
-        )),
-        Line::from(Span::styled("Enter connects · Esc back", Style::new().fg(DIM))),
-    ];
+    lines.push(Line::from(Span::styled(
+        "Paste the pairing code from your server's admin page.",
+        Style::new().fg(DIM),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![
+        Span::styled("> ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        shown,
+    ]));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "The code opens a tunnel — you'll still sign in afterwards.",
+        Style::new().fg(DIM),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Enter connects · Esc back",
+        Style::new().fg(DIM),
+    )));
     if app.connecting {
         lines.push(Line::from(Span::styled("dialling…", Style::new().fg(ACCENT))));
     }
-    if let Some(message) = &app.message {
-        lines.push(Line::from(Span::styled(
-            message.text.clone(),
-            match message.kind {
-                MessageKind::Error => Style::new().fg(Color::Red),
-                MessageKind::Info => Style::new().fg(DIM),
-            },
-        )));
-    }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+    lines.extend(connect_message(app));
+    render_centered_block(frame, area, lines);
 }
 
 fn render_connecting(frame: &mut Frame, area: Rect, app: &App) {
-    let box_area = centered_rect(60, 4, area);
-    frame.render_widget(Clear, box_area);
-
-    let block = Block::default().borders(Borders::ALL).border_style(Style::new().fg(ACCENT));
-    let inner = block.inner(box_area);
-    frame.render_widget(block, box_area);
-
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                format!("Connecting to {}…", app.server),
-                Style::new().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled("Ctrl+C to quit", Style::new().fg(DIM))),
-        ])
-        .alignment(Alignment::Center)
-        .wrap(Wrap { trim: true }),
-        inner,
-    );
+    let mut lines = banner_lines(area);
+    lines.push(Line::from(Span::styled(
+        format!("Connecting to {}…", app.server),
+        Style::new().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled("Ctrl+C to quit", Style::new().fg(DIM))));
+    lines.extend(connect_message(app));
+    render_centered_block(frame, area, lines);
 }
 
 fn render_help(frame: &mut Frame, area: Rect) {
@@ -551,7 +549,11 @@ mod tests {
 
     /// Render one frame and flatten the buffer to text for assertions.
     fn draw(app: &mut App) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(90, 26)).unwrap();
+        draw_sized(app, 90, 26)
+    }
+
+    fn draw_sized(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let mut out = String::new();
@@ -589,16 +591,18 @@ mod tests {
         app.connect.password = "secret".into();
 
         let text = draw(&mut app);
-        assert!(text.contains("Connect to mStream"));
         assert!(text.contains("alice"));
         assert!(text.contains("••••••"), "password is masked");
         assert!(!text.contains("secret"), "password is never drawn in the clear");
     }
 
     #[test]
-    fn the_first_screen_asks_how_to_connect() {
+    fn the_first_screen_shows_the_banner_and_asks_how_to_connect() {
         let mut app = App::new(None, None, None);
         let text = draw(&mut app);
+        // The wordmark the server prints at boot, not a bordered dialog.
+        assert!(text.contains(r"|_| |_| |_|____/"), "banner is drawn");
+        assert!(!text.contains("┌"), "no border box on the startup screen");
         assert!(text.contains("How do you want to connect?"));
         assert!(text.contains("Direct"));
         assert!(text.contains("Quick Connect"));
@@ -747,6 +751,14 @@ mod tests {
         app.handle_action(Action::Submit);
         app.apply_event(Event::SearchResults(Box::new(Default::default())));
         assert!(draw(&mut app).contains("0 tracks"));
+    }
+
+    #[test]
+    fn the_banner_is_dropped_when_it_would_not_fit() {
+        let mut app = App::new(None, None, None);
+        let text = draw_sized(&mut app, 40, 12);
+        assert!(!text.contains(r"|_| |_| |_|____/"), "art is skipped rather than mangled");
+        assert!(text.contains("Direct"), "the choice is still usable");
     }
 
     #[test]
