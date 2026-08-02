@@ -104,7 +104,7 @@ fn event_loop(
     }
 }
 
-fn dispatch(
+pub(crate) fn dispatch(
     app: &App,
     pending: &mut Vec<Effect>,
     audio_tx: &Sender<AudioCmd>,

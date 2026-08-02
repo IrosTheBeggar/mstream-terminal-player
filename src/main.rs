@@ -6,6 +6,7 @@ mod dj;
 mod engine;
 mod player;
 mod quickconnect;
+mod replay;
 mod runtime;
 mod serve;
 mod tui;
@@ -53,6 +54,8 @@ enum Command {
     /// Dial a Quick Connect pairing code and probe the tunnel (diagnostic)
     #[command(hide = true)]
     QuickconnectProbe { code: String },
+    /// Drive the interactive player from a script (smoke testing)
+    Replay(replay::ReplayArgs),
     /// List mStream servers advertising themselves on this network
     Discover {
         /// How long to listen for adverts
@@ -105,6 +108,7 @@ fn main() {
         (Some(Command::QuickconnectProbe { code }), _) => {
             std::process::exit(quickconnect::probe(&code));
         }
+        (Some(Command::Replay(args)), _) => std::process::exit(replay::run(args)),
         (Some(Command::Discover { seconds }), _) => {
             std::process::exit(discovery::print_found(seconds));
         }

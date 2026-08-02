@@ -317,6 +317,29 @@ brew tap / scoop manifest later.
 Gapless (append-to-sink redesign of the advance loop), TUI as remote for server-side audio,
 album art (ratatui-image), media keys (MPRIS/SMTC), scrobbling hooks, brew/scoop/AUR packaging.
 
+## Smoke testing
+
+`mstream-player replay "<script>"` drives the TUI from a script. Keys go through exactly the path
+a real key press takes — `map_key(key, app.input_mode())` → `App::handle_action` → `ui::render`
+against a `TestBackend` — so it exercises the real state machine and the real drawing code, and
+prints the effects each step produced plus the resulting screen.
+
+```
+# offline and deterministic: worker replies come from @event steps. CI-safe.
+mstream-player replay "Down, Enter, @servers, Enter, @needs-login"
+
+# live: real workers, real server, real replies (and real surprises)
+mstream-player replay "Down, Enter, Enter" --live --wait-ms 4500
+```
+
+Steps are keys by name (`Down`, `Enter`, `Esc`, `Tab`, `ctrl+c`), single characters, `'quoted
+text'` to type, `@event` to inject a worker reply (`@servers`, `@connected`, `@needs-login`,
+`@tunnel`, `@unauthorized`, `@error:msg`), `wait:500`, and `frame` to print the screen mid-run.
+
+This exists because two bug classes were escaping: layout problems that a piped terminal capture
+misreports (ratatui only redraws changed cells), and state-machine transitions that only appear
+when keys are pressed in sequence against real replies. The first live run found one of each.
+
 ## Known risks (accepted)
 
 - Linux binaries link ALSA dynamically (`libasound` required at runtime — already true today).
