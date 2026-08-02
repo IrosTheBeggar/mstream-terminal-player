@@ -455,7 +455,10 @@ impl App {
             show_help: false,
             should_quit: false,
         };
-        app.connect.server = server.unwrap_or_else(|| "http://localhost:3000".to_string());
+        // Prefill only a server we actually know — a saved session, or one
+        // passed on the command line. Guessing localhost just means the first
+        // thing a new user does is delete it.
+        app.connect.server = server.unwrap_or_default();
         app
     }
 
@@ -1913,10 +1916,21 @@ mod tests {
     }
 
     #[test]
+    fn the_server_field_starts_empty_for_a_new_user() {
+        // It used to be prefilled with a guess at localhost, so the first
+        // thing anyone had to do was delete two dozen characters.
+        let app = App::new(None, None, None);
+        assert!(app.connect.server.is_empty());
+
+        // A server we actually know about is still offered.
+        let app = App::new(Some("http://host:3000".into()), None, None);
+        assert_eq!(app.connect.server, "http://host:3000");
+    }
+
+    #[test]
     fn connect_form_edits_the_focused_field_only() {
         let mut app = App::new(None, None, None);
         app.connect.stage = ConnectStage::Direct;
-        app.connect.server.clear();
         app.handle_action(Action::Input('h'));
         app.handle_action(Action::CycleFocus);
         app.handle_action(Action::Input('u'));

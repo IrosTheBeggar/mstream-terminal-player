@@ -399,23 +399,36 @@ fn render_connect_choice(frame: &mut Frame, area: Rect, app: &App) {
 fn render_connect_direct(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines = banner_lines(area);
 
-    let field = |index: usize, label: &str, value: String| -> Line<'static> {
+    let field = |index: usize, label: &str, value: String, hint: &str| -> Line<'static> {
         let focused = app.connect.field == index;
         let style = if focused {
             Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
         } else {
             Style::new()
         };
-        Line::from(vec![
-            Span::styled(format!("{} {label:<10}", if focused { ">" } else { " " }), style),
-            Span::raw(value),
-            Span::styled(if focused { "▏" } else { "" }, style),
-        ])
+        let cursor = |on: bool| Span::styled(if on { "▏" } else { "" }, style);
+        let mut spans =
+            vec![Span::styled(format!("{} {label:<10}", if focused { ">" } else { " " }), style)];
+        if value.is_empty() {
+            // Nothing typed yet: the cursor sits where typing starts and the
+            // hint shows the shape of what goes there.
+            spans.push(cursor(focused));
+            spans.push(Span::styled(hint.to_string(), Style::new().fg(DIM)));
+        } else {
+            spans.push(Span::raw(value));
+            spans.push(cursor(focused));
+        }
+        Line::from(spans)
     };
 
-    lines.push(field(0, "Server", app.connect.server.clone()));
-    lines.push(field(1, "Username", app.connect.username.clone()));
-    lines.push(field(2, "Password", "•".repeat(app.connect.password.chars().count())));
+    lines.push(field(0, "Server", app.connect.server.clone(), "http://192.168.1.10:3000"));
+    lines.push(field(1, "Username", app.connect.username.clone(), ""));
+    lines.push(field(
+        2,
+        "Password",
+        "•".repeat(app.connect.password.chars().count()),
+        "",
+    ));
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "Leave the username empty for a server in public mode.",
@@ -661,6 +674,9 @@ mod tests {
 
         let text = draw(&mut app);
         assert!(text.contains("alice"));
+        // An empty server field shows the shape of what belongs there rather
+        // than a guess the user has to delete.
+        assert!(text.contains("http://192.168.1.10:3000"), "placeholder shown");
         assert!(text.contains("••••••"), "password is masked");
         assert!(!text.contains("secret"), "password is never drawn in the clear");
     }
