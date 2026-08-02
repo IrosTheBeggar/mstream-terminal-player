@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, 
 
 use crate::cmd_library::fmt_duration;
 
-use super::app::{App, Entry, Focus, MessageKind, Tab};
+use super::app::{App, CONNECT_METHODS, ConnectStage, Entry, Focus, MessageKind, Tab};
 use super::worker::LibraryNode;
 
 const ACCENT: Color = Color::Cyan;
@@ -291,6 +291,12 @@ fn render_connect(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    match app.connect.stage {
+        ConnectStage::Choosing => return render_connect_choice(frame, area, app),
+        ConnectStage::QuickConnect => return render_connect_quick(frame, area, app),
+        ConnectStage::Direct => {}
+    }
+
     let box_area = centered_rect(70, 13, area);
     frame.render_widget(Clear, box_area);
 
@@ -325,7 +331,7 @@ fn render_connect(frame: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(DIM),
         )),
         Line::from(Span::styled(
-            "Tab/↑↓ switch fields · Enter connects · Ctrl+C quits",
+            "Tab/↑↓ switch fields · Enter connects · Esc back · Ctrl+C quits",
             Style::new().fg(DIM),
         )),
     ];
@@ -343,6 +349,100 @@ fn render_connect(frame: &mut Frame, area: Rect, app: &App) {
         )));
     }
 
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
+/// Step one: how do you want to reach the server?
+fn render_connect_choice(frame: &mut Frame, area: Rect, app: &App) {
+    let box_area = centered_rect(66, 11, area);
+    frame.render_widget(Clear, box_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(ACCENT))
+        .title(" Connect to mStream ");
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+
+    let mut lines = vec![Line::from("How do you want to connect?"), Line::raw("")];
+    for (i, (name, blurb)) in CONNECT_METHODS.iter().enumerate() {
+        let selected = app.connect.choice == i;
+        let style = if selected {
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} {name:<14}", if selected { ">" } else { " " }), style),
+            Span::styled((*blurb).to_string(), Style::new().fg(DIM)),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "↑↓ choose · Enter continue · Ctrl+C quits",
+        Style::new().fg(DIM),
+    )));
+    if let Some(message) = &app.message {
+        lines.push(Line::from(Span::styled(
+            message.text.clone(),
+            match message.kind {
+                MessageKind::Error => Style::new().fg(Color::Red),
+                MessageKind::Info => Style::new().fg(DIM),
+            },
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
+/// Step two, Quick Connect branch: paste the pairing code.
+fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
+    let box_area = centered_rect(72, 12, area);
+    frame.render_widget(Clear, box_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(ACCENT))
+        .title(" Quick Connect ");
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+
+    let code = app.connect.code.trim();
+    // The code is a few hundred characters — show enough to recognise it,
+    // plus a length so a paste is visibly confirmed.
+    let shown = if code.is_empty() {
+        Span::styled("paste the code here", Style::new().fg(DIM))
+    } else {
+        let head: String = code.chars().take(28).collect();
+        Span::raw(format!("{head}…  ({} characters)", code.chars().count()))
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Paste the pairing code from your server's admin page.",
+            Style::new().fg(DIM),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("> ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            shown,
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "The code opens a tunnel — you'll still sign in afterwards.",
+            Style::new().fg(DIM),
+        )),
+        Line::from(Span::styled("Enter connects · Esc back", Style::new().fg(DIM))),
+    ];
+    if app.connecting {
+        lines.push(Line::from(Span::styled("dialling…", Style::new().fg(ACCENT))));
+    }
+    if let Some(message) = &app.message {
+        lines.push(Line::from(Span::styled(
+            message.text.clone(),
+            match message.kind {
+                MessageKind::Error => Style::new().fg(Color::Red),
+                MessageKind::Info => Style::new().fg(DIM),
+            },
+        )));
+    }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
@@ -484,6 +584,7 @@ mod tests {
     #[test]
     fn connect_screen_masks_the_password() {
         let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::Direct;
         app.connect.username = "alice".into();
         app.connect.password = "secret".into();
 
@@ -492,6 +593,30 @@ mod tests {
         assert!(text.contains("alice"));
         assert!(text.contains("••••••"), "password is masked");
         assert!(!text.contains("secret"), "password is never drawn in the clear");
+    }
+
+    #[test]
+    fn the_first_screen_asks_how_to_connect() {
+        let mut app = App::new(None, None, None);
+        let text = draw(&mut app);
+        assert!(text.contains("How do you want to connect?"));
+        assert!(text.contains("Direct"));
+        assert!(text.contains("Quick Connect"));
+        assert!(!text.contains("Password"), "credentials come after the choice");
+    }
+
+    #[test]
+    fn the_quick_connect_screen_confirms_a_pasted_code() {
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::QuickConnect;
+        let text = draw(&mut app);
+        assert!(text.contains("paste the code here"));
+        // Pairing is not login, and the screen has to say so.
+        assert!(text.contains("still sign in"));
+
+        app.connect.code = format!("mstr1:{}", "x".repeat(300));
+        let text = draw(&mut app);
+        assert!(text.contains("306 characters"), "a long paste is visibly confirmed");
     }
 
     #[test]

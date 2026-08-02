@@ -313,12 +313,33 @@ pub struct Message {
     pub kind: MessageKind,
 }
 
+/// Which step of the connect screen is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConnectStage {
+    /// Pick how to reach the server.
+    #[default]
+    Choosing,
+    /// Server address plus credentials.
+    Direct,
+    /// Paste a pairing code and reach the server over its Iroh tunnel.
+    QuickConnect,
+}
+
+/// The two ways in, in menu order.
+pub const CONNECT_METHODS: [(&str, &str); 2] = [
+    ("Direct", "server address on your network"),
+    ("Quick Connect", "pairing code — works from anywhere"),
+];
+
 /// The connect screen, shown when there is no usable session.
 #[derive(Debug, Default)]
 pub struct ConnectForm {
+    pub stage: ConnectStage,
+    pub choice: usize,
     pub server: String,
     pub username: String,
     pub password: String,
+    pub code: String,
     pub field: usize,
     pub submitting: bool,
 }
@@ -586,31 +607,90 @@ impl App {
     }
 
     fn handle_connect_action(&mut self, action: Action) -> Vec<Effect> {
-        match action {
-            Action::Quit => {
-                self.should_quit = true;
-                vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)]
-            }
-            Action::Input(c) => {
-                self.connect.value_mut().push(c);
-                Vec::new()
-            }
-            Action::Backspace => {
-                self.connect.value_mut().pop();
-                Vec::new()
-            }
-            Action::CycleFocus | Action::Down => {
-                self.connect.next_field();
-                Vec::new()
-            }
-            Action::Up => {
-                self.connect.field =
-                    (self.connect.field + ConnectForm::FIELDS - 1) % ConnectForm::FIELDS;
-                Vec::new()
-            }
-            Action::Submit => self.submit_connect(),
-            _ => Vec::new(),
+        if action == Action::Quit {
+            self.should_quit = true;
+            return vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)];
         }
+
+        match self.connect.stage {
+            ConnectStage::Choosing => match action {
+                Action::Up => {
+                    self.connect.choice = self.connect.choice.saturating_sub(1);
+                    Vec::new()
+                }
+                Action::Down | Action::CycleFocus => {
+                    self.connect.choice = (self.connect.choice + 1).min(CONNECT_METHODS.len() - 1);
+                    Vec::new()
+                }
+                Action::Submit | Action::Activate => {
+                    self.message = None;
+                    self.connect.stage = if self.connect.choice == 0 {
+                        ConnectStage::Direct
+                    } else {
+                        ConnectStage::QuickConnect
+                    };
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            },
+
+            ConnectStage::Direct => match action {
+                Action::Input(c) => {
+                    self.connect.value_mut().push(c);
+                    Vec::new()
+                }
+                Action::Backspace => {
+                    self.connect.value_mut().pop();
+                    Vec::new()
+                }
+                Action::CycleFocus | Action::Down => {
+                    self.connect.next_field();
+                    Vec::new()
+                }
+                Action::Up => {
+                    self.connect.field =
+                        (self.connect.field + ConnectForm::FIELDS - 1) % ConnectForm::FIELDS;
+                    Vec::new()
+                }
+                Action::Cancel => {
+                    self.connect.stage = ConnectStage::Choosing;
+                    self.message = None;
+                    Vec::new()
+                }
+                Action::Submit => self.submit_connect(),
+                _ => Vec::new(),
+            },
+
+            ConnectStage::QuickConnect => match action {
+                Action::Input(c) => {
+                    self.connect.code.push(c);
+                    Vec::new()
+                }
+                Action::Backspace => {
+                    self.connect.code.pop();
+                    Vec::new()
+                }
+                Action::Cancel => {
+                    self.connect.stage = ConnectStage::Choosing;
+                    self.message = None;
+                    Vec::new()
+                }
+                Action::Submit => self.submit_quick_connect(),
+                _ => Vec::new(),
+            },
+        }
+    }
+
+    fn submit_quick_connect(&mut self) -> Vec<Effect> {
+        let code = self.connect.code.trim().to_string();
+        if code.is_empty() {
+            self.error("paste a pairing code first");
+            return Vec::new();
+        }
+        self.connecting = true;
+        self.connect.submitting = true;
+        self.info("dialling the tunnel — this can take a few seconds…");
+        vec![Effect::Api(ApiCmd::QuickConnect { code })]
     }
 
     fn submit_connect(&mut self) -> Vec<Effect> {
@@ -955,6 +1035,15 @@ impl App {
                 }
                 effects
             }
+            Event::TunnelReady { local_url } => {
+                self.connecting = false;
+                self.connect.submitting = false;
+                self.connect.server = local_url;
+                self.connect.stage = ConnectStage::Direct;
+                self.connect.field = 1; // straight to the username
+                self.info("tunnel open — sign in to continue");
+                Vec::new()
+            }
             Event::Listing(listing) => {
                 self.path = listing.path.trim_matches('/').to_string();
                 self.files.set(entries_from_listing(&listing));
@@ -1061,6 +1150,7 @@ impl App {
                 self.connecting = false;
                 self.connect.submitting = false;
                 self.connect.server = self.server.clone();
+                self.connect.stage = ConnectStage::Choosing;
                 self.token = None;
                 self.error("not authorized — sign in again");
                 Vec::new()
@@ -1176,7 +1266,8 @@ pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
             KeyCode::Backspace => Some(Action::Backspace),
             KeyCode::Enter => Some(Action::Submit),
             KeyCode::Esc => Some(Action::Cancel),
-            KeyCode::Tab | KeyCode::Down => Some(Action::CycleFocus),
+            KeyCode::Tab => Some(Action::CycleFocus),
+            KeyCode::Down => Some(Action::Down),
             KeyCode::Up => Some(Action::Up),
             _ => None,
         };
@@ -1466,8 +1557,86 @@ mod tests {
     }
 
     #[test]
+    fn the_first_screen_offers_both_ways_in() {
+        let mut app = App::new(None, None, None);
+        assert_eq!(app.connect.stage, ConnectStage::Choosing);
+        assert_eq!(CONNECT_METHODS.len(), 2);
+
+        // Direct is the default choice.
+        app.handle_action(Action::Submit);
+        assert_eq!(app.connect.stage, ConnectStage::Direct);
+
+        // Esc returns to the chooser, where Down picks Quick Connect.
+        app.handle_action(Action::Cancel);
+        assert_eq!(app.connect.stage, ConnectStage::Choosing);
+        app.handle_action(Action::Down);
+        app.handle_action(Action::Submit);
+        assert_eq!(app.connect.stage, ConnectStage::QuickConnect);
+    }
+
+    #[test]
+    fn the_chooser_selection_stays_in_range() {
+        let mut app = App::new(None, None, None);
+        for _ in 0..5 {
+            app.handle_action(Action::Up);
+        }
+        assert_eq!(app.connect.choice, 0);
+        for _ in 0..5 {
+            app.handle_action(Action::Down);
+        }
+        assert_eq!(app.connect.choice, CONNECT_METHODS.len() - 1);
+    }
+
+    #[test]
+    fn pasting_a_pairing_code_dials_the_tunnel() {
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::QuickConnect;
+        for c in "mstr1:abc".chars() {
+            app.handle_action(Action::Input(c));
+        }
+        let effects = app.handle_action(Action::Submit);
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into() })]
+        );
+        assert!(app.connecting);
+    }
+
+    #[test]
+    fn an_empty_pairing_code_is_refused_without_a_request() {
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::QuickConnect;
+        assert!(app.handle_action(Action::Submit).is_empty());
+        assert!(!app.connecting);
+    }
+
+    #[test]
+    fn an_open_tunnel_leads_to_the_login_form() {
+        // The secret gates the pipe, not the API — so the tunnel coming up
+        // means "now sign in", not "you're in".
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::QuickConnect;
+        app.connecting = true;
+
+        app.apply_event(Event::TunnelReady { local_url: "http://127.0.0.1:51234".into() });
+        assert_eq!(app.connect.stage, ConnectStage::Direct);
+        assert_eq!(app.connect.server, "http://127.0.0.1:51234");
+        assert_eq!(app.connect.field, 1, "focus lands on the username");
+        assert!(!app.connecting);
+    }
+
+    #[test]
+    fn losing_authorization_returns_to_the_chooser() {
+        let mut app = connected_app();
+        app.apply_event(Event::Unauthorized);
+        assert!(!app.connected);
+        assert_eq!(app.connect.stage, ConnectStage::Choosing);
+    }
+
+    #[test]
     fn connecting_without_a_username_uses_public_mode() {
         let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::Direct;
         app.connect.server = "http://host:3000".into();
         let effects = app.handle_action(Action::Submit);
         assert_eq!(
@@ -1479,6 +1648,7 @@ mod tests {
     #[test]
     fn connect_form_edits_the_focused_field_only() {
         let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::Direct;
         app.connect.server.clear();
         app.handle_action(Action::Input('h'));
         app.handle_action(Action::CycleFocus);
@@ -1491,6 +1661,7 @@ mod tests {
     #[test]
     fn login_effect_carries_credentials_and_clears_the_password() {
         let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::Direct;
         app.connect.server = "http://host:3000".into();
         app.connect.username = "alice".into();
         app.connect.password = "secret".into();

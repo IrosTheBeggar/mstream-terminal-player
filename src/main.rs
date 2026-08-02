@@ -4,6 +4,7 @@ mod cmd_play;
 mod dj;
 mod engine;
 mod player;
+mod quickconnect;
 mod runtime;
 mod serve;
 mod tui;
@@ -48,6 +49,9 @@ enum Command {
     Search(cmd_library::SearchArgs),
     /// Show what Auto-DJ would play next, and why
     Dj(cmd_library::DjArgs),
+    /// Dial a Quick Connect pairing code and probe the tunnel (diagnostic)
+    #[command(hide = true)]
+    QuickconnectProbe { code: String },
     /// List playlists, or show one playlist's tracks
     Playlists(cmd_library::PlaylistArgs),
 }
@@ -91,6 +95,9 @@ fn main() {
         (Some(Command::Browse(args)), _) => std::process::exit(cmd_library::browse(args)),
         (Some(Command::Search(args)), _) => std::process::exit(cmd_library::search(args)),
         (Some(Command::Dj(args)), _) => std::process::exit(cmd_library::dj(args)),
+        (Some(Command::QuickconnectProbe { code }), _) => {
+            std::process::exit(quickconnect::probe(&code));
+        }
         (Some(Command::Playlists(args)), _) => std::process::exit(cmd_library::playlists(args)),
         (Some(Command::Serve(args)), _) => Some(args),
         // Legacy spawn contract: bare `--port N`.

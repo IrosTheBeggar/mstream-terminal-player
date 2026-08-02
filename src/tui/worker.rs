@@ -42,6 +42,9 @@ pub enum ApiCmd {
     /// Use an existing token (or none, for public-mode servers).
     Connect { server: String, token: Option<String> },
     Login { server: String, username: String, password: String },
+    /// Dial a Quick Connect pairing code, then treat the resulting loopback
+    /// address as an ordinary server.
+    QuickConnect { code: String },
     Browse(String),
     Library(LibraryNode),
     /// Ask for the next Auto-DJ track, seeded on what's playing now.
@@ -126,6 +129,9 @@ pub enum Event {
         token: Option<String>,
         ping: Box<Ping>,
     },
+    /// The Quick Connect tunnel is up and reachable at `local_url`, but the
+    /// server still wants credentials — the secret gates the pipe, not the API.
+    TunnelReady { local_url: String },
     Listing(Box<DirListing>),
     /// Contents of a library view, tagged with the node they belong to.
     Library { node: LibraryNode, data: LibraryData },
@@ -244,6 +250,10 @@ pub fn spawn_api(events: Sender<Event>) -> Sender<ApiCmd> {
 
 fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     let mut client: Option<Client> = None;
+    // Held for as long as this thread lives; dropping it closes the tunnel out
+    // from under the client, so it is explicitly dropped on the way out.
+    #[allow(unused_assignments)]
+    let mut bridge: Option<crate::quickconnect::TunnelBridge> = None;
 
     while let Ok(cmd) = rx.recv() {
         let result = match cmd {
@@ -254,6 +264,20 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
             ApiCmd::Login { server, username, password } => {
                 login(&mut client, &server, &username, &password, events)
             }
+
+            ApiCmd::QuickConnect { code } => match quick_connect(&code) {
+                Ok(opened) => {
+                    let url = opened.local_url.clone();
+                    bridge = Some(opened);
+                    // A public-mode server answers straight away; anything else
+                    // needs a login over the freshly-opened tunnel.
+                    match connect(&mut client, &url, None, events) {
+                        Some(Event::Unauthorized) => Some(Event::TunnelReady { local_url: url }),
+                        other => other,
+                    }
+                }
+                Err(e) => Some(Event::Error(e)),
+            },
 
             ApiCmd::Browse(path) => with_client(client.as_ref(), |c| {
                 c.file_explorer(&path).map(|l| Event::Listing(Box::new(l)))
@@ -293,6 +317,14 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
             }
         }
     }
+
+    drop(bridge);
+}
+
+/// Parse a pairing code and bring the tunnel up on loopback.
+fn quick_connect(code: &str) -> Result<crate::quickconnect::TunnelBridge, String> {
+    let parsed = crate::quickconnect::parse_code(code)?;
+    crate::quickconnect::open_bridge(&parsed)
 }
 
 fn connect(
