@@ -357,6 +357,15 @@ fn render_connect_choice(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::from("How do you want to connect?"));
     lines.push(Line::raw(""));
 
+    // Size the name column from the longest name so the descriptions line up
+    // however many methods there are, with a gutter between the two.
+    let name_column = CONNECT_METHODS
+        .iter()
+        .map(|(name, _)| name.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 6;
+
     for (i, (name, blurb)) in CONNECT_METHODS.iter().enumerate() {
         let selected = app.connect.choice == i;
         let style = if selected {
@@ -365,7 +374,14 @@ fn render_connect_choice(frame: &mut Frame, area: Rect, app: &App) {
             Style::new()
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("{} {name:<14}", if selected { ">" } else { " " }), style),
+            Span::styled(
+                format!(
+                    "{} {name:<width$}",
+                    if selected { ">" } else { " " },
+                    width = name_column
+                ),
+                style,
+            ),
             Span::styled((*blurb).to_string(), Style::new().fg(DIM)),
         ]));
     }
@@ -604,6 +620,24 @@ mod tests {
         assert!(text.contains(r"|_| |_| |_|____/"), "banner is drawn");
         assert!(!text.contains("┌"), "no border box on the startup screen");
         assert!(text.contains("How do you want to connect?"));
+
+        // The descriptions form a second column: same start position on every
+        // row, with a clear gutter after the longest name.
+        let columns: Vec<usize> = text
+            .lines()
+            .filter_map(|line| {
+                let name = line.find("Direct").or_else(|| line.find("Quick Connect"))?;
+                let blurb = line.find("server address").or_else(|| line.find("pairing code"))?;
+                Some(blurb - name)
+            })
+            .collect();
+        assert_eq!(columns.len(), 2, "both methods are listed");
+        assert_eq!(columns[0], columns[1], "descriptions share a column");
+        assert!(
+            columns[0] >= "Quick Connect".len() + 4,
+            "gutter after the longest name, got offset {}",
+            columns[0]
+        );
         assert!(text.contains("Direct"));
         assert!(text.contains("Quick Connect"));
         assert!(!text.contains("Password"), "credentials come after the choice");
