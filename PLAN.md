@@ -162,6 +162,133 @@ bounce a user to a login screen.
 `session.json` (Phase 3) covers the common case; a server picker is a self-contained follow-up
 and was not worth half-building here.
 
+### Phase A — Configuration pass (state, first run, Quick Connect)
+
+Inserted after Phase 4 and before release: shipping a binary with a "type a URL" first run and no
+persisted settings would be the wrong first impression, and the storage layout is cheapest to fix
+before anyone has files to migrate.
+
+#### A1 — State storage
+
+Audit of what exists today (2026-08-02). One file is ever written:
+`<config-dir>/mstream-player/session.json` holding `{server, username?, token?}`, `0600` on unix,
+inheriting the profile ACL on Windows. Everything else — volume, repeat, shuffle, Auto-DJ mode,
+the queue, position, current tab and browse path — is in-memory and dies with the process, and
+there is no library cache. Separately, `stream-download` spools each track to a `NamedTempFile`
+in the OS temp dir (deleted on drop, leaked on hard kill).
+
+Work:
+- **Atomic session writes.** `fs::write` truncates then writes, so a crash mid-write leaves a
+  truncated file — which the loader treats as a hard error telling the user to run `logout`.
+  Write to a sibling temp file and `rename` (atomic on both platforms).
+- **Split settings from secrets.** `config.toml` (servers, preferences — safe to sync, back up,
+  or check into dotfiles) and a separate credential store. This is also what unblocks the
+  multi-server item deferred from Phase 4. OS keychain stays a later option, not a prerequisite.
+- **Schema version** on both files from the start.
+- **Configurable stream cache.** Whole tracks land in the OS temp dir, and `/tmp` is tmpfs on
+  many Linux distros — a 400 MB FLAC silently costs 400 MB of RAM. Expose the directory
+  (`TempStorageProvider::new_in`) and offer `BoundedStorageProvider` for constrained boxes.
+- **Persist what a player is expected to remember**: volume, repeat/shuffle/Auto-DJ mode, last
+  server, last browse path. Restoring the queue and position is a separate decision — nice, but
+  it interacts with Auto-DJ and needs a "resume?" affordance rather than silently replaying.
+- Document `MSTREAM_PLAYER_CONFIG_DIR` (currently only tests use it; it's how portable installs
+  would work).
+
+#### A2 — First run
+
+Today the first screen is three empty fields. mStream advertises itself over mDNS
+(`_mstream._tcp`, **enabled by default**) with TXT records carrying `name`, `scheme`, `port`,
+`path` (so reverse-proxy subpaths resolve), `v`, `auth=apikey,jwt`, and `iroh=1` when the tunnel
+is available. That is enough to replace typing with picking.
+
+- Browse `_mstream._tcp` (crate: `mdns-sd`) and present found servers with their friendly names;
+  keep manual entry as a fallback and for servers off-LAN.
+- Build the base URL from the TXT record rather than guessing `http://host:3000`.
+- Normalise hand-typed input (accept `host`, `host:3000`, bare paths) instead of rejecting it.
+- Public-mode servers should connect with no credentials at all — detect and skip the password.
+- Show the `iroh=1` capability so Quick Connect is only offered where it can work.
+
+#### A3 — Quick Connect (Iroh)
+
+**What it actually is** (verified in `src/api/iroh.js`, `src/state/iroh.js`,
+`docs/iroh-pairing-code.md`): a long opaque string `mstr1:<base64url>` whose payload is
+`{t: <EndpointTicket>, s: <base64 32-byte connectSecret>}`. Not a short code, not a PIN.
+
+- `GET /api/v1/iroh/code` is **core**, but returns the code only when `iroh.enabled` **and**
+  (`iroh.shareCodePublic` **or** the caller is admin). `iroh.enabled` defaults to **false**.
+- Dial: parse `t` → `EndpointAddr`, connect with ALPN `mstream/tunnel/2`, then on the **first**
+  bi-stream write the raw 32 secret bytes, finish the send side, and read `"OK"`. Rejection can
+  surface as a non-`OK` read *or* as a thrown QUIC error depending on platform — handle both.
+- After that, **one bi-stream == one TCP connection**, and ordinary HTTP rides it.
+
+**The design that makes this cheap:** run a loopback TCP listener that opens a bi-stream per
+inbound connection, and point the existing `api::Client` at `http://127.0.0.1:<port>`. Every
+Phase 3 endpoint, range requests and seeking included, then works unchanged.
+
+Three things to be honest about in the UI:
+- **Pairing is not login.** The secret gates the pipe, not the API — the user still logs in
+  normally over the tunnel. The `/api/v1/auth/pair` one-time-token exchange is specified in
+  `docs/iroh-pairing-code.md` as v2 but **is not built**.
+- **Pair on the LAN, roam later.** The code can only be fetched over an existing connection, by
+  an admin. So the flow is: connect at home, save the code, use it from anywhere afterwards.
+- Rotating the secret (`POST /api/v1/admin/iroh/rotate-secret`) invalidates every code ever
+  issued — it is the only revocation, and it is all-or-nothing.
+
+Needs the `iroh` (1.x) and `iroh-tickets` crates. **Risk:** nothing in the mStream repo tests a
+Rust client against the Node NAPI tunnel; the only handshake test is Node-to-Node. Prove the
+handshake against a live tunnel before building UI on top.
+
+### Phase B — UI iterations (Auto-DJ, journeys, discovery, admin)
+
+Feature-detect everything here from `GET /api/v1/ping` — it reports `discovery`, `discoveryPath`,
+`discoveryP2p` and `federationDiscovery`, and the in-code rule is "no flag, no probes". Absent
+fields mean an older server: treat as false. (Our `Ping` type needs extending to carry them.)
+
+#### B1 — Auto-DJ panel
+Promote the footer toggle to a real panel: mode, tempo tolerance, key strictness, genre
+whitelist/blacklist, rating floor, artist cooldown, and a preview of the next few picks.
+The big win available from `random-songs` and not yet used: `similarTo` (1–8 paths, averaged into
+a **session centroid** — send the recent picks as a rolling anchor) paired with `minSimilarity`.
+Joi enforces both-or-neither. Real calibration from the server source: same-artist ≈ .6–.9,
+cross-artist ≈ .3–.7, so map a perceptual slider onto that range. The sonic pool is a hard
+constraint — the BPM/key waterfall never widens outside it and fails loudly instead.
+
+#### B2 — Sonic Journey
+`POST /api/v1/discovery/local/path` with `{startFilePath, endFilePath, length}` (4–32, default 14)
+returns waypoints along the great-circle arc between two tracks' embeddings, each carrying `t`
+(0→1 arc position). `length` counts **total rows including both seeds**, so the result is the
+queue. UI: pick a start (usually what's playing) and an end, choose a length, preview the arc,
+queue it. Handle `notAnalyzed` as the **per-end object** `{start, end}` it is, so the message can
+name which end is still waiting, and the same-audio short circuit that returns just two rows.
+
+#### B3 — Discovery browsing
+- Local: similar tracks, and similar artists with their `entryPoints` (up to 2 playable doorways
+  per artist) — a natural "more like this" and "artist radio".
+- P2P and federation similarity, clearly labelled with provenance (`peer.name`) and with the
+  privacy difference surfaced: p2p queries run against local snapshot copies and never leave the
+  machine, while federation sends the seed vector to peers the admin paired with.
+- P2P results carry no `filepath` (you don't have those tracks) — present them as discovery, not
+  as something to queue. Federation results do carry one and are streamable.
+
+#### B4 — Admin panel
+Admin auth is the **same JWT** — `admin` comes from the users table, and the token is byte
+identical, so the client must probe rather than inspect it. Two gates will bite a terminal client:
+`lockAdmin` returns 405, and `adminAccess.mode` restricts by IP, so a panel run from another
+machine gets 403 under hardened configs. Say that plainly rather than showing a bare error.
+
+Build, in order of fit: **logs** (`/api/v1/admin/logs/recent?since=<seq>` is a purpose-built
+tail-poll API with a cursor), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and
+`/api/v1/scan/status` — no admin rights, no IP gate), **users & access**, **server audio**
+(pairs with `/api/v1/server-playback/*`), **scan params and server config** (uniform scalar
+toggles), then transcode, federation and p2p peer management.
+
+Skip: log/export zip downloads, the SSL cert upload, the admin file-explorer tree, and backup
+destination creation — all genuinely browser-shaped. Guard with confirmation:
+`config/secret` (logs everyone out), `config/ui` (reboots and changes which routes exist),
+`iroh/rotate-secret`, and `config/admin-access` (can lock you out from your own IP).
+Note `users/access` is a **full replace, not a patch** — read-modify-write or you'll silently
+clear flags.
+
 ### Phase 5 — Release & install
 Tag-driven releases (binaries + `manifest.json` with per-file sha256). README install matrix.
 brew tap / scoop manifest later.
@@ -193,6 +320,15 @@ album art (ratatui-image), media keys (MPRIS/SMTC), scrobbling hooks, brew/scoop
 - Download-on-enable adds a failure mode → covered by `serverAudioBinaryPath` + CLI fallback.
 - Two-repo version skew → covered by pinning + `apiVersion` check.
 - rodio device-hotplug behavior and gapless are deferred, not solved.
+- **Iroh tunnel wire compatibility is unproven** (Phase A3): mStream's tunnel runs in-process via
+  the `@number0/iroh` NAPI addon, and nothing in that repo tests a Rust `iroh` client against it —
+  the only handshake test is Node-to-Node. Both sides are on the iroh 1.x line, which is
+  suggestive, not evidence. Spike the handshake first; the phase is scoped so the rest of Quick
+  Connect is worthless without it.
+- Phase B depends on server-side features that are off by default (`collectDiscoveryData`,
+  `discoveryP2p.enabled`, `federation.enabled`, `iroh.enabled`). Every one is feature-detected
+  from `/api/v1/ping`, so the client degrades rather than erroring — but it does mean most of
+  Phase B is invisible on a default install.
 
 ## Appendix — Phase 1 audit findings (of rust-server-audio @ mStream bec11154)
 
