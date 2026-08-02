@@ -272,27 +272,44 @@ pub fn run(args: ReplayArgs) -> i32 {
     }
 
     let settle = |app: &mut App, pending: &mut Vec<Effect>| {
-        if let Some((event_tx, event_rx, audio_tx, api_tx)) = live.as_ref() {
-            let deadline = Instant::now() + Duration::from_millis(args.wait_ms);
-            loop {
-                crate::tui::dispatch(app, pending, audio_tx, api_tx, event_tx);
-                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                    break;
-                };
-                match event_rx.recv_timeout(remaining) {
-                    Ok(event) => {
-                        // Status ticks arrive constantly and say nothing about
-                        // a flow; fold them in without reporting them.
-                        let noisy = matches!(event, Event::Status(_));
-                        if !noisy {
-                            println!("   ← {event:?}");
-                        }
-                        let more = app.apply_event(event);
-                        pending.extend(more);
-                    }
-                    Err(_) => break,
-                }
+        let Some((event_tx, event_rx, audio_tx, api_tx)) = live.as_ref() else {
+            return;
+        };
+        // Wait only when a worker owes us an answer, and wait for *every*
+        // outstanding one. Counting matters: a discovery browse and a tunnel
+        // dial can be in flight together, and stopping at the first reply
+        // would let later steps run while the second is still connecting.
+        let mut outstanding = 0usize;
+        let mut deadline = Instant::now();
+        loop {
+            let asked = pending
+                .iter()
+                .filter(|effect| matches!(effect, Effect::Api(_) | Effect::Discover))
+                .count();
+            if asked > 0 {
+                outstanding += asked;
+                deadline = Instant::now() + Duration::from_millis(args.wait_ms);
             }
+            crate::tui::dispatch(app, pending, audio_tx, api_tx, event_tx);
+
+            let event = if outstanding > 0 {
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .and_then(|remaining| event_rx.recv_timeout(remaining).ok())
+            } else {
+                event_rx.try_recv().ok()
+            };
+            let Some(event) = event else { break };
+
+            // Status ticks arrive every hundred milliseconds and say nothing
+            // about a flow, so they are neither reported nor counted as an
+            // answer.
+            if !matches!(event, Event::Status(_)) {
+                outstanding = outstanding.saturating_sub(1);
+                println!("   ← {event:?}");
+            }
+            let more = app.apply_event(event);
+            pending.extend(more);
         }
     };
 

@@ -632,6 +632,23 @@ impl App {
             return vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)];
         }
 
+        // A connection attempt takes seconds. Keys pressed in the meantime
+        // must not edit the credentials or code being used, nor fire a second
+        // attempt — a few stray characters appended to a pairing code turn it
+        // into unreadable base64. Esc still abandons the attempt.
+        if self.connect.submitting {
+            return match action {
+                Action::Cancel => {
+                    self.connect.submitting = false;
+                    self.connecting = false;
+                    self.connect.stage = ConnectStage::Choosing;
+                    self.message = None;
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            };
+        }
+
         match self.connect.stage {
             ConnectStage::Choosing => match action {
                 Action::Up => {
@@ -1083,10 +1100,22 @@ impl App {
                 effects
             }
             Event::ServersDiscovered(found) => {
+                // Results can land after the user has already made a choice.
+                // Row 0 means "the paste row" while the list is empty and
+                // "the first server" once it isn't, so without this the
+                // cursor silently retargets and Enter connects somewhere the
+                // user never picked.
+                let entered_a_code = !self.connect.code.trim().is_empty();
                 self.connect.searching = false;
                 self.connect.found = found;
-                // Keep the cursor on the paste row if nothing turned up.
-                self.connect.row = self.connect.row.min(self.connect.paste_row());
+                self.connect.row = if entered_a_code {
+                    // Someone mid-paste keeps their place; otherwise the
+                    // cursor lands on the first server, which is what a user
+                    // who simply waited expects.
+                    self.connect.paste_row()
+                } else {
+                    self.connect.row.min(self.connect.paste_row())
+                };
                 Vec::new()
             }
             Event::TunnelReady { local_url } => {
@@ -1200,6 +1229,12 @@ impl App {
                 Vec::new()
             }
             Event::NeedsLogin { server } => {
+                // A reply from a connection attempt that has been overtaken —
+                // we already reached somewhere else. Applying it would drag a
+                // connected session back to a login form.
+                if self.connected {
+                    return Vec::new();
+                }
                 self.connecting = false;
                 self.connect.submitting = false;
                 self.connect.server = server;
@@ -1710,6 +1745,47 @@ mod tests {
                 token: None,
             })]
         );
+    }
+
+    #[test]
+    fn late_discovery_results_do_not_move_the_cursor_off_the_paste_row() {
+        // Found live: the browse takes seconds, so a pasted code can be
+        // submitted before it answers. Row 0 means "paste" with an empty list
+        // and "first server" with a populated one, so the arriving results
+        // used to retarget Enter at a server the user never chose.
+        use crate::discovery::DiscoveredServer;
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::QuickConnect;
+        for c in "mstr1:abc".chars() {
+            app.handle_action(Action::Input(c));
+        }
+        assert!(app.connect.on_paste_row());
+
+        app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
+            name: "Living Room".into(),
+            base_url: "http://192.168.1.71:3999".into(),
+            version: None,
+            quick_connect: true,
+        }]));
+        assert!(app.connect.on_paste_row(), "still aimed at the code the user pasted");
+
+        // …and Enter still dials the code rather than the newly-found server.
+        let effects = app.handle_action(Action::Submit);
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into() })]
+        );
+    }
+
+    #[test]
+    fn a_late_needs_login_cannot_unseat_a_live_session() {
+        // Found live: a second connection attempt answered after the tunnel
+        // had already connected, and dragged the connected UI to a login form
+        // for a server the user had abandoned.
+        let mut app = connected_app();
+        app.apply_event(Event::NeedsLogin { server: "http://192.168.1.71:3999".into() });
+        assert!(app.connected, "the live session survives");
+        assert_eq!(app.server, "http://host:3000", "and stays on its own server");
     }
 
     #[test]
