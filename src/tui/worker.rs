@@ -18,6 +18,7 @@ use crate::api::types::{
     Track,
 };
 use crate::api::{ApiError, Client};
+use crate::discovery::DiscoveredServer;
 use crate::dj;
 use crate::engine::Engine;
 use crate::player::{PlayerCtl, PlayerStatus};
@@ -129,6 +130,8 @@ pub enum Event {
         token: Option<String>,
         ping: Box<Ping>,
     },
+    /// Servers that answered an mDNS browse.
+    ServersDiscovered(Vec<DiscoveredServer>),
     /// The Quick Connect tunnel is up and reachable at `local_url`, but the
     /// server still wants credentials — the secret gates the pipe, not the API.
     TunnelReady { local_url: String },
@@ -236,6 +239,22 @@ fn apply_audio_cmd(
     }
     None
 }
+
+/// Browse for servers on its own thread — mDNS listens for a fixed window, and
+/// that shouldn't hold up a pairing attempt queued behind it.
+pub fn spawn_discovery(events: Sender<Event>) {
+    thread::Builder::new()
+        .name("mstream-mdns".into())
+        .spawn(move || {
+            let found = crate::discovery::browse(DISCOVERY_WINDOW).unwrap_or_default();
+            let _ = events.send(Event::ServersDiscovered(found));
+        })
+        .ok();
+}
+
+/// How long to listen for adverts. Long enough for a quiet network to answer,
+/// short enough not to feel stuck.
+const DISCOVERY_WINDOW: Duration = Duration::from_secs(3);
 
 // ── API thread ──────────────────────────────────────────────────────────────
 

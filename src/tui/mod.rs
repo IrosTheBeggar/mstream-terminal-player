@@ -47,13 +47,14 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
 
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let audio_tx = worker::spawn_audio(event_tx.clone());
-    let api_tx = worker::spawn_api(event_tx);
+    let api_tx = worker::spawn_api(event_tx.clone());
 
     let mut app = App::new(server, token, username);
     let pending = app.start();
 
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut app, &event_rx, &audio_tx, &api_tx, pending);
+    let result =
+        event_loop(&mut terminal, &mut app, &event_rx, &audio_tx, &api_tx, &event_tx, pending);
     ratatui::restore();
 
     match result {
@@ -71,10 +72,11 @@ fn event_loop(
     events: &Receiver<Event>,
     audio_tx: &Sender<AudioCmd>,
     api_tx: &Sender<ApiCmd>,
+    event_tx: &Sender<Event>,
     mut pending: Vec<Effect>,
 ) -> std::io::Result<()> {
     loop {
-        dispatch(app, &mut pending, audio_tx, api_tx);
+        dispatch(app, &mut pending, audio_tx, api_tx, event_tx);
 
         terminal.draw(|frame| ui::render(frame, app))?;
 
@@ -96,7 +98,7 @@ fn event_loop(
         }
 
         if app.should_quit {
-            dispatch(app, &mut pending, audio_tx, api_tx);
+            dispatch(app, &mut pending, audio_tx, api_tx, event_tx);
             return Ok(());
         }
     }
@@ -107,6 +109,7 @@ fn dispatch(
     pending: &mut Vec<Effect>,
     audio_tx: &Sender<AudioCmd>,
     api_tx: &Sender<ApiCmd>,
+    event_tx: &Sender<Event>,
 ) {
     for effect in pending.drain(..) {
         match effect {
@@ -116,6 +119,7 @@ fn dispatch(
             Effect::Api(cmd) => {
                 let _ = api_tx.send(cmd);
             }
+            Effect::Discover => worker::spawn_discovery(event_tx.clone()),
             Effect::SaveSession => {
                 let session = Session {
                     server: app.server.clone(),

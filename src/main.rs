@@ -1,6 +1,7 @@
 mod api;
 mod cmd_library;
 mod cmd_play;
+mod discovery;
 mod dj;
 mod engine;
 mod player;
@@ -52,6 +53,12 @@ enum Command {
     /// Dial a Quick Connect pairing code and probe the tunnel (diagnostic)
     #[command(hide = true)]
     QuickconnectProbe { code: String },
+    /// List mStream servers advertising themselves on this network
+    Discover {
+        /// How long to listen for adverts
+        #[arg(long, default_value_t = 3.0)]
+        seconds: f64,
+    },
     /// List playlists, or show one playlist's tracks
     Playlists(cmd_library::PlaylistArgs),
 }
@@ -97,6 +104,9 @@ fn main() {
         (Some(Command::Dj(args)), _) => std::process::exit(cmd_library::dj(args)),
         (Some(Command::QuickconnectProbe { code }), _) => {
             std::process::exit(quickconnect::probe(&code));
+        }
+        (Some(Command::Discover { seconds }), _) => {
+            std::process::exit(discovery::print_found(seconds));
         }
         (Some(Command::Playlists(args)), _) => std::process::exit(cmd_library::playlists(args)),
         (Some(Command::Serve(args)), _) => Some(args),

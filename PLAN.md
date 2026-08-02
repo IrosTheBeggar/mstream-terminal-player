@@ -201,8 +201,11 @@ Today the first screen is three empty fields. mStream advertises itself over mDN
 `path` (so reverse-proxy subpaths resolve), `v`, `auth=apikey,jwt`, and `iroh=1` when the tunnel
 is available. That is enough to replace typing with picking.
 
-- Browse `_mstream._tcp` (crate: `mdns-sd`) and present found servers with their friendly names;
-  keep manual entry as a fallback and for servers off-LAN.
+- ✅ Browse `_mstream._tcp` (crate: `mdns-sd`) and present found servers with their friendly
+  names. Landed on the Quick Connect screen first, which is where it earns the most: that screen
+  now lists servers found on the network — picking one connects directly, no code needed — above
+  the paste-a-code row for reaching a server anywhere. Servers are labelled "pairing available"
+  only when they advertise `iroh=1`. Still to do: offer the same list on the Direct branch.
 - Build the base URL from the TXT record rather than guessing `http://host:3000`.
 - Normalise hand-typed input (accept `host`, `host:3000`, bare paths) instead of rejecting it.
 - Public-mode servers should connect with no credentials at all — detect and skip the password.

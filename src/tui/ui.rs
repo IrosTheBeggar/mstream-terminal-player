@@ -432,11 +432,66 @@ fn render_connect_direct(frame: &mut Frame, area: Rect, app: &App) {
     render_centered_block(frame, area, lines);
 }
 
-/// Step two, Quick Connect branch: paste the pairing code.
+/// Step two, Quick Connect branch: pick a server found on the network, or
+/// paste a pairing code to reach one anywhere.
 fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines = banner_lines(area);
+    let form = &app.connect;
 
-    let code = app.connect.code.trim();
+    lines.push(Line::from(Span::styled("Servers on your network", Style::new().fg(DIM))));
+
+    if form.found.is_empty() {
+        lines.push(Line::from(Span::styled(
+            if form.searching { "  searching…" } else { "  none found" },
+            Style::new().fg(DIM),
+        )));
+    } else {
+        // Line the columns up the way the method chooser does.
+        let name_column = form
+            .found
+            .iter()
+            .map(|server| server.name.chars().count())
+            .max()
+            .unwrap_or(0)
+            + 2;
+        for (i, server) in form.found.iter().enumerate() {
+            let selected = form.row == i;
+            let style = if selected {
+                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new()
+            };
+            let mut spans = vec![
+                Span::styled(
+                    format!(
+                        "{} {:<width$}",
+                        if selected { ">" } else { " " },
+                        server.name,
+                        width = name_column
+                    ),
+                    style,
+                ),
+                Span::styled(server.base_url.clone(), Style::new().fg(DIM)),
+            ];
+            // Only advertise pairing where the server says it's available.
+            if server.quick_connect {
+                spans.push(Span::styled("  · pairing available", Style::new().fg(DIM)));
+            }
+            lines.push(Line::from(spans));
+        }
+        if form.searching {
+            lines.push(Line::from(Span::styled("  searching…", Style::new().fg(DIM))));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "Or paste a pairing code to reach a server anywhere",
+        Style::new().fg(DIM),
+    )));
+
+    let selected = form.on_paste_row();
+    let code = form.code.trim();
     // The code is a few hundred characters — show enough to recognise it,
     // plus a length so a paste is visibly confirmed.
     let shown = if code.is_empty() {
@@ -445,27 +500,25 @@ fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
         let head: String = code.chars().take(28).collect();
         Span::raw(format!("{head}…  ({} characters)", code.chars().count()))
     };
-
-    lines.push(Line::from(Span::styled(
-        "Paste the pairing code from your server's admin page.",
-        Style::new().fg(DIM),
-    )));
-    lines.push(Line::raw(""));
     lines.push(Line::from(vec![
-        Span::styled("> ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if selected { "> " } else { "  " },
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
         shown,
     ]));
+
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "The code opens a tunnel — you'll still sign in afterwards.",
+        "A code opens a tunnel — you'll still sign in afterwards.",
         Style::new().fg(DIM),
     )));
     lines.push(Line::from(Span::styled(
-        "Enter connects · Esc back",
+        "↑↓ choose · Enter connects · Esc back",
         Style::new().fg(DIM),
     )));
     if app.connecting {
-        lines.push(Line::from(Span::styled("dialling…", Style::new().fg(ACCENT))));
+        lines.push(Line::from(Span::styled("connecting…", Style::new().fg(ACCENT))));
     }
     lines.extend(connect_message(app));
     render_centered_block(frame, area, lines);
@@ -655,6 +708,42 @@ mod tests {
         app.connect.code = format!("mstr1:{}", "x".repeat(300));
         let text = draw(&mut app);
         assert!(text.contains("306 characters"), "a long paste is visibly confirmed");
+    }
+
+    #[test]
+    fn the_quick_connect_screen_lists_servers_found_on_the_network() {
+        use crate::discovery::DiscoveredServer;
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::QuickConnect;
+        app.connect.searching = true;
+
+        assert!(draw(&mut app).contains("searching…"));
+
+        app.apply_event(crate::tui::worker::Event::ServersDiscovered(vec![
+            DiscoveredServer {
+                name: "Living Room".into(),
+                base_url: "http://192.168.1.71:3999".into(),
+                version: Some("6.19.2".into()),
+                quick_connect: true,
+            },
+            DiscoveredServer {
+                name: "Attic".into(),
+                base_url: "http://192.168.1.9:3000".into(),
+                version: None,
+                quick_connect: false,
+            },
+        ]));
+
+        let text = draw(&mut app);
+        assert!(text.contains("Servers on your network"));
+        assert!(text.contains("Living Room"));
+        assert!(text.contains("http://192.168.1.71:3999"));
+        assert!(text.contains("Attic"));
+        assert!(!text.contains("searching…"), "the spinner clears once results land");
+
+        // Pairing is only advertised where the server said it's available, and
+        // only once — the second server didn't advertise it.
+        assert_eq!(text.matches("pairing available").count(), 1);
     }
 
     #[test]

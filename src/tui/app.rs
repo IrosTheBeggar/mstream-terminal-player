@@ -10,6 +10,7 @@ use ratatui::widgets::ListState;
 
 use crate::api::types::{Album, DirListing, Genre, Track, TrackMetadata};
 use crate::api::urls;
+use crate::discovery::DiscoveredServer;
 use crate::player::PlayerStatus;
 
 use super::worker::{ApiCmd, AudioCmd, AutoDjMode, Event, LibraryData, LibraryNode};
@@ -24,6 +25,8 @@ pub enum Effect {
     Api(ApiCmd),
     /// Persist the session after a successful login.
     SaveSession,
+    /// Look for servers advertising themselves on the local network.
+    Discover,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,6 +345,23 @@ pub struct ConnectForm {
     pub code: String,
     pub field: usize,
     pub submitting: bool,
+    /// Servers found on the network, for the Quick Connect screen.
+    pub found: Vec<DiscoveredServer>,
+    pub searching: bool,
+    /// Row selected on the Quick Connect screen: an index into `found`, or
+    /// `found.len()` for the paste-a-code row, which is always last.
+    pub row: usize,
+}
+
+impl ConnectForm {
+    /// The paste-a-code row sits after any discovered servers.
+    pub fn paste_row(&self) -> usize {
+        self.found.len()
+    }
+
+    pub fn on_paste_row(&self) -> bool {
+        self.row >= self.paste_row()
+    }
 }
 
 impl ConnectForm {
@@ -624,12 +644,15 @@ impl App {
                 }
                 Action::Submit | Action::Activate => {
                     self.message = None;
-                    self.connect.stage = if self.connect.choice == 0 {
-                        ConnectStage::Direct
-                    } else {
-                        ConnectStage::QuickConnect
-                    };
-                    Vec::new()
+                    if self.connect.choice == 0 {
+                        self.connect.stage = ConnectStage::Direct;
+                        return Vec::new();
+                    }
+                    self.connect.stage = ConnectStage::QuickConnect;
+                    self.connect.searching = true;
+                    self.connect.found.clear();
+                    self.connect.row = 0;
+                    vec![Effect::Discover]
                 }
                 _ => Vec::new(),
             },
@@ -662,7 +685,17 @@ impl App {
             },
 
             ConnectStage::QuickConnect => match action {
+                Action::Up => {
+                    self.connect.row = self.connect.row.saturating_sub(1);
+                    Vec::new()
+                }
+                Action::Down => {
+                    self.connect.row = (self.connect.row + 1).min(self.connect.paste_row());
+                    Vec::new()
+                }
                 Action::Input(c) => {
+                    // Typing anywhere means "I have a code", so jump to it.
+                    self.connect.row = self.connect.paste_row();
                     self.connect.code.push(c);
                     Vec::new()
                 }
@@ -675,7 +708,21 @@ impl App {
                     self.message = None;
                     Vec::new()
                 }
-                Action::Submit => self.submit_quick_connect(),
+                Action::Submit => {
+                    // A server found on this network is reachable directly —
+                    // no tunnel needed, and no code to paste.
+                    if let Some(server) = self.connect.found.get(self.connect.row).cloned() {
+                        self.connecting = true;
+                        self.connect.submitting = true;
+                        self.connect.server = server.base_url.clone();
+                        self.info(format!("connecting to {}…", server.name));
+                        return vec![Effect::Api(ApiCmd::Connect {
+                            server: server.base_url,
+                            token: None,
+                        })];
+                    }
+                    self.submit_quick_connect()
+                }
                 _ => Vec::new(),
             },
         }
@@ -1034,6 +1081,13 @@ impl App {
                     effects.push(Effect::SaveSession);
                 }
                 effects
+            }
+            Event::ServersDiscovered(found) => {
+                self.connect.searching = false;
+                self.connect.found = found;
+                // Keep the cursor on the paste row if nothing turned up.
+                self.connect.row = self.connect.row.min(self.connect.paste_row());
+                Vec::new()
             }
             Event::TunnelReady { local_url } => {
                 self.connecting = false;
@@ -1585,6 +1639,77 @@ mod tests {
             app.handle_action(Action::Down);
         }
         assert_eq!(app.connect.choice, CONNECT_METHODS.len() - 1);
+    }
+
+    #[test]
+    fn opening_quick_connect_starts_a_network_search() {
+        let mut app = App::new(None, None, None);
+        app.handle_action(Action::Down); // onto Quick Connect
+        let effects = app.handle_action(Action::Submit);
+        assert_eq!(app.connect.stage, ConnectStage::QuickConnect);
+        assert!(effects.contains(&Effect::Discover));
+        assert!(app.connect.searching);
+    }
+
+    #[test]
+    fn choosing_a_discovered_server_connects_to_it_directly() {
+        use crate::discovery::DiscoveredServer;
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::QuickConnect;
+        app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
+            name: "Living Room".into(),
+            base_url: "http://192.168.1.71:3999".into(),
+            version: None,
+            quick_connect: true,
+        }]));
+        assert!(!app.connect.searching);
+
+        // A server on this network needs no tunnel and no code.
+        let effects = app.handle_action(Action::Submit);
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCmd::Connect {
+                server: "http://192.168.1.71:3999".into(),
+                token: None,
+            })]
+        );
+    }
+
+    #[test]
+    fn typing_a_code_jumps_past_the_discovered_servers() {
+        use crate::discovery::DiscoveredServer;
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::QuickConnect;
+        app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
+            name: "Living Room".into(),
+            base_url: "http://host:3999".into(),
+            version: None,
+            quick_connect: true,
+        }]));
+        assert_eq!(app.connect.row, 0, "starts on the first server");
+
+        app.handle_action(Action::Input('m'));
+        assert!(app.connect.on_paste_row(), "typing means the user has a code");
+
+        // …and Enter now dials rather than connecting to the highlighted server.
+        for c in "str1:abc".chars() {
+            app.handle_action(Action::Input(c));
+        }
+        let effects = app.handle_action(Action::Submit);
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into() })]
+        );
+    }
+
+    #[test]
+    fn the_selection_cannot_run_past_the_paste_row() {
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::QuickConnect;
+        for _ in 0..5 {
+            app.handle_action(Action::Down);
+        }
+        assert_eq!(app.connect.row, app.connect.paste_row());
     }
 
     #[test]
