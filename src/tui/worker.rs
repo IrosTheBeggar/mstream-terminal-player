@@ -132,6 +132,9 @@ pub enum Event {
     },
     /// Servers that answered an mDNS browse.
     ServersDiscovered(Vec<DiscoveredServer>),
+    /// We reached this server but it wants credentials. Distinct from
+    /// [`Event::Unauthorized`], which means an established session went bad.
+    NeedsLogin { server: String },
     /// The Quick Connect tunnel is up and reachable at `local_url`, but the
     /// server still wants credentials — the secret gates the pipe, not the API.
     TunnelReady { local_url: String },
@@ -291,7 +294,9 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                     // A public-mode server answers straight away; anything else
                     // needs a login over the freshly-opened tunnel.
                     match connect(&mut client, &url, None, events) {
-                        Some(Event::Unauthorized) => Some(Event::TunnelReady { local_url: url }),
+                        Some(Event::NeedsLogin { .. }) => {
+                            Some(Event::TunnelReady { local_url: url })
+                        }
                         other => other,
                     }
                 }
@@ -362,7 +367,9 @@ fn connect(
             *client = Some(c);
             Some(Event::Connected { server, username: None, token, ping: Box::new(ping) })
         }
-        Err(ApiError::Unauthorized) => Some(Event::Unauthorized),
+        // Reaching the server and being asked to sign in is a normal outcome
+        // of picking one, not an authorization failure.
+        Err(ApiError::Unauthorized) => Some(Event::NeedsLogin { server: c.server() }),
         Err(e) => Some(Event::Error(e.to_string())),
     }
 }

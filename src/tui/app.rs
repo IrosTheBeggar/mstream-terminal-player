@@ -1199,14 +1199,29 @@ impl App {
                 self.message = None;
                 Vec::new()
             }
+            Event::NeedsLogin { server } => {
+                self.connecting = false;
+                self.connect.submitting = false;
+                self.connect.server = server;
+                self.connect.stage = ConnectStage::Direct;
+                self.connect.field = 1; // straight to the username
+                self.info("this server needs a sign-in");
+                Vec::new()
+            }
             Event::Unauthorized => {
+                // An established session went bad. Offer the login form for
+                // the server we were already using rather than dumping the
+                // user back at "how do you want to connect?".
                 self.connected = false;
                 self.connecting = false;
                 self.connect.submitting = false;
-                self.connect.server = self.server.clone();
-                self.connect.stage = ConnectStage::Choosing;
+                if !self.server.is_empty() {
+                    self.connect.server = self.server.clone();
+                }
+                self.connect.stage = ConnectStage::Direct;
+                self.connect.field = 1;
                 self.token = None;
-                self.error("not authorized — sign in again");
+                self.error("session expired — sign in again");
                 Vec::new()
             }
             Event::Error(e) => {
@@ -1611,6 +1626,28 @@ mod tests {
     }
 
     #[test]
+    fn a_public_mode_server_picked_from_the_network_connects_outright() {
+        use crate::discovery::DiscoveredServer;
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::QuickConnect;
+        app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
+            name: "Open Server".into(),
+            base_url: "http://192.168.1.5:3000".into(),
+            version: None,
+            quick_connect: false,
+        }]));
+        app.handle_action(Action::Submit);
+
+        app.apply_event(Event::Connected {
+            server: "http://192.168.1.5:3000".into(),
+            username: None,
+            token: None,
+            ping: Box::new(Default::default()),
+        });
+        assert!(app.connected, "no login step when the server doesn't want one");
+    }
+
+    #[test]
     fn the_first_screen_offers_both_ways_in() {
         let mut app = App::new(None, None, None);
         assert_eq!(app.connect.stage, ConnectStage::Choosing);
@@ -1751,11 +1788,40 @@ mod tests {
     }
 
     #[test]
-    fn losing_authorization_returns_to_the_chooser() {
+    fn a_picked_server_that_wants_credentials_opens_its_login_form() {
+        // Regression: choosing a server found on the network bounced back to
+        // "how do you want to connect?", losing the server that was picked —
+        // the connect path was reporting "needs a sign-in" as an
+        // authorization failure.
+        use crate::discovery::DiscoveredServer;
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::QuickConnect;
+        app.apply_event(Event::ServersDiscovered(vec![DiscoveredServer {
+            name: "Living Room".into(),
+            base_url: "http://192.168.1.71:3999".into(),
+            version: None,
+            quick_connect: true,
+        }]));
+        app.handle_action(Action::Submit);
+
+        app.apply_event(Event::NeedsLogin { server: "http://192.168.1.71:3999".into() });
+        assert_eq!(app.connect.stage, ConnectStage::Direct, "lands on the login form");
+        assert_eq!(
+            app.connect.server, "http://192.168.1.71:3999",
+            "the chosen server is kept, not blanked"
+        );
+        assert_eq!(app.connect.field, 1, "focus is on the username");
+        assert!(!app.connecting);
+    }
+
+    #[test]
+    fn an_expired_session_offers_a_login_for_the_same_server() {
         let mut app = connected_app();
         app.apply_event(Event::Unauthorized);
         assert!(!app.connected);
-        assert_eq!(app.connect.stage, ConnectStage::Choosing);
+        assert_eq!(app.connect.stage, ConnectStage::Direct);
+        assert_eq!(app.connect.server, "http://host:3000", "stays on the server in use");
+        assert!(app.token.is_none());
     }
 
     #[test]
