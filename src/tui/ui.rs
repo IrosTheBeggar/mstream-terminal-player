@@ -101,31 +101,58 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    let [tabs_area, server_area] =
-        Layout::horizontal([Constraint::Min(20), Constraint::Length(40)]).areas(area);
-
     let titles: Vec<Line> = Tab::ALL
         .iter()
         .enumerate()
         .map(|(i, t)| Line::from(format!(" {}:{} ", i + 1, t.title())))
         .collect();
+
+    // The tabs are how you move around, so they get the space they need and
+    // the server label takes what is left — a fixed split truncated "4:Search"
+    // clean off at 80 columns. The titles carry their own spacing, so the
+    // widget's default padding is turned off below and this sum is exact.
+    let tabs_width: u16 =
+        titles.iter().map(|line| line.width() as u16).sum::<u16>().min(area.width);
+    let [tabs_area, server_area] =
+        Layout::horizontal([Constraint::Length(tabs_width), Constraint::Min(0)]).areas(area);
+
     frame.render_widget(
         Tabs::new(titles)
             .select(app.tab.index())
             .highlight_style(Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
-            .divider(""),
+            .divider("")
+            .padding("", ""),
         tabs_area,
     );
 
-    let who = match &app.username {
-        Some(user) => format!("{user}@{}", app.server),
-        None => app.server.clone(),
-    };
+    let who = server_label(app, server_area.width as usize);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(who, Style::new().fg(DIM))))
             .alignment(Alignment::Right),
         server_area,
     );
+}
+
+/// The most informative form of "who and where" that fits, down to nothing.
+/// Dropping the scheme first keeps the host visible on a narrow terminal.
+fn server_label(app: &App, width: usize) -> String {
+    let host = app
+        .server
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .to_string();
+    let mut candidates = Vec::new();
+    if let Some(user) = &app.username {
+        candidates.push(format!("{user}@{}", app.server));
+        candidates.push(format!("{user}@{host}"));
+    } else {
+        candidates.push(app.server.clone());
+    }
+    candidates.push(host);
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.chars().count() <= width)
+        .unwrap_or_default()
 }
 
 fn render_browser(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -310,32 +337,56 @@ fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let volume = (app.volume * 100.0).round() as u32;
+    let shuffle = if app.queue.shuffle { "on" } else { "off" };
+    let full = format!(
+        "vol {volume:>3}%  repeat {}  shuffle {shuffle}  dj {}",
+        app.queue.repeat.label(),
+        app.autodj.label()
+    );
+    // Abbreviate rather than let the mode readout crowd the message off the
+    // line entirely.
+    let compact = format!(
+        "{volume:>3}%  rpt {}  shf {shuffle}  dj {}",
+        app.queue.repeat.label(),
+        app.autodj.label()
+    );
+    let modes = if area.width as usize >= full.chars().count() + 28 { full } else { compact };
+    let modes_width = (modes.chars().count() as u16).min(area.width);
+
     let [message_area, modes_area] =
-        Layout::horizontal([Constraint::Min(10), Constraint::Length(48)]).areas(area);
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(modes_width)]).areas(area);
 
     let message = match &app.message {
         Some(m) => Span::styled(
-            m.text.clone(),
+            fit(&m.text, message_area.width as usize),
             match m.kind {
                 MessageKind::Error => Style::new().fg(Color::Red),
                 MessageKind::Info => Style::new().fg(DIM),
             },
         ),
-        None => Span::styled("? help   q quit", Style::new().fg(DIM)),
+        None => Span::styled(
+            fit("? help   q quit", message_area.width as usize),
+            Style::new().fg(DIM),
+        ),
     };
     frame.render_widget(Paragraph::new(Line::from(message)), message_area);
-
-    let modes = format!(
-        "vol {:>3}%  repeat {}  shuffle {}  dj {}",
-        (app.volume * 100.0).round() as u32,
-        app.queue.repeat.label(),
-        if app.queue.shuffle { "on" } else { "off" },
-        app.autodj.label()
-    );
     frame.render_widget(
         Paragraph::new(Span::styled(modes, Style::new().fg(DIM))).alignment(Alignment::Right),
         modes_area,
     );
+}
+
+/// Shorten to `width`, marking the cut so it reads as elided rather than
+/// broken off mid-word.
+fn fit(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    if width <= 1 {
+        return String::new();
+    }
+    text.chars().take(width - 1).collect::<String>() + "…"
 }
 
 fn render_connect(frame: &mut Frame, area: Rect, app: &App) {
@@ -898,6 +949,53 @@ mod tests {
         let text = draw_sized(&mut app, 40, 12);
         assert!(!text.contains(r"|_| |_| |_|____/"), "art is skipped rather than mangled");
         assert!(text.contains("Direct"), "the choice is still usable");
+    }
+
+    #[test]
+    fn every_tab_survives_a_narrow_terminal() {
+        // Found by walking the flow at 76 columns: a fixed 40-column server
+        // label squeezed the tab bar and cut "4:Search" off entirely.
+        let mut app = connected_app();
+        app.username = Some("tester".into());
+        for width in [76, 80, 100, 140] {
+            let text = draw_sized(&mut app, width, 20);
+            for tab in ["1:Files", "2:Library", "3:Playlists", "4:Search"] {
+                assert!(text.contains(tab), "{tab} missing at {width} columns");
+            }
+        }
+    }
+
+    #[test]
+    fn the_server_label_sheds_detail_before_the_tabs_do() {
+        let mut app = connected_app();
+        app.username = Some("tester".into());
+
+        // Roomy: the whole thing, scheme and all. Note this still fits at 76
+        // columns now that the tabs only take what they need.
+        assert!(draw_sized(&mut app, 140, 20).contains("tester@http://host:3000"));
+        assert!(draw_sized(&mut app, 76, 20).contains("tester@http://host:3000"));
+
+        // Genuinely tight: the scheme goes first, the host stays, and the
+        // tabs are still whole.
+        let narrow = draw_sized(&mut app, 62, 20);
+        assert!(narrow.contains("tester@host:3000"), "kept the useful part");
+        assert!(!narrow.contains("tester@http://host:3000"));
+        assert!(narrow.contains("4:Search"));
+    }
+
+    #[test]
+    fn a_long_message_is_elided_not_chopped() {
+        let mut app = connected_app();
+        app.apply_event(crate::tui::worker::Event::Connected {
+            server: "http://averylongservername.example.com:3000".into(),
+            username: None,
+            token: None,
+            ping: Box::new(Default::default()),
+        });
+        let text = draw_sized(&mut app, 76, 20);
+        assert!(text.contains('…'), "the cut is marked rather than looking broken");
+        // And the mode readout abbreviates instead of crowding it out.
+        assert!(text.contains("rpt off") || text.contains("repeat off"));
     }
 
     #[test]
