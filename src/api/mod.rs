@@ -9,7 +9,6 @@
 //! Servers with no users configured run in "public mode" and authenticate every
 //! request, so a token-less client is valid and supported.
 
-pub mod session;
 pub mod types;
 pub mod urls;
 
@@ -102,17 +101,17 @@ impl Client {
         self
     }
 
-    /// Build a client from explicit overrides, falling back to the saved
-    /// session. A saved token is only reused for the server it was issued by.
+    /// Build a client from explicit overrides, falling back to the most
+    /// recently used server. A stored token is looked up by server, so one is
+    /// never sent to a host that didn't issue it.
     pub fn resolve(server: Option<&str>, token: Option<&str>) -> Result<Self, ApiError> {
-        let saved = session::load().map_err(ApiError::Config)?;
-        let server = match (server, &saved) {
-            (Some(s), _) => s.to_string(),
-            (None, Some(s)) => s.server.clone(),
+        let config = crate::config::load().map_err(ApiError::Config)?;
+        let server = match (server, crate::config::most_recent_server(&config)) {
+            (Some(server), _) => server.to_string(),
+            (None, Some(entry)) => entry.url.clone(),
             (None, None) => {
                 return Err(ApiError::Config(
-                    "no server given and no saved session — run \
-                     `mstream-player login --server <url> --user <name>`"
+                    "no server given and none remembered — run `mstream-player login --server <url> --user <name>`"
                         .to_string(),
                 ));
             }
@@ -120,10 +119,11 @@ impl Client {
 
         let client = Client::new(&server)?;
         let token = match token {
-            Some(t) => Some(t.to_string()),
-            None => saved
-                .filter(|s| same_server(&s.server, &server))
-                .and_then(|s| s.token),
+            Some(token) => Some(token.to_string()),
+            None => {
+                let credentials = crate::config::load_credentials().map_err(ApiError::Config)?;
+                crate::config::token_for(&credentials, &server)
+            }
         };
         Ok(client.with_token(token))
     }
@@ -354,13 +354,6 @@ impl Client {
         urls::transcode_url(&self.server(), filepath, codec, bitrate, self.token.as_deref())
             .map_err(ApiError::Config)
     }
-}
-
-/// Whether two server URLs refer to the same place, for deciding if a saved
-/// token may be reused. Conservative by design: a mismatch just means the user
-/// re-logs in, while a false match would leak a token to another host.
-fn same_server(a: &str, b: &str) -> bool {
-    a.trim_end_matches('/') == b.trim_end_matches('/')
 }
 
 /// Pull mStream's `{"error": "..."}` out of a failure body, falling back to a

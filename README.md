@@ -74,6 +74,17 @@ mstream-player dj "music/Artist/Album/01.flac" --mode similar
 mstream-player dj "music/Artist/Album/01.flac" --mode tempo
 ```
 
+## Where it keeps things
+
+Two files, in `%APPDATA%\mstream-player` (Windows), `~/Library/Application Support/mstream-player`
+(macOS) or `~/.config/mstream-player` (Linux). Set `MSTREAM_PLAYER_CONFIG_DIR` to put them
+somewhere else — a portable install can keep them beside the binary.
+
+- `config.toml` — servers and preferences. Readable and editable; fine to keep in a dotfiles repo.
+- `credentials.toml` — access tokens only. Owner-only on unix, and the one to leave out of any sync.
+
+Both are written by rename, so an interrupted write leaves the previous file intact.
+
 ## Playback
 
 ```

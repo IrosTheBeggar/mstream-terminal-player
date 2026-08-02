@@ -177,21 +177,22 @@ the queue, position, current tab and browse path — is in-memory and dies with 
 there is no library cache. Separately, `stream-download` spools each track to a `NamedTempFile`
 in the OS temp dir (deleted on drop, leaked on hard kill).
 
-Work:
-- **Atomic session writes.** `fs::write` truncates then writes, so a crash mid-write leaves a
+Work (✅ done 2026-08-02 — atomic writes, schema versions, the config/credentials split and
+persisted preferences all landed together; the stream cache is still open):
+- ✅ **Atomic session writes.** `fs::write` truncates then writes, so a crash mid-write leaves a
   truncated file — which the loader treats as a hard error telling the user to run `logout`.
   Write to a sibling temp file and `rename` (atomic on both platforms).
-- **Split settings from secrets.** `config.toml` (servers, preferences — safe to sync, back up,
+- ✅ **Split settings from secrets.** `config.toml` (servers, preferences — safe to sync, back up,
   or check into dotfiles) and a separate credential store. This is also what unblocks the
   multi-server item deferred from Phase 4. OS keychain stays a later option, not a prerequisite.
-- **Schema version** on both files from the start.
-- **Configurable stream cache.** Whole tracks land in the OS temp dir, and `/tmp` is tmpfs on
+- ✅ **Schema version** on both files from the start.
+- ⬜ **Configurable stream cache.** Whole tracks land in the OS temp dir, and `/tmp` is tmpfs on
   many Linux distros — a 400 MB FLAC silently costs 400 MB of RAM. Expose the directory
   (`TempStorageProvider::new_in`) and offer `BoundedStorageProvider` for constrained boxes.
-- **Persist what a player is expected to remember**: volume, repeat/shuffle/Auto-DJ mode, last
+- ✅ **Persist what a player is expected to remember**: volume, repeat/shuffle/Auto-DJ mode, last
   server, last browse path. Restoring the queue and position is a separate decision — nice, but
   it interacts with Auto-DJ and needs a "resume?" affordance rather than silently replaying.
-- Document `MSTREAM_PLAYER_CONFIG_DIR` (currently only tests use it; it's how portable installs
+- ✅ Document `MSTREAM_PLAYER_CONFIG_DIR` (currently only tests use it; it's how portable installs
   would work).
 
 #### A2 — First run

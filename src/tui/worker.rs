@@ -108,6 +108,15 @@ impl AutoDjMode {
             AutoDjMode::BpmKey => "tempo+key",
         }
     }
+
+    /// Anything unrecognised falls back to off rather than refusing to start.
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "similar" => AutoDjMode::Similar,
+            "tempo+key" => AutoDjMode::BpmKey,
+            _ => AutoDjMode::Off,
+        }
+    }
 }
 
 /// How many tracks "Recently Added" asks for.

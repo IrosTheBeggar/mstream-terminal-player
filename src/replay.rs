@@ -239,13 +239,19 @@ pub fn run(args: ReplayArgs) -> i32 {
         }
     };
 
-    // Live mode starts from the same place the real binary would.
-    let (server, token) = if args.live {
-        (args.conn.server.clone(), args.conn.token.clone())
+    // Live mode starts from the same place the real binary would — same
+    // stored server, token, browse path and preferences.
+    let mut app = if args.live {
+        let start = crate::tui::startup(args.conn.server.clone(), args.conn.token.clone());
+        let mut app = App::new(start.server, start.token, start.username)
+            .with_prefs(&start.prefs);
+        if let Some(path) = start.last_path {
+            app.path = path;
+        }
+        app
     } else {
-        (None, None)
+        App::new(None, None, None)
     };
-    let mut app = App::new(server, token, None);
     let mut pending = if args.live { app.start() } else { Vec::new() };
 
     let live = args.live.then(|| {
@@ -361,6 +367,11 @@ pub fn run(args: ReplayArgs) -> i32 {
 
     if !args.frames {
         println!("{}", buffer_text(&terminal));
+    }
+    // Mirror what the real binary does on the way out, so a scripted run
+    // exercises the save path too.
+    if args.live {
+        crate::tui::remember(&app);
     }
     0
 }

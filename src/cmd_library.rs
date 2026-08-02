@@ -8,8 +8,8 @@ use std::io::Read;
 
 use clap::Args;
 
-use crate::api::session::{self, Session};
 use crate::api::{ApiError, Client};
+use crate::config;
 
 /// Server/token overrides shared by every read-only command. Omit both to use
 /// the saved session.
@@ -292,25 +292,33 @@ pub fn login(args: LoginArgs) -> i32 {
         Err(e) => return fail(e),
     };
 
-    let session = Session {
-        server: client.server(),
-        username: Some(args.user.clone()),
-        token: Some(resp.token),
-    };
-    match session::save(&session) {
-        Ok(path) => {
-            println!("logged in as {} to {}", args.user, session.server);
-            if !resp.vpaths.is_empty() {
-                println!("libraries: {}", resp.vpaths.join(", "));
-            }
-            println!("session saved to {}", path.display());
-            0
-        }
+    let server = client.server();
+    let mut config = match config::load() {
+        Ok(config) => config,
         Err(e) => {
-            eprintln!("error: logged in, but could not save the session: {e}");
-            1
+            eprintln!("error: signed in, but could not read the config: {e}");
+            return 1;
         }
+    };
+    config::touch_server(&mut config, &server, Some(args.user.clone()));
+
+    let mut credentials = config::load_credentials().unwrap_or_default();
+    config::store_token(&mut credentials, &server, Some(resp.token));
+
+    if let Err(e) = config::save(&config).and_then(|()| config::save_credentials(&credentials)) {
+        eprintln!("error: signed in, but could not save it: {e}");
+        return 1;
     }
+
+    println!("logged in as {} to {server}", args.user);
+    if !resp.vpaths.is_empty() {
+        println!("libraries: {}", resp.vpaths.join(", "));
+    }
+    match config::credentials_path() {
+        Ok(path) => println!("token saved to {}", path.display()),
+        Err(_) => {}
+    }
+    0
 }
 
 fn resolve_password(args: &LoginArgs) -> Result<String, String> {
@@ -331,13 +339,15 @@ fn resolve_password(args: &LoginArgs) -> Result<String, String> {
 }
 
 pub fn logout() -> i32 {
-    match session::clear() {
+    // Forget the tokens, keep the server list — signing out shouldn't make
+    // the player forget where your music lives.
+    match config::forget_all_tokens() {
         Ok(true) => {
-            println!("session cleared");
+            println!("signed out; the server list is kept");
             0
         }
         Ok(false) => {
-            println!("no saved session");
+            println!("not signed in");
             0
         }
         Err(e) => {

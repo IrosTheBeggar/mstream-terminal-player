@@ -1,6 +1,7 @@
 mod api;
 mod cmd_library;
 mod cmd_play;
+mod config;
 mod discovery;
 mod dj;
 mod engine;

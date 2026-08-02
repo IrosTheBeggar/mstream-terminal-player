@@ -83,6 +83,15 @@ impl Repeat {
             Repeat::One => "one",
         }
     }
+
+    /// Anything unrecognised falls back to off rather than refusing to start.
+    pub fn from_label(label: &str) -> Self {
+        match label {
+            "all" => Repeat::All,
+            "one" => Repeat::One,
+            _ => Repeat::Off,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -460,6 +469,27 @@ impl App {
         // thing a new user does is delete it.
         app.connect.server = server.unwrap_or_default();
         app
+    }
+
+    /// Start from remembered preferences.
+    pub fn with_prefs(mut self, prefs: &crate::config::PlayerPrefs) -> Self {
+        self.volume = prefs.volume.clamp(0.0, 1.0);
+        self.queue.repeat = Repeat::from_label(&prefs.repeat);
+        self.queue.shuffle = prefs.shuffle;
+        self.autodj = AutoDjMode::from_label(&prefs.autodj);
+        self
+    }
+
+    /// The preferences worth remembering for next time.
+    pub fn prefs(&self) -> crate::config::PlayerPrefs {
+        crate::config::PlayerPrefs {
+            // Rounded because this lands in a file people are meant to read;
+            // 0.74999994 is noise from repeated nudges.
+            volume: (self.volume * 100.0).round() / 100.0,
+            repeat: self.queue.repeat.label().to_string(),
+            shuffle: self.queue.shuffle,
+            autodj: self.autodj.label().to_string(),
+        }
     }
 
     /// Effects to run at startup.
@@ -2222,6 +2252,39 @@ mod tests {
             Effect::Api(cmd @ ApiCmd::AutoDj { .. }) => Some(cmd),
             _ => None,
         })
+    }
+
+    #[test]
+    fn remembered_preferences_are_applied_and_handed_back() {
+        let saved = crate::config::PlayerPrefs {
+            volume: 0.35,
+            repeat: "all".into(),
+            shuffle: true,
+            autodj: "tempo+key".into(),
+        };
+        let app = App::new(None, None, None).with_prefs(&saved);
+        assert_eq!(app.volume, 0.35);
+        assert_eq!(app.queue.repeat, Repeat::All);
+        assert!(app.queue.shuffle);
+        assert_eq!(app.autodj, AutoDjMode::BpmKey);
+
+        // What goes out matches what came in, so a restart is a no-op.
+        assert_eq!(app.prefs(), saved);
+    }
+
+    #[test]
+    fn nonsense_preferences_fall_back_rather_than_refusing_to_start() {
+        // A hand-edited config shouldn't be able to brick the player.
+        let saved = crate::config::PlayerPrefs {
+            volume: 9.0,
+            repeat: "sideways".into(),
+            shuffle: false,
+            autodj: "disco".into(),
+        };
+        let app = App::new(None, None, None).with_prefs(&saved);
+        assert_eq!(app.volume, 1.0, "volume is clamped");
+        assert_eq!(app.queue.repeat, Repeat::Off);
+        assert_eq!(app.autodj, AutoDjMode::Off);
     }
 
     #[test]
