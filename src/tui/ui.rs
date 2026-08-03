@@ -657,10 +657,21 @@ fn entry_line(entry: &Entry, width: usize, playing: Option<&str>) -> Line<'stati
                 Span::styled(detail.clone(), Style::new().fg(dim())),
             ])
         }
-        Entry::Discover { label, detail, .. } => Line::from(vec![
-            Span::styled(label.clone(), Style::new().fg(folder())),
-            Span::styled(format!("   {detail}"), Style::new().fg(dim())),
-        ]),
+        // Elided rather than left for the terminal to chop: in a narrow trail
+        // column an unclipped detail ends mid-word, and a lone letter against
+        // the rule reads as a rendering fault rather than as elision.
+        Entry::Discover { label, detail, .. } => {
+            let name = fit(label, width);
+            let room = width.saturating_sub(width_of(&name) + 3);
+            let mut spans = vec![Span::styled(name, Style::new().fg(folder()))];
+            if room > 1 {
+                spans.push(Span::styled(
+                    format!("   {}", fit(detail, room)),
+                    Style::new().fg(dim()),
+                ));
+            }
+            Line::from(spans)
+        }
         Entry::Track { label, track } => {
             // Bold as well as coloured, so the playing row stays findable
             // where colour has been taken away — NO_COLOR, a 16-colour

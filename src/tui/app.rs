@@ -3006,7 +3006,7 @@ fn default_normal() -> Vec<Binding> {
     Binding {
         keys: vec![key(KeyCode::Tab)],
         action: Action::CycleFocus,
-        help: Some("browser / queue"),
+        help: Some("show / hide the queue"),
     },
     // One digit per visible tab; `select_tab` ignores a number past the end,
     // so a server without Discover simply has nothing on 5. Listed one per
