@@ -319,14 +319,36 @@ server without an index, `A` cycles straight past a mode that can't work, and a 
 preferences are global, capabilities are per-server. `mstream-player info` prints the enabled
 features, where "none enabled" is the ordinary answer on a default install.
 
-#### B1 — Auto-DJ panel
-Promote the footer toggle to a real panel: mode, tempo tolerance, key strictness, genre
-whitelist/blacklist, rating floor, artist cooldown, and a preview of the next few picks.
-The big win available from `random-songs` and not yet used: `similarTo` (1–8 paths, averaged into
-a **session centroid** — send the recent picks as a rolling anchor) paired with `minSimilarity`.
-Joi enforces both-or-neither. Real calibration from the server source: same-artist ≈ .6–.9,
-cross-artist ≈ .3–.7, so map a perceptual slider onto that range. The sonic pool is a hard
-constraint — the BPM/key waterfall never widens outside it and fails loudly instead.
+#### B1 — Auto-DJ panel ✅ DONE 2026-08-02
+
+`D` opens a panel over the player: mode, sonic pool + anchor, tempo window, key matching, rating
+floor, artist cooldown, and genre whitelist/blacklist with a chooser fed by `db/genres`. `p`
+samples three picks from the current settings without queueing any, which is how a setting gets
+judged before it is committed to. Everything persists under `[player.dj]`.
+
+`similarTo` + `minSimilarity` are now used, and are the reason the panel is worth having.
+Request building lives in `dj::build_random_request` — pure, so what reaches the server is
+pinned by tests reading the actual JSON, which is the only place absent-vs-empty is visible
+(an empty array is not "no filter": it puts the request into continuity mode).
+
+- **Both-or-neither is structural.** `RandomSongRequest::with_sonic_pool` takes seeds and
+  threshold together and drops both unless both are present, so the `.and('similarTo',
+  'minSimilarity')` 400 is unreachable rather than merely avoided. It bites on the first pick of
+  a session, where tightness is set but nothing has played yet.
+- **The slider is perceptual.** Raw cosine 0..1 is nearly all dead travel — the server's own
+  calibration puts same-artist around .6–.9 and cross-artist .3–.7 — so 1–100 maps onto
+  .30–.85, and the panel shows the raw value it lands on plus the pool size the server reports.
+- **A hard constraint stays hard.** Tempo, key and artist relax inside the pool; the pool never
+  widens. When it empties, the 400 is caught and retried once *without* the pool, saying so,
+  rather than stalling the queue.
+- **Feature-gated** on `discovery` from B0: no index, no sonic rows, no `similarTo` on the wire.
+
+Two things live testing caught that reasoning had not: a modal overlay borrowing the player's
+keymap meant `p` arrived as "previous track" (fixed with an `InputMode::Panel` binding set), and
+a pick confined to 37 sonically-close tracks was being described as "picking at random".
+
+**Deferred:** `artists` (similar-artist scope) needs a Last.fm proxy that isn't built; the
+waterfall's step 1–5 branch stays unused until then.
 
 #### B2 — Sonic Journey
 `POST /api/v1/discovery/local/path` with `{startFilePath, endFilePath, length}` (4–32, default 14)

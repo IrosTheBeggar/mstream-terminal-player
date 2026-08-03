@@ -36,7 +36,7 @@ track queues everything visible and starts there; `a` queues just that one.
 | `Space` | play or pause · `n` / `p` next / previous |
 | `[` `]` | seek 5s · `-` `+` volume |
 | `d` / `C` | remove from queue / clear queue |
-| `r` / `s` | repeat / shuffle · `A` auto-dj |
+| `r` / `s` | repeat / shuffle · `A` auto-dj · `D` auto-dj panel |
 | `?` | help · `q` quit |
 
 ## Library commands
@@ -63,6 +63,7 @@ Servers running in public mode (no users configured) need no login — just pass
 
 Press `A` to cycle Auto-DJ: **off → similar → tempo+key**. When the queue has
 nothing left after the track that's playing, it quietly adds one more.
+Press `D` for the panel, where the rest of it lives.
 
 - **similar** uses the server's audio-embedding index (`discovery`), so picks
   sound like what you're listening to rather than merely sharing a tag.
@@ -75,6 +76,25 @@ past it otherwise, and a remembered `similar` setting is dropped (with a note)
 when you connect somewhere that lacks one. If the index is there but the track
 hasn't been analysed yet, it falls back to tempo+key and says so instead of
 going quiet. `mstream-player info` lists what a given server has enabled.
+
+### The panel (`D`)
+
+| Setting | |
+|---|---|
+| **Sonic pool** | only pick tracks that *sound* like the session, as a tightness slider. Shows the raw cosine it maps to, and how many tracks are inside it. |
+| **Anchor** | `current` follows each track; `session` averages the recent picks, so a set drifts as a whole instead of walking away one song at a time. |
+| **Tempo window** | how far either side of the seed's BPM, at the same, half and double time. The server widens to twice this before giving up on tempo. |
+| **Key matching** | `compatible` is the Camelot neighbourhood; `strict` never leaves the seed's key. |
+| **Rating floor** · **Artist cooldown** | skip anything below a rating; keep the last N artists out. |
+| **Genres** | whitelist or blacklist. A whitelist also excludes untagged tracks — "only these" is the stricter promise. |
+
+`↑↓` choose · `←→` adjust · `p` samples three picks so you can hear what a
+setting does before committing to it · `Esc` closes. Settings persist.
+
+The sonic pool is a **hard** constraint: tempo, key and artist all relax
+inside it, but it never widens. If nothing is similar enough the player says
+so and loosens for that one pick rather than quietly playing something else.
+Rows that need the server's embedding index only appear where it exists.
 
 To see what it would pick without launching the player:
 

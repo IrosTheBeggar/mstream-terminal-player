@@ -302,6 +302,52 @@ pub struct RandomSongRequest {
     pub musical_keys: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignore_artists: Vec<String>,
+    /// 1–10. Omitted when zero, which the server also reads as "no floor".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_rating: Option<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
+    /// Only meaningful alongside `genres`: "whitelist" (default) or
+    /// "blacklist". Note the deliberate asymmetry server-side — a whitelist
+    /// blocks untagged tracks, a blacklist lets them through.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genre_mode: Option<String>,
+
+    // The sonic pool. The server's Joi schema binds these with `.and(...)`,
+    // so sending one without the other is a 400 — see `with_sonic_pool`.
+    /// 1–8 seed paths, averaged into a centroid when there is more than one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub similar_to: Vec<String>,
+    /// Raw cosine floor, 0..1. A hard constraint: the server's waterfall
+    /// relaxes tempo, key and artist *within* the pool and never widens past
+    /// it, failing loudly instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_similarity: Option<f64>,
+}
+
+/// Most seed paths the server will average into a centroid.
+pub const SIMILAR_TO_MAX: usize = 8;
+
+impl RandomSongRequest {
+    /// Attach the sonic pool, or leave it off entirely.
+    ///
+    /// Both fields go on together or neither does — the server enforces that
+    /// with `.and('similarTo', 'minSimilarity')`, so half a pool is a 400
+    /// rather than a looser search.
+    pub fn with_sonic_pool(mut self, seeds: &[String], threshold: Option<f64>) -> Self {
+        let seeds: Vec<String> = seeds.iter().take(SIMILAR_TO_MAX).cloned().collect();
+        match (seeds.is_empty(), threshold) {
+            (false, Some(threshold)) => {
+                self.similar_to = seeds;
+                self.min_similarity = Some(threshold);
+            }
+            _ => {
+                self.similar_to.clear();
+                self.min_similarity = None;
+            }
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -310,6 +356,22 @@ pub struct RandomSongsResponse {
     pub songs: Vec<Track>,
     #[serde(rename = "ignoreList")]
     pub ignore_list: Vec<u32>,
+    /// Present only when the request carried a sonic pool.
+    pub sonic: Option<SonicReport>,
+}
+
+/// What the sonic pool did on this pick — the feedback that makes the
+/// tightness slider tunable rather than guesswork.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SonicReport {
+    /// Cosine of the pick against the seed or centroid. Null when the pick
+    /// somehow has no vector.
+    pub similarity: Option<f64>,
+    /// How many analysed tracks sit inside the threshold at all, before the
+    /// other filters cut it down.
+    #[serde(rename = "poolSize")]
+    pub pool_size: u32,
 }
 
 /// `POST /api/v1/discovery/local/similar/tracks` — nearest neighbours in the
@@ -415,6 +477,62 @@ mod tests {
         let p: Ping = serde_json::from_str(json).unwrap();
         assert_eq!(p.vpaths, vec!["testlib"]);
         assert_eq!(p.transcode.unwrap().default_codec.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn the_sonic_pool_is_sent_whole_or_not_at_all() {
+        let seeds = vec!["lib/a.mp3".to_string()];
+
+        let body = serde_json::to_value(
+            RandomSongRequest::default().with_sonic_pool(&seeds, Some(0.62)),
+        )
+        .unwrap();
+        assert_eq!(body["similarTo"], serde_json::json!(["lib/a.mp3"]));
+        assert_eq!(body["minSimilarity"], 0.62);
+
+        // A threshold with no seed, or a seed with no threshold, would be a
+        // 400 from the server's `.and(...)` — neither may reach the wire.
+        for half in [
+            RandomSongRequest::default().with_sonic_pool(&seeds, None),
+            RandomSongRequest::default().with_sonic_pool(&[], Some(0.62)),
+        ] {
+            let body = serde_json::to_value(half).unwrap();
+            assert!(body.get("similarTo").is_none(), "got {body}");
+            assert!(body.get("minSimilarity").is_none(), "got {body}");
+        }
+    }
+
+    #[test]
+    fn more_seeds_than_the_server_averages_are_trimmed() {
+        let seeds: Vec<String> = (0..20).map(|i| format!("lib/{i}.mp3")).collect();
+        let request = RandomSongRequest::default().with_sonic_pool(&seeds, Some(0.5));
+        assert_eq!(request.similar_to.len(), SIMILAR_TO_MAX, "the server caps this at 8");
+        // The most recent picks are the ones worth anchoring to, and callers
+        // pass them newest-first.
+        assert_eq!(request.similar_to[0], "lib/0.mp3");
+    }
+
+    #[test]
+    fn an_empty_request_sends_an_empty_body() {
+        // Every filter is optional, and a filter we don't mean must not
+        // appear — the server's waterfall branches on field presence.
+        let body = serde_json::to_value(RandomSongRequest::default()).unwrap();
+        assert_eq!(body, serde_json::json!({}));
+    }
+
+    #[test]
+    fn reads_the_sonic_report_when_the_server_sends_one() {
+        let json = r#"{"songs":[],"ignoreList":[4,5],
+            "sonic":{"similarity":0.7213,"poolSize":1247}}"#;
+        let r: RandomSongsResponse = serde_json::from_str(json).unwrap();
+        let sonic = r.sonic.unwrap();
+        assert_eq!(sonic.similarity, Some(0.7213));
+        assert_eq!(sonic.pool_size, 1247);
+
+        // And copes when it doesn't: non-sonic picks omit the whole object.
+        let r: RandomSongsResponse =
+            serde_json::from_str(r#"{"songs":[],"ignoreList":[]}"#).unwrap();
+        assert!(r.sonic.is_none());
     }
 
     #[test]

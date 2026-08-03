@@ -8,8 +8,8 @@ use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, 
 
 use crate::cmd_library::fmt_duration;
 
-use super::app::{App, CONNECT_METHODS, ConnectStage, Entry, Focus, MessageKind, Tab};
-use super::worker::LibraryNode;
+use super::app::{App, CONNECT_METHODS, ConnectStage, DjRow, Entry, Focus, MessageKind, Tab};
+use super::worker::{AutoDjMode, LibraryNode};
 
 const ACCENT: Color = Color::Cyan;
 const DIM: Color = Color::DarkGray;
@@ -130,6 +130,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_transport(frame, transport, app);
     render_footer(frame, footer, app);
 
+    if app.dj_panel.is_some() {
+        render_dj_panel(frame, area, app);
+    }
     if app.show_help {
         render_help(frame, area);
     }
@@ -636,6 +639,223 @@ fn render_connecting(frame: &mut Frame, area: Rect, app: &App) {
     render_centered_block(frame, area, lines);
 }
 
+/// The Auto-DJ panel: what the picker is being told to do, and what that
+/// actually produces.
+fn render_dj_panel(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(panel) = app.dj_panel.as_ref() else { return };
+    if panel.genres.is_some() {
+        return render_genre_picker(frame, area, app);
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    // Widest label plus a gutter, so the values form a column.
+    let label_width = panel.rows.iter().map(|r| r.label().len()).max().unwrap_or(0) + 2;
+
+    for (index, row) in panel.rows.iter().enumerate() {
+        let focused = index == panel.row;
+        let marker = if focused { "> " } else { "  " };
+        let label_style = if focused {
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        };
+        let mut spans = vec![
+            Span::styled(marker, label_style),
+            Span::styled(format!("{:<label_width$}", row.label()), label_style),
+        ];
+        spans.extend(dj_value_spans(*row, app));
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::raw(""));
+    lines.extend(dj_sample_lines(app));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  ↑↓ choose · ←→ adjust · p sample · Esc close",
+        Style::new().fg(DIM),
+    )));
+
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let box_area = centered_rect(66, height, area);
+    frame.render_widget(Clear, box_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(ACCENT))
+        .title(" Auto-DJ ");
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The right-hand side of a settings row: the value, plus whatever context
+/// makes it meaningful.
+fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
+    let dim = Style::new().fg(DIM);
+    let value = |text: String| Span::raw(text);
+    match row {
+        DjRow::Mode => {
+            let mut spans = vec![value(app.autodj.label().to_string())];
+            // Worth saying out loud: in this mode the pick comes straight
+            // from the neighbour list, so the filters below are not consulted.
+            if app.autodj == AutoDjMode::Similar {
+                spans.push(Span::styled("   filters below don't apply", dim));
+            }
+            spans
+        }
+        DjRow::Tightness => {
+            if app.dj.sonic_tightness == 0 {
+                return vec![value("off".into()), Span::styled("   any track", dim)];
+            }
+            let filled = (app.dj.sonic_tightness / 10) as usize;
+            let bar: String =
+                "▓".repeat(filled) + &"░".repeat(10usize.saturating_sub(filled));
+            let cosine = crate::dj::sonic_threshold(app.dj.sonic_tightness).unwrap_or(0.0);
+            vec![
+                value(format!("{bar} {:>3}%", app.dj.sonic_tightness)),
+                // The raw number is what the server actually filters on, and
+                // seeing it is how the slider stops being a mystery.
+                Span::styled(format!("   cosine ≥ {cosine:.2}"), dim),
+            ]
+        }
+        DjRow::Anchor => {
+            let (label, what) = match app.dj.sonic_anchor {
+                crate::dj::SonicAnchor::Current => ("current", "follows each track"),
+                crate::dj::SonicAnchor::Session => ("session", "averages recent picks"),
+            };
+            vec![value(label.into()), Span::styled(format!("   {what}"), dim)]
+        }
+        DjRow::Tempo => {
+            if app.dj.tempo_tolerance == 0 {
+                return vec![value("off".into())];
+            }
+            vec![
+                value(format!("±{}%", app.dj.tempo_tolerance)),
+                Span::styled(
+                    format!("   widens to ±{}% before giving up", app.dj.tempo_tolerance * 2),
+                    dim,
+                ),
+            ]
+        }
+        DjRow::Key => {
+            let what = match app.dj.key_matching {
+                crate::dj::KeyMatching::Off => "any key",
+                crate::dj::KeyMatching::Compatible => "the Camelot neighbourhood",
+                crate::dj::KeyMatching::Strict => "the same key only",
+            };
+            vec![
+                value(app.dj.key_matching.label().to_string()),
+                Span::styled(format!("   {what}"), dim),
+            ]
+        }
+        DjRow::Rating => {
+            if app.dj.min_rating == 0 {
+                return vec![value("off".into())];
+            }
+            vec![value(format!("≥ {}", app.dj.min_rating))]
+        }
+        DjRow::Cooldown => {
+            if app.dj.artist_cooldown == 0 {
+                return vec![value("off".into())];
+            }
+            vec![
+                value(format!("{} artists", app.dj.artist_cooldown)),
+                Span::styled("   recently played, skipped", dim),
+            ]
+        }
+        DjRow::Genres => {
+            let mode = app.dj.genre_mode.label().to_string();
+            if app.dj.genre_mode == crate::dj::GenreMode::Off {
+                return vec![value(mode), Span::styled("   Enter to choose", dim)];
+            }
+            let chosen = if app.dj.genres.is_empty() {
+                "none chosen — Enter to pick".to_string()
+            } else {
+                app.dj.genres.join(", ")
+            };
+            let mut spans = vec![value(format!("{mode}  ")), Span::styled(chosen, dim)];
+            // The asymmetry bites people: "only these" is a stricter promise
+            // than "anything but these", and it drops untagged tracks.
+            if app.dj.genre_mode == crate::dj::GenreMode::Whitelist
+                && !app.dj.genres.is_empty()
+            {
+                spans.push(Span::styled("  (untagged excluded)", dim));
+            }
+            spans
+        }
+    }
+}
+
+/// The sample block: what these settings actually pick, and how big a pool
+/// they leave to pick from.
+fn dj_sample_lines(app: &App) -> Vec<Line<'static>> {
+    let Some(panel) = app.dj_panel.as_ref() else { return Vec::new() };
+    let dim = Style::new().fg(DIM);
+    let mut lines = vec![Line::from(Span::styled("  Sample", dim))];
+
+    if let Some(pool) = &panel.pool {
+        lines.push(Line::from(Span::styled(
+            format!("  {} tracks inside the sonic pool", pool.pool_size),
+            dim,
+        )));
+    }
+    if panel.sample_pending {
+        lines.push(Line::from(Span::styled("  picking…", dim)));
+        return lines;
+    }
+    if panel.sample.is_empty() {
+        lines.push(Line::from(Span::styled("  press p to see what these settings pick", dim)));
+        return lines;
+    }
+    for (index, track) in panel.sample.iter().enumerate() {
+        lines.push(Line::from(format!("  {}. {}", index + 1, track.display_name())));
+    }
+    lines
+}
+
+fn render_genre_picker(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(picker) = app.dj_panel.as_ref().and_then(|p| p.genres.as_ref()) else { return };
+
+    let mut lines: Vec<Line> = Vec::new();
+    if picker.loading {
+        lines.push(Line::from(Span::styled("  loading genres…", Style::new().fg(DIM))));
+    } else if picker.all.is_empty() {
+        lines.push(Line::from(Span::styled("  no genres tagged", Style::new().fg(DIM))));
+    } else {
+        // Keep the highlighted row on screen for long lists.
+        let visible = (area.height.saturating_sub(8)) as usize;
+        let first = picker.row.saturating_sub(visible.saturating_sub(1));
+        for (index, name) in picker.all.iter().enumerate().skip(first).take(visible) {
+            let chosen = app.dj.genres.iter().any(|g| g == name);
+            let focused = index == picker.row;
+            let style = if focused {
+                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{}[{}] {name}", if focused { "> " } else { "  " }, if chosen { 'x' } else { ' ' }),
+                style,
+            )));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  ↑↓ move · Space toggle · Enter done",
+        Style::new().fg(DIM),
+    )));
+
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let box_area = centered_rect(50, height, area);
+    frame.render_widget(Clear, box_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(ACCENT))
+        .title(format!(" Genres · {} ", app.dj.genre_mode.label()));
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn render_help(frame: &mut Frame, area: Rect) {
     let box_area = centered_rect(62, 18, area);
     frame.render_widget(Clear, box_area);
@@ -663,6 +883,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ("d / C", "remove from queue / clear queue"),
         ("r / s", "repeat / shuffle"),
         ("A", "auto-dj: off / similar / tempo+key"),
+        ("D", "auto-dj settings"),
         ("? / Esc", "toggle this help"),
         ("q", "quit"),
     ];
@@ -736,9 +957,18 @@ mod tests {
         out
     }
 
+    /// A session against a fully-featured server. Capabilities are set
+    /// explicitly because they decide which rows the Auto-DJ panel draws; a
+    /// default (empty) set would quietly be testing the degraded layout.
     fn connected_app() -> App {
         let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
         app.connected = true;
+        app.capabilities = crate::api::types::Capabilities {
+            discovery: true,
+            discovery_path: true,
+            discovery_p2p: false,
+            federation_discovery: false,
+        };
         app
     }
 
@@ -984,6 +1214,90 @@ mod tests {
         assert!(text.contains("Genre: Ambient"), "the title tracks the drill-down");
         assert!(text.contains("Drift"));
         assert!(text.contains("[1:35]"));
+    }
+
+    #[test]
+    fn the_dj_panel_shows_each_setting_with_what_it_means() {
+        let mut app = connected_app();
+        app.dj.sonic_tightness = 60;
+        app.handle_action(Action::OpenDjPanel);
+        let text = draw_sized(&mut app, 100, 34);
+
+        assert!(text.contains("Auto-DJ"));
+        for row in ["Mode", "Sonic pool", "Anchor", "Tempo window", "Key matching", "Genres"] {
+            assert!(text.contains(row), "missing {row} in:\n{text}");
+        }
+        // The slider shows the raw threshold it maps to, so the number the
+        // server filters on is never a mystery.
+        assert!(text.contains("cosine ≥ 0.63"), "got:\n{text}");
+        assert!(text.contains("60%"));
+        // And the tempo row says what the fallback widens to.
+        assert!(text.contains("±6%") && text.contains("±12%"), "got:\n{text}");
+        assert!(text.contains("press p to see what these settings pick"));
+    }
+
+    #[test]
+    fn the_dj_panel_hides_the_sonic_rows_without_an_index() {
+        let mut app = connected_app();
+        app.capabilities = Default::default();
+        app.handle_action(Action::OpenDjPanel);
+        let text = draw_sized(&mut app, 100, 34);
+        assert!(!text.contains("Sonic pool"), "nothing promises a pool that can't exist");
+        assert!(!text.contains("Anchor"));
+        assert!(text.contains("Tempo window"), "the rest of the panel is still there");
+    }
+
+    #[test]
+    fn the_dj_panel_reports_the_pool_and_the_sample() {
+        let mut app = connected_app();
+        app.handle_action(Action::OpenDjPanel);
+        app.apply_event(crate::tui::worker::Event::AutoDjSample {
+            tracks: vec![Track {
+                filepath: "lib/x.mp3".into(),
+                metadata: TrackMetadata {
+                    artist: Some("Band".into()),
+                    title: Some("Song".into()),
+                    ..Default::default()
+                },
+            }],
+            pool: Some(crate::api::types::SonicReport {
+                similarity: Some(0.71),
+                pool_size: 1247,
+            }),
+            note: None,
+        });
+        let text = draw_sized(&mut app, 100, 34);
+        // The pool size is the number that makes the slider tunable.
+        assert!(text.contains("1247 tracks inside the sonic pool"), "got:\n{text}");
+        assert!(text.contains("1. Band - Song"), "got:\n{text}");
+    }
+
+    #[test]
+    fn the_genre_chooser_marks_what_is_selected() {
+        let mut app = connected_app();
+        app.dj.genres = vec!["Techno".into()];
+        app.handle_action(Action::OpenDjPanel);
+        let last = app.dj_panel.as_ref().unwrap().rows.len() - 1;
+        app.dj_panel.as_mut().unwrap().row = last;
+        app.handle_action(Action::Activate);
+        app.apply_event(crate::tui::worker::Event::Genres(vec![
+            crate::api::types::Genre { name: "Ambient".into(), track_count: None },
+            crate::api::types::Genre { name: "Techno".into(), track_count: None },
+        ]));
+
+        let text = draw_sized(&mut app, 100, 34);
+        assert!(text.contains("[ ] Ambient"), "got:\n{text}");
+        assert!(text.contains("[x] Techno"), "already chosen:\n{text}");
+        assert!(text.contains("Space toggle"));
+    }
+
+    #[test]
+    fn the_dj_panel_survives_a_small_terminal() {
+        let mut app = connected_app();
+        app.handle_action(Action::OpenDjPanel);
+        // Must not panic, and must not try to draw outside the frame.
+        draw_sized(&mut app, 40, 12);
+        draw_sized(&mut app, 20, 8);
     }
 
     #[test]

@@ -11,9 +11,12 @@ use ratatui::widgets::ListState;
 use crate::api::types::{Album, DirListing, Genre, Track, TrackMetadata};
 use crate::api::urls;
 use crate::discovery::DiscoveredServer;
+use crate::dj;
 use crate::player::PlayerStatus;
 
-use super::worker::{ApiCmd, AudioCmd, AutoDjMode, Event, LibraryData, LibraryNode};
+use super::worker::{
+    ApiCmd, AudioCmd, AutoDjMode, DjRequest, Event, LibraryData, LibraryNode,
+};
 
 const SEEK_STEP: f64 = 5.0;
 const VOLUME_STEP: f32 = 0.05;
@@ -98,6 +101,10 @@ impl Repeat {
 pub enum InputMode {
     Normal,
     Editing,
+    /// A modal overlay is up and owns the keyboard. Its own bindings apply,
+    /// so a letter that means "previous track" outside it can mean something
+    /// else inside without the two fighting.
+    Panel,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +134,7 @@ pub enum Action {
     ToggleRepeat,
     ToggleShuffle,
     ToggleAutoDj,
+    OpenDjPanel,
     StartSearch,
     Input(char),
     Backspace,
@@ -393,6 +401,89 @@ impl ConnectForm {
     }
 }
 
+/// How many recent tracks to keep for anchoring and cooldown. The sonic
+/// centroid takes at most 8 (the server's cap), the artist cooldown at most
+/// 20; keeping the longer list serves both.
+const RECENT_MEMORY: usize = 20;
+
+/// How many picks the panel's sample takes. Each is its own round trip, so
+/// enough to show the character of the settings and no more.
+const DJ_SAMPLE_COUNT: usize = 3;
+
+/// One adjustable line in the Auto-DJ panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DjRow {
+    Mode,
+    Tightness,
+    Anchor,
+    Tempo,
+    Key,
+    Rating,
+    Cooldown,
+    Genres,
+}
+
+impl DjRow {
+    pub fn label(self) -> &'static str {
+        match self {
+            DjRow::Mode => "Mode",
+            DjRow::Tightness => "Sonic pool",
+            DjRow::Anchor => "Anchor",
+            DjRow::Tempo => "Tempo window",
+            DjRow::Key => "Key matching",
+            DjRow::Rating => "Rating floor",
+            DjRow::Cooldown => "Artist cooldown",
+            DjRow::Genres => "Genres",
+        }
+    }
+}
+
+/// The Auto-DJ panel's own state. Rows shown depend on what the server can
+/// do, so the panel is built fresh from capabilities each time it opens.
+#[derive(Debug, Default)]
+pub struct DjPanel {
+    pub rows: Vec<DjRow>,
+    pub row: usize,
+    /// Genre chooser, when open over the panel.
+    pub genres: Option<GenrePicker>,
+    /// Sample picks from the current settings, and what the pool looked like.
+    pub sample: Vec<Track>,
+    pub sample_pending: bool,
+    pub pool: Option<crate::api::types::SonicReport>,
+}
+
+impl DjPanel {
+    fn new(capabilities: crate::api::types::Capabilities) -> Self {
+        let mut rows = vec![DjRow::Mode];
+        // No index, no pool — and no row promising one.
+        if capabilities.discovery {
+            rows.push(DjRow::Tightness);
+            rows.push(DjRow::Anchor);
+        }
+        rows.extend([
+            DjRow::Tempo,
+            DjRow::Key,
+            DjRow::Rating,
+            DjRow::Cooldown,
+            DjRow::Genres,
+        ]);
+        DjPanel { rows, ..Default::default() }
+    }
+
+    pub fn selected(&self) -> DjRow {
+        self.rows.get(self.row).copied().unwrap_or(DjRow::Mode)
+    }
+}
+
+/// Choosing which genres the filter applies to.
+#[derive(Debug, Default)]
+pub struct GenrePicker {
+    /// Every genre the server knows, alphabetical as it sent them.
+    pub all: Vec<String>,
+    pub row: usize,
+    pub loading: bool,
+}
+
 pub struct App {
     /// Where this session's requests and stream URLs go. For a Quick Connect
     /// session that is the loopback bridge, which lives and dies with the
@@ -432,6 +523,14 @@ pub struct App {
     /// otherwise, so an optional feature is never assumed present.
     pub capabilities: crate::api::types::Capabilities,
     pub autodj: AutoDjMode,
+    /// How Auto-DJ chooses, beyond the mode.
+    pub dj: dj::Settings,
+    /// The settings panel, when it is open.
+    pub dj_panel: Option<DjPanel>,
+    /// Tracks played recently, newest first. Feeds both the sonic anchor and
+    /// the artist cooldown, so the session anchors on where it has been
+    /// rather than only on the song currently sounding.
+    autodj_recent: Vec<Track>,
     /// Round-trip cursor the random-songs picker uses to avoid repeats.
     autodj_ignore: Vec<u32>,
     /// A request is in flight; don't pile on another.
@@ -474,6 +573,9 @@ impl App {
             queue: Queue::default(),
             capabilities: Default::default(),
             autodj: AutoDjMode::Off,
+            dj: dj::Settings::default(),
+            dj_panel: None,
+            autodj_recent: Vec::new(),
             autodj_ignore: Vec::new(),
             autodj_pending: false,
             status: PlayerStatus::default(),
@@ -511,6 +613,7 @@ impl App {
         self.queue.repeat = Repeat::from_label(&prefs.repeat);
         self.queue.shuffle = prefs.shuffle;
         self.autodj = AutoDjMode::from_label(&prefs.autodj);
+        self.dj = dj::Settings::from_prefs(&prefs.dj);
         self
     }
 
@@ -523,7 +626,47 @@ impl App {
             repeat: self.queue.repeat.label().to_string(),
             shuffle: self.queue.shuffle,
             autodj: self.autodj.label().to_string(),
+            dj: self.dj.to_prefs(),
         }
+    }
+
+    /// Recent track paths, newest first — the sonic anchor.
+    fn anchors(&self) -> Vec<String> {
+        self.autodj_recent.iter().map(|t| t.filepath.clone()).collect()
+    }
+
+    /// Recently-played artist names, newest first and deduped, for the
+    /// cooldown. Tracks with no artist tag contribute nothing rather than an
+    /// empty name the server would match against everything.
+    fn recent_artists(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        self.autodj_recent
+            .iter()
+            .filter_map(|t| t.metadata.artist.as_deref())
+            .filter(|a| !a.trim().is_empty())
+            .filter(|a| seen.insert(a.to_ascii_lowercase()))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Note a track as played, for anchoring and cooldown.
+    fn remember_played(&mut self, track: &Track) {
+        self.autodj_recent.retain(|t| t.filepath != track.filepath);
+        self.autodj_recent.insert(0, track.clone());
+        self.autodj_recent.truncate(RECENT_MEMORY);
+    }
+
+    /// Everything the worker needs to ask for a pick.
+    fn dj_request(&self) -> Box<DjRequest> {
+        Box::new(DjRequest {
+            mode: self.autodj,
+            settings: self.dj.clone(),
+            seed: self.now_playing.clone().map(Box::new),
+            ignore_list: self.autodj_ignore.clone(),
+            anchors: self.anchors(),
+            recent_artists: self.recent_artists(),
+            sonic_available: self.capabilities.discovery,
+        })
     }
 
     /// Effects to run at startup.
@@ -556,6 +699,8 @@ impl App {
     pub fn input_mode(&self) -> InputMode {
         if !self.connected || self.editing_query {
             InputMode::Editing
+        } else if self.dj_panel.is_some() {
+            InputMode::Panel
         } else {
             InputMode::Normal
         }
@@ -608,6 +753,11 @@ impl App {
         // The connect screen swallows everything except quit.
         if !self.connected {
             return self.handle_connect_action(action);
+        }
+        // The panel is modal: it owns the arrow keys and the letters it uses,
+        // so playback shortcuts can't fire while someone is editing settings.
+        if self.dj_panel.is_some() {
+            return self.handle_dj_action(action);
         }
         if self.editing_query {
             if let Some(effects) = self.handle_query_action(&action) {
@@ -695,6 +845,8 @@ impl App {
                 ));
                 Vec::new()
             }
+            // `A` cycles the mode, which is the whole interaction most of the
+            // time; the panel behind `D` is for the rest of it.
             Action::ToggleAutoDj => {
                 self.autodj = self.autodj.next_available(self.capabilities);
                 self.info(format!("auto-dj: {}", self.autodj.label()));
@@ -705,6 +857,7 @@ impl App {
                 }
                 self.maybe_autodj()
             }
+            Action::OpenDjPanel => self.open_dj_panel(),
 
             Action::StartSearch => {
                 self.tab = Tab::Search;
@@ -907,6 +1060,168 @@ impl App {
         })]
     }
 
+    // ── Auto-DJ panel ───────────────────────────────────────────────────────
+
+    /// Open the panel, built for what this server can do.
+    fn open_dj_panel(&mut self) -> Vec<Effect> {
+        self.dj_panel = Some(DjPanel::new(self.capabilities));
+        self.message = None;
+        Vec::new()
+    }
+
+    /// Keys while the panel is open. Left/right adjust the highlighted row;
+    /// everything else is navigation or one of the panel's own commands.
+    fn handle_dj_action(&mut self, action: Action) -> Vec<Effect> {
+        if action == Action::Quit {
+            self.should_quit = true;
+            return vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)];
+        }
+        // The genre chooser sits over the panel and takes keys first.
+        if self.dj_panel.as_ref().is_some_and(|p| p.genres.is_some()) {
+            return self.handle_genre_action(action);
+        }
+
+        let Some(panel) = self.dj_panel.as_mut() else { return Vec::new() };
+        match action {
+            Action::Cancel | Action::ToggleAutoDj => {
+                self.dj_panel = None;
+                Vec::new()
+            }
+            Action::Up => {
+                panel.row = panel.row.saturating_sub(1);
+                Vec::new()
+            }
+            Action::Down => {
+                panel.row = (panel.row + 1).min(panel.rows.len().saturating_sub(1));
+                Vec::new()
+            }
+            Action::First => {
+                panel.row = 0;
+                Vec::new()
+            }
+            Action::Last => {
+                panel.row = panel.rows.len().saturating_sub(1);
+                Vec::new()
+            }
+            // `h`/`l` and the arrows both land here — `[`/`]` too, which is
+            // the same left/right shape.
+            Action::Back | Action::SeekBackward => self.adjust_dj_row(-1),
+            Action::SeekForward => self.adjust_dj_row(1),
+            Action::Activate | Action::Submit => match panel.selected() {
+                // Enter on the genre row opens the chooser; elsewhere it
+                // nudges the setting, matching what right-arrow does.
+                DjRow::Genres => self.open_genre_picker(),
+                _ => self.adjust_dj_row(1),
+            },
+            // `p` samples what these settings produce.
+            Action::Input('p') => self.sample_dj(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Move the highlighted setting by one step. Numbers move in useful
+    /// increments rather than by one, so a slider crosses its range in a
+    /// handful of presses.
+    fn adjust_dj_row(&mut self, delta: i32) -> Vec<Effect> {
+        let Some(panel) = self.dj_panel.as_ref() else { return Vec::new() };
+        let step = |value: u32, by: i32, max: u32| -> u32 {
+            (value as i32 + by).clamp(0, max as i32) as u32
+        };
+        match panel.selected() {
+            DjRow::Mode => {
+                self.autodj = if delta > 0 {
+                    self.autodj.next_available(self.capabilities)
+                } else {
+                    // Three modes, so stepping forward twice is stepping back.
+                    self.autodj
+                        .next_available(self.capabilities)
+                        .next_available(self.capabilities)
+                };
+                if self.autodj == AutoDjMode::Off {
+                    self.autodj_pending = false;
+                    return Vec::new();
+                }
+                return self.maybe_autodj();
+            }
+            DjRow::Tightness => {
+                self.dj.sonic_tightness = step(self.dj.sonic_tightness, delta * 5, 100);
+            }
+            DjRow::Anchor => self.dj.sonic_anchor = self.dj.sonic_anchor.next(),
+            DjRow::Tempo => {
+                self.dj.tempo_tolerance =
+                    step(self.dj.tempo_tolerance, delta, dj::TEMPO_TOLERANCE_MAX);
+            }
+            DjRow::Key => {
+                self.dj.key_matching = if delta > 0 {
+                    self.dj.key_matching.next()
+                } else {
+                    self.dj.key_matching.next().next()
+                };
+            }
+            DjRow::Rating => self.dj.min_rating = step(self.dj.min_rating, delta, dj::RATING_MAX),
+            DjRow::Cooldown => {
+                self.dj.artist_cooldown =
+                    step(self.dj.artist_cooldown, delta, dj::ARTIST_COOLDOWN_MAX);
+            }
+            DjRow::Genres => self.dj.genre_mode = self.dj.genre_mode.next(),
+        }
+        Vec::new()
+    }
+
+    fn open_genre_picker(&mut self) -> Vec<Effect> {
+        let Some(panel) = self.dj_panel.as_mut() else { return Vec::new() };
+        panel.genres = Some(GenrePicker { loading: true, ..Default::default() });
+        vec![Effect::Api(ApiCmd::Genres)]
+    }
+
+    fn handle_genre_action(&mut self, action: Action) -> Vec<Effect> {
+        let Some(panel) = self.dj_panel.as_mut() else { return Vec::new() };
+        let Some(picker) = panel.genres.as_mut() else { return Vec::new() };
+        match action {
+            Action::Cancel | Action::Activate | Action::Submit => {
+                panel.genres = None;
+            }
+            Action::Up => picker.row = picker.row.saturating_sub(1),
+            Action::Down => {
+                picker.row = (picker.row + 1).min(picker.all.len().saturating_sub(1));
+            }
+            Action::First => picker.row = 0,
+            Action::Last => picker.row = picker.all.len().saturating_sub(1),
+            // Space toggles, which is why Enter closes rather than selects:
+            // a chooser you leave with the same key you pick with is a
+            // chooser you keep leaving by accident.
+            Action::PlayPause => {
+                if let Some(name) = picker.all.get(picker.row).cloned() {
+                    if let Some(at) = self.dj.genres.iter().position(|g| *g == name) {
+                        self.dj.genres.remove(at);
+                    } else {
+                        self.dj.genres.push(name);
+                    }
+                    // Choosing genres with the filter off is a dead end;
+                    // switch it on rather than silently ignoring the choice.
+                    if self.dj.genre_mode == dj::GenreMode::Off && !self.dj.genres.is_empty() {
+                        self.dj.genre_mode = dj::GenreMode::Whitelist;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn sample_dj(&mut self) -> Vec<Effect> {
+        let Some(panel) = self.dj_panel.as_mut() else { return Vec::new() };
+        if panel.sample_pending {
+            return Vec::new();
+        }
+        panel.sample_pending = true;
+        panel.sample.clear();
+        vec![Effect::Api(ApiCmd::AutoDjSample {
+            request: self.dj_request(),
+            count: DJ_SAMPLE_COUNT,
+        })]
+    }
+
     /// Text entry for the search box. Returns `None` for keys the search box
     /// doesn't claim, so they fall through to the normal bindings.
     fn handle_query_action(&mut self, action: &Action) -> Option<Vec<Effect>> {
@@ -1101,6 +1416,7 @@ impl App {
         self.queue.current = Some(index);
         self.queue.state.select(Some(index));
         let hint = track.metadata.duration;
+        self.remember_played(&track);
         self.now_playing = Some(track);
 
         let mut effects = vec![Effect::Audio(AudioCmd::Play { url, duration_hint: hint })];
@@ -1125,11 +1441,7 @@ impl App {
         }
 
         self.autodj_pending = true;
-        vec![Effect::Api(ApiCmd::AutoDj {
-            mode: self.autodj,
-            seed: self.now_playing.clone().map(Box::new),
-            ignore_list: self.autodj_ignore.clone(),
-        })]
+        vec![Effect::Api(ApiCmd::AutoDj(self.dj_request()))]
     }
 
     fn play_pause(&mut self) -> Vec<Effect> {
@@ -1288,6 +1600,29 @@ impl App {
                 }
                 self.library.set(entries_from_library(data));
                 self.message = None;
+                Vec::new()
+            }
+            Event::AutoDjSample { tracks, pool, note } => {
+                if let Some(panel) = self.dj_panel.as_mut() {
+                    panel.sample_pending = false;
+                    panel.sample = tracks;
+                    // Keep the last pool size when this pick didn't report
+                    // one: it still describes the settings on screen.
+                    panel.pool = pool.or(panel.pool.take());
+                }
+                if let Some(note) = note {
+                    self.info(note);
+                }
+                Vec::new()
+            }
+            Event::Genres(genres) => {
+                if let Some(picker) =
+                    self.dj_panel.as_mut().and_then(|panel| panel.genres.as_mut())
+                {
+                    picker.all = genres.into_iter().map(|g| g.name).collect();
+                    picker.loading = false;
+                    picker.row = picker.row.min(picker.all.len().saturating_sub(1));
+                }
                 Vec::new()
             }
             Event::AutoDjPick { candidates, ignore_list, note } => {
@@ -1525,6 +1860,26 @@ pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
         };
     }
 
+    // A modal overlay gets its own bindings rather than borrowing the
+    // player's. Sharing them meant `p` reached the panel as "previous track"
+    // and its sample key did nothing at all.
+    if mode == InputMode::Panel {
+        return match key.code {
+            KeyCode::Char('q') => Some(Action::Quit),
+            KeyCode::Esc | KeyCode::Char('D') => Some(Action::Cancel),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::Down),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::Up),
+            KeyCode::Left | KeyCode::Char('h' | '[') => Some(Action::Back),
+            KeyCode::Right | KeyCode::Char('l' | ']') => Some(Action::SeekForward),
+            KeyCode::Home | KeyCode::Char('g') => Some(Action::First),
+            KeyCode::End | KeyCode::Char('G') => Some(Action::Last),
+            KeyCode::Enter => Some(Action::Submit),
+            KeyCode::Char(' ') => Some(Action::PlayPause),
+            KeyCode::Char(c) => Some(Action::Input(c)),
+            _ => None,
+        };
+    }
+
     match key.code {
         KeyCode::Char('q') => Some(Action::Quit),
         KeyCode::Char('?') => Some(Action::ToggleHelp),
@@ -1556,6 +1911,7 @@ pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
         KeyCode::Char('r') => Some(Action::ToggleRepeat),
         KeyCode::Char('s') => Some(Action::ToggleShuffle),
         KeyCode::Char('A') => Some(Action::ToggleAutoDj),
+        KeyCode::Char('D') => Some(Action::OpenDjPanel),
         KeyCode::Char('/') => Some(Action::StartSearch),
         _ => None,
     }
@@ -1568,6 +1924,13 @@ mod tests {
 
     fn track(path: &str) -> Track {
         Track { filepath: path.to_string(), metadata: TrackMetadata::default() }
+    }
+
+    fn track_by(path: &str, artist: &str) -> Track {
+        Track {
+            filepath: path.to_string(),
+            metadata: TrackMetadata { artist: Some(artist.to_string()), ..Default::default() },
+        }
     }
 
     /// A session against a fully-featured server. Capabilities are set
@@ -2633,6 +2996,7 @@ mod tests {
             repeat: "all".into(),
             shuffle: true,
             autodj: "tempo+key".into(),
+            dj: Default::default(),
         };
         let app = App::new(None, None, None).with_prefs(&saved);
         assert_eq!(app.volume, 0.35);
@@ -2652,6 +3016,7 @@ mod tests {
             repeat: "sideways".into(),
             shuffle: false,
             autodj: "disco".into(),
+            dj: Default::default(),
         };
         let app = App::new(None, None, None).with_prefs(&saved);
         assert_eq!(app.volume, 1.0, "volume is clamped");
@@ -2669,6 +3034,233 @@ mod tests {
         assert_eq!(app.autodj, AutoDjMode::BpmKey);
         app.handle_action(Action::ToggleAutoDj);
         assert_eq!(app.autodj, AutoDjMode::Off);
+    }
+
+    #[test]
+    fn the_panel_only_offers_rows_the_server_can_honour() {
+        let mut app = connected_app();
+        app.handle_action(Action::OpenDjPanel);
+        let rows = &app.dj_panel.as_ref().unwrap().rows;
+        assert!(rows.contains(&DjRow::Tightness), "this server has the index");
+        assert!(rows.contains(&DjRow::Anchor));
+
+        // Without it, a row promising a sonic pool would be a lie.
+        let mut app = connected_app();
+        app.capabilities = Default::default();
+        app.handle_action(Action::OpenDjPanel);
+        let rows = &app.dj_panel.as_ref().unwrap().rows;
+        assert!(!rows.contains(&DjRow::Tightness));
+        assert!(!rows.contains(&DjRow::Anchor));
+        assert!(rows.contains(&DjRow::Tempo), "the rest is still there");
+    }
+
+    #[test]
+    fn the_panel_binds_its_own_keys_rather_than_the_players() {
+        // Found live: `p` reached the panel as "previous track", so the
+        // sample key silently did nothing.
+        let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        assert_eq!(map_key(key('p'), InputMode::Normal), Some(Action::PrevTrack));
+        assert_eq!(map_key(key('p'), InputMode::Panel), Some(Action::Input('p')));
+
+        // Left/right come from three shapes, all meaning "adjust".
+        for c in ['h', '['] {
+            assert_eq!(map_key(key(c), InputMode::Panel), Some(Action::Back));
+        }
+        for c in ['l', ']'] {
+            assert_eq!(map_key(key(c), InputMode::Panel), Some(Action::SeekForward));
+        }
+        // And the panel's own key closes it, as does Esc.
+        assert_eq!(map_key(key('D'), InputMode::Panel), Some(Action::Cancel));
+        assert_eq!(
+            map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), InputMode::Panel),
+            Some(Action::Cancel)
+        );
+    }
+
+    #[test]
+    fn the_panel_owns_the_keyboard_while_it_is_open() {
+        let mut app = connected_app();
+        assert_eq!(app.input_mode(), InputMode::Normal);
+        app.handle_action(Action::OpenDjPanel);
+        assert_eq!(app.input_mode(), InputMode::Panel);
+        app.handle_action(Action::Cancel);
+        assert_eq!(app.input_mode(), InputMode::Normal);
+    }
+
+    #[test]
+    fn the_panel_takes_the_keys_the_player_would_otherwise_use() {
+        // Space is the toggle inside the genre chooser and pause outside it;
+        // arrows move settings, not the browser. Leaking either would make
+        // editing settings play music.
+        let mut app = connected_app();
+        app.queue.replace(vec![track("a"), track("b")]);
+        app.handle_action(Action::OpenDjPanel);
+
+        let effects = app.handle_action(Action::PlayPause);
+        assert!(effects.is_empty(), "no playback from inside the panel");
+        app.handle_action(Action::Down);
+        assert_eq!(app.dj_panel.as_ref().unwrap().row, 1, "moves the panel, not the queue");
+        assert_eq!(app.queue.current, None);
+
+        app.handle_action(Action::Cancel);
+        assert!(app.dj_panel.is_none(), "Esc closes it");
+    }
+
+    #[test]
+    fn adjusting_a_row_changes_the_setting_it_names() {
+        let mut app = connected_app();
+        app.handle_action(Action::OpenDjPanel);
+
+        // Row 0 is the mode; stepping right cycles it.
+        app.handle_action(Action::SeekForward);
+        assert_eq!(app.autodj, AutoDjMode::Similar);
+
+        // Tightness moves in useful steps and stops at the ends rather than
+        // wrapping — a slider that wraps loses your place.
+        app.dj_panel.as_mut().unwrap().row = 1;
+        assert_eq!(app.dj_panel.as_ref().unwrap().selected(), DjRow::Tightness);
+        app.handle_action(Action::SeekForward);
+        assert_eq!(app.dj.sonic_tightness, 5);
+        for _ in 0..40 {
+            app.handle_action(Action::SeekForward);
+        }
+        assert_eq!(app.dj.sonic_tightness, 100, "clamped at the top");
+        for _ in 0..40 {
+            app.handle_action(Action::Back);
+        }
+        assert_eq!(app.dj.sonic_tightness, 0, "and at the bottom, which is off");
+    }
+
+    #[test]
+    fn panel_settings_are_remembered() {
+        let mut app = connected_app();
+        app.handle_action(Action::OpenDjPanel);
+        app.dj_panel.as_mut().unwrap().row = 1;
+        app.handle_action(Action::SeekForward); // tightness 5
+
+        let saved = app.prefs();
+        assert_eq!(saved.dj.sonic_tightness, 5);
+        let restored = App::new(None, None, None).with_prefs(&saved);
+        assert_eq!(restored.dj, app.dj);
+    }
+
+    #[test]
+    fn g_and_shift_g_jump_to_the_ends_of_the_panel() {
+        // Found live: both keys were bound in panel mode but the settings
+        // list ignored them, so `G` silently did nothing.
+        let mut app = connected_app();
+        app.handle_action(Action::OpenDjPanel);
+        app.handle_action(Action::Last);
+        let panel = app.dj_panel.as_ref().unwrap();
+        assert_eq!(panel.selected(), DjRow::Genres, "the last row");
+        app.handle_action(Action::First);
+        assert_eq!(app.dj_panel.as_ref().unwrap().selected(), DjRow::Mode);
+    }
+
+    #[test]
+    fn choosing_a_genre_switches_the_filter_on() {
+        // Picking genres while the mode is off would do nothing at all, which
+        // reads as the chooser being broken.
+        let mut app = connected_app();
+        app.handle_action(Action::OpenDjPanel);
+        app.dj_panel.as_mut().unwrap().row = app.dj_panel.as_ref().unwrap().rows.len() - 1;
+        assert_eq!(app.dj_panel.as_ref().unwrap().selected(), DjRow::Genres);
+
+        let effects = app.handle_action(Action::Activate);
+        assert_eq!(effects, vec![Effect::Api(ApiCmd::Genres)]);
+        assert!(app.dj_panel.as_ref().unwrap().genres.as_ref().unwrap().loading);
+
+        app.apply_event(Event::Genres(vec![
+            Genre { name: "Ambient".into(), track_count: Some(4) },
+            Genre { name: "Techno".into(), track_count: Some(9) },
+        ]));
+        let picker = app.dj_panel.as_ref().unwrap().genres.as_ref().unwrap();
+        assert_eq!(picker.all, vec!["Ambient", "Techno"]);
+        assert!(!picker.loading);
+
+        app.handle_action(Action::PlayPause); // toggle "Ambient"
+        assert_eq!(app.dj.genres, vec!["Ambient"]);
+        assert_eq!(app.dj.genre_mode, dj::GenreMode::Whitelist, "switched on for you");
+
+        // And toggling it back off leaves nothing selected.
+        app.handle_action(Action::PlayPause);
+        assert!(app.dj.genres.is_empty());
+
+        app.handle_action(Action::Submit);
+        assert!(app.dj_panel.as_ref().unwrap().genres.is_none(), "Enter closes the chooser");
+        assert!(app.dj_panel.is_some(), "back to the panel, not out of it");
+    }
+
+    #[test]
+    fn sampling_asks_for_picks_without_queueing_any() {
+        let mut app = connected_app();
+        app.handle_action(Action::OpenDjPanel);
+
+        let effects = app.handle_action(Action::Input('p'));
+        match effects.as_slice() {
+            [Effect::Api(ApiCmd::AutoDjSample { count, .. })] => assert_eq!(*count, 3),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(app.dj_panel.as_ref().unwrap().sample_pending);
+        // A second press while one is out must not pile on.
+        assert!(app.handle_action(Action::Input('p')).is_empty());
+
+        app.apply_event(Event::AutoDjSample {
+            tracks: vec![track("one"), track("two")],
+            pool: Some(crate::api::types::SonicReport {
+                similarity: Some(0.71),
+                pool_size: 1247,
+            }),
+            note: None,
+        });
+        let panel = app.dj_panel.as_ref().unwrap();
+        assert_eq!(panel.sample.len(), 2);
+        assert_eq!(panel.pool.as_ref().unwrap().pool_size, 1247);
+        assert!(!panel.sample_pending);
+        assert!(app.queue.items.is_empty(), "a sample is not a queue");
+    }
+
+    #[test]
+    fn a_request_carries_the_session_the_panel_is_tuning() {
+        let mut app = connected_app();
+        app.autodj = AutoDjMode::BpmKey;
+        app.dj.sonic_tightness = 50;
+        app.dj.artist_cooldown = 2;
+
+        // Two tracks played, newest first, with the artist of each.
+        app.queue.replace(vec![
+            track_by("a", "Alpha"),
+            track_by("b", "Beta"),
+            track_by("c", "Gamma"),
+        ]);
+        app.play_index(0);
+        app.play_index(1);
+        let effects = app.play_index(2);
+
+        match autodj_effect(&effects).expect("the queue ran out") {
+            ApiCmd::AutoDj(request) => {
+                assert_eq!(request.anchors, vec!["c", "b", "a"], "newest first");
+                assert_eq!(request.recent_artists, vec!["Gamma", "Beta", "Alpha"]);
+                assert!(request.sonic_available, "this server has the index");
+                assert_eq!(request.settings.sonic_tightness, 50);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_cooldown_list_does_not_repeat_an_artist() {
+        // Three tracks by the same artist should not spend the whole cooldown.
+        let mut app = connected_app();
+        app.queue.replace(vec![
+            track_by("a", "Alpha"),
+            track_by("b", "Alpha"),
+            track_by("c", "Beta"),
+        ]);
+        app.play_index(0);
+        app.play_index(1);
+        app.play_index(2);
+        assert_eq!(app.recent_artists(), vec!["Beta", "Alpha"]);
     }
 
     #[test]
@@ -2693,6 +3285,7 @@ mod tests {
             repeat: "off".into(),
             shuffle: false,
             autodj: "similar".into(),
+            dj: Default::default(),
         };
         let mut app = App::new(None, None, None).with_prefs(&saved);
         assert_eq!(app.autodj, AutoDjMode::Similar);
@@ -2727,14 +3320,14 @@ mod tests {
     fn switching_autodj_on_with_an_empty_queue_starts_it() {
         let mut app = connected_app();
         let effects = app.handle_action(Action::ToggleAutoDj);
-        assert_eq!(
-            autodj_effect(&effects),
-            Some(&ApiCmd::AutoDj {
-                mode: AutoDjMode::Similar,
-                seed: None,
-                ignore_list: Vec::new(),
-            })
-        );
+        match autodj_effect(&effects).expect("a request goes out") {
+            ApiCmd::AutoDj(request) => {
+                assert_eq!(request.mode, AutoDjMode::Similar);
+                assert!(request.seed.is_none());
+                assert!(request.ignore_list.is_empty());
+            }
+            other => panic!("unexpected command {other:?}"),
+        }
     }
 
     #[test]
@@ -2757,9 +3350,13 @@ mod tests {
         let effects = app.play_index(1);
         let cmd = autodj_effect(&effects).expect("the last track should pull in another");
         match cmd {
-            ApiCmd::AutoDj { mode, seed, .. } => {
-                assert_eq!(*mode, AutoDjMode::BpmKey);
-                assert_eq!(seed.as_ref().unwrap().filepath, "b", "seeded on what's playing");
+            ApiCmd::AutoDj(request) => {
+                assert_eq!(request.mode, AutoDjMode::BpmKey);
+                assert_eq!(
+                    request.seed.as_ref().unwrap().filepath,
+                    "b",
+                    "seeded on what's playing"
+                );
             }
             other => panic!("unexpected command {other:?}"),
         }

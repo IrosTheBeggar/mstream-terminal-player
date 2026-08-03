@@ -143,6 +143,300 @@ pub fn compatible_keys(raw: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Only the seed's own key — for people who want a set that never leaves it.
+pub fn exact_keys(raw: Option<&str>) -> Vec<String> {
+    raw.and_then(to_camelot).map(|c| vec![c.code()]).unwrap_or_default()
+}
+
+// ── Sonic pool ──────────────────────────────────────────────────────────────
+
+/// Ends of the useful cosine band for the sonic pool.
+///
+/// The embeddings do not spread over 0..1 in any useful way: the server's own
+/// calibration puts same-artist pairs around .6–.9 and cross-artist ones
+/// around .3–.7. A slider over the raw value would spend most of its travel
+/// selecting either everything or nothing, so the band is what gets exposed.
+pub const SONIC_LOOSEST: f64 = 0.30;
+pub const SONIC_TIGHTEST: f64 = 0.85;
+
+/// Map the panel's 1–100 tightness onto `minSimilarity`. Zero means the sonic
+/// pool is switched off, and returns `None` — the caller must then send
+/// neither `similarTo` nor `minSimilarity`, which the server requires as a
+/// pair.
+pub fn sonic_threshold(tightness: u32) -> Option<f64> {
+    if tightness == 0 {
+        return None;
+    }
+    let t = f64::from(tightness.clamp(1, 100));
+    let raw = SONIC_LOOSEST + (t - 1.0) / 99.0 * (SONIC_TIGHTEST - SONIC_LOOSEST);
+    Some((raw * 100.0).round() / 100.0)
+}
+
+// ── Settings ────────────────────────────────────────────────────────────────
+
+/// How hard to hold the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeyMatching {
+    Off,
+    /// The Camelot neighbourhood — what harmonic mixing normally means.
+    #[default]
+    Compatible,
+    /// The seed's own key and nothing else.
+    Strict,
+}
+
+/// What the sonic pool measures distance from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SonicAnchor {
+    /// Just what's playing — the set follows each track in turn.
+    Current,
+    /// Recent picks averaged into a centroid, so the set drifts as a whole
+    /// instead of walking away one song at a time.
+    #[default]
+    Session,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GenreMode {
+    #[default]
+    Off,
+    /// Only these genres. Note this also excludes untagged tracks — the
+    /// server treats "only these" as the stricter promise.
+    Whitelist,
+    /// Anything but these. Untagged tracks pass.
+    Blacklist,
+}
+
+// Labels are the on-disk spelling as well as the on-screen one. Anything
+// unrecognised falls back to the default rather than refusing to load a
+// config someone hand-edited.
+impl KeyMatching {
+    pub fn label(self) -> &'static str {
+        match self {
+            KeyMatching::Off => "off",
+            KeyMatching::Compatible => "compatible",
+            KeyMatching::Strict => "strict",
+        }
+    }
+    pub fn from_label(raw: &str) -> Self {
+        match raw {
+            "off" => KeyMatching::Off,
+            "strict" => KeyMatching::Strict,
+            _ => KeyMatching::Compatible,
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            KeyMatching::Off => KeyMatching::Compatible,
+            KeyMatching::Compatible => KeyMatching::Strict,
+            KeyMatching::Strict => KeyMatching::Off,
+        }
+    }
+}
+
+impl SonicAnchor {
+    pub fn label(self) -> &'static str {
+        match self {
+            SonicAnchor::Current => "current",
+            SonicAnchor::Session => "session",
+        }
+    }
+    pub fn from_label(raw: &str) -> Self {
+        match raw {
+            "current" => SonicAnchor::Current,
+            _ => SonicAnchor::Session,
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            SonicAnchor::Current => SonicAnchor::Session,
+            SonicAnchor::Session => SonicAnchor::Current,
+        }
+    }
+}
+
+impl GenreMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            GenreMode::Off => "off",
+            GenreMode::Whitelist => "whitelist",
+            GenreMode::Blacklist => "blacklist",
+        }
+    }
+    pub fn from_label(raw: &str) -> Self {
+        match raw {
+            "whitelist" => GenreMode::Whitelist,
+            "blacklist" => GenreMode::Blacklist,
+            _ => GenreMode::Off,
+        }
+    }
+    pub fn next(self) -> Self {
+        match self {
+            GenreMode::Off => GenreMode::Whitelist,
+            GenreMode::Whitelist => GenreMode::Blacklist,
+            GenreMode::Blacklist => GenreMode::Off,
+        }
+    }
+}
+
+/// Everything the Auto-DJ panel controls.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Settings {
+    /// Percent either side of the seed tempo. Zero drops the tempo filter.
+    pub tempo_tolerance: u32,
+    pub key_matching: KeyMatching,
+    /// 1–10, or zero for no floor.
+    pub min_rating: u32,
+    /// How many recently-played artists to keep out.
+    pub artist_cooldown: u32,
+    /// 1–100, or zero for no sonic pool.
+    pub sonic_tightness: u32,
+    pub sonic_anchor: SonicAnchor,
+    pub genre_mode: GenreMode,
+    pub genres: Vec<String>,
+}
+
+/// Bounds for the panel's adjustable numbers. A tempo tolerance past ~30%
+/// stops meaning anything, and the server caps ratings at 10.
+pub const TEMPO_TOLERANCE_MAX: u32 = 30;
+pub const RATING_MAX: u32 = 10;
+pub const ARTIST_COOLDOWN_MAX: u32 = 20;
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings::from_prefs(&crate::config::AutoDjPrefs::default())
+    }
+}
+
+impl Settings {
+    pub fn from_prefs(prefs: &crate::config::AutoDjPrefs) -> Self {
+        Settings {
+            tempo_tolerance: prefs.tempo_tolerance.min(TEMPO_TOLERANCE_MAX),
+            key_matching: KeyMatching::from_label(&prefs.key_matching),
+            min_rating: prefs.min_rating.min(RATING_MAX),
+            artist_cooldown: prefs.artist_cooldown.min(ARTIST_COOLDOWN_MAX),
+            sonic_tightness: prefs.sonic_tightness.min(100),
+            sonic_anchor: SonicAnchor::from_label(&prefs.sonic_anchor),
+            genre_mode: GenreMode::from_label(&prefs.genre_mode),
+            genres: prefs.genres.clone(),
+        }
+    }
+
+    pub fn to_prefs(&self) -> crate::config::AutoDjPrefs {
+        crate::config::AutoDjPrefs {
+            tempo_tolerance: self.tempo_tolerance,
+            key_matching: self.key_matching.label().to_string(),
+            min_rating: self.min_rating,
+            artist_cooldown: self.artist_cooldown,
+            sonic_tightness: self.sonic_tightness,
+            sonic_anchor: self.sonic_anchor.label().to_string(),
+            genre_mode: self.genre_mode.label().to_string(),
+            genres: self.genres.clone(),
+        }
+    }
+
+    /// Tempo tolerance as the fraction `bpm_windows` takes.
+    pub fn tolerance(&self) -> f64 {
+        f64::from(self.tempo_tolerance) / 100.0
+    }
+}
+
+// ── Request building ────────────────────────────────────────────────────────
+
+use crate::api::types::{BpmWindow, RandomSongRequest, Track};
+
+/// Turn the panel's settings and the current session into a random-songs
+/// request.
+///
+/// Pure on purpose: what gets asked of the server is the part worth pinning
+/// down in tests, and it depends on enough moving pieces — a seed that may
+/// lack tags, capabilities that may withhold the sonic pool, filters that
+/// must vanish rather than go out empty — that reading the JSON is the only
+/// honest way to know.
+///
+/// `anchors` are recent track paths, newest first, and `recent_artists` the
+/// names to keep out; both are trimmed here to whatever the settings allow.
+pub fn build_random_request(
+    settings: &Settings,
+    seed: Option<&Track>,
+    ignore_list: Vec<u32>,
+    anchors: &[String],
+    recent_artists: &[String],
+    sonic_available: bool,
+) -> (RandomSongRequest, Option<String>) {
+    let mut request = RandomSongRequest { ignore_list, ..Default::default() };
+    let mut note = None;
+
+    if let Some(seed) = seed {
+        if settings.tempo_tolerance > 0 {
+            if let Some(bpm) = seed.metadata.bpm {
+                let to_window = |r: BpmRange| BpmWindow { min: r.min, max: r.max };
+                let tolerance = settings.tolerance();
+                request.bpm_ranges =
+                    bpm_windows(f64::from(bpm), tolerance).into_iter().map(to_window).collect();
+                // The server relaxes to the wide set before dropping tempo
+                // altogether; twice the tolerance is that second chance.
+                request.bpm_ranges_wide = bpm_windows(f64::from(bpm), tolerance * 2.0)
+                    .into_iter()
+                    .map(to_window)
+                    .collect();
+            }
+        }
+        request.musical_keys = match settings.key_matching {
+            KeyMatching::Off => Vec::new(),
+            KeyMatching::Compatible => compatible_keys(seed.metadata.musical_key.as_deref()),
+            KeyMatching::Strict => exact_keys(seed.metadata.musical_key.as_deref()),
+        };
+
+        // Be honest when there was nothing to match on: the pick is really
+        // just random, and the user should know that rather than assume the
+        // tempo matching is broken.
+        let wanted_continuity =
+            settings.tempo_tolerance > 0 || settings.key_matching != KeyMatching::Off;
+        if wanted_continuity && request.bpm_ranges.is_empty() && request.musical_keys.is_empty() {
+            note = Some("no tempo or key tags on this track".to_string());
+        }
+    }
+
+    if settings.min_rating > 0 {
+        request.min_rating = Some(settings.min_rating.min(RATING_MAX));
+    }
+
+    if settings.artist_cooldown > 0 {
+        request.ignore_artists = recent_artists
+            .iter()
+            .take(settings.artist_cooldown as usize)
+            .cloned()
+            .collect();
+    }
+
+    if settings.genre_mode != GenreMode::Off && !settings.genres.is_empty() {
+        request.genres = settings.genres.clone();
+        request.genre_mode = Some(settings.genre_mode.label().to_string());
+    }
+
+    // The pool needs the index; without it the request would 403 as a whole,
+    // taking the ordinary tempo/key pick down with it.
+    let threshold = sonic_available.then(|| sonic_threshold(settings.sonic_tightness)).flatten();
+    let seeds: Vec<String> = match settings.sonic_anchor {
+        SonicAnchor::Current => anchors.iter().take(1).cloned().collect(),
+        SonicAnchor::Session => anchors.to_vec(),
+    };
+    let request = request.with_sonic_pool(&seeds, threshold);
+
+    // Finish the "nothing to match on" note now that it is settled whether a
+    // pool is carrying the pick. "Picking at random" would be a lie when the
+    // choice is still confined to tracks that sound like the seed.
+    let note = note.map(|reason| {
+        if request.min_similarity.is_some() {
+            format!("{reason} — picking from the sonic pool")
+        } else {
+            format!("{reason} — picking at random")
+        }
+    });
+    (request, note)
+}
+
 /// A tempo window, inclusive.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BpmRange {
@@ -307,6 +601,282 @@ mod tests {
         let tight = bpm_windows(128.0, TIGHT_TOLERANCE)[0];
         let wide = bpm_windows(128.0, WIDE_TOLERANCE)[0];
         assert!(wide.min < tight.min && wide.max > tight.max);
+    }
+
+    /// A seed with the tags a well-kept library has.
+    fn seed(bpm: Option<u32>, key: Option<&str>) -> Track {
+        Track {
+            filepath: "lib/seed.mp3".into(),
+            metadata: crate::api::types::TrackMetadata {
+                artist: Some("Seed Artist".into()),
+                bpm,
+                musical_key: key.map(str::to_string),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// The request as JSON — what the server actually receives, which is the
+    /// only place absent-vs-empty is visible.
+    fn body(request: &RandomSongRequest) -> serde_json::Value {
+        serde_json::to_value(request).unwrap()
+    }
+
+    #[test]
+    fn a_default_session_asks_for_tempo_and_key_around_the_seed() {
+        let settings = Settings::default();
+        let (request, note) = build_random_request(
+            &settings,
+            Some(&seed(Some(128), Some("A minor"))),
+            vec![3, 4],
+            &[],
+            &[],
+            false,
+        );
+        assert!(note.is_none(), "nothing to explain when the tags are there");
+
+        let body = body(&request);
+        assert_eq!(body["ignoreList"], serde_json::json!([3, 4]));
+        assert_eq!(body["musicalKeys"], serde_json::json!(["8A", "7A", "9A", "8B"]));
+        // Tight windows, plus the wider set the server relaxes to first.
+        assert_eq!(body["bpmRanges"][0]["min"], 120.3);
+        assert_eq!(body["bpmRangesWide"][0]["min"], 112.6);
+        // Nothing else was asked for, so nothing else is sent.
+        for absent in ["minRating", "genres", "genreMode", "similarTo", "minSimilarity"] {
+            assert!(body.get(absent).is_none(), "{absent} should be absent: {body}");
+        }
+    }
+
+    #[test]
+    fn switching_a_filter_off_removes_it_rather_than_sending_an_empty_one() {
+        // The server branches on field presence — an empty list is not the
+        // same as no list, and would put the request in continuity mode.
+        let settings = Settings {
+            tempo_tolerance: 0,
+            key_matching: KeyMatching::Off,
+            min_rating: 0,
+            artist_cooldown: 0,
+            genre_mode: GenreMode::Off,
+            genres: vec!["Ambient".into()],
+            ..Settings::default()
+        };
+        let (request, note) = build_random_request(
+            &settings,
+            Some(&seed(Some(128), Some("A minor"))),
+            Vec::new(),
+            &["lib/a.mp3".into()],
+            &["Someone".into()],
+            true,
+        );
+        assert_eq!(body(&request), serde_json::json!({}), "an unfiltered pick asks for nothing");
+        assert!(note.is_none(), "not matching on tags was the instruction, not a surprise");
+    }
+
+    #[test]
+    fn an_untagged_seed_says_so_when_matching_was_wanted() {
+        let (request, note) =
+            build_random_request(&Settings::default(), Some(&seed(None, None)), Vec::new(), &[], &[], false);
+        assert!(request.bpm_ranges.is_empty() && request.musical_keys.is_empty());
+        let note = note.unwrap();
+        assert!(note.contains("no tempo or key tags"));
+        assert!(note.ends_with("picking at random"), "got: {note}");
+    }
+
+    #[test]
+    fn an_untagged_seed_inside_a_sonic_pool_is_not_called_random() {
+        // Found live: the pick was confined to 37 tracks that sound like the
+        // seed, and the player still called it random.
+        let settings = Settings { sonic_tightness: 40, ..Settings::default() };
+        let (request, note) = build_random_request(
+            &settings,
+            Some(&seed(None, None)),
+            Vec::new(),
+            &["lib/seed.mp3".into()],
+            &[],
+            true,
+        );
+        assert!(request.min_similarity.is_some());
+        assert!(note.unwrap().ends_with("picking from the sonic pool"));
+    }
+
+    #[test]
+    fn the_sonic_pool_follows_the_anchor_setting() {
+        let anchors: Vec<String> =
+            (0..12).map(|i| format!("lib/{i}.mp3")).collect();
+        let tight = Settings { sonic_tightness: 50, ..Settings::default() };
+
+        // Session: the whole rolling window, trimmed to what the server averages.
+        let (request, _) = build_random_request(
+            &Settings { sonic_anchor: SonicAnchor::Session, ..tight.clone() },
+            None,
+            Vec::new(),
+            &anchors,
+            &[],
+            true,
+        );
+        assert_eq!(request.similar_to.len(), 8);
+        assert!(request.min_similarity.is_some());
+
+        // Current: only what is playing right now.
+        let (request, _) = build_random_request(
+            &Settings { sonic_anchor: SonicAnchor::Current, ..tight },
+            None,
+            Vec::new(),
+            &anchors,
+            &[],
+            true,
+        );
+        assert_eq!(request.similar_to, vec!["lib/0.mp3"], "newest first");
+    }
+
+    #[test]
+    fn the_sonic_pool_is_withheld_when_the_server_has_no_index() {
+        // Sending it anyway would 403 the whole call and take the ordinary
+        // tempo/key pick down with it.
+        let settings = Settings { sonic_tightness: 80, ..Settings::default() };
+        let (request, _) = build_random_request(
+            &settings,
+            Some(&seed(Some(128), Some("8A"))),
+            Vec::new(),
+            &["lib/a.mp3".into()],
+            &[],
+            false,
+        );
+        assert!(request.similar_to.is_empty());
+        assert!(request.min_similarity.is_none());
+        assert!(!request.musical_keys.is_empty(), "the rest of the pick is unaffected");
+    }
+
+    #[test]
+    fn a_pool_with_nothing_to_anchor_on_is_not_half_sent() {
+        // First pick of a session: tightness is set but nothing has played.
+        let settings = Settings { sonic_tightness: 60, ..Settings::default() };
+        let (request, _) =
+            build_random_request(&settings, None, Vec::new(), &[], &[], true);
+        let body = body(&request);
+        assert!(body.get("similarTo").is_none(), "got {body}");
+        assert!(body.get("minSimilarity").is_none(), "half a pool is a 400");
+    }
+
+    #[test]
+    fn the_cooldown_sends_only_as_many_artists_as_asked_for() {
+        let recent: Vec<String> = (0..10).map(|i| format!("Artist {i}")).collect();
+        let settings = Settings { artist_cooldown: 3, ..Settings::default() };
+        let (request, _) =
+            build_random_request(&settings, None, Vec::new(), &[], &recent, false);
+        assert_eq!(request.ignore_artists, vec!["Artist 0", "Artist 1", "Artist 2"]);
+
+        let settings = Settings { artist_cooldown: 0, ..Settings::default() };
+        let (request, _) =
+            build_random_request(&settings, None, Vec::new(), &[], &recent, false);
+        assert!(request.ignore_artists.is_empty(), "off means the field is gone");
+    }
+
+    #[test]
+    fn genres_and_rating_ride_along_when_set() {
+        let settings = Settings {
+            genre_mode: GenreMode::Blacklist,
+            genres: vec!["Spoken Word".into()],
+            min_rating: 4,
+            ..Settings::default()
+        };
+        let (request, _) = build_random_request(&settings, None, Vec::new(), &[], &[], false);
+        let body = body(&request);
+        assert_eq!(body["genres"], serde_json::json!(["Spoken Word"]));
+        assert_eq!(body["genreMode"], "blacklist");
+        assert_eq!(body["minRating"], 4);
+    }
+
+    #[test]
+    fn a_genre_mode_with_no_genres_chosen_filters_nothing() {
+        let settings =
+            Settings { genre_mode: GenreMode::Whitelist, genres: Vec::new(), ..Settings::default() };
+        let (request, _) = build_random_request(&settings, None, Vec::new(), &[], &[], false);
+        let body = body(&request);
+        assert!(body.get("genres").is_none());
+        assert!(body.get("genreMode").is_none(), "a mode alone would filter everything out");
+    }
+
+    #[test]
+    fn strict_key_matching_narrows_what_gets_asked_for() {
+        let compatible = build_random_request(
+            &Settings { key_matching: KeyMatching::Compatible, ..Settings::default() },
+            Some(&seed(None, Some("A minor"))),
+            Vec::new(),
+            &[],
+            &[],
+            false,
+        )
+        .0;
+        let strict = build_random_request(
+            &Settings { key_matching: KeyMatching::Strict, ..Settings::default() },
+            Some(&seed(None, Some("A minor"))),
+            Vec::new(),
+            &[],
+            &[],
+            false,
+        )
+        .0;
+        assert_eq!(compatible.musical_keys.len(), 4);
+        assert_eq!(strict.musical_keys, vec!["8A"]);
+    }
+
+    #[test]
+    fn settings_survive_a_round_trip_through_the_config_file() {
+        let settings = Settings {
+            tempo_tolerance: 9,
+            key_matching: KeyMatching::Strict,
+            min_rating: 7,
+            artist_cooldown: 5,
+            sonic_tightness: 45,
+            sonic_anchor: SonicAnchor::Current,
+            genre_mode: GenreMode::Blacklist,
+            genres: vec!["Ambient".into()],
+        };
+        assert_eq!(Settings::from_prefs(&settings.to_prefs()), settings);
+
+        // A value from a newer player, or a typo in a hand-edited file, falls
+        // back rather than refusing to load.
+        let prefs = crate::config::AutoDjPrefs {
+            key_matching: "quantum".into(),
+            genre_mode: "maybe".into(),
+            tempo_tolerance: 9000,
+            min_rating: 99,
+            ..Default::default()
+        };
+        let settings = Settings::from_prefs(&prefs);
+        assert_eq!(settings.key_matching, KeyMatching::Compatible);
+        assert_eq!(settings.genre_mode, GenreMode::Off);
+        assert_eq!(settings.tempo_tolerance, TEMPO_TOLERANCE_MAX, "clamped, not wild");
+        assert_eq!(settings.min_rating, RATING_MAX);
+    }
+
+    #[test]
+    fn strict_key_matching_keeps_only_the_seeds_own_key() {
+        assert_eq!(exact_keys(Some("A minor")), vec!["8A"]);
+        assert_eq!(compatible_keys(Some("A minor")).len(), 4, "the wheel neighbourhood");
+        assert!(exact_keys(Some("gibberish")).is_empty());
+        assert!(exact_keys(None).is_empty());
+    }
+
+    #[test]
+    fn the_tightness_slider_spans_the_band_the_embeddings_actually_use() {
+        // Zero is off, and off must produce no threshold at all: the server
+        // rejects minSimilarity without similarTo and vice versa.
+        assert_eq!(sonic_threshold(0), None);
+
+        assert_eq!(sonic_threshold(1), Some(SONIC_LOOSEST));
+        assert_eq!(sonic_threshold(100), Some(SONIC_TIGHTEST));
+        // Monotonic, and inside the band the whole way.
+        let mut previous = 0.0;
+        for t in 1..=100 {
+            let v = sonic_threshold(t).unwrap();
+            assert!(v >= previous, "tightness {t} went backwards");
+            assert!((SONIC_LOOSEST..=SONIC_TIGHTEST).contains(&v), "tightness {t} → {v}");
+            previous = v;
+        }
+        // Out-of-range input is clamped rather than extrapolated past the band.
+        assert_eq!(sonic_threshold(500), Some(SONIC_TIGHTEST));
     }
 
     #[test]

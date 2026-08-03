@@ -64,6 +64,8 @@ pub struct PlayerPrefs {
     pub shuffle: bool,
     /// "off", "similar" or "tempo+key".
     pub autodj: String,
+    /// How Auto-DJ chooses, beyond the mode.
+    pub dj: AutoDjPrefs,
 }
 
 impl Default for PlayerPrefs {
@@ -73,6 +75,54 @@ impl Default for PlayerPrefs {
             repeat: "off".to_string(),
             shuffle: false,
             autodj: "off".to_string(),
+            dj: AutoDjPrefs::default(),
+        }
+    }
+}
+
+/// `[player.dj]` — the Auto-DJ panel's settings.
+///
+/// Kept as plain scalars and strings rather than enums so an unrecognised
+/// value from a newer player degrades to the default instead of failing the
+/// whole config load; the app parses each one leniently.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoDjPrefs {
+    /// Percent either side of the seed tempo for the tight window. The wide
+    /// window the server falls back to is twice this.
+    pub tempo_tolerance: u32,
+    /// "off", "compatible" (Camelot neighbours) or "strict" (the same key).
+    pub key_matching: String,
+    /// Minimum rating, 1–10. Zero means no floor, which is also what the
+    /// server reads a zero as.
+    pub min_rating: u32,
+    /// How many recently-played artists to keep out of the next pick.
+    pub artist_cooldown: u32,
+    /// Perceptual 1–100 slider onto a cosine threshold; 0 switches the sonic
+    /// pool off entirely. See `dj::sonic_threshold`.
+    pub sonic_tightness: u32,
+    /// "current" (just what's playing) or "session" (recent picks averaged
+    /// into a centroid, so a set drifts as a whole rather than song by song).
+    pub sonic_anchor: String,
+    /// "off", "whitelist" (only these) or "blacklist" (anything but these).
+    pub genre_mode: String,
+    pub genres: Vec<String>,
+}
+
+impl Default for AutoDjPrefs {
+    fn default() -> Self {
+        AutoDjPrefs {
+            // Matches dj::TIGHT_TOLERANCE, the value Phase 4 shipped with.
+            tempo_tolerance: 6,
+            key_matching: "compatible".to_string(),
+            min_rating: 0,
+            // A little variety by default; a session that repeats an artist
+            // immediately reads as broken even when the pick was legitimate.
+            artist_cooldown: 3,
+            sonic_tightness: 0,
+            sonic_anchor: "session".to_string(),
+            genre_mode: "off".to_string(),
+            genres: Vec::new(),
         }
     }
 }

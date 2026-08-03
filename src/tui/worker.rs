@@ -14,8 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::types::{
-    Album, BpmWindow, Capabilities, DirListing, Genre, Ping, PlaylistSummary, RandomSongRequest,
-    SearchResults, Track,
+    Album, Capabilities, DirListing, Genre, Ping, PlaylistSummary, SearchResults, Track,
 };
 use crate::api::{ApiError, Client};
 use crate::discovery::DiscoveredServer;
@@ -50,11 +49,33 @@ pub enum ApiCmd {
     Browse(String),
     Library(LibraryNode),
     /// Ask for the next Auto-DJ track, seeded on what's playing now.
-    AutoDj { mode: AutoDjMode, seed: Option<Box<Track>>, ignore_list: Vec<u32> },
+    AutoDj(Box<DjRequest>),
+    /// Ask for several picks at once without queueing any of them, so the
+    /// panel can show what the current settings actually produce.
+    AutoDjSample { request: Box<DjRequest>, count: usize },
+    /// Every genre in the library, for the Auto-DJ genre filter.
+    Genres,
     Playlists,
     LoadPlaylist(String),
     Search(String),
     Shutdown,
+}
+
+/// Everything needed to ask the server for an Auto-DJ pick: the mode, the
+/// panel's settings, and the shape of the session so far.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DjRequest {
+    pub mode: AutoDjMode,
+    pub settings: dj::Settings,
+    pub seed: Option<Box<Track>>,
+    pub ignore_list: Vec<u32>,
+    /// Recent track paths, newest first — what the sonic pool measures from.
+    pub anchors: Vec<String>,
+    /// Recently-played artists, newest first, for the cooldown.
+    pub recent_artists: Vec<String>,
+    /// Whether the server has the embedding index at all. Without it the
+    /// sonic pool must not be requested: the whole call would 403.
+    pub sonic_available: bool,
 }
 
 /// A position in the tag-based library hierarchy. Doubles as the request (what
@@ -177,6 +198,16 @@ pub enum Event {
     /// Auto-DJ candidates, best first. `note` explains any fallback that had
     /// to happen so the UI can say so out loud.
     AutoDjPick { candidates: Vec<Track>, ignore_list: Vec<u32>, note: Option<String> },
+    /// What the current Auto-DJ settings produce, for the panel. Carries the
+    /// sonic report when there was one — the pool size is the number that
+    /// makes the tightness slider tunable.
+    AutoDjSample {
+        tracks: Vec<Track>,
+        pool: Option<crate::api::types::SonicReport>,
+        note: Option<String>,
+    },
+    /// Every genre in the library.
+    Genres(Vec<Genre>),
     Playlists(Vec<PlaylistSummary>),
     PlaylistTracks { name: String, tracks: Vec<Track> },
     SearchResults(Box<SearchResults>),
@@ -357,15 +388,21 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 load_library(c, &node).map(|data| Event::Library { node: node.clone(), data })
             }),
 
-            ApiCmd::AutoDj { mode, seed, ignore_list } => with_client(client.as_ref(), |c| {
-                autodj_pick(c, caps, mode, seed.as_deref(), ignore_list).map(
-                    |(candidates, ignore_list, note)| Event::AutoDjPick {
-                        candidates,
-                        ignore_list,
-                        note,
-                    },
-                )
+            ApiCmd::AutoDj(request) => with_client(client.as_ref(), |c| {
+                autodj_pick(c, caps, &request).map(|picked| Event::AutoDjPick {
+                    candidates: picked.tracks,
+                    ignore_list: picked.ignore_list,
+                    note: picked.note,
+                })
             }),
+
+            ApiCmd::AutoDjSample { request, count } => with_client(client.as_ref(), |c| {
+                autodj_sample(c, caps, &request, count)
+            }),
+
+            ApiCmd::Genres => {
+                with_client(client.as_ref(), |c| c.genres().map(Event::Genres))
+            }
 
             ApiCmd::Playlists => {
                 with_client(client.as_ref(), |c| c.playlists().map(Event::Playlists))
@@ -499,36 +536,40 @@ fn load_library(client: &Client, node: &LibraryNode) -> Result<LibraryData, ApiE
     })
 }
 
-type AutoDjResult = Result<(Vec<Track>, Vec<u32>, Option<String>), ApiError>;
+/// One answer from the picker.
+struct Picked {
+    tracks: Vec<Track>,
+    ignore_list: Vec<u32>,
+    note: Option<String>,
+    pool: Option<crate::api::types::SonicReport>,
+}
+
+type AutoDjResult = Result<Picked, ApiError>;
 
 /// Choose what Auto-DJ should play next.
 ///
 /// Similarity is best-effort: the server may have discovery switched off, or
 /// simply not have embedded this track yet. Rather than stalling, both cases
 /// fall through to tempo/key matching and say why.
-fn autodj_pick(
-    client: &Client,
-    caps: Capabilities,
-    mode: AutoDjMode,
-    seed: Option<&Track>,
-    ignore_list: Vec<u32>,
-) -> AutoDjResult {
-    match mode {
-        AutoDjMode::Off => Ok((Vec::new(), ignore_list, None)),
+fn autodj_pick(client: &Client, caps: Capabilities, request: &DjRequest) -> AutoDjResult {
+    let ignore_list = request.ignore_list.clone();
+    match request.mode {
+        AutoDjMode::Off => {
+            Ok(Picked { tracks: Vec::new(), ignore_list, note: None, pool: None })
+        }
 
-        AutoDjMode::BpmKey => pick_by_tempo_and_key(client, seed, ignore_list, None),
+        AutoDjMode::BpmKey => pick_by_tempo_and_key(client, request, None),
 
         AutoDjMode::Similar => {
-            let Some(seed) = seed else {
-                return pick_by_tempo_and_key(client, None, ignore_list, None);
+            let Some(seed) = request.seed.as_deref() else {
+                return pick_by_tempo_and_key(client, request, None);
             };
             // No flag, no probe: ping already said there is no index here, so
             // asking would spend a round trip to be told 403.
             if !caps.discovery {
                 return pick_by_tempo_and_key(
                     client,
-                    Some(seed),
-                    ignore_list,
+                    request,
                     Some("this server has no similarity index — matching tempo and key"),
                 );
             }
@@ -537,27 +578,25 @@ fn autodj_pick(
                 // above is what normally keeps us out of here.
                 None => pick_by_tempo_and_key(
                     client,
-                    Some(seed),
-                    ignore_list,
+                    request,
                     Some("similarity was switched off on this server — matching tempo and key"),
                 ),
                 Some(found) if found.not_analyzed => pick_by_tempo_and_key(
                     client,
-                    Some(seed),
-                    ignore_list,
+                    request,
                     Some("this track hasn't been analysed yet — matching tempo and key"),
                 ),
                 Some(found) if found.results.is_empty() => pick_by_tempo_and_key(
                     client,
-                    Some(seed),
-                    ignore_list,
+                    request,
                     Some("nothing sounded similar — matching tempo and key"),
                 ),
-                Some(found) => Ok((
-                    found.results.into_iter().map(|r| r.into_track()).collect(),
+                Some(found) => Ok(Picked {
+                    tracks: found.results.into_iter().map(|r| r.into_track()).collect(),
                     ignore_list,
-                    None,
-                )),
+                    note: None,
+                    pool: None,
+                }),
             }
         }
     }
@@ -565,37 +604,100 @@ fn autodj_pick(
 
 fn pick_by_tempo_and_key(
     client: &Client,
-    seed: Option<&Track>,
-    ignore_list: Vec<u32>,
+    request: &DjRequest,
     note: Option<&str>,
 ) -> AutoDjResult {
-    let mut request = RandomSongRequest { ignore_list, ..Default::default() };
-    let mut note = note.map(str::to_string);
+    let (body, tag_note) = dj::build_random_request(
+        &request.settings,
+        request.seed.as_deref(),
+        request.ignore_list.clone(),
+        &request.anchors,
+        &request.recent_artists,
+        request.sonic_available,
+    );
+    let sonic_asked = body.min_similarity.is_some();
 
-    if let Some(seed) = seed {
-        if let Some(bpm) = seed.metadata.bpm {
-            let to_window = |r: dj::BpmRange| BpmWindow { min: r.min, max: r.max };
-            request.bpm_ranges = dj::bpm_windows(f64::from(bpm), dj::TIGHT_TOLERANCE)
-                .into_iter()
-                .map(to_window)
-                .collect();
-            request.bpm_ranges_wide = dj::bpm_windows(f64::from(bpm), dj::WIDE_TOLERANCE)
-                .into_iter()
-                .map(to_window)
-                .collect();
+    let response = match client.random_song(&body) {
+        Ok(response) => response,
+        // A hard sonic pool fails loudly by design — the server would rather
+        // say "nothing is that similar" than quietly play something that
+        // isn't. It answers 400 for both an empty pool and a seed it hasn't
+        // analysed. Retry once without the pool so the session keeps moving,
+        // and say what happened rather than leaving the queue to run dry.
+        Err(ApiError::Server { status: 400, message }) if sonic_asked => {
+            let (relaxed, _) = dj::build_random_request(
+                &request.settings,
+                request.seed.as_deref(),
+                request.ignore_list.clone(),
+                &request.anchors,
+                &request.recent_artists,
+                false,
+            );
+            let response = client.random_song(&relaxed)?;
+            return Ok(Picked {
+                tracks: response.songs,
+                ignore_list: response.ignore_list,
+                note: Some(format!("{} — loosen the sonic pool", trim_period(&message))),
+                pool: None,
+            });
         }
-        request.musical_keys = dj::compatible_keys(seed.metadata.musical_key.as_deref());
+        Err(e) => return Err(e),
+    };
 
-        // Be honest when there was nothing to match on: the pick is really
-        // just random, and the user should know that rather than assume the
-        // tempo matching is broken.
-        if request.bpm_ranges.is_empty() && request.musical_keys.is_empty() && note.is_none() {
-            note = Some("no tempo or key tags on this track — picking at random".to_string());
+    Ok(Picked {
+        tracks: response.songs,
+        ignore_list: response.ignore_list,
+        note: note.map(str::to_string).or(tag_note),
+        pool: response.sonic,
+    })
+}
+
+/// Take several picks in a row without committing to any of them, feeding
+/// each back into the next call's cooldown so the sample shows variety rather
+/// than the same track three times.
+fn autodj_sample(
+    client: &Client,
+    caps: Capabilities,
+    request: &DjRequest,
+    count: usize,
+) -> Result<Event, ApiError> {
+    let mut scratch = request.clone();
+    // Always sample through the random-songs path: it is the one the panel's
+    // settings actually drive, and the only one that reports a pool size.
+    scratch.mode = AutoDjMode::BpmKey;
+
+    let mut tracks: Vec<Track> = Vec::new();
+    let mut pool = None;
+    let mut note = None;
+    for _ in 0..count {
+        let picked = match autodj_pick(client, caps, &scratch) {
+            Ok(picked) => picked,
+            // A sample that finds nothing is an answer, not an error: it is
+            // exactly what a too-tight setting looks like.
+            Err(ApiError::Server { status: 400, message }) => {
+                note = Some(trim_period(&message));
+                break;
+            }
+            Err(e) => return Err(e),
+        };
+        pool = picked.pool.or(pool);
+        note = note.or(picked.note);
+        let Some(track) = picked.tracks.into_iter().next() else { break };
+        scratch.ignore_list = picked.ignore_list;
+        if let Some(artist) = track.metadata.artist.clone() {
+            scratch.recent_artists.insert(0, artist);
         }
+        if tracks.iter().any(|t: &Track| t.filepath == track.filepath) {
+            break; // the pool is exhausted; more calls would repeat
+        }
+        tracks.push(track);
     }
 
-    let response = client.random_song(&request)?;
-    Ok((response.songs, response.ignore_list, note))
+    Ok(Event::AutoDjSample { tracks, pool, note })
+}
+
+fn trim_period(message: &str) -> String {
+    message.trim().trim_end_matches('.').to_string()
 }
 
 /// Run a request against the connected client, mapping failures onto events.
