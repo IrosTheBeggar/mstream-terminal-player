@@ -7,7 +7,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, Padding, Paragraph, Tabs, Wrap,
+    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Tabs, Wrap,
 };
 
 use crate::cmd_library::fmt_duration;
@@ -242,21 +242,21 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // queue panes already close with a rule right above it, so a box of its own
     // would only spend two rows drawing a line next to a line. On an 80x24
     // terminal those two rows are an eighth of the list.
-    let [header, body, transport, footer] = Layout::vertical([
+    let [header, body, rule, transport, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
+        Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Length(1),
     ])
     .areas(area);
 
     render_header(frame, header, app);
-
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(body);
-    render_browser(frame, left, app);
-    render_queue(frame, right, app);
-
+    render_columns(frame, body, app);
+    frame.render_widget(
+        Paragraph::new(Span::styled("\u{2500}".repeat(rule.width as usize), Style::new().fg(dim()))),
+        rule,
+    );
     render_transport(frame, transport, app);
     render_footer(frame, footer, app);
 
@@ -338,13 +338,115 @@ fn server_label(app: &App, width: usize) -> String {
         .unwrap_or_default()
 }
 
-fn render_browser(frame: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.focus == Focus::Browser;
-    let title = browser_title(app);
+/// The browser, as columns: the listings you came through, then the one you
+/// are in, then the queue if it is open.
+///
+/// Borderless, with a rule between columns. Two boxes side by side spent four
+/// columns on vertical lines and read as two separate windows; a rule says the
+/// same thing in one column and reads as one surface.
+fn render_columns(frame: &mut Frame, area: Rect, app: &mut App) {
+    let widths = column_widths(area.width, app.trail.len(), app.queue_column);
+    let constraints: Vec<Constraint> =
+        widths.iter().map(|w| Constraint::Length(*w)).collect();
+    let areas = Layout::horizontal(constraints).split(area);
 
-    // Borders take two columns and the cursor gutter takes the width of its
-    // symbol on every row; what is left is what a line has to lay out in.
-    let content = area.width.saturating_sub(2 + CURSOR.len() as u16) as usize;
+    // The trail is drawn from the innermost outwards, so when there is only
+    // room for one it is the one you just came out of.
+    let shown_trail = widths.len() - 1 - usize::from(app.queue_column);
+    let skip = app.trail.len().saturating_sub(shown_trail);
+    for (slot, step) in app.trail.iter().skip(skip).enumerate() {
+        render_trail_column(frame, areas[slot], step);
+    }
+
+    let current = shown_trail;
+    if app.queue_column {
+        divider(frame, areas[current]);
+        render_queue_column(frame, areas[current + 1], app);
+    }
+    render_current_column(frame, areas[current], app);
+}
+
+/// How wide each column gets. The one you are in is the one you are reading,
+/// so it is fed first; the context columns take what is left, and drop off
+/// entirely rather than shrink to the point of saying nothing.
+fn column_widths(total: u16, trail: usize, queue: bool) -> Vec<u16> {
+    const CURRENT_MIN: u16 = 28;
+    const QUEUE_MIN: u16 = 22;
+    const TRAIL_WIDTH: u16 = 20;
+    const TRAIL_MAX: usize = 2;
+
+    let queue_width = if queue { QUEUE_MIN.min(total.saturating_sub(CURRENT_MIN)) } else { 0 };
+    let mut spare = total.saturating_sub(CURRENT_MIN + queue_width);
+    let mut shown = 0;
+    while shown < trail.min(TRAIL_MAX) && spare >= TRAIL_WIDTH {
+        spare -= TRAIL_WIDTH;
+        shown += 1;
+    }
+
+    let mut widths = vec![TRAIL_WIDTH; shown];
+    widths.push(total.saturating_sub(TRAIL_WIDTH * shown as u16 + queue_width));
+    if queue {
+        widths.push(queue_width);
+    }
+    widths
+}
+
+/// A column you came through. Never focused, so it is drawn quietly, with the
+/// row you took marked rather than a cursor.
+fn render_trail_column(frame: &mut Frame, area: Rect, step: &crate::tui::app::Trail) {
+    let [head, body] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let head = inset(head);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            fit(step.title.trim(), head.width as usize),
+            Style::new().fg(dim()),
+        )),
+        head,
+    );
+
+    let width = area.width.saturating_sub(2) as usize;
+    let items: Vec<ListItem> = step
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let line = entry_line(entry, width, None);
+            let style = if i == step.chosen {
+                Style::new().add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(dim())
+            };
+            ListItem::new(line.patch_style(style))
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(step.chosen));
+    frame.render_stateful_widget(List::new(items), inset(body), &mut state);
+    divider(frame, area);
+}
+
+/// The column the cursor is in.
+fn render_current_column(frame: &mut Frame, area: Rect, app: &mut App) {
+    let focused = app.focus == Focus::Browser;
+    let [head, body] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let title = browser_title(app);
+    let head = inset(head);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            fit(title.trim(), head.width as usize),
+            if focused {
+                Style::new().add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(dim())
+            },
+        )),
+        head,
+    );
+
+    let inner = inset(body);
+    let content = inner.width.saturating_sub(CURSOR.len() as u16) as usize;
     let playing = app.now_playing.as_ref().map(|track| track.filepath.as_str());
     let items: Vec<ListItem> = app
         .pane()
@@ -352,13 +454,8 @@ fn render_browser(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|entry| ListItem::new(entry_line(entry, content, playing)))
         .collect();
-
     let empty = items.is_empty();
-    // Reversed, not accent-coloured: accent now means "this is playing", and
-    // one row can be both. Background for where you are, foreground for what
-    // you are hearing.
     let list = List::new(items)
-        .block(bordered(title, focused))
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol(CURSOR);
 
@@ -369,23 +466,90 @@ fn render_browser(frame: &mut Frame, area: Rect, app: &mut App) {
         Tab::Search => &mut app.search.state,
         Tab::Discover => &mut app.discover.state,
     };
-    frame.render_stateful_widget(list, area, state);
+    frame.render_stateful_widget(list, inner, state);
 
     if empty {
         frame.render_widget(
             Paragraph::new(Span::styled(empty_hint(app), Style::new().fg(dim()))),
-            inner_first_line(area),
+            Rect { height: 1.min(inner.height), ..inner },
         );
     }
 }
 
-/// What an empty pane should say. "Nothing here" and "not here yet" look
-/// identical on screen and mean opposite things, so the answer turns on
-/// whether a request is still out — a pane that says "(no playlists)" while
-/// the playlists are on the wire has told you something false.
+/// The queue, as the last column. It is the end of the same chain the other
+/// columns walk -- artist, album, track, queued -- so it belongs on the right
+/// of them rather than in a pane of its own.
+fn render_queue_column(frame: &mut Frame, area: Rect, app: &mut App) {
+    let focused = app.focus == Focus::Queue;
+    let [head, body] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let head = inset(head);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            fit(queue_title(&app.queue).trim(), head.width as usize),
+            if focused {
+                Style::new().add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(dim())
+            },
+        )),
+        head,
+    );
+
+    let inner = inset(body);
+    if app.queue.items.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled("'a' queues a track", Style::new().fg(dim())))
+                .wrap(Wrap { trim: true }),
+            inner,
+        );
+        return;
+    }
+
+    let current = app.queue.current;
+    let items: Vec<ListItem> = app
+        .queue
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, track)| {
+            let playing = Some(i) == current;
+            let style = if playing { Style::new().fg(accent()) } else { Style::new() };
+            let marker = if playing { "\u{25b6} " } else { "  " };
+            ListItem::new(Line::from(Span::styled(
+                fit(&format!("{marker}{}", track.display_name()), inner.width as usize),
+                style,
+            )))
+        })
+        .collect();
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+        inner,
+        &mut app.queue.state,
+    );
+}
+
+/// A column's writable area: one space in from each edge, so rows never sit
+/// against the rule on either side.
+fn inset(area: Rect) -> Rect {
+    Rect { x: area.x + 1, width: area.width.saturating_sub(2), ..area }
+}
+
+/// The rule down a column's right edge, which is what separates it from the
+/// next one now that nothing is boxed.
+fn divider(frame: &mut Frame, area: Rect) {
+    frame.render_widget(
+        Block::default().borders(Borders::RIGHT).border_style(Style::new().fg(dim())),
+        area,
+    );
+}
+
+/// What an empty column should say. "Nothing here" and "not here yet"
+/// look identical on screen and mean opposite things, so the answer turns
+/// on whether a request is still out.
 fn empty_hint(app: &App) -> String {
     if app.pane().loading {
-        return format!("{} loading…", SPINNER[app.spinner % SPINNER.len()]);
+        return format!("{} loading\u{2026}", SPINNER[app.spinner % SPINNER.len()]);
     }
     match app.tab {
         Tab::Files => "(empty directory)",
@@ -397,7 +561,7 @@ fn empty_hint(app: &App) -> String {
     .to_string()
 }
 
-fn browser_title(app: &App) -> String {
+pub(crate) fn browser_title(app: &App) -> String {
     match app.tab {
         Tab::Files => {
             if app.path.is_empty() {
@@ -504,49 +668,6 @@ fn entry_line(entry: &Entry, width: usize, playing: Option<&str>) -> Line<'stati
     }
 }
 
-fn render_queue(frame: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.focus == Focus::Queue;
-    let title = queue_title(&app.queue);
-
-    let current = app.queue.current;
-    let items: Vec<ListItem> = app
-        .queue
-        .items
-        .iter()
-        .enumerate()
-        .map(|(i, track)| {
-            let playing = Some(i) == current;
-            let marker = if playing { "▶ " } else { "  " };
-            let style = if playing {
-                Style::new().fg(accent())
-            } else {
-                Style::new()
-            };
-            ListItem::new(Line::from(Span::styled(
-                format!("{marker}{}", track.display_name()),
-                style,
-            )))
-        })
-        .collect();
-
-    let empty = items.is_empty();
-    let list = List::new(items)
-        .block(bordered(title, focused))
-        .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
-    frame.render_stateful_widget(list, area, &mut app.queue.state);
-
-    if empty {
-        // Along the bottom edge, where a hint belongs — the top of the pane is
-        // where the first track will appear, and putting the prompt there
-        // makes an empty queue look like a queue with something in it.
-        frame.render_widget(
-            Paragraph::new(Span::styled("'a' queues a track", Style::new().fg(dim())))
-                .wrap(Wrap { trim: true }),
-            inner_last_line(area),
-        );
-    }
-}
-
 /// How many, and how long. A queue that Auto-DJ or a journey built is a set
 /// rather than a list, and "how long is this" is the question a set raises.
 fn queue_title(queue: &Queue) -> String {
@@ -572,13 +693,22 @@ fn fmt_span(seconds: f64) -> String {
 }
 
 fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(dim()))
-        .title(" Now Playing ");
-    let inner = block.inner(area);
+    // No box. The browser page draws its columns against a rule rather than
+    // inside borders, and a full-screen view framed in a rectangle it does not
+    // need was the odd one out -- it also spent two rows and two columns
+    // drawing the edge of a thing that already fills the screen.
     frame.render_widget(Clear, area);
-    frame.render_widget(block, area);
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: area.height,
+    };
+    frame.render_widget(
+        Paragraph::new(Span::styled(" Now Playing", Style::new().fg(dim()))),
+        Rect { height: 1, ..inner },
+    );
+    let inner = Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner };
 
     // Body, then a rule, then the transport band and the key hints along the
     // foot. The band spans the full width rather than sitting in a column, so
@@ -1649,29 +1779,6 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn bordered(title: String, focused: bool) -> Block<'static> {
-    let style = if focused { Style::new().fg(accent()) } else { Style::new().fg(dim()) };
-    Block::default().borders(Borders::ALL).border_style(style).title(title)
-}
-
-/// First writable row inside a bordered block — used for placeholder text in
-/// empty lists.
-fn inner_first_line(area: Rect) -> Rect {
-    Rect {
-        x: area.x + 2,
-        y: area.y + 1,
-        width: area.width.saturating_sub(3),
-        height: 1.min(area.height.saturating_sub(2)),
-    }
-}
-
-/// Last writable row inside a bordered block, for a hint that belongs at the
-/// foot of a pane rather than in the middle of where its contents will go.
-fn inner_last_line(area: Rect) -> Rect {
-    let first = inner_first_line(area);
-    Rect { y: area.y + area.height.saturating_sub(2).max(1), ..first }
-}
-
 fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
     let width = (area.width * width_percent / 100).min(area.width);
     let height = height.min(area.height);
@@ -2001,7 +2108,9 @@ mod tests {
         assert!(text.contains("playing"));
         assert!(text.contains("0:50 / 3:20"), "elapsed and total are shown");
         assert!(text.contains("vol 100%"));
-        assert!(text.contains("▶"), "the queue marks the current track");
+        app.handle_action(Action::CycleFocus);
+        let text = draw(&mut app);
+        assert!(text.contains("▶"), "the queue column marks the current track");
         assert!(
             !text.contains("repeat off") && !text.contains("dj off"),
             "modes that are off are not worth the width: {text}"
@@ -2717,25 +2826,52 @@ mod tests {
     #[test]
     fn empty_panes_explain_themselves() {
         let mut app = connected_app();
+        // The queue is a column you open now, not a pane that is always there.
+        assert!(!draw(&mut app).contains("Queue ("), "closed by default");
+        app.handle_action(Action::CycleFocus);
         let text = draw(&mut app);
-        assert!(text.contains("Queue (0)"));
-        assert!(text.contains("'a' queues a track"));
+        assert!(text.contains("Queue (0)"), "{text}");
+        assert!(text.contains("'a' queues a track"), "{text}");
     }
 
     #[test]
-    fn the_queue_hint_sits_on_the_last_row_of_the_pane() {
+    fn the_queue_column_opens_and_closes_on_tab() {
         let mut app = connected_app();
+        app.queue.replace(vec![tagged_track()]);
+        assert!(!draw(&mut app).contains("Queue ("));
+
+        app.handle_action(Action::CycleFocus);
+        assert!(app.queue_column);
+        assert_eq!(app.focus, Focus::Queue, "opening it moves the cursor there too");
+        assert!(draw(&mut app).contains("Queue (1)"));
+
+        app.handle_action(Action::CycleFocus);
+        assert!(!app.queue_column);
+        assert_eq!(app.focus, Focus::Browser, "and closing it hands the cursor back");
+    }
+
+    #[test]
+    fn the_columns_build_up_as_you_go_in_and_fall_away_as_you_come_out() {
+        use crate::tui::worker::{LibraryData, LibraryNode};
+        let mut app = connected_app();
+        app.handle_action(Action::SelectTab(1));
+        app.apply_event(Event::Library {
+            node: LibraryNode::Root,
+            data: LibraryData::Artists(vec!["Bassnectar".into(), "ill Gates".into()]),
+        });
+        assert!(app.trail.is_empty(), "one column at the top");
+
+        app.handle_action(Action::Down);
+        app.handle_action(Action::Activate);
+        // Captured on the way in, from what was already on screen — going a
+        // level deeper costs one request, not two.
+        assert_eq!(app.trail.len(), 1);
+        assert_eq!(app.trail[0].title.trim(), "Library");
         let text = draw(&mut app);
-        let rows: Vec<&str> = text.lines().collect();
-        let hint = rows
-            .iter()
-            .position(|row| row.contains("'a' queues a track"))
-            .expect("the hint is drawn");
-        let bottom = rows
-            .iter()
-            .rposition(|row| row.contains("└"))
-            .expect("the queue pane has a bottom border");
-        assert_eq!(hint + 1, bottom, "the hint is the row above the pane's bottom edge");
+        assert!(text.contains("Bassnectar"), "the column behind is still drawn: {text}");
+
+        app.handle_action(Action::Back);
+        assert!(app.trail.is_empty(), "and it falls away coming out");
     }
 
     #[test]

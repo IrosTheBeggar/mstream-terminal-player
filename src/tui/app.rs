@@ -216,6 +216,20 @@ pub enum Entry {
     Track { label: String, track: Box<Track> },
 }
 
+/// A column to the left of the one you are in: a listing you came through,
+/// kept so the browser can show where you are as columns rather than as a
+/// path in a title bar.
+///
+/// Display-only, and captured from what was already on screen — walking back
+/// up costs no request, and neither does drawing the context.
+#[derive(Debug)]
+pub struct Trail {
+    pub title: String,
+    pub entries: Vec<Entry>,
+    /// Which row of this listing was taken to get to the next column.
+    pub chosen: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct Pane {
     pub entries: Vec<Entry>,
@@ -594,6 +608,13 @@ pub struct App {
     /// Breadcrumb through the tag hierarchy; the last element is the view on
     /// screen. Always non-empty once the Library tab has been opened.
     pub library_stack: Vec<LibraryNode>,
+    /// The columns to the left of the current one, innermost last. Pushed as
+    /// you go in, popped as you come out; cleared when the tab changes.
+    pub trail: Vec<Trail>,
+    /// Whether the queue is showing as the last column. It is the end of the
+    /// same chain -- artist, album, track, queued -- so it reads better as one
+    /// more column than as a separate pane that is always there.
+    pub queue_column: bool,
     pub playlists: Pane,
     pub playlist_open: Option<String>,
     pub discover: Pane,
@@ -679,6 +700,8 @@ impl App {
             files: Pane::default(),
             library: Pane::default(),
             library_stack: Vec::new(),
+            trail: Vec::new(),
+            queue_column: false,
             playlists: Pane::default(),
             playlist_open: None,
             discover: Pane::default(),
@@ -1033,6 +1056,11 @@ impl App {
             }
             Action::Cancel => {
                 self.show_help = false;
+                Vec::new()
+            }
+            Action::CycleFocus if !self.fullscreen => {
+                self.queue_column = !self.queue_column;
+                self.focus = if self.queue_column { Focus::Queue } else { Focus::Browser };
                 Vec::new()
             }
             Action::CycleFocus => {
@@ -1637,6 +1665,7 @@ impl App {
     }
 
     fn select_tab(&mut self, index: usize) -> Vec<Effect> {
+        self.trail.clear();
         let Some(tab) = self.tabs().get(index).copied() else {
             return Vec::new();
         };
@@ -1727,17 +1756,23 @@ impl App {
         match entry {
             Entry::Parent => self.go_back(),
             Entry::Dir { path, .. } => {
+                self.push_trail();
                 self.path = path.clone();
                 vec![Effect::Api(ApiCmd::Browse(path))]
             }
             Entry::Node { node, label } => {
+                self.push_trail();
                 self.library_stack.push(node.clone());
                 self.library.set(Vec::new());
                 self.info(format!("loading {label}…"));
                 vec![Effect::Api(ApiCmd::Library(node))]
             }
-            Entry::Discover { node, label, .. } => self.open_discover(node, &label),
+            Entry::Discover { node, label, .. } => {
+                self.push_trail();
+                self.open_discover(node, &label)
+            }
             Entry::Playlist { name } => {
+                self.push_trail();
                 self.info(format!("loading playlist {name}…"));
                 vec![Effect::Api(ApiCmd::LoadPlaylist(name))]
             }
@@ -1754,7 +1789,22 @@ impl App {
         }
     }
 
+    /// Remember the listing on screen as a column, on the way into the next
+    /// one. Called before the request goes out, so the context is there while
+    /// the reply is still coming.
+    fn push_trail(&mut self) {
+        let pane = self.pane();
+        if pane.entries.is_empty() {
+            return;
+        }
+        let title = crate::tui::ui::browser_title(self);
+        let chosen = pane.state.selected().unwrap_or(0);
+        let entries = pane.entries.clone();
+        self.trail.push(Trail { title, entries, chosen });
+    }
+
     fn go_back(&mut self) -> Vec<Effect> {
+        self.trail.pop();
         match self.tab {
             Tab::Files => {
                 if self.path.is_empty() {
