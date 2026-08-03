@@ -283,6 +283,8 @@ pub struct Pane {
     /// "nothing here" or "not here yet" and the two look identical on
     /// screen, so the difference has to be recorded rather than guessed.
     pub loading: bool,
+    /// The columns to the left of this one, innermost last.
+    pub trail: Vec<Trail>,
 }
 
 impl Pane {
@@ -653,9 +655,6 @@ pub struct App {
     /// Breadcrumb through the tag hierarchy; the last element is the view on
     /// screen. Always non-empty once the Library tab has been opened.
     pub library_stack: Vec<LibraryNode>,
-    /// The columns to the left of the current one, innermost last. Pushed as
-    /// you go in, popped as you come out; cleared when the tab changes.
-    pub trail: Vec<Trail>,
     /// The whole search reply, kept rather than flattened. Every class comes
     /// back in one response, so moving between them costs nothing.
     pub search_hits: Option<Box<crate::api::types::SearchResults>>,
@@ -749,7 +748,6 @@ impl App {
             files: Pane::default(),
             library: Pane::default(),
             library_stack: Vec::new(),
-            trail: Vec::new(),
             search_hits: None,
             search_stack: Vec::new(),
             queue_column: false,
@@ -1716,7 +1714,7 @@ impl App {
                 }
                 self.info(format!("searching for {query:?}…"));
                 self.search_stack.clear();
-                self.trail.clear();
+                self.search.trail.clear();
                 Some(vec![Effect::Api(ApiCmd::Search(query))])
             }
             _ => None,
@@ -1724,10 +1722,10 @@ impl App {
     }
 
     fn select_tab(&mut self, index: usize) -> Vec<Effect> {
-        self.trail.clear();
         let Some(tab) = self.tabs().get(index).copied() else {
             return Vec::new();
         };
+        let already_here = self.tab == tab;
         // Whatever the cursor is on *now* is what "more like this" means, and
         // switching tabs moves the cursor somewhere else entirely — so the
         // candidate has to be taken before the change, not after.
@@ -1755,8 +1753,15 @@ impl App {
             Tab::Playlists if self.playlists.entries.is_empty() => {
                 vec![Effect::Api(ApiCmd::Playlists)]
             }
-            Tab::Search if self.search.entries.is_empty() && self.query.is_empty() => {
+            // Pressing the Search tab while already on it means "another
+            // one" — there is nowhere else that keystroke could sensibly go,
+            // and looking at results with no way back to the box was the
+            // dead end. Arriving from elsewhere keeps the results you had.
+            Tab::Search
+                if already_here || (self.search.entries.is_empty() && self.query.is_empty()) =>
+            {
                 self.editing_query = true;
+                self.query.clear();
                 Vec::new()
             }
             _ => Vec::new(),
@@ -1875,18 +1880,18 @@ impl App {
     /// one. Called before the request goes out, so the context is there while
     /// the reply is still coming.
     fn push_trail(&mut self) {
-        let pane = self.pane();
+        let title = crate::tui::ui::browser_title(self);
+        let pane = self.pane_mut();
         if pane.entries.is_empty() {
             return;
         }
-        let title = crate::tui::ui::browser_title(self);
         let chosen = pane.state.selected().unwrap_or(0);
         let entries = pane.entries.clone();
-        self.trail.push(Trail { title, entries, chosen });
+        pane.trail.push(Trail { title, entries, chosen });
     }
 
     fn go_back(&mut self) -> Vec<Effect> {
-        self.trail.pop();
+        self.pane_mut().trail.pop();
         match self.tab {
             Tab::Files => {
                 if self.path.is_empty() {
@@ -2512,7 +2517,7 @@ impl App {
                 });
                 self.search_hits = Some(results);
                 self.search_stack = vec![SearchNode::Root];
-                self.trail.clear();
+                self.search.trail.clear();
                 self.search.set(self.search_root_entries());
                 self.message = None;
                 Vec::new()

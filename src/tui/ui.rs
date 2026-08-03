@@ -345,7 +345,7 @@ fn server_label(app: &App, width: usize) -> String {
 /// columns on vertical lines and read as two separate windows; a rule says the
 /// same thing in one column and reads as one surface.
 fn render_columns(frame: &mut Frame, area: Rect, app: &mut App) {
-    let widths = column_widths(area.width, app.trail.len(), app.queue_column);
+    let widths = column_widths(area.width, app.pane().trail.len(), app.queue_column);
     let constraints: Vec<Constraint> =
         widths.iter().map(|w| Constraint::Length(*w)).collect();
     let areas = Layout::horizontal(constraints).split(area);
@@ -353,8 +353,8 @@ fn render_columns(frame: &mut Frame, area: Rect, app: &mut App) {
     // The trail is drawn from the innermost outwards, so when there is only
     // room for one it is the one you just came out of.
     let shown_trail = widths.len() - 1 - usize::from(app.queue_column);
-    let skip = app.trail.len().saturating_sub(shown_trail);
-    for (slot, step) in app.trail.iter().skip(skip).enumerate() {
+    let skip = app.pane().trail.len().saturating_sub(shown_trail);
+    for (slot, step) in app.pane().trail.iter().skip(skip).enumerate() {
         render_trail_column(frame, areas[slot], step);
     }
 
@@ -1192,7 +1192,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             },
         ),
         None => Span::styled(
-            fit("? help   q quit", message_area.width as usize),
+            fit(idle_hint(app), message_area.width as usize),
             Style::new().fg(dim()),
         ),
     };
@@ -1201,6 +1201,18 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(Span::styled(modes, Style::new().fg(dim()))).alignment(Alignment::Right),
         modes_area,
     );
+}
+
+/// What the footer says when there is no message to show.
+///
+/// Tab-specific, because the key you want next depends on where you are: with
+/// search results on screen the question is how to run another one, and `/`
+/// being in the help screen is no use to someone who does not know to look.
+fn idle_hint(app: &App) -> &'static str {
+    match app.tab {
+        Tab::Search if app.search_hits.is_some() => "/ new search   ? help   q quit",
+        _ => "? help   q quit",
+    }
 }
 
 /// The modes worth a reader's attention: the ones that are on.
@@ -2890,19 +2902,41 @@ mod tests {
             node: LibraryNode::Root,
             data: LibraryData::Artists(vec!["Bassnectar".into(), "ill Gates".into()]),
         });
-        assert!(app.trail.is_empty(), "one column at the top");
+        assert!(app.library.trail.is_empty(), "one column at the top");
 
         app.handle_action(Action::Down);
         app.handle_action(Action::Activate);
         // Captured on the way in, from what was already on screen — going a
         // level deeper costs one request, not two.
-        assert_eq!(app.trail.len(), 1);
-        assert_eq!(app.trail[0].title.trim(), "Library");
+        assert_eq!(app.library.trail.len(), 1);
+        assert_eq!(app.library.trail[0].title.trim(), "Library");
         let text = draw(&mut app);
         assert!(text.contains("Bassnectar"), "the column behind is still drawn: {text}");
 
         app.handle_action(Action::Back);
-        assert!(app.trail.is_empty(), "and it falls away coming out");
+        assert!(app.library.trail.is_empty(), "and it falls away coming out");
+    }
+
+    #[test]
+    fn the_columns_are_still_there_when_you_come_back_to_a_tab() {
+        // Leaving a tab and returning put you back several folders deep with
+        // nothing behind you: the position was remembered and the context was
+        // thrown away. The trail belongs to the pane, not to the app.
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Artist"], &[]))));
+        app.handle_action(Action::Down);
+        app.handle_action(Action::Activate);
+        app.apply_event(Event::Listing(Box::new(listing("/lib/Artist/", &["Album"], &[]))));
+        assert_eq!(app.files.trail.len(), 1);
+
+        app.handle_action(Action::SelectTab(1));
+        app.handle_action(Action::SelectTab(0));
+        assert_eq!(app.files.trail.len(), 1, "the way in came back with the place");
+        assert!(draw(&mut app).contains("/lib"), "and it is drawn");
+
+        // Each tab keeps its own, so one does not inherit another's columns.
+        app.handle_action(Action::SelectTab(1));
+        assert!(app.library.trail.is_empty());
     }
 
     #[test]
