@@ -666,13 +666,13 @@ fn tab_strip_width(app: &App) -> u16 {
 fn tab_strip(app: &App, width: u16) -> Line<'static> {
     let current = app.now_tab();
     let active = Style::new().fg(accent()).add_modifier(Modifier::BOLD);
-    let rest = Style::new().fg(dim());
+    let rest = Style::new();
 
     if tab_strip_width(app) > width {
         return Line::from(vec![
-            Span::styled("‹ ", rest),
+            Span::styled("‹ ", Style::new().fg(dim())),
             Span::styled(current.title(), active),
-            Span::styled(" ›", rest),
+            Span::styled(" ›", Style::new().fg(dim())),
         ]);
     }
 
@@ -845,7 +845,10 @@ fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
     let Some(track) = &app.now_playing else {
         return vec![
             Line::raw(""),
-            Line::from(Span::styled(fit("nothing playing", width), Style::new().fg(dim()))),
+            Line::from(Span::styled(
+                fit("nothing playing", width),
+                Style::new().add_modifier(Modifier::BOLD),
+            )),
             Line::raw(""),
             Line::from(Span::styled(
                 fit("0 goes back to the browser", width),
@@ -859,11 +862,11 @@ fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
         Line::raw(""),
         Line::from(Span::styled(
             fit(meta.display_title().unwrap_or_else(|| track.file_name()), width),
-            Style::new().add_modifier(Modifier::BOLD),
+            Style::new().fg(accent()).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             fit(meta.artist.as_deref().unwrap_or("unknown artist"), width),
-            Style::new().fg(accent()).add_modifier(Modifier::BOLD),
+            Style::new().add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),
     ];
@@ -901,16 +904,24 @@ fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::raw(""));
-    let (state, style) = if !app.audio_available {
-        ("audio device unavailable", Style::new().fg(Color::Red))
-    } else if app.status.paused {
-        ("⏸ paused", faint)
+    if !app.audio_available {
+        lines.push(Line::from(Span::styled(
+            "audio device unavailable",
+            Style::new().fg(Color::Red),
+        )));
+        return lines;
+    }
+    let (glyph, word) = if app.status.paused {
+        ("⏸", "paused")
     } else if app.status.playing {
-        ("▶ playing", faint)
+        ("▶", "playing")
     } else {
-        ("stopped", faint)
+        ("■", "stopped")
     };
-    lines.push(Line::from(Span::styled(state, style)));
+    lines.push(Line::from(vec![
+        Span::styled(glyph, Style::new().fg(accent())),
+        Span::raw(format!(" {word}")),
+    ]));
     lines
 }
 
@@ -946,7 +957,7 @@ fn progress_line(app: &App, width: usize) -> Line<'static> {
         Span::styled("\u{2588}".repeat(filled), Style::new().fg(accent())),
         Span::styled("\u{2591}".repeat(bar_width - filled), Style::new().fg(dim())),
         Span::raw("  "),
-        Span::raw(position),
+        Span::styled(position, Style::new().fg(accent())),
         Span::styled(format!(" / {total}"), Style::new().fg(dim())),
     ])
 }
