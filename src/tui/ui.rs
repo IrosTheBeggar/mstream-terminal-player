@@ -4,12 +4,15 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, Gauge, List, ListItem, Padding, Paragraph, Tabs, Wrap,
+};
 
 use crate::cmd_library::fmt_duration;
 
 use super::app::{
-    App, CONNECT_METHODS, ConnectStage, DjRow, Entry, Focus, MessageKind, Queue, Repeat, Tab,
+    App, CONNECT_METHODS, ConnectStage, DjRow, Entry, Focus, MessageKind, NowTab, Queue, Repeat,
+    Tab,
 };
 use super::worker::{AutoDjMode, DiscoverNode, LibraryNode};
 use crate::api::types::Track;
@@ -465,16 +468,50 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
 
-    // The gauge and the status line are pinned to the bottom; the card floats
-    // in whatever is left, so it stays centred as the terminal changes size.
-    let [card, gauge_area, status_area] = Layout::vertical([
+    // Body, then a rule, then the transport band and the key hints along the
+    // foot. The band spans the full width rather than sitting in a column, so
+    // the bar is long enough to read as a position rather than a stepper.
+    let [body, rule, gauge_area, keys_area] = Layout::vertical([
         Constraint::Min(1),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(inner);
 
-    render_centered_block(frame, card, now_playing_card(app, card.width as usize));
+    // The tab strip gets the width it needs and the facts take what is left,
+    // down to a floor where the labelled rows stop fitting. Splitting down the
+    // middle instead truncated the last tab to "Vis" on an 88-column terminal.
+    let strip = tab_strip_width(app);
+    let left_width = inner
+        .width
+        .saturating_sub(strip + 2)
+        .clamp(FACTS_MIN_WIDTH, FACTS_MAX_WIDTH)
+        .min(inner.width);
+    let [facts_area, panel_area] =
+        Layout::horizontal([Constraint::Length(left_width), Constraint::Min(0)]).areas(body);
+
+    // The divider is the facts column's own right border, so it runs the full
+    // height of the body and meets the rule below it at a proper junction.
+    let divider = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(Style::new().fg(DIM))
+        .padding(Padding::horizontal(1));
+    let facts_inner = divider.inner(facts_area);
+    frame.render_widget(divider, facts_area);
+    frame.render_widget(
+        Paragraph::new(now_playing_card(app, facts_inner.width as usize)),
+        facts_inner,
+    );
+    render_now_panel(frame, panel_area, app);
+
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            rule_with_junction(rule.width, left_width),
+            Style::new().fg(DIM),
+        )),
+        rule,
+    );
 
     let position = fmt_duration(app.status.position);
     let total =
@@ -488,37 +525,235 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
         gauge_area,
     );
 
-    // There is no footer down here, so the modes come along — otherwise going
-    // full screen would quietly hide whether shuffle or auto-dj is on.
+    // The keys that work here, and the modes -- there is no footer down here
+    // to carry either, and going full screen should not quietly hide whether
+    // shuffle is on.
     let modes = mode_readout(app, false);
     let [left, right] = Layout::horizontal([
         Constraint::Min(0),
-        Constraint::Length((width_of(&modes) as u16).min(status_area.width)),
+        Constraint::Length((width_of(&modes) as u16).min(keys_area.width)),
     ])
-    .areas(status_area);
+    .areas(keys_area);
     frame.render_widget(
         Paragraph::new(Span::styled(
-            fit("0 back", left.width as usize),
+            fit(now_keys_hint(app), left.width as usize),
             Style::new().fg(DIM),
         )),
         left,
     );
     frame.render_widget(
-        Paragraph::new(Span::styled(modes, Style::new().fg(DIM)))
-            .alignment(Alignment::Right),
+        Paragraph::new(Span::styled(modes, Style::new().fg(DIM))).alignment(Alignment::Right),
         right,
     );
 }
 
-/// The block of text in the middle of the now-playing screen, laid out to
-/// `width` columns. Pure so the shape can be asserted without a terminal.
+/// Bounds on the facts column. Below the floor the labelled rows stop fitting;
+/// above the ceiling the tab panel is paying for whitespace nobody asked for.
+const FACTS_MIN_WIDTH: u16 = 26;
+const FACTS_MAX_WIDTH: u16 = 46;
+
+/// Two spaces between tabs, so the strip is as short as it can be while still
+/// reading as separate words.
+const TAB_GAP: &str = "  ";
+
+/// What the whole strip wants, so the split can hand it over before the facts
+/// take what's left.
+fn tab_strip_width(app: &App) -> u16 {
+    let tabs = app.now_tabs();
+    let names: usize = tabs.iter().map(|t| width_of(t.title())).sum();
+    let gaps = tabs.len().saturating_sub(1) * TAB_GAP.len();
+    (names + gaps) as u16
+}
+
+/// The tab strip, or — when even the adaptive split can't fit it — just the
+/// one you are on, with arrows for the rest. A truncated last tab looks like a
+/// bug; naming the current one and pointing at the others does not.
+fn tab_strip(app: &App, width: u16) -> Line<'static> {
+    let current = app.now_tab();
+    let active = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
+    let rest = Style::new().fg(DIM);
+
+    if tab_strip_width(app) > width {
+        return Line::from(vec![
+            Span::styled("‹ ", rest),
+            Span::styled(current.title(), active),
+            Span::styled(" ›", rest),
+        ]);
+    }
+
+    let mut spans = Vec::new();
+    for tab in app.now_tabs() {
+        if !spans.is_empty() {
+            spans.push(Span::raw(TAB_GAP));
+        }
+        spans.push(Span::styled(tab.title(), if tab == current { active } else { rest }));
+    }
+    Line::from(spans)
+}
+
+/// A horizontal rule that closes the column divider above it, rather than
+/// running past it and leaving the vertical line dangling into the transport.
+fn rule_with_junction(width: u16, at: u16) -> String {
+    let width = width as usize;
+    let at = at as usize;
+    if at >= width {
+        return "─".repeat(width);
+    }
+    format!("{}┴{}", "─".repeat(at), "─".repeat(width - at - 1))
+}
+
+/// The key hints along the foot. Only what does something on the tab in front
+/// of you: offering "Enter play" while the lyrics are up is a small lie.
+fn now_keys_hint(app: &App) -> &'static str {
+    match app.now_tab() {
+        NowTab::Queue => "←→ tab   ↑↓ list   Enter play   d remove   0 back",
+        _ => "←→ tab   ↑↓ scroll   0 back",
+    }
+}
+
+/// The tab strip, and whichever tab is open under it.
+fn render_now_panel(frame: &mut Frame, area: Rect, app: &App) {
+    if area.width < 12 || area.height < 3 {
+        return;
+    }
+    let area = Block::default().padding(Padding::horizontal(1)).inner(area);
+    let [strip, rule, content] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)])
+            .areas(area);
+
+    frame.render_widget(Paragraph::new(tab_strip(app, strip.width)), strip);
+    frame.render_widget(
+        Paragraph::new(Span::styled("─".repeat(rule.width as usize), Style::new().fg(DIM))),
+        rule,
+    );
+
+    match app.now_tab() {
+        NowTab::Queue => render_now_queue(frame, content, app),
+        NowTab::AutoDj => frame.render_widget(Paragraph::new(autodj_summary(app)), content),
+        NowTab::Lyrics => {
+            render_now_placeholder(frame, content, "words go here", "not wired up yet")
+        }
+        NowTab::Discover => {
+            render_now_placeholder(frame, content, "what this sounds like", "not wired up yet")
+        }
+        NowTab::Visualizer => {
+            render_now_placeholder(frame, content, "the spectrum goes here", "needs the audio tap")
+        }
+    }
+}
+
+fn render_now_placeholder(frame: &mut Frame, area: Rect, what: &str, why: &str) {
+    let lines = vec![
+        Line::raw(""),
+        Line::from(Span::styled(what.to_string(), Style::new().fg(DIM))),
+        Line::from(Span::styled(why.to_string(), Style::new().fg(DIM))),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The queue as the full-screen view draws it. It shares the browser screen's
+/// selection rather than keeping its own, so `d` removes the row under the
+/// cursor whichever screen you are looking at.
+fn render_now_queue(frame: &mut Frame, area: Rect, app: &App) {
+    if app.queue.items.is_empty() {
+        render_now_placeholder(frame, area, "nothing queued", "0 back, then 'a' on a track");
+        return;
+    }
+
+    let width = area.width as usize;
+    let current = app.queue.current;
+    let items: Vec<ListItem> = app
+        .queue
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, track)| {
+            let playing = Some(i) == current;
+            let style = if playing { Style::new().fg(ACCENT) } else { Style::new() };
+            let marker = if playing { "\u{25b6} " } else { "  " };
+            let name = format!("{marker}{}", track.display_name());
+            let Some(duration) = track.metadata.duration else {
+                return ListItem::new(Line::from(Span::styled(name, style)));
+            };
+            let time = fmt_duration(duration);
+            let time_width = width_of(&time);
+            let name = fit(&name, width.saturating_sub(time_width + 1));
+            let gap = width.saturating_sub(width_of(&name) + time_width).max(1);
+            ListItem::new(Line::from(vec![
+                Span::styled(name, style),
+                Span::raw(" ".repeat(gap)),
+                Span::styled(time, Style::new().fg(DIM)),
+            ]))
+        })
+        .collect();
+
+    let mut state = app.queue.state;
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+        area,
+        &mut state,
+    );
+}
+
+/// What Auto-DJ is set to, read-only. `D` stays the one place it changes: two
+/// screens editing one set of settings is two things to keep in step.
+fn autodj_summary(app: &App) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(DIM);
+    let row = |label: &str, value: String| {
+        Line::from(vec![Span::styled(format!("{label:<9}"), dim), Span::raw(value)])
+    };
+
+    let mut lines = vec![Line::raw(""), row("Mode", app.autodj.label().to_string())];
+    if app.autodj != AutoDjMode::Off {
+        let dj = &app.dj;
+        if app.capabilities.discovery {
+            lines.push(row(
+                "Pool",
+                match dj.sonic_tightness {
+                    0 => "any".to_string(),
+                    tightness => format!("sonic, tightness {tightness}"),
+                },
+            ));
+        }
+        lines.push(row("Tempo", format!("±{} BPM", dj.tempo_tolerance)));
+        lines.push(row("Key", dj.key_matching.label().to_string()));
+        if dj.min_rating > 0 {
+            lines.push(row("Rating", format!("{}+", dj.min_rating)));
+        }
+        if dj.artist_cooldown > 0 {
+            lines.push(row("Cooldown", format!("last {} artists", dj.artist_cooldown)));
+        }
+        if !dj.genres.is_empty() {
+            lines.push(row("Genres", format!("{} {}", dj.genre_mode.label(), dj.genres.len())));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        if app.autodj == AutoDjMode::Off {
+            "A turns it on \u{b7} D opens the panel"
+        } else {
+            "D opens the panel to change it"
+        },
+        dim,
+    )));
+    lines
+}
+
+/// The left-hand column: what is playing, then what the tags know about it as
+/// a labelled ladder. Pure so the shape can be asserted without a terminal.
+///
+/// A ladder rather than the one-line run of separators the compact transport
+/// uses — there is room here, and a column of labels can be read for one value
+/// where `2:54 · 85 BPM · 10B · ★★★★` has to be read whole.
 fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
     let Some(track) = &app.now_playing else {
         return vec![
+            Line::raw(""),
             Line::from(Span::styled(fit("nothing playing", width), Style::new().fg(DIM))),
             Line::raw(""),
             Line::from(Span::styled(
-                fit("press 0 to go back and queue something", width),
+                fit("0 goes back to the browser", width),
                 Style::new().fg(DIM),
             )),
         ];
@@ -526,76 +761,64 @@ fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
 
     let meta = &track.metadata;
     let mut lines = vec![
-        Line::from(Span::styled(
-            fit(meta.artist.as_deref().unwrap_or("unknown artist"), width),
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
-        )),
+        Line::raw(""),
         Line::from(Span::styled(
             fit(meta.display_title().unwrap_or_else(|| track.file_name()), width),
             Style::new().add_modifier(Modifier::BOLD),
         )),
+        Line::from(Span::styled(
+            fit(meta.artist.as_deref().unwrap_or("unknown artist"), width),
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
     ];
 
-    let album = match (meta.album.as_deref().filter(|a| !a.is_empty()), meta.year) {
-        (Some(album), Some(year)) => Some(format!("{album} · {year}")),
-        (Some(album), None) => Some(album.to_string()),
-        (None, Some(year)) => Some(year.to_string()),
-        (None, None) => None,
+    let dim = Style::new().fg(DIM);
+    let mut row = |label: &str, value: String| {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{label:<8}"), dim),
+            Span::raw(fit(&value, width.saturating_sub(8))),
+        ]));
     };
-    if let Some(album) = album {
-        lines.push(Line::from(Span::styled(fit(&album, width), Style::new().fg(DIM))));
+    if let Some(album) = meta.album.as_deref().filter(|a| !a.is_empty()) {
+        row("Album", album.to_string());
     }
-
-    let facts = track_facts(meta);
-    if !facts.is_empty() {
-        lines.push(Line::from(Span::styled(fit(&facts, width), Style::new().fg(DIM))));
+    if let Some(year) = meta.year {
+        row("Year", year.to_string());
+    }
+    if let Some(bpm) = meta.bpm {
+        row("Tempo", format!("{bpm} BPM"));
+    }
+    if let Some(key) = meta.musical_key.as_deref().filter(|k| !k.is_empty()) {
+        // The Camelot code is what Auto-DJ matches on, so lead with the same
+        // name for the same thing and let the tag's spelling follow.
+        row(
+            "Key",
+            match crate::dj::to_camelot(key) {
+                Some(camelot) => format!("{}  {key}", camelot.code()),
+                None => key.to_string(),
+            },
+        );
+    }
+    if let Some(rating) = meta.rating.filter(|r| *r > 0) {
+        row("Rating", format!("{rating}/10"));
+    }
+    if let Some(plays) = meta.play_count.filter(|p| *p > 0) {
+        row("Plays", plays.to_string());
     }
 
     lines.push(Line::raw(""));
-    let state = if !app.audio_available {
-        "audio device unavailable"
+    let (state, style) = if !app.audio_available {
+        ("audio device unavailable", Style::new().fg(Color::Red))
     } else if app.status.paused {
-        "⏸ paused"
+        ("⏸ paused", dim)
     } else if app.status.playing {
-        "▶ playing"
+        ("▶ playing", dim)
     } else {
-        "stopped"
-    };
-    let style = if app.audio_available {
-        Style::new().fg(DIM)
-    } else {
-        Style::new().fg(Color::Red)
+        ("stopped", dim)
     };
     lines.push(Line::from(Span::styled(state, style)));
     lines
-}
-
-/// The one-line summary of what the tags know. Everything is optional, so this
-/// joins what is there rather than laying out a fixed set of slots — a track
-/// with no BPM should not leave a gap where the BPM would go.
-fn track_facts(meta: &crate::api::types::TrackMetadata) -> String {
-    let mut facts = Vec::new();
-    if let Some(duration) = meta.duration {
-        facts.push(fmt_duration(duration));
-    }
-    if let Some(bpm) = meta.bpm {
-        facts.push(format!("{bpm} BPM"));
-    }
-    if let Some(key) = meta.musical_key.as_deref().filter(|k| !k.is_empty()) {
-        // The Camelot code is what the Auto-DJ panel matches on, so show the
-        // same name for the same thing; the tag's own spelling comes after it.
-        match crate::dj::to_camelot(key) {
-            Some(camelot) => facts.push(format!("{} ({key})", camelot.code())),
-            None => facts.push(key.to_string()),
-        }
-    }
-    if let Some(rating) = meta.rating.filter(|r| *r > 0) {
-        facts.push(format!("{rating}/10"));
-    }
-    if let Some(plays) = meta.play_count.filter(|p| *p > 0) {
-        facts.push(format!("{plays} plays"));
-    }
-    facts.join(" · ")
 }
 
 fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
@@ -1313,10 +1536,11 @@ fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::api::types::{DirEntry, DirListing, FileEntry, Track, TrackMetadata};
-    use crate::tui::app::Action;
+    use crate::tui::app::{Action, InputMode};
     use crate::tui::worker::Event;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// Render one frame and flatten the buffer to text for assertions.
     fn draw(app: &mut App) -> String {
@@ -1667,7 +1891,8 @@ mod tests {
 
         assert!(text.contains("Now Playing"), "{text}");
         assert!(text.contains("Bassnectar") && text.contains("Rewind The Track"), "{text}");
-        assert!(text.contains("Divergent Spectrum · 2011"), "{text}");
+        assert!(text.contains("Album   Divergent Spectrum"), "{text}");
+        assert!(text.contains("Year    2011"), "{text}");
         assert!(text.contains("1:11 / 3:29"), "the gauge is still there: {text}");
         // The browser and queue are gone -- this is a view, not an overlay.
         assert!(!text.contains("1:Files"), "{text}");
@@ -1684,45 +1909,152 @@ mod tests {
     fn the_now_playing_card_skips_the_tags_a_track_does_not_have() {
         let mut app = connected_app();
         app.now_playing = Some(tagged_track());
-        let full = now_playing_card(&app, 60);
-        let text: String =
-            full.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
-                .collect::<Vec<_>>()
-                .join("\n");
-        assert!(text.contains("3:29 · 174 BPM · 8A (A minor) · 7/10 · 23 plays"), "{text}");
+        let text = card_text(&app);
+        for row in ["Album", "Year", "Tempo", "Key", "Rating", "Plays"] {
+            assert!(text.contains(row), "{row} is missing from:\n{text}");
+        }
+        assert!(text.contains("174 BPM"), "{text}");
+        // The Camelot code leads, because that is what Auto-DJ matches on,
+        // and the tag's own spelling follows it.
+        assert!(text.contains("8A  A minor"), "{text}");
 
-        // A bare file: no gaps where the missing facts would have gone.
+        // A bare file: no labels standing over empty values.
         app.now_playing = Some(Track {
             filepath: "lib/Artist/untagged.mp3".into(),
             metadata: TrackMetadata::default(),
         });
-        let bare = now_playing_card(&app, 60);
-        let text: String =
-            bare.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
-                .collect::<Vec<_>>()
-                .join("\n");
+        let text = card_text(&app);
         assert!(text.contains("unknown artist"), "{text}");
         assert!(text.contains("untagged.mp3"), "falls back to the filename: {text}");
-        assert!(!text.contains("·"), "no separators with nothing to separate: {text}");
+        for row in ["Album", "Year", "Tempo", "Key", "Rating", "Plays"] {
+            assert!(!text.contains(row), "{row} has nothing to show:\n{text}");
+        }
+    }
+
+    fn card_text(app: &App) -> String {
+        now_playing_card(app, 60)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
-    fn the_key_reuses_the_camelot_code_the_dj_panel_matches_on() {
+    fn the_tabs_move_under_the_arrows_and_come_back_round() {
+        let mut app = connected_app();
+        app.now_playing = Some(tagged_track());
+        app.handle_action(Action::ToggleNowPlaying);
+        assert_eq!(app.input_mode(), InputMode::Now, "the view claims the arrows");
+
+        // The tagged track has no lyrics, so that tab is not in the strip and
+        // the arrows must not stop on it.
+        assert_eq!(app.now_tabs(), vec![NowTab::Queue, NowTab::Discover, NowTab::AutoDj, NowTab::Visualizer]);
+
+        let right = |app: &mut App| {
+            let action = app.keymap.action(key_event(KeyCode::Right), InputMode::Now).unwrap();
+            app.handle_action(action);
+        };
+        right(&mut app);
+        assert_eq!(app.now_tab(), NowTab::Discover);
+        right(&mut app);
+        right(&mut app);
+        assert_eq!(app.now_tab(), NowTab::Visualizer);
+        right(&mut app);
+        assert_eq!(app.now_tab(), NowTab::Queue, "off the end and round again");
+
+        let left = app.keymap.action(key_event(KeyCode::Left), InputMode::Now).unwrap();
+        app.handle_action(left);
+        assert_eq!(app.now_tab(), NowTab::Visualizer, "and the other way");
+    }
+
+    #[test]
+    fn the_lyrics_tab_turns_on_the_track_not_the_server() {
+        let mut app = connected_app();
+        app.handle_action(Action::ToggleNowPlaying);
+
+        let mut track = tagged_track();
+        track.metadata.has_lyrics = true;
+        app.now_playing = Some(track);
+        assert!(app.now_tabs().contains(&NowTab::Lyrics));
+        assert!(draw(&mut app).contains("Lyrics"));
+
+        // The track carrying the tab can end while you are reading it, so the
+        // view must fall back rather than sit on a tab that no longer exists.
+        app.now_tab = NowTab::Lyrics;
+        app.now_playing = Some(tagged_track());
+        assert_eq!(app.now_tab(), NowTab::Queue);
+        assert!(!draw(&mut app).contains("Lyrics"));
+    }
+
+    #[test]
+    fn the_view_keeps_the_transport_keys_it_did_not_claim() {
+        // The whole reason this is a fall-through and not its own table: play,
+        // skip and volume have to go on working, and go on obeying [keys].
+        let app = connected_app();
+        for (code, expected) in [
+            (KeyCode::Char(' '), Action::PlayPause),
+            (KeyCode::Char('n'), Action::NextTrack),
+            (KeyCode::Char('+'), Action::VolumeUp),
+            (KeyCode::Char('?'), Action::ToggleHelp),
+        ] {
+            assert_eq!(
+                app.keymap.action(key_event(code), InputMode::Now),
+                Some(expected.clone()),
+                "{code:?} should still work in the full-screen view"
+            );
+        }
+        // And the ones it did claim mean something else here than outside.
         assert_eq!(
-            track_facts(&TrackMetadata {
-                musical_key: Some("A minor".into()),
-                ..Default::default()
-            }),
-            "8A (A minor)"
+            app.keymap.action(key_event(KeyCode::Right), InputMode::Normal),
+            Some(Action::Activate)
         );
-        // An unparseable tag is shown as written rather than dropped.
-        assert_eq!(
-            track_facts(&TrackMetadata {
-                musical_key: Some("wonky".into()),
-                ..Default::default()
-            }),
-            "wonky"
-        );
+    }
+
+    #[test]
+    fn the_auto_dj_tab_reports_without_offering_to_change_anything() {
+        let mut app = connected_app();
+        app.now_playing = Some(tagged_track());
+        app.handle_action(Action::ToggleNowPlaying);
+        app.autodj = AutoDjMode::BpmKey;
+        app.now_tab = NowTab::AutoDj;
+
+        let text = draw(&mut app);
+        assert!(text.contains("Mode") && text.contains("tempo+key"), "{text}");
+        assert!(text.contains("Tempo") && text.contains("BPM"), "{text}");
+        assert!(text.contains("D opens the panel"), "one place to change it: {text}");
+    }
+
+    fn key_event(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn the_strip_gives_up_its_names_before_it_truncates_one() {
+        let mut app = connected_app();
+        let mut track = tagged_track();
+        track.metadata.has_lyrics = true;
+        app.now_playing = Some(track);
+        app.handle_action(Action::ToggleNowPlaying);
+
+        // Wide enough: every tab is named.
+        let wide = draw_sized(&mut app, 100, 16);
+        assert!(wide.contains("Queue  Lyrics  Discover  Auto-DJ  Visualizer"), "{wide}");
+
+        // Not wide enough: the one you are on, and arrows for the rest. A tab
+        // chopped to "Vis" reads as a bug; this reads as a choice.
+        let narrow = draw_sized(&mut app, 64, 16);
+        assert!(narrow.contains("‹ Queue ›"), "{narrow}");
+        assert!(!narrow.contains("Discover"), "{narrow}");
+    }
+
+    #[test]
+    fn an_unreadable_key_is_shown_as_written_rather_than_dropped() {
+        let mut app = connected_app();
+        app.now_playing = Some(Track {
+            filepath: "lib/a.mp3".into(),
+            metadata: TrackMetadata { musical_key: Some("wonky".into()), ..Default::default() },
+        });
+        assert!(card_text(&app).contains("wonky"));
     }
 
     #[test]
@@ -1731,7 +2063,7 @@ mod tests {
         app.handle_action(Action::ToggleNowPlaying);
         let text = draw(&mut app);
         assert!(text.contains("nothing playing"), "{text}");
-        assert!(text.contains("press 0 to go back"), "{text}");
+        assert!(text.contains("0 goes back to the browser"), "{text}");
     }
 
     #[test]

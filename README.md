@@ -48,7 +48,7 @@ window.
 | `1` … `5` | Files / Library / Playlists / Search / Discover · `/` search |
 | `0` | full-screen now playing |
 | `Space` | play or pause · `n` / `p` next / previous |
-| `i` | jump to whatever is playing |
+| `i` | jump to whatever is playing · `0` full-screen now playing |
 | `[` `]` | seek 5s · `{` `}` seek a minute · `-` `+` volume |
 | `d` / `C` | remove from queue / clear queue |
 | `r` / `s` | repeat / shuffle · `A` auto-dj · `D` auto-dj panel |
@@ -130,6 +130,44 @@ everywhere else — `Space`, `n`, the seek keys and the volume keys all keep
 working while you're looking at it, and `0` goes back. The key is the same
 Camelot code the Auto-DJ panel matches on, with the tag's own spelling beside
 it. Tags a track doesn't have are left out rather than shown empty.
+
+## Now Playing
+
+`0` gives the whole terminal to what's playing: the tags down the left as a
+labelled column, a full-width transport along the foot, and a tabbed panel on
+the right.
+
+```
+┌ Now Playing ────────────────────────────────────────────────────────────┐
+│                              │ Queue  Lyrics  Discover  Auto-DJ  Visual… │
+│ Rewind The Track             │ ──────────────────────────────────────────│
+│ Bassnectar                   │ ▶ Bassnectar - Rewind The Track      3:29 │
+│                              │   Bassnectar - Mic Check             4:02 │
+│ Album   Divergent Spectrum   │   Bassnectar - Elastic               3:02 │
+│ Year    2011                 │                                           │
+│ Tempo   174 BPM              │                                           │
+│ Key     8A  A minor          │                                           │
+│──────────────────────────────┴───────────────────────────────────────────│
+│████████████████████▍               1:11 / 3:29                           │
+│←→ tab   ↑↓ list   Enter play   d remove   0 back        vol 100%  dj sim… │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+`←` `→` move between tabs, `↑` `↓` move within one. It's a view rather than a
+dialog, so everything else keeps working — `Space`, `n`, `p`, seeking and
+volume all behave as they do outside, including wherever `[keys]` moved them.
+`Esc` or `0` leaves.
+
+**Queue** shares the browser screen's selection, so `Enter` plays and `d`
+removes the row under the cursor either way. **Auto-DJ** reports what it is set
+to without offering to change it — `D` stays the one place that happens.
+**Lyrics** appears only for a track the server has words for, so the strip
+changes shape as the queue moves. **Discover** needs the server's index. Where
+the strip won't fit, it shows the tab you're on between arrows rather than
+truncating the last name.
+
+Lyrics, Discover and the visualizer are stubs for now; the layout is what's
+real.
 
 ## Auto-DJ
 

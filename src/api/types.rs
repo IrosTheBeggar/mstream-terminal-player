@@ -136,6 +136,13 @@ pub struct TrackMetadata {
     pub musical_key: Option<String>,
     #[serde(rename = "play-count")]
     pub play_count: Option<u64>,
+    /// Whether the server holds words for this track, and whether they carry
+    /// timings. Cheap to read off a listing, and it saves offering a lyrics
+    /// view for a track that has none.
+    #[serde(rename = "has-lyrics")]
+    pub has_lyrics: bool,
+    #[serde(rename = "has-synced-lyrics")]
+    pub has_synced_lyrics: bool,
 }
 
 impl TrackMetadata {

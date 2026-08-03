@@ -119,6 +119,39 @@ pub enum InputMode {
     /// so a letter that means "previous track" outside it can mean something
     /// else inside without the two fighting.
     Panel,
+    /// The full-screen now-playing view. Unlike [`InputMode::Panel`] this is a
+    /// *view*, not a modal: it claims the arrows for its own tabs and falls
+    /// through to the normal bindings for everything else, so play/pause,
+    /// skip, seek and volume keep working — and keep obeying `[keys]`.
+    Now,
+}
+
+/// A tab in the full-screen now-playing view.
+///
+/// Deliberately not [`Tab`]: those are places to browse, these are things to
+/// watch while something plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowTab {
+    Queue,
+    Lyrics,
+    Discover,
+    AutoDj,
+    Visualizer,
+}
+
+pub const NOW_TABS: [NowTab; 5] =
+    [NowTab::Queue, NowTab::Lyrics, NowTab::Discover, NowTab::AutoDj, NowTab::Visualizer];
+
+impl NowTab {
+    pub fn title(self) -> &'static str {
+        match self {
+            NowTab::Queue => "Queue",
+            NowTab::Lyrics => "Lyrics",
+            NowTab::Discover => "Discover",
+            NowTab::AutoDj => "Auto-DJ",
+            NowTab::Visualizer => "Visualizer",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,6 +183,8 @@ pub enum Action {
     /// Put the cursor back on the track that's playing.
     JumpToPlaying,
     ToggleNowPlaying,
+    NowTabNext,
+    NowTabPrev,
     VolumeUp,
     VolumeDown,
     RemoveFromQueue,
@@ -611,6 +646,11 @@ pub struct App {
     /// wall clock rather than counted per draw, so it turns at one speed
     /// whether the app is idle or flooded — and stays still under test.
     pub spinner: usize,
+    pub now_tab: NowTab,
+    /// Cursor for whichever now-playing tab is not the queue. The Queue tab
+    /// keeps using the queue's own selection, so `d` there removes the row you
+    /// are looking at rather than one the other screen had highlighted.
+    pub now_scroll: usize,
 
     pub message: Option<Message>,
     pub show_help: bool,
@@ -666,6 +706,8 @@ impl App {
             audio_available: true,
             fullscreen: false,
             spinner: 0,
+            now_tab: NowTab::Queue,
+            now_scroll: 0,
             message: None,
             show_help: false,
             should_quit: false,
@@ -812,10 +854,48 @@ impl App {
         if !self.connected || self.editing_query {
             InputMode::Editing
         } else if self.dj_panel.is_some() || self.journey.is_some() {
+            // A modal drawn over the full-screen view still owns the keyboard.
             InputMode::Panel
+        } else if self.fullscreen {
+            InputMode::Now
         } else {
             InputMode::Normal
         }
+    }
+
+    /// The now-playing tabs this session can actually fill. Lyrics turns on
+    /// the track rather than the server, so the strip changes shape as the
+    /// queue moves — which is why nothing may assume its own tab still exists.
+    pub fn now_tabs(&self) -> Vec<NowTab> {
+        NOW_TABS.iter().copied().filter(|tab| self.now_tab_available(*tab)).collect()
+    }
+
+    fn now_tab_available(&self, tab: NowTab) -> bool {
+        match tab {
+            NowTab::Queue | NowTab::AutoDj | NowTab::Visualizer => true,
+            NowTab::Lyrics => {
+                self.now_playing.as_ref().is_some_and(|track| track.metadata.has_lyrics)
+            }
+            NowTab::Discover => self.capabilities.discovery,
+        }
+    }
+
+    /// The tab on screen. Falls back rather than trusting the stored one: the
+    /// track that was carrying the Lyrics tab can end while you are reading it.
+    pub fn now_tab(&self) -> NowTab {
+        if self.now_tab_available(self.now_tab) { self.now_tab } else { NowTab::Queue }
+    }
+
+    fn move_now_tab(&mut self, delta: isize) -> Vec<Effect> {
+        let tabs = self.now_tabs();
+        let current = self.now_tab();
+        let at = tabs.iter().position(|t| *t == current).unwrap_or(0) as isize;
+        // Wrap: five tabs and two keys, so walking off one end and coming back
+        // round beats making the user turn around.
+        let next = (at + delta).rem_euclid(tabs.len() as isize) as usize;
+        self.now_tab = tabs[next];
+        self.now_scroll = 0;
+        Vec::new()
     }
 
     pub fn pane(&self) -> &Pane {
@@ -1009,6 +1089,8 @@ impl App {
                 self.fullscreen = !self.fullscreen;
                 Vec::new()
             }
+            Action::NowTabNext => self.move_now_tab(1),
+            Action::NowTabPrev => self.move_now_tab(-1),
             Action::VolumeUp => self.change_volume(VOLUME_STEP),
             Action::VolumeDown => self.change_volume(-VOLUME_STEP),
 
@@ -1594,20 +1676,44 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) -> Vec<Effect> {
+        // The full-screen view owns the arrows while it is up, and what they
+        // move depends on which of its tabs is showing.
+        if self.fullscreen {
+            if self.now_tab() == NowTab::Queue {
+                return self.move_queue_selection(delta);
+            }
+            self.now_scroll = self.now_scroll.saturating_add_signed(delta);
+            return Vec::new();
+        }
         match self.focus {
             Focus::Browser => self.pane_mut().move_by(delta),
-            Focus::Queue => {
-                if !self.queue.items.is_empty() {
-                    let last = self.queue.items.len() as isize - 1;
-                    let current = self.queue.state.selected().unwrap_or(0) as isize;
-                    self.queue.state.select(Some((current + delta).clamp(0, last) as usize));
-                }
-            }
+            Focus::Queue => return self.move_queue_selection(delta),
+        }
+        Vec::new()
+    }
+
+    fn move_queue_selection(&mut self, delta: isize) -> Vec<Effect> {
+        if !self.queue.items.is_empty() {
+            let last = self.queue.items.len() as isize - 1;
+            let current = self.queue.state.selected().unwrap_or(0) as isize;
+            self.queue.state.select(Some((current + delta).clamp(0, last) as usize));
         }
         Vec::new()
     }
 
     fn activate(&mut self) -> Vec<Effect> {
+        // In the full-screen view there is no browser on screen to open into,
+        // so Enter means the one thing it can mean: play what is highlighted.
+        if self.fullscreen {
+            if self.now_tab() != NowTab::Queue {
+                return Vec::new();
+            }
+            return match self.queue.state.selected() {
+                Some(index) => self.play_index(index),
+                None => Vec::new(),
+            };
+        }
+
         if self.focus == Focus::Queue {
             let Some(index) = self.queue.state.selected() else {
                 return Vec::new();
@@ -1869,7 +1975,11 @@ impl App {
     }
 
     fn remove_from_queue(&mut self) -> Vec<Effect> {
-        if self.focus != Focus::Queue {
+        // The Queue tab of the full-screen view is the queue, whatever the
+        // hidden browser screen happens to have focused.
+        let on_the_queue =
+            if self.fullscreen { self.now_tab() == NowTab::Queue } else { self.focus == Focus::Queue };
+        if !on_the_queue {
             return Vec::new();
         }
         let Some(index) = self.queue.state.selected() else {
@@ -2610,12 +2720,17 @@ impl Action {
             Action::StartJourney => "sonic-journey",
             Action::ToggleHelp => "help",
             Action::Quit => "quit",
-            // Text entry and panel plumbing; nothing to point a key at.
+            // Text entry, and the keys the overlays claim for themselves.
+            // Those tables aren't rebindable — the panel and the full-screen
+            // view both draw their own hints, so the keys are on screen where
+            // they apply rather than in the config file.
             Action::SelectTab(_)
             | Action::Input(_)
             | Action::Backspace
             | Action::Submit
-            | Action::Cancel => return None,
+            | Action::Cancel
+            | Action::NowTabNext
+            | Action::NowTabPrev => return None,
         })
     }
 
@@ -2773,17 +2888,38 @@ fn default_panel() -> Vec<Binding> {
     ]
 }
 
+/// What the full-screen view claims for itself. Everything absent from here
+/// falls through to the normal bindings, which is the point: this list is only
+/// the keys that mean something different once the browser is off screen.
+fn default_now() -> Vec<Binding> {
+    vec![
+    Binding {
+        keys: vec![key(KeyCode::Right), ch('l'), key(KeyCode::Tab)],
+        action: Action::NowTabNext,
+        help: None,
+    },
+    Binding { keys: vec![key(KeyCode::Left), ch('h')], action: Action::NowTabPrev, help: None },
+    // Esc leaves, because a screen filling the terminal should close the way
+    // every other full-screen thing does. `0` still toggles.
+    Binding { keys: vec![key(KeyCode::Esc)], action: Action::ToggleNowPlaying, help: None },
+    ]
+}
+
 /// The bindings in force: the defaults, with whatever `[keys]` in config.toml
 /// had to say about them.
 #[derive(Debug, Clone)]
 pub struct Keymap {
     normal: Vec<Binding>,
     panel: Vec<Binding>,
+    /// Claimed by the full-screen view, which then falls through to `normal`.
+    /// Only the keys whose meaning actually changes go here; everything else
+    /// keeps working there, including whatever `[keys]` moved it to.
+    now: Vec<Binding>,
 }
 
 impl Default for Keymap {
     fn default() -> Self {
-        Keymap { normal: default_normal(), panel: default_panel() }
+        Keymap { normal: default_normal(), panel: default_panel(), now: default_now() }
     }
 }
 
@@ -2883,6 +3019,15 @@ impl Keymap {
                 KeyCode::Up => Some(Action::Up),
                 _ => None,
             };
+        }
+
+        // The full-screen view is a view, not a modal: it takes the handful of
+        // keys whose meaning changes there and lets the rest through, so
+        // pause, skip and seek go on working and go on obeying `[keys]`.
+        if mode == InputMode::Now {
+            if let Some(binding) = self.now.iter().find(|b| b.keys.contains(&pressed)) {
+                return Some(binding.action.clone());
+            }
         }
 
         let table = if mode == InputMode::Panel { &self.panel } else { &self.normal };
