@@ -14,7 +14,7 @@ use crate::cmd_library::fmt_duration;
 
 use super::app::{
     App, CONNECT_METHODS, ConnectStage, DjRow, Entry, Focus, MessageKind, NowTab, Queue, Repeat,
-    Tab,
+    SearchNode, Tab,
 };
 use super::worker::{AutoDjMode, DiscoverNode, LibraryNode};
 use crate::api::types::Track;
@@ -586,10 +586,18 @@ pub(crate) fn browser_title(app: &App) -> String {
         },
         Tab::Search => {
             let query = if app.query.is_empty() { "…" } else { &app.query };
-            match (&app.search_summary, app.editing_query) {
-                (_, true) => format!(" Search: {query}▏"),
-                (Some(summary), _) => format!(" Search: {query} — {summary} "),
-                (None, _) => format!(" Search: {query} "),
+            if app.editing_query {
+                return format!(" Search: {query}▏");
+            }
+            match app.search_node() {
+                SearchNode::Root => match &app.search_summary {
+                    Some(summary) => format!(" Search: {query} — {summary} "),
+                    None => format!(" Search: {query} "),
+                },
+                SearchNode::Class(class) => format!(" {} ", class.title()),
+                SearchNode::Library(LibraryNode::Artist(artist)) => format!(" Artist: {artist} "),
+                SearchNode::Library(LibraryNode::Album { name, .. }) => format!(" Album: {name} "),
+                SearchNode::Library(_) => format!(" Search: {query} "),
             }
         }
         // Every Discover view hangs off one track, so every title names it —
@@ -637,6 +645,18 @@ fn entry_line(entry: &Entry, width: usize, playing: Option<&str>) -> Line<'stati
             Line::from(Span::styled(label.clone(), Style::new().fg(folder())))
         }
         Entry::Playlist { name } => Line::from(format!("♪ {name}")),
+        // The count is flushed right, the same column the durations make, so
+        // the menu reads down the numbers.
+        Entry::Search { label, detail, .. } => {
+            let count_width = width_of(detail);
+            let name = fit(label, width.saturating_sub(count_width + 1));
+            let gap = width.saturating_sub(width_of(&name) + count_width).max(1);
+            Line::from(vec![
+                Span::styled(name, Style::new().fg(folder())),
+                Span::raw(" ".repeat(gap)),
+                Span::styled(detail.clone(), Style::new().fg(dim())),
+            ])
+        }
         Entry::Discover { label, detail, .. } => Line::from(vec![
             Span::styled(label.clone(), Style::new().fg(folder())),
             Span::styled(format!("   {detail}"), Style::new().fg(dim())),
@@ -2921,7 +2941,37 @@ mod tests {
 
         app.handle_action(Action::Submit);
         app.apply_event(Event::SearchResults(Box::new(Default::default())));
-        assert!(draw(&mut app).contains("0 tracks"));
+        assert!(draw(&mut app).contains("0 matches"));
+    }
+
+    #[test]
+    fn the_search_menu_says_what_matched_and_how_many() {
+        use crate::api::types::{SearchGroup, SearchResults, SearchTrack};
+        let mut app = connected_app();
+        app.handle_action(Action::SelectTab(3));
+        let hit = |name: &str| SearchTrack {
+            name: name.into(),
+            filepath: format!("lib/{name}.mp3"),
+            album_art_file: None,
+            metadata: TrackMetadata::default(),
+        };
+        app.apply_event(Event::SearchResults(Box::new(SearchResults {
+            artists: vec![
+                SearchGroup { name: "Moon Hooch".into(), album_art_file: None },
+                SearchGroup { name: "Moondog".into(), album_art_file: None },
+            ],
+            albums: vec![],
+            title: vec![hit("Moonlight")],
+            files: vec![],
+            lyrics: vec![hit("Harvest")],
+        })));
+
+        let text = draw(&mut app);
+        assert!(text.contains("Artists"), "{text}");
+        assert!(text.contains("Lyrics"), "{text}");
+        assert!(!text.contains("Albums"), "a class with no hits is not a row: {text}");
+        // Counts flush right, the column the durations make elsewhere.
+        assert!(text.lines().any(|row| row.contains("Artists") && row.trim_end().ends_with('2')));
     }
 
     #[test]

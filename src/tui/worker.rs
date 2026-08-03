@@ -63,6 +63,11 @@ pub enum ApiCmd {
     Playlists,
     LoadPlaylist(String),
     Search(String),
+    /// Open an artist or album that a search turned up. The same request the
+    /// Library tab makes, under its own name so the reply can be told apart:
+    /// one event with two possible destinations is how a slow reply ends up
+    /// in the wrong column.
+    SearchDrill(LibraryNode),
     Shutdown,
 }
 
@@ -242,6 +247,8 @@ pub enum Event {
     Journey { stops: Vec<JourneyStop>, note: Option<String> },
     /// A Discover view's contents, tagged with the node they belong to.
     Discover { node: DiscoverNode, data: DiscoverData, note: Option<String> },
+    /// Contents of an artist or album reached from the search results.
+    SearchDrill { node: LibraryNode, data: LibraryData },
     Playlists(Vec<PlaylistSummary>),
     PlaylistTracks { name: String, tracks: Vec<Track> },
     SearchResults(Box<SearchResults>),
@@ -427,6 +434,9 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 c.file_explorer(&path).map(|l| Event::Listing(Box::new(l)))
             }),
 
+            ApiCmd::SearchDrill(node) => with_client(client.as_ref(), |c| {
+                load_library(c, &node).map(|data| Event::SearchDrill { node: node.clone(), data })
+            }),
             ApiCmd::Library(node) => with_client(client.as_ref(), |c| {
                 load_library(c, &node).map(|data| Event::Library { node: node.clone(), data })
             }),

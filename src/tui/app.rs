@@ -210,10 +210,55 @@ pub enum Entry {
     /// A step deeper into the tag-based library (an artist, album, genre…).
     Node { label: String, node: LibraryNode },
     Playlist { name: String },
+    /// A row in the search-class menu: what it matched on, and how many.
+    Search { label: String, detail: String, node: SearchNode },
     /// A step deeper into Discover. `detail` is the dim right-hand column —
     /// how close, how much the guess rests on, what it sounds like.
     Discover { label: String, detail: String, node: DiscoverNode },
     Track { label: String, track: Box<Track> },
+}
+
+/// Which of the five things a search matched on. The server answers all of
+/// them at once and they mean different things -- a title hit and a lyrics hit
+/// are not the same discovery -- so they get to stay separate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchClass {
+    Artists,
+    Albums,
+    Titles,
+    Files,
+    Lyrics,
+}
+
+pub const SEARCH_CLASSES: [SearchClass; 5] = [
+    SearchClass::Artists,
+    SearchClass::Albums,
+    SearchClass::Titles,
+    SearchClass::Files,
+    SearchClass::Lyrics,
+];
+
+impl SearchClass {
+    pub fn title(self) -> &'static str {
+        match self {
+            SearchClass::Artists => "Artists",
+            SearchClass::Albums => "Albums",
+            SearchClass::Titles => "Titles",
+            SearchClass::Files => "Filenames",
+            SearchClass::Lyrics => "Lyrics",
+        }
+    }
+}
+
+/// A position in the search results, the same shape the Library tab uses.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SearchNode {
+    /// The list of classes, with how many each matched.
+    Root,
+    Class(SearchClass),
+    /// An artist or album hit, opened. Carries a [`LibraryNode`] because that
+    /// is exactly what it is -- the same place, reached from somewhere else.
+    Library(LibraryNode),
 }
 
 /// A column to the left of the one you are in: a listing you came through,
@@ -611,6 +656,10 @@ pub struct App {
     /// The columns to the left of the current one, innermost last. Pushed as
     /// you go in, popped as you come out; cleared when the tab changes.
     pub trail: Vec<Trail>,
+    /// The whole search reply, kept rather than flattened. Every class comes
+    /// back in one response, so moving between them costs nothing.
+    pub search_hits: Option<Box<crate::api::types::SearchResults>>,
+    pub search_stack: Vec<SearchNode>,
     /// Whether the queue is showing as the last column. It is the end of the
     /// same chain -- artist, album, track, queued -- so it reads better as one
     /// more column than as a separate pane that is always there.
@@ -701,6 +750,8 @@ impl App {
             library: Pane::default(),
             library_stack: Vec::new(),
             trail: Vec::new(),
+            search_hits: None,
+            search_stack: Vec::new(),
             queue_column: false,
             playlists: Pane::default(),
             playlist_open: None,
@@ -978,6 +1029,12 @@ impl App {
         for pane in panes {
             pane.loading = false;
         }
+    }
+
+    /// Where the Search tab is: the class menu, one class, or something
+    /// opened out of it.
+    pub fn search_node(&self) -> &SearchNode {
+        self.search_stack.last().unwrap_or(&SearchNode::Root)
     }
 
     /// The library view currently on screen.
@@ -1658,6 +1715,8 @@ impl App {
                     return Some(Vec::new());
                 }
                 self.info(format!("searching for {query:?}…"));
+                self.search_stack.clear();
+                self.trail.clear();
                 Some(vec![Effect::Api(ApiCmd::Search(query))])
             }
             _ => None,
@@ -1760,12 +1819,35 @@ impl App {
                 self.path = path.clone();
                 vec![Effect::Api(ApiCmd::Browse(path))]
             }
+            Entry::Node { node, label } if self.tab == Tab::Search => {
+                self.push_trail();
+                self.search_stack.push(SearchNode::Library(node.clone()));
+                self.search.set(Vec::new());
+                self.info(format!("loading {label}…"));
+                vec![Effect::Api(ApiCmd::SearchDrill(node))]
+            }
             Entry::Node { node, label } => {
                 self.push_trail();
                 self.library_stack.push(node.clone());
                 self.library.set(Vec::new());
                 self.info(format!("loading {label}…"));
                 vec![Effect::Api(ApiCmd::Library(node))]
+            }
+            Entry::Search { node, label, .. } => {
+                self.push_trail();
+                self.search_stack.push(node.clone());
+                match node {
+                    // Every class is already in hand -- no request.
+                    SearchNode::Class(_) | SearchNode::Root => {
+                        self.search.set(self.search_class_entries());
+                        Vec::new()
+                    }
+                    SearchNode::Library(node) => {
+                        self.search.set(Vec::new());
+                        self.info(format!("loading {label}…"));
+                        vec![Effect::Api(ApiCmd::SearchDrill(node))]
+                    }
+                }
             }
             Entry::Discover { node, label, .. } => {
                 self.push_trail();
@@ -1816,6 +1898,26 @@ impl App {
                 };
                 self.path = parent.clone();
                 vec![Effect::Api(ApiCmd::Browse(parent))]
+            }
+            Tab::Search => {
+                if self.search_stack.len() <= 1 {
+                    return Vec::new(); // already at the class menu
+                }
+                self.search_stack.pop();
+                match self.search_node().clone() {
+                    SearchNode::Root => {
+                        self.search.set(self.search_root_entries());
+                        Vec::new()
+                    }
+                    SearchNode::Class(_) => {
+                        self.search.set(self.search_class_entries());
+                        Vec::new()
+                    }
+                    SearchNode::Library(node) => {
+                        self.search.set(Vec::new());
+                        vec![Effect::Api(ApiCmd::SearchDrill(node))]
+                    }
+                }
             }
             Tab::Library => {
                 if self.library_stack.len() <= 1 {
@@ -2399,33 +2501,29 @@ impl App {
                 Vec::new()
             }
             Event::SearchResults(results) => {
-                let group_hits = results.artists.len() + results.albums.len();
-                let mut tracks: Vec<Track> = Vec::new();
-                let mut seen = std::collections::HashSet::new();
-                for hit in results
-                    .title
-                    .iter()
-                    .chain(results.files.iter())
-                    .chain(results.lyrics.iter())
-                {
-                    if seen.insert(hit.filepath.clone()) {
-                        tracks.push(Track {
-                            filepath: hit.filepath.clone(),
-                            metadata: hit.metadata.clone(),
-                        });
-                    }
-                }
-                self.search_summary = Some(if group_hits > 0 {
-                    format!("{} tracks, {group_hits} artist/album matches", tracks.len())
-                } else {
-                    format!("{} tracks", tracks.len())
+                // Kept whole. Flattening the three track classes into one list
+                // and counting the other two into a sentence was throwing the
+                // artist and album hits away entirely -- the server found
+                // them, we said how many, and no key reached them.
+                let total: usize = search_counts(&results).iter().sum();
+                self.search_summary = Some(match total {
+                    1 => "1 match".to_string(),
+                    n => format!("{n} matches"),
                 });
-                self.search.set(
-                    tracks
-                        .into_iter()
-                        .map(|t| Entry::Track { label: t.display_name(), track: Box::new(t) })
-                        .collect(),
-                );
+                self.search_hits = Some(results);
+                self.search_stack = vec![SearchNode::Root];
+                self.trail.clear();
+                self.search.set(self.search_root_entries());
+                self.message = None;
+                Vec::new()
+            }
+            Event::SearchDrill { node, data } => {
+                // Drop a reply for a view already left, the same rule the
+                // Library and Discover tabs follow.
+                if self.search_node() != &SearchNode::Library(node) {
+                    return Vec::new();
+                }
+                self.search.set(entries_from_library(data));
                 self.message = None;
                 Vec::new()
             }
@@ -2501,6 +2599,73 @@ fn genre_label(genre: &Genre) -> String {
 
 /// Rows for a loaded library view. Every one of these sits below the mode
 /// menu, so they all get a ".." to climb back out.
+/// How many hits each class holds, in menu order.
+fn search_counts(results: &crate::api::types::SearchResults) -> [usize; 5] {
+    [
+        results.artists.len(),
+        results.albums.len(),
+        results.title.len(),
+        results.files.len(),
+        results.lyrics.len(),
+    ]
+}
+
+impl App {
+    /// The class menu: what matched, and how many. Classes that matched
+    /// nothing are left out -- a row saying zero is a row you have to read to
+    /// learn it was not worth reading.
+    fn search_root_entries(&self) -> Vec<Entry> {
+        let Some(hits) = &self.search_hits else {
+            return Vec::new();
+        };
+        let counts = search_counts(hits);
+        SEARCH_CLASSES
+            .iter()
+            .zip(counts)
+            .filter(|(_, n)| *n > 0)
+            .map(|(class, n)| Entry::Search {
+                label: class.title().to_string(),
+                detail: n.to_string(),
+                node: SearchNode::Class(*class),
+            })
+            .collect()
+    }
+
+    /// The hits inside whichever class is open. Artists and albums become the
+    /// same nodes the Library tab drills, because that is what they are.
+    fn search_class_entries(&self) -> Vec<Entry> {
+        let (Some(hits), SearchNode::Class(class)) = (&self.search_hits, self.search_node())
+        else {
+            return Vec::new();
+        };
+        let track_rows = |rows: &[crate::api::types::SearchTrack]| {
+            rows.iter()
+                .map(|hit| {
+                    let track =
+                        Track { filepath: hit.filepath.clone(), metadata: hit.metadata.clone() };
+                    Entry::Track { label: track.display_name(), track: Box::new(track) }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut entries = vec![Entry::Parent];
+        match class {
+            SearchClass::Artists => entries.extend(hits.artists.iter().map(|group| Entry::Node {
+                label: group.name.clone(),
+                node: LibraryNode::Artist(group.name.clone()),
+            })),
+            SearchClass::Albums => entries.extend(hits.albums.iter().map(|group| Entry::Node {
+                label: group.name.clone(),
+                node: LibraryNode::Album { name: group.name.clone(), artist: None },
+            })),
+            SearchClass::Titles => entries.extend(track_rows(&hits.title)),
+            SearchClass::Files => entries.extend(track_rows(&hits.files)),
+            SearchClass::Lyrics => entries.extend(track_rows(&hits.lyrics)),
+        }
+        entries
+    }
+}
+
 fn entries_from_library(data: LibraryData) -> Vec<Entry> {
     let mut entries = vec![Entry::Parent];
     match data {
@@ -3372,26 +3537,59 @@ mod tests {
     }
 
     #[test]
-    fn search_results_dedupe_across_categories() {
-        use crate::api::types::SearchTrack;
+    fn every_class_a_search_matched_is_reachable() {
+        use crate::api::types::{SearchGroup, SearchTrack};
         let mut app = connected_app();
+        app.handle_action(Action::SelectTab(3));
         let hit = |p: &str| SearchTrack {
             name: p.to_string(),
             filepath: p.to_string(),
             album_art_file: None,
             metadata: TrackMetadata::default(),
         };
-        let results = SearchResults {
-            artists: vec![Default::default()],
+        app.apply_event(Event::SearchResults(Box::new(SearchResults {
+            artists: vec![SearchGroup { name: "Moon Hooch".into(), album_art_file: None }],
             albums: vec![],
             title: vec![hit("lib/a.mp3")],
             files: vec![hit("lib/a.mp3"), hit("lib/b.mp3")],
             lyrics: vec![],
-        };
-        app.apply_event(Event::SearchResults(Box::new(results)));
+        })));
 
-        assert_eq!(app.search.entries.len(), 2, "the same track is listed once");
-        assert_eq!(app.search_summary.as_deref(), Some("2 tracks, 1 artist/album matches"));
+        // The artist hit used to be counted into a sentence and thrown away.
+        // Classes that matched nothing stay out of the menu.
+        let menu: Vec<&str> = app
+            .search
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Search { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(menu, vec!["Artists", "Titles", "Filenames"]);
+        assert_eq!(app.search_summary.as_deref(), Some("4 matches"));
+
+        // Opening a class needs no request -- the whole reply is in hand.
+        assert!(app.handle_action(Action::Activate).is_empty(), "no request to open a class");
+        assert_eq!(app.search_node(), &SearchNode::Class(SearchClass::Artists));
+
+        // And the artist opens the same place the Library tab would, under a
+        // command of its own so the reply cannot land in the wrong column.
+        let effects = app.handle_action(Action::Activate);
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCmd::SearchDrill(LibraryNode::Artist("Moon Hooch".into())))]
+        );
+
+        // A track that matched on two classes is listed under both, which is
+        // the point: it says the match was found two ways.
+        app.handle_action(Action::Back);
+        app.handle_action(Action::Back);
+        app.handle_action(Action::Down);
+        app.handle_action(Action::Down);
+        app.handle_action(Action::Activate);
+        assert_eq!(app.search_node(), &SearchNode::Class(SearchClass::Files));
+        assert_eq!(app.search.entries.len(), 3, "'..' plus both filename hits");
     }
 
     #[test]
