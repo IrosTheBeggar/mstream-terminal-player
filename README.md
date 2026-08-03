@@ -37,6 +37,7 @@ track queues everything visible and starts there; `a` queues just that one.
 | `[` `]` | seek 5s · `-` `+` volume |
 | `d` / `C` | remove from queue / clear queue |
 | `r` / `s` | repeat / shuffle · `A` auto-dj · `D` auto-dj panel |
+| `J` | sonic journey to the highlighted track |
 | `?` | help · `q` quit |
 
 ## Library commands
@@ -96,7 +97,35 @@ inside it, but it never widens. If nothing is similar enough the player says
 so and loosens for that one pick rather than quietly playing something else.
 Rows that need the server's embedding index only appear where it exists.
 
-To see what it would pick without launching the player:
+## Sonic Journey
+
+Highlight a track and press `J`: the player plots a route to it from whatever
+is playing, through tracks that sit between the two in the server's embedding
+space. With nothing playing it takes two presses — one to mark where to set
+off from, one to say where to end up.
+
+```
+┌ Sonic Journey ──────────────────────────────────┐
+│  From    Boukmanflow - Bout2skate               │
+│  To      Boukmanflow - The Hangout              │
+│  Stops   14   ←→ to change                      │
+│                                                 │
+│   1.   0%  Boukmanflow - Bout2skate             │
+│   2.   8%  Boukmanflow - NewRapCity             │
+│   …                                             │
+│   7.  46%  ALM - Goodbye 78                     │
+│   …                                             │
+│  14. 100%  Boukmanflow - The Hangout            │
+└─────────────────────────────────────────────────┘
+```
+
+The percentage is how far along the arc each stop sits. Changing the length
+re-plots rather than trimming — a shorter journey passes through different
+places. `Enter` makes it the queue and starts it; `Esc` walks away.
+
+Needs the server's discovery index; without it the key says so instead.
+
+To see what Auto-DJ would pick without launching the player:
 
 ```
 mstream-player dj "music/Artist/Album/01.flac" --mode similar

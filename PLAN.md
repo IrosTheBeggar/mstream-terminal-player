@@ -350,13 +350,28 @@ a pick confined to 37 sonically-close tracks was being described as "picking at 
 **Deferred:** `artists` (similar-artist scope) needs a Last.fm proxy that isn't built; the
 waterfall's step 1–5 branch stays unused until then.
 
-#### B2 — Sonic Journey
-`POST /api/v1/discovery/local/path` with `{startFilePath, endFilePath, length}` (4–32, default 14)
-returns waypoints along the great-circle arc between two tracks' embeddings, each carrying `t`
-(0→1 arc position). `length` counts **total rows including both seeds**, so the result is the
-queue. UI: pick a start (usually what's playing) and an end, choose a length, preview the arc,
-queue it. Handle `notAnalyzed` as the **per-end object** `{start, end}` it is, so the message can
-name which end is still waiting, and the same-audio short circuit that returns just two rows.
+#### B2 — Sonic Journey ✅ DONE 2026-08-02
+
+`J` on a highlighted track plots a route to it from whatever is playing — `POST
+/api/v1/discovery/local/path`, waypoints along the great-circle arc between the two embeddings.
+With nothing playing it takes two presses: one to mark where to set off from, one to say where to
+end up. The panel lists each stop with its arc position, `←→` changes the length (4–32), `Enter`
+makes it the queue and starts it, `Esc` walks away.
+
+- **Length is a replot, not a trim.** `length` counts total rows including both seeds, so the arc
+  is *resampled* when it changes — verified live: at 14 stops the waypoints sit 0.091 apart, at 10
+  they sit 0.111 apart and the same tracks come back with different similarities.
+- **Three non-failures, each with its own sentence,** decided by a pure `journey_note`: an
+  unanalysed end (per-end, so the message names *which* one is waiting), two seeds that are the
+  same recording (the route short-circuits to just the ends), and an arc that came up short
+  because waypoints snap to *visible* tracks and a small library runs out.
+- Gated on `discoveryPath` from B0 — mStream's own comment says that flag's real payload is
+  "this server version has the route".
+
+Verified live against demo.mstream.io: a 14-stop journey ran from one track to another through
+evenly-spaced waypoints, drifting through a second artist mid-arc and arriving where asked;
+shortening it twice replotted each time; queueing replaced the queue with the 10 stops and
+started playing. The same-track short circuit was hit by accident first and reported correctly.
 
 #### B3 — Discovery browsing
 - Local: similar tracks, and similar artists with their `entryPoints` (up to 2 playable doorways

@@ -306,6 +306,29 @@ impl Client {
         }
     }
 
+    /// A journey from one track to another through the embedding space.
+    ///
+    /// `length` counts the total rows including both seeds, so the answer is
+    /// the queue. Like [`Client::similar_tracks`], `None` means the server has
+    /// discovery switched off rather than that anything went wrong.
+    pub fn journey(
+        &self,
+        start: &str,
+        end: &str,
+        length: u32,
+    ) -> Result<Option<JourneyResponse>, ApiError> {
+        let body = serde_json::json!({
+            "startFilePath": start,
+            "endFilePath": end,
+            "length": length.clamp(JOURNEY_MIN_LENGTH, JOURNEY_MAX_LENGTH),
+        });
+        match self.post("api/v1/discovery/local/path", body) {
+            Ok(response) => Ok(Some(response)),
+            Err(ApiError::Forbidden(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn genres(&self) -> Result<Vec<Genre>, ApiError> {
         let r: GenresResponse = self.get("api/v1/db/genres")?;
         Ok(r.genres)

@@ -133,6 +133,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.dj_panel.is_some() {
         render_dj_panel(frame, area, app);
     }
+    if app.journey.is_some() {
+        render_journey(frame, area, app);
+    }
     if app.show_help {
         render_help(frame, area);
     }
@@ -639,6 +642,73 @@ fn render_connecting(frame: &mut Frame, area: Rect, app: &App) {
     render_centered_block(frame, area, lines);
 }
 
+/// A Sonic Journey: the arc from one track to another, ready to become the
+/// queue.
+fn render_journey(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(journey) = app.journey.as_ref() else { return };
+    let dim = Style::new().fg(DIM);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("  From    ", dim),
+            Span::raw(journey.from.display_name()),
+        ]),
+        Line::from(vec![
+            Span::styled("  To      ", dim),
+            Span::raw(journey.to.display_name()),
+        ]),
+        Line::from(vec![
+            Span::styled("  Stops   ", dim),
+            Span::raw(journey.length.to_string()),
+            Span::styled("   ←→ to change", dim),
+        ]),
+        Line::raw(""),
+    ];
+
+    if journey.pending {
+        lines.push(Line::from(Span::styled("  plotting the route…", dim)));
+    } else if journey.stops.is_empty() {
+        lines.push(Line::from(Span::styled("  no route between these two", dim)));
+    } else {
+        // Leave room for the three header lines, the hint, and the borders.
+        let visible = (area.height as usize).saturating_sub(10).max(3);
+        let shown = journey.stops.iter().enumerate().skip(journey.offset).take(visible);
+        for (index, stop) in shown {
+            let position = format!("{:>3.0}%", stop.t * 100.0);
+            // The ends are the tracks that were chosen; everything between is
+            // the server's pick for that point on the arc.
+            let is_end = index == 0 || index + 1 == journey.stops.len();
+            let style = if is_end { Style::new().fg(ACCENT) } else { Style::new() };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:>2}. ", index + 1), dim),
+                Span::styled(position, dim),
+                Span::styled(format!("  {}", stop.metadata_display()), style),
+            ]));
+        }
+        let remaining = journey.stops.len().saturating_sub(journey.offset + visible);
+        if remaining > 0 {
+            lines.push(Line::from(Span::styled(format!("      … {remaining} more"), dim)));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  ↑↓ scroll · ←→ stops · Enter queue it · Esc cancel",
+        dim,
+    )));
+
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let box_area = centered_rect(70, height, area);
+    frame.render_widget(Clear, box_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(ACCENT))
+        .title(" Sonic Journey ");
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 /// The Auto-DJ panel: what the picker is being told to do, and what that
 /// actually produces.
 fn render_dj_panel(frame: &mut Frame, area: Rect, app: &App) {
@@ -884,6 +954,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         ("r / s", "repeat / shuffle"),
         ("A", "auto-dj: off / similar / tempo+key"),
         ("D", "auto-dj settings"),
+        ("J", "sonic journey to the highlighted track"),
         ("? / Esc", "toggle this help"),
         ("q", "quit"),
     ];
@@ -1214,6 +1285,110 @@ mod tests {
         assert!(text.contains("Genre: Ambient"), "the title tracks the drill-down");
         assert!(text.contains("Drift"));
         assert!(text.contains("[1:35]"));
+    }
+
+    #[test]
+    fn a_journey_shows_the_arc_it_would_queue() {
+        let mut app = connected_app();
+        app.queue.replace(vec![Track {
+            filepath: "lib/start.mp3".into(),
+            metadata: TrackMetadata {
+                artist: Some("First".into()),
+                title: Some("Departure".into()),
+                ..Default::default()
+            },
+        }]);
+        app.play_index(0);
+        app.files.set(vec![crate::tui::app::Entry::Track {
+            label: "end".into(),
+            track: Box::new(Track {
+                filepath: "lib/end.mp3".into(),
+                metadata: TrackMetadata {
+                    artist: Some("Last".into()),
+                    title: Some("Arrival".into()),
+                    ..Default::default()
+                },
+            }),
+        }]);
+        app.files.state.select(Some(0));
+        app.handle_action(Action::StartJourney);
+
+        // While it's in flight the panel says so rather than looking empty.
+        let text = draw_sized(&mut app, 100, 30);
+        assert!(text.contains("Sonic Journey"));
+        assert!(text.contains("plotting the route"), "got:\n{text}");
+
+        app.apply_event(crate::tui::worker::Event::Journey {
+            stops: vec![
+                crate::api::types::JourneyStop {
+                    filepath: "lib/start.mp3".into(),
+                    t: 0.0,
+                    similarity: 1.0,
+                    metadata: TrackMetadata {
+                        artist: Some("First".into()),
+                        title: Some("Departure".into()),
+                        ..Default::default()
+                    },
+                },
+                crate::api::types::JourneyStop {
+                    filepath: "lib/mid.mp3".into(),
+                    t: 0.5,
+                    similarity: 0.8,
+                    metadata: TrackMetadata {
+                        artist: Some("Middle".into()),
+                        title: Some("Somewhere".into()),
+                        ..Default::default()
+                    },
+                },
+                crate::api::types::JourneyStop {
+                    filepath: "lib/end.mp3".into(),
+                    t: 1.0,
+                    similarity: 1.0,
+                    metadata: TrackMetadata {
+                        artist: Some("Last".into()),
+                        title: Some("Arrival".into()),
+                        ..Default::default()
+                    },
+                },
+            ],
+            note: None,
+        });
+
+        let text = draw_sized(&mut app, 100, 30);
+        assert!(text.contains("First - Departure"));
+        assert!(text.contains("Middle - Somewhere"));
+        assert!(text.contains("Last - Arrival"));
+        // The arc position is what makes it a journey rather than a playlist.
+        assert!(text.contains("0%") && text.contains("50%") && text.contains("100%"), "got:\n{text}");
+        assert!(text.contains("Enter queue it"));
+    }
+
+    #[test]
+    fn a_journey_survives_a_small_terminal() {
+        let mut app = connected_app();
+        app.queue.replace(vec![Track { filepath: "a".into(), metadata: Default::default() }]);
+        app.play_index(0);
+        app.files.set(vec![crate::tui::app::Entry::Track {
+            label: "b".into(),
+            track: Box::new(Track { filepath: "b".into(), metadata: Default::default() }),
+        }]);
+        app.files.state.select(Some(0));
+        app.handle_action(Action::StartJourney);
+        app.apply_event(crate::tui::worker::Event::Journey {
+            stops: (0..32)
+                .map(|i| crate::api::types::JourneyStop {
+                    filepath: format!("lib/{i}.mp3"),
+                    t: f64::from(i) / 31.0,
+                    similarity: 0.9,
+                    metadata: Default::default(),
+                })
+                .collect(),
+            note: None,
+        });
+        // A 32-stop arc in a short terminal must scroll, not overflow.
+        let text = draw_sized(&mut app, 60, 20);
+        assert!(text.contains("more"), "the rest is accounted for:\n{text}");
+        draw_sized(&mut app, 24, 9);
     }
 
     #[test]

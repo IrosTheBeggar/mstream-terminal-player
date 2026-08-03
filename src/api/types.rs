@@ -402,6 +402,75 @@ impl SimilarTrack {
     }
 }
 
+// ── Sonic Journey ───────────────────────────────────────────────────────────
+
+/// `POST /api/v1/discovery/local/path` — a walk along the great-circle arc
+/// between two tracks' embeddings, each waypoint snapped to a real track.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct JourneyResponse {
+    /// Which ends the discovery worker hasn't embedded yet. Per-end rather
+    /// than one flag, so a message can name the end that is still waiting.
+    #[serde(rename = "notAnalyzed")]
+    pub not_analyzed: NotAnalyzed,
+    /// Both seeds are included, so this *is* the queue. It can come up short
+    /// when the library runs out of visible tracks — short is an answer, not
+    /// an error.
+    pub results: Vec<JourneyStop>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct NotAnalyzed {
+    pub start: bool,
+    pub end: bool,
+}
+
+impl NotAnalyzed {
+    pub fn any(&self) -> bool {
+        self.start || self.end
+    }
+
+    /// Which end to name in a message, when one of them is holding things up.
+    pub fn which(&self) -> &'static str {
+        match (self.start, self.end) {
+            (true, true) => "neither end has",
+            (true, false) => "the starting track hasn't",
+            (false, true) => "the destination hasn't",
+            (false, false) => "both ends have",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct JourneyStop {
+    pub filepath: String,
+    /// Position along the arc: 0 at the start, 1 at the destination.
+    pub t: f64,
+    /// How close this track sits to the waypoint it stands in for.
+    pub similarity: f64,
+    #[serde(deserialize_with = "null_default")]
+    pub metadata: TrackMetadata,
+}
+
+impl JourneyStop {
+    pub fn to_track(&self) -> Track {
+        Track { filepath: self.filepath.clone(), metadata: self.metadata.clone() }
+    }
+
+    /// Artist and title where they exist, the filename otherwise — the same
+    /// rule [`Track::display_name`] follows.
+    pub fn metadata_display(&self) -> String {
+        self.to_track().display_name()
+    }
+}
+
+/// Bounds the server puts on the journey length, which counts both seeds.
+pub const JOURNEY_MIN_LENGTH: u32 = 4;
+pub const JOURNEY_MAX_LENGTH: u32 = 32;
+pub const JOURNEY_DEFAULT_LENGTH: u32 = 14;
+
 // ── Playlists ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Deserialize)]

@@ -14,7 +14,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::types::{
-    Album, Capabilities, DirListing, Genre, Ping, PlaylistSummary, SearchResults, Track,
+    Album, Capabilities, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults,
+    Track,
 };
 use crate::api::{ApiError, Client};
 use crate::discovery::DiscoveredServer;
@@ -55,6 +56,8 @@ pub enum ApiCmd {
     AutoDjSample { request: Box<DjRequest>, count: usize },
     /// Every genre in the library, for the Auto-DJ genre filter.
     Genres,
+    /// Walk from one track to another through the embedding space.
+    Journey { start: String, end: String, length: u32 },
     Playlists,
     LoadPlaylist(String),
     Search(String),
@@ -208,6 +211,9 @@ pub enum Event {
     },
     /// Every genre in the library.
     Genres(Vec<Genre>),
+    /// A journey's stops, in order. `note` explains a short or empty arc —
+    /// both are answers the server gives deliberately rather than failures.
+    Journey { stops: Vec<JourneyStop>, note: Option<String> },
     Playlists(Vec<PlaylistSummary>),
     PlaylistTracks { name: String, tracks: Vec<Track> },
     SearchResults(Box<SearchResults>),
@@ -403,6 +409,10 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
             ApiCmd::Genres => {
                 with_client(client.as_ref(), |c| c.genres().map(Event::Genres))
             }
+
+            ApiCmd::Journey { start, end, length } => with_client(client.as_ref(), |c| {
+                journey(c, &start, &end, length)
+            }),
 
             ApiCmd::Playlists => {
                 with_client(client.as_ref(), |c| c.playlists().map(Event::Playlists))
@@ -696,6 +706,52 @@ fn autodj_sample(
     Ok(Event::AutoDjSample { tracks, pool, note })
 }
 
+/// Fetch a journey and translate the ways it can legitimately come up short
+/// into something worth reading.
+fn journey(client: &Client, start: &str, end: &str, length: u32) -> Result<Event, ApiError> {
+    let Some(response) = client.journey(start, end, length)? else {
+        // Gated on `discoveryPath`, so this only happens if the server was
+        // reconfigured since the ping.
+        return Ok(Event::Journey {
+            stops: Vec::new(),
+            note: Some("discovery is switched off on this server".into()),
+        });
+    };
+
+    let note = journey_note(&response, length);
+    // An arc that couldn't be plotted has no stops worth showing; the note
+    // carries the whole answer.
+    let stops = if response.not_analyzed.any() { Vec::new() } else { response.results };
+    Ok(Event::Journey { stops, note })
+}
+
+/// What, if anything, needs saying about a journey the server returned.
+///
+/// Every case here is one the route produces deliberately — an unanalysed
+/// end, two identical seeds, a library that ran out of visible waypoints —
+/// so none of them is an error, and each deserves its own sentence.
+pub(crate) fn journey_note(
+    response: &crate::api::types::JourneyResponse,
+    asked: u32,
+) -> Option<String> {
+    if response.not_analyzed.any() {
+        return Some(format!(
+            "{} been analysed yet — the discovery worker gets to it in its own time",
+            response.not_analyzed.which()
+        ));
+    }
+    let got = response.results.len();
+    if got == 2 && asked > 2 {
+        // There is no arc between a point and itself: identical seeds (or
+        // duplicate copies of one recording) short-circuit to just the ends.
+        return Some("those are the same track — nothing to travel through".to_string());
+    }
+    if (got as u32) < asked {
+        return Some(format!("the library ran out at {got} of {asked} stops"));
+    }
+    None
+}
+
 fn trim_period(message: &str) -> String {
     message.trim().trim_end_matches('.').to_string()
 }
@@ -739,6 +795,44 @@ mod tests {
             resolve_target("mstream+iroh://endpointabc", Some(&tunnel)),
             (tunnel.0.clone(), tunnel.1.clone())
         );
+    }
+
+    #[test]
+    fn a_journey_names_the_end_that_is_holding_it_up() {
+        use crate::api::types::{JourneyResponse, NotAnalyzed};
+        let waiting = |start, end| {
+            journey_note(
+                &JourneyResponse {
+                    not_analyzed: NotAnalyzed { start, end },
+                    results: Vec::new(),
+                },
+                14,
+            )
+            .unwrap()
+        };
+        // Per-end, so the message can point at the one still waiting rather
+        // than shrugging at both.
+        assert!(waiting(true, false).contains("starting track"));
+        assert!(waiting(false, true).contains("destination"));
+        assert!(waiting(true, true).contains("neither end"));
+    }
+
+    #[test]
+    fn a_short_arc_is_explained_rather_than_treated_as_a_failure() {
+        use crate::api::types::{JourneyResponse, JourneyStop};
+        let stops = |n: usize| JourneyResponse {
+            results: (0..n).map(|_| JourneyStop::default()).collect(),
+            ..Default::default()
+        };
+        // Waypoints snap to visible tracks, and a small library runs out.
+        assert!(journey_note(&stops(9), 14).unwrap().contains("ran out at 9 of 14"));
+        // Exactly two rows means both ends are the same recording.
+        assert!(journey_note(&stops(2), 14).unwrap().contains("same track"));
+        // A full arc needs no explanation.
+        assert!(journey_note(&stops(14), 14).is_none());
+        // …and a four-stop journey that came back whole is not "the same
+        // track" just because two of its rows are the seeds.
+        assert!(journey_note(&stops(4), 4).is_none());
     }
 
     #[test]

@@ -135,6 +135,7 @@ pub enum Action {
     ToggleShuffle,
     ToggleAutoDj,
     OpenDjPanel,
+    StartJourney,
     StartSearch,
     Input(char),
     Backspace,
@@ -475,6 +476,20 @@ impl DjPanel {
     }
 }
 
+/// A walk from one track to another through the embedding space, waiting to
+/// be looked at and queued.
+#[derive(Debug)]
+pub struct Journey {
+    pub from: Track,
+    pub to: Track,
+    /// Total stops asked for, both ends included.
+    pub length: u32,
+    pub stops: Vec<crate::api::types::JourneyStop>,
+    pub pending: bool,
+    /// First visible row, so a long arc can be scrolled.
+    pub offset: usize,
+}
+
 /// Choosing which genres the filter applies to.
 #[derive(Debug, Default)]
 pub struct GenrePicker {
@@ -527,6 +542,10 @@ pub struct App {
     pub dj: dj::Settings,
     /// The settings panel, when it is open.
     pub dj_panel: Option<DjPanel>,
+    /// The journey being looked at, when one is.
+    pub journey: Option<Journey>,
+    /// A journey start chosen but not yet paired with a destination.
+    pub journey_from: Option<Track>,
     /// Tracks played recently, newest first. Feeds both the sonic anchor and
     /// the artist cooldown, so the session anchors on where it has been
     /// rather than only on the song currently sounding.
@@ -575,6 +594,8 @@ impl App {
             autodj: AutoDjMode::Off,
             dj: dj::Settings::default(),
             dj_panel: None,
+            journey: None,
+            journey_from: None,
             autodj_recent: Vec::new(),
             autodj_ignore: Vec::new(),
             autodj_pending: false,
@@ -699,7 +720,7 @@ impl App {
     pub fn input_mode(&self) -> InputMode {
         if !self.connected || self.editing_query {
             InputMode::Editing
-        } else if self.dj_panel.is_some() {
+        } else if self.dj_panel.is_some() || self.journey.is_some() {
             InputMode::Panel
         } else {
             InputMode::Normal
@@ -754,10 +775,13 @@ impl App {
         if !self.connected {
             return self.handle_connect_action(action);
         }
-        // The panel is modal: it owns the arrow keys and the letters it uses,
-        // so playback shortcuts can't fire while someone is editing settings.
+        // Panels are modal: they own the arrow keys and the letters they use,
+        // so playback shortcuts can't fire while one is up.
         if self.dj_panel.is_some() {
             return self.handle_dj_action(action);
+        }
+        if self.journey.is_some() {
+            return self.handle_journey_action(action);
         }
         if self.editing_query {
             if let Some(effects) = self.handle_query_action(&action) {
@@ -858,6 +882,7 @@ impl App {
                 self.maybe_autodj()
             }
             Action::OpenDjPanel => self.open_dj_panel(),
+            Action::StartJourney => self.start_journey(),
 
             Action::StartSearch => {
                 self.tab = Tab::Search;
@@ -1058,6 +1083,122 @@ impl App {
             username,
             password: std::mem::take(&mut self.connect.password),
         })]
+    }
+
+    // ── Sonic Journey ───────────────────────────────────────────────────────
+
+    /// `J` on a track. What's playing is the natural place to set off from,
+    /// so one press is usually enough; with nothing playing it takes two —
+    /// one to mark where to start, one to say where to end up.
+    fn start_journey(&mut self) -> Vec<Effect> {
+        if !self.capabilities.discovery_path {
+            self.error("this server can't plot journeys — it has no discovery index");
+            return Vec::new();
+        }
+        let Some(picked) = self.selected_track() else {
+            self.error("highlight a track to travel to");
+            return Vec::new();
+        };
+
+        let from = self.now_playing.clone().or_else(|| self.journey_from.take());
+        let Some(from) = from else {
+            self.journey_from = Some(picked.clone());
+            self.info(format!(
+                "journey starts at {} — now highlight where it should end and press J",
+                picked.display_name()
+            ));
+            return Vec::new();
+        };
+
+        self.journey_from = None;
+        self.open_journey(from, picked)
+    }
+
+    fn open_journey(&mut self, from: Track, to: Track) -> Vec<Effect> {
+        let length = self
+            .journey
+            .as_ref()
+            .map_or(crate::api::types::JOURNEY_DEFAULT_LENGTH, |j| j.length);
+        self.journey = Some(Journey {
+            from,
+            to,
+            length,
+            stops: Vec::new(),
+            pending: true,
+            offset: 0,
+        });
+        self.message = None;
+        self.fetch_journey()
+    }
+
+    fn fetch_journey(&mut self) -> Vec<Effect> {
+        let Some(journey) = self.journey.as_mut() else { return Vec::new() };
+        journey.pending = true;
+        journey.offset = 0;
+        vec![Effect::Api(ApiCmd::Journey {
+            start: journey.from.filepath.clone(),
+            end: journey.to.filepath.clone(),
+            length: journey.length,
+        })]
+    }
+
+    fn handle_journey_action(&mut self, action: Action) -> Vec<Effect> {
+        if action == Action::Quit {
+            self.should_quit = true;
+            return vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)];
+        }
+        let Some(journey) = self.journey.as_mut() else { return Vec::new() };
+        match action {
+            Action::Cancel | Action::Input('J') => {
+                self.journey = None;
+                Vec::new()
+            }
+            // Changing the length is a different arc, so it has to be asked
+            // for again rather than trimmed locally.
+            Action::SeekForward | Action::Back | Action::SeekBackward => {
+                let delta: i32 = if action == Action::SeekForward { 2 } else { -2 };
+                let length = (journey.length as i32 + delta).clamp(
+                    crate::api::types::JOURNEY_MIN_LENGTH as i32,
+                    crate::api::types::JOURNEY_MAX_LENGTH as i32,
+                ) as u32;
+                if length == journey.length {
+                    return Vec::new();
+                }
+                journey.length = length;
+                self.fetch_journey()
+            }
+            Action::Down => {
+                journey.offset = (journey.offset + 1).min(journey.stops.len().saturating_sub(1));
+                Vec::new()
+            }
+            Action::Up => {
+                journey.offset = journey.offset.saturating_sub(1);
+                Vec::new()
+            }
+            Action::First => {
+                journey.offset = 0;
+                Vec::new()
+            }
+            Action::Activate | Action::Submit => self.queue_journey(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Take the arc as the queue and start at its first stop.
+    fn queue_journey(&mut self) -> Vec<Effect> {
+        let Some(journey) = self.journey.take() else { return Vec::new() };
+        if journey.stops.is_empty() {
+            return Vec::new();
+        }
+        let count = journey.stops.len();
+        let tracks: Vec<Track> = journey.stops.iter().map(|s| s.to_track()).collect();
+        self.queue.replace(tracks);
+        self.info(format!(
+            "{count} stops from {} to {}",
+            journey.from.display_name(),
+            journey.to.display_name()
+        ));
+        self.play_index(0)
     }
 
     // ── Auto-DJ panel ───────────────────────────────────────────────────────
@@ -1367,6 +1508,20 @@ impl App {
         }
     }
 
+    /// The track under the cursor, wherever the cursor is. Directories and
+    /// playlist rows are not tracks and give nothing.
+    fn selected_track(&self) -> Option<Track> {
+        match self.focus {
+            Focus::Browser => match self.pane().selected() {
+                Some(Entry::Track { track, .. }) => Some((**track).clone()),
+                _ => None,
+            },
+            Focus::Queue => {
+                self.queue.state.selected().and_then(|i| self.queue.items.get(i)).cloned()
+            }
+        }
+    }
+
     fn add_selected_to_queue(&mut self) -> Vec<Effect> {
         if self.focus != Focus::Browser {
             return Vec::new();
@@ -1609,6 +1764,19 @@ impl App {
                     // Keep the last pool size when this pick didn't report
                     // one: it still describes the settings on screen.
                     panel.pool = pool.or(panel.pool.take());
+                }
+                if let Some(note) = note {
+                    self.info(note);
+                }
+                Vec::new()
+            }
+            Event::Journey { stops, note } => {
+                // A journey the user closed while it was in flight stays
+                // closed; the reply is no longer wanted.
+                if let Some(journey) = self.journey.as_mut() {
+                    journey.pending = false;
+                    journey.stops = stops;
+                    journey.offset = 0;
                 }
                 if let Some(note) = note {
                     self.info(note);
@@ -1912,6 +2080,7 @@ pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
         KeyCode::Char('s') => Some(Action::ToggleShuffle),
         KeyCode::Char('A') => Some(Action::ToggleAutoDj),
         KeyCode::Char('D') => Some(Action::OpenDjPanel),
+        KeyCode::Char('J') => Some(Action::StartJourney),
         KeyCode::Char('/') => Some(Action::StartSearch),
         _ => None,
     }
@@ -3034,6 +3203,162 @@ mod tests {
         assert_eq!(app.autodj, AutoDjMode::BpmKey);
         app.handle_action(Action::ToggleAutoDj);
         assert_eq!(app.autodj, AutoDjMode::Off);
+    }
+
+    /// A browser pane holding tracks, with one highlighted.
+    fn browsing(app: &mut App, names: &[&str], selected: usize) {
+        let entries: Vec<Entry> = names
+            .iter()
+            .map(|n| Entry::Track { label: (*n).to_string(), track: Box::new(track(n)) })
+            .collect();
+        app.files.set(entries);
+        app.files.state.select(Some(selected));
+    }
+
+    fn stop(path: &str, t: f64) -> crate::api::types::JourneyStop {
+        crate::api::types::JourneyStop {
+            filepath: path.into(),
+            t,
+            similarity: 0.9,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_journey_sets_off_from_what_is_playing() {
+        // One keypress when something is already playing: that track is the
+        // obvious place to leave from.
+        let mut app = connected_app();
+        app.queue.replace(vec![track("playing")]);
+        app.play_index(0);
+        browsing(&mut app, &["far-away"], 0);
+
+        let effects = app.handle_action(Action::StartJourney);
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCmd::Journey {
+                start: "playing".into(),
+                end: "far-away".into(),
+                length: 14,
+            })]
+        );
+        let journey = app.journey.as_ref().unwrap();
+        assert!(journey.pending);
+        assert_eq!(journey.from.filepath, "playing");
+        assert_eq!(journey.to.filepath, "far-away");
+    }
+
+    #[test]
+    fn with_nothing_playing_a_journey_takes_two_presses() {
+        let mut app = connected_app();
+        browsing(&mut app, &["a", "b"], 0);
+
+        // First press marks where to set off from and says so.
+        assert!(app.handle_action(Action::StartJourney).is_empty());
+        assert!(app.journey.is_none(), "no request until there are two ends");
+        assert_eq!(app.journey_from.as_ref().unwrap().filepath, "a");
+        assert!(app.message.as_ref().unwrap().text.contains("press J"));
+
+        // Second press, on a different track, plots it.
+        app.files.state.select(Some(1));
+        let effects = app.handle_action(Action::StartJourney);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCmd::Journey { start, end, .. })] if start == "a" && end == "b"
+        ));
+        assert!(app.journey_from.is_none(), "the pending start is consumed");
+    }
+
+    #[test]
+    fn a_journey_needs_a_server_that_can_plot_one() {
+        let mut app = connected_app();
+        app.capabilities.discovery_path = false;
+        browsing(&mut app, &["a"], 0);
+
+        assert!(app.handle_action(Action::StartJourney).is_empty());
+        assert!(app.journey.is_none());
+        assert!(app.message.as_ref().unwrap().text.contains("can't plot journeys"));
+    }
+
+    #[test]
+    fn a_journey_needs_a_track_not_a_folder() {
+        let mut app = connected_app();
+        app.files.set(vec![Entry::Dir {
+            label: "an album".into(),
+            path: "lib/an album".into(),
+        }]);
+        app.files.state.select(Some(0));
+
+        assert!(app.handle_action(Action::StartJourney).is_empty());
+        assert!(app.message.as_ref().unwrap().text.contains("highlight a track"));
+    }
+
+    #[test]
+    fn changing_the_length_asks_for_a_different_arc() {
+        // The stops aren't a list to trim — a shorter journey is a different
+        // set of waypoints, so it has to be replotted.
+        let mut app = connected_app();
+        app.queue.replace(vec![track("from")]);
+        app.play_index(0);
+        browsing(&mut app, &["to"], 0);
+        app.handle_action(Action::StartJourney);
+        app.apply_event(Event::Journey {
+            stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
+            note: None,
+        });
+        assert!(!app.journey.as_ref().unwrap().pending);
+
+        let effects = app.handle_action(Action::SeekForward);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCmd::Journey { length: 16, .. })]
+        ));
+        assert!(app.journey.as_ref().unwrap().pending, "waiting on the new arc");
+
+        // And it stops at the ends the server accepts rather than asking for
+        // a length it would reject.
+        for _ in 0..40 {
+            app.handle_action(Action::Back);
+        }
+        assert_eq!(app.journey.as_ref().unwrap().length, 4);
+        assert!(app.handle_action(Action::Back).is_empty(), "no request at the floor");
+    }
+
+    #[test]
+    fn queueing_a_journey_replaces_the_queue_and_starts_it() {
+        let mut app = connected_app();
+        app.queue.replace(vec![track("old")]);
+        app.play_index(0);
+        browsing(&mut app, &["to"], 0);
+        app.handle_action(Action::StartJourney);
+        app.apply_event(Event::Journey {
+            stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
+            note: None,
+        });
+
+        let effects = app.handle_action(Action::Submit);
+        assert!(app.journey.is_none(), "the panel closes once it's the queue");
+        assert_eq!(
+            app.queue.items.iter().map(|t| t.filepath.as_str()).collect::<Vec<_>>(),
+            vec!["from", "mid", "to"],
+            "the arc is the queue, in order"
+        );
+        assert_eq!(app.queue.current, Some(0));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+    }
+
+    #[test]
+    fn a_journey_reply_that_arrives_after_it_is_closed_is_dropped() {
+        let mut app = connected_app();
+        app.queue.replace(vec![track("from")]);
+        app.play_index(0);
+        browsing(&mut app, &["to"], 0);
+        app.handle_action(Action::StartJourney);
+        app.handle_action(Action::Cancel);
+
+        app.apply_event(Event::Journey { stops: vec![stop("late", 0.0)], note: None });
+        assert!(app.journey.is_none(), "it stays closed");
+        assert_eq!(app.queue.items.len(), 1, "and nothing is queued behind the user's back");
     }
 
     #[test]
