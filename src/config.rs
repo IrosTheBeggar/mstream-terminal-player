@@ -9,6 +9,11 @@
 //!
 //! Both carry a schema version and are written by rename, so a crash or a full
 //! disk leaves the previous file intact rather than a half-written one.
+//!
+//! This module also answers "where does scratch data go" ([`spool_dir`]) —
+//! the settings live in config.toml, but the files themselves go under the
+//! platform *cache* directory, which backup tools and tmpfs both treat
+//! differently from config.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,6 +36,8 @@ pub struct Config {
     pub version: u32,
     #[serde(default)]
     pub player: PlayerPrefs,
+    #[serde(default, skip_serializing_if = "CachePrefs::is_unset")]
+    pub cache: CachePrefs,
     /// Most recently used first, so the player knows where to reconnect
     /// without needing a timestamp or a "current" pointer.
     #[serde(default, rename = "server")]
@@ -39,7 +46,12 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { version: SCHEMA_VERSION, player: PlayerPrefs::default(), servers: Vec::new() }
+        Config {
+            version: SCHEMA_VERSION,
+            player: PlayerPrefs::default(),
+            cache: CachePrefs::default(),
+            servers: Vec::new(),
+        }
     }
 }
 
@@ -62,6 +74,25 @@ impl Default for PlayerPrefs {
             shuffle: false,
             autodj: "off".to_string(),
         }
+    }
+}
+
+/// `[cache]` — where scratch data lives. Today that is only the streaming
+/// spool (the playing track's buffer, one file at a time); a persistent
+/// track cache would live under the same root if one ever grows.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CachePrefs {
+    /// Cache root; spool files go in `spool/` inside it. Unset means the
+    /// platform cache directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dir: Option<PathBuf>,
+}
+
+impl CachePrefs {
+    /// Keeps an empty `[cache]` header out of config.toml.
+    fn is_unset(&self) -> bool {
+        self.dir.is_none()
     }
 }
 
@@ -126,6 +157,70 @@ pub fn config_path() -> Result<PathBuf, String> {
 
 pub fn credentials_path() -> Result<PathBuf, String> {
     Ok(config_dir()?.join(CREDENTIALS_FILE))
+}
+
+/// Where streaming spool files belong: `MSTREAM_PLAYER_CACHE_DIR` first, then
+/// `[cache] dir` from config.toml, then the platform cache directory —
+/// deliberately *not* the OS temp dir, which is RAM-backed tmpfs on many
+/// Linux systems, where a spooled FLAC silently costs its size in memory.
+/// `None` (no usable location at all) lets the engine fall back to OS temp.
+pub fn spool_dir() -> Option<PathBuf> {
+    cache_root().map(|root| root.join("spool"))
+}
+
+fn cache_root() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("MSTREAM_PLAYER_CACHE_DIR") {
+        return Some(expand_home(PathBuf::from(dir)));
+    }
+    // A broken config file must not decide where scratch files go — the TUI
+    // will surface the parse error on its own; here it just means "default".
+    if let Ok(config) = load() {
+        if let Some(dir) = config.cache.dir {
+            return Some(expand_home(dir));
+        }
+    }
+    platform_cache_dir()
+}
+
+fn platform_cache_dir() -> Option<PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches"))
+    } else {
+        std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+    };
+    base.map(|b| b.join("mstream-player"))
+}
+
+/// Expand a leading `~`, so `dir = "~/scratch"` in config.toml means what the
+/// person who wrote it meant.
+fn expand_home(path: PathBuf) -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    expand_home_from(path, home)
+}
+
+fn expand_home_from(path: PathBuf, home: Option<PathBuf>) -> PathBuf {
+    let Some(home) = home else { return path };
+    // Owned so the borrow of `path` ends before we may return it.
+    let rest: Option<String> = match path.to_str() {
+        Some("~") => Some(String::new()),
+        Some(s) => s
+            .strip_prefix("~/")
+            .or_else(|| s.strip_prefix("~\\"))
+            .map(str::to_string),
+        None => None,
+    };
+    match rest {
+        Some(rest) if rest.is_empty() => home,
+        Some(rest) => home.join(rest),
+        None => path,
+    }
 }
 
 // ── Reading and writing ─────────────────────────────────────────────────────
@@ -465,6 +560,51 @@ mod tests {
         assert_eq!(load().unwrap().servers.len(), 1, "the server is still known");
         assert!(!forget_all_tokens().unwrap(), "signing out twice is not an error");
         drop(scratch);
+    }
+
+    #[test]
+    fn a_cache_dir_round_trips_and_stays_out_of_the_file_when_unset() {
+        let scratch = Scratch::new("cache");
+        save(&Config::default()).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(!text.contains("[cache]"), "an unset cache dir should not clutter the file: {text}");
+
+        let mut config = Config::default();
+        config.cache.dir = Some(PathBuf::from("D:/scratch"));
+        save(&config).unwrap();
+        assert_eq!(load().unwrap().cache.dir, Some(PathBuf::from("D:/scratch")));
+    }
+
+    #[test]
+    fn the_spool_dir_prefers_the_env_var_then_the_config_then_the_platform() {
+        let scratch = Scratch::new("spool");
+
+        // Nothing configured: the platform cache dir, plus our spool folder.
+        let fallback = spool_dir().expect("this machine has a home directory");
+        assert!(fallback.ends_with("spool"), "{}", fallback.display());
+        assert!(fallback.to_string_lossy().contains("mstream-player"));
+
+        let mut config = Config::default();
+        config.cache.dir = Some(scratch.dir.join("from-config"));
+        save(&config).unwrap();
+        assert_eq!(spool_dir(), Some(scratch.dir.join("from-config").join("spool")));
+
+        // SAFETY: the Scratch guard's lock serialises env manipulation.
+        unsafe { std::env::set_var("MSTREAM_PLAYER_CACHE_DIR", scratch.dir.join("from-env")) };
+        let from_env = spool_dir();
+        unsafe { std::env::remove_var("MSTREAM_PLAYER_CACHE_DIR") };
+        assert_eq!(from_env, Some(scratch.dir.join("from-env").join("spool")));
+    }
+
+    #[test]
+    fn a_leading_tilde_means_home() {
+        let home = Some(PathBuf::from("/home/paul"));
+        assert_eq!(expand_home_from("~/x".into(), home.clone()), PathBuf::from("/home/paul/x"));
+        assert_eq!(expand_home_from("~".into(), home.clone()), PathBuf::from("/home/paul"));
+        assert_eq!(expand_home_from(r"~\x".into(), home.clone()), PathBuf::from("/home/paul/x"));
+        assert_eq!(expand_home_from("/abs".into(), home.clone()), PathBuf::from("/abs"));
+        assert_eq!(expand_home_from("not~/x".into(), home.clone()), PathBuf::from("not~/x"));
+        assert_eq!(expand_home_from("~/x".into(), None), PathBuf::from("~/x"));
     }
 
     #[test]

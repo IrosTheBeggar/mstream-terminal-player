@@ -94,6 +94,16 @@ struct ServeArgs {
 fn main() {
     let cli = Cli::parse();
 
+    // Streaming scratch space (PLAN A1): each playing track spools to a temp
+    // file. Decide where those belong before anything can open a stream, and
+    // sweep leftovers from killed runs while we're at it. When no cache dir
+    // can be resolved the engine falls back to the OS temp dir, so that's
+    // where leftovers would be, too.
+    let spool_dir = config::spool_dir();
+    let sweep = spool_dir.clone().unwrap_or_else(std::env::temp_dir);
+    engine::http::clean_spool_dir(&sweep);
+    engine::http::set_spool_dir(spool_dir);
+
     let serve_args = match (cli.command, cli.port) {
         (Some(Command::Tui(conn)), _) => {
             std::process::exit(tui::run(conn.server, conn.token));

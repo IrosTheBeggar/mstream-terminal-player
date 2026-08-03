@@ -85,6 +85,18 @@ somewhere else — a portable install can keep them beside the binary.
 
 Both are written by rename, so an interrupted write leaves the previous file intact.
 
+While a track plays it is spooled to one scratch file (that's what makes seeking instant), which
+goes in the platform cache directory — `%LOCALAPPDATA%\mstream-player\spool`,
+`~/Library/Caches/mstream-player/spool` or `~/.cache/mstream-player/spool` — rather than `/tmp`,
+which is RAM-backed on many Linux systems. Only the playing track is spooled; the file is deleted
+when it stops, and leftovers from a crash are swept at the next start. To put it elsewhere, set
+`MSTREAM_PLAYER_CACHE_DIR` or add to config.toml:
+
+```toml
+[cache]
+dir = "/mnt/scratch"   # spool files land in <dir>/spool
+```
+
 ## Playback
 
 ```

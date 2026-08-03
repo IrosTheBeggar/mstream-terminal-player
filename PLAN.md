@@ -177,8 +177,8 @@ the queue, position, current tab and browse path — is in-memory and dies with 
 there is no library cache. Separately, `stream-download` spools each track to a `NamedTempFile`
 in the OS temp dir (deleted on drop, leaked on hard kill).
 
-Work (✅ done 2026-08-02 — atomic writes, schema versions, the config/credentials split and
-persisted preferences all landed together; the stream cache is still open):
+Work (✅ all done 2026-08-02 — atomic writes, schema versions, the config/credentials split and
+persisted preferences landed together; the spool relocation followed the same day):
 - ✅ **Atomic session writes.** `fs::write` truncates then writes, so a crash mid-write leaves a
   truncated file — which the loader treats as a hard error telling the user to run `logout`.
   Write to a sibling temp file and `rename` (atomic on both platforms).
@@ -186,9 +186,23 @@ persisted preferences all landed together; the stream cache is still open):
   or check into dotfiles) and a separate credential store. This is also what unblocks the
   multi-server item deferred from Phase 4. OS keychain stays a later option, not a prerequisite.
 - ✅ **Schema version** on both files from the start.
-- ⬜ **Configurable stream cache.** Whole tracks land in the OS temp dir, and `/tmp` is tmpfs on
-  many Linux distros — a 400 MB FLAC silently costs 400 MB of RAM. Expose the directory
-  (`TempStorageProvider::new_in`) and offer `BoundedStorageProvider` for constrained boxes.
+- ✅ **Streaming scratch space** (was "configurable stream cache" — renamed because it is a
+  *spool*, not a cache: only the playing track has a file, nothing is prefetched, nothing
+  persists). The problem stands as stated: whole tracks landed in the OS temp dir, and `/tmp` is
+  tmpfs on many Linux distros — a 400 MB FLAC silently cost 400 MB of RAM. Spool files now go to
+  `<platform cache dir>/mstream-player/spool` (`%LOCALAPPDATA%`, `~/Library/Caches`,
+  `$XDG_CACHE_HOME`/`~/.cache`), overridable with `[cache] dir` in config.toml or
+  `MSTREAM_PLAYER_CACHE_DIR` (`~` expands). They carry an `mstream-spool-` prefix so startup can
+  sweep leftovers from killed runs without touching anything else — safe against a concurrently
+  running instance, because unlink-while-open is harmless on unix and the Windows handles hold
+  delete sharing (worst case the delete is refused and skipped). An unusable configured dir falls
+  back to OS temp with a one-time warning instead of failing playback. Two scope decisions:
+  `BoundedStorageProvider` ("offer it for constrained boxes") was **rejected** — it errors on any
+  seek outside its window, which would regress exactly what finding #13 fixed; and queue
+  prefetch / a persistent track cache are real features, not knobs on this one — moved to
+  Phase 7. Verified live against demo.mstream.io: spool file appears in the new dir during
+  playback, `%TEMP%` stays clean, the file self-deletes on exit, and a planted orphan was swept
+  while a foreign file in the same dir was left alone.
 - ✅ **Persist what a player is expected to remember**: volume, repeat/shuffle/Auto-DJ mode, last
   server, last browse path. Restoring the queue and position is a separate decision — nice, but
   it interacts with Auto-DJ and needs a "resume?" affordance rather than silently replaying.
@@ -315,8 +329,13 @@ brew tap / scoop manifest later.
   consider replacing `/server-remote` regex page surgery with a template marker.
 
 ### Phase 7 — Backlog (deliberately deferred)
-Gapless (append-to-sink redesign of the advance loop), TUI as remote for server-side audio,
-album art (ratatui-image), media keys (MPRIS/SMTC), scrobbling hooks, brew/scoop/AUR packaging.
+Gapless (append-to-sink redesign of the advance loop) and its natural companion, next-track
+prefetch — open the upcoming track's reader early so a track change doesn't start from zero.
+A persistent track cache (replay without re-downloading, offline listening) is the step after
+that and a genuinely bigger one: eviction policy, a size budget, an index keyed by server +
+filepath — this is where the SQLite question from A1 returns with an actual job to do. Also:
+TUI as remote for server-side audio, album art (ratatui-image), media keys (MPRIS/SMTC),
+scrobbling hooks, brew/scoop/AUR packaging.
 
 ## Smoke testing
 
