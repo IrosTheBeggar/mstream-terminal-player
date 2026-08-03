@@ -57,6 +57,8 @@ enum Command {
     QuickconnectProbe { code: String },
     /// Drive the interactive player from a script (smoke testing)
     Replay(replay::ReplayArgs),
+    /// Print the key bindings as a config.toml section, ready to edit
+    Keys,
     /// List mStream servers advertising themselves on this network
     Discover {
         /// How long to listen for adverts
@@ -120,6 +122,13 @@ fn main() {
             std::process::exit(quickconnect::probe(&code));
         }
         (Some(Command::Replay(args)), _) => std::process::exit(replay::run(args)),
+        (Some(Command::Keys), _) => {
+            // The bindings in force, not the built-in ones: someone asking
+            // what their keys are wants the answer for their config.
+            let start = tui::startup(None, None);
+            print!("{}", tui::keymap_for(&start.keys).to_config_toml());
+            std::process::exit(0);
+        }
         (Some(Command::Discover { seconds }), _) => {
             std::process::exit(discovery::print_found(seconds));
         }

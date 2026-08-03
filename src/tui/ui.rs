@@ -138,7 +138,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_journey(frame, area, app);
     }
     if app.show_help {
-        render_help(frame, area);
+        render_help(frame, area, app);
     }
 }
 
@@ -969,16 +969,8 @@ const HELP_TEXT_WIDTH: usize = 24;
 /// Rendering the real bindings is the point: a hand-written copy of this list
 /// drifted from the truth within a day of the last key being added, and a
 /// help screen that lies is worse than none.
-fn render_help(frame: &mut Frame, area: Rect) {
-    let entries: Vec<(String, &'static str)> = crate::tui::app::NORMAL_KEYS
-        .iter()
-        .filter_map(|binding| {
-            let what = binding.help?;
-            let keys =
-                binding.keys.iter().map(|k| k.label()).collect::<Vec<_>>().join(" ");
-            Some((keys, what))
-        })
-        .collect();
+fn render_help(frame: &mut Frame, area: Rect, app: &App) {
+    let entries = app.keymap.help_rows();
 
     // Lay out in as few columns as fit the height, so a tall terminal gets a
     // single readable list and a short one gets two or three.
@@ -1590,9 +1582,7 @@ mod tests {
         let text = draw_sized(&mut app, 120, 44);
         assert!(text.contains("Keys"), "the overlay drew at all");
 
-        for binding in crate::tui::app::NORMAL_KEYS {
-            let Some(what) = binding.help else { continue };
-            let keys = binding.keys.iter().map(|k| k.label()).collect::<Vec<_>>().join(" ");
+        for (keys, what) in app.keymap.help_rows() {
             // Key and description on one line, exactly as laid out — not
             // merely present somewhere on screen.
             let row = format!("  {keys:<HELP_KEYS_WIDTH$}{what}");
@@ -1601,22 +1591,33 @@ mod tests {
     }
 
     #[test]
+    fn the_help_follows_a_rebound_key() {
+        // The point of holding the keymap on the app: rebinding `n` has to
+        // change what the help says, not just what the key does.
+        let mut app = connected_app();
+        app = app.with_keys(
+            &[("next-track".to_string(), vec!["b".to_string()])].into_iter().collect(),
+        );
+        app.handle_action(Action::ToggleHelp);
+        let text = draw_sized(&mut app, 120, 44);
+        assert!(text.contains("  b          next track"), "got:\n{text}");
+        assert!(!text.contains("  n          next track"));
+    }
+
+    #[test]
     fn every_help_entry_fits_its_column() {
         // The columns are laid out by padding to a fixed width, so one
         // over-long entry shunts everything to its right out of line — which
         // is exactly what a 25-character description did.
-        for binding in crate::tui::app::NORMAL_KEYS {
-            let keys = binding.keys.iter().map(|k| k.label()).collect::<Vec<_>>().join(" ");
+        for (keys, what) in crate::tui::app::Keymap::default().help_rows() {
             assert!(
                 keys.chars().count() <= HELP_KEYS_WIDTH,
                 "keys {keys:?} are wider than the column ({HELP_KEYS_WIDTH})"
             );
-            if let Some(what) = binding.help {
-                assert!(
-                    what.chars().count() <= HELP_TEXT_WIDTH,
-                    "{what:?} is wider than the column ({HELP_TEXT_WIDTH})"
-                );
-            }
+            assert!(
+                what.chars().count() <= HELP_TEXT_WIDTH,
+                "{what:?} is wider than the column ({HELP_TEXT_WIDTH})"
+            );
         }
     }
 

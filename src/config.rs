@@ -38,6 +38,11 @@ pub struct Config {
     pub player: PlayerPrefs,
     #[serde(default, skip_serializing_if = "CachePrefs::is_unset")]
     pub cache: CachePrefs,
+    /// `[keys]` — action name to the keys that should fire it. Empty means
+    /// the built-in bindings, and only the actions named here are changed.
+    /// See `mstream-player keys` for the full list in this format.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub keys: std::collections::BTreeMap<String, Vec<String>>,
     /// Most recently used first, so the player knows where to reconnect
     /// without needing a timestamp or a "current" pointer.
     #[serde(default, rename = "server")]
@@ -50,6 +55,7 @@ impl Default for Config {
             version: SCHEMA_VERSION,
             player: PlayerPrefs::default(),
             cache: CachePrefs::default(),
+            keys: std::collections::BTreeMap::new(),
             servers: Vec::new(),
         }
     }

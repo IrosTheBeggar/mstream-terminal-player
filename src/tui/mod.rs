@@ -15,7 +15,7 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event as TermEvent, KeyEventKind};
 
 use crate::config;
-use app::{App, Effect, map_key};
+use app::{App, Effect};
 use worker::{ApiCmd, AudioCmd, Event};
 
 /// How long to wait for a key before redrawing anyway. Also sets how quickly
@@ -33,6 +33,8 @@ pub(crate) struct Startup {
     /// Pairing code for the remembered server, when it is one reached through
     /// a tunnel. Without it that server cannot be dialled again.
     pub tunnel_code: Option<String>,
+    /// The `[keys]` section, unvalidated — the app reports what it can't use.
+    pub keys: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Resolve the starting point from stored config plus any overrides. Shared
@@ -77,7 +79,27 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
         .filter(|s| crate::quickconnect::is_tunnel_id(s))
         .and_then(|id| config::pairing_for(&credentials, id));
 
-    Startup { server, token, username, last_path, prefs: config.player, tunnel_code }
+    Startup {
+        server,
+        token,
+        username,
+        last_path,
+        prefs: config.player,
+        tunnel_code,
+        keys: config.keys,
+    }
+}
+
+/// The bindings a `[keys]` section produces, with anything wrong reported to
+/// stderr — which the player can't do mid-draw, but a command can.
+pub(crate) fn keymap_for(
+    keys: &std::collections::BTreeMap<String, Vec<String>>,
+) -> app::Keymap {
+    let (keymap, warnings) = app::Keymap::default().with_overrides(keys);
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
+    keymap
 }
 
 /// Build the app from a resolved [`Startup`].
@@ -89,6 +111,7 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
 pub(crate) fn app_from(start: Startup) -> App {
     let mut app = App::new(start.server, start.token, start.username)
         .with_prefs(&start.prefs)
+        .with_keys(&start.keys)
         .with_tunnel(start.tunnel_code);
     if let Some(path) = start.last_path {
         // Pick up where the last session left off; `start` browses this.
@@ -158,7 +181,7 @@ fn event_loop(
                 // Windows reports key releases as well as presses; without this
                 // filter every keystroke would act twice.
                 TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(action) = map_key(key, app.input_mode()) {
+                    if let Some(action) = app.keymap.action(key, app.input_mode()) {
                         pending.extend(app.handle_action(action));
                     }
                 }

@@ -23,7 +23,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::api::types::Ping;
 use crate::discovery::DiscoveredServer;
-use crate::tui::app::{App, Effect, map_key};
+use crate::tui::app::{App, Effect};
 use crate::tui::ui;
 use crate::tui::worker::{self, Event};
 
@@ -325,7 +325,7 @@ pub fn run(args: ReplayArgs) -> i32 {
         match step {
             Step::Key(key) => {
                 println!("── {}. {label}", index + 1);
-                match map_key(*key, app.input_mode()) {
+                match app.keymap.action(*key, app.input_mode()) {
                     Some(action) => {
                         let effects = app.handle_action(action.clone());
                         report(&effects);

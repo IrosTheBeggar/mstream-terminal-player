@@ -175,8 +175,19 @@ Deliberately not adopted: `p` stays "previous track" though cmus, ncmpcpp and te
 pause (our `Space` is unambiguous, and `n`/`p` is equally standard elsewhere); `Space` stays
 play/pause rather than ncmpcpp's select/add. Noted for later: `n`/`N` are spoken for everywhere
 else as search-match navigation, so an in-list find would need different keys, and bare `g`
-forecloses the `g`-prefix namespace rmpc uses for `gt`/`gT`. Configurable bindings — which all
-five of those players have and this one doesn't — get much easier now the keymap is data.
+forecloses the `g`-prefix namespace rmpc uses for `gt`/`gT`.
+
+**Configurable bindings** ✅ (2026-08-03) — the last thing all five of those players had and this
+one didn't. A `[keys]` section in config.toml maps action names to key lists, layered over the
+defaults; `mstream-player keys` prints the current map in exactly that format, and a round-trip
+test proves pasting its output changes nothing. Naming an action *replaces* its keys, so a
+binding can be moved or removed (`[]`); a claimed key is taken off whatever held it, so moving
+one never means unbinding another by hand. Three rules came from things that went wrong while
+building it: two actions claiming one key would have cancelled *both* (first claim now wins, and
+the loser keeps its old key); a line whose every key was unreadable would have silently unbound
+the action (a typo now costs the line, not the binding); and `ctrl+D` parsed to a key no terminal
+sends (Ctrl folds case, bare letters don't). `Ctrl+C` is not rebindable — it is the way out when
+everything else is confusing. Panel keys stay fixed, since panels draw their own hints.
 
 **Deferred from this phase:** the "TOML config with multiple saved servers" item. Single-server
 `session.json` (Phase 3) covers the common case; a server picker is a self-contained follow-up

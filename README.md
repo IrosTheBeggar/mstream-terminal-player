@@ -45,6 +45,32 @@ track queues everything visible and starts there; `a` queues just that one.
 `?` shows the same list in the app. It is generated from the key table
 itself, so it cannot fall out of step with what the keys actually do.
 
+### Rebinding
+
+```bash
+mstream-player keys
+```
+
+prints every binding as a `[keys]` section you can paste into `config.toml`
+and edit:
+
+```toml
+[keys]
+next-track = ["b"]              # move it
+jump-to-playing = ["ctrl+o"]    # ctrl+x, ctrl-x and ^x all work
+add-to-queue = ["a", "insert"]  # give it several
+clear-queue = []                # or take it away
+```
+
+Naming an action **replaces** its keys; anything you don't name keeps its
+default. A key you claim is taken off whatever held it before, so moving one
+binding never means unbinding another by hand first. A line the player can't
+read costs you that line and nothing else — it says what was wrong on the
+first screen and carries on. `Ctrl+C` always quits, whatever the file says.
+
+Overlays like the Auto-DJ panel keep their own keys, since they draw their
+own hints along the bottom.
+
 ## Library commands
 
 ```
@@ -171,7 +197,8 @@ Two files, in `%APPDATA%\mstream-player` (Windows), `~/Library/Application Suppo
 (macOS) or `~/.config/mstream-player` (Linux). Set `MSTREAM_PLAYER_CONFIG_DIR` to put them
 somewhere else — a portable install can keep them beside the binary.
 
-- `config.toml` — servers and preferences. Readable and editable; fine to keep in a dotfiles repo.
+- `config.toml` — servers, preferences and key bindings. Readable and editable; fine to keep in a
+  dotfiles repo.
 - `credentials.toml` — access tokens and Quick Connect pairing codes. Owner-only on unix, and the
   one to leave out of any sync.
 

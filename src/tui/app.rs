@@ -595,6 +595,9 @@ pub struct App {
     pub message: Option<Message>,
     pub show_help: bool,
     pub should_quit: bool,
+    /// The bindings in force. Held here rather than looked up globally so the
+    /// help screen and the key handler can never disagree about them.
+    pub keymap: Keymap,
 }
 
 impl App {
@@ -643,6 +646,7 @@ impl App {
             message: None,
             show_help: false,
             should_quit: false,
+            keymap: Keymap::default(),
         };
         // A tunnel identity is not an address: it can't be typed, edited or
         // connected to directly, so it stays out of both the endpoint and the
@@ -656,6 +660,27 @@ impl App {
             app.connect.server = server.unwrap_or_default();
         }
         app
+    }
+
+    /// Apply the `[keys]` section. Anything wrong with it is reported on the
+    /// first screen rather than thrown, because a mistyped binding should
+    /// cost you that binding and nothing else.
+    pub fn with_keys(
+        mut self,
+        overrides: &std::collections::BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        if overrides.is_empty() {
+            return self;
+        }
+        let (keymap, warnings) = Keymap::default().with_overrides(overrides);
+        self.keymap = keymap;
+        if let Some(first) = warnings.first() {
+            self.error(match warnings.len() {
+                1 => first.clone(),
+                n => format!("{first} (and {} more)", n - 1),
+            });
+        }
+        self
     }
 
     /// Supply the pairing code for a remembered tunnel server, which is what
@@ -2300,179 +2325,447 @@ impl Key {
     }
 }
 
+impl Key {
+    /// How this key is written in config.toml. Chosen to be typeable —
+    /// `ctrl+d` rather than the `^d` the help screen shows.
+    pub fn spec(self) -> String {
+        let base = match self.code {
+            KeyCode::Char(' ') => "space".to_string(),
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::Enter => "enter".to_string(),
+            KeyCode::Esc => "esc".to_string(),
+            KeyCode::Tab => "tab".to_string(),
+            KeyCode::Backspace => "backspace".to_string(),
+            KeyCode::Up => "up".to_string(),
+            KeyCode::Down => "down".to_string(),
+            KeyCode::Left => "left".to_string(),
+            KeyCode::Right => "right".to_string(),
+            KeyCode::Home => "home".to_string(),
+            KeyCode::End => "end".to_string(),
+            KeyCode::PageUp => "pageup".to_string(),
+            KeyCode::PageDown => "pagedown".to_string(),
+            other => format!("{other:?}").to_lowercase(),
+        };
+        if self.ctrl { format!("ctrl+{base}") } else { base }
+    }
+
+    /// Read a key back out of config.toml. Accepts the spelling [`Key::spec`]
+    /// writes plus the obvious near-misses, since this is hand-edited.
+    pub fn parse(spec: &str) -> Option<Key> {
+        let spec = spec.trim();
+        // `ctrl+d`, `Ctrl-D` and the help screen's own `^d` all mean one thing.
+        let (ctrl, rest) = match spec.strip_prefix('^') {
+            Some(rest) => (true, rest),
+            None => {
+                let lower = spec.to_ascii_lowercase();
+                match lower.strip_prefix("ctrl+").or_else(|| lower.strip_prefix("ctrl-")) {
+                    // The suffix is taken from the original so a bound
+                    // capital survives the lowercasing done to find it.
+                    Some(rest) => (true, &spec[spec.len() - rest.len()..]),
+                    None => (false, spec),
+                }
+            }
+        };
+        if rest.is_empty() {
+            return None;
+        }
+        let code = match rest.to_ascii_lowercase().as_str() {
+            "space" => KeyCode::Char(' '),
+            "enter" | "return" => KeyCode::Enter,
+            "esc" | "escape" => KeyCode::Esc,
+            "tab" => KeyCode::Tab,
+            "backspace" | "bksp" => KeyCode::Backspace,
+            "up" | "↑" => KeyCode::Up,
+            "down" | "↓" => KeyCode::Down,
+            "left" | "←" => KeyCode::Left,
+            "right" | "→" => KeyCode::Right,
+            "home" => KeyCode::Home,
+            "end" => KeyCode::End,
+            "pageup" | "pgup" => KeyCode::PageUp,
+            "pagedown" | "pgdn" => KeyCode::PageDown,
+            _ => {
+                let mut chars = rest.chars();
+                let only = chars.next()?;
+                // More than one character and not a name above: not a key.
+                if chars.next().is_some() {
+                    return None;
+                }
+                // Case matters for a bare letter — `g` and `G` are different
+                // bindings — but not with Ctrl, where the terminal sends the
+                // lowercase form either way. Keeping the capital there would
+                // make a binding that can never fire.
+                if ctrl { KeyCode::Char(only.to_ascii_lowercase()) } else { KeyCode::Char(only) }
+            }
+        };
+        Some(Key { code, ctrl })
+    }
+}
+
+impl Action {
+    /// The name this action answers to in `[keys]`. `None` for actions that
+    /// are the app talking to itself rather than something to bind.
+    pub fn name(&self) -> Option<&'static str> {
+        Some(match self {
+            Action::Up => "up",
+            Action::Down => "down",
+            Action::PageUp => "page-up",
+            Action::PageDown => "page-down",
+            Action::HalfPageUp => "half-page-up",
+            Action::HalfPageDown => "half-page-down",
+            Action::First => "first",
+            Action::Last => "last",
+            Action::Activate => "open",
+            Action::Back => "back",
+            Action::AddToQueue => "add-to-queue",
+            Action::CycleFocus => "switch-pane",
+            Action::SelectTab(0) => "tab-1",
+            Action::SelectTab(1) => "tab-2",
+            Action::SelectTab(2) => "tab-3",
+            Action::SelectTab(3) => "tab-4",
+            Action::SelectTab(4) => "tab-5",
+            Action::StartSearch => "search",
+            Action::PlayPause => "play-pause",
+            Action::NextTrack => "next-track",
+            Action::PrevTrack => "previous-track",
+            Action::JumpToPlaying => "jump-to-playing",
+            Action::SeekForward => "seek-forward",
+            Action::SeekBackward => "seek-back",
+            Action::SeekForwardFar => "seek-forward-far",
+            Action::SeekBackwardFar => "seek-back-far",
+            Action::VolumeUp => "volume-up",
+            Action::VolumeDown => "volume-down",
+            Action::RemoveFromQueue => "remove-from-queue",
+            Action::ClearQueue => "clear-queue",
+            Action::ToggleRepeat => "repeat",
+            Action::ToggleShuffle => "shuffle",
+            Action::ToggleAutoDj => "auto-dj",
+            Action::OpenDjPanel => "auto-dj-panel",
+            Action::StartJourney => "sonic-journey",
+            Action::ToggleHelp => "help",
+            Action::Quit => "quit",
+            // Text entry and panel plumbing; nothing to point a key at.
+            Action::SelectTab(_)
+            | Action::Input(_)
+            | Action::Backspace
+            | Action::Submit
+            | Action::Cancel => return None,
+        })
+    }
+
+    pub fn from_name(name: &str) -> Option<Action> {
+        // Derived from `name()` rather than a second list, so the two cannot
+        // disagree about what anything is called.
+        default_normal().into_iter().map(|b| b.action).find(|a| a.name() == Some(name))
+    }
+}
+
 /// One action and every key that fires it.
+#[derive(Debug, Clone)]
 pub struct Binding {
-    pub keys: &'static [Key],
+    pub keys: Vec<Key>,
     pub action: Action,
     /// What it does, for the help screen. `None` keeps a binding working but
-    /// off the list — the other four tab digits, say, which the first row
-    /// already covers.
+    /// off the list.
     pub help: Option<&'static str>,
 }
 
 /// The player's keys. Order is the order the help lists them, so related
 /// things are grouped rather than sorted.
-pub const NORMAL_KEYS: &[Binding] = &[
-    Binding { keys: &[ch('j'), key(KeyCode::Down)], action: Action::Down, help: Some("move down") },
-    Binding { keys: &[ch('k'), key(KeyCode::Up)], action: Action::Up, help: Some("move up") },
+fn default_normal() -> Vec<Binding> {
+    vec![
+    Binding { keys: vec![ch('j'), key(KeyCode::Down)], action: Action::Down, help: Some("move down") },
+    Binding { keys: vec![ch('k'), key(KeyCode::Up)], action: Action::Up, help: Some("move up") },
     Binding {
-        keys: &[key(KeyCode::PageDown)],
+        keys: vec![key(KeyCode::PageDown)],
         action: Action::PageDown,
         help: Some("a screenful down"),
     },
-    Binding { keys: &[key(KeyCode::PageUp)], action: Action::PageUp, help: Some("a screenful up") },
+    Binding { keys: vec![key(KeyCode::PageUp)], action: Action::PageUp, help: Some("a screenful up") },
     // Half a page, as in vim — and reachable without a Fn key, which is why
     // it earns its place beside PgUp/PgDn rather than replacing them.
     Binding {
-        keys: &[ctrl('d')],
+        keys: vec![ctrl('d')],
         action: Action::HalfPageDown,
         help: Some("half that, down"),
     },
-    Binding { keys: &[ctrl('u')], action: Action::HalfPageUp, help: Some("half that, up") },
+    Binding { keys: vec![ctrl('u')], action: Action::HalfPageUp, help: Some("half that, up") },
     Binding {
-        keys: &[ch('g'), key(KeyCode::Home)],
+        keys: vec![ch('g'), key(KeyCode::Home)],
         action: Action::First,
         help: Some("first"),
     },
-    Binding { keys: &[ch('G'), key(KeyCode::End)], action: Action::Last, help: Some("last") },
+    Binding { keys: vec![ch('G'), key(KeyCode::End)], action: Action::Last, help: Some("last") },
     Binding {
-        keys: &[key(KeyCode::Enter), ch('l'), key(KeyCode::Right)],
+        keys: vec![key(KeyCode::Enter), ch('l'), key(KeyCode::Right)],
         action: Action::Activate,
         help: Some("open, or play from here"),
     },
     Binding {
-        keys: &[ch('h'), key(KeyCode::Left)],
+        keys: vec![ch('h'), key(KeyCode::Left)],
         action: Action::Back,
         help: Some("go back"),
     },
-    Binding { keys: &[ch('a')], action: Action::AddToQueue, help: Some("add to queue") },
+    Binding { keys: vec![ch('a')], action: Action::AddToQueue, help: Some("add to queue") },
     Binding {
-        keys: &[key(KeyCode::Tab)],
+        keys: vec![key(KeyCode::Tab)],
         action: Action::CycleFocus,
         help: Some("browser / queue"),
     },
     // One digit per visible tab; `select_tab` ignores a number past the end,
     // so a server without Discover simply has nothing on 5. Listed one per
     // row because "which tab is 3" is the thing a reader actually wants.
-    Binding { keys: &[ch('1')], action: Action::SelectTab(0), help: Some("Files") },
-    Binding { keys: &[ch('2')], action: Action::SelectTab(1), help: Some("Library") },
-    Binding { keys: &[ch('3')], action: Action::SelectTab(2), help: Some("Playlists") },
-    Binding { keys: &[ch('4')], action: Action::SelectTab(3), help: Some("Search") },
+    Binding { keys: vec![ch('1')], action: Action::SelectTab(0), help: Some("Files") },
+    Binding { keys: vec![ch('2')], action: Action::SelectTab(1), help: Some("Library") },
+    Binding { keys: vec![ch('3')], action: Action::SelectTab(2), help: Some("Playlists") },
+    Binding { keys: vec![ch('4')], action: Action::SelectTab(3), help: Some("Search") },
     Binding {
-        keys: &[ch('5')],
+        keys: vec![ch('5')],
         action: Action::SelectTab(4),
         help: Some("Discover, if enabled"),
     },
-    Binding { keys: &[ch('/')], action: Action::StartSearch, help: Some("search") },
-    Binding { keys: &[ch(' ')], action: Action::PlayPause, help: Some("play or pause") },
-    Binding { keys: &[ch('n')], action: Action::NextTrack, help: Some("next track") },
-    Binding { keys: &[ch('p')], action: Action::PrevTrack, help: Some("previous track") },
+    Binding { keys: vec![ch('/')], action: Action::StartSearch, help: Some("search") },
+    Binding { keys: vec![ch(' ')], action: Action::PlayPause, help: Some("play or pause") },
+    Binding { keys: vec![ch('n')], action: Action::NextTrack, help: Some("next track") },
+    Binding { keys: vec![ch('p')], action: Action::PrevTrack, help: Some("previous track") },
     Binding {
-        keys: &[ch('i')],
+        keys: vec![ch('i')],
         action: Action::JumpToPlaying,
         help: Some("jump to what's playing"),
     },
     Binding {
-        keys: &[ch(']')],
+        keys: vec![ch(']')],
         action: Action::SeekForward,
         help: Some("seek 5s forward"),
     },
-    Binding { keys: &[ch('[')], action: Action::SeekBackward, help: Some("seek 5s back") },
+    Binding { keys: vec![ch('[')], action: Action::SeekBackward, help: Some("seek 5s back") },
     Binding {
-        keys: &[ch('}')],
+        keys: vec![ch('}')],
         action: Action::SeekForwardFar,
         help: Some("seek a minute forward"),
     },
     Binding {
-        keys: &[ch('{')],
+        keys: vec![ch('{')],
         action: Action::SeekBackwardFar,
         help: Some("seek a minute back"),
     },
-    Binding { keys: &[ch('+'), ch('=')], action: Action::VolumeUp, help: Some("louder") },
-    Binding { keys: &[ch('-')], action: Action::VolumeDown, help: Some("quieter") },
+    Binding { keys: vec![ch('+'), ch('=')], action: Action::VolumeUp, help: Some("louder") },
+    Binding { keys: vec![ch('-')], action: Action::VolumeDown, help: Some("quieter") },
     Binding {
-        keys: &[ch('d')],
+        keys: vec![ch('d')],
         action: Action::RemoveFromQueue,
         help: Some("remove from queue"),
     },
-    Binding { keys: &[ch('C')], action: Action::ClearQueue, help: Some("clear the queue") },
-    Binding { keys: &[ch('r')], action: Action::ToggleRepeat, help: Some("repeat") },
-    Binding { keys: &[ch('s')], action: Action::ToggleShuffle, help: Some("shuffle") },
-    Binding { keys: &[ch('A')], action: Action::ToggleAutoDj, help: Some("auto-dj on / off") },
-    Binding { keys: &[ch('D')], action: Action::OpenDjPanel, help: Some("auto-dj settings") },
-    Binding { keys: &[ch('J')], action: Action::StartJourney, help: Some("sonic journey") },
+    Binding { keys: vec![ch('C')], action: Action::ClearQueue, help: Some("clear the queue") },
+    Binding { keys: vec![ch('r')], action: Action::ToggleRepeat, help: Some("repeat") },
+    Binding { keys: vec![ch('s')], action: Action::ToggleShuffle, help: Some("shuffle") },
+    Binding { keys: vec![ch('A')], action: Action::ToggleAutoDj, help: Some("auto-dj on / off") },
+    Binding { keys: vec![ch('D')], action: Action::OpenDjPanel, help: Some("auto-dj settings") },
+    Binding { keys: vec![ch('J')], action: Action::StartJourney, help: Some("sonic journey") },
     Binding {
-        keys: &[ch('?'), key(KeyCode::Esc)],
+        keys: vec![ch('?'), key(KeyCode::Esc)],
         action: Action::ToggleHelp,
         help: Some("this help"),
     },
-    Binding { keys: &[ch('q'), ctrl('c')], action: Action::Quit, help: Some("quit") },
-];
+    Binding { keys: vec![ch('q'), ctrl('c')], action: Action::Quit, help: Some("quit") },
+    ]
+}
 
 /// Keys while a modal overlay is up. It gets its own set rather than
 /// borrowing the player's: sharing them meant `p` arrived as "previous
 /// track" and the panel's own sample key did nothing.
-pub const PANEL_KEYS: &[Binding] = &[
-    Binding { keys: &[ch('j'), key(KeyCode::Down)], action: Action::Down, help: None },
-    Binding { keys: &[ch('k'), key(KeyCode::Up)], action: Action::Up, help: None },
+///
+/// Not configurable, deliberately: a panel draws its own hints along the
+/// bottom, and those would start lying the moment its keys could move.
+fn default_panel() -> Vec<Binding> {
+    vec![
+    Binding { keys: vec![ch('j'), key(KeyCode::Down)], action: Action::Down, help: None },
+    Binding { keys: vec![ch('k'), key(KeyCode::Up)], action: Action::Up, help: None },
     Binding {
-        keys: &[ch('h'), ch('['), key(KeyCode::Left)],
+        keys: vec![ch('h'), ch('['), key(KeyCode::Left)],
         action: Action::Back,
         help: None,
     },
     Binding {
-        keys: &[ch('l'), ch(']'), key(KeyCode::Right)],
+        keys: vec![ch('l'), ch(']'), key(KeyCode::Right)],
         action: Action::SeekForward,
         help: None,
     },
-    Binding { keys: &[ch('g'), key(KeyCode::Home)], action: Action::First, help: None },
-    Binding { keys: &[ch('G'), key(KeyCode::End)], action: Action::Last, help: None },
-    Binding { keys: &[key(KeyCode::Enter)], action: Action::Submit, help: None },
-    Binding { keys: &[ch(' ')], action: Action::PlayPause, help: None },
-    Binding { keys: &[key(KeyCode::Esc), ch('D')], action: Action::Cancel, help: None },
-    Binding { keys: &[ch('q'), ctrl('c')], action: Action::Quit, help: None },
-];
-
-/// Map a key press to an action. Editing mode routes printable keys to text
-/// input; everything else comes from the tables above.
-pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
-    let pressed = Key {
-        code: key.code,
-        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
-    };
-    // Ctrl+C quits from anywhere, including mid-typing.
-    if pressed == ctrl('c') {
-        return Some(Action::Quit);
-    }
-
-    if mode == InputMode::Editing {
-        return match key.code {
-            KeyCode::Char(c) => Some(Action::Input(c)),
-            KeyCode::Backspace => Some(Action::Backspace),
-            KeyCode::Enter => Some(Action::Submit),
-            KeyCode::Esc => Some(Action::Cancel),
-            KeyCode::Tab => Some(Action::CycleFocus),
-            KeyCode::Down => Some(Action::Down),
-            KeyCode::Up => Some(Action::Up),
-            _ => None,
-        };
-    }
-
-    let table = if mode == InputMode::Panel { PANEL_KEYS } else { NORMAL_KEYS };
-    if let Some(binding) = table.iter().find(|b| b.keys.contains(&pressed)) {
-        return Some(binding.action.clone());
-    }
-
-    // Anything else typed into a panel is the panel's own business (the
-    // Auto-DJ sample key, say). Ctrl combinations are not: an unbound one
-    // must do nothing rather than arrive as a bare letter.
-    if mode == InputMode::Panel && !pressed.ctrl {
-        if let KeyCode::Char(c) = key.code {
-            return Some(Action::Input(c));
-        }
-    }
-    None
+    Binding { keys: vec![ch('g'), key(KeyCode::Home)], action: Action::First, help: None },
+    Binding { keys: vec![ch('G'), key(KeyCode::End)], action: Action::Last, help: None },
+    Binding { keys: vec![key(KeyCode::Enter)], action: Action::Submit, help: None },
+    Binding { keys: vec![ch(' ')], action: Action::PlayPause, help: None },
+    Binding { keys: vec![key(KeyCode::Esc), ch('D')], action: Action::Cancel, help: None },
+    Binding { keys: vec![ch('q'), ctrl('c')], action: Action::Quit, help: None },
+    ]
 }
+
+/// The bindings in force: the defaults, with whatever `[keys]` in config.toml
+/// had to say about them.
+#[derive(Debug, Clone)]
+pub struct Keymap {
+    normal: Vec<Binding>,
+    panel: Vec<Binding>,
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        Keymap { normal: default_normal(), panel: default_panel() }
+    }
+}
+
+impl Keymap {
+    /// Layer a config's `[keys]` over the defaults.
+    ///
+    /// Naming an action **replaces** its keys rather than adding to them, so
+    /// a binding can be moved or removed outright (`action = []`). Everything
+    /// unmentioned keeps its default.
+    ///
+    /// A key the user asks for is taken from whatever held it before: binding
+    /// `d` to something new should not also require unbinding it from the old
+    /// thing. Problems are collected rather than raised — a typo in one line
+    /// must not cost someone their music player.
+    pub fn with_overrides(
+        mut self,
+        overrides: &std::collections::BTreeMap<String, Vec<String>>,
+    ) -> (Self, Vec<String>) {
+        let mut warnings = Vec::new();
+        // Who has asked for each key. First claim wins: two lines wanting one
+        // key is a contradiction, and cancelling both — which is what
+        // stripping each in turn does — would leave the key doing nothing at
+        // all, which is nobody's intent.
+        let mut claimed: std::collections::HashMap<Key, Action> = std::collections::HashMap::new();
+
+        for (name, specs) in overrides {
+            let Some(action) = Action::from_name(name) else {
+                warnings.push(format!("[keys] has no action called '{name}'"));
+                continue;
+            };
+            let Some(slot) = self.normal.iter().position(|b| b.action == action) else {
+                warnings.push(format!("[keys] '{name}' cannot be rebound"));
+                continue;
+            };
+            let mut keys = Vec::new();
+            for spec in specs {
+                let Some(key) = Key::parse(spec) else {
+                    warnings.push(format!("[keys] '{name}': '{spec}' is not a key"));
+                    continue;
+                };
+                match claimed.get(&key) {
+                    Some(first) if *first != action => {
+                        warnings.push(format!(
+                            "[keys] '{spec}' is bound to both {} and {name} — keeping {}",
+                            first.name().unwrap_or("?"),
+                            first.name().unwrap_or("?"),
+                        ));
+                        continue;
+                    }
+                    _ => {
+                        claimed.insert(key, action.clone());
+                        keys.push(key);
+                    }
+                }
+            }
+            // A line whose every key was unreadable is a mistake, not a
+            // request to unbind — that is what an explicit `[]` is for. Leave
+            // the default alone; the warning already says what went wrong.
+            if keys.is_empty() && !specs.is_empty() {
+                warnings.push(format!("[keys] '{name}' left as it was"));
+                continue;
+            }
+            self.normal[slot].keys = keys;
+        }
+
+        // Take each claimed key off whatever held it before, so binding `d`
+        // to something new doesn't also mean unbinding it from the old thing
+        // by hand.
+        for (key, owner) in &claimed {
+            for binding in &mut self.normal {
+                if binding.action != *owner {
+                    binding.keys.retain(|k| k != key);
+                }
+            }
+        }
+
+        (self, warnings)
+    }
+
+    /// What a key press means in this mode.
+    pub fn action(&self, key: KeyEvent, mode: InputMode) -> Option<Action> {
+        let pressed = Key { code: key.code, ctrl: key.modifiers.contains(KeyModifiers::CONTROL) };
+        // Ctrl+C quits from anywhere, including mid-typing, and is not
+        // rebindable — it is the way out when everything else is confusing.
+        if pressed == ctrl('c') {
+            return Some(Action::Quit);
+        }
+
+        if mode == InputMode::Editing {
+            return match key.code {
+                KeyCode::Char(c) => Some(Action::Input(c)),
+                KeyCode::Backspace => Some(Action::Backspace),
+                KeyCode::Enter => Some(Action::Submit),
+                KeyCode::Esc => Some(Action::Cancel),
+                KeyCode::Tab => Some(Action::CycleFocus),
+                KeyCode::Down => Some(Action::Down),
+                KeyCode::Up => Some(Action::Up),
+                _ => None,
+            };
+        }
+
+        let table = if mode == InputMode::Panel { &self.panel } else { &self.normal };
+        if let Some(binding) = table.iter().find(|b| b.keys.contains(&pressed)) {
+            return Some(binding.action.clone());
+        }
+
+        // Anything else typed into a panel is the panel's own business (the
+        // Auto-DJ sample key, say). Ctrl combinations are not: an unbound one
+        // must do nothing rather than arrive as a bare letter.
+        if mode == InputMode::Panel && !pressed.ctrl {
+            if let KeyCode::Char(c) = key.code {
+                return Some(Action::Input(c));
+            }
+        }
+        None
+    }
+
+    /// The rows the help screen draws, in table order.
+    pub fn help_rows(&self) -> Vec<(String, &'static str)> {
+        self.normal
+            .iter()
+            .filter_map(|binding| {
+                let what = binding.help?;
+                let keys = binding.keys.iter().map(|k| k.label()).collect::<Vec<_>>().join(" ");
+                // A binding with every key taken away has nothing to show.
+                (!keys.is_empty()).then_some((keys, what))
+            })
+            .collect()
+    }
+
+    /// The whole map as a `[keys]` section, ready to paste into config.toml.
+    pub fn to_config_toml(&self) -> String {
+        let mut out = String::from(
+            "# Auto-DJ panel and other overlays keep their own keys.\n\
+             # Naming an action replaces its keys; give it [] to unbind it.\n\
+             [keys]\n",
+        );
+        for binding in &self.normal {
+            let Some(name) = binding.action.name() else { continue };
+            let keys: Vec<String> =
+                binding.keys.iter().map(|k| format!("\"{}\"", k.spec())).collect();
+            out.push_str(&format!("{name} = [{}]\n", keys.join(", ")));
+        }
+        out
+    }
+}
+
+/// Map a key press using the *default* bindings.
+///
+/// Test-only: the player reads `app.keymap`, which may have been rebound.
+#[cfg(test)]
+pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
+    static DEFAULTS: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
+    DEFAULTS.get_or_init(Keymap::default).action(key, mode)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -3917,6 +4210,175 @@ mod tests {
         assert!(rows.contains(&DjRow::Tempo), "the rest is still there");
     }
 
+    /// A `[keys]` section from a config file.
+    fn keys(pairs: &[(&str, &[&str])]) -> std::collections::BTreeMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(name, specs)| {
+                ((*name).to_string(), specs.iter().map(|s| (*s).to_string()).collect())
+            })
+            .collect()
+    }
+
+    fn press(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn a_rebound_action_answers_to_its_new_key_and_not_the_old_one() {
+        let (map, warnings) = Keymap::default()
+            .with_overrides(&keys(&[("next-track", &["b"])]));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(map.action(press('b'), InputMode::Normal), Some(Action::NextTrack));
+        // Naming an action replaces its keys rather than adding to them, so
+        // the default is gone — that is what makes a binding movable.
+        assert_eq!(map.action(press('n'), InputMode::Normal), None);
+        // Everything unmentioned is untouched.
+        assert_eq!(map.action(press('p'), InputMode::Normal), Some(Action::PrevTrack));
+    }
+
+    #[test]
+    fn taking_a_key_from_another_action_just_works() {
+        // Binding `d` to something new should not also require unbinding it
+        // from remove-from-queue first.
+        let (map, warnings) =
+            Keymap::default().with_overrides(&keys(&[("next-track", &["d"])]));
+        assert!(warnings.is_empty(), "no complaint about the old owner: {warnings:?}");
+        assert_eq!(map.action(press('d'), InputMode::Normal), Some(Action::NextTrack));
+        // And the action that lost it still works by its other keys, or not
+        // at all if it had none.
+        assert_eq!(map.action(press('C'), InputMode::Normal), Some(Action::ClearQueue));
+    }
+
+    #[test]
+    fn an_action_can_be_unbound_entirely() {
+        let (map, _) = Keymap::default().with_overrides(&keys(&[("clear-queue", &[])]));
+        assert_eq!(map.action(press('C'), InputMode::Normal), None);
+        // And it drops off the help, rather than listing a key that is gone.
+        assert!(!map.help_rows().iter().any(|(_, what)| *what == "clear the queue"));
+    }
+
+    #[test]
+    fn a_line_of_nothing_but_typos_leaves_the_binding_alone() {
+        // An explicit `[]` means "unbind this". A line where every key was
+        // unreadable means the line is wrong, and taking the key away would
+        // punish a typo far harder than it deserves.
+        let (map, warnings) =
+            Keymap::default().with_overrides(&keys(&[("volume-up", &["not a key"])]));
+        assert_eq!(map.action(press('+'), InputMode::Normal), Some(Action::VolumeUp));
+        assert!(warnings.iter().any(|w| w.contains("left as it was")), "{warnings:?}");
+
+        // But one good key among the bad still takes effect.
+        let (map, _) = Keymap::default()
+            .with_overrides(&keys(&[("volume-up", &["not a key", "V"])]));
+        assert_eq!(map.action(press('V'), InputMode::Normal), Some(Action::VolumeUp));
+        assert_eq!(map.action(press('+'), InputMode::Normal), None);
+    }
+
+    #[test]
+    fn the_help_follows_the_bindings_that_are_actually_in_force() {
+        let (map, _) = Keymap::default().with_overrides(&keys(&[("quit", &["ctrl+q", "Z"])]));
+        let quit = map
+            .help_rows()
+            .into_iter()
+            .find(|(_, what)| *what == "quit")
+            .expect("quit is still listed");
+        assert_eq!(quit.0, "^q Z", "the help shows the new keys, in order");
+    }
+
+    #[test]
+    fn a_broken_keys_section_costs_only_the_broken_line() {
+        let (map, warnings) = Keymap::default().with_overrides(&keys(&[
+            ("next-track", &["b"]),
+            ("teleport", &["t"]),
+            ("previous-track", &["not a key"]),
+        ]));
+        assert!(warnings.iter().any(|w| w.contains("no action called 'teleport'")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("'not a key' is not a key")), "{warnings:?}");
+        // The good line still took effect, and the player still works.
+        assert_eq!(map.action(press('b'), InputMode::Normal), Some(Action::NextTrack));
+        assert_eq!(map.action(press(' '), InputMode::Normal), Some(Action::PlayPause));
+        // The line that was all typos kept its default rather than vanishing.
+        assert_eq!(map.action(press('p'), InputMode::Normal), Some(Action::PrevTrack));
+    }
+
+    #[test]
+    fn two_actions_claiming_one_key_is_reported() {
+        let (map, warnings) = Keymap::default()
+            .with_overrides(&keys(&[("next-track", &["z"]), ("previous-track", &["z"])]));
+        assert!(warnings.iter().any(|w| w.contains("bound to both")), "{warnings:?}");
+        // The first claim wins outright — stripping the key from each in turn
+        // would leave it doing nothing, which is nobody's intent.
+        assert_eq!(map.action(press('z'), InputMode::Normal), Some(Action::NextTrack));
+        // And the one that lost keeps the binding it already had, rather than
+        // being left with none at all.
+        assert_eq!(map.action(press('p'), InputMode::Normal), Some(Action::PrevTrack));
+    }
+
+    #[test]
+    fn ctrl_c_cannot_be_taken_away() {
+        // The way out has to survive any config, including a hostile one.
+        let (map, _) = Keymap::default().with_overrides(&keys(&[("quit", &["Z"])]));
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(map.action(ctrl_c, InputMode::Normal), Some(Action::Quit));
+        assert_eq!(map.action(ctrl_c, InputMode::Panel), Some(Action::Quit));
+        assert_eq!(map.action(ctrl_c, InputMode::Editing), Some(Action::Quit));
+    }
+
+    #[test]
+    fn key_specs_round_trip_and_forgive_the_obvious_variants() {
+        for spec in ["j", "G", "space", "enter", "esc", "tab", "up", "pagedown", "ctrl+d", "?"] {
+            let parsed = Key::parse(spec).unwrap_or_else(|| panic!("could not read {spec:?}"));
+            // What it writes back must read as the same key — case included,
+            // since `G` and `g` are different bindings.
+            assert_eq!(Key::parse(&parsed.spec()), Some(parsed), "{spec} did not round-trip");
+        }
+        assert_eq!(Key::parse("G").unwrap().spec(), "G", "a capital stays capital");
+        // Same key, several spellings — this is a hand-edited file.
+        for spec in ["ctrl+d", "Ctrl+D", "ctrl-d", "^d"] {
+            assert_eq!(Key::parse(spec), Some(ctrl('d')), "{spec}");
+        }
+        assert_eq!(Key::parse("PgDn"), Some(key(KeyCode::PageDown)));
+        assert_eq!(Key::parse("Escape"), Some(key(KeyCode::Esc)));
+        // With Ctrl the capital is folded away: the terminal sends the
+        // lowercase form, so `ctrl+D` would otherwise never fire.
+        assert_eq!(Key::parse("ctrl+D"), Some(ctrl('d')));
+        for bad in ["", "  ", "nonsense", "ctrl+"] {
+            assert_eq!(Key::parse(bad), None, "{bad:?} is not a key");
+        }
+    }
+
+    #[test]
+    fn every_bindable_action_has_a_name_and_finds_its_way_back() {
+        for binding in default_normal() {
+            let name = binding
+                .action
+                .name()
+                .unwrap_or_else(|| panic!("{:?} is bound but unnameable", binding.action));
+            assert_eq!(
+                Action::from_name(name),
+                Some(binding.action.clone()),
+                "'{name}' does not resolve back to what it names"
+            );
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "'{name}' is not a kebab-case name"
+            );
+        }
+    }
+
+    #[test]
+    fn the_dumped_config_is_the_config_that_would_be_read_back() {
+        // `mstream-player keys` is only useful if pasting its output changes
+        // nothing — which means the writer and the parser have to agree.
+        let dumped = Keymap::default().to_config_toml();
+        let parsed: crate::config::Config =
+            toml::from_str(&format!("version = 1\n{dumped}")).expect("valid TOML");
+        let (map, warnings) = Keymap::default().with_overrides(&parsed.keys);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(map.help_rows(), Keymap::default().help_rows(), "round trip changed something");
+    }
+
     #[test]
     fn a_modifier_is_part_of_the_key_not_decoration() {
         // Ctrl was only ever checked for `c`, so Ctrl+D arrived as plain `d`
@@ -3942,10 +4404,10 @@ mod tests {
         // Two rows claiming the same key means the second is dead code, and
         // which one wins depends on table order — worth catching here rather
         // than as "that key stopped working".
-        for table in [NORMAL_KEYS, PANEL_KEYS] {
+        for table in [default_normal(), default_panel()] {
             let mut seen = std::collections::HashMap::new();
-            for binding in table {
-                for key in binding.keys {
+            for binding in &table {
+                for key in &binding.keys {
                     let previous = seen.insert(*key, binding.action.clone());
                     assert!(
                         previous.is_none(),
