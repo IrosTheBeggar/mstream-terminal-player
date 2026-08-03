@@ -28,17 +28,22 @@ track queues everything visible and starts there; `a` queues just that one.
 | Key | |
 |---|---|
 | `j` `k` / `↓` `↑` | move · `g` / `G` first / last |
+| `Ctrl+d` / `Ctrl+u` | half a screen down / up · `PgDn` `PgUp` a whole one |
 | `Enter` / `l` | open a folder, or play from the highlighted track |
 | `h` | go back |
 | `a` | add the highlighted track to the queue |
 | `Tab` | switch between browser and queue |
 | `1` … `5` | Files / Library / Playlists / Search / Discover · `/` search |
 | `Space` | play or pause · `n` / `p` next / previous |
-| `[` `]` | seek 5s · `-` `+` volume |
+| `i` | jump to whatever is playing |
+| `[` `]` | seek 5s · `{` `}` seek a minute · `-` `+` volume |
 | `d` / `C` | remove from queue / clear queue |
 | `r` / `s` | repeat / shuffle · `A` auto-dj · `D` auto-dj panel |
 | `J` | sonic journey to the highlighted track |
 | `?` | help · `q` quit |
+
+`?` shows the same list in the app. It is generated from the key table
+itself, so it cannot fall out of step with what the keys actually do.
 
 ## Library commands
 

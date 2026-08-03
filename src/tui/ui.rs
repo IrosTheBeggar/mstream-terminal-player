@@ -960,8 +960,59 @@ fn render_genre_picker(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Widths of the two halves of a help entry.
+const HELP_KEYS_WIDTH: usize = 11;
+const HELP_TEXT_WIDTH: usize = 24;
+
+/// The keys, read straight off the keymap.
+///
+/// Rendering the real bindings is the point: a hand-written copy of this list
+/// drifted from the truth within a day of the last key being added, and a
+/// help screen that lies is worse than none.
 fn render_help(frame: &mut Frame, area: Rect) {
-    let box_area = centered_rect(62, 18, area);
+    let entries: Vec<(String, &'static str)> = crate::tui::app::NORMAL_KEYS
+        .iter()
+        .filter_map(|binding| {
+            let what = binding.help?;
+            let keys =
+                binding.keys.iter().map(|k| k.label()).collect::<Vec<_>>().join(" ");
+            Some((keys, what))
+        })
+        .collect();
+
+    // Lay out in as few columns as fit the height, so a tall terminal gets a
+    // single readable list and a short one gets two or three.
+    let column_width = (HELP_KEYS_WIDTH + HELP_TEXT_WIDTH + 2) as u16;
+    let usable_rows = area.height.saturating_sub(4).max(1) as usize;
+    let columns = entries.len().div_ceil(usable_rows).max(1);
+    let columns = columns.min((area.width / column_width).max(1) as usize);
+    let per_column = entries.len().div_ceil(columns);
+
+    let lines: Vec<Line> = (0..per_column)
+        .map(|row| {
+            let mut spans = Vec::new();
+            for column in 0..columns {
+                let Some((keys, what)) = entries.get(column * per_column + row) else {
+                    break;
+                };
+                spans.push(Span::styled(
+                    format!("  {keys:<HELP_KEYS_WIDTH$}"),
+                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::raw(format!("{what:<HELP_TEXT_WIDTH$}")));
+            }
+            Line::from(spans)
+        })
+        .collect();
+
+    let width = (columns as u16 * column_width + 2).min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let box_area = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
     frame.render_widget(Clear, box_area);
 
     let block = Block::default()
@@ -970,40 +1021,6 @@ fn render_help(frame: &mut Frame, area: Rect) {
         .title(" Keys ");
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
-
-    let rows = [
-        ("j / k / ↓ ↑", "move"),
-        ("g / G", "first / last"),
-        ("Enter / l", "open folder, or play from here"),
-        ("h", "go back"),
-        ("a", "add track to queue"),
-        ("Tab", "switch browser / queue"),
-        ("1 2 3 4", "Files / Library / Playlists / Search"),
-        ("/", "search"),
-        ("Space", "play or pause"),
-        ("n / p", "next / previous track"),
-        ("[ / ]", "seek 5s back / forward"),
-        ("- / +", "volume"),
-        ("d / C", "remove from queue / clear queue"),
-        ("r / s", "repeat / shuffle"),
-        ("A", "auto-dj: off / similar / tempo+key"),
-        ("D", "auto-dj settings"),
-        ("J", "sonic journey to the highlighted track"),
-        ("? / Esc", "toggle this help"),
-        ("q", "quit"),
-    ];
-    let lines: Vec<Line> = rows
-        .iter()
-        .map(|(keys, what)| {
-            Line::from(vec![
-                Span::styled(
-                    format!("  {keys:<14}"),
-                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(*what),
-            ])
-        })
-        .collect();
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -1564,13 +1581,61 @@ mod tests {
     }
 
     #[test]
-    fn help_overlay_lists_bindings() {
+    fn the_help_screen_is_the_keymap() {
+        // The whole point of deriving it: a key that works but isn't listed,
+        // or a listed key that no longer works, is now unrepresentable. The
+        // hand-written version drifted within a day of the last key landing.
         let mut app = connected_app();
         app.handle_action(Action::ToggleHelp);
-        let text = draw(&mut app);
-        assert!(text.contains("Keys"));
-        assert!(text.contains("play or pause"));
-        assert!(text.contains("seek 5s back / forward"));
+        let text = draw_sized(&mut app, 120, 44);
+        assert!(text.contains("Keys"), "the overlay drew at all");
+
+        for binding in crate::tui::app::NORMAL_KEYS {
+            let Some(what) = binding.help else { continue };
+            let keys = binding.keys.iter().map(|k| k.label()).collect::<Vec<_>>().join(" ");
+            // Key and description on one line, exactly as laid out — not
+            // merely present somewhere on screen.
+            let row = format!("  {keys:<HELP_KEYS_WIDTH$}{what}");
+            assert!(text.contains(&row), "help is missing {row:?}\n{text}");
+        }
+    }
+
+    #[test]
+    fn every_help_entry_fits_its_column() {
+        // The columns are laid out by padding to a fixed width, so one
+        // over-long entry shunts everything to its right out of line — which
+        // is exactly what a 25-character description did.
+        for binding in crate::tui::app::NORMAL_KEYS {
+            let keys = binding.keys.iter().map(|k| k.label()).collect::<Vec<_>>().join(" ");
+            assert!(
+                keys.chars().count() <= HELP_KEYS_WIDTH,
+                "keys {keys:?} are wider than the column ({HELP_KEYS_WIDTH})"
+            );
+            if let Some(what) = binding.help {
+                assert!(
+                    what.chars().count() <= HELP_TEXT_WIDTH,
+                    "{what:?} is wider than the column ({HELP_TEXT_WIDTH})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_help_folds_into_columns_when_it_cannot_fit_in_one() {
+        let mut app = connected_app();
+        app.handle_action(Action::ToggleHelp);
+
+        // Tall and wide: one column, and the last binding is still on screen.
+        let tall = draw_sized(&mut app, 120, 44);
+        assert!(tall.contains("quit"));
+
+        // Short: the same content has to fold rather than fall off the end.
+        let short = draw_sized(&mut app, 120, 24);
+        assert!(short.contains("quit"), "nothing is lost when it folds:\n{short}");
+        assert!(short.contains("move down"), "including the first row");
+        for line in short.lines() {
+            assert!(line.chars().count() <= 120);
+        }
     }
 
     #[test]

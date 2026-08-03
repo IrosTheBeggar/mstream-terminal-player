@@ -20,7 +20,12 @@ use super::worker::{
 };
 
 const SEEK_STEP: f64 = 5.0;
+/// The shifted seek keys. Five seconds is the wrong unit for a long mix or a
+/// set recording, where the interesting distance is minutes.
+const SEEK_STEP_FAR: f64 = 60.0;
 const VOLUME_STEP: f32 = 0.05;
+/// Rows a page key moves. Ctrl+u/d move half of this, as they do in vim.
+const PAGE_STEP: isize = 10;
 
 /// A side effect for the run loop to dispatch to a worker.
 #[derive(Debug, Clone, PartialEq)]
@@ -126,6 +131,8 @@ pub enum Action {
     Down,
     PageUp,
     PageDown,
+    HalfPageUp,
+    HalfPageDown,
     First,
     Last,
     Activate,
@@ -136,6 +143,12 @@ pub enum Action {
     PrevTrack,
     SeekForward,
     SeekBackward,
+    /// Coarse seek — the same idea shifted, for tracks where five seconds is
+    /// not a useful unit.
+    SeekForwardFar,
+    SeekBackwardFar,
+    /// Put the cursor back on the track that's playing.
+    JumpToPlaying,
     VolumeUp,
     VolumeDown,
     RemoveFromQueue,
@@ -854,8 +867,10 @@ impl App {
 
             Action::Up => self.move_selection(-1),
             Action::Down => self.move_selection(1),
-            Action::PageUp => self.move_selection(-10),
-            Action::PageDown => self.move_selection(10),
+            Action::PageUp => self.move_selection(-PAGE_STEP),
+            Action::PageDown => self.move_selection(PAGE_STEP),
+            Action::HalfPageUp => self.move_selection(-PAGE_STEP / 2),
+            Action::HalfPageDown => self.move_selection(PAGE_STEP / 2),
             Action::First => {
                 match self.focus {
                     Focus::Browser => self.pane_mut().select_first(),
@@ -888,6 +903,9 @@ impl App {
             Action::PrevTrack => self.skip_previous(),
             Action::SeekForward => self.seek_by(SEEK_STEP),
             Action::SeekBackward => self.seek_by(-SEEK_STEP),
+            Action::SeekForwardFar => self.seek_by(SEEK_STEP_FAR),
+            Action::SeekBackwardFar => self.seek_by(-SEEK_STEP_FAR),
+            Action::JumpToPlaying => self.jump_to_playing(),
             Action::VolumeUp => self.change_volume(VOLUME_STEP),
             Action::VolumeDown => self.change_volume(-VOLUME_STEP),
 
@@ -1681,6 +1699,25 @@ impl App {
         vec![Effect::Api(ApiCmd::Discover { node, seed: Box::new(seed) })]
     }
 
+    /// Put the cursor back on the playing track.
+    ///
+    /// Every other terminal player has this (cmus `i`, ncmpcpp `o`,
+    /// musikcube `x`) and for the same reason: browsing takes you a long way
+    /// from the music — several tabs and two drill-downs, here — and there
+    /// needs to be one key that means "back to where I was listening".
+    fn jump_to_playing(&mut self) -> Vec<Effect> {
+        let Some(index) = self.queue.current else {
+            self.info("nothing is playing");
+            return Vec::new();
+        };
+        self.focus = Focus::Queue;
+        self.queue.state.select(Some(index));
+        if let Some(track) = self.queue.items.get(index) {
+            self.info(format!("playing {}", track.display_name()));
+        }
+        Vec::new()
+    }
+
     /// The track under the cursor, wherever the cursor is. Directories and
     /// playlist rows are not tracks and give nothing.
     fn selected_track(&self) -> Option<Track> {
@@ -2214,11 +2251,197 @@ fn entries_from_listing(listing: &DirListing) -> Vec<Entry> {
     entries
 }
 
+// ── Keymap ──────────────────────────────────────────────────────────────────
+//
+// One table per mode, and the help screen is rendered from it. Keeping a
+// second hand-written list of "what the keys are" meant the help drifted
+// from the truth: it still advertised four tabs after a fifth was added.
+
+/// A key press, modifier included. Carrying the modifier is what stops
+/// `Ctrl+D` from being mistaken for `d` — which it was, quietly deleting a
+/// queue entry when a vim user reached for half-page-down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Key {
+    pub code: KeyCode,
+    pub ctrl: bool,
+}
+
+const fn key(code: KeyCode) -> Key {
+    Key { code, ctrl: false }
+}
+const fn ch(c: char) -> Key {
+    Key { code: KeyCode::Char(c), ctrl: false }
+}
+const fn ctrl(c: char) -> Key {
+    Key { code: KeyCode::Char(c), ctrl: true }
+}
+
+impl Key {
+    /// How this key is written on the help screen.
+    pub fn label(self) -> String {
+        let base = match self.code {
+            KeyCode::Char(' ') => "Space".to_string(),
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::Enter => "Enter".to_string(),
+            KeyCode::Esc => "Esc".to_string(),
+            KeyCode::Tab => "Tab".to_string(),
+            KeyCode::Backspace => "Bksp".to_string(),
+            KeyCode::Up => "↑".to_string(),
+            KeyCode::Down => "↓".to_string(),
+            KeyCode::Left => "←".to_string(),
+            KeyCode::Right => "→".to_string(),
+            KeyCode::Home => "Home".to_string(),
+            KeyCode::End => "End".to_string(),
+            KeyCode::PageUp => "PgUp".to_string(),
+            KeyCode::PageDown => "PgDn".to_string(),
+            other => format!("{other:?}"),
+        };
+        if self.ctrl { format!("^{base}") } else { base }
+    }
+}
+
+/// One action and every key that fires it.
+pub struct Binding {
+    pub keys: &'static [Key],
+    pub action: Action,
+    /// What it does, for the help screen. `None` keeps a binding working but
+    /// off the list — the other four tab digits, say, which the first row
+    /// already covers.
+    pub help: Option<&'static str>,
+}
+
+/// The player's keys. Order is the order the help lists them, so related
+/// things are grouped rather than sorted.
+pub const NORMAL_KEYS: &[Binding] = &[
+    Binding { keys: &[ch('j'), key(KeyCode::Down)], action: Action::Down, help: Some("move down") },
+    Binding { keys: &[ch('k'), key(KeyCode::Up)], action: Action::Up, help: Some("move up") },
+    Binding {
+        keys: &[key(KeyCode::PageDown)],
+        action: Action::PageDown,
+        help: Some("a screenful down"),
+    },
+    Binding { keys: &[key(KeyCode::PageUp)], action: Action::PageUp, help: Some("a screenful up") },
+    // Half a page, as in vim — and reachable without a Fn key, which is why
+    // it earns its place beside PgUp/PgDn rather than replacing them.
+    Binding {
+        keys: &[ctrl('d')],
+        action: Action::HalfPageDown,
+        help: Some("half that, down"),
+    },
+    Binding { keys: &[ctrl('u')], action: Action::HalfPageUp, help: Some("half that, up") },
+    Binding {
+        keys: &[ch('g'), key(KeyCode::Home)],
+        action: Action::First,
+        help: Some("first"),
+    },
+    Binding { keys: &[ch('G'), key(KeyCode::End)], action: Action::Last, help: Some("last") },
+    Binding {
+        keys: &[key(KeyCode::Enter), ch('l'), key(KeyCode::Right)],
+        action: Action::Activate,
+        help: Some("open, or play from here"),
+    },
+    Binding {
+        keys: &[ch('h'), key(KeyCode::Left)],
+        action: Action::Back,
+        help: Some("go back"),
+    },
+    Binding { keys: &[ch('a')], action: Action::AddToQueue, help: Some("add to queue") },
+    Binding {
+        keys: &[key(KeyCode::Tab)],
+        action: Action::CycleFocus,
+        help: Some("browser / queue"),
+    },
+    // One digit per visible tab; `select_tab` ignores a number past the end,
+    // so a server without Discover simply has nothing on 5. Listed one per
+    // row because "which tab is 3" is the thing a reader actually wants.
+    Binding { keys: &[ch('1')], action: Action::SelectTab(0), help: Some("Files") },
+    Binding { keys: &[ch('2')], action: Action::SelectTab(1), help: Some("Library") },
+    Binding { keys: &[ch('3')], action: Action::SelectTab(2), help: Some("Playlists") },
+    Binding { keys: &[ch('4')], action: Action::SelectTab(3), help: Some("Search") },
+    Binding {
+        keys: &[ch('5')],
+        action: Action::SelectTab(4),
+        help: Some("Discover, if enabled"),
+    },
+    Binding { keys: &[ch('/')], action: Action::StartSearch, help: Some("search") },
+    Binding { keys: &[ch(' ')], action: Action::PlayPause, help: Some("play or pause") },
+    Binding { keys: &[ch('n')], action: Action::NextTrack, help: Some("next track") },
+    Binding { keys: &[ch('p')], action: Action::PrevTrack, help: Some("previous track") },
+    Binding {
+        keys: &[ch('i')],
+        action: Action::JumpToPlaying,
+        help: Some("jump to what's playing"),
+    },
+    Binding {
+        keys: &[ch(']')],
+        action: Action::SeekForward,
+        help: Some("seek 5s forward"),
+    },
+    Binding { keys: &[ch('[')], action: Action::SeekBackward, help: Some("seek 5s back") },
+    Binding {
+        keys: &[ch('}')],
+        action: Action::SeekForwardFar,
+        help: Some("seek a minute forward"),
+    },
+    Binding {
+        keys: &[ch('{')],
+        action: Action::SeekBackwardFar,
+        help: Some("seek a minute back"),
+    },
+    Binding { keys: &[ch('+'), ch('=')], action: Action::VolumeUp, help: Some("louder") },
+    Binding { keys: &[ch('-')], action: Action::VolumeDown, help: Some("quieter") },
+    Binding {
+        keys: &[ch('d')],
+        action: Action::RemoveFromQueue,
+        help: Some("remove from queue"),
+    },
+    Binding { keys: &[ch('C')], action: Action::ClearQueue, help: Some("clear the queue") },
+    Binding { keys: &[ch('r')], action: Action::ToggleRepeat, help: Some("repeat") },
+    Binding { keys: &[ch('s')], action: Action::ToggleShuffle, help: Some("shuffle") },
+    Binding { keys: &[ch('A')], action: Action::ToggleAutoDj, help: Some("auto-dj on / off") },
+    Binding { keys: &[ch('D')], action: Action::OpenDjPanel, help: Some("auto-dj settings") },
+    Binding { keys: &[ch('J')], action: Action::StartJourney, help: Some("sonic journey") },
+    Binding {
+        keys: &[ch('?'), key(KeyCode::Esc)],
+        action: Action::ToggleHelp,
+        help: Some("this help"),
+    },
+    Binding { keys: &[ch('q'), ctrl('c')], action: Action::Quit, help: Some("quit") },
+];
+
+/// Keys while a modal overlay is up. It gets its own set rather than
+/// borrowing the player's: sharing them meant `p` arrived as "previous
+/// track" and the panel's own sample key did nothing.
+pub const PANEL_KEYS: &[Binding] = &[
+    Binding { keys: &[ch('j'), key(KeyCode::Down)], action: Action::Down, help: None },
+    Binding { keys: &[ch('k'), key(KeyCode::Up)], action: Action::Up, help: None },
+    Binding {
+        keys: &[ch('h'), ch('['), key(KeyCode::Left)],
+        action: Action::Back,
+        help: None,
+    },
+    Binding {
+        keys: &[ch('l'), ch(']'), key(KeyCode::Right)],
+        action: Action::SeekForward,
+        help: None,
+    },
+    Binding { keys: &[ch('g'), key(KeyCode::Home)], action: Action::First, help: None },
+    Binding { keys: &[ch('G'), key(KeyCode::End)], action: Action::Last, help: None },
+    Binding { keys: &[key(KeyCode::Enter)], action: Action::Submit, help: None },
+    Binding { keys: &[ch(' ')], action: Action::PlayPause, help: None },
+    Binding { keys: &[key(KeyCode::Esc), ch('D')], action: Action::Cancel, help: None },
+    Binding { keys: &[ch('q'), ctrl('c')], action: Action::Quit, help: None },
+];
+
 /// Map a key press to an action. Editing mode routes printable keys to text
-/// input; everything else is a normal binding.
+/// input; everything else comes from the tables above.
 pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    if ctrl && matches!(key.code, KeyCode::Char('c')) {
+    let pressed = Key {
+        code: key.code,
+        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
+    };
+    // Ctrl+C quits from anywhere, including mid-typing.
+    if pressed == ctrl('c') {
         return Some(Action::Quit);
     }
 
@@ -2235,64 +2458,20 @@ pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
         };
     }
 
-    // A modal overlay gets its own bindings rather than borrowing the
-    // player's. Sharing them meant `p` reached the panel as "previous track"
-    // and its sample key did nothing at all.
-    if mode == InputMode::Panel {
-        return match key.code {
-            KeyCode::Char('q') => Some(Action::Quit),
-            KeyCode::Esc | KeyCode::Char('D') => Some(Action::Cancel),
-            KeyCode::Down | KeyCode::Char('j') => Some(Action::Down),
-            KeyCode::Up | KeyCode::Char('k') => Some(Action::Up),
-            KeyCode::Left | KeyCode::Char('h' | '[') => Some(Action::Back),
-            KeyCode::Right | KeyCode::Char('l' | ']') => Some(Action::SeekForward),
-            KeyCode::Home | KeyCode::Char('g') => Some(Action::First),
-            KeyCode::End | KeyCode::Char('G') => Some(Action::Last),
-            KeyCode::Enter => Some(Action::Submit),
-            KeyCode::Char(' ') => Some(Action::PlayPause),
-            KeyCode::Char(c) => Some(Action::Input(c)),
-            _ => None,
-        };
+    let table = if mode == InputMode::Panel { PANEL_KEYS } else { NORMAL_KEYS };
+    if let Some(binding) = table.iter().find(|b| b.keys.contains(&pressed)) {
+        return Some(binding.action.clone());
     }
 
-    match key.code {
-        KeyCode::Char('q') => Some(Action::Quit),
-        KeyCode::Char('?') => Some(Action::ToggleHelp),
-        KeyCode::Esc => Some(Action::Cancel),
-        KeyCode::Tab => Some(Action::CycleFocus),
-        // One digit per visible tab. `select_tab` ignores a number past the
-        // end, so a server without Discover simply has nothing on 5.
-        KeyCode::Char(c @ '1'..='5') => Some(Action::SelectTab(c as usize - '1' as usize)),
-
-        KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
-        KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
-        KeyCode::Char('g') | KeyCode::Home => Some(Action::First),
-        KeyCode::Char('G') | KeyCode::End => Some(Action::Last),
-        KeyCode::PageUp => Some(Action::PageUp),
-        KeyCode::PageDown => Some(Action::PageDown),
-
-        KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => Some(Action::Activate),
-        KeyCode::Char('h') | KeyCode::Left => Some(Action::Back),
-        KeyCode::Char('a') => Some(Action::AddToQueue),
-
-        KeyCode::Char(' ') => Some(Action::PlayPause),
-        KeyCode::Char('n') => Some(Action::NextTrack),
-        KeyCode::Char('p') => Some(Action::PrevTrack),
-        KeyCode::Char(']') => Some(Action::SeekForward),
-        KeyCode::Char('[') => Some(Action::SeekBackward),
-        KeyCode::Char('+' | '=') => Some(Action::VolumeUp),
-        KeyCode::Char('-') => Some(Action::VolumeDown),
-
-        KeyCode::Char('d') => Some(Action::RemoveFromQueue),
-        KeyCode::Char('C') => Some(Action::ClearQueue),
-        KeyCode::Char('r') => Some(Action::ToggleRepeat),
-        KeyCode::Char('s') => Some(Action::ToggleShuffle),
-        KeyCode::Char('A') => Some(Action::ToggleAutoDj),
-        KeyCode::Char('D') => Some(Action::OpenDjPanel),
-        KeyCode::Char('J') => Some(Action::StartJourney),
-        KeyCode::Char('/') => Some(Action::StartSearch),
-        _ => None,
+    // Anything else typed into a panel is the panel's own business (the
+    // Auto-DJ sample key, say). Ctrl combinations are not: an unbound one
+    // must do nothing rather than arrive as a bare letter.
+    if mode == InputMode::Panel && !pressed.ctrl {
+        if let KeyCode::Char(c) = key.code {
+            return Some(Action::Input(c));
+        }
     }
+    None
 }
 
 #[cfg(test)]
@@ -3736,6 +3915,112 @@ mod tests {
         assert!(!rows.contains(&DjRow::Tightness));
         assert!(!rows.contains(&DjRow::Anchor));
         assert!(rows.contains(&DjRow::Tempo), "the rest is still there");
+    }
+
+    #[test]
+    fn a_modifier_is_part_of_the_key_not_decoration() {
+        // Ctrl was only ever checked for `c`, so Ctrl+D arrived as plain `d`
+        // and quietly removed a queue entry when a vim user reached for
+        // half-page-down.
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(map_key(ctrl_d, InputMode::Normal), Some(Action::HalfPageDown));
+        let plain_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(map_key(plain_d, InputMode::Normal), Some(Action::RemoveFromQueue));
+
+        // And an unbound Ctrl combination does nothing at all rather than
+        // falling through to the bare letter.
+        let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert_eq!(map_key(ctrl_r, InputMode::Normal), None);
+        // Including inside a panel, where bare letters are passed through.
+        assert_eq!(map_key(ctrl_r, InputMode::Panel), None);
+        let plain_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        assert_eq!(map_key(plain_p, InputMode::Panel), Some(Action::Input('p')));
+    }
+
+    #[test]
+    fn every_binding_is_reachable_and_unambiguous() {
+        // Two rows claiming the same key means the second is dead code, and
+        // which one wins depends on table order — worth catching here rather
+        // than as "that key stopped working".
+        for table in [NORMAL_KEYS, PANEL_KEYS] {
+            let mut seen = std::collections::HashMap::new();
+            for binding in table {
+                for key in binding.keys {
+                    let previous = seen.insert(*key, binding.action.clone());
+                    assert!(
+                        previous.is_none(),
+                        "{} is bound twice: {:?} and {:?}",
+                        key.label(),
+                        previous.unwrap(),
+                        binding.action
+                    );
+                }
+                assert!(!binding.keys.is_empty(), "{:?} has no key", binding.action);
+            }
+        }
+    }
+
+    #[test]
+    fn jumping_to_what_is_playing_goes_to_the_queue() {
+        // Browsing takes you a long way from the music — several tabs and two
+        // drill-downs — so one key has to lead back.
+        let mut app = connected_app();
+        let named = Track {
+            filepath: "b".into(),
+            metadata: TrackMetadata {
+                artist: Some("Band".into()),
+                title: Some("Song".into()),
+                ..Default::default()
+            },
+        };
+        app.queue.replace(vec![track("a"), named, track("c")]);
+        app.play_index(1);
+        // Wander off.
+        app.focus = Focus::Browser;
+        app.queue.state.select(Some(0));
+
+        assert!(app.handle_action(Action::JumpToPlaying).is_empty());
+        assert_eq!(app.focus, Focus::Queue);
+        assert_eq!(app.queue.state.selected(), Some(1), "the playing row, not the first");
+        assert!(app.message.as_ref().unwrap().text.contains("Band - Song"));
+    }
+
+    #[test]
+    fn jumping_with_nothing_playing_says_so() {
+        let mut app = connected_app();
+        app.queue.replace(vec![track("a")]);
+        assert!(app.handle_action(Action::JumpToPlaying).is_empty());
+        assert_eq!(app.focus, Focus::Browser, "the cursor stays where it was");
+        assert!(app.message.as_ref().unwrap().text.contains("nothing is playing"));
+    }
+
+    #[test]
+    fn the_shifted_seek_keys_move_by_a_minute() {
+        let mut app = connected_app();
+        app.status.source = "http://host/a.mp3".into();
+        app.status.position = 200.0;
+
+        let effects = app.handle_action(Action::SeekForwardFar);
+        assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(260.0))]);
+        let effects = app.handle_action(Action::SeekBackwardFar);
+        assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(140.0))]);
+        // And the fine keys still move by five.
+        let effects = app.handle_action(Action::SeekForward);
+        assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(205.0))]);
+    }
+
+    #[test]
+    fn half_a_page_is_half_of_a_page() {
+        let mut app = connected_app();
+        let names: Vec<String> = (0..40).map(|i| i.to_string()).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        browsing(&mut app, &refs, 0);
+
+        app.handle_action(Action::PageDown);
+        let after_page = app.files.state.selected().unwrap();
+        app.handle_action(Action::First);
+        app.handle_action(Action::HalfPageDown);
+        assert_eq!(app.files.state.selected(), Some(after_page / 2));
     }
 
     #[test]

@@ -158,6 +158,26 @@ Splitting `ApiError::Forbidden` out of `Unauthorized` was a prerequisite: mStrea
 "feature disabled", per-user permissions, and request-validation failures, none of which should
 bounce a user to a login screen.
 
+**Keys** (revisited 2026-08-03 after reading how cmus, ncmpcpp, musikcube, rmpc and termusic
+handle navigation). Bindings live in one table per mode in `app.rs`, and `?` renders the help
+*from that table* — the hand-written copy had already drifted, still advertising four tabs a day
+after the fifth landed. A key press now carries its modifier, which is what stopped `Ctrl+D`
+being read as plain `d` and silently removing a queue entry.
+
+Three things the survey said we were missing, each with independent precedent:
+- **Jump to what's playing** (`i`) — cmus `i`, ncmpcpp `o`, musikcube `x` all have it, and this
+  player made the need worse: browsing now goes five tabs and two drill-downs deep.
+- **A coarse seek** (`{` `}`, one minute) — cmus carries two granularities for a reason; five
+  seconds is the wrong unit for a long mix.
+- **Half-page scroll** (`Ctrl+u` / `Ctrl+d`) — vim-standard, and reachable without a Fn key.
+
+Deliberately not adopted: `p` stays "previous track" though cmus, ncmpcpp and termusic use it for
+pause (our `Space` is unambiguous, and `n`/`p` is equally standard elsewhere); `Space` stays
+play/pause rather than ncmpcpp's select/add. Noted for later: `n`/`N` are spoken for everywhere
+else as search-match navigation, so an in-list find would need different keys, and bare `g`
+forecloses the `g`-prefix namespace rmpc uses for `gt`/`gT`. Configurable bindings — which all
+five of those players have and this one doesn't — get much easier now the keymap is data.
+
 **Deferred from this phase:** the "TOML config with multiple saved servers" item. Single-server
 `session.json` (Phase 3) covers the common case; a server picker is a self-contained follow-up
 and was not worth half-building here.
