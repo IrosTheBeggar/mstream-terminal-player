@@ -84,6 +84,27 @@ first screen and carries on. `Ctrl+C` always quits, whatever the file says.
 Overlays like the Auto-DJ panel keep their own keys, since they draw their
 own hints along the bottom.
 
+### Colours
+
+The player varies three colours: an accent for what's playing and what's
+selected, a dim for labels and rules, and one for folders. By default they're
+palette *names* — `cyan`, `dark-gray`, `blue` — so your terminal's own scheme
+picks the hues and the player looks like the rest of your terminal rather than
+imposing a look on it.
+
+To pin them instead:
+
+```toml
+[theme]
+accent = "#4fc3d6"     # exact, and needs a truecolor terminal
+dim = "bright-black"   # or a palette name
+folder = "33"          # or an index into the 256-colour cube
+```
+
+A value it can't read costs you that colour and nothing else — it says what was
+wrong on the first screen and keeps the default. Errors stay red and aren't
+configurable; an error that isn't red is a trap.
+
 ## Library commands
 
 ```

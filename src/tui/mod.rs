@@ -39,6 +39,8 @@ pub(crate) struct Startup {
     pub tunnel_code: Option<String>,
     /// The `[keys]` section, unvalidated — the app reports what it can't use.
     pub keys: std::collections::BTreeMap<String, Vec<String>>,
+    /// The `[theme]` section, likewise.
+    pub theme: config::ThemePrefs,
 }
 
 /// Resolve the starting point from stored config plus any overrides. Shared
@@ -91,6 +93,7 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
         prefs: config.player,
         tunnel_code,
         keys: config.keys,
+        theme: config.theme,
     }
 }
 
@@ -104,6 +107,16 @@ pub(crate) fn keymap_for(
         eprintln!("warning: {warning}");
     }
     keymap
+}
+
+/// The palette in force, with anything unreadable reported to stderr — which
+/// the player cannot do mid-draw, but a start-up path can.
+pub(crate) fn theme_for(prefs: &config::ThemePrefs) -> ui::Theme {
+    let (theme, warnings) = ui::Theme::from_prefs(prefs);
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
+    theme
 }
 
 /// Build the app from a resolved [`Startup`].
@@ -130,6 +143,8 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let audio_tx = worker::spawn_audio(event_tx.clone());
     let api_tx = worker::spawn_api(event_tx.clone());
+
+    ui::set_theme(theme_for(&start.theme));
 
     let mut app = app_from(start);
     let pending = app.start();

@@ -1,11 +1,13 @@
 //! Rendering. Reads app state, draws widgets — no decisions of its own.
 
+use std::sync::OnceLock;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Clear, Gauge, List, ListItem, Padding, Paragraph, Tabs, Wrap,
+    Block, Borders, Clear, List, ListItem, Padding, Paragraph, Tabs, Wrap,
 };
 
 use crate::cmd_library::fmt_duration;
@@ -17,8 +19,108 @@ use super::app::{
 use super::worker::{AutoDjMode, DiscoverNode, LibraryNode};
 use crate::api::types::Track;
 
-const ACCENT: Color = Color::Cyan;
-const DIM: Color = Color::DarkGray;
+/// The colours the drawing code varies, resolved once at startup.
+///
+/// Process-wide rather than threaded through every helper, the same shape the
+/// spool directory uses and for the same reason: `entry_line` and friends are
+/// pure functions of a row, and giving each one a palette argument would be
+/// all noise and no meaning.
+static THEME: OnceLock<Theme> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Theme {
+    pub accent: Color,
+    pub dim: Color,
+    pub folder: Color,
+}
+
+impl Default for Theme {
+    /// Palette names, not RGB. A terminal app that hard-codes hues looks wrong
+    /// inside somebody else's colour scheme; naming the slot lets their scheme
+    /// answer. `[theme]` is there for anyone who would rather pin it.
+    fn default() -> Self {
+        Theme { accent: Color::Cyan, dim: Color::DarkGray, folder: Color::Blue }
+    }
+}
+
+impl Theme {
+    /// Read a `[theme]` section, reporting what it could not use rather than
+    /// refusing to start. One unreadable colour costs that colour and nothing
+    /// else — the same bargain `[keys]` makes.
+    pub fn from_prefs(prefs: &crate::config::ThemePrefs) -> (Self, Vec<String>) {
+        let mut theme = Theme::default();
+        let mut warnings = Vec::new();
+        let mut set = |slot: &mut Color, raw: &Option<String>, name: &str| {
+            let Some(raw) = raw else { return };
+            match parse_color(raw) {
+                Some(color) => *slot = color,
+                None => warnings.push(format!(
+                    "theme.{name}: '{raw}' is not a colour name, #rrggbb or 0-255 — keeping the default"
+                )),
+            }
+        };
+        set(&mut theme.accent, &prefs.accent, "accent");
+        set(&mut theme.dim, &prefs.dim, "dim");
+        set(&mut theme.folder, &prefs.folder, "folder");
+        (theme, warnings)
+    }
+}
+
+pub fn set_theme(theme: Theme) {
+    let _ = THEME.set(theme);
+}
+
+fn theme() -> &'static Theme {
+    THEME.get_or_init(Theme::default)
+}
+
+fn accent() -> Color {
+    theme().accent
+}
+
+fn dim() -> Color {
+    theme().dim
+}
+
+fn folder() -> Color {
+    theme().folder
+}
+
+/// A palette name, an exact `#rrggbb`, or an index into the 256-colour cube.
+fn parse_color(raw: &str) -> Option<Color> {
+    let text = raw.trim().to_ascii_lowercase();
+    if let Some(hex) = text.strip_prefix('#') {
+        if hex.len() != 6 {
+            return None;
+        }
+        let byte = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).ok();
+        return Some(Color::Rgb(byte(0)?, byte(2)?, byte(4)?));
+    }
+    if let Ok(index) = text.parse::<u8>() {
+        return Some(Color::Indexed(index));
+    }
+    // Both spellings of grey, and both ways of writing the bright half, since
+    // there is no reason to make someone guess which one this program wanted.
+    Some(match text.replace('_', "-").as_str() {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "white" | "gray" | "grey" => Color::Gray,
+        "dark-gray" | "dark-grey" | "bright-black" | "light-black" => Color::DarkGray,
+        "bright-red" | "light-red" => Color::LightRed,
+        "bright-green" | "light-green" => Color::LightGreen,
+        "bright-yellow" | "light-yellow" => Color::LightYellow,
+        "bright-blue" | "light-blue" => Color::LightBlue,
+        "bright-magenta" | "light-magenta" => Color::LightMagenta,
+        "bright-cyan" | "light-cyan" => Color::LightCyan,
+        "bright-white" | "light-white" => Color::White,
+        _ => return None,
+    })
+}
 
 /// Left gutter the cursor symbol reserves on every browser row, blank or not.
 const CURSOR: &str = "> ";
@@ -47,7 +149,7 @@ fn banner_lines(area: Rect) -> Vec<Line<'static>> {
         return Vec::new();
     }
     let mut lines: Vec<Line<'static>> =
-        BANNER.iter().map(|l| Line::from(Span::styled(*l, Style::new().fg(ACCENT)))).collect();
+        BANNER.iter().map(|l| Line::from(Span::styled(*l, Style::new().fg(accent())))).collect();
     lines.push(Line::raw(""));
     lines
 }
@@ -83,7 +185,7 @@ fn connect_message(app: &App, area: Rect) -> Vec<Line<'static>> {
     };
     let style = match message.kind {
         MessageKind::Error => Style::new().fg(Color::Red),
-        MessageKind::Info => Style::new().fg(DIM),
+        MessageKind::Info => Style::new().fg(dim()),
     };
     wrap(&message.text, MESSAGE_WIDTH.min(area.width as usize))
         .into_iter()
@@ -191,7 +293,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Tabs::new(titles)
             .select(app.tab_index())
-            .highlight_style(Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
+            .highlight_style(Style::new().fg(accent()).add_modifier(Modifier::BOLD))
             .divider("")
             .padding("", ""),
         tabs_area,
@@ -199,7 +301,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
     let who = server_label(app, server_area.width as usize);
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(who, Style::new().fg(DIM))))
+        Paragraph::new(Line::from(Span::styled(who, Style::new().fg(dim()))))
             .alignment(Alignment::Right),
         server_area,
     );
@@ -264,7 +366,7 @@ fn render_browser(frame: &mut Frame, area: Rect, app: &mut App) {
 
     if empty {
         frame.render_widget(
-            Paragraph::new(Span::styled(empty_hint(app), Style::new().fg(DIM))),
+            Paragraph::new(Span::styled(empty_hint(app), Style::new().fg(dim()))),
             inner_first_line(area),
         );
     }
@@ -351,26 +453,26 @@ fn browser_title(app: &App) -> String {
 /// draws selection and playback on separate channels for exactly that reason.
 fn entry_line(entry: &Entry, width: usize, playing: Option<&str>) -> Line<'static> {
     match entry {
-        Entry::Parent => Line::from(Span::styled("..", Style::new().fg(DIM))),
+        Entry::Parent => Line::from(Span::styled("..", Style::new().fg(dim()))),
         Entry::Dir { label, .. } => Line::from(Span::styled(
             format!("{label}/"),
-            Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            Style::new().fg(folder()).add_modifier(Modifier::BOLD),
         )),
         Entry::Node { label, .. } => Line::from(Span::styled(
             label.clone(),
-            Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            Style::new().fg(folder()).add_modifier(Modifier::BOLD),
         )),
         Entry::Playlist { name } => Line::from(format!("♪ {name}")),
         Entry::Discover { label, detail, .. } => Line::from(vec![
             Span::styled(
                 label.clone(),
-                Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                Style::new().fg(folder()).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("   {detail}"), Style::new().fg(DIM)),
+            Span::styled(format!("   {detail}"), Style::new().fg(dim())),
         ]),
         Entry::Track { label, track } => {
             let style = if playing.is_some_and(|path| path == track.filepath) {
-                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+                Style::new().fg(accent()).add_modifier(Modifier::BOLD)
             } else {
                 Style::new()
             };
@@ -386,7 +488,7 @@ fn entry_line(entry: &Entry, width: usize, playing: Option<&str>) -> Line<'stati
             Line::from(vec![
                 Span::styled(title, style),
                 Span::raw(" ".repeat(gap)),
-                Span::styled(time, Style::new().fg(DIM)),
+                Span::styled(time, Style::new().fg(dim())),
             ])
         }
     }
@@ -406,7 +508,7 @@ fn render_queue(frame: &mut Frame, area: Rect, app: &mut App) {
             let playing = Some(i) == current;
             let marker = if playing { "▶ " } else { "  " };
             let style = if playing {
-                Style::new().fg(ACCENT)
+                Style::new().fg(accent())
             } else {
                 Style::new()
             };
@@ -428,7 +530,7 @@ fn render_queue(frame: &mut Frame, area: Rect, app: &mut App) {
         // where the first track will appear, and putting the prompt there
         // makes an empty queue look like a queue with something in it.
         frame.render_widget(
-            Paragraph::new(Span::styled("'a' queues a track", Style::new().fg(DIM)))
+            Paragraph::new(Span::styled("'a' queues a track", Style::new().fg(dim())))
                 .wrap(Wrap { trim: true }),
             inner_last_line(area),
         );
@@ -462,7 +564,7 @@ fn fmt_span(seconds: f64) -> String {
 fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(DIM))
+        .border_style(Style::new().fg(dim()))
         .title(" Now Playing ");
     let inner = block.inner(area);
     frame.render_widget(Clear, area);
@@ -495,7 +597,7 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
     // height of the body and meets the rule below it at a proper junction.
     let divider = Block::default()
         .borders(Borders::RIGHT)
-        .border_style(Style::new().fg(DIM))
+        .border_style(Style::new().fg(dim()))
         .padding(Padding::horizontal(1));
     let facts_inner = divider.inner(facts_area);
     frame.render_widget(divider, facts_area);
@@ -508,20 +610,13 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(Span::styled(
             rule_with_junction(rule.width, left_width),
-            Style::new().fg(DIM),
+            Style::new().fg(dim()),
         )),
         rule,
     );
 
-    let position = fmt_duration(app.status.position);
-    let total =
-        if app.status.duration > 0.0 { fmt_duration(app.status.duration) } else { "--:--".into() };
     frame.render_widget(
-        Gauge::default()
-            .ratio(app.status.progress())
-            .label(format!("{position} / {total}"))
-            .gauge_style(Style::new().fg(ACCENT))
-            .use_unicode(true),
+        Paragraph::new(progress_line(app, gauge_area.width as usize)),
         gauge_area,
     );
 
@@ -537,12 +632,12 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(Span::styled(
             fit(now_keys_hint(app), left.width as usize),
-            Style::new().fg(DIM),
+            Style::new().fg(dim()),
         )),
         left,
     );
     frame.render_widget(
-        Paragraph::new(Span::styled(modes, Style::new().fg(DIM))).alignment(Alignment::Right),
+        Paragraph::new(Span::styled(modes, Style::new().fg(dim()))).alignment(Alignment::Right),
         right,
     );
 }
@@ -570,8 +665,8 @@ fn tab_strip_width(app: &App) -> u16 {
 /// bug; naming the current one and pointing at the others does not.
 fn tab_strip(app: &App, width: u16) -> Line<'static> {
     let current = app.now_tab();
-    let active = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
-    let rest = Style::new().fg(DIM);
+    let active = Style::new().fg(accent()).add_modifier(Modifier::BOLD);
+    let rest = Style::new().fg(dim());
 
     if tab_strip_width(app) > width {
         return Line::from(vec![
@@ -623,7 +718,7 @@ fn render_now_panel(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(Paragraph::new(tab_strip(app, strip.width)), strip);
     frame.render_widget(
-        Paragraph::new(Span::styled("─".repeat(rule.width as usize), Style::new().fg(DIM))),
+        Paragraph::new(Span::styled("─".repeat(rule.width as usize), Style::new().fg(dim()))),
         rule,
     );
 
@@ -645,8 +740,8 @@ fn render_now_panel(frame: &mut Frame, area: Rect, app: &App) {
 fn render_now_placeholder(frame: &mut Frame, area: Rect, what: &str, why: &str) {
     let lines = vec![
         Line::raw(""),
-        Line::from(Span::styled(what.to_string(), Style::new().fg(DIM))),
-        Line::from(Span::styled(why.to_string(), Style::new().fg(DIM))),
+        Line::from(Span::styled(what.to_string(), Style::new().fg(dim()))),
+        Line::from(Span::styled(why.to_string(), Style::new().fg(dim()))),
     ];
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -669,7 +764,7 @@ fn render_now_queue(frame: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, track)| {
             let playing = Some(i) == current;
-            let style = if playing { Style::new().fg(ACCENT) } else { Style::new() };
+            let style = if playing { Style::new().fg(accent()) } else { Style::new() };
             let marker = if playing { "\u{25b6} " } else { "  " };
             let name = format!("{marker}{}", track.display_name());
             let Some(duration) = track.metadata.duration else {
@@ -682,7 +777,7 @@ fn render_now_queue(frame: &mut Frame, area: Rect, app: &App) {
             ListItem::new(Line::from(vec![
                 Span::styled(name, style),
                 Span::raw(" ".repeat(gap)),
-                Span::styled(time, Style::new().fg(DIM)),
+                Span::styled(time, Style::new().fg(dim())),
             ]))
         })
         .collect();
@@ -698,9 +793,9 @@ fn render_now_queue(frame: &mut Frame, area: Rect, app: &App) {
 /// What Auto-DJ is set to, read-only. `D` stays the one place it changes: two
 /// screens editing one set of settings is two things to keep in step.
 fn autodj_summary(app: &App) -> Vec<Line<'static>> {
-    let dim = Style::new().fg(DIM);
+    let faint = Style::new().fg(dim());
     let row = |label: &str, value: String| {
-        Line::from(vec![Span::styled(format!("{label:<9}"), dim), Span::raw(value)])
+        Line::from(vec![Span::styled(format!("{label:<9}"), faint), Span::raw(value)])
     };
 
     let mut lines = vec![Line::raw(""), row("Mode", app.autodj.label().to_string())];
@@ -735,7 +830,7 @@ fn autodj_summary(app: &App) -> Vec<Line<'static>> {
         } else {
             "D opens the panel to change it"
         },
-        dim,
+        faint,
     )));
     lines
 }
@@ -750,11 +845,11 @@ fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
     let Some(track) = &app.now_playing else {
         return vec![
             Line::raw(""),
-            Line::from(Span::styled(fit("nothing playing", width), Style::new().fg(DIM))),
+            Line::from(Span::styled(fit("nothing playing", width), Style::new().fg(dim()))),
             Line::raw(""),
             Line::from(Span::styled(
                 fit("0 goes back to the browser", width),
-                Style::new().fg(DIM),
+                Style::new().fg(dim()),
             )),
         ];
     };
@@ -768,57 +863,92 @@ fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
         )),
         Line::from(Span::styled(
             fit(meta.artist.as_deref().unwrap_or("unknown artist"), width),
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::new().fg(accent()).add_modifier(Modifier::BOLD),
         )),
         Line::raw(""),
     ];
 
-    let dim = Style::new().fg(DIM);
-    let mut row = |label: &str, value: String| {
-        lines.push(Line::from(vec![
-            Span::styled(format!("{label:<8}"), dim),
-            Span::raw(fit(&value, width.saturating_sub(8))),
-        ]));
-    };
+    let faint = Style::new().fg(dim());
+    let value_width = width.saturating_sub(8);
+    let plain = |value: String| vec![Span::raw(fit(&value, value_width))];
+
     if let Some(album) = meta.album.as_deref().filter(|a| !a.is_empty()) {
-        row("Album", album.to_string());
+        fact_row(&mut lines, "Album", plain(album.to_string()));
     }
     if let Some(year) = meta.year {
-        row("Year", year.to_string());
+        fact_row(&mut lines, "Year", plain(year.to_string()));
     }
     if let Some(bpm) = meta.bpm {
-        row("Tempo", format!("{bpm} BPM"));
+        fact_row(&mut lines, "Tempo", plain(format!("{bpm} BPM")));
     }
     if let Some(key) = meta.musical_key.as_deref().filter(|k| !k.is_empty()) {
-        // The Camelot code is what Auto-DJ matches on, so lead with the same
-        // name for the same thing and let the tag's spelling follow.
-        row(
-            "Key",
-            match crate::dj::to_camelot(key) {
-                Some(camelot) => format!("{}  {key}", camelot.code()),
-                None => key.to_string(),
-            },
-        );
+        // The Camelot code is what Auto-DJ matches on, so it gets the accent
+        // and the tag's own spelling follows it, quietly.
+        let value = match crate::dj::to_camelot(key) {
+            Some(camelot) => vec![
+                Span::styled(camelot.code().to_string(), Style::new().fg(accent())),
+                Span::styled(format!("  {key}"), faint),
+            ],
+            None => plain(key.to_string()),
+        };
+        fact_row(&mut lines, "Key", value);
     }
     if let Some(rating) = meta.rating.filter(|r| *r > 0) {
-        row("Rating", format!("{rating}/10"));
+        fact_row(&mut lines, "Rating", plain(format!("{rating}/10")));
     }
     if let Some(plays) = meta.play_count.filter(|p| *p > 0) {
-        row("Plays", plays.to_string());
+        fact_row(&mut lines, "Plays", plain(plays.to_string()));
     }
 
     lines.push(Line::raw(""));
     let (state, style) = if !app.audio_available {
         ("audio device unavailable", Style::new().fg(Color::Red))
     } else if app.status.paused {
-        ("⏸ paused", dim)
+        ("⏸ paused", faint)
     } else if app.status.playing {
-        ("▶ playing", dim)
+        ("▶ playing", faint)
     } else {
-        ("stopped", dim)
+        ("stopped", faint)
     };
     lines.push(Line::from(Span::styled(state, style)));
     lines
+}
+
+/// One labelled row of the facts column. Takes spans rather than a string so
+/// a value can carry its own emphasis -- the Camelot key does.
+fn fact_row(lines: &mut Vec<Line<'static>>, label: &str, value: Vec<Span<'static>>) {
+    let mut spans = vec![Span::styled(format!("{label:<8}"), Style::new().fg(dim()))];
+    spans.extend(value);
+    lines.push(Line::from(spans));
+}
+
+/// The progress bar, drawn rather than handed to ratatui's `Gauge`.
+///
+/// The Gauge paints its remainder by swapping the style's foreground and
+/// background, so with only a foreground set the unfilled part comes out as
+/// bare terminal background and the bar appears to fade into nothing. Giving
+/// it a background instead paints a solid slab heavier than the bar itself.
+/// Blocks and a lighter shade for the track say the same thing more quietly,
+/// and put the time beside the bar where there is room for it to be read.
+fn progress_line(app: &App, width: usize) -> Line<'static> {
+    let position = fmt_duration(app.status.position);
+    let total =
+        if app.status.duration > 0.0 { fmt_duration(app.status.duration) } else { "--:--".into() };
+    let time = format!("{position} / {total}");
+    let bar_width = width.saturating_sub(width_of(&time) + 3);
+    if bar_width < 4 {
+        return Line::from(Span::styled(fit(&time, width), Style::new().fg(dim())));
+    }
+
+    let filled = (app.status.progress() * bar_width as f64).round() as usize;
+    let filled = filled.min(bar_width);
+    Line::from(vec![
+        Span::styled("\u{2588}".repeat(filled), Style::new().fg(accent())),
+        Span::styled("\u{2591}".repeat(bar_width - filled), Style::new().fg(dim())),
+        Span::raw("  "),
+        Span::raw(position),
+        Span::styled(format!(" / {total}"), Style::new().fg(dim())),
+    ])
 }
 
 fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
@@ -840,22 +970,12 @@ fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
                 Style::new().add_modifier(Modifier::BOLD),
             )
         }
-        (None, _) => ("nothing playing".to_string(), Style::new().fg(DIM)),
+        (None, _) => ("nothing playing".to_string(), Style::new().fg(dim())),
     };
     frame.render_widget(Paragraph::new(Span::styled(label, style)), title_area);
 
-    let position = fmt_duration(app.status.position);
-    let total = if app.status.duration > 0.0 {
-        fmt_duration(app.status.duration)
-    } else {
-        "--:--".to_string()
-    };
     frame.render_widget(
-        Gauge::default()
-            .ratio(app.status.progress())
-            .label(format!("{position} / {total}"))
-            .gauge_style(Style::new().fg(ACCENT))
-            .use_unicode(true),
+        Paragraph::new(progress_line(app, gauge_area.width as usize)),
         gauge_area,
     );
 }
@@ -876,17 +996,17 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             fit(&m.text, message_area.width as usize),
             match m.kind {
                 MessageKind::Error => Style::new().fg(Color::Red),
-                MessageKind::Info => Style::new().fg(DIM),
+                MessageKind::Info => Style::new().fg(dim()),
             },
         ),
         None => Span::styled(
             fit("? help   q quit", message_area.width as usize),
-            Style::new().fg(DIM),
+            Style::new().fg(dim()),
         ),
     };
     frame.render_widget(Paragraph::new(Line::from(message)), message_area);
     frame.render_widget(
-        Paragraph::new(Span::styled(modes, Style::new().fg(DIM))).alignment(Alignment::Right),
+        Paragraph::new(Span::styled(modes, Style::new().fg(dim()))).alignment(Alignment::Right),
         modes_area,
     );
 }
@@ -979,7 +1099,7 @@ fn render_connect_choice(frame: &mut Frame, area: Rect, app: &App) {
     for (i, (name, blurb)) in CONNECT_METHODS.iter().enumerate() {
         let selected = app.connect.choice == i;
         let style = if selected {
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+            Style::new().fg(accent()).add_modifier(Modifier::BOLD)
         } else {
             Style::new()
         };
@@ -992,14 +1112,14 @@ fn render_connect_choice(frame: &mut Frame, area: Rect, app: &App) {
                 ),
                 style,
             ),
-            Span::styled((*blurb).to_string(), Style::new().fg(DIM)),
+            Span::styled((*blurb).to_string(), Style::new().fg(dim())),
         ]));
     }
 
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "↑↓ choose · Enter continue · Ctrl+C quits",
-        Style::new().fg(DIM),
+        Style::new().fg(dim()),
     )));
     lines.extend(connect_message(app, area));
     render_centered_block(frame, area, lines);
@@ -1012,7 +1132,7 @@ fn render_connect_direct(frame: &mut Frame, area: Rect, app: &App) {
     let field = |index: usize, label: &str, value: String, hint: &str| -> Line<'static> {
         let focused = app.connect.field == index;
         let style = if focused {
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+            Style::new().fg(accent()).add_modifier(Modifier::BOLD)
         } else {
             Style::new()
         };
@@ -1023,7 +1143,7 @@ fn render_connect_direct(frame: &mut Frame, area: Rect, app: &App) {
             // Nothing typed yet: the cursor sits where typing starts and the
             // hint shows the shape of what goes there.
             spans.push(cursor(focused));
-            spans.push(Span::styled(hint.to_string(), Style::new().fg(DIM)));
+            spans.push(Span::styled(hint.to_string(), Style::new().fg(dim())));
         } else {
             spans.push(Span::raw(value));
             spans.push(cursor(focused));
@@ -1042,14 +1162,14 @@ fn render_connect_direct(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "Leave the username empty for a server in public mode.",
-        Style::new().fg(DIM),
+        Style::new().fg(dim()),
     )));
     lines.push(Line::from(Span::styled(
         "Tab/↑↓ switch fields · Enter connects · Esc back",
-        Style::new().fg(DIM),
+        Style::new().fg(dim()),
     )));
     if app.connecting {
-        lines.push(Line::from(Span::styled("connecting…", Style::new().fg(ACCENT))));
+        lines.push(Line::from(Span::styled("connecting…", Style::new().fg(accent()))));
     }
     lines.extend(connect_message(app, area));
     render_centered_block(frame, area, lines);
@@ -1061,12 +1181,12 @@ fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines = banner_lines(area);
     let form = &app.connect;
 
-    lines.push(Line::from(Span::styled("Servers on your network", Style::new().fg(DIM))));
+    lines.push(Line::from(Span::styled("Servers on your network", Style::new().fg(dim()))));
 
     if form.found.is_empty() {
         lines.push(Line::from(Span::styled(
             if form.searching { "  searching…" } else { "  none found" },
-            Style::new().fg(DIM),
+            Style::new().fg(dim()),
         )));
     } else {
         // Line the columns up the way the method chooser does.
@@ -1080,7 +1200,7 @@ fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
         for (i, server) in form.found.iter().enumerate() {
             let selected = form.row == i;
             let style = if selected {
-                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+                Style::new().fg(accent()).add_modifier(Modifier::BOLD)
             } else {
                 Style::new()
             };
@@ -1094,23 +1214,23 @@ fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
                     ),
                     style,
                 ),
-                Span::styled(server.base_url.clone(), Style::new().fg(DIM)),
+                Span::styled(server.base_url.clone(), Style::new().fg(dim())),
             ];
             // Only advertise pairing where the server says it's available.
             if server.quick_connect {
-                spans.push(Span::styled("  · pairing available", Style::new().fg(DIM)));
+                spans.push(Span::styled("  · pairing available", Style::new().fg(dim())));
             }
             lines.push(Line::from(spans));
         }
         if form.searching {
-            lines.push(Line::from(Span::styled("  searching…", Style::new().fg(DIM))));
+            lines.push(Line::from(Span::styled("  searching…", Style::new().fg(dim()))));
         }
     }
 
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "Or paste a pairing code to reach a server anywhere",
-        Style::new().fg(DIM),
+        Style::new().fg(dim()),
     )));
 
     let selected = form.on_paste_row();
@@ -1118,7 +1238,7 @@ fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
     // The code is a few hundred characters — show enough to recognise it,
     // plus a length so a paste is visibly confirmed.
     let shown = if code.is_empty() {
-        Span::styled("paste the code here", Style::new().fg(DIM))
+        Span::styled("paste the code here", Style::new().fg(dim()))
     } else {
         let head: String = code.chars().take(28).collect();
         Span::raw(format!("{head}…  ({} characters)", code.chars().count()))
@@ -1126,7 +1246,7 @@ fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::from(vec![
         Span::styled(
             if selected { "> " } else { "  " },
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::new().fg(accent()).add_modifier(Modifier::BOLD),
         ),
         shown,
     ]));
@@ -1134,14 +1254,14 @@ fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "A code opens a tunnel — you'll still sign in afterwards.",
-        Style::new().fg(DIM),
+        Style::new().fg(dim()),
     )));
     lines.push(Line::from(Span::styled(
         "↑↓ choose · Enter connects · Esc back",
-        Style::new().fg(DIM),
+        Style::new().fg(dim()),
     )));
     if app.connecting {
-        lines.push(Line::from(Span::styled("connecting…", Style::new().fg(ACCENT))));
+        lines.push(Line::from(Span::styled("connecting…", Style::new().fg(accent()))));
     }
     lines.extend(connect_message(app, area));
     render_centered_block(frame, area, lines);
@@ -1153,7 +1273,7 @@ fn render_connecting(frame: &mut Frame, area: Rect, app: &App) {
         format!("Connecting to {}…", app.server),
         Style::new().add_modifier(Modifier::BOLD),
     )));
-    lines.push(Line::from(Span::styled("Ctrl+C to quit", Style::new().fg(DIM))));
+    lines.push(Line::from(Span::styled("Ctrl+C to quit", Style::new().fg(dim()))));
     lines.extend(connect_message(app, area));
     render_centered_block(frame, area, lines);
 }
@@ -1162,29 +1282,29 @@ fn render_connecting(frame: &mut Frame, area: Rect, app: &App) {
 /// queue.
 fn render_journey(frame: &mut Frame, area: Rect, app: &App) {
     let Some(journey) = app.journey.as_ref() else { return };
-    let dim = Style::new().fg(DIM);
+    let faint = Style::new().fg(dim());
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("  From    ", dim),
+            Span::styled("  From    ", faint),
             Span::raw(journey.from.display_name()),
         ]),
         Line::from(vec![
-            Span::styled("  To      ", dim),
+            Span::styled("  To      ", faint),
             Span::raw(journey.to.display_name()),
         ]),
         Line::from(vec![
-            Span::styled("  Stops   ", dim),
+            Span::styled("  Stops   ", faint),
             Span::raw(journey.length.to_string()),
-            Span::styled("   ←→ to change", dim),
+            Span::styled("   ←→ to change", faint),
         ]),
         Line::raw(""),
     ];
 
     if journey.pending {
-        lines.push(Line::from(Span::styled("  plotting the route…", dim)));
+        lines.push(Line::from(Span::styled("  plotting the route…", faint)));
     } else if journey.stops.is_empty() {
-        lines.push(Line::from(Span::styled("  no route between these two", dim)));
+        lines.push(Line::from(Span::styled("  no route between these two", faint)));
     } else {
         // Leave room for the three header lines, the hint, and the borders.
         let visible = (area.height as usize).saturating_sub(10).max(3);
@@ -1194,23 +1314,23 @@ fn render_journey(frame: &mut Frame, area: Rect, app: &App) {
             // The ends are the tracks that were chosen; everything between is
             // the server's pick for that point on the arc.
             let is_end = index == 0 || index + 1 == journey.stops.len();
-            let style = if is_end { Style::new().fg(ACCENT) } else { Style::new() };
+            let style = if is_end { Style::new().fg(accent()) } else { Style::new() };
             lines.push(Line::from(vec![
-                Span::styled(format!("  {:>2}. ", index + 1), dim),
-                Span::styled(position, dim),
+                Span::styled(format!("  {:>2}. ", index + 1), faint),
+                Span::styled(position, faint),
                 Span::styled(format!("  {}", stop.metadata_display()), style),
             ]));
         }
         let remaining = journey.stops.len().saturating_sub(journey.offset + visible);
         if remaining > 0 {
-            lines.push(Line::from(Span::styled(format!("      … {remaining} more"), dim)));
+            lines.push(Line::from(Span::styled(format!("      … {remaining} more"), faint)));
         }
     }
 
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "  ↑↓ scroll · ←→ stops · Enter queue it · Esc cancel",
-        dim,
+        faint,
     )));
 
     let height = (lines.len() as u16 + 2).min(area.height);
@@ -1218,7 +1338,7 @@ fn render_journey(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, box_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(ACCENT))
+        .border_style(Style::new().fg(accent()))
         .title(" Sonic Journey ");
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
@@ -1241,7 +1361,7 @@ fn render_dj_panel(frame: &mut Frame, area: Rect, app: &App) {
         let focused = index == panel.row;
         let marker = if focused { "> " } else { "  " };
         let label_style = if focused {
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+            Style::new().fg(accent()).add_modifier(Modifier::BOLD)
         } else {
             Style::new()
         };
@@ -1258,7 +1378,7 @@ fn render_dj_panel(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "  ↑↓ choose · ←→ adjust · p sample · Esc close",
-        Style::new().fg(DIM),
+        Style::new().fg(dim()),
     )));
 
     let height = (lines.len() as u16 + 2).min(area.height);
@@ -1266,7 +1386,7 @@ fn render_dj_panel(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, box_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(ACCENT))
+        .border_style(Style::new().fg(accent()))
         .title(" Auto-DJ ");
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
@@ -1276,7 +1396,7 @@ fn render_dj_panel(frame: &mut Frame, area: Rect, app: &App) {
 /// The right-hand side of a settings row: the value, plus whatever context
 /// makes it meaningful.
 fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
-    let dim = Style::new().fg(DIM);
+    let faint = Style::new().fg(dim());
     let value = |text: String| Span::raw(text);
     match row {
         DjRow::Mode => {
@@ -1284,13 +1404,13 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
             // Worth saying out loud: in this mode the pick comes straight
             // from the neighbour list, so the filters below are not consulted.
             if app.autodj == AutoDjMode::Similar {
-                spans.push(Span::styled("   filters below don't apply", dim));
+                spans.push(Span::styled("   filters below don't apply", faint));
             }
             spans
         }
         DjRow::Tightness => {
             if app.dj.sonic_tightness == 0 {
-                return vec![value("off".into()), Span::styled("   any track", dim)];
+                return vec![value("off".into()), Span::styled("   any track", faint)];
             }
             let filled = (app.dj.sonic_tightness / 10) as usize;
             let bar: String =
@@ -1300,7 +1420,7 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
                 value(format!("{bar} {:>3}%", app.dj.sonic_tightness)),
                 // The raw number is what the server actually filters on, and
                 // seeing it is how the slider stops being a mystery.
-                Span::styled(format!("   cosine ≥ {cosine:.2}"), dim),
+                Span::styled(format!("   cosine ≥ {cosine:.2}"), faint),
             ]
         }
         DjRow::Anchor => {
@@ -1308,7 +1428,7 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
                 crate::dj::SonicAnchor::Current => ("current", "follows each track"),
                 crate::dj::SonicAnchor::Session => ("session", "averages recent picks"),
             };
-            vec![value(label.into()), Span::styled(format!("   {what}"), dim)]
+            vec![value(label.into()), Span::styled(format!("   {what}"), faint)]
         }
         DjRow::Tempo => {
             if app.dj.tempo_tolerance == 0 {
@@ -1318,7 +1438,7 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
                 value(format!("±{}%", app.dj.tempo_tolerance)),
                 Span::styled(
                     format!("   widens to ±{}% before giving up", app.dj.tempo_tolerance * 2),
-                    dim,
+                    faint,
                 ),
             ]
         }
@@ -1330,7 +1450,7 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
             };
             vec![
                 value(app.dj.key_matching.label().to_string()),
-                Span::styled(format!("   {what}"), dim),
+                Span::styled(format!("   {what}"), faint),
             ]
         }
         DjRow::Rating => {
@@ -1345,26 +1465,26 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
             }
             vec![
                 value(format!("{} artists", app.dj.artist_cooldown)),
-                Span::styled("   recently played, skipped", dim),
+                Span::styled("   recently played, skipped", faint),
             ]
         }
         DjRow::Genres => {
             let mode = app.dj.genre_mode.label().to_string();
             if app.dj.genre_mode == crate::dj::GenreMode::Off {
-                return vec![value(mode), Span::styled("   Enter to choose", dim)];
+                return vec![value(mode), Span::styled("   Enter to choose", faint)];
             }
             let chosen = if app.dj.genres.is_empty() {
                 "none chosen — Enter to pick".to_string()
             } else {
                 app.dj.genres.join(", ")
             };
-            let mut spans = vec![value(format!("{mode}  ")), Span::styled(chosen, dim)];
+            let mut spans = vec![value(format!("{mode}  ")), Span::styled(chosen, faint)];
             // The asymmetry bites people: "only these" is a stricter promise
             // than "anything but these", and it drops untagged tracks.
             if app.dj.genre_mode == crate::dj::GenreMode::Whitelist
                 && !app.dj.genres.is_empty()
             {
-                spans.push(Span::styled("  (untagged excluded)", dim));
+                spans.push(Span::styled("  (untagged excluded)", faint));
             }
             spans
         }
@@ -1375,21 +1495,21 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
 /// they leave to pick from.
 fn dj_sample_lines(app: &App) -> Vec<Line<'static>> {
     let Some(panel) = app.dj_panel.as_ref() else { return Vec::new() };
-    let dim = Style::new().fg(DIM);
-    let mut lines = vec![Line::from(Span::styled("  Sample", dim))];
+    let faint = Style::new().fg(dim());
+    let mut lines = vec![Line::from(Span::styled("  Sample", faint))];
 
     if let Some(pool) = &panel.pool {
         lines.push(Line::from(Span::styled(
             format!("  {} tracks inside the sonic pool", pool.pool_size),
-            dim,
+            faint,
         )));
     }
     if panel.sample_pending {
-        lines.push(Line::from(Span::styled("  picking…", dim)));
+        lines.push(Line::from(Span::styled("  picking…", faint)));
         return lines;
     }
     if panel.sample.is_empty() {
-        lines.push(Line::from(Span::styled("  press p to see what these settings pick", dim)));
+        lines.push(Line::from(Span::styled("  press p to see what these settings pick", faint)));
         return lines;
     }
     for (index, track) in panel.sample.iter().enumerate() {
@@ -1403,9 +1523,9 @@ fn render_genre_picker(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut lines: Vec<Line> = Vec::new();
     if picker.loading {
-        lines.push(Line::from(Span::styled("  loading genres…", Style::new().fg(DIM))));
+        lines.push(Line::from(Span::styled("  loading genres…", Style::new().fg(dim()))));
     } else if picker.all.is_empty() {
-        lines.push(Line::from(Span::styled("  no genres tagged", Style::new().fg(DIM))));
+        lines.push(Line::from(Span::styled("  no genres tagged", Style::new().fg(dim()))));
     } else {
         // Keep the highlighted row on screen for long lists.
         let visible = (area.height.saturating_sub(8)) as usize;
@@ -1414,7 +1534,7 @@ fn render_genre_picker(frame: &mut Frame, area: Rect, app: &App) {
             let chosen = app.dj.genres.iter().any(|g| g == name);
             let focused = index == picker.row;
             let style = if focused {
-                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+                Style::new().fg(accent()).add_modifier(Modifier::BOLD)
             } else {
                 Style::new()
             };
@@ -1427,7 +1547,7 @@ fn render_genre_picker(frame: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "  ↑↓ move · Space toggle · Enter done",
-        Style::new().fg(DIM),
+        Style::new().fg(dim()),
     )));
 
     let height = (lines.len() as u16 + 2).min(area.height);
@@ -1435,7 +1555,7 @@ fn render_genre_picker(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, box_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(ACCENT))
+        .border_style(Style::new().fg(accent()))
         .title(format!(" Genres · {} ", app.dj.genre_mode.label()));
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
@@ -1471,7 +1591,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
                 };
                 spans.push(Span::styled(
                     format!("  {keys:<HELP_KEYS_WIDTH$}"),
-                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    Style::new().fg(accent()).add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::raw(format!("{what:<HELP_TEXT_WIDTH$}")));
             }
@@ -1491,7 +1611,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::new().fg(ACCENT))
+        .border_style(Style::new().fg(accent()))
         .title(" Keys ");
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
@@ -1499,7 +1619,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn bordered(title: String, focused: bool) -> Block<'static> {
-    let style = if focused { Style::new().fg(ACCENT) } else { Style::new().fg(DIM) };
+    let style = if focused { Style::new().fg(accent()) } else { Style::new().fg(dim()) };
     Block::default().borders(Borders::ALL).border_style(style).title(title)
 }
 
@@ -1778,7 +1898,7 @@ mod tests {
         // Colour, not a glyph: the cursor owns the gutter and a row can be
         // both selected and playing at once.
         let lit = entry_line(&entry, 40, Some("lib/a.mp3"));
-        assert_eq!(lit.spans[0].style.fg, Some(ACCENT));
+        assert_eq!(lit.spans[0].style.fg, Some(accent()));
         assert!(lit.spans[0].style.add_modifier.contains(Modifier::BOLD));
 
         let other = entry_line(&entry, 40, Some("lib/b.mp3"));
@@ -2026,6 +2146,61 @@ mod tests {
 
     fn key_event(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn a_theme_colour_can_be_a_name_a_hex_or_an_index() {
+        assert_eq!(parse_color("cyan"), Some(Color::Cyan));
+        assert_eq!(parse_color(" Bright-Blue "), Some(Color::LightBlue));
+        // Both spellings of grey, and both ways of saying the bright half.
+        assert_eq!(parse_color("dark-grey"), Some(Color::DarkGray));
+        assert_eq!(parse_color("bright_black"), Some(Color::DarkGray));
+        assert_eq!(parse_color("light-cyan"), Some(Color::LightCyan));
+
+        assert_eq!(parse_color("#4fc3d6"), Some(Color::Rgb(0x4f, 0xc3, 0xd6)));
+        assert_eq!(parse_color("33"), Some(Color::Indexed(33)));
+
+        assert_eq!(parse_color("#4fc3"), None, "a short hex is a mistake, not a colour");
+        assert_eq!(parse_color("#gggggg"), None);
+        assert_eq!(parse_color("chartreuse"), None);
+        assert_eq!(parse_color("300"), None, "past the 256-colour cube");
+    }
+
+    #[test]
+    fn an_unreadable_theme_costs_that_colour_and_nothing_else() {
+        let (theme, warnings) = Theme::from_prefs(&crate::config::ThemePrefs {
+            accent: Some("#4fc3d6".into()),
+            dim: Some("chartreuse".into()),
+            folder: None,
+        });
+        assert_eq!(theme.accent, Color::Rgb(0x4f, 0xc3, 0xd6), "the good one applies");
+        assert_eq!(theme.dim, Theme::default().dim, "the bad one keeps the default");
+        assert_eq!(theme.folder, Theme::default().folder);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("theme.dim") && warnings[0].contains("chartreuse"));
+    }
+
+    #[test]
+    fn the_progress_bar_draws_a_track_rather_than_fading_into_nothing() {
+        let mut app = connected_app();
+        app.status.position = 30.0;
+        app.status.duration = 60.0;
+
+        let line = progress_line(&app, 40);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.ends_with("0:30 / 1:00"), "{text}");
+        // Half filled, and the other half is a visible track: ratatui's Gauge
+        // paints its remainder with the background, so a bar with only a
+        // foreground set ran off into nothing.
+        let filled = text.chars().filter(|c| *c == '█').count();
+        let track = text.chars().filter(|c| *c == '░').count();
+        assert_eq!(filled, track, "{text}");
+        assert!(track > 0, "the unfilled half has to be visible: {text}");
+
+        // No room for a bar: the time still gets said.
+        let cramped: String =
+            progress_line(&app, 12).spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(cramped.contains("0:30"), "{cramped}");
     }
 
     #[test]

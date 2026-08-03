@@ -247,10 +247,12 @@ pub fn run(args: ReplayArgs) -> i32 {
     // Live mode starts from the same place the real binary would — same
     // stored server, token, browse path and preferences.
     let mut app = if args.live {
-        crate::tui::app_from(crate::tui::startup(
-            args.conn.server.clone(),
-            args.conn.token.clone(),
-        ))
+        let start =
+            crate::tui::startup(args.conn.server.clone(), args.conn.token.clone());
+        // Same palette the real binary would draw with, so a replay is a
+        // faithful picture of what someone's config actually produces.
+        ui::set_theme(crate::tui::theme_for(&start.theme));
+        crate::tui::app_from(start)
     } else {
         App::new(None, None, None)
     };

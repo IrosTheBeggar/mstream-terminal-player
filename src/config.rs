@@ -38,6 +38,10 @@ pub struct Config {
     pub player: PlayerPrefs,
     #[serde(default, skip_serializing_if = "CachePrefs::is_unset")]
     pub cache: CachePrefs,
+    /// `[theme]` — the three colours the drawing code actually varies. Unset
+    /// means palette names, so the terminal's own scheme picks the hues.
+    #[serde(default, skip_serializing_if = "ThemePrefs::is_unset")]
+    pub theme: ThemePrefs,
     /// `[keys]` — action name to the keys that should fire it. Empty means
     /// the built-in bindings, and only the actions named here are changed.
     /// See `mstream-player keys` for the full list in this format.
@@ -55,6 +59,7 @@ impl Default for Config {
             version: SCHEMA_VERSION,
             player: PlayerPrefs::default(),
             cache: CachePrefs::default(),
+            theme: ThemePrefs::default(),
             keys: std::collections::BTreeMap::new(),
             servers: Vec::new(),
         }
@@ -149,6 +154,34 @@ impl CachePrefs {
     /// Keeps an empty `[cache]` header out of config.toml.
     fn is_unset(&self) -> bool {
         self.dir.is_none()
+    }
+}
+
+/// `[theme]` — the colours the player varies.
+///
+/// Each takes either a palette name (`cyan`, `bright-blue`), which lets the
+/// terminal's own scheme decide the hue, or an exact `#rrggbb`, or a 0–255
+/// index into the 256-colour cube. Names are the default because a terminal
+/// app that hard-codes hues looks wrong in everyone else's colour scheme.
+///
+/// Red is not here on purpose: an error that isn't red is a trap.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemePrefs {
+    /// What is playing, what is selected, the progress bar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accent: Option<String>,
+    /// Labels, durations, rules, hints — everything secondary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dim: Option<String>,
+    /// Directories and library nodes in the browser.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+}
+
+impl ThemePrefs {
+    fn is_unset(&self) -> bool {
+        self.accent.is_none() && self.dim.is_none() && self.folder.is_none()
     }
 }
 
