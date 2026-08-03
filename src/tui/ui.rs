@@ -1358,7 +1358,11 @@ mod tests {
             directories: dirs.iter().map(|d| DirEntry { name: (*d).to_string() }).collect(),
             files: files
                 .iter()
-                .map(|f| FileEntry { name: (*f).to_string(), kind: Some("mp3".into()) })
+                .map(|f| FileEntry {
+                    name: (*f).to_string(),
+                    kind: Some("mp3".into()),
+                    ..Default::default()
+                })
                 .collect(),
         }
     }

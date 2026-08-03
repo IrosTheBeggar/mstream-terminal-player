@@ -14,6 +14,7 @@ pub mod types;
 pub mod urls;
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use reqwest::{Method, StatusCode, Url};
@@ -80,6 +81,10 @@ pub struct Client {
     /// segment — required for servers hosted under a reverse-proxy subpath.
     base: Url,
     token: Option<String>,
+    /// Set once this server has shown it can't answer a listing that asks for
+    /// metadata, so the fallback costs one wasted request per session rather
+    /// than one per folder.
+    plain_listings: AtomicBool,
 }
 
 impl Client {
@@ -103,7 +108,7 @@ impl Client {
             .build()
             .map_err(|e| ApiError::Config(format!("could not build http client: {e}")))?;
 
-        Ok(Client { http, base, token: None })
+        Ok(Client { http, base, token: None, plain_listings: AtomicBool::new(false) })
     }
 
     pub fn with_token(mut self, token: Option<String>) -> Self {
@@ -251,11 +256,28 @@ impl Client {
     ///
     /// An empty string lists the libraries (vpaths); [`BEST_START`] asks the
     /// server to pick the most useful place instead.
+    /// `pullMetadata` costs the server one batched query for the whole folder
+    /// and buys durations, BPM and key for every row — without it a track
+    /// queued from the file browser is a filename with no length, and Auto-DJ
+    /// seeded from one has no tempo to match.
     pub fn file_explorer(&self, directory: &str) -> Result<DirListing, ApiError> {
-        self.post(
-            "api/v1/file-explorer",
-            serde_json::json!({ "directory": directory }),
-        )
+        if !self.plain_listings.load(Ordering::Relaxed) {
+            let body =
+                serde_json::json!({ "directory": directory, "pullMetadata": true });
+            match self.post("api/v1/file-explorer", body) {
+                Ok(listing) => return Ok(listing),
+                // The server validates this body against a schema that rejects
+                // keys it doesn't know, so one too old to have the parameter
+                // answers 400 rather than ignoring it. Browsing has to work
+                // everywhere and the tags are a nicety, so ask once and then
+                // stop asking.
+                Err(ApiError::Server { status: 400, .. }) => {
+                    self.plain_listings.store(true, Ordering::Relaxed);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        self.post("api/v1/file-explorer", serde_json::json!({ "directory": directory }))
     }
 
     pub fn artists(&self) -> Result<Vec<String>, ApiError> {

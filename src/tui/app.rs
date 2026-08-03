@@ -8,7 +8,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 
-use crate::api::types::{Album, DirListing, Genre, Track, TrackMetadata};
+use crate::api::types::{Album, DirListing, Genre, Track};
 use crate::api::urls;
 use crate::discovery::DiscoveredServer;
 use crate::dj;
@@ -2402,10 +2402,25 @@ fn entries_from_listing(listing: &DirListing) -> Vec<Entry> {
         if !is_audio(file.kind.as_deref()) {
             continue;
         }
-        let filepath = qualify(prefix, &file.name);
+        // The server's own filepath when it sent one: it is the canonical
+        // form, and it is what these tags were looked up under. Falling back
+        // to the joined path keeps listings without metadata working exactly
+        // as before.
+        let tags = file.metadata.as_ref();
+        let filepath = tags
+            .map(|m| m.filepath.clone())
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| qualify(prefix, &file.name));
+        // The label stays the filename — this is the view of what is on disk,
+        // and that is what people are looking for here. The tags ride along
+        // for the queue, the now-playing screen and Auto-DJ, which all read
+        // them off the track rather than the row.
         entries.push(Entry::Track {
             label: file.name.clone(),
-            track: Box::new(Track { filepath, metadata: TrackMetadata::default() }),
+            track: Box::new(Track {
+                filepath,
+                metadata: tags.and_then(|m| m.metadata.clone()).unwrap_or_default(),
+            }),
         });
     }
     entries
@@ -2929,7 +2944,7 @@ pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::{DirEntry, FileEntry, SearchResults};
+    use crate::api::types::{DirEntry, FileEntry, FileMetadata, SearchResults, TrackMetadata};
 
     fn track(path: &str) -> Track {
         Track { filepath: path.to_string(), metadata: TrackMetadata::default() }
@@ -2963,7 +2978,11 @@ mod tests {
             directories: dirs.iter().map(|d| DirEntry { name: (*d).to_string() }).collect(),
             files: files
                 .iter()
-                .map(|f| FileEntry { name: (*f).to_string(), kind: Some("mp3".into()) })
+                .map(|f| FileEntry {
+                    name: (*f).to_string(),
+                    kind: Some("mp3".into()),
+                    ..Default::default()
+                })
                 .collect(),
         }
     }
@@ -4285,6 +4304,79 @@ mod tests {
     }
 
     #[test]
+    fn a_listing_carries_the_tags_the_server_sent_with_it() {
+        let listing = DirListing {
+            path: "/library/Artist/Album".into(),
+            directories: Vec::new(),
+            files: vec![
+                FileEntry {
+                    name: "01 - Song.mp3".into(),
+                    kind: Some("mp3".into()),
+                    metadata: Some(FileMetadata {
+                        filepath: "library/Artist/Album/01 - Song.mp3".into(),
+                        metadata: Some(TrackMetadata {
+                            title: Some("Song".into()),
+                            artist: Some("Artist".into()),
+                            duration: Some(238.655),
+                            bpm: Some(130),
+                            ..Default::default()
+                        }),
+                    }),
+                },
+                // On disk but not in the database — scanned since, or never.
+                // The row still has to work, just without the extras.
+                FileEntry {
+                    name: "02 - Unscanned.mp3".into(),
+                    kind: Some("mp3".into()),
+                    metadata: Some(FileMetadata {
+                        filepath: "library/Artist/Album/02 - Unscanned.mp3".into(),
+                        metadata: None,
+                    }),
+                },
+            ],
+        };
+
+        let tracks: Vec<Track> = entries_from_listing(&listing)
+            .into_iter()
+            .filter_map(|e| match e {
+                Entry::Track { track, .. } => Some(*track),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(tracks[0].metadata.duration, Some(238.655));
+        assert_eq!(tracks[0].metadata.bpm, Some(130));
+        assert_eq!(tracks[0].display_name(), "Artist - Song");
+        assert_eq!(tracks[0].filepath, "library/Artist/Album/01 - Song.mp3");
+
+        assert_eq!(tracks[1].metadata, TrackMetadata::default());
+        assert_eq!(tracks[1].display_name(), "02 - Unscanned.mp3", "falls back to the name");
+    }
+
+    #[test]
+    fn a_listing_without_metadata_still_builds_its_own_paths() {
+        // What an older server answers, and what the fallback request gets:
+        // no `metadata` key at all. The path has to come from the folder plus
+        // the filename, exactly as it did before.
+        let listing = DirListing {
+            path: "/library/Artist".into(),
+            directories: Vec::new(),
+            files: vec![FileEntry {
+                name: "loose.mp3".into(),
+                kind: Some("mp3".into()),
+                metadata: None,
+            }],
+        };
+        match &entries_from_listing(&listing)[1] {
+            Entry::Track { track, .. } => {
+                assert_eq!(track.filepath, "library/Artist/loose.mp3");
+                assert_eq!(track.metadata, TrackMetadata::default());
+            }
+            other => panic!("expected a track, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_playlist_file_is_not_offered_as_a_track() {
         // Found live: an album folder held `001-2pac-greatest_hits.m3u`, and
         // Enter queues everything on screen, so the playlist file went into
@@ -4294,8 +4386,16 @@ mod tests {
             path: "/library/2Pac/Greatest Hits".into(),
             directories: Vec::new(),
             files: vec![
-                FileEntry { name: "001-2pac-greatest_hits.m3u".into(), kind: Some("m3u".into()) },
-                FileEntry { name: "201 - Keep Ya Head Up.mp3".into(), kind: Some("mp3".into()) },
+                FileEntry {
+                    name: "001-2pac-greatest_hits.m3u".into(),
+                    kind: Some("m3u".into()),
+                    ..Default::default()
+                },
+                FileEntry {
+                    name: "201 - Keep Ya Head Up.mp3".into(),
+                    kind: Some("mp3".into()),
+                    ..Default::default()
+                },
             ],
         };
         let entries = entries_from_listing(&listing);

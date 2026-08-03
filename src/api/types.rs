@@ -227,6 +227,22 @@ pub struct FileEntry {
     /// File extension as classified by the server ("mp3", "flac", ...).
     #[serde(rename = "type")]
     pub kind: Option<String>,
+    /// Present only when the listing asked for metadata, and doubly wrapped on
+    /// the wire — see [`FileMetadata`].
+    pub metadata: Option<FileMetadata>,
+}
+
+/// The `metadata` a file-explorer listing carries when `pullMetadata` is set.
+///
+/// Two layers on purpose, and both matter: the outer one is the server's own
+/// canonical `<vpath>/<relative path>` for the file, and the inner one is the
+/// tags — `null` for a file that is on disk but not in the database, which is
+/// every playlist file and anything added since the last scan.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FileMetadata {
+    pub filepath: String,
+    pub metadata: Option<TrackMetadata>,
 }
 
 // ── Search ──────────────────────────────────────────────────────────────────
@@ -518,6 +534,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_live_file_explorer_metadata() {
+        // Captured verbatim from a live mStream with `pullMetadata: true`,
+        // trimmed to the fields this player reads. Two layers of `metadata`
+        // is not a typo — see [`FileMetadata`] — and the inner one really is
+        // null for the playlist file sitting in the same folder.
+        let json = r#"{"path":"/library/3-1 Remixes/13 Horrible Remixes/","directories":[],
+            "files":[{"type":"mp3","name":"01 - My Rave.mp3","metadata":{
+            "filepath":"library/3-1 Remixes/13 Horrible Remixes/01 - My Rave.mp3",
+            "metadata":{"artist":"3-1 Remixes","album":"13 Horrible Remixes By 3-1","track":1,
+            "disk":null,"title":"My Rave (Nid & Sancy)","duration":238.655,"year":2009,
+            "album-art":null,"rating":null,"play-count":null,"bpm":130,"musical-key":"G major",
+            "genres":["Progressive Electronic"],"bitrate":271000,"sample-rate":44100,
+            "has-lyrics":false,"has-synced-lyrics":false}}},
+            {"type":"m3u","name":"13 Horrible Remixes.m3u","metadata":{
+            "filepath":"library/3-1 Remixes/13 Horrible Remixes/13 Horrible Remixes.m3u",
+            "metadata":null}}]}"#;
+        let listing: DirListing = serde_json::from_str(json).unwrap();
+
+        let tags = listing.files[0].metadata.as_ref().unwrap();
+        assert_eq!(tags.filepath, "library/3-1 Remixes/13 Horrible Remixes/01 - My Rave.mp3");
+        let meta = tags.metadata.as_ref().unwrap();
+        assert_eq!(meta.duration, Some(238.655));
+        assert_eq!(meta.bpm, Some(130));
+        assert_eq!(meta.musical_key.as_deref(), Some("G major"));
+        assert_eq!(meta.title.as_deref(), Some("My Rave (Nid & Sancy)"));
+        assert_eq!(meta.year, Some(2009));
+
+        // Present but empty: on disk, not in the database.
+        assert!(listing.files[1].metadata.as_ref().unwrap().metadata.is_none());
+    }
+
+    #[test]
     fn parses_live_search_shape() {
         // Captured verbatim from a live mStream response.
         let json = r#"{"artists":[],"albums":[],"title":[],"files":[{"name":"testlib/sine-60s.mp3",
@@ -571,6 +619,9 @@ mod tests {
         assert_eq!(d.path, "/testlib/");
         assert_eq!(d.files[0].kind.as_deref(), Some("flac"));
         assert_eq!(d.directories[0].name, "Terminal Test");
+        // The pre-`pullMetadata` shape, which is also what the fallback
+        // request gets back: no `metadata` key at all.
+        assert!(d.files[0].metadata.is_none());
     }
 
     #[test]

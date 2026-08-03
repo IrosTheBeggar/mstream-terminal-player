@@ -432,7 +432,16 @@ pub fn ls(args: LsArgs) -> i32 {
         println!("{:<6} {}/", "dir", qualify(&d.name));
     }
     for f in &listing.files {
-        println!("{:<6} {}", f.kind.as_deref().unwrap_or("file"), qualify(&f.name));
+        // The listing now comes with tags, so say how long a track is while
+        // we have it. Files the scanner hasn't indexed just don't get one.
+        let length = f
+            .metadata
+            .as_ref()
+            .and_then(|m| m.metadata.as_ref())
+            .and_then(|m| m.duration)
+            .map(|d| format!("  [{}]", fmt_duration(d)))
+            .unwrap_or_default();
+        println!("{:<6} {}{length}", f.kind.as_deref().unwrap_or("file"), qualify(&f.name));
     }
     if listing.directories.is_empty() && listing.files.is_empty() {
         println!("(empty)");
