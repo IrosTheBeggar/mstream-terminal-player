@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use crate::api::types::{
     Album, Capabilities, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults,
-    Track,
+    SimilarArtist, Track,
 };
 use crate::api::{ApiError, Client};
 use crate::discovery::DiscoveredServer;
@@ -58,6 +58,8 @@ pub enum ApiCmd {
     Genres,
     /// Walk from one track to another through the embedding space.
     Journey { start: String, end: String, length: u32 },
+    /// Fill a Discover view. `seed` is the track it all hangs off.
+    Discover { node: DiscoverNode, seed: Box<Track> },
     Playlists,
     LoadPlaylist(String),
     Search(String),
@@ -79,6 +81,27 @@ pub struct DjRequest {
     /// Whether the server has the embedding index at all. Without it the
     /// sonic pool must not be requested: the whole call would 403.
     pub sonic_available: bool,
+}
+
+/// A view in the Discover tab. Like [`LibraryNode`], it is both the request
+/// and the identity of what comes back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoverNode {
+    /// The mode menu — static, needs no request.
+    Root,
+    /// Tracks that sound like the seed.
+    Tracks,
+    /// Artists that sound like the seed's artist.
+    Artists,
+    /// One artist's ways in. Answered from the artists reply already in
+    /// hand, so it costs nothing.
+    Artist(String),
+}
+
+#[derive(Debug)]
+pub enum DiscoverData {
+    Tracks(Vec<Track>),
+    Artists(Vec<SimilarArtist>),
 }
 
 /// A position in the tag-based library hierarchy. Doubles as the request (what
@@ -214,6 +237,8 @@ pub enum Event {
     /// A journey's stops, in order. `note` explains a short or empty arc —
     /// both are answers the server gives deliberately rather than failures.
     Journey { stops: Vec<JourneyStop>, note: Option<String> },
+    /// A Discover view's contents, tagged with the node they belong to.
+    Discover { node: DiscoverNode, data: DiscoverData, note: Option<String> },
     Playlists(Vec<PlaylistSummary>),
     PlaylistTracks { name: String, tracks: Vec<Track> },
     SearchResults(Box<SearchResults>),
@@ -413,6 +438,10 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
             ApiCmd::Journey { start, end, length } => with_client(client.as_ref(), |c| {
                 journey(c, &start, &end, length)
             }),
+
+            ApiCmd::Discover { node, seed } => {
+                with_client(client.as_ref(), |c| discover(c, &node, &seed))
+            }
 
             ApiCmd::Playlists => {
                 with_client(client.as_ref(), |c| c.playlists().map(Event::Playlists))
@@ -704,6 +733,91 @@ fn autodj_sample(
     }
 
     Ok(Event::AutoDjSample { tracks, pool, note })
+}
+
+/// How many neighbours a Discover view asks for. Deep enough to browse,
+/// short enough that the tail is still relevant rather than noise.
+const DISCOVER_LIMIT: u32 = 40;
+
+/// Fill a Discover view.
+///
+/// Both routes have the same three non-answers — the feature is off, the
+/// seed hasn't been embedded yet, or the ranking was walked as far as the
+/// server was willing to go. None is a failure, so each gets a sentence and
+/// an empty list rather than an error.
+fn discover(
+    client: &Client,
+    node: &DiscoverNode,
+    seed: &Track,
+) -> Result<Event, ApiError> {
+    let disabled = |data| Event::Discover {
+        node: node.clone(),
+        data,
+        note: Some("discovery is switched off on this server".into()),
+    };
+
+    match node {
+        // Both are answered without asking the server: the mode menu is
+        // static, and an artist's ways in arrived with the artist list.
+        DiscoverNode::Root | DiscoverNode::Artist(_) => Ok(Event::Discover {
+            node: node.clone(),
+            data: DiscoverData::Tracks(Vec::new()),
+            note: None,
+        }),
+
+        DiscoverNode::Tracks => {
+            let Some(found) = client.similar_tracks(&seed.filepath, DISCOVER_LIMIT)? else {
+                return Ok(disabled(DiscoverData::Tracks(Vec::new())));
+            };
+            let note = if found.not_analyzed {
+                Some("this track hasn't been analysed yet".to_string())
+            } else if found.results.is_empty() {
+                Some("nothing in your library sounds like this".to_string())
+            } else {
+                None
+            };
+            Ok(Event::Discover {
+                node: node.clone(),
+                data: DiscoverData::Tracks(
+                    found.results.into_iter().map(|r| r.into_track()).collect(),
+                ),
+                note,
+            })
+        }
+
+        DiscoverNode::Artists => {
+            let Some(artist) = seed.metadata.artist.as_deref().filter(|a| !a.trim().is_empty())
+            else {
+                return Ok(Event::Discover {
+                    node: node.clone(),
+                    data: DiscoverData::Artists(Vec::new()),
+                    note: Some("this track has no artist tag to compare against".into()),
+                });
+            };
+            let Some(found) = client.similar_artists(artist, DISCOVER_LIMIT)? else {
+                return Ok(disabled(DiscoverData::Artists(Vec::new())));
+            };
+            let note = if found.not_analyzed {
+                Some(format!("none of {artist}'s tracks have been analysed yet"))
+            } else if found.results.is_empty() {
+                Some(format!("nothing in your library sounds like {artist}"))
+            } else if found.capped {
+                // The server stops walking a long ranking, so a short list
+                // here means "stopped looking", not "there is no more".
+                Some(format!(
+                    "{} artists — the server stopped searching before the list ran out",
+                    found.results.len()
+                ))
+            } else {
+                None
+            };
+            Ok(Event::Discover {
+                node: node.clone(),
+                data: DiscoverData::Artists(found.results),
+                note,
+            })
+        }
+    }
 }
 
 /// Fetch a journey and translate the ways it can legitimately come up short

@@ -15,7 +15,8 @@ use crate::dj;
 use crate::player::PlayerStatus;
 
 use super::worker::{
-    ApiCmd, AudioCmd, AutoDjMode, DjRequest, Event, LibraryData, LibraryNode,
+    ApiCmd, AudioCmd, AutoDjMode, DiscoverData, DiscoverNode, DjRequest, Event, LibraryData,
+    LibraryNode,
 };
 
 const SEEK_STEP: f64 = 5.0;
@@ -38,10 +39,12 @@ pub enum Tab {
     Library,
     Playlists,
     Search,
+    Discover,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Files, Tab::Library, Tab::Playlists, Tab::Search];
+    pub const ALL: [Tab; 5] =
+        [Tab::Files, Tab::Library, Tab::Playlists, Tab::Search, Tab::Discover];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -49,11 +52,17 @@ impl Tab {
             Tab::Library => "Library",
             Tab::Playlists => "Playlists",
             Tab::Search => "Search",
+            Tab::Discover => "Discover",
         }
     }
 
-    pub fn index(self) -> usize {
-        Tab::ALL.iter().position(|t| *t == self).unwrap_or(0)
+    /// Whether this server can serve the tab at all. A tab that can only ever
+    /// say "not available here" is worse than no tab.
+    pub fn available(self, capabilities: crate::api::types::Capabilities) -> bool {
+        match self {
+            Tab::Discover => capabilities.discovery,
+            _ => true,
+        }
     }
 }
 
@@ -152,6 +161,9 @@ pub enum Entry {
     /// A step deeper into the tag-based library (an artist, album, genre…).
     Node { label: String, node: LibraryNode },
     Playlist { name: String },
+    /// A step deeper into Discover. `detail` is the dim right-hand column —
+    /// how close, how much the guess rests on, what it sounds like.
+    Discover { label: String, detail: String, node: DiscoverNode },
     Track { label: String, track: Box<Track> },
 }
 
@@ -528,6 +540,14 @@ pub struct App {
     pub library_stack: Vec<LibraryNode>,
     pub playlists: Pane,
     pub playlist_open: Option<String>,
+    pub discover: Pane,
+    /// Breadcrumb through the Discover tab, mirroring `library_stack`.
+    pub discover_stack: Vec<DiscoverNode>,
+    /// The track every Discover view hangs off. Captured when a view is
+    /// opened so the list doesn't quietly re-anchor when the song changes.
+    pub discover_seed: Option<Track>,
+    /// The last artist list, kept so drilling into one of them costs nothing.
+    pub discover_artists: Vec<crate::api::types::SimilarArtist>,
     pub search: Pane,
     pub query: String,
     pub editing_query: bool,
@@ -585,6 +605,10 @@ impl App {
             library_stack: Vec::new(),
             playlists: Pane::default(),
             playlist_open: None,
+            discover: Pane::default(),
+            discover_stack: Vec::new(),
+            discover_seed: None,
+            discover_artists: Vec::new(),
             search: Pane::default(),
             query: String::new(),
             editing_query: false,
@@ -733,6 +757,7 @@ impl App {
             Tab::Library => &self.library,
             Tab::Playlists => &self.playlists,
             Tab::Search => &self.search,
+            Tab::Discover => &self.discover,
         }
     }
 
@@ -742,12 +767,28 @@ impl App {
             Tab::Library => &mut self.library,
             Tab::Playlists => &mut self.playlists,
             Tab::Search => &mut self.search,
+            Tab::Discover => &mut self.discover,
         }
     }
 
     /// The library view currently on screen.
     pub fn library_node(&self) -> &LibraryNode {
         self.library_stack.last().unwrap_or(&LibraryNode::Root)
+    }
+
+    pub fn discover_node(&self) -> &DiscoverNode {
+        self.discover_stack.last().unwrap_or(&DiscoverNode::Root)
+    }
+
+    /// The tabs this server can actually serve, in order. The numbers on the
+    /// header are positions in *this* list, so they stay 1..n with no gaps.
+    pub fn tabs(&self) -> Vec<Tab> {
+        Tab::ALL.into_iter().filter(|t| t.available(self.capabilities)).collect()
+    }
+
+    /// Where the current tab sits among the visible ones.
+    pub fn tab_index(&self) -> usize {
+        self.tabs().iter().position(|t| *t == self.tab).unwrap_or(0)
     }
 
     /// The current server as it should be shown. A tunnel session's endpoint
@@ -1393,9 +1434,13 @@ impl App {
     }
 
     fn select_tab(&mut self, index: usize) -> Vec<Effect> {
-        let Some(tab) = Tab::ALL.get(index).copied() else {
+        let Some(tab) = self.tabs().get(index).copied() else {
             return Vec::new();
         };
+        // Whatever the cursor is on *now* is what "more like this" means, and
+        // switching tabs moves the cursor somewhere else entirely — so the
+        // candidate has to be taken before the change, not after.
+        let carried = self.now_playing.clone().or_else(|| self.selected_track());
         self.tab = tab;
         self.focus = Focus::Browser;
 
@@ -1404,6 +1449,16 @@ impl App {
             Tab::Library if self.library_stack.is_empty() => {
                 self.library_stack.push(LibraryNode::Root);
                 self.library.set(library_root_entries());
+                Vec::new()
+            }
+            Tab::Discover => {
+                self.set_discover_seed(carried);
+                if self.discover_stack.is_empty() {
+                    self.discover_stack.push(DiscoverNode::Root);
+                }
+                if *self.discover_node() == DiscoverNode::Root {
+                    self.discover.set(self.discover_root_entries());
+                }
                 Vec::new()
             }
             Tab::Playlists if self.playlists.entries.is_empty() => {
@@ -1454,6 +1509,7 @@ impl App {
                 self.info(format!("loading {label}…"));
                 vec![Effect::Api(ApiCmd::Library(node))]
             }
+            Entry::Discover { node, label, .. } => self.open_discover(node, &label),
             Entry::Playlist { name } => {
                 self.info(format!("loading playlist {name}…"));
                 vec![Effect::Api(ApiCmd::LoadPlaylist(name))]
@@ -1504,8 +1560,125 @@ impl App {
                 self.playlist_open = None;
                 vec![Effect::Api(ApiCmd::Playlists)]
             }
+            Tab::Discover => {
+                if self.discover_stack.len() <= 1 {
+                    return Vec::new(); // already at the mode menu
+                }
+                self.discover_stack.pop();
+                match self.discover_node().clone() {
+                    DiscoverNode::Root => {
+                        // Back at the top: re-anchor on whatever is current,
+                        // so the next look starts from where you are now.
+                        let carried = self.now_playing.clone();
+                        self.set_discover_seed(carried);
+                        self.discover.set(self.discover_root_entries());
+                        Vec::new()
+                    }
+                    // An artist's ways in came with the artist list, so
+                    // stepping back to it needs nothing from the server.
+                    DiscoverNode::Artists => {
+                        self.discover.set(self.discover_artist_entries());
+                        Vec::new()
+                    }
+                    node => self.request_discover(node),
+                }
+            }
             _ => Vec::new(),
         }
+    }
+
+    // ── Discover ────────────────────────────────────────────────────────────
+
+    /// Re-anchor Discover, keeping the previous seed when there is no new
+    /// candidate — stepping around inside the tab must not lose it.
+    fn set_discover_seed(&mut self, candidate: Option<Track>) {
+        if let Some(seed) = candidate {
+            self.discover_seed = Some(seed);
+        }
+    }
+
+    /// The mode menu. Static, so opening the tab costs no request.
+    fn discover_root_entries(&self) -> Vec<Entry> {
+        let artist = self
+            .discover_seed
+            .as_ref()
+            .and_then(|t| t.metadata.artist.clone())
+            .unwrap_or_default();
+        vec![
+            Entry::Discover {
+                label: "Similar tracks".into(),
+                detail: "in your library".into(),
+                node: DiscoverNode::Tracks,
+            },
+            Entry::Discover {
+                label: "Similar artists".into(),
+                detail: if artist.is_empty() {
+                    "needs an artist tag".into()
+                } else {
+                    format!("like {artist}")
+                },
+                node: DiscoverNode::Artists,
+            },
+        ]
+    }
+
+    /// Rows for the artist list already in hand.
+    fn discover_artist_entries(&self) -> Vec<Entry> {
+        let mut entries = vec![Entry::Parent];
+        entries.extend(self.discover_artists.iter().map(|a| {
+            let ways = match a.entry_points.len() {
+                0 => "no way in".to_string(),
+                1 => "1 way in".to_string(),
+                n => format!("{n} ways in"),
+            };
+            let mut detail = format!("{:.2}  {ways}", a.similarity);
+            let tags: Vec<&str> = a.genre_tags.iter().take(2).map(|t| tidy_tag(t)).collect();
+            if !tags.is_empty() {
+                detail.push_str(" · ");
+                detail.push_str(&tags.join(", "));
+            }
+            Entry::Discover {
+                label: a.artist.clone(),
+                detail,
+                node: DiscoverNode::Artist(a.artist.clone()),
+            }
+        }));
+        entries
+    }
+
+    /// The chosen artist's doorways, as playable rows.
+    fn discover_entry_point_entries(&self, artist: &str) -> Vec<Entry> {
+        let mut entries = vec![Entry::Parent];
+        if let Some(found) = self.discover_artists.iter().find(|a| a.artist == artist) {
+            entries.extend(found.entry_points.iter().map(|track| Entry::Track {
+                label: track.display_name(),
+                track: Box::new(track.clone()),
+            }));
+        }
+        entries
+    }
+
+    fn open_discover(&mut self, node: DiscoverNode, label: &str) -> Vec<Effect> {
+        // An artist's ways in are already here; going in costs nothing.
+        if let DiscoverNode::Artist(artist) = &node {
+            let entries = self.discover_entry_point_entries(artist);
+            self.discover_stack.push(node);
+            self.discover.set(entries);
+            self.message = None;
+            return Vec::new();
+        }
+        self.discover_stack.push(node.clone());
+        self.discover.set(Vec::new());
+        self.info(format!("looking for {}…", label.to_lowercase()));
+        self.request_discover(node)
+    }
+
+    fn request_discover(&mut self, node: DiscoverNode) -> Vec<Effect> {
+        let Some(seed) = self.discover_seed.clone() else {
+            self.error("play or highlight a track first — discovery needs somewhere to start");
+            return Vec::new();
+        };
+        vec![Effect::Api(ApiCmd::Discover { node, seed: Box::new(seed) })]
     }
 
     /// The track under the cursor, wherever the cursor is. Directories and
@@ -1757,6 +1930,32 @@ impl App {
                 self.message = None;
                 Vec::new()
             }
+            Event::Discover { node, data, note } => {
+                // Drop a reply for a view the user has already left, the same
+                // rule the Library tab follows.
+                if *self.discover_node() != node {
+                    return Vec::new();
+                }
+                match data {
+                    DiscoverData::Tracks(tracks) => {
+                        let mut entries = vec![Entry::Parent];
+                        entries.extend(tracks.into_iter().map(|track| Entry::Track {
+                            label: track.display_name(),
+                            track: Box::new(track),
+                        }));
+                        self.discover.set(entries);
+                    }
+                    DiscoverData::Artists(artists) => {
+                        self.discover_artists = artists;
+                        self.discover.set(self.discover_artist_entries());
+                    }
+                }
+                match note {
+                    Some(note) => self.info(note),
+                    None => self.message = None,
+                }
+                Vec::new()
+            }
             Event::AutoDjSample { tracks, pool, note } => {
                 if let Some(panel) = self.dj_panel.as_mut() {
                     panel.sample_pending = false;
@@ -1976,6 +2175,14 @@ fn entries_from_library(data: LibraryData) -> Vec<Entry> {
     entries
 }
 
+/// The model writes hierarchical tags — "Electronic---Dubstep". In a list of
+/// artists similar to each other the prefix is the same on every row, so only
+/// the leaf carries information; it is also the difference between two tags
+/// fitting on a line and none of them fitting.
+fn tidy_tag(tag: &str) -> &str {
+    tag.rsplit("---").next().unwrap_or(tag).trim()
+}
+
 /// Join a directory prefix and an entry name into a library path.
 fn qualify(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
@@ -2053,7 +2260,9 @@ pub fn map_key(key: KeyEvent, mode: InputMode) -> Option<Action> {
         KeyCode::Char('?') => Some(Action::ToggleHelp),
         KeyCode::Esc => Some(Action::Cancel),
         KeyCode::Tab => Some(Action::CycleFocus),
-        KeyCode::Char(c @ '1'..='4') => Some(Action::SelectTab(c as usize - '1' as usize)),
+        // One digit per visible tab. `select_tab` ignores a number past the
+        // end, so a server without Discover simply has nothing on 5.
+        KeyCode::Char(c @ '1'..='5') => Some(Action::SelectTab(c as usize - '1' as usize)),
 
         KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
@@ -3222,6 +3431,156 @@ mod tests {
             similarity: 0.9,
             ..Default::default()
         }
+    }
+
+    fn similar_artist(name: &str, similarity: f64, ways: &[&str]) -> crate::api::types::SimilarArtist {
+        crate::api::types::SimilarArtist {
+            artist: name.into(),
+            similarity,
+            analyzed_count: 12,
+            genre_tags: vec!["ambient".into()],
+            entry_points: ways.iter().map(|p| track(p)).collect(),
+        }
+    }
+
+    /// Index of the Discover tab among the visible ones.
+    fn discover_tab(app: &App) -> usize {
+        app.tabs().iter().position(|t| *t == Tab::Discover).expect("discover is available")
+    }
+
+    #[test]
+    fn hierarchical_model_tags_are_shown_by_their_leaf() {
+        // Live against a real index every row read "Electronic---Dubstep,
+        // Electroni…" — the shared prefix filled the column and said nothing.
+        assert_eq!(tidy_tag("Electronic---Dubstep"), "Dubstep");
+        assert_eq!(tidy_tag("Hip Hop---Trap"), "Trap");
+        assert_eq!(tidy_tag("Jazz"), "Jazz");
+        assert_eq!(tidy_tag(""), "");
+    }
+
+    #[test]
+    fn the_discover_tab_is_absent_where_the_server_cannot_serve_it() {
+        let app = connected_app();
+        assert!(app.tabs().contains(&Tab::Discover));
+
+        let mut plain = connected_app();
+        plain.capabilities = Default::default();
+        assert!(!plain.tabs().contains(&Tab::Discover));
+        // And the numbers stay 1..n so no key points at a gap.
+        assert_eq!(plain.tabs().len(), 4);
+        assert!(plain.handle_action(Action::SelectTab(4)).is_empty(), "there is no fifth tab");
+        assert_ne!(plain.tab, Tab::Discover);
+    }
+
+    #[test]
+    fn opening_discover_anchors_on_what_is_highlighted() {
+        // The cursor was on a track in another tab, and that is the obvious
+        // thing to mean by "more like this".
+        let mut app = connected_app();
+        browsing(&mut app, &["a", "b"], 1);
+        app.handle_action(Action::SelectTab(discover_tab(&app)));
+
+        assert_eq!(app.tab, Tab::Discover);
+        assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "b");
+        // The mode menu costs no request.
+        assert_eq!(app.discover.entries.len(), 2);
+    }
+
+    #[test]
+    fn what_is_playing_wins_over_what_is_merely_highlighted() {
+        let mut app = connected_app();
+        app.queue.replace(vec![track("playing")]);
+        app.play_index(0);
+        browsing(&mut app, &["highlighted"], 0);
+        app.handle_action(Action::SelectTab(discover_tab(&app)));
+        assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "playing");
+    }
+
+    #[test]
+    fn similar_tracks_are_ordinary_playable_rows() {
+        let mut app = connected_app();
+        browsing(&mut app, &["seed"], 0);
+        app.handle_action(Action::SelectTab(discover_tab(&app)));
+
+        let effects = app.handle_action(Action::Activate);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCmd::Discover { node: DiscoverNode::Tracks, seed })]
+                if seed.filepath == "seed"
+        ));
+
+        app.apply_event(Event::Discover {
+            node: DiscoverNode::Tracks,
+            data: DiscoverData::Tracks(vec![track("near-one"), track("near-two")]),
+            note: None,
+        });
+        // Parent row plus the two neighbours, and Enter plays them like any
+        // other list — no new concept to learn.
+        assert_eq!(app.discover.entries.len(), 3);
+        app.discover.state.select(Some(1));
+        let effects = app.handle_action(Action::Activate);
+        assert_eq!(app.queue.items.len(), 2);
+        assert_eq!(app.queue.current, Some(0));
+        assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+    }
+
+    #[test]
+    fn an_artist_drills_into_its_ways_in_without_asking_again() {
+        // The entry points arrived with the artist list, so going in costs
+        // nothing — the whole reason the server sends them inline.
+        let mut app = connected_app();
+        browsing(&mut app, &["seed"], 0);
+        app.handle_action(Action::SelectTab(discover_tab(&app)));
+        app.discover.state.select(Some(1)); // "Similar artists"
+        app.handle_action(Action::Activate);
+
+        app.apply_event(Event::Discover {
+            node: DiscoverNode::Artists,
+            data: DiscoverData::Artists(vec![
+                similar_artist("Near Artist", 0.91, &["in-one", "in-two"]),
+                similar_artist("Other", 0.80, &[]),
+            ]),
+            note: None,
+        });
+        assert_eq!(app.discover.entries.len(), 3, "parent plus two artists");
+
+        app.discover.state.select(Some(1));
+        let effects = app.handle_action(Action::Activate);
+        assert!(effects.is_empty(), "no request — the doorways were already here");
+        assert_eq!(*app.discover_node(), DiscoverNode::Artist("Near Artist".into()));
+        assert_eq!(app.discover.entries.len(), 3, "parent plus two ways in");
+
+        // And back out again, still without asking.
+        assert!(app.handle_action(Action::Back).is_empty());
+        assert_eq!(*app.discover_node(), DiscoverNode::Artists);
+        assert_eq!(app.discover.entries.len(), 3);
+    }
+
+    #[test]
+    fn a_discover_reply_for_a_view_already_left_is_dropped() {
+        let mut app = connected_app();
+        browsing(&mut app, &["seed"], 0);
+        app.handle_action(Action::SelectTab(discover_tab(&app)));
+        app.handle_action(Action::Activate); // into Tracks
+        app.handle_action(Action::Back); // and straight back out
+
+        app.apply_event(Event::Discover {
+            node: DiscoverNode::Tracks,
+            data: DiscoverData::Tracks(vec![track("late")]),
+            note: None,
+        });
+        assert_eq!(*app.discover_node(), DiscoverNode::Root);
+        assert_eq!(app.discover.entries.len(), 2, "still the mode menu");
+    }
+
+    #[test]
+    fn discovery_with_nothing_to_go_on_says_so() {
+        let mut app = connected_app();
+        app.handle_action(Action::SelectTab(discover_tab(&app)));
+        assert!(app.discover_seed.is_none(), "nothing playing, nothing highlighted");
+
+        assert!(app.handle_action(Action::Activate).is_empty());
+        assert!(app.message.as_ref().unwrap().text.contains("play or highlight a track"));
     }
 
     #[test]

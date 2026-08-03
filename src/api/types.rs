@@ -402,6 +402,40 @@ impl SimilarTrack {
     }
 }
 
+/// `POST /api/v1/discovery/local/similar/artists` — artists whose overall
+/// sound sits near the seed's, each with a way in.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SimilarArtistsResponse {
+    /// The seed artist has no embedded tracks yet.
+    #[serde(rename = "notAnalyzed")]
+    pub not_analyzed: bool,
+    /// The server stopped walking the ranking before filling the limit, so a
+    /// short list means "we stopped looking", not "there is no more".
+    pub capped: bool,
+    pub results: Vec<SimilarArtist>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SimilarArtist {
+    pub artist: String,
+    pub similarity: f64,
+    /// How many of this artist's tracks the discovery worker has embedded —
+    /// a similarity drawn from three tracks deserves less trust than one
+    /// drawn from fifty.
+    #[serde(rename = "analyzedCount")]
+    pub analyzed_count: u32,
+    /// The model's own style guesses for this artist, not file tags.
+    #[serde(rename = "genreTags", deserialize_with = "null_default")]
+    pub genre_tags: Vec<String>,
+    /// Up to two of this artist's tracks that sit closest to the *seed's*
+    /// sound — playable doorways that continue what you were listening to,
+    /// rather than whatever the artist is best known for.
+    #[serde(rename = "entryPoints")]
+    pub entry_points: Vec<Track>,
+}
+
 // ── Sonic Journey ───────────────────────────────────────────────────────────
 
 /// `POST /api/v1/discovery/local/path` — a walk along the great-circle arc

@@ -9,7 +9,8 @@ use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, 
 use crate::cmd_library::fmt_duration;
 
 use super::app::{App, CONNECT_METHODS, ConnectStage, DjRow, Entry, Focus, MessageKind, Tab};
-use super::worker::{AutoDjMode, LibraryNode};
+use super::worker::{AutoDjMode, DiscoverNode, LibraryNode};
+use crate::api::types::Track;
 
 const ACCENT: Color = Color::Cyan;
 const DIM: Color = Color::DarkGray;
@@ -142,7 +143,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
-    let titles: Vec<Line> = Tab::ALL
+    // Only the tabs this server can serve, so the numbers run 1..n with no
+    // gaps and none of them lead somewhere empty.
+    let titles: Vec<Line> = app
+        .tabs()
         .iter()
         .enumerate()
         .map(|(i, t)| Line::from(format!(" {}:{} ", i + 1, t.title())))
@@ -159,7 +163,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(
         Tabs::new(titles)
-            .select(app.tab.index())
+            .select(app.tab_index())
             .highlight_style(Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
             .divider("")
             .padding("", ""),
@@ -220,6 +224,7 @@ fn render_browser(frame: &mut Frame, area: Rect, app: &mut App) {
         Tab::Library => &mut app.library.state,
         Tab::Playlists => &mut app.playlists.state,
         Tab::Search => &mut app.search.state,
+        Tab::Discover => &mut app.discover.state,
     };
     frame.render_stateful_widget(list, area, state);
 
@@ -229,6 +234,7 @@ fn render_browser(frame: &mut Frame, area: Rect, app: &mut App) {
             Tab::Library => "loading…",
             Tab::Playlists => "(no playlists)",
             Tab::Search => "type a query and press Enter",
+            Tab::Discover => "loading…",
         };
         frame.render_widget(
             Paragraph::new(Span::styled(hint, Style::new().fg(DIM))),
@@ -268,6 +274,27 @@ fn browser_title(app: &App) -> String {
                 (None, _) => format!(" Search: {query} "),
             }
         }
+        // Every Discover view hangs off one track, so every title names it —
+        // a list of neighbours means nothing without saying neighbours of what.
+        Tab::Discover => {
+            let seed = app
+                .discover_seed
+                .as_ref()
+                .map_or_else(|| "nothing yet".to_string(), Track::display_name);
+            match app.discover_node() {
+                DiscoverNode::Root => format!(" Discover · from {seed} "),
+                DiscoverNode::Tracks => format!(" Sounds like {seed} "),
+                DiscoverNode::Artists => {
+                    let artist = app
+                        .discover_seed
+                        .as_ref()
+                        .and_then(|t| t.metadata.artist.clone())
+                        .unwrap_or_else(|| seed.clone());
+                    format!(" Artists like {artist} ")
+                }
+                DiscoverNode::Artist(artist) => format!(" Ways into {artist} "),
+            }
+        }
     }
 }
 
@@ -283,6 +310,13 @@ fn entry_line(entry: &Entry) -> Line<'static> {
             Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
         )),
         Entry::Playlist { name } => Line::from(format!("♪ {name}")),
+        Entry::Discover { label, detail, .. } => Line::from(vec![
+            Span::styled(
+                label.clone(),
+                Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("   {detail}"), Style::new().fg(DIM)),
+        ]),
         Entry::Track { label, track } => {
             let mut spans = vec![Span::raw(label.clone())];
             if let Some(duration) = track.metadata.duration {
@@ -1288,6 +1322,60 @@ mod tests {
     }
 
     #[test]
+    fn the_discover_tab_names_what_it_is_working_from() {
+        // A list of neighbours means nothing without saying neighbours of
+        // what, so every view in the tab carries the seed in its title.
+        let mut app = connected_app();
+        app.files.set(vec![crate::tui::app::Entry::Track {
+            label: "seed".into(),
+            track: Box::new(Track {
+                filepath: "lib/seed.mp3".into(),
+                metadata: TrackMetadata {
+                    artist: Some("Seed Artist".into()),
+                    title: Some("Seed Song".into()),
+                    ..Default::default()
+                },
+            }),
+        }]);
+        app.files.state.select(Some(0));
+
+        let discover = app.tabs().iter().position(|t| *t == Tab::Discover).unwrap();
+        app.handle_action(Action::SelectTab(discover));
+        let text = draw(&mut app);
+        assert!(text.contains("5:Discover"));
+        assert!(text.contains("Seed Artist - Seed Song"), "the title names the seed:\n{text}");
+        assert!(text.contains("Similar tracks"));
+        assert!(text.contains("like Seed Artist"), "and the artist row names the artist");
+
+        // Artist rows carry how close, how many ways in, and what it sounds
+        // like — the three things that decide whether to open one.
+        app.discover.state.select(Some(1));
+        app.handle_action(Action::Activate);
+        app.apply_event(crate::tui::worker::Event::Discover {
+            node: crate::tui::worker::DiscoverNode::Artists,
+            data: crate::tui::worker::DiscoverData::Artists(vec![
+                crate::api::types::SimilarArtist {
+                    artist: "Near One".into(),
+                    similarity: 0.94,
+                    analyzed_count: 20,
+                    genre_tags: vec!["Electronic---Dubstep".into()],
+                    entry_points: vec![Track {
+                        filepath: "lib/way.mp3".into(),
+                        metadata: Default::default(),
+                    }],
+                },
+            ]),
+            note: None,
+        });
+        let text = draw(&mut app);
+        assert!(text.contains("Artists like Seed Artist"), "got:\n{text}");
+        assert!(text.contains("Near One"));
+        assert!(text.contains("0.94"));
+        assert!(text.contains("1 way in"), "singular, not '1 ways in':\n{text}");
+        assert!(text.contains("Dubstep") && !text.contains("Electronic---"));
+    }
+
+    #[test]
     fn a_journey_shows_the_arc_it_would_queue() {
         let mut app = connected_app();
         app.queue.replace(vec![Track {
@@ -1534,17 +1622,26 @@ mod tests {
         let mut app = connected_app();
         app.username = Some("tester".into());
 
-        // Roomy: the whole thing, scheme and all. Note this still fits at 76
-        // columns now that the tabs only take what they need.
+        // Roomy: the whole thing, scheme and all.
         assert!(draw_sized(&mut app, 140, 20).contains("tester@http://host:3000"));
-        assert!(draw_sized(&mut app, 76, 20).contains("tester@http://host:3000"));
+        assert!(draw_sized(&mut app, 88, 20).contains("tester@http://host:3000"));
 
-        // Genuinely tight: the scheme goes first, the host stays, and the
-        // tabs are still whole.
-        let narrow = draw_sized(&mut app, 62, 20);
+        // Genuinely tight: the scheme goes first, the host stays, and every
+        // tab is still whole — including the fifth, which only exists on a
+        // server with discovery and is what made the header longer.
+        let narrow = draw_sized(&mut app, 72, 20);
         assert!(narrow.contains("tester@host:3000"), "kept the useful part");
         assert!(!narrow.contains("tester@http://host:3000"));
-        assert!(narrow.contains("4:Search"));
+        assert!(narrow.contains("5:Discover"));
+
+        // A server without discovery has no fifth tab, so the same label
+        // survives in a narrower terminal.
+        let mut plain = connected_app();
+        plain.capabilities = Default::default();
+        plain.username = Some("tester".into());
+        let text = draw_sized(&mut plain, 72, 20);
+        assert!(!text.contains("Discover"), "no tab for a feature this server lacks");
+        assert!(text.contains("tester@http://host:3000"), "and the freed width shows");
     }
 
     #[test]

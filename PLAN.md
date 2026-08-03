@@ -373,14 +373,45 @@ evenly-spaced waypoints, drifting through a second artist mid-arc and arriving w
 shortening it twice replotted each time; queueing replaced the queue with the 10 stops and
 started playing. The same-track short circuit was hit by accident first and reported correctly.
 
-#### B3 — Discovery browsing
-- Local: similar tracks, and similar artists with their `entryPoints` (up to 2 playable doorways
-  per artist) — a natural "more like this" and "artist radio".
+#### B3a — Discover tab, local ✅ DONE 2026-08-02
+
+A fifth tab, built the way the Library tab is: a static mode menu that costs no request, then
+drill-down. Two modes — **Similar tracks** (ordinary playable rows, so Enter and `a` mean what
+they always mean) and **Similar artists** (rows carrying how close, how many ways in, and what it
+sounds like; Enter opens that artist's `entryPoints`).
+
+The design question was how a terminal handles four sources whose rows mean different things.
+The answer is **don't mix them**: one mode per source, homogeneous rows inside each, so Enter
+never changes meaning within a list.
+
+- **The seed is what's playing, or failing that what's highlighted** — the same rule Sonic Journey
+  uses. Captured *before* the tab changes, since switching tabs moves the cursor; getting that
+  ordering wrong made the seed always empty, which the tests caught and reading did not.
+- **Entry points arrive with the artist list**, so drilling into one costs nothing — the reason
+  the server inlines them.
+- **The tab is hidden where the server has no index.** Tab numbers are positions in the *visible*
+  list, so they stay 1..n with no gaps and no key points at a dead tab.
+- Model tags are hierarchical (`Electronic---Dubstep`); only the leaf is shown. Live, the shared
+  prefix filled the column on every row and said nothing.
+
+Verified against a live personal server with a real index: Library → highlight → Discover carried
+the seed across, similar tracks returned 40 neighbours, similar artists returned a ranked list
+with tags, and drilling into one played a doorway.
+
+#### B3b — Discovery browsing, network (todo)
 - P2P and federation similarity, clearly labelled with provenance (`peer.name`) and with the
   privacy difference surfaced: p2p queries run against local snapshot copies and never leave the
   machine, while federation sends the seed vector to peers the admin paired with.
-- P2P results carry no `filepath` (you don't have those tracks) — present them as discovery, not
-  as something to queue. Federation results do carry one and are streamable.
+- P2P results carry no `filepath` at all — leads, not files. Present them read-only rather than
+  inventing an action; `searched.{peers,tracks}` is worth showing.
+- Federation results **are** streamable: `GET /api/v1/federation/peers/:id/stream/<path>` proxies
+  over the bridge with Range forwarded, so seeking works. It deliberately has no transcode, so a
+  peer's opus file cannot play — degrade with a clear message. (The comment at
+  `discovery-federation.js:147` still calls the proxy "future"; it exists.)
+- **Cost:** the queue assumes every track is local (`play_index` builds `media_url` from
+  `self.server`), so queue items need to carry their origin before a peer's track can play.
+- **Verifiability:** the personal server has `discoveryP2p` on, so the p2p half can be tested
+  live. No federated peers are available, so that half would ship unverified.
 
 #### B4 — Admin panel
 Admin auth is the **same JWT** — `admin` comes from the users table, and the token is byte

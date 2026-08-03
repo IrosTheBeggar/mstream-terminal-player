@@ -32,7 +32,7 @@ track queues everything visible and starts there; `a` queues just that one.
 | `h` | go back |
 | `a` | add the highlighted track to the queue |
 | `Tab` | switch between browser and queue |
-| `1` `2` `3` `4` | Files / Library / Playlists / Search · `/` search |
+| `1` … `5` | Files / Library / Playlists / Search / Discover · `/` search |
 | `Space` | play or pause · `n` / `p` next / previous |
 | `[` `]` | seek 5s · `-` `+` volume |
 | `d` / `C` | remove from queue / clear queue |
@@ -96,6 +96,34 @@ The sonic pool is a **hard** constraint: tempo, key and artist all relax
 inside it, but it never widens. If nothing is similar enough the player says
 so and loosens for that one pick rather than quietly playing something else.
 Rows that need the server's embedding index only appear where it exists.
+
+## Discover
+
+Press `5` with a track playing or highlighted, and the Discover tab opens
+anchored on it:
+
+```
+┌ Discover · from Bassnectar - Rewind The Track ───────────┐
+│> Similar tracks    in your library                       │
+│  Similar artists   like Bassnectar                       │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Similar tracks** are ordinary rows — `Enter` plays from there, `a` queues
+one, exactly as everywhere else. **Similar artists** shows how close each one
+is, how many ways in it has, and what the model thinks it sounds like:
+
+```
+┌ Artists like Bassnectar ─────────────────────────────────┐
+│> Barely Alive   0.96  2 ways in · Dubstep, Electro House │
+│  ill Gates      0.95  2 ways in · Dubstep, Drum n Bass   │
+│  NiT GriT       0.95  2 ways in · Dubstep, Glitch        │
+```
+
+`Enter` opens an artist's ways in — the two of their tracks closest to *what
+you were already listening to*, rather than whatever they're best known for.
+
+The tab only appears on servers that have the discovery index.
 
 ## Sonic Journey
 
