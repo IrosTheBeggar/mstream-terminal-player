@@ -274,11 +274,18 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     // Only the tabs this server can serve, so the numbers run 1..n with no
     // gaps and none of them lead somewhere empty.
+    // Brackets on the open tab, not just colour -- the titles already pad
+    // with a space either side, so this costs nothing in width and survives a
+    // terminal that has taken the colour away.
+    let open = app.tab_index();
     let titles: Vec<Line> = app
         .tabs()
         .iter()
         .enumerate()
-        .map(|(i, t)| Line::from(format!(" {}:{} ", i + 1, t.title())))
+        .map(|(i, t)| {
+            let (left, right) = if i == open { ('[', ']') } else { (' ', ' ') };
+            Line::from(format!("{left}{}:{}{right}", i + 1, t.title()))
+        })
         .collect();
 
     // The tabs are how you move around, so they get the space they need and
@@ -454,20 +461,20 @@ fn browser_title(app: &App) -> String {
 fn entry_line(entry: &Entry, width: usize, playing: Option<&str>) -> Line<'static> {
     match entry {
         Entry::Parent => Line::from(Span::styled("..", Style::new().fg(dim()))),
-        Entry::Dir { label, .. } => Line::from(Span::styled(
-            format!("{label}/"),
-            Style::new().fg(folder()).add_modifier(Modifier::BOLD),
-        )),
-        Entry::Node { label, .. } => Line::from(Span::styled(
-            label.clone(),
-            Style::new().fg(folder()).add_modifier(Modifier::BOLD),
-        )),
+        // Colour but not bold. A folder listing is mostly folders and the
+        // library is nothing but nodes, so bolding them turns a whole pane
+        // into emphasis -- which leaves the row that is actually playing
+        // nothing to stand out against. The trailing slash carries the same
+        // meaning without any styling at all.
+        Entry::Dir { label, .. } => {
+            Line::from(Span::styled(format!("{label}/"), Style::new().fg(folder())))
+        }
+        Entry::Node { label, .. } => {
+            Line::from(Span::styled(label.clone(), Style::new().fg(folder())))
+        }
         Entry::Playlist { name } => Line::from(format!("♪ {name}")),
         Entry::Discover { label, detail, .. } => Line::from(vec![
-            Span::styled(
-                label.clone(),
-                Style::new().fg(folder()).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(label.clone(), Style::new().fg(folder())),
             Span::styled(format!("   {detail}"), Style::new().fg(dim())),
         ]),
         Entry::Track { label, track } => {
@@ -2225,6 +2232,55 @@ mod tests {
         let cramped: String =
             progress_line(&app, 12).spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(cramped.contains("0:30"), "{cramped}");
+    }
+
+    #[test]
+    fn which_tab_is_open_survives_a_terminal_with_no_colour() {
+        // Both tab bars said "this one" in colour alone. NO_COLOR is a
+        // standard crossterm honours, so that is a state a terminal can
+        // simply refuse to show — and which screen you are on is not
+        // something the UI can afford to whisper.
+        let mut app = connected_app();
+        let text = draw(&mut app);
+        assert!(text.contains("[1:Files] 2:Library"), "{text}");
+
+        app.handle_action(Action::SelectTab(1));
+        let text = draw(&mut app);
+        assert!(text.contains(" 1:Files [2:Library]"), "{text}");
+
+        // Bracketing must not shift the row: the titles already padded with a
+        // space either side, so the brackets take that space rather than new
+        // space, and the header's width calculation is untouched.
+        let widths: Vec<usize> =
+            [0usize, 1, 2].iter().map(|tab| {
+                let mut app = connected_app();
+                app.handle_action(Action::SelectTab(*tab));
+                draw(&mut app).lines().next().unwrap().trim_end().len()
+            }).collect();
+        assert_eq!(widths[0], widths[1], "the header does not move as tabs change");
+        assert_eq!(widths[1], widths[2]);
+    }
+
+    #[test]
+    fn a_folder_listing_is_coloured_but_not_shouted() {
+        // Every row in the library is a node, so bolding them all marked
+        // nothing and left the playing row nothing to stand out against.
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Album"], &["a.mp3"]))));
+
+        let dir = entry_line(
+            &Entry::Dir { label: "Album".into(), path: "lib/Album".into() },
+            40,
+            None,
+        );
+        assert_eq!(dir.spans[0].style.fg, Some(folder()));
+        assert!(
+            !dir.spans[0].style.add_modifier.contains(Modifier::BOLD),
+            "colour is enough for a whole pane of these"
+        );
+        // The slash says it too, which is what carries when colour cannot.
+        let text: String = dir.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.ends_with('/'), "{text}");
     }
 
     #[test]
