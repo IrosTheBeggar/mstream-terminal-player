@@ -199,6 +199,9 @@ pub enum Event {
     TrackEnded,
     /// The audio device could not be opened; playback is unavailable.
     AudioFailed(String),
+    /// One source would not play — wrong format, gone from the server, or
+    /// something this decoder doesn't speak. The rest of the queue is fine.
+    PlaybackFailed(String),
     Connected {
         /// Where this session's requests go. For a tunnel this is the loopback
         /// bridge, which is exactly why it cannot also be the identity.
@@ -286,8 +289,17 @@ fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
         match rx.recv_timeout(TICK) {
             Ok(AudioCmd::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(cmd) => {
+                // A source that won't play is a different kind of problem
+                // from a command that failed: the queue can carry on past it,
+                // and should, so it gets its own event.
+                let starting = matches!(cmd, AudioCmd::Play { .. });
                 if let Some(err) = apply_audio_cmd(player, cmd, &mut suppress_end) {
-                    let _ = events.send(Event::Error(err));
+                    let event = if starting {
+                        Event::PlaybackFailed(err)
+                    } else {
+                        Event::Error(err)
+                    };
+                    let _ = events.send(event);
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}

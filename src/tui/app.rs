@@ -588,6 +588,10 @@ pub struct App {
     /// A request is in flight; don't pile on another.
     autodj_pending: bool,
     pub status: PlayerStatus,
+    /// Tracks that failed to start since the last one that played. Bounds the
+    /// skipping so a queue of nothing but broken files stops rather than
+    /// looping.
+    failures: usize,
     pub volume: f32,
     pub now_playing: Option<Track>,
     pub audio_available: bool,
@@ -640,6 +644,7 @@ impl App {
             autodj_ignore: Vec::new(),
             autodj_pending: false,
             status: PlayerStatus::default(),
+            failures: 0,
             volume: 1.0,
             now_playing: None,
             audio_available: true,
@@ -1890,6 +1895,11 @@ impl App {
     pub fn apply_event(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::Status(status) => {
+                // Something loaded and is playing, so whatever went wrong
+                // before is behind us — the run of failures starts over.
+                if !status.source.is_empty() {
+                    self.failures = 0;
+                }
                 self.status = status;
                 Vec::new()
             }
@@ -1898,6 +1908,29 @@ impl App {
                 self.audio_available = false;
                 self.error(format!("audio unavailable: {e}"));
                 Vec::new()
+            }
+            Event::PlaybackFailed(e) => {
+                // One bad file used to end the listening session: the message
+                // appeared and the queue simply stopped. Say which track, and
+                // carry on to the next.
+                let what = self
+                    .now_playing
+                    .as_ref()
+                    .map(Track::display_name)
+                    .unwrap_or_else(|| "that track".to_string());
+                self.failures += 1;
+                // A queue where nothing plays must not be walked forever —
+                // with repeat on, skipping would go round and round.
+                if self.failures >= self.queue.items.len().max(1) {
+                    self.failures = 0;
+                    self.now_playing = None;
+                    self.queue.current = None;
+                    self.error(format!("{what} could not be played, and nor could the rest"));
+                    return vec![Effect::Audio(AudioCmd::Stop)];
+                }
+                self.error(format!("skipping {what} — {e}"));
+                // Manual, so repeat-one doesn't sit on the broken track.
+                self.skip(true)
             }
             Event::Connected { server, id, username, token, ping } => {
                 self.connected = true;
@@ -2267,6 +2300,12 @@ fn entries_from_listing(listing: &DirListing) -> Vec<Entry> {
         });
     }
     for file in &listing.files {
+        // A playlist file is a list of tracks, not a track. The server
+        // indexes them all the same, and `Enter` queues everything on screen,
+        // so leaving one here puts something undecodable in the queue.
+        if !is_audio(file.kind.as_deref()) {
+            continue;
+        }
         let filepath = qualify(prefix, &file.name);
         entries.push(Entry::Track {
             label: file.name.clone(),
@@ -2274,6 +2313,22 @@ fn entries_from_listing(listing: &DirListing) -> Vec<Entry> {
         });
     }
     entries
+}
+
+/// Whether the file explorer should offer this as something to play.
+///
+/// mStream indexes playlist files alongside audio — its ping even reports
+/// `m3u: false` under `supportedAudioFiles`, and its own Auto-DJ picker
+/// excludes them with the note that a client cannot stream one. The file
+/// browser is the one place they still reach a queue.
+///
+/// Anything unrecognised is treated as audio: a format this player cannot
+/// decode should fail loudly when played, not vanish from the listing.
+fn is_audio(kind: Option<&str>) -> bool {
+    !matches!(
+        kind.map(str::to_ascii_lowercase).as_deref(),
+        Some("m3u" | "m3u8" | "pls" | "cue" | "xspf" | "asx")
+    )
 }
 
 // ── Keymap ──────────────────────────────────────────────────────────────────
@@ -4053,6 +4108,90 @@ mod tests {
 
         assert!(app.handle_action(Action::Activate).is_empty());
         assert!(app.message.as_ref().unwrap().text.contains("play or highlight a track"));
+    }
+
+    #[test]
+    fn a_playlist_file_is_not_offered_as_a_track() {
+        // Found live: an album folder held `001-2pac-greatest_hits.m3u`, and
+        // Enter queues everything on screen, so the playlist file went into
+        // the queue and the decoder rejected it — stopping the album on the
+        // first row. mStream's own Auto-DJ excludes these for this reason.
+        let listing = DirListing {
+            path: "/library/2Pac/Greatest Hits".into(),
+            directories: Vec::new(),
+            files: vec![
+                FileEntry { name: "001-2pac-greatest_hits.m3u".into(), kind: Some("m3u".into()) },
+                FileEntry { name: "201 - Keep Ya Head Up.mp3".into(), kind: Some("mp3".into()) },
+            ],
+        };
+        let entries = entries_from_listing(&listing);
+        let labels: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Track { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, vec!["201 - Keep Ya Head Up.mp3"]);
+
+        // A format this player can't decode is still audio, and still listed:
+        // it should fail loudly when played, not disappear from the library.
+        assert!(is_audio(Some("opus")));
+        assert!(is_audio(Some("mp3")));
+        assert!(is_audio(None), "an unclassified file is given the benefit of the doubt");
+        for playlist in ["m3u", "M3U", "m3u8", "pls", "cue"] {
+            assert!(!is_audio(Some(playlist)), "{playlist} is a list, not a track");
+        }
+    }
+
+    #[test]
+    fn a_track_that_will_not_play_is_skipped_rather_than_stopping_everything() {
+        // The queue used to stop dead on the first unplayable file: the
+        // message appeared and nothing moved. One bad file should cost one
+        // track, not the session.
+        let mut app = connected_app();
+        app.queue.replace(vec![track("broken"), track("fine"), track("also-fine")]);
+        app.play_index(0);
+
+        let effects = app.apply_event(Event::PlaybackFailed("unrecognised format".into()));
+        assert_eq!(app.queue.current, Some(1), "moved on to the next track");
+        assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+        let message = &app.message.as_ref().unwrap().text;
+        assert!(message.contains("skipping"), "got: {message}");
+        assert!(message.contains("broken"), "and names the track: {message}");
+    }
+
+    #[test]
+    fn a_queue_where_nothing_plays_gives_up_instead_of_looping() {
+        // With repeat on, skipping past every broken track would go round
+        // forever, hammering the server and never making a sound.
+        let mut app = connected_app();
+        app.queue.repeat = Repeat::All;
+        app.queue.replace(vec![track("a"), track("b")]);
+        app.play_index(0);
+
+        app.apply_event(Event::PlaybackFailed("nope".into()));
+        let effects = app.apply_event(Event::PlaybackFailed("nope".into()));
+        assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)], "it stops rather than wrapping");
+        assert_eq!(app.queue.current, None);
+        assert!(app.message.as_ref().unwrap().text.contains("nor could the rest"));
+    }
+
+    #[test]
+    fn one_track_playing_forgives_the_failures_before_it() {
+        // The give-up counter is about a *run* of failures. A queue with one
+        // bad file every few tracks must keep going indefinitely.
+        let mut app = connected_app();
+        app.queue.replace(vec![track("a"), track("b")]);
+        app.play_index(0);
+        app.apply_event(Event::PlaybackFailed("nope".into()));
+        assert_eq!(app.failures, 1);
+
+        app.apply_event(Event::Status(PlayerStatus {
+            source: "http://host/b.mp3".into(),
+            ..Default::default()
+        }));
+        assert_eq!(app.failures, 0, "a track that loaded clears the run");
     }
 
     #[test]
