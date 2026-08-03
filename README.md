@@ -15,6 +15,12 @@ mstream-player
 Launches the TUI. It reconnects from a saved session, or shows a connect screen (leave the
 username empty for a server in public mode).
 
+Type the address however you say it — `nas:3000`, `demo.mstream.io`, `attic.local:3000`, or a
+full URL. A missing `http://` or `https://` is filled in from where the server lives: addresses
+that can only be on your network (loopback, private ranges, `.local`, plain hostnames) get
+`http`, anything reachable from the internet gets `https`. The completed address is written back
+into the field, so you can see what was assumed.
+
 **Files** browses folders as they sit on disk. **Library** browses by tags — artists, albums,
 genres, and recently added — and **Search** and **Playlists** do what they say. `Enter` on a
 track queues everything visible and starts there; `a` queues just that one.
@@ -51,7 +57,7 @@ mstream-player logout
 ```
 
 Servers running in public mode (no users configured) need no login — just pass
-`--server <url>`.
+`--server <url>`. `--server` accepts the same shorthand as the connect screen.
 
 ## Auto-DJ
 

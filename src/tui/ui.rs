@@ -56,17 +56,52 @@ fn render_centered_block(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>
     frame.render_widget(Paragraph::new(lines), rect);
 }
 
-/// The trailing status line shared by every connect screen.
-fn connect_message(app: &App) -> Option<Line<'static>> {
-    app.message.as_ref().map(|message| {
-        Line::from(Span::styled(
-            message.text.clone(),
-            match message.kind {
-                MessageKind::Error => Style::new().fg(Color::Red),
-                MessageKind::Info => Style::new().fg(DIM),
-            },
-        ))
-    })
+/// Longest a wrapped message line gets. Keeps a long error from stretching
+/// the centered block out to the full terminal, which would shove the banner
+/// and the fields off to the left every time something went wrong.
+const MESSAGE_WIDTH: usize = 66;
+
+/// The trailing status shared by every connect screen, wrapped rather than
+/// cut: these messages end in the instruction ("Enter again to send it
+/// anyway"), so losing the tail loses the point.
+fn connect_message(app: &App, area: Rect) -> Vec<Line<'static>> {
+    let Some(message) = app.message.as_ref() else {
+        return Vec::new();
+    };
+    let style = match message.kind {
+        MessageKind::Error => Style::new().fg(Color::Red),
+        MessageKind::Info => Style::new().fg(DIM),
+    };
+    wrap(&message.text, MESSAGE_WIDTH.min(area.width as usize))
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, style)))
+        .collect()
+}
+
+/// Break text on word boundaries. A word longer than `width` (a URL, say) is
+/// left whole and allowed to overhang rather than being chopped mid-token.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let fits = line.chars().count() + 1 + word.chars().count() <= width;
+        if line.is_empty() {
+            line.push_str(word);
+        } else if fits {
+            line.push(' ');
+            line.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut line));
+            line.push_str(word);
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -442,7 +477,7 @@ fn render_connect_choice(frame: &mut Frame, area: Rect, app: &App) {
         "↑↓ choose · Enter continue · Ctrl+C quits",
         Style::new().fg(DIM),
     )));
-    lines.extend(connect_message(app));
+    lines.extend(connect_message(app, area));
     render_centered_block(frame, area, lines);
 }
 
@@ -492,7 +527,7 @@ fn render_connect_direct(frame: &mut Frame, area: Rect, app: &App) {
     if app.connecting {
         lines.push(Line::from(Span::styled("connecting…", Style::new().fg(ACCENT))));
     }
-    lines.extend(connect_message(app));
+    lines.extend(connect_message(app, area));
     render_centered_block(frame, area, lines);
 }
 
@@ -584,7 +619,7 @@ fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
     if app.connecting {
         lines.push(Line::from(Span::styled("connecting…", Style::new().fg(ACCENT))));
     }
-    lines.extend(connect_message(app));
+    lines.extend(connect_message(app, area));
     render_centered_block(frame, area, lines);
 }
 
@@ -595,7 +630,7 @@ fn render_connecting(frame: &mut Frame, area: Rect, app: &App) {
         Style::new().add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled("Ctrl+C to quit", Style::new().fg(DIM))));
-    lines.extend(connect_message(app));
+    lines.extend(connect_message(app, area));
     render_centered_block(frame, area, lines);
 }
 
@@ -730,6 +765,44 @@ mod tests {
         assert!(text.contains("http://192.168.1.10:3000"), "placeholder shown");
         assert!(text.contains("••••••"), "password is masked");
         assert!(!text.contains("secret"), "password is never drawn in the clear");
+    }
+
+    #[test]
+    fn a_long_connect_message_wraps_instead_of_losing_its_ending() {
+        // The plaintext warning ends in the instruction, so a hard cut at the
+        // terminal edge threw away the only actionable part of it.
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::Direct;
+        app.connect.server = "http://music.example.com".into();
+        app.connect.username = "alice".into();
+        app.connect.password = "pw".into();
+        app.handle_action(Action::Submit);
+
+        let text = draw(&mut app);
+        assert!(text.contains("unencrypted"));
+        assert!(text.contains("Enter again to send it anyway"), "the instruction survives");
+
+        // Narrow enough to drop the banner: still wraps, still complete.
+        let text = draw_sized(&mut app, 50, 16);
+        assert!(text.contains("Enter again to send it anyway"));
+        // And it took more rows to say it, rather than running off the edge.
+        let rows = text.lines().filter(|line| line.contains("unencrypted")).count()
+            + text.lines().filter(|line| line.contains("Enter again")).count();
+        assert_eq!(rows, 2, "the message occupies two wrapped rows");
+    }
+
+    #[test]
+    fn wrapping_breaks_on_words_and_keeps_every_one() {
+        let wrapped = wrap("the quick brown fox jumps", 10);
+        assert_eq!(wrapped, vec!["the quick", "brown fox", "jumps"]);
+        assert!(wrapped.iter().all(|line| line.chars().count() <= 10));
+
+        // A word longer than the width is kept whole rather than mangled.
+        assert_eq!(wrap("http://a.very.long.host:3000/path is down", 10), vec![
+            "http://a.very.long.host:3000/path",
+            "is down"
+        ]);
+        assert!(wrap("", 10).is_empty());
     }
 
     #[test]

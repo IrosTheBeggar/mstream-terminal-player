@@ -270,16 +270,23 @@ pub fn login(args: LoginArgs) -> i32 {
         }
     };
 
-    let mut client = match Client::new(&args.server) {
+    let server = match crate::api::server_url::normalize(&args.server) {
+        Ok(server) => server,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            return 2;
+        }
+    };
+
+    let mut client = match Client::new(&server) {
         Ok(c) => c,
         Err(e) => return fail(e),
     };
 
     if client.is_insecure_remote() {
         eprintln!(
-            "warning: {} is plain HTTP — your password and token will cross the network \
-             unencrypted",
-            args.server
+            "warning: {server} is plain HTTP — your password and token will cross the \
+             internet unencrypted"
         );
     }
 

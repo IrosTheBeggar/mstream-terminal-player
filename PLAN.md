@@ -220,11 +220,39 @@ is available. That is enough to replace typing with picking.
   names. Landed on the Quick Connect screen first, which is where it earns the most: that screen
   now lists servers found on the network — picking one connects directly, no code needed — above
   the paste-a-code row for reaching a server anywhere. Servers are labelled "pairing available"
-  only when they advertise `iroh=1`. Still to do: offer the same list on the Direct branch.
-- Build the base URL from the TXT record rather than guessing `http://host:3000`.
-- Normalise hand-typed input (accept `host`, `host:3000`, bare paths) instead of rejecting it.
-- Public-mode servers should connect with no credentials at all — detect and skip the password.
-- Show the `iroh=1` capability so Quick Connect is only offered where it can work.
+  only when they advertise `iroh=1`.
+  **Not extending the list to the Direct branch** (decided 2026-08-02): anyone who has registered
+  a domain for their server wants to type it, so mDNS names would be the wrong default in the
+  place people go to type an address.
+- ✅ Build the base URL from the TXT record rather than guessing `http://host:3000` — scheme,
+  port and the `path` prefix all come from the advert, so reverse-proxy subpaths resolve.
+- ✅ **Normalise hand-typed input.** `src/api/server_url.rs` completes what a person types before
+  anything else sees it: `nas:3000`, `demo.mstream.io`, `::1`, a pasted address bar with a
+  `#!/artists` fragment, embedded credentials, a trailing slash. Every entry point runs through
+  it — the connect screen and every `--server` flag — because the normalised string is what
+  lands in `config.toml`, and storing what was typed would leave `nas:3000` and `http://nas:3000`
+  looking like two servers, each holding half a session.
+  - **The missing scheme is guessed from where the server lives:** loopback, RFC1918, link-local,
+    `.local`, and single-label hostnames get `http` (how a LAN mStream is actually served);
+    everything else gets `https`, because guessing `http` for an address that might be public
+    would silently downgrade every later request. A typed scheme is always obeyed.
+  - This kills the worst first-run message in the app. `Url::parse` reads `nas:3000` as *scheme*
+    `nas`, so the old error accused the user of typing a protocol they hadn't typed; a bare
+    hostname got "relative URL without a base".
+- ✅ Public-mode servers connect with no credentials at all — an empty username sends `Connect`
+  rather than `Login`.
+- ✅ Show the `iroh=1` capability so Quick Connect is only offered where it can work.
+- ✅ **Validate before dispatching.** A mistyped address, or a username with no password, is
+  answered immediately instead of after a round trip. The completed URL is written back into the
+  field, so what was assumed is visible when it turns out to be wrong.
+- ✅ **Warn before a password crosses the internet in the clear.** The check existed
+  (`is_insecure_remote`) but only the CLI used it; the TUI sent passwords over plaintext http
+  without comment. Now it asks once and takes a second Enter as consent, keyed to the URL so
+  editing the address asks again. Its definition of "remote" was also widened to exclude private
+  and `.local` addresses — the same host classification the scheme guess uses — because a warning
+  on every LAN sign-in is noise, and noise is what gets clicked through.
+- ✅ Connect-screen messages wrap instead of being cut at the terminal edge. They end in the
+  instruction ("Enter again to send it anyway"), so a hard cut removed the only actionable part.
 
 #### A3 — Quick Connect (Iroh)
 

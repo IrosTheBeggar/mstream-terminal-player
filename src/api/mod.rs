@@ -9,6 +9,7 @@
 //! Servers with no users configured run in "public mode" and authenticate every
 //! request, so a token-less client is valid and supported.
 
+pub mod server_url;
 pub mod types;
 pub mod urls;
 
@@ -107,7 +108,9 @@ impl Client {
     pub fn resolve(server: Option<&str>, token: Option<&str>) -> Result<Self, ApiError> {
         let config = crate::config::load().map_err(ApiError::Config)?;
         let server = match (server, crate::config::most_recent_server(&config)) {
-            (Some(server), _) => server.to_string(),
+            // Whatever a `--server` flag carries gets the same treatment as
+            // something typed into the connect screen.
+            (Some(server), _) => server_url::normalize(server).map_err(ApiError::Config)?,
             (None, Some(entry)) => entry.url.clone(),
             (None, None) => {
                 return Err(ApiError::Config(
@@ -137,13 +140,10 @@ impl Client {
         self.token.as_deref()
     }
 
-    /// True when the base URL is plaintext and not loopback — callers should
-    /// warn before sending credentials.
+    /// True when the base URL would put credentials on the wire in the clear
+    /// beyond the local network — callers should warn before sending them.
     pub fn is_insecure_remote(&self) -> bool {
-        if self.base.scheme() != "http" {
-            return false;
-        }
-        !matches!(self.base.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
+        server_url::crosses_the_internet_unencrypted(self.base.as_str())
     }
 
     // ── Plumbing ────────────────────────────────────────────────────────────
@@ -410,6 +410,9 @@ mod tests {
         assert!(!Client::new("https://music.example.com").unwrap().is_insecure_remote());
         assert!(!Client::new("http://localhost:3000").unwrap().is_insecure_remote());
         assert!(!Client::new("http://127.0.0.1:3000").unwrap().is_insecure_remote());
+        // A LAN server over http is the normal mStream deployment, not a
+        // finding — see server_url::crosses_the_internet_unencrypted.
+        assert!(!Client::new("http://192.168.1.71:3999").unwrap().is_insecure_remote());
     }
 
     #[test]

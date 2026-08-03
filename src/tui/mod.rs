@@ -47,6 +47,11 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
     };
     let credentials = config::load_credentials().unwrap_or_default();
 
+    // `--server nas:3000` gets the same completion the connect screen gives.
+    // An address too broken to normalise is passed through untouched, so the
+    // connect screen can show it back with the reason.
+    let server = server.map(|s| crate::api::server_url::normalize(&s).unwrap_or(s));
+
     // An explicit --server wins; a stored token is looked up per server, so
     // one is never sent to a host that didn't issue it.
     let chosen = match &server {

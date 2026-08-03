@@ -360,6 +360,10 @@ pub struct ConnectForm {
     /// Row selected on the Quick Connect screen: an index into `found`, or
     /// `found.len()` for the paste-a-code row, which is always last.
     pub row: usize,
+    /// The server URL whose plaintext warning has been acknowledged. Held as
+    /// the URL rather than a flag so that editing the address asks again
+    /// instead of carrying consent over to a different host.
+    pub insecure_ack: Option<String>,
 }
 
 impl ConnectForm {
@@ -791,24 +795,56 @@ impl App {
     }
 
     fn submit_connect(&mut self) -> Vec<Effect> {
-        let server = self.connect.server.trim().to_string();
-        if server.is_empty() {
-            self.error("enter a server URL");
-            return Vec::new();
-        }
-        self.connecting = true;
-        self.connect.submitting = true;
-        self.message = None;
+        // Everything that can be settled without the network is settled here:
+        // a round trip to learn that an address was mistyped is a slow way to
+        // be told something we already know.
+        let server = match crate::api::server_url::normalize(&self.connect.server) {
+            Ok(server) => server,
+            Err(message) => {
+                self.error(message);
+                return Vec::new();
+            }
+        };
+        // Show what was filled in. "nas:3000" becoming "http://nas:3000" is
+        // exactly what someone needs to see when it doesn't connect.
+        self.connect.server = server.clone();
+
+        let username = self.connect.username.trim().to_string();
 
         // No username means the server is expected to be in public mode, where
         // every request authenticates anyway.
-        if self.connect.username.trim().is_empty() {
+        if username.is_empty() {
+            self.connecting = true;
+            self.connect.submitting = true;
+            self.message = None;
             self.server = server.clone();
             return vec![Effect::Api(ApiCmd::Connect { server, token: None })];
         }
+
+        if self.connect.password.is_empty() {
+            self.error("enter a password, or clear the username for a public server");
+            return Vec::new();
+        }
+
+        // Plain http past the local network puts the password on the wire in
+        // the clear. Say so once, and let the answer be yes.
+        if crate::api::server_url::crosses_the_internet_unencrypted(&server)
+            && self.connect.insecure_ack.as_deref() != Some(server.as_str())
+        {
+            self.connect.insecure_ack = Some(server.clone());
+            self.error(format!(
+                "{server} is plain http — your password would cross the internet \
+                 unencrypted. Enter again to send it anyway."
+            ));
+            return Vec::new();
+        }
+
+        self.connecting = true;
+        self.connect.submitting = true;
+        self.message = None;
         vec![Effect::Api(ApiCmd::Login {
             server,
-            username: self.connect.username.trim().to_string(),
+            username,
             password: std::mem::take(&mut self.connect.password),
         })]
     }
@@ -1987,6 +2023,115 @@ mod tests {
             })]
         );
         assert!(app.connect.password.is_empty(), "password is not kept in memory after use");
+    }
+
+    /// A connect screen sitting on `Direct` with the given server text.
+    fn at_direct(server: &str) -> App {
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::Direct;
+        app.connect.server = server.into();
+        app
+    }
+
+    #[test]
+    fn a_typed_address_is_completed_before_it_is_used() {
+        // What used to happen here: "relative URL without a base", after a
+        // round trip, with the typed text still on screen.
+        let mut app = at_direct("nas:3000");
+        let effects = app.handle_action(Action::Submit);
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCmd::Connect { server: "http://nas:3000".into(), token: None })]
+        );
+        assert_eq!(app.connect.server, "http://nas:3000", "the field shows what was assumed");
+
+        let mut app = at_direct("music.example.com");
+        app.handle_action(Action::Submit);
+        assert_eq!(app.connect.server, "https://music.example.com");
+    }
+
+    #[test]
+    fn an_unusable_address_is_refused_without_a_round_trip() {
+        let mut app = at_direct("ftp://host");
+        assert!(app.handle_action(Action::Submit).is_empty(), "nothing is dispatched");
+        assert!(!app.connecting, "and the screen doesn't pretend to be busy");
+        let message = app.message.as_ref().unwrap();
+        assert_eq!(message.kind, MessageKind::Error);
+        assert!(message.text.contains("http://"), "it says what to type instead");
+
+        let mut app = at_direct("   ");
+        assert!(app.handle_action(Action::Submit).is_empty());
+        assert!(app.message.as_ref().unwrap().text.contains("enter a server address"));
+    }
+
+    #[test]
+    fn a_username_without_a_password_is_caught_here_not_by_the_server() {
+        let mut app = at_direct("http://host:3000");
+        app.connect.username = "alice".into();
+        assert!(app.handle_action(Action::Submit).is_empty());
+        let text = &app.message.as_ref().unwrap().text;
+        assert!(text.contains("password"), "got: {text}");
+        // The way out is spelled out, since public mode is a real mode.
+        assert!(text.contains("public"), "got: {text}");
+    }
+
+    #[test]
+    fn sending_a_password_over_plain_http_asks_first() {
+        let mut app = at_direct("http://music.example.com");
+        app.connect.username = "alice".into();
+        app.connect.password = "secret".into();
+
+        // First Enter: warned, nothing sent, password still typed.
+        assert!(app.handle_action(Action::Submit).is_empty());
+        assert!(app.message.as_ref().unwrap().text.contains("unencrypted"));
+        assert_eq!(app.connect.password, "secret", "so the answer can just be yes");
+
+        // Second Enter: taken as consent.
+        let effects = app.handle_action(Action::Submit);
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCmd::Login {
+                server: "http://music.example.com".into(),
+                username: "alice".into(),
+                password: "secret".into(),
+            })]
+        );
+    }
+
+    #[test]
+    fn consent_to_plaintext_does_not_follow_you_to_another_server() {
+        let mut app = at_direct("http://music.example.com");
+        app.connect.username = "alice".into();
+        app.connect.password = "secret".into();
+        app.handle_action(Action::Submit); // warned
+
+        app.connect.server = "http://other.example.com".into();
+        assert!(app.handle_action(Action::Submit).is_empty(), "the new host warns on its own");
+        assert!(app.message.as_ref().unwrap().text.contains("other.example.com"));
+    }
+
+    #[test]
+    fn signing_in_to_a_lan_server_is_not_interrupted() {
+        // http on the LAN is how mStream is normally run: a warning every
+        // time would be noise, and noise is what gets clicked through.
+        for server in ["http://192.168.1.71:3999", "nas:3000", "http://localhost:3000"] {
+            let mut app = at_direct(server);
+            app.connect.username = "alice".into();
+            app.connect.password = "secret".into();
+            let effects = app.handle_action(Action::Submit);
+            assert!(
+                matches!(effects.as_slice(), [Effect::Api(ApiCmd::Login { .. })]),
+                "{server} should sign in without ceremony, got {effects:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_public_server_over_plain_http_needs_no_warning() {
+        // Nothing secret is being sent, so there is nothing to warn about.
+        let mut app = at_direct("http://music.example.com");
+        let effects = app.handle_action(Action::Submit);
+        assert!(matches!(effects.as_slice(), [Effect::Api(ApiCmd::Connect { .. })]));
     }
 
     #[test]
