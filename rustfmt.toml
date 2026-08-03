@@ -1,0 +1,30 @@
+# This crate is formatted by hand, to roughly 100 columns. rustfmt cannot
+# reproduce that style, so `cargo fmt` would rewrite all 19 files in src/ --
+# about 2900 lines of churn on top of whatever you were actually committing.
+# This setting makes `cargo fmt` a no-op and `cargo fmt --check` pass, which
+# is the honest encoding of "this repo formats itself".
+#
+# Two things in the committed source put it out of rustfmt's reach entirely,
+# so this is not a matter of finding the right widths (checked: all 153
+# option/value pairs `rustfmt --help=config` advertises, on rustfmt 1.8.0):
+#
+#   * A struct-form enum variant carrying a doc comment or attribute is always
+#     exploded onto separate lines, at any `struct_variant_width`. There are 16
+#     of those written inline here -- 11 in src/tui/worker.rs alone.
+#   * 17 code lines run past 100 columns (src/replay.rs:409 at 110,
+#     src/dj.rs:678 at 109). Keeping them needs max_width >= 116, which would
+#     then collapse hundreds of lines this source deliberately wraps.
+#
+# The closest reachable config left 839 lines differing, found by coordinate
+# descent over the stable options:
+#
+#     max_width = 100                      chain_width = 75
+#     fn_call_width = 80                   array_width = 80
+#     struct_lit_width = 96                struct_variant_width = 45
+#     single_line_if_else_max_width = 90   single_line_let_else_max_width = 90
+#
+# If you would rather have a formatter than hand-formatting, that block is the
+# one to adopt: put it here in place of the line below, run `cargo fmt` once as
+# its own commit, and add `cargo fmt --check` to CI. Use
+# `git blame --ignore-rev` on the reformat commit to keep history readable.
+disable_all_formatting = true
