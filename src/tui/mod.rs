@@ -9,7 +9,7 @@ pub mod ui;
 pub mod worker;
 
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event as TermEvent, KeyEventKind};
@@ -21,6 +21,10 @@ use worker::{ApiCmd, AudioCmd, Event};
 /// How long to wait for a key before redrawing anyway. Also sets how quickly
 /// the progress bar advances on screen.
 const POLL: Duration = Duration::from_millis(100);
+
+/// How often the spinner steps. Off the wall clock rather than the draw count,
+/// so it turns at one speed whether the loop is idle or churning.
+const SPIN_EVERY: Duration = Duration::from_millis(90);
 
 /// Everything remembered about how to start: which server, with what
 /// credentials, where we were browsing, and the player's settings.
@@ -131,8 +135,10 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     let pending = app.start();
 
     let mut terminal = ratatui::init();
+    push_window_title();
     let result =
         event_loop(&mut terminal, &mut app, &event_rx, &audio_tx, &api_tx, &event_tx, pending);
+    pop_window_title();
     ratatui::restore();
 
     remember(&app);
@@ -171,8 +177,23 @@ fn event_loop(
     event_tx: &Sender<Event>,
     mut pending: Vec<Effect>,
 ) -> std::io::Result<()> {
+    let mut title = String::new();
+    let mut spun = Instant::now();
     loop {
         dispatch(app, &mut pending, audio_tx, api_tx, event_tx);
+
+        if spun.elapsed() >= SPIN_EVERY {
+            app.spinner = app.spinner.wrapping_add(1);
+            spun = Instant::now();
+        }
+
+        // The player spends most of its life behind another window, where the
+        // title bar is the only part of it still on screen.
+        let wanted = window_title(app);
+        if wanted != title {
+            set_window_title(&wanted);
+            title = wanted;
+        }
 
         terminal.draw(|frame| ui::render(frame, app))?;
 
@@ -198,6 +219,36 @@ fn event_loop(
             return Ok(());
         }
     }
+}
+
+/// What the terminal's title bar should read. Paused is worth saying, because
+/// from outside the window silence and a paused track look the same.
+pub(crate) fn window_title(app: &App) -> String {
+    match &app.now_playing {
+        Some(track) if app.status.paused => format!("⏸ {}", track.display_name()),
+        Some(track) => format!("▶ {}", track.display_name()),
+        None => "mstream-player".to_string(),
+    }
+}
+
+fn set_window_title(title: &str) {
+    use ratatui::crossterm::{execute, terminal::SetTitle};
+    let _ = execute!(std::io::stdout(), SetTitle(title));
+}
+
+/// Save and restore the title the terminal had before us (XTWINOPS 22/23), so
+/// quitting doesn't leave the last track's name in the tab. Terminals that
+/// don't implement it ignore the sequence, which costs nothing.
+fn push_window_title() {
+    use std::io::Write;
+    let _ = write!(std::io::stdout(), "\x1b[22;2t");
+    let _ = std::io::stdout().flush();
+}
+
+fn pop_window_title() {
+    use std::io::Write;
+    let _ = write!(std::io::stdout(), "\x1b[23;2t");
+    let _ = std::io::stdout().flush();
 }
 
 pub(crate) fn save_login(app: &App) -> Result<(), String> {
@@ -240,5 +291,32 @@ pub(crate) fn dispatch(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::types::{Track, TrackMetadata};
+
+    #[test]
+    fn the_window_title_says_what_is_playing_and_whether_it_stopped() {
+        let mut app = App::new(Some("http://host:3000".into()), None, None);
+        assert_eq!(window_title(&app), "mstream-player");
+
+        app.now_playing = Some(Track {
+            filepath: "lib/a.mp3".into(),
+            metadata: TrackMetadata {
+                title: Some("Moonlight".into()),
+                artist: Some("Trio".into()),
+                ..Default::default()
+            },
+        });
+        assert_eq!(window_title(&app), "▶ Trio - Moonlight");
+
+        // From outside the window a paused track and silence look identical,
+        // so the title is the only place that can tell them apart.
+        app.status.paused = true;
+        assert_eq!(window_title(&app), "⏸ Trio - Moonlight");
     }
 }

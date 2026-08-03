@@ -28,6 +28,15 @@ either way. **Library** browses by tags — artists, albums,
 genres, and recently added — and **Search** and **Playlists** do what they say. `Enter` on a
 track queues everything visible and starts there; `a` queues just that one.
 
+Where you are and what you are hearing are drawn separately: the cursor is a
+highlighted background, the playing track is in colour, and a row that is both
+shows both. Lengths are flushed to the right edge so a folder can be read down
+the column, and the queue's title carries how long it runs as well as how many
+tracks are in it. A pane still waiting on the server says so with a spinner
+rather than claiming to be empty. The terminal's title bar follows the track,
+which is the only part of the player still visible when it is behind another
+window.
+
 | Key | |
 |---|---|
 | `j` `k` / `↓` `↑` | move · `g` / `G` first / last |

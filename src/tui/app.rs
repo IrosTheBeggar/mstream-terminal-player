@@ -184,6 +184,10 @@ pub enum Entry {
 pub struct Pane {
     pub entries: Vec<Entry>,
     pub state: ListState,
+    /// A request for this pane's contents is out. An empty list means
+    /// "nothing here" or "not here yet" and the two look identical on
+    /// screen, so the difference has to be recorded rather than guessed.
+    pub loading: bool,
 }
 
 impl Pane {
@@ -197,6 +201,9 @@ impl Pane {
         };
         self.entries = entries;
         self.state.select(selected);
+        // Every reply lands here, so this is the one place that has to
+        // remember to stop the spinner.
+        self.loading = false;
     }
 
     pub fn selected(&self) -> Option<&Entry> {
@@ -595,6 +602,10 @@ pub struct App {
     pub volume: f32,
     pub now_playing: Option<Track>,
     pub audio_available: bool,
+    /// Which frame the spinner is on. Advanced by the event loop against a
+    /// wall clock rather than counted per draw, so it turns at one speed
+    /// whether the app is idle or flooded — and stays still under test.
+    pub spinner: usize,
 
     pub message: Option<Message>,
     pub show_help: bool,
@@ -648,6 +659,7 @@ impl App {
             volume: 1.0,
             now_playing: None,
             audio_available: true,
+            spinner: 0,
             message: None,
             show_help: false,
             should_quit: false,
@@ -759,6 +771,12 @@ impl App {
 
     /// Effects to run at startup.
     pub fn start(&mut self) -> Vec<Effect> {
+        let effects = self.begin();
+        self.note_pending(&effects);
+        effects
+    }
+
+    fn begin(&mut self) -> Vec<Effect> {
         // A tunnel server has no address to connect to until its code is
         // dialled, so reconnecting means opening the tunnel again first.
         if crate::quickconnect::is_tunnel_id(&self.server_id) {
@@ -805,12 +823,51 @@ impl App {
     }
 
     fn pane_mut(&mut self) -> &mut Pane {
-        match self.tab {
+        let tab = self.tab;
+        self.pane_for_mut(tab)
+    }
+
+    fn pane_for_mut(&mut self, tab: Tab) -> &mut Pane {
+        match tab {
             Tab::Files => &mut self.files,
             Tab::Library => &mut self.library,
             Tab::Playlists => &mut self.playlists,
             Tab::Search => &mut self.search,
             Tab::Discover => &mut self.discover,
+        }
+    }
+
+    /// Note which panes have a request in flight, reading it off the effects
+    /// that were just produced rather than asking every call site to remember.
+    /// Tagging by the command means a reply for a tab you have since left
+    /// still clears the right spinner.
+    fn note_pending(&mut self, effects: &[Effect]) {
+        for effect in effects {
+            let tab = match effect {
+                Effect::Api(ApiCmd::Browse(_)) => Tab::Files,
+                Effect::Api(ApiCmd::Library(_)) => Tab::Library,
+                Effect::Api(ApiCmd::Playlists | ApiCmd::LoadPlaylist(_)) => Tab::Playlists,
+                Effect::Api(ApiCmd::Search(_)) => Tab::Search,
+                Effect::Api(ApiCmd::Discover { .. }) => Tab::Discover,
+                _ => continue,
+            };
+            self.pane_for_mut(tab).loading = true;
+        }
+    }
+
+    /// A request that failed answers nothing, so nothing calls `Pane::set` and
+    /// nothing would otherwise stop the spinner. A stuck spinner is a worse
+    /// lie than an empty list.
+    fn clear_pending(&mut self) {
+        let panes = [
+            &mut self.files,
+            &mut self.library,
+            &mut self.playlists,
+            &mut self.search,
+            &mut self.discover,
+        ];
+        for pane in panes {
+            pane.loading = false;
         }
     }
 
@@ -855,6 +912,12 @@ impl App {
     // ── Actions ─────────────────────────────────────────────────────────────
 
     pub fn handle_action(&mut self, action: Action) -> Vec<Effect> {
+        let effects = self.act(action);
+        self.note_pending(&effects);
+        effects
+    }
+
+    fn act(&mut self, action: Action) -> Vec<Effect> {
         // The connect screen swallows everything except quit.
         if !self.connected {
             return self.handle_connect_action(action);
@@ -1907,6 +1970,15 @@ impl App {
     // ── Worker events ───────────────────────────────────────────────────────
 
     pub fn apply_event(&mut self, event: Event) -> Vec<Effect> {
+        if matches!(event, Event::Error(_) | Event::Unauthorized) {
+            self.clear_pending();
+        }
+        let effects = self.consume(event);
+        self.note_pending(&effects);
+        effects
+    }
+
+    fn consume(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::Status(status) => {
                 // Something loaded and is playing, so whatever went wrong
@@ -3699,6 +3771,31 @@ mod tests {
         // Already loaded: switching back doesn't refetch.
         app.handle_action(Action::SelectTab(0));
         assert!(app.handle_action(Action::SelectTab(2)).is_empty());
+    }
+
+    #[test]
+    fn a_pane_knows_when_its_contents_are_still_on_the_wire() {
+        let mut app = connected_app();
+        assert!(!app.playlists.loading);
+
+        app.handle_action(Action::SelectTab(2));
+        assert!(app.playlists.loading, "asking marks the pane, not the call site");
+        // Only the pane that was asked for — leaving the tab mid-flight must
+        // not leave a spinner turning somewhere it was never requested.
+        assert!(!app.files.loading && !app.search.loading);
+
+        app.apply_event(Event::Playlists(Vec::new()));
+        assert!(!app.playlists.loading, "the reply lands through Pane::set");
+    }
+
+    #[test]
+    fn a_request_that_fails_is_no_longer_pending() {
+        let mut app = connected_app();
+        app.handle_action(Action::SelectTab(2));
+        // Nothing calls `Pane::set` on the way out of an error, so this is the
+        // one path that would otherwise spin forever.
+        app.apply_event(Event::Error("nope".into()));
+        assert!(!app.playlists.loading);
     }
 
     #[test]

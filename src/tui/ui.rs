@@ -8,12 +8,21 @@ use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, 
 
 use crate::cmd_library::fmt_duration;
 
-use super::app::{App, CONNECT_METHODS, ConnectStage, DjRow, Entry, Focus, MessageKind, Tab};
+use super::app::{
+    App, CONNECT_METHODS, ConnectStage, DjRow, Entry, Focus, MessageKind, Queue, Repeat, Tab,
+};
 use super::worker::{AutoDjMode, DiscoverNode, LibraryNode};
 use crate::api::types::Track;
 
 const ACCENT: Color = Color::Cyan;
 const DIM: Color = Color::DarkGray;
+
+/// Left gutter the cursor symbol reserves on every browser row, blank or not.
+const CURSOR: &str = "> ";
+
+/// Braille spinner. Ten frames is slow enough to read as turning rather than
+/// flickering at the rate the event loop advances it.
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// The mStream wordmark, character for character as the server prints it at
 /// boot (cli-boot-wrapper.js).
@@ -113,10 +122,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         return;
     }
 
+    // The transport carries two lines of content and no border: the browser and
+    // queue panes already close with a rule right above it, so a box of its own
+    // would only spend two rows drawing a line next to a line. On an 80x24
+    // terminal those two rows are an eighth of the list.
     let [header, body, transport, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
-        Constraint::Length(4),
+        Constraint::Length(2),
         Constraint::Length(1),
     ])
     .areas(area);
@@ -206,18 +219,25 @@ fn render_browser(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == Focus::Browser;
     let title = browser_title(app);
 
+    // Borders take two columns and the cursor gutter takes the width of its
+    // symbol on every row; what is left is what a line has to lay out in.
+    let content = area.width.saturating_sub(2 + CURSOR.len() as u16) as usize;
+    let playing = app.now_playing.as_ref().map(|track| track.filepath.as_str());
     let items: Vec<ListItem> = app
         .pane()
         .entries
         .iter()
-        .map(|entry| ListItem::new(entry_line(entry)))
+        .map(|entry| ListItem::new(entry_line(entry, content, playing)))
         .collect();
 
     let empty = items.is_empty();
+    // Reversed, not accent-coloured: accent now means "this is playing", and
+    // one row can be both. Background for where you are, foreground for what
+    // you are hearing.
     let list = List::new(items)
         .block(bordered(title, focused))
-        .highlight_style(Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
-        .highlight_symbol("> ");
+        .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+        .highlight_symbol(CURSOR);
 
     let state = match app.tab {
         Tab::Files => &mut app.files.state,
@@ -229,18 +249,29 @@ fn render_browser(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_stateful_widget(list, area, state);
 
     if empty {
-        let hint = match app.tab {
-            Tab::Files => "(empty directory)",
-            Tab::Library => "loading…",
-            Tab::Playlists => "(no playlists)",
-            Tab::Search => "type a query and press Enter",
-            Tab::Discover => "loading…",
-        };
         frame.render_widget(
-            Paragraph::new(Span::styled(hint, Style::new().fg(DIM))),
+            Paragraph::new(Span::styled(empty_hint(app), Style::new().fg(DIM))),
             inner_first_line(area),
         );
     }
+}
+
+/// What an empty pane should say. "Nothing here" and "not here yet" look
+/// identical on screen and mean opposite things, so the answer turns on
+/// whether a request is still out — a pane that says "(no playlists)" while
+/// the playlists are on the wire has told you something false.
+fn empty_hint(app: &App) -> String {
+    if app.pane().loading {
+        return format!("{} loading…", SPINNER[app.spinner % SPINNER.len()]);
+    }
+    match app.tab {
+        Tab::Files => "(empty directory)",
+        Tab::Library => "(nothing here)",
+        Tab::Playlists => "(no playlists)",
+        Tab::Search => "type a query and press Enter",
+        Tab::Discover => "(nothing similar)",
+    }
+    .to_string()
 }
 
 fn browser_title(app: &App) -> String {
@@ -298,7 +329,13 @@ fn browser_title(app: &App) -> String {
     }
 }
 
-fn entry_line(entry: &Entry) -> Line<'static> {
+/// One browser row, laid out to `width` columns.
+///
+/// `playing` is the filepath of the track on the speakers, if any. It is
+/// marked in colour rather than with a glyph: the cursor already owns the left
+/// gutter, and a row can be both at once — every other player in this class
+/// draws selection and playback on separate channels for exactly that reason.
+fn entry_line(entry: &Entry, width: usize, playing: Option<&str>) -> Line<'static> {
     match entry {
         Entry::Parent => Line::from(Span::styled("..", Style::new().fg(DIM))),
         Entry::Dir { label, .. } => Line::from(Span::styled(
@@ -318,21 +355,32 @@ fn entry_line(entry: &Entry) -> Line<'static> {
             Span::styled(format!("   {detail}"), Style::new().fg(DIM)),
         ]),
         Entry::Track { label, track } => {
-            let mut spans = vec![Span::raw(label.clone())];
-            if let Some(duration) = track.metadata.duration {
-                spans.push(Span::styled(
-                    format!("  [{}]", fmt_duration(duration)),
-                    Style::new().fg(DIM),
-                ));
-            }
-            Line::from(spans)
+            let style = if playing.is_some_and(|path| path == track.filepath) {
+                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new()
+            };
+            let Some(duration) = track.metadata.duration else {
+                return Line::from(Span::styled(label.clone(), style));
+            };
+            // Flushed to the right edge so the times form a column: a list of
+            // tracks is read down the length, not across the titles.
+            let time = fmt_duration(duration);
+            let time_width = width_of(&time);
+            let title = fit(label, width.saturating_sub(time_width + 1));
+            let gap = width.saturating_sub(width_of(&title) + time_width).max(1);
+            Line::from(vec![
+                Span::styled(title, style),
+                Span::raw(" ".repeat(gap)),
+                Span::styled(time, Style::new().fg(DIM)),
+            ])
         }
     }
 }
 
 fn render_queue(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == Focus::Queue;
-    let title = format!(" Queue ({}) ", app.queue.items.len());
+    let title = queue_title(&app.queue);
 
     let current = app.queue.current;
     let items: Vec<ListItem> = app
@@ -362,21 +410,44 @@ fn render_queue(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_stateful_widget(list, area, &mut app.queue.state);
 
     if empty {
+        // Along the bottom edge, where a hint belongs — the top of the pane is
+        // where the first track will appear, and putting the prompt there
+        // makes an empty queue look like a queue with something in it.
         frame.render_widget(
             Paragraph::new(Span::styled("'a' queues a track", Style::new().fg(DIM)))
                 .wrap(Wrap { trim: true }),
-            inner_first_line(area),
+            inner_last_line(area),
         );
     }
 }
 
-fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).border_style(Style::new().fg(DIM));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+/// How many, and how long. A queue that Auto-DJ or a journey built is a set
+/// rather than a list, and "how long is this" is the question a set raises.
+fn queue_title(queue: &Queue) -> String {
+    let total: f64 = queue.items.iter().filter_map(|track| track.metadata.duration).sum();
+    if total > 0.0 {
+        format!(" Queue ({}) · {} ", queue.items.len(), fmt_span(total))
+    } else {
+        format!(" Queue ({}) ", queue.items.len())
+    }
+}
 
+/// A whole-queue length, in the coarsest unit that still says something.
+fn fmt_span(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return "0m".to_string();
+    }
+    let total = seconds.round() as u64;
+    match (total / 3600, (total % 3600) / 60) {
+        (0, 0) => format!("{total}s"),
+        (0, m) => format!("{m}m"),
+        (h, m) => format!("{h}h {m:02}m"),
+    }
+}
+
+fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
     let [title_area, gauge_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
 
     let (label, style) = match (&app.now_playing, app.audio_available) {
         (_, false) => ("audio device unavailable".to_string(), Style::new().fg(Color::Red)),
@@ -414,22 +485,12 @@ fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
-    let volume = (app.volume * 100.0).round() as u32;
-    let shuffle = if app.queue.shuffle { "on" } else { "off" };
-    let full = format!(
-        "vol {volume:>3}%  repeat {}  shuffle {shuffle}  dj {}",
-        app.queue.repeat.label(),
-        app.autodj.label()
-    );
+    let full = mode_readout(app, false);
     // Abbreviate rather than let the mode readout crowd the message off the
     // line entirely.
-    let compact = format!(
-        "{volume:>3}%  rpt {}  shf {shuffle}  dj {}",
-        app.queue.repeat.label(),
-        app.autodj.label()
-    );
-    let modes = if area.width as usize >= full.chars().count() + 28 { full } else { compact };
-    let modes_width = (modes.chars().count() as u16).min(area.width);
+    let compact = mode_readout(app, true);
+    let modes = if area.width as usize >= width_of(&full) + 28 { full } else { compact };
+    let modes_width = (width_of(&modes) as u16).min(area.width);
 
     let [message_area, modes_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(modes_width)]).areas(area);
@@ -454,16 +515,61 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// Shorten to `width`, marking the cut so it reads as elided rather than
-/// broken off mid-word.
+/// The modes worth a reader's attention: the ones that are on.
+///
+/// Spelling out `repeat off  shuffle off  dj off` spends most of the line
+/// saying nothing happened, and it is the state nearly all of the time. What
+/// is left goes to the message, which is the half of the footer that changes.
+/// Volume stays whatever it reads, because it is the one that gets nudged.
+fn mode_readout(app: &App, compact: bool) -> String {
+    let volume = (app.volume * 100.0).round() as u32;
+    let mut parts =
+        vec![if compact { format!("{volume:>3}%") } else { format!("vol {volume:>3}%") }];
+    if app.queue.repeat != Repeat::Off {
+        let label = app.queue.repeat.label();
+        parts.push(if compact { format!("rpt {label}") } else { format!("repeat {label}") });
+    }
+    if app.queue.shuffle {
+        parts.push(if compact { "shf".to_string() } else { "shuffle".to_string() });
+    }
+    if app.autodj != AutoDjMode::Off {
+        parts.push(format!("dj {}", app.autodj.label()));
+    }
+    parts.join("  ")
+}
+
+/// Width in terminal columns, which is not the character count once anything
+/// wide or combining turns up in a tag.
+fn width_of(text: &str) -> usize {
+    Span::raw(text).width()
+}
+
+fn char_width(c: char) -> usize {
+    let mut buf = [0u8; 4];
+    Span::raw(&*c.encode_utf8(&mut buf)).width()
+}
+
+/// Shorten to `width` columns, marking the cut so it reads as elided rather
+/// than broken off mid-word.
 fn fit(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
+    if width_of(text) <= width {
         return text.to_string();
     }
     if width <= 1 {
         return String::new();
     }
-    text.chars().take(width - 1).collect::<String>() + "…"
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = char_width(c);
+        if used + w > width - 1 {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 fn render_connect(frame: &mut Frame, area: Rect, app: &App) {
@@ -1032,6 +1138,13 @@ fn inner_first_line(area: Rect) -> Rect {
     }
 }
 
+/// Last writable row inside a bordered block, for a hint that belongs at the
+/// foot of a pane rather than in the middle of where its contents will go.
+fn inner_last_line(area: Rect) -> Rect {
+    let first = inner_first_line(area);
+    Rect { y: area.y + area.height.saturating_sub(2).max(1), ..first }
+}
+
 fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
     let width = (area.width * width_percent / 100).min(area.width);
     let height = height.min(area.height);
@@ -1243,6 +1356,81 @@ mod tests {
     }
 
     #[test]
+    fn durations_line_up_against_the_right_edge() {
+        let track = |name: &str, seconds: f64| Entry::Track {
+            label: name.to_string(),
+            track: Box::new(Track {
+                filepath: format!("lib/{name}"),
+                metadata: TrackMetadata { duration: Some(seconds), ..Default::default() },
+            }),
+        };
+        for (name, seconds) in [("short", 61.0), ("a much longer title indeed", 3599.0)] {
+            let line = entry_line(&track(name, seconds), 30, None);
+            assert_eq!(line.width(), 30, "'{name}' fills the row exactly");
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.ends_with(&fmt_duration(seconds)), "time is flush right: '{text}'");
+        }
+    }
+
+    #[test]
+    fn a_track_with_no_length_still_gets_a_row() {
+        let entry = Entry::Track {
+            label: "Untagged".into(),
+            track: Box::new(Track {
+                filepath: "lib/x.mp3".into(),
+                metadata: TrackMetadata::default(),
+            }),
+        };
+        let line = entry_line(&entry, 30, None);
+        assert_eq!(line.width(), "Untagged".len(), "no padding without a time to pad to");
+    }
+
+    #[test]
+    fn the_playing_track_is_marked_wherever_it_is_listed() {
+        let entry = Entry::Track {
+            label: "Trio - Moonlight".into(),
+            track: Box::new(Track {
+                filepath: "lib/a.mp3".into(),
+                metadata: TrackMetadata { duration: Some(200.0), ..Default::default() },
+            }),
+        };
+        // Colour, not a glyph: the cursor owns the gutter and a row can be
+        // both selected and playing at once.
+        let lit = entry_line(&entry, 40, Some("lib/a.mp3"));
+        assert_eq!(lit.spans[0].style.fg, Some(ACCENT));
+        assert!(lit.spans[0].style.add_modifier.contains(Modifier::BOLD));
+
+        let other = entry_line(&entry, 40, Some("lib/b.mp3"));
+        assert_eq!(other.spans[0].style.fg, None);
+        assert_eq!(lit.width(), other.width(), "marking it does not move the row");
+    }
+
+    #[test]
+    fn the_queue_title_carries_how_long_as_well_as_how_many() {
+        let track = |seconds: Option<f64>| Track {
+            filepath: "lib/a.mp3".into(),
+            metadata: TrackMetadata { duration: seconds, ..Default::default() },
+        };
+        let mut queue = Queue::default();
+        assert_eq!(queue_title(&queue), " Queue (0) ");
+
+        queue.replace(vec![track(Some(2400.0)), track(Some(1800.0))]);
+        assert_eq!(queue_title(&queue), " Queue (2) · 1h 10m ");
+
+        queue.replace(vec![track(None)]);
+        assert_eq!(queue_title(&queue), " Queue (1) ", "no total when nothing knows its length");
+    }
+
+    #[test]
+    fn a_span_is_given_in_the_coarsest_unit_that_still_says_something() {
+        assert_eq!(fmt_span(45.0), "45s");
+        assert_eq!(fmt_span(150.0), "2m");
+        assert_eq!(fmt_span(3600.0), "1h 00m");
+        assert_eq!(fmt_span(8130.0), "2h 15m");
+        assert_eq!(fmt_span(0.0), "0m");
+    }
+
+    #[test]
     fn browser_shows_directories_and_tracks() {
         let mut app = connected_app();
         app.apply_event(Event::Listing(Box::new(listing(
@@ -1281,9 +1469,29 @@ mod tests {
         assert!(text.contains("playing"));
         assert!(text.contains("0:50 / 3:20"), "elapsed and total are shown");
         assert!(text.contains("vol 100%"));
-        assert!(text.contains("repeat off"));
-        assert!(text.contains("dj off"));
         assert!(text.contains("▶"), "the queue marks the current track");
+        assert!(
+            !text.contains("repeat off") && !text.contains("dj off"),
+            "modes that are off are not worth the width: {text}"
+        );
+    }
+
+    #[test]
+    fn the_footer_names_only_the_modes_that_are_on() {
+        let mut app = connected_app();
+        assert_eq!(mode_readout(&app, false), "vol 100%", "all defaults says nothing extra");
+
+        app.handle_action(Action::ToggleRepeat);
+        app.handle_action(Action::ToggleShuffle);
+        app.autodj = AutoDjMode::Similar;
+        let full = mode_readout(&app, false);
+        assert!(full.contains("repeat all"), "{full}");
+        assert!(full.contains("shuffle"), "{full}");
+        assert!(full.contains("dj similar"), "{full}");
+
+        let compact = mode_readout(&app, true);
+        assert!(width_of(&compact) < width_of(&full), "the short form is shorter: {compact}");
+        assert!(compact.contains("rpt all") && compact.contains("shf"), "{compact}");
     }
 
     #[test]
@@ -1327,7 +1535,7 @@ mod tests {
         let text = draw(&mut app);
         assert!(text.contains("Genre: Ambient"), "the title tracks the drill-down");
         assert!(text.contains("Drift"));
-        assert!(text.contains("[1:35]"));
+        assert!(text.contains("1:35"));
     }
 
     #[test]
@@ -1648,6 +1856,58 @@ mod tests {
     }
 
     #[test]
+    fn the_queue_hint_sits_on_the_last_row_of_the_pane() {
+        let mut app = connected_app();
+        let text = draw(&mut app);
+        let rows: Vec<&str> = text.lines().collect();
+        let hint = rows
+            .iter()
+            .position(|row| row.contains("'a' queues a track"))
+            .expect("the hint is drawn");
+        let bottom = rows
+            .iter()
+            .rposition(|row| row.contains("└"))
+            .expect("the queue pane has a bottom border");
+        assert_eq!(hint + 1, bottom, "the hint is the row above the pane's bottom edge");
+    }
+
+    #[test]
+    fn a_pane_waiting_on_the_server_says_so_instead_of_saying_it_is_empty() {
+        let mut app = connected_app();
+        // The bug this exists for: opening Playlists showed "(no playlists)"
+        // for as long as the round trip took, which is a different claim.
+        app.handle_action(Action::SelectTab(2));
+        let waiting = draw(&mut app);
+        assert!(waiting.contains("loading…"), "{waiting}");
+        assert!(!waiting.contains("(no playlists)"), "{waiting}");
+
+        app.apply_event(Event::Playlists(Vec::new()));
+        let answered = draw(&mut app);
+        assert!(answered.contains("(no playlists)"), "{answered}");
+        assert!(!answered.contains("loading…"), "{answered}");
+    }
+
+    #[test]
+    fn a_failed_request_stops_the_spinner_rather_than_turning_forever() {
+        let mut app = connected_app();
+        app.handle_action(Action::SelectTab(2));
+        app.apply_event(Event::Error("server said no".into()));
+        let text = draw(&mut app);
+        assert!(!text.contains("loading…"), "{text}");
+        assert!(text.contains("(no playlists)"), "{text}");
+    }
+
+    #[test]
+    fn the_spinner_turns() {
+        let mut app = connected_app();
+        app.handle_action(Action::SelectTab(2));
+        let first = draw(&mut app);
+        app.spinner += 1;
+        let second = draw(&mut app);
+        assert_ne!(first, second, "advancing the tick changes the frame");
+    }
+
+    #[test]
     fn search_tab_shows_the_query_and_result_summary() {
         let mut app = connected_app();
         app.handle_action(Action::SelectTab(3));
@@ -1722,8 +1982,8 @@ mod tests {
         });
         let text = draw_sized(&mut app, 76, 20);
         assert!(text.contains('…'), "the cut is marked rather than looking broken");
-        // And the mode readout abbreviates instead of crowding it out.
-        assert!(text.contains("rpt off") || text.contains("repeat off"));
+        // And the mode readout is still there beside it, abbreviated if need be.
+        assert!(text.contains("vol 100%") || text.contains("100%"));
     }
 
     #[test]
