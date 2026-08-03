@@ -26,6 +26,15 @@ use urls::TranscodeCodec;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// The directory to ask [`Client::file_explorer`] for when what you want is
+/// "wherever it makes sense to start".
+///
+/// The server resolves it: one library and you land inside it, several and
+/// you get the list to choose from. Asking for `""` always gives the list —
+/// which on the common single-library setup is one row that everyone has to
+/// step through before reaching any music.
+pub const BEST_START: &str = "~";
+
 #[derive(Debug)]
 pub enum ApiError {
     /// Could not reach the server at all.
@@ -238,7 +247,10 @@ impl Client {
         self.get("api/v1/ping")
     }
 
-    /// Browse a directory. Empty string lists the libraries (vpaths).
+    /// Browse a directory.
+    ///
+    /// An empty string lists the libraries (vpaths); [`BEST_START`] asks the
+    /// server to pick the most useful place instead.
     pub fn file_explorer(&self, directory: &str) -> Result<DirListing, ApiError> {
         self.post(
             "api/v1/file-explorer",

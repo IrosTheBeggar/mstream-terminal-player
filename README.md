@@ -21,7 +21,10 @@ that can only be on your network (loopback, private ranges, `.local`, plain host
 `http`, anything reachable from the internet gets `https`. The completed address is written back
 into the field, so you can see what was assumed.
 
-**Files** browses folders as they sit on disk. **Library** browses by tags — artists, albums,
+**Files** browses folders as they sit on disk, opening wherever the server says
+is most useful — straight inside your library when there is only one, or the
+list to choose from when there are several. `h` from there goes up to the list
+either way. **Library** browses by tags — artists, albums,
 genres, and recently added — and **Search** and **Playlists** do what they say. `Enter` on a
 track queues everything visible and starts there; `a` queues just that one.
 
@@ -78,6 +81,8 @@ own hints along the bottom.
 echo "$PASSWORD" | mstream-player login --server http://localhost:3000 --user alice --password-stdin
 
 mstream-player info                          # server capabilities + session
+mstream-player ls                            # start wherever makes sense
+mstream-player ls ""                         # the list of libraries
 mstream-player ls "music/Artist/Album"       # browse folders
 mstream-player browse                        # artists · --albums · --genres
 mstream-player browse "Artist" "Album"       # an artist's albums, then its tracks

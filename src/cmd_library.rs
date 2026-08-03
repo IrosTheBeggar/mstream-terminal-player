@@ -410,7 +410,9 @@ pub fn ls(args: LsArgs) -> i32 {
         Ok(c) => c,
         Err(code) => return code,
     };
-    let dir = args.path.unwrap_or_default();
+    // No argument means "start somewhere sensible", which the server works
+    // out; an explicit "" still asks for the list of libraries.
+    let dir = args.path.unwrap_or_else(|| crate::api::BEST_START.to_string());
     let listing = match client.file_explorer(&dir) {
         Ok(l) => l,
         Err(e) => return fail(e),

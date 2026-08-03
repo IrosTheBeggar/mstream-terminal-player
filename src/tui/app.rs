@@ -1748,6 +1748,20 @@ impl App {
         Vec::new()
     }
 
+    /// Where the file browser should open.
+    ///
+    /// Where you left off, if that was remembered. Otherwise let the server
+    /// choose: with a single library the old answer was a list containing
+    /// exactly one row, which everyone had to step through before reaching
+    /// any music.
+    fn opening_path(&self) -> String {
+        if self.path.is_empty() {
+            crate::api::BEST_START.to_string()
+        } else {
+            self.path.clone()
+        }
+    }
+
     /// The track under the cursor, wherever the cursor is. Directories and
     /// playlist rows are not tracks and give nothing.
     fn selected_track(&self) -> Option<Track> {
@@ -1966,7 +1980,7 @@ impl App {
                 }
 
                 let mut effects = vec![
-                    Effect::Api(ApiCmd::Browse(self.path.clone())),
+                    Effect::Api(ApiCmd::Browse(self.opening_path())),
                     Effect::Audio(AudioCmd::SetVolume(self.volume)),
                 ];
                 // Worth persisting when we hold a token we logged in for — or
@@ -4108,6 +4122,51 @@ mod tests {
 
         assert!(app.handle_action(Action::Activate).is_empty());
         assert!(app.message.as_ref().unwrap().text.contains("play or highlight a track"));
+    }
+
+    #[test]
+    fn the_browser_opens_where_the_server_thinks_best() {
+        // With one library the old opening screen was a list of exactly one
+        // row, which everyone stepped through to reach any music.
+        let mut app = App::new(Some("http://host:3000".into()), Some("t".into()), None);
+        let effects = app.apply_event(Event::Connected {
+            server: "http://host:3000".into(),
+            id: "http://host:3000".into(),
+            username: None,
+            token: None,
+            ping: Box::new(Default::default()),
+        });
+        assert!(
+            effects.contains(&Effect::Api(ApiCmd::Browse(crate::api::BEST_START.into()))),
+            "got {effects:?}"
+        );
+
+        // A remembered path still wins — being put back where you were beats
+        // being taken somewhere tidy.
+        let mut app = App::new(Some("http://host:3000".into()), Some("t".into()), None);
+        app.path = "library/Artist".into();
+        let effects = app.apply_event(Event::Connected {
+            server: "http://host:3000".into(),
+            id: "http://host:3000".into(),
+            username: None,
+            token: None,
+            ping: Box::new(Default::default()),
+        });
+        assert!(
+            effects.contains(&Effect::Api(ApiCmd::Browse("library/Artist".into()))),
+            "got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn going_up_from_a_library_still_asks_for_the_list() {
+        // `~` and `""` are different questions: the second is the only way to
+        // see the other libraries, so navigating up must keep using it.
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &[], &[]))));
+        assert_eq!(app.path, "lib");
+        let effects = app.handle_action(Action::Back);
+        assert_eq!(effects, vec![Effect::Api(ApiCmd::Browse(String::new()))]);
     }
 
     #[test]
