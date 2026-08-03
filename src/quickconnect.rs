@@ -40,6 +40,10 @@ const ONLINE_TIMEOUT: Duration = Duration::from_secs(8);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(25);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Marks a remembered server as one reached through a tunnel rather than at a
+/// URL. Deliberately not a real scheme: nothing may hand it to an HTTP client.
+pub const TUNNEL_ID_PREFIX: &str = "mstream+iroh://";
+
 #[derive(Debug, Clone)]
 pub struct PairingCode {
     pub addr: EndpointAddr,
@@ -51,6 +55,31 @@ impl PairingCode {
     pub fn endpoint_label(&self) -> String {
         let id = self.addr.id.to_string();
         id.chars().take(12).collect()
+    }
+
+    /// Stable identity of the server this code reaches.
+    ///
+    /// The endpoint id is a public key, so it holds still across new loopback
+    /// ports, new networks, and a re-issued code for the same server — which
+    /// is what makes it the right thing to file a saved session under. The
+    /// loopback URL a session happens to use is none of those things.
+    pub fn server_id(&self) -> String {
+        format!("{TUNNEL_ID_PREFIX}{}", self.addr.id)
+    }
+}
+
+/// Whether a remembered server is reached through a tunnel. Such an identity
+/// is not an address: reaching it means dialling its pairing code first.
+pub fn is_tunnel_id(server: &str) -> bool {
+    server.starts_with(TUNNEL_ID_PREFIX)
+}
+
+/// A tunnel identity in a form worth showing someone, since the raw endpoint
+/// id is a 52-character public key. Anything else is returned unchanged.
+pub fn display_server(server: &str) -> String {
+    match server.strip_prefix(TUNNEL_ID_PREFIX) {
+        Some(id) => format!("quick connect · {}", id.chars().take(12).collect::<String>()),
+        None => server.to_string(),
     }
 }
 
@@ -351,6 +380,33 @@ mod tests {
         let code = parse_code(&encode(Some(1), TICKET, &[7u8; 32])).unwrap();
         assert_eq!(code.secret, vec![7u8; 32]);
         assert!(!code.endpoint_label().is_empty());
+    }
+
+    #[test]
+    fn the_server_id_comes_from_the_endpoint_not_the_secret() {
+        // Two codes for the same server — different secrets, as a rotation
+        // produces — must still name the same server, or a rotation would
+        // strand the saved session it was meant to keep working.
+        let a = parse_code(&encode(Some(1), TICKET, &[1u8; 32])).unwrap();
+        let b = parse_code(&encode(Some(1), TICKET, &[2u8; 32])).unwrap();
+        assert_eq!(a.server_id(), b.server_id());
+
+        assert!(is_tunnel_id(&a.server_id()));
+        assert!(!is_tunnel_id("http://host:3000"));
+        // And the identity never carries the secret it was derived alongside.
+        assert!(!a.server_id().contains(&base64::engine::general_purpose::STANDARD
+            .encode([1u8; 32])));
+    }
+
+    #[test]
+    fn a_tunnel_identity_is_shown_as_something_readable() {
+        let code = parse_code(&encode(Some(1), TICKET, &[7u8; 32])).unwrap();
+        let shown = display_server(&code.server_id());
+        assert!(shown.starts_with("quick connect · "), "got: {shown}");
+        assert!(!shown.contains(TUNNEL_ID_PREFIX), "the scheme is noise to a reader");
+        assert!(shown.chars().count() < 32, "short enough for a header: {shown}");
+        // Ordinary servers pass through untouched.
+        assert_eq!(display_server("https://demo.mstream.io"), "https://demo.mstream.io");
     }
 
     #[test]

@@ -271,6 +271,19 @@ is available. That is enough to replace typing with picking.
 inbound connection, and point the existing `api::Client` at `http://127.0.0.1:<port>`. Every
 Phase 3 endpoint, range requests and seeking included, then works unchanged.
 
+**Identity is not the endpoint** (fixed 2026-08-02, after the loopback URL was found being saved
+as the server). A tunnel session has two names and they must not be confused: the loopback bridge
+it sends bytes to *this run*, and `mstream+iroh://<endpoint-id>` — the iroh public key — which is
+what it is remembered as. The first is an ephemeral port; saving it meant the next launch dialled
+a port that no longer existed, and the JWT was filed under a URL that could never match again.
+The endpoint id holds still across ports, networks and a re-issued code for the same server.
+The pairing code goes in `credentials.toml` beside the token, since it carries the tunnel secret
+and is the only thing that turns a remembered identity back into a connection; `config.toml` gets
+only the identity, which is a public key and safe to sync. Sign-out keeps the code deliberately —
+fetching a new one needs admin access over an existing connection, so dropping it could strand
+someone away from home. The CLI subcommands can't dial a tunnel and say so instead of failing on
+a URL parse.
+
 Three things to be honest about in the UI:
 - **Pairing is not login.** The secret gates the pipe, not the API — the user still logs in
   normally over the tunnel. The `/api/v1/auth/pair` one-time-token exchange is specified in

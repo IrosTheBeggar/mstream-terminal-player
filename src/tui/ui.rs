@@ -171,17 +171,19 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 /// The most informative form of "who and where" that fits, down to nothing.
 /// Dropping the scheme first keeps the host visible on a narrow terminal.
 fn server_label(app: &App, width: usize) -> String {
-    let host = app
-        .server
+    // A tunnel session shows its identity, not the loopback port it happens
+    // to be riding on today.
+    let shown = app.server_display();
+    let host = shown
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .to_string();
     let mut candidates = Vec::new();
     if let Some(user) = &app.username {
-        candidates.push(format!("{user}@{}", app.server));
+        candidates.push(format!("{user}@{shown}"));
         candidates.push(format!("{user}@{host}"));
     } else {
-        candidates.push(app.server.clone());
+        candidates.push(shown.clone());
     }
     candidates.push(host);
     candidates
@@ -1061,6 +1063,7 @@ mod tests {
         let mut app = connected_app();
         app.apply_event(crate::tui::worker::Event::Connected {
             server: "http://averylongservername.example.com:3000".into(),
+            id: "http://averylongservername.example.com:3000".into(),
             username: None,
             token: None,
             ping: Box::new(Default::default()),

@@ -30,6 +30,9 @@ pub(crate) struct Startup {
     pub username: Option<String>,
     pub last_path: Option<String>,
     pub prefs: config::PlayerPrefs,
+    /// Pairing code for the remembered server, when it is one reached through
+    /// a tunnel. Without it that server cannot be dialled again.
+    pub tunnel_code: Option<String>,
 }
 
 /// Resolve the starting point from stored config plus any overrides. Shared
@@ -69,8 +72,29 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
     };
     let token = token
         .or_else(|| server.as_deref().and_then(|url| config::token_for(&credentials, url)));
+    let tunnel_code = server
+        .as_deref()
+        .filter(|s| crate::quickconnect::is_tunnel_id(s))
+        .and_then(|id| config::pairing_for(&credentials, id));
 
-    Startup { server, token, username, last_path, prefs: config.player }
+    Startup { server, token, username, last_path, prefs: config.player, tunnel_code }
+}
+
+/// Build the app from a resolved [`Startup`].
+///
+/// Shared with the replay harness rather than copied into it: a scripted run
+/// is only worth anything if it begins exactly where the real binary would,
+/// and a second copy of this drifted once already — it kept its own `App`
+/// construction and silently stopped restoring tunnel sessions.
+pub(crate) fn app_from(start: Startup) -> App {
+    let mut app = App::new(start.server, start.token, start.username)
+        .with_prefs(&start.prefs)
+        .with_tunnel(start.tunnel_code);
+    if let Some(path) = start.last_path {
+        // Pick up where the last session left off; `start` browses this.
+        app.path = path;
+    }
+    app
 }
 
 pub fn run(server: Option<String>, token: Option<String>) -> i32 {
@@ -80,12 +104,7 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     let audio_tx = worker::spawn_audio(event_tx.clone());
     let api_tx = worker::spawn_api(event_tx.clone());
 
-    let mut app =
-        App::new(start.server, start.token, start.username).with_prefs(&start.prefs);
-    if let Some(path) = start.last_path {
-        // Pick up where the last session left off; `start` browses this.
-        app.path = path;
-    }
+    let mut app = app_from(start);
     let pending = app.start();
 
     let mut terminal = ratatui::init();
@@ -109,9 +128,11 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
 pub(crate) fn remember(app: &App) {
     let mut config = config::load().unwrap_or_default();
     config.player = app.prefs();
-    if !app.server.is_empty() {
-        config::touch_server(&mut config, &app.server, app.username.clone());
-        config::set_last_path(&mut config, &app.server, &app.path);
+    // Keyed on the identity, never the endpoint: a tunnel session's loopback
+    // port is meaningless by the next run.
+    if !app.server_id.is_empty() {
+        config::touch_server(&mut config, &app.server_id, app.username.clone());
+        config::set_last_path(&mut config, &app.server_id, &app.path);
     }
     if let Err(e) = config::save(&config) {
         eprintln!("warning: could not save settings: {e}");
@@ -158,12 +179,17 @@ fn event_loop(
 
 pub(crate) fn save_login(app: &App) -> Result<(), String> {
     let mut config = config::load()?;
-    config::touch_server(&mut config, &app.server, app.username.clone());
+    config::touch_server(&mut config, &app.server_id, app.username.clone());
     config.player = app.prefs();
     config::save(&config)?;
 
     let mut credentials = config::load_credentials()?;
-    config::store_token(&mut credentials, &app.server, app.token.clone());
+    config::store_token(&mut credentials, &app.server_id, app.token.clone());
+    // The pairing code goes in beside the token: both are secrets, and the
+    // code is what turns a remembered tunnel identity back into a connection.
+    if crate::quickconnect::is_tunnel_id(&app.server_id) {
+        config::store_pairing(&mut credentials, &app.server_id, app.tunnel_code.clone());
+    }
     config::save_credentials(&credentials)
 }
 

@@ -44,8 +44,9 @@ pub enum ApiCmd {
     Connect { server: String, token: Option<String> },
     Login { server: String, username: String, password: String },
     /// Dial a Quick Connect pairing code, then treat the resulting loopback
-    /// address as an ordinary server.
-    QuickConnect { code: String },
+    /// address as an ordinary server. A token is carried when reconnecting to
+    /// a tunnel server we have already signed in to.
+    QuickConnect { code: String, token: Option<String> },
     Browse(String),
     Library(LibraryNode),
     /// Ask for the next Auto-DJ track, seeded on what's playing now.
@@ -134,7 +135,12 @@ pub enum Event {
     /// The audio device could not be opened; playback is unavailable.
     AudioFailed(String),
     Connected {
+        /// Where this session's requests go. For a tunnel this is the loopback
+        /// bridge, which is exactly why it cannot also be the identity.
         server: String,
+        /// What to remember the server as: the same URL for a direct
+        /// connection, a `mstream+iroh://` identity for a tunnel.
+        id: String,
         username: Option<String>,
         token: Option<String>,
         ping: Box<Ping>,
@@ -146,7 +152,7 @@ pub enum Event {
     NeedsLogin { server: String },
     /// The Quick Connect tunnel is up and reachable at `local_url`, but the
     /// server still wants credentials — the secret gates the pipe, not the API.
-    TunnelReady { local_url: String },
+    TunnelReady { local_url: String, id: String },
     Listing(Box<DirListing>),
     /// Contents of a library view, tagged with the node they belong to.
     Library { node: LibraryNode, data: LibraryData },
@@ -285,26 +291,36 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     // from under the client, so it is explicitly dropped on the way out.
     #[allow(unused_assignments)]
     let mut bridge: Option<crate::quickconnect::TunnelBridge> = None;
+    // The tunnel session's two names, once one is open: the loopback address
+    // requests go to, and the identity it is remembered by.
+    let mut tunnel: Option<(String, String)> = None;
 
     while let Ok(cmd) = rx.recv() {
         let result = match cmd {
             ApiCmd::Shutdown => break,
 
-            ApiCmd::Connect { server, token } => connect(&mut client, &server, token, events),
-
-            ApiCmd::Login { server, username, password } => {
-                login(&mut client, &server, &username, &password, events)
+            ApiCmd::Connect { server, token } => {
+                connect(&mut client, &server, &server.clone(), token, events)
             }
 
-            ApiCmd::QuickConnect { code } => match quick_connect(&code) {
-                Ok(opened) => {
+            ApiCmd::Login { server, username, password } => {
+                // Signing in to a tunnel server goes over the open bridge, but
+                // is filed under the endpoint id — the loopback port is gone
+                // by the next run.
+                let (endpoint, id) = resolve_target(&server, tunnel.as_ref());
+                login(&mut client, &endpoint, &id, &username, &password, events)
+            }
+
+            ApiCmd::QuickConnect { code, token } => match quick_connect(&code) {
+                Ok((id, opened)) => {
                     let url = opened.local_url.clone();
                     bridge = Some(opened);
+                    tunnel = Some((url.clone(), id.clone()));
                     // A public-mode server answers straight away; anything else
                     // needs a login over the freshly-opened tunnel.
-                    match connect(&mut client, &url, None, events) {
+                    match connect(&mut client, &url, &id, token, events) {
                         Some(Event::NeedsLogin { .. }) => {
-                            Some(Event::TunnelReady { local_url: url })
+                            Some(Event::TunnelReady { local_url: url, id })
                         }
                         other => other,
                     }
@@ -354,15 +370,31 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     drop(bridge);
 }
 
-/// Parse a pairing code and bring the tunnel up on loopback.
-fn quick_connect(code: &str) -> Result<crate::quickconnect::TunnelBridge, String> {
+/// Parse a pairing code, bring the tunnel up on loopback, and report the
+/// identity the code names alongside it.
+fn quick_connect(code: &str) -> Result<(String, crate::quickconnect::TunnelBridge), String> {
     let parsed = crate::quickconnect::parse_code(code)?;
-    crate::quickconnect::open_bridge(&parsed)
+    let id = parsed.server_id();
+    Ok((id, crate::quickconnect::open_bridge(&parsed)?))
+}
+
+/// Split a connect target into (where to send bytes, what to remember it as).
+/// They differ only for a tunnel, which the UI names either way round: by its
+/// identity when reconnecting, by the loopback URL when the login form is
+/// carrying what the tunnel just published.
+fn resolve_target(server: &str, tunnel: Option<&(String, String)>) -> (String, String) {
+    match tunnel {
+        Some((local_url, id)) if server == id || server == local_url => {
+            (local_url.clone(), id.clone())
+        }
+        _ => (server.to_string(), server.to_string()),
+    }
 }
 
 fn connect(
     client: &mut Option<Client>,
     server: &str,
+    id: &str,
     token: Option<String>,
     _events: &Sender<Event>,
 ) -> Option<Event> {
@@ -374,7 +406,13 @@ fn connect(
         Ok(ping) => {
             let server = c.server();
             *client = Some(c);
-            Some(Event::Connected { server, username: None, token, ping: Box::new(ping) })
+            Some(Event::Connected {
+                server,
+                id: id.to_string(),
+                username: None,
+                token,
+                ping: Box::new(ping),
+            })
         }
         // Reaching the server and being asked to sign in is a normal outcome
         // of picking one, not an authorization failure.
@@ -386,6 +424,7 @@ fn connect(
 fn login(
     client: &mut Option<Client>,
     server: &str,
+    id: &str,
     username: &str,
     password: &str,
     _events: &Sender<Event>,
@@ -407,6 +446,7 @@ fn login(
             *client = Some(c);
             Some(Event::Connected {
                 server,
+                id: id.to_string(),
                 username: Some(username.to_string()),
                 token: Some(token),
                 ping: Box::new(ping),
@@ -532,5 +572,40 @@ where
         // feature-flag answer that shouldn't bounce the user to a login form.
         Err(ApiError::Unauthorized) => Some(Event::Unauthorized),
         Err(e) => Some(Event::Error(e.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tunnel_login_goes_over_the_bridge_but_is_filed_under_the_identity() {
+        let tunnel = (
+            "http://127.0.0.1:51234".to_string(),
+            "mstream+iroh://endpointabc".to_string(),
+        );
+
+        // The login form carries the loopback URL the tunnel published...
+        assert_eq!(
+            resolve_target("http://127.0.0.1:51234", Some(&tunnel)),
+            (tunnel.0.clone(), tunnel.1.clone())
+        );
+        // ...and a reconnect names the same session by its identity. Both
+        // have to reach the bridge, and both have to be remembered as the id.
+        assert_eq!(
+            resolve_target("mstream+iroh://endpointabc", Some(&tunnel)),
+            (tunnel.0.clone(), tunnel.1.clone())
+        );
+    }
+
+    #[test]
+    fn a_direct_server_is_its_own_identity() {
+        let direct = ("http://host:3000".to_string(), "http://host:3000".to_string());
+        assert_eq!(resolve_target("http://host:3000", None), direct);
+
+        // An unrelated server is not swallowed by an open tunnel.
+        let tunnel = ("http://127.0.0.1:1".to_string(), "mstream+iroh://x".to_string());
+        assert_eq!(resolve_target("http://host:3000", Some(&tunnel)), direct);
     }
 }

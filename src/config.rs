@@ -112,11 +112,16 @@ pub struct Credentials {
     pub version: u32,
     #[serde(default, rename = "token")]
     pub tokens: Vec<TokenEntry>,
+    /// Quick Connect pairing codes, one per tunnel server. These live here
+    /// rather than in config.toml because a code carries the 32-byte secret
+    /// that opens the tunnel — knowing it is enough to reach the server.
+    #[serde(default, rename = "pairing")]
+    pub pairings: Vec<PairingEntry>,
 }
 
 impl Default for Credentials {
     fn default() -> Self {
-        Credentials { version: SCHEMA_VERSION, tokens: Vec::new() }
+        Credentials { version: SCHEMA_VERSION, tokens: Vec::new(), pairings: Vec::new() }
     }
 }
 
@@ -124,6 +129,13 @@ impl Default for Credentials {
 pub struct TokenEntry {
     pub server: String,
     pub token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PairingEntry {
+    /// The tunnel identity this code reaches — never a URL.
+    pub server: String,
+    pub code: String,
 }
 
 // ── Locations ───────────────────────────────────────────────────────────────
@@ -354,8 +366,28 @@ pub fn store_token(credentials: &mut Credentials, server: &str, token: Option<St
     }
 }
 
+pub fn pairing_for(credentials: &Credentials, server: &str) -> Option<String> {
+    credentials
+        .pairings
+        .iter()
+        .find(|entry| same_server(&entry.server, server))
+        .map(|entry| entry.code.clone())
+}
+
+pub fn store_pairing(credentials: &mut Credentials, server: &str, code: Option<String>) {
+    credentials.pairings.retain(|entry| !same_server(&entry.server, server));
+    if let Some(code) = code {
+        credentials.pairings.push(PairingEntry { server: server.to_string(), code });
+    }
+}
+
 /// Forget every token, keeping the server list — signing out shouldn't make
 /// the player forget where your music lives.
+///
+/// Pairing codes are kept for the same reason, and a stronger one: a code can
+/// only be fetched over an existing connection by an admin, so discarding it
+/// on a routine sign-out could leave someone away from home with no way back
+/// in. Removing a tunnel server outright is what should drop its code.
 pub fn forget_all_tokens() -> Result<bool, String> {
     let mut credentials = load_credentials()?;
     if credentials.tokens.is_empty() {
@@ -543,6 +575,73 @@ mod tests {
 
         store_token(&mut credentials, "http://one:3000", None);
         assert!(credentials.tokens.is_empty());
+    }
+
+    #[test]
+    fn a_tunnel_server_survives_a_restart() {
+        // End to end for the thing that was broken: what a Quick Connect
+        // session writes must be enough to reach the same server next run.
+        let scratch = Scratch::new("tunnel");
+        let id = "mstream+iroh://endpointabc";
+
+        let mut config = Config::default();
+        touch_server(&mut config, id, Some("alice".into()));
+        set_last_path(&mut config, id, "music/Artist");
+        save(&config).unwrap();
+
+        let mut credentials = Credentials::default();
+        store_token(&mut credentials, id, Some("jwt-token".into()));
+        store_pairing(&mut credentials, id, Some("mstr1:thecode".into()));
+        save_credentials(&credentials).unwrap();
+
+        // Next launch: the identity is remembered, and both secrets come back
+        // with it — the token to stay signed in, the code to get there at all.
+        let reloaded = load().unwrap();
+        assert_eq!(most_recent_server(&reloaded).unwrap().url, id);
+        assert_eq!(reloaded.servers[0].last_path.as_deref(), Some("music/Artist"));
+        let credentials = load_credentials().unwrap();
+        assert_eq!(token_for(&credentials, id), Some("jwt-token".into()));
+        assert_eq!(pairing_for(&credentials, id), Some("mstr1:thecode".into()));
+
+        // The code is a secret, so it belongs in the owner-only file and
+        // nowhere near the one that's safe to sync.
+        let config_text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(config_text.contains(id), "the identity itself is not secret");
+        assert!(!config_text.contains("mstr1:thecode"), "but the code is");
+    }
+
+    #[test]
+    fn a_pairing_code_is_replaced_not_stacked() {
+        let mut credentials = Credentials::default();
+        let id = "mstream+iroh://endpointabc";
+        store_pairing(&mut credentials, id, Some("first".into()));
+        // Re-pairing after a rotation: same server, new code, one entry.
+        store_pairing(&mut credentials, id, Some("second".into()));
+        assert_eq!(credentials.pairings.len(), 1);
+        assert_eq!(pairing_for(&credentials, id), Some("second".into()));
+        assert_eq!(pairing_for(&credentials, "mstream+iroh://other"), None);
+
+        store_pairing(&mut credentials, id, None);
+        assert!(credentials.pairings.is_empty());
+    }
+
+    #[test]
+    fn signing_out_keeps_the_way_back_to_a_tunnel_server() {
+        // A code can only be fetched over an existing connection by an admin,
+        // so dropping it on a routine sign-out could strand someone away from
+        // home with no way to re-pair.
+        let scratch = Scratch::new("logout-tunnel");
+        let id = "mstream+iroh://endpointabc";
+        let mut credentials = Credentials::default();
+        store_token(&mut credentials, id, Some("jwt".into()));
+        store_pairing(&mut credentials, id, Some("mstr1:thecode".into()));
+        save_credentials(&credentials).unwrap();
+
+        assert!(forget_all_tokens().unwrap());
+        let after = load_credentials().unwrap();
+        assert!(after.tokens.is_empty(), "the sign-in is gone");
+        assert_eq!(pairing_for(&after, id), Some("mstr1:thecode".into()), "the route is not");
+        drop(scratch);
     }
 
     #[test]

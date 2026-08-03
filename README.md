@@ -87,7 +87,14 @@ Two files, in `%APPDATA%\mstream-player` (Windows), `~/Library/Application Suppo
 somewhere else — a portable install can keep them beside the binary.
 
 - `config.toml` — servers and preferences. Readable and editable; fine to keep in a dotfiles repo.
-- `credentials.toml` — access tokens only. Owner-only on unix, and the one to leave out of any sync.
+- `credentials.toml` — access tokens and Quick Connect pairing codes. Owner-only on unix, and the
+  one to leave out of any sync.
+
+A server reached with Quick Connect is remembered as `mstream+iroh://<endpoint-id>` rather than by
+address — the tunnel gets a fresh local port every run, so the port is no use as a name. Its
+pairing code is kept in `credentials.toml`, which is what lets the player re-dial the tunnel on
+its own at the next launch. Signing out keeps the code: getting a new one takes admin access over
+a connection you may not have from wherever you are.
 
 Both are written by rename, so an interrupted write leaves the previous file intact.
 

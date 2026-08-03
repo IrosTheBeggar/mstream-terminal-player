@@ -121,15 +121,20 @@ fn parse_step(raw: &str, app_server: &str) -> Result<Step, String> {
             "needs-login" => Event::NeedsLogin {
                 server: arg.unwrap_or_else(|| app_server.to_string()),
             },
-            "connected" => Event::Connected {
-                server: arg.unwrap_or_else(|| app_server.to_string()),
-                username: Some("tester".into()),
-                token: Some("token".into()),
-                ping: Box::new(Ping { vpaths: vec!["testlib".into()], ..Default::default() }),
-            },
+            "connected" => {
+                let server = arg.unwrap_or_else(|| app_server.to_string());
+                Event::Connected {
+                    id: server.clone(),
+                    server,
+                    username: Some("tester".into()),
+                    token: Some("token".into()),
+                    ping: Box::new(Ping { vpaths: vec!["testlib".into()], ..Default::default() }),
+                }
+            }
             "unauthorized" => Event::Unauthorized,
             "tunnel" => Event::TunnelReady {
                 local_url: arg.unwrap_or_else(|| "http://127.0.0.1:7000".to_string()),
+                id: format!("{}{}", crate::quickconnect::TUNNEL_ID_PREFIX, "replaytestendpoint"),
             },
             "error" => Event::Error(arg.unwrap_or_else(|| "something went wrong".into())),
             other => return Err(format!("unknown event '@{other}'")),
@@ -242,13 +247,10 @@ pub fn run(args: ReplayArgs) -> i32 {
     // Live mode starts from the same place the real binary would — same
     // stored server, token, browse path and preferences.
     let mut app = if args.live {
-        let start = crate::tui::startup(args.conn.server.clone(), args.conn.token.clone());
-        let mut app = App::new(start.server, start.token, start.username)
-            .with_prefs(&start.prefs);
-        if let Some(path) = start.last_path {
-            app.path = path;
-        }
-        app
+        crate::tui::app_from(crate::tui::startup(
+            args.conn.server.clone(),
+            args.conn.token.clone(),
+        ))
     } else {
         App::new(None, None, None)
     };

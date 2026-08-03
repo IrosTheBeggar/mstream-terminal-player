@@ -111,6 +111,16 @@ impl Client {
             // Whatever a `--server` flag carries gets the same treatment as
             // something typed into the connect screen.
             (Some(server), _) => server_url::normalize(server).map_err(ApiError::Config)?,
+            // A tunnel server is remembered by identity, not address, and
+            // reaching it means dialling its pairing code — which only the
+            // player does. Say so rather than failing on a parse.
+            (None, Some(entry)) if crate::quickconnect::is_tunnel_id(&entry.url) => {
+                return Err(ApiError::Config(
+                    "the last server was reached with Quick Connect, which these commands \
+                     cannot dial — pass --server <url>, or use the player"
+                        .to_string(),
+                ));
+            }
             (None, Some(entry)) => entry.url.clone(),
             (None, None) => {
                 return Err(ApiError::Config(

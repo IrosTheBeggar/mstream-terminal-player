@@ -394,7 +394,17 @@ impl ConnectForm {
 }
 
 pub struct App {
+    /// Where this session's requests and stream URLs go. For a Quick Connect
+    /// session that is the loopback bridge, which lives and dies with the
+    /// process — see [`App::server_id`] for the part worth remembering.
     pub server: String,
+    /// What the current server is remembered as: the same URL for a direct
+    /// connection, a `mstream+iroh://` identity for a tunnel.
+    pub server_id: String,
+    /// Pairing code for the tunnel this session is using, if any. Held so it
+    /// can be saved alongside the session — without it, a remembered tunnel
+    /// server cannot be reached again.
+    pub tunnel_code: Option<String>,
     pub token: Option<String>,
     pub username: Option<String>,
     pub connected: bool,
@@ -439,6 +449,8 @@ impl App {
     pub fn new(server: Option<String>, token: Option<String>, username: Option<String>) -> Self {
         let mut app = App {
             server: server.clone().unwrap_or_default(),
+            server_id: server.clone().unwrap_or_default(),
+            tunnel_code: None,
             token,
             username,
             connected: false,
@@ -468,11 +480,25 @@ impl App {
             show_help: false,
             should_quit: false,
         };
-        // Prefill only a server we actually know — a saved session, or one
-        // passed on the command line. Guessing localhost just means the first
-        // thing a new user does is delete it.
-        app.connect.server = server.unwrap_or_default();
+        // A tunnel identity is not an address: it can't be typed, edited or
+        // connected to directly, so it stays out of both the endpoint and the
+        // form until dialling turns it into a loopback URL.
+        if crate::quickconnect::is_tunnel_id(&app.server_id) {
+            app.server.clear();
+        } else {
+            // Prefill only a server we actually know — a saved session, or one
+            // passed on the command line. Guessing localhost just means the
+            // first thing a new user does is delete it.
+            app.connect.server = server.unwrap_or_default();
+        }
         app
+    }
+
+    /// Supply the pairing code for a remembered tunnel server, which is what
+    /// makes reconnecting to one possible at all.
+    pub fn with_tunnel(mut self, code: Option<String>) -> Self {
+        self.tunnel_code = code;
+        self
     }
 
     /// Start from remembered preferences.
@@ -498,6 +524,21 @@ impl App {
 
     /// Effects to run at startup.
     pub fn start(&mut self) -> Vec<Effect> {
+        // A tunnel server has no address to connect to until its code is
+        // dialled, so reconnecting means opening the tunnel again first.
+        if crate::quickconnect::is_tunnel_id(&self.server_id) {
+            let Some(code) = self.tunnel_code.clone() else {
+                // Remembered, but the code that reaches it is gone — deleted
+                // credentials, or a config copied without them.
+                self.server_id.clear();
+                self.error(
+                    "the pairing code for the last server is gone — paste it again to reconnect",
+                );
+                return Vec::new();
+            };
+            self.connecting = true;
+            return vec![Effect::Api(ApiCmd::QuickConnect { code, token: self.token.clone() })];
+        }
         if self.server.is_empty() {
             return Vec::new(); // connect form is showing
         }
@@ -537,6 +578,16 @@ impl App {
     /// The library view currently on screen.
     pub fn library_node(&self) -> &LibraryNode {
         self.library_stack.last().unwrap_or(&LibraryNode::Root)
+    }
+
+    /// The current server as it should be shown. A tunnel session's endpoint
+    /// is a loopback port that means nothing to anyone, so it is named by its
+    /// identity instead.
+    pub fn server_display(&self) -> String {
+        if crate::quickconnect::is_tunnel_id(&self.server_id) {
+            return crate::quickconnect::display_server(&self.server_id);
+        }
+        self.server.clone()
     }
 
     fn info(&mut self, text: impl Into<String>) {
@@ -790,8 +841,11 @@ impl App {
         }
         self.connecting = true;
         self.connect.submitting = true;
+        // Kept from here on: it is the only way back to this server, and
+        // nothing is written until the connection actually succeeds.
+        self.tunnel_code = Some(code.clone());
         self.info("dialling the tunnel — this can take a few seconds…");
-        vec![Effect::Api(ApiCmd::QuickConnect { code })]
+        vec![Effect::Api(ApiCmd::QuickConnect { code, token: self.token.clone() })]
     }
 
     fn submit_connect(&mut self) -> Vec<Effect> {
@@ -1139,11 +1193,12 @@ impl App {
                 self.error(format!("audio unavailable: {e}"));
                 Vec::new()
             }
-            Event::Connected { server, username, token, ping } => {
+            Event::Connected { server, id, username, token, ping } => {
                 self.connected = true;
                 self.connecting = false;
                 self.connect.submitting = false;
                 self.server = server;
+                self.server_id = id;
                 if token.is_some() {
                     self.token = token;
                 }
@@ -1153,7 +1208,7 @@ impl App {
                 let libraries = ping.vpaths.len();
                 self.info(format!(
                     "connected to {} ({} librar{})",
-                    self.server,
+                    self.server_display(),
                     libraries,
                     if libraries == 1 { "y" } else { "ies" }
                 ));
@@ -1162,8 +1217,11 @@ impl App {
                     Effect::Api(ApiCmd::Browse(self.path.clone())),
                     Effect::Audio(AudioCmd::SetVolume(self.volume)),
                 ];
-                // Only worth persisting when we hold a token we logged in for.
-                if self.token.is_some() && self.username.is_some() {
+                // Worth persisting when we hold a token we logged in for — or
+                // a pairing code, which is the only way back to this server
+                // even when it needs no login at all.
+                let signed_in = self.token.is_some() && self.username.is_some();
+                if signed_in || self.tunnel_code.is_some() {
                     effects.push(Effect::SaveSession);
                 }
                 effects
@@ -1187,10 +1245,14 @@ impl App {
                 };
                 Vec::new()
             }
-            Event::TunnelReady { local_url } => {
+            Event::TunnelReady { local_url, id } => {
                 self.connecting = false;
                 self.connect.submitting = false;
+                // The form carries the loopback address, which is a real,
+                // working endpoint for the sign-in about to happen; the
+                // identity is what the session will be filed under.
                 self.connect.server = local_url;
+                self.server_id = id;
                 self.connect.stage = ConnectStage::Direct;
                 self.connect.field = 1; // straight to the username
                 self.info("tunnel open — sign in to continue");
@@ -1744,6 +1806,7 @@ mod tests {
 
         app.apply_event(Event::Connected {
             server: "http://192.168.1.5:3000".into(),
+            id: "http://192.168.1.5:3000".into(),
             username: None,
             token: None,
             ping: Box::new(Default::default()),
@@ -1842,7 +1905,7 @@ mod tests {
         let effects = app.handle_action(Action::Submit);
         assert_eq!(
             effects,
-            vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into() })]
+            vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None })]
         );
     }
 
@@ -1880,7 +1943,7 @@ mod tests {
         let effects = app.handle_action(Action::Submit);
         assert_eq!(
             effects,
-            vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into() })]
+            vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None })]
         );
     }
 
@@ -1904,9 +1967,143 @@ mod tests {
         let effects = app.handle_action(Action::Submit);
         assert_eq!(
             effects,
-            vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into() })]
+            vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None })]
         );
         assert!(app.connecting);
+    }
+
+    #[test]
+    fn a_tunnel_session_is_remembered_by_identity_not_by_its_loopback_port() {
+        // The bug this pins: the loopback bridge got saved as the server, so
+        // the next run dialled a port that no longer existed, and the token
+        // was filed under a URL that could never match again.
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::QuickConnect;
+        for c in "mstr1:abc".chars() {
+            app.handle_action(Action::Input(c));
+        }
+        app.handle_action(Action::Submit);
+
+        app.apply_event(Event::TunnelReady {
+            local_url: "http://127.0.0.1:51234".into(),
+            id: "mstream+iroh://endpointabc".into(),
+        });
+        app.connect.username = "alice".into();
+        app.connect.password = "pw".into();
+        app.handle_action(Action::Submit);
+        app.apply_event(Event::Connected {
+            server: "http://127.0.0.1:51234".into(),
+            id: "mstream+iroh://endpointabc".into(),
+            username: Some("alice".into()),
+            token: Some("tok".into()),
+            ping: Box::new(Default::default()),
+        });
+
+        // What gets written down is the identity...
+        assert_eq!(app.server_id, "mstream+iroh://endpointabc");
+        // ...while requests and stream URLs still go over the bridge.
+        assert_eq!(app.server, "http://127.0.0.1:51234");
+        assert_eq!(app.tunnel_code.as_deref(), Some("mstr1:abc"), "kept, or there's no way back");
+    }
+
+    #[test]
+    fn a_public_tunnel_server_is_still_worth_saving() {
+        // No login means no token and no username — but without the pairing
+        // code stored, the server is unreachable next time.
+        let mut app = App::new(None, None, None);
+        app.connect.stage = ConnectStage::QuickConnect;
+        for c in "mstr1:pub".chars() {
+            app.handle_action(Action::Input(c));
+        }
+        app.handle_action(Action::Submit);
+
+        let effects = app.apply_event(Event::Connected {
+            server: "http://127.0.0.1:5000".into(),
+            id: "mstream+iroh://pubserver".into(),
+            username: None,
+            token: None,
+            ping: Box::new(Default::default()),
+        });
+        assert!(effects.contains(&Effect::SaveSession), "got {effects:?}");
+    }
+
+    #[test]
+    fn reconnecting_to_a_tunnel_server_dials_its_code_again() {
+        let app = App::new(Some("mstream+iroh://endpointabc".into()), Some("tok".into()), None);
+        // The identity is not an address, so it must not reach the form or
+        // the endpoint — only the dialler.
+        assert!(app.server.is_empty(), "nothing can be requested from an identity");
+        assert!(app.connect.server.is_empty(), "and it cannot be typed or edited");
+
+        let mut app = app.with_tunnel(Some("mstr1:saved".into()));
+        let effects = app.start();
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCmd::QuickConnect {
+                code: "mstr1:saved".into(),
+                token: Some("tok".into()),
+            })],
+            "the saved token rides the re-dialled tunnel"
+        );
+        assert!(app.connecting);
+    }
+
+    #[test]
+    fn a_remembered_tunnel_with_no_code_says_so_instead_of_hanging() {
+        // Credentials deleted, or a config.toml copied to a new machine
+        // without the file holding its secrets.
+        let mut app = App::new(Some("mstream+iroh://endpointabc".into()), None, None);
+        assert!(app.start().is_empty(), "nothing to dial, so nothing is attempted");
+        assert!(!app.connecting, "and it doesn't sit on a connecting screen forever");
+        assert!(app.server_id.is_empty(), "the unreachable server is let go");
+        let message = &app.message.as_ref().unwrap().text;
+        assert!(message.contains("pairing code"), "got: {message}");
+    }
+
+    #[test]
+    fn an_expired_tunnel_session_signs_back_in_over_the_open_bridge() {
+        // The tunnel outlives the token: the bridge is still up in the worker,
+        // so the login form must aim at it rather than at an identity no HTTP
+        // client can dial.
+        let mut app = App::new(None, None, None);
+        app.connected = true;
+        app.server = "http://127.0.0.1:51234".into();
+        app.server_id = "mstream+iroh://endpointabc".into();
+        app.token = Some("stale".into());
+
+        app.apply_event(Event::Unauthorized);
+        assert_eq!(app.connect.stage, ConnectStage::Direct);
+        assert_eq!(app.connect.server, "http://127.0.0.1:51234", "aims at the live bridge");
+
+        app.connect.username = "alice".into();
+        app.connect.password = "pw".into();
+        let effects = app.handle_action(Action::Submit);
+        // Loopback, so no plaintext warning stands between the user and a
+        // re-login they didn't ask for in the first place.
+        assert_eq!(
+            effects,
+            vec![Effect::Api(ApiCmd::Login {
+                server: "http://127.0.0.1:51234".into(),
+                username: "alice".into(),
+                password: "pw".into(),
+            })]
+        );
+    }
+
+    #[test]
+    fn a_tunnel_is_shown_by_name_rather_than_by_port() {
+        let mut app = App::new(None, None, None);
+        app.server = "http://127.0.0.1:51234".into();
+        app.server_id = "mstream+iroh://endpointabcdef123456".into();
+        let shown = app.server_display();
+        assert!(shown.starts_with("quick connect"), "got: {shown}");
+        assert!(!shown.contains("127.0.0.1"), "the port is an implementation detail");
+
+        // A direct server is shown as itself.
+        let mut app = App::new(None, None, None);
+        app.server = "https://demo.mstream.io".into();
+        app.server_id = "https://demo.mstream.io".into();
+        assert_eq!(app.server_display(), "https://demo.mstream.io");
     }
 
     #[test]
@@ -1925,11 +2122,15 @@ mod tests {
         app.connect.stage = ConnectStage::QuickConnect;
         app.connecting = true;
 
-        app.apply_event(Event::TunnelReady { local_url: "http://127.0.0.1:51234".into() });
+        app.apply_event(Event::TunnelReady {
+            local_url: "http://127.0.0.1:51234".into(),
+            id: "mstream+iroh://abc123".into(),
+        });
         assert_eq!(app.connect.stage, ConnectStage::Direct);
         assert_eq!(app.connect.server, "http://127.0.0.1:51234");
         assert_eq!(app.connect.field, 1, "focus lands on the username");
         assert!(!app.connecting);
+        assert_eq!(app.server_id, "mstream+iroh://abc123", "already filed under its identity");
     }
 
     #[test]
