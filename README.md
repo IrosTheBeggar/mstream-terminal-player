@@ -46,6 +46,7 @@ window.
 | `a` | add the highlighted track to the queue |
 | `Tab` | switch between browser and queue |
 | `1` … `5` | Files / Library / Playlists / Search / Discover · `/` search |
+| `0` | full-screen now playing |
 | `Space` | play or pause · `n` / `p` next / previous |
 | `i` | jump to whatever is playing |
 | `[` `]` | seek 5s · `{` `}` seek a minute · `-` `+` volume |
@@ -104,6 +105,31 @@ mstream-player logout
 
 Servers running in public mode (no users configured) need no login — just pass
 `--server <url>`. `--server` accepts the same shorthand as the connect screen.
+
+## Now playing
+
+`0` gives the whole terminal over to what's playing:
+
+```
+┌ Now Playing ───────────────────────────────────────────────────┐
+│                                                                │
+│              Bassnectar                                        │
+│              Rewind The Track                                  │
+│              Divergent Spectrum · 2011                         │
+│              3:29 · 174 BPM · 8A (A minor) · 7/10 · 23 plays   │
+│                                                                │
+│              ▶ playing                                         │
+│                                                                │
+│████████████████████████▉          1:11 / 3:29                  │
+│0 back                                       vol 100%  dj similar│
+└────────────────────────────────────────────────────────────────┘
+```
+
+It's a view rather than a dialog, so every key still means what it means
+everywhere else — `Space`, `n`, the seek keys and the volume keys all keep
+working while you're looking at it, and `0` goes back. The key is the same
+Camelot code the Auto-DJ panel matches on, with the tag's own spelling beside
+it. Tags a track doesn't have are left out rather than shown empty.
 
 ## Auto-DJ
 

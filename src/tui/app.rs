@@ -149,6 +149,7 @@ pub enum Action {
     SeekBackwardFar,
     /// Put the cursor back on the track that's playing.
     JumpToPlaying,
+    ToggleNowPlaying,
     VolumeUp,
     VolumeDown,
     RemoveFromQueue,
@@ -602,6 +603,10 @@ pub struct App {
     pub volume: f32,
     pub now_playing: Option<Track>,
     pub audio_available: bool,
+    /// The full-screen now-playing view. A view rather than an overlay: every
+    /// normal key still means what it meant, so `space`, `n` and the seek keys
+    /// keep working while you are looking at it.
+    pub fullscreen: bool,
     /// Which frame the spinner is on. Advanced by the event loop against a
     /// wall clock rather than counted per draw, so it turns at one speed
     /// whether the app is idle or flooded — and stays still under test.
@@ -659,6 +664,7 @@ impl App {
             volume: 1.0,
             now_playing: None,
             audio_available: true,
+            fullscreen: false,
             spinner: 0,
             message: None,
             show_help: false,
@@ -999,6 +1005,10 @@ impl App {
             Action::SeekForwardFar => self.seek_by(SEEK_STEP_FAR),
             Action::SeekBackwardFar => self.seek_by(-SEEK_STEP_FAR),
             Action::JumpToPlaying => self.jump_to_playing(),
+            Action::ToggleNowPlaying => {
+                self.fullscreen = !self.fullscreen;
+                Vec::new()
+            }
             Action::VolumeUp => self.change_volume(VOLUME_STEP),
             Action::VolumeDown => self.change_volume(-VOLUME_STEP),
 
@@ -2569,6 +2579,7 @@ impl Action {
             Action::NextTrack => "next-track",
             Action::PrevTrack => "previous-track",
             Action::JumpToPlaying => "jump-to-playing",
+            Action::ToggleNowPlaying => "now-playing",
             Action::SeekForward => "seek-forward",
             Action::SeekBackward => "seek-back",
             Action::SeekForwardFar => "seek-forward-far",
@@ -2672,6 +2683,13 @@ fn default_normal() -> Vec<Binding> {
         keys: vec![ch('i')],
         action: Action::JumpToPlaying,
         help: Some("jump to what's playing"),
+    },
+    // Zero reads as "the screen before the tabs": 1..5 are places to go, this
+    // is where you already are.
+    Binding {
+        keys: vec![ch('0')],
+        action: Action::ToggleNowPlaying,
+        help: Some("full-screen now playing"),
     },
     Binding {
         keys: vec![ch(']')],

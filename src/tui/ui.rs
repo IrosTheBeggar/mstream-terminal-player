@@ -122,6 +122,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         return;
     }
 
+    // A view, not an overlay: it replaces the frame rather than sitting on top
+    // of it, but input stays in normal mode, so every transport key still does
+    // what it does everywhere else.
+    if app.fullscreen {
+        render_now_playing(frame, area, app);
+        if app.show_help {
+            render_help(frame, area, app);
+        }
+        return;
+    }
+
     // The transport carries two lines of content and no border: the browser and
     // queue panes already close with a rule right above it, so a box of its own
     // would only spend two rows drawing a line next to a line. On an 80x24
@@ -443,6 +454,148 @@ fn fmt_span(seconds: f64) -> String {
         (0, m) => format!("{m}m"),
         (h, m) => format!("{h}h {m:02}m"),
     }
+}
+
+fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(DIM))
+        .title(" Now Playing ");
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+
+    // The gauge and the status line are pinned to the bottom; the card floats
+    // in whatever is left, so it stays centred as the terminal changes size.
+    let [card, gauge_area, status_area] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    render_centered_block(frame, card, now_playing_card(app, card.width as usize));
+
+    let position = fmt_duration(app.status.position);
+    let total =
+        if app.status.duration > 0.0 { fmt_duration(app.status.duration) } else { "--:--".into() };
+    frame.render_widget(
+        Gauge::default()
+            .ratio(app.status.progress())
+            .label(format!("{position} / {total}"))
+            .gauge_style(Style::new().fg(ACCENT))
+            .use_unicode(true),
+        gauge_area,
+    );
+
+    // There is no footer down here, so the modes come along — otherwise going
+    // full screen would quietly hide whether shuffle or auto-dj is on.
+    let modes = mode_readout(app, false);
+    let [left, right] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length((width_of(&modes) as u16).min(status_area.width)),
+    ])
+    .areas(status_area);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            fit("0 back", left.width as usize),
+            Style::new().fg(DIM),
+        )),
+        left,
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled(modes, Style::new().fg(DIM)))
+            .alignment(Alignment::Right),
+        right,
+    );
+}
+
+/// The block of text in the middle of the now-playing screen, laid out to
+/// `width` columns. Pure so the shape can be asserted without a terminal.
+fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
+    let Some(track) = &app.now_playing else {
+        return vec![
+            Line::from(Span::styled(fit("nothing playing", width), Style::new().fg(DIM))),
+            Line::raw(""),
+            Line::from(Span::styled(
+                fit("press 0 to go back and queue something", width),
+                Style::new().fg(DIM),
+            )),
+        ];
+    };
+
+    let meta = &track.metadata;
+    let mut lines = vec![
+        Line::from(Span::styled(
+            fit(meta.artist.as_deref().unwrap_or("unknown artist"), width),
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            fit(meta.display_title().unwrap_or_else(|| track.file_name()), width),
+            Style::new().add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    let album = match (meta.album.as_deref().filter(|a| !a.is_empty()), meta.year) {
+        (Some(album), Some(year)) => Some(format!("{album} · {year}")),
+        (Some(album), None) => Some(album.to_string()),
+        (None, Some(year)) => Some(year.to_string()),
+        (None, None) => None,
+    };
+    if let Some(album) = album {
+        lines.push(Line::from(Span::styled(fit(&album, width), Style::new().fg(DIM))));
+    }
+
+    let facts = track_facts(meta);
+    if !facts.is_empty() {
+        lines.push(Line::from(Span::styled(fit(&facts, width), Style::new().fg(DIM))));
+    }
+
+    lines.push(Line::raw(""));
+    let state = if !app.audio_available {
+        "audio device unavailable"
+    } else if app.status.paused {
+        "⏸ paused"
+    } else if app.status.playing {
+        "▶ playing"
+    } else {
+        "stopped"
+    };
+    let style = if app.audio_available {
+        Style::new().fg(DIM)
+    } else {
+        Style::new().fg(Color::Red)
+    };
+    lines.push(Line::from(Span::styled(state, style)));
+    lines
+}
+
+/// The one-line summary of what the tags know. Everything is optional, so this
+/// joins what is there rather than laying out a fixed set of slots — a track
+/// with no BPM should not leave a gap where the BPM would go.
+fn track_facts(meta: &crate::api::types::TrackMetadata) -> String {
+    let mut facts = Vec::new();
+    if let Some(duration) = meta.duration {
+        facts.push(fmt_duration(duration));
+    }
+    if let Some(bpm) = meta.bpm {
+        facts.push(format!("{bpm} BPM"));
+    }
+    if let Some(key) = meta.musical_key.as_deref().filter(|k| !k.is_empty()) {
+        // The Camelot code is what the Auto-DJ panel matches on, so show the
+        // same name for the same thing; the tag's own spelling comes after it.
+        match crate::dj::to_camelot(key) {
+            Some(camelot) => facts.push(format!("{} ({key})", camelot.code())),
+            None => facts.push(key.to_string()),
+        }
+    }
+    if let Some(rating) = meta.rating.filter(|r| *r > 0) {
+        facts.push(format!("{rating}/10"));
+    }
+    if let Some(plays) = meta.play_count.filter(|p| *p > 0) {
+        facts.push(format!("{plays} plays"));
+    }
+    facts.join(" · ")
 }
 
 fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
@@ -1474,6 +1627,129 @@ mod tests {
             !text.contains("repeat off") && !text.contains("dj off"),
             "modes that are off are not worth the width: {text}"
         );
+    }
+
+    /// A track with every tag mStream can give us, for the now-playing card.
+    fn tagged_track() -> Track {
+        Track {
+            filepath: "lib/a.mp3".into(),
+            metadata: TrackMetadata {
+                title: Some("Rewind The Track".into()),
+                artist: Some("Bassnectar".into()),
+                album: Some("Divergent Spectrum".into()),
+                year: Some(2011),
+                duration: Some(209.0),
+                bpm: Some(174),
+                musical_key: Some("A minor".into()),
+                rating: Some(7),
+                play_count: Some(23),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn the_now_playing_screen_replaces_the_frame() {
+        let mut app = connected_app();
+        app.queue.replace(vec![tagged_track()]);
+        app.play_index(0);
+        app.status.playing = true;
+        app.status.position = 71.0;
+        app.status.duration = 209.0;
+
+        assert!(!app.fullscreen);
+        app.handle_action(Action::ToggleNowPlaying);
+        let text = draw(&mut app);
+
+        assert!(text.contains("Now Playing"), "{text}");
+        assert!(text.contains("Bassnectar") && text.contains("Rewind The Track"), "{text}");
+        assert!(text.contains("Divergent Spectrum · 2011"), "{text}");
+        assert!(text.contains("1:11 / 3:29"), "the gauge is still there: {text}");
+        // The browser and queue are gone -- this is a view, not an overlay.
+        assert!(!text.contains("1:Files"), "{text}");
+        assert!(!text.contains("Queue ("), "{text}");
+        // But the modes come along, since there is no footer to carry them.
+        assert!(text.contains("vol 100%"), "{text}");
+        assert!(text.contains("0 back"), "{text}");
+
+        app.handle_action(Action::ToggleNowPlaying);
+        assert!(draw(&mut app).contains("1:Files"), "and it toggles back");
+    }
+
+    #[test]
+    fn the_now_playing_card_skips_the_tags_a_track_does_not_have() {
+        let mut app = connected_app();
+        app.now_playing = Some(tagged_track());
+        let full = now_playing_card(&app, 60);
+        let text: String =
+            full.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(text.contains("3:29 · 174 BPM · 8A (A minor) · 7/10 · 23 plays"), "{text}");
+
+        // A bare file: no gaps where the missing facts would have gone.
+        app.now_playing = Some(Track {
+            filepath: "lib/Artist/untagged.mp3".into(),
+            metadata: TrackMetadata::default(),
+        });
+        let bare = now_playing_card(&app, 60);
+        let text: String =
+            bare.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(text.contains("unknown artist"), "{text}");
+        assert!(text.contains("untagged.mp3"), "falls back to the filename: {text}");
+        assert!(!text.contains("·"), "no separators with nothing to separate: {text}");
+    }
+
+    #[test]
+    fn the_key_reuses_the_camelot_code_the_dj_panel_matches_on() {
+        assert_eq!(
+            track_facts(&TrackMetadata {
+                musical_key: Some("A minor".into()),
+                ..Default::default()
+            }),
+            "8A (A minor)"
+        );
+        // An unparseable tag is shown as written rather than dropped.
+        assert_eq!(
+            track_facts(&TrackMetadata {
+                musical_key: Some("wonky".into()),
+                ..Default::default()
+            }),
+            "wonky"
+        );
+    }
+
+    #[test]
+    fn the_now_playing_screen_says_so_when_nothing_is() {
+        let mut app = connected_app();
+        app.handle_action(Action::ToggleNowPlaying);
+        let text = draw(&mut app);
+        assert!(text.contains("nothing playing"), "{text}");
+        assert!(text.contains("press 0 to go back"), "{text}");
+    }
+
+    #[test]
+    fn the_now_playing_screen_survives_a_small_terminal() {
+        let mut app = connected_app();
+        app.queue.replace(vec![tagged_track()]);
+        app.play_index(0);
+        app.handle_action(Action::ToggleNowPlaying);
+        for (w, h) in [(20u16, 4u16), (32, 6), (200, 60)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        }
+    }
+
+    #[test]
+    fn help_still_opens_over_the_now_playing_screen() {
+        let mut app = connected_app();
+        app.handle_action(Action::ToggleNowPlaying);
+        app.handle_action(Action::ToggleHelp);
+        let text = draw(&mut app);
+        assert!(text.contains("Keys"), "{text}");
+        assert!(text.contains("full-screen now playing"), "and it lists the new key: {text}");
     }
 
     #[test]
