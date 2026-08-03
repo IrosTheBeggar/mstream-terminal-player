@@ -428,6 +428,9 @@ pub struct App {
     pub search_summary: Option<String>,
 
     pub queue: Queue,
+    /// What the connected server offers. Default (nothing) until a ping says
+    /// otherwise, so an optional feature is never assumed present.
+    pub capabilities: crate::api::types::Capabilities,
     pub autodj: AutoDjMode,
     /// Round-trip cursor the random-songs picker uses to avoid repeats.
     autodj_ignore: Vec<u32>,
@@ -469,6 +472,7 @@ impl App {
             editing_query: false,
             search_summary: None,
             queue: Queue::default(),
+            capabilities: Default::default(),
             autodj: AutoDjMode::Off,
             autodj_ignore: Vec::new(),
             autodj_pending: false,
@@ -692,7 +696,7 @@ impl App {
                 Vec::new()
             }
             Action::ToggleAutoDj => {
-                self.autodj = self.autodj.next();
+                self.autodj = self.autodj.next_available(self.capabilities);
                 self.info(format!("auto-dj: {}", self.autodj.label()));
                 if self.autodj == AutoDjMode::Off {
                     // Any reply still in flight is no longer wanted.
@@ -1205,6 +1209,7 @@ impl App {
                 if username.is_some() {
                     self.username = username;
                 }
+                self.capabilities = crate::api::types::Capabilities::from(ping.as_ref());
                 let libraries = ping.vpaths.len();
                 self.info(format!(
                     "connected to {} ({} librar{})",
@@ -1212,6 +1217,18 @@ impl App {
                     libraries,
                     if libraries == 1 { "y" } else { "ies" }
                 ));
+
+                // A remembered mode can outlive the server that supported it —
+                // preferences are global, capabilities are per-server. Say so
+                // rather than leaving a mode selected that quietly does
+                // something else.
+                if !self.autodj.available(self.capabilities) {
+                    self.autodj = self.autodj.next_available(self.capabilities);
+                    self.info(format!(
+                        "this server has no similarity index — auto-dj is on {}",
+                        self.autodj.label()
+                    ));
+                }
 
                 let mut effects = vec![
                     Effect::Api(ApiCmd::Browse(self.path.clone())),
@@ -1553,9 +1570,18 @@ mod tests {
         Track { filepath: path.to_string(), metadata: TrackMetadata::default() }
     }
 
+    /// A session against a fully-featured server. Capabilities are set
+    /// explicitly because they change what the UI offers — a default (empty)
+    /// set would silently be testing the degraded path.
     fn connected_app() -> App {
         let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
         app.connected = true;
+        app.capabilities = crate::api::types::Capabilities {
+            discovery: true,
+            discovery_path: true,
+            discovery_p2p: false,
+            federation_discovery: false,
+        };
         app
     }
 
@@ -2643,6 +2669,58 @@ mod tests {
         assert_eq!(app.autodj, AutoDjMode::BpmKey);
         app.handle_action(Action::ToggleAutoDj);
         assert_eq!(app.autodj, AutoDjMode::Off);
+    }
+
+    #[test]
+    fn autodj_skips_a_mode_the_server_cannot_serve() {
+        // Default install: no embedding index. Offering "similar" would spend
+        // a keystroke and a round trip to land on tempo+key anyway.
+        let mut app = connected_app();
+        app.capabilities = Default::default();
+
+        app.handle_action(Action::ToggleAutoDj);
+        assert_eq!(app.autodj, AutoDjMode::BpmKey, "straight past similar");
+        app.handle_action(Action::ToggleAutoDj);
+        assert_eq!(app.autodj, AutoDjMode::Off, "and the cycle still closes");
+    }
+
+    #[test]
+    fn a_remembered_similar_mode_is_dropped_on_a_server_without_the_index() {
+        // Preferences are global; capabilities are per-server. Reconnecting
+        // elsewhere must not leave a mode selected that does something else.
+        let saved = crate::config::PlayerPrefs {
+            volume: 1.0,
+            repeat: "off".into(),
+            shuffle: false,
+            autodj: "similar".into(),
+        };
+        let mut app = App::new(None, None, None).with_prefs(&saved);
+        assert_eq!(app.autodj, AutoDjMode::Similar);
+
+        app.apply_event(Event::Connected {
+            server: "http://plain:3000".into(),
+            id: "http://plain:3000".into(),
+            username: None,
+            token: None,
+            ping: Box::new(Default::default()),
+        });
+        assert_eq!(app.autodj, AutoDjMode::BpmKey);
+        assert!(app.message.as_ref().unwrap().text.contains("similarity index"));
+
+        // On a server that has one, the remembered mode is left alone.
+        let mut app = App::new(None, None, None).with_prefs(&saved);
+        app.apply_event(Event::Connected {
+            server: "http://rich:3000".into(),
+            id: "http://rich:3000".into(),
+            username: None,
+            token: None,
+            ping: Box::new(crate::api::types::Ping {
+                discovery: true,
+                ..Default::default()
+            }),
+        });
+        assert_eq!(app.autodj, AutoDjMode::Similar);
+        assert!(app.capabilities.discovery);
     }
 
     #[test]

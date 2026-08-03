@@ -70,8 +70,11 @@ nothing left after the track that's playing, it quietly adds one more.
   Camelot code and matched against its wheel neighbours and relative
   major/minor, with tempo windows at the same, half and double time.
 
-If similarity is switched off server-side, or the track hasn't been analysed
-yet, it falls back to tempo+key and says so instead of going quiet.
+**similar** only appears where the server has the index — `A` cycles straight
+past it otherwise, and a remembered `similar` setting is dropped (with a note)
+when you connect somewhere that lacks one. If the index is there but the track
+hasn't been analysed yet, it falls back to tempo+key and says so instead of
+going quiet. `mstream-player info` lists what a given server has enabled.
 
 To see what it would pick without launching the player:
 

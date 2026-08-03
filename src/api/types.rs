@@ -37,6 +37,69 @@ pub struct Ping {
     pub no_file_modify: bool,
     #[serde(rename = "noUpload")]
     pub no_upload: bool,
+
+    // Discovery features. All are off by default in mStream, and an older
+    // server omits the field entirely — which `#[serde(default)]` turns into
+    // `false`, the same answer for the same reason.
+    /// The local audio-embedding index: similar tracks and similar artists.
+    pub discovery: bool,
+    /// Great-circle paths between two tracks' embeddings (Sonic Journey).
+    #[serde(rename = "discoveryPath")]
+    pub discovery_path: bool,
+    /// Similarity against peers' local snapshot copies.
+    #[serde(rename = "discoveryP2p")]
+    pub discovery_p2p: bool,
+    /// Similarity federated out to paired servers.
+    #[serde(rename = "federationDiscovery")]
+    pub federation_discovery: bool,
+}
+
+/// What this server can actually do, lifted out of [`Ping`].
+///
+/// The rule everywhere downstream is **no flag, no probe**: every one of these
+/// is disabled by default server-side, and asking anyway earns a 403 that
+/// looks like a failure but isn't. Carried as a small `Copy` value so any code
+/// deciding whether to offer a feature can hold one without ceremony.
+///
+/// Each feature is gated on its own flag rather than inferred from another —
+/// the server reports them separately, so the client believes them separately.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Capabilities {
+    pub discovery: bool,
+    pub discovery_path: bool,
+    pub discovery_p2p: bool,
+    pub federation_discovery: bool,
+}
+
+impl From<&Ping> for Capabilities {
+    fn from(ping: &Ping) -> Self {
+        Capabilities {
+            discovery: ping.discovery,
+            discovery_path: ping.discovery_path,
+            discovery_p2p: ping.discovery_p2p,
+            federation_discovery: ping.federation_discovery,
+        }
+    }
+}
+
+impl Capabilities {
+    /// Feature names to show someone asking what this server offers.
+    pub fn enabled_names(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.discovery {
+            names.push("similarity");
+        }
+        if self.discovery_path {
+            names.push("sonic journey");
+        }
+        if self.discovery_p2p {
+            names.push("p2p discovery");
+        }
+        if self.federation_discovery {
+            names.push("federated discovery");
+        }
+        names
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -352,5 +415,36 @@ mod tests {
         let p: Ping = serde_json::from_str(json).unwrap();
         assert_eq!(p.vpaths, vec!["testlib"]);
         assert_eq!(p.transcode.unwrap().default_codec.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn reads_discovery_flags_from_a_live_ping() {
+        // Captured verbatim from demo.mstream.io, which runs the local
+        // embedding index but neither p2p nor federation.
+        let json = r#"{"vpaths":["library"],"transcode":{"defaultCodec":"opus",
+            "defaultBitrate":"96k"},"noMkdir":true,"noUpload":true,"noFileModify":true,
+            "allowYoutubeDownload":false,"discovery":true,"discoveryPath":true,
+            "discoveryP2p":false,"federationDiscovery":false}"#;
+        let caps = Capabilities::from(&serde_json::from_str::<Ping>(json).unwrap());
+        assert_eq!(
+            caps,
+            Capabilities {
+                discovery: true,
+                discovery_path: true,
+                discovery_p2p: false,
+                federation_discovery: false,
+            }
+        );
+        assert_eq!(caps.enabled_names(), vec!["similarity", "sonic journey"]);
+    }
+
+    #[test]
+    fn a_server_that_reports_nothing_is_treated_as_having_nothing() {
+        // An older mStream omits these fields entirely. Absent must mean off,
+        // or the client probes routes that answer 403 — which is exactly the
+        // failure feature detection exists to avoid.
+        let caps = Capabilities::from(&serde_json::from_str::<Ping>(r#"{"vpaths":[]}"#).unwrap());
+        assert_eq!(caps, Capabilities::default());
+        assert!(caps.enabled_names().is_empty());
     }
 }

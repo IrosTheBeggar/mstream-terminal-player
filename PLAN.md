@@ -299,9 +299,25 @@ handshake against a live tunnel before building UI on top.
 
 ### Phase B — UI iterations (Auto-DJ, journeys, discovery, admin)
 
-Feature-detect everything here from `GET /api/v1/ping` — it reports `discovery`, `discoveryPath`,
-`discoveryP2p` and `federationDiscovery`, and the in-code rule is "no flag, no probes". Absent
-fields mean an older server: treat as false. (Our `Ping` type needs extending to carry them.)
+#### B0 — Feature detection ✅ DONE 2026-08-02
+
+Everything in this phase is gated on `GET /api/v1/ping`, which reports `discovery`,
+`discoveryPath`, `discoveryP2p` and `federationDiscovery`. The rule is **no flag, no probe**:
+each of these is off by default server-side, and asking anyway earns a 403 that reads like a
+failure but isn't. Absent fields mean an older server and are treated as false — the same answer
+for the same reason. Each feature is gated on its own flag rather than inferred from another,
+since the server reports them separately.
+
+`Ping` carries the four flags; `Capabilities` (a small `Copy` value in `api/types.rs`) lifts them
+out for anything deciding whether to offer a feature. The api thread refreshes it from one place —
+where `Event::Connected` is sent — so a new way of connecting cannot forget to ask, and the app
+stores its own copy from the same event.
+
+First use, and the pattern the rest of Phase B follows: Auto-DJ no longer probes similarity on a
+server without an index, `A` cycles straight past a mode that can't work, and a *remembered*
+`similar` mode is dropped with an explanation when reconnecting somewhere that lacks it —
+preferences are global, capabilities are per-server. `mstream-player info` prints the enabled
+features, where "none enabled" is the ordinary answer on a default install.
 
 #### B1 — Auto-DJ panel
 Promote the footer toggle to a real panel: mode, tempo tolerance, key strictness, genre

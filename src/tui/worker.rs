@@ -14,8 +14,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::types::{
-    Album, BpmWindow, DirListing, Genre, Ping, PlaylistSummary, RandomSongRequest, SearchResults,
-    Track,
+    Album, BpmWindow, Capabilities, DirListing, Genre, Ping, PlaylistSummary, RandomSongRequest,
+    SearchResults, Track,
 };
 use crate::api::{ApiError, Client};
 use crate::discovery::DiscoveredServer;
@@ -94,6 +94,24 @@ pub enum AutoDjMode {
 }
 
 impl AutoDjMode {
+    /// Cycle to the next mode this server can actually deliver.
+    ///
+    /// Offering a mode that would immediately fall back to a different one
+    /// wastes a keystroke and misreports what the player is doing.
+    pub fn next_available(self, caps: Capabilities) -> Self {
+        let next = self.next();
+        if next == AutoDjMode::Similar && !caps.discovery {
+            // Only ever one hop: Off and BpmKey need nothing from the server.
+            return next.next();
+        }
+        next
+    }
+
+    /// Whether this mode can work against the given server.
+    pub fn available(self, caps: Capabilities) -> bool {
+        self != AutoDjMode::Similar || caps.discovery
+    }
+
     pub fn next(self) -> Self {
         match self {
             AutoDjMode::Off => AutoDjMode::Similar,
@@ -294,6 +312,9 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     // The tunnel session's two names, once one is open: the loopback address
     // requests go to, and the identity it is remembered by.
     let mut tunnel: Option<(String, String)> = None;
+    // What the connected server said it can do. Nothing optional is probed
+    // before this says so.
+    let mut caps = Capabilities::default();
 
     while let Ok(cmd) = rx.recv() {
         let result = match cmd {
@@ -337,7 +358,7 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
             }),
 
             ApiCmd::AutoDj { mode, seed, ignore_list } => with_client(client.as_ref(), |c| {
-                autodj_pick(c, mode, seed.as_deref(), ignore_list).map(
+                autodj_pick(c, caps, mode, seed.as_deref(), ignore_list).map(
                     |(candidates, ignore_list, note)| Event::AutoDjPick {
                         candidates,
                         ignore_list,
@@ -359,6 +380,12 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 c.search(&query).map(|r| Event::SearchResults(Box::new(r)))
             }),
         };
+
+        // One place to learn what the server offers, so a new way of
+        // connecting can't forget to ask.
+        if let Some(Event::Connected { ping, .. }) = &result {
+            caps = Capabilities::from(ping.as_ref());
+        }
 
         if let Some(event) = result {
             if events.send(event).is_err() {
@@ -481,6 +508,7 @@ type AutoDjResult = Result<(Vec<Track>, Vec<u32>, Option<String>), ApiError>;
 /// fall through to tempo/key matching and say why.
 fn autodj_pick(
     client: &Client,
+    caps: Capabilities,
     mode: AutoDjMode,
     seed: Option<&Track>,
     ignore_list: Vec<u32>,
@@ -494,12 +522,24 @@ fn autodj_pick(
             let Some(seed) = seed else {
                 return pick_by_tempo_and_key(client, None, ignore_list, None);
             };
+            // No flag, no probe: ping already said there is no index here, so
+            // asking would spend a round trip to be told 403.
+            if !caps.discovery {
+                return pick_by_tempo_and_key(
+                    client,
+                    Some(seed),
+                    ignore_list,
+                    Some("this server has no similarity index — matching tempo and key"),
+                );
+            }
             match client.similar_tracks(&seed.filepath, SIMILAR_LIMIT)? {
+                // Backstop for a server reconfigured mid-session; the flag
+                // above is what normally keeps us out of here.
                 None => pick_by_tempo_and_key(
                     client,
                     Some(seed),
                     ignore_list,
-                    Some("similarity is switched off on this server — matching tempo and key"),
+                    Some("similarity was switched off on this server — matching tempo and key"),
                 ),
                 Some(found) if found.not_analyzed => pick_by_tempo_and_key(
                     client,

@@ -393,6 +393,15 @@ pub fn info(conn: ConnArgs) -> i32 {
             );
         }
     }
+
+    // Every one of these is off by default server-side, so "none" is the
+    // ordinary answer rather than a sign anything is wrong.
+    let caps = crate::api::types::Capabilities::from(&ping);
+    let names = caps.enabled_names();
+    println!(
+        "features:  {}",
+        if names.is_empty() { "none enabled".to_string() } else { names.join(", ") }
+    );
     0
 }
 
