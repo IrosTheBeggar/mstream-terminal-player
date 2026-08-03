@@ -471,6 +471,9 @@ fn entry_line(entry: &Entry, width: usize, playing: Option<&str>) -> Line<'stati
             Span::styled(format!("   {detail}"), Style::new().fg(dim())),
         ]),
         Entry::Track { label, track } => {
+            // Bold as well as coloured, so the playing row stays findable
+            // where colour has been taken away — NO_COLOR, a 16-colour
+            // terminal, or eyes that don't separate these two hues.
             let style = if playing.is_some_and(|path| path == track.filepath) {
                 Style::new().fg(accent()).add_modifier(Modifier::BOLD)
             } else {
@@ -647,15 +650,15 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
 const FACTS_MIN_WIDTH: u16 = 26;
 const FACTS_MAX_WIDTH: u16 = 46;
 
-/// Two spaces between tabs, so the strip is as short as it can be while still
-/// reading as separate words.
-const TAB_GAP: &str = "  ";
+/// One space between tabs; the brackets below do the separating.
+const TAB_GAP: &str = " ";
 
 /// What the whole strip wants, so the split can hand it over before the facts
-/// take what's left.
+/// take what's left. Every tab is bracketed or space-padded to the same width,
+/// so this does not change as the selection moves.
 fn tab_strip_width(app: &App) -> u16 {
     let tabs = app.now_tabs();
-    let names: usize = tabs.iter().map(|t| width_of(t.title())).sum();
+    let names: usize = tabs.iter().map(|t| width_of(t.title()) + 2).sum();
     let gaps = tabs.len().saturating_sub(1) * TAB_GAP.len();
     (names + gaps) as u16
 }
@@ -681,7 +684,17 @@ fn tab_strip(app: &App, width: u16) -> Line<'static> {
         if !spans.is_empty() {
             spans.push(Span::raw(TAB_GAP));
         }
-        spans.push(Span::styled(tab.title(), if tab == current { active } else { rest }));
+        // Brackets, not just colour. Colour is the first thing a terminal
+        // takes away — NO_COLOR is a standard crossterm honours, and plenty of
+        // people are running 16 colours or can't tell two hues apart. Which
+        // tab you are on is not something the UI can afford to whisper. The
+        // inactive ones are padded to the same width so the strip does not
+        // shuffle as the selection moves.
+        let (open, close) = if tab == current { ("[", "]") } else { (" ", " ") };
+        let style = if tab == current { active } else { rest };
+        spans.push(Span::styled(open, style));
+        spans.push(Span::styled(tab.title(), style));
+        spans.push(Span::styled(close, style));
     }
     Line::from(spans)
 }
@@ -2224,7 +2237,7 @@ mod tests {
 
         // Wide enough: every tab is named.
         let wide = draw_sized(&mut app, 100, 16);
-        assert!(wide.contains("Queue  Lyrics  Discover  Auto-DJ  Visualizer"), "{wide}");
+        assert!(wide.contains("[Queue]  Lyrics   Discover   Auto-DJ   Visualizer "), "{wide}");
 
         // Not wide enough: the one you are on, and arrows for the rest. A tab
         // chopped to "Vis" reads as a bug; this reads as a choice.
