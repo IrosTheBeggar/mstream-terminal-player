@@ -1,16 +1,17 @@
 //! What the audio looks like.
 //!
-//! Four ways of drawing the same tap: bars, scope, vectorscope, spectrogram.
-//! All of them paint onto [`Canvas`], so they get two pixels per cell and
-//! work in any terminal.
+//! Four ways of drawing the same tap: bars, scope, vectorscope, VU. All of
+//! them paint onto [`Canvas`], so they get two pixels per cell and work in
+//! any terminal.
 //!
-//! The bars owe their behaviour to cava, which is MIT and worth reading: the
-//! difference between a spectrum that looks like music and one that looks
-//! like noise is almost entirely in what happens *between* frames — gravity,
-//! neighbour smoothing and automatic sensitivity — rather than in the FFT.
+//! The bars follow cava's `cavacore` (MIT), which is worth reading: almost
+//! none of what makes a spectrum look like music is in the transform. It is
+//! in the tilt applied across the bands, and in what happens *between*
+//! frames. The scope's triggering follows scope-tui (MIT), which waits for a
+//! crossing to hold rather than taking the first one it sees.
 
-use std::collections::VecDeque;
 use std::f32::consts::PI;
+use std::time::Instant;
 
 use ratatui::style::Color;
 
@@ -24,11 +25,11 @@ pub enum VizMode {
     Bars,
     Scope,
     Vectorscope,
-    Spectrogram,
+    Vu,
 }
 
 pub const VIZ_MODES: [VizMode; 4] =
-    [VizMode::Bars, VizMode::Scope, VizMode::Vectorscope, VizMode::Spectrogram];
+    [VizMode::Bars, VizMode::Scope, VizMode::Vectorscope, VizMode::Vu];
 
 impl VizMode {
     pub fn title(self) -> &'static str {
@@ -36,7 +37,7 @@ impl VizMode {
             VizMode::Bars => "spectrum",
             VizMode::Scope => "scope",
             VizMode::Vectorscope => "vectorscope",
-            VizMode::Spectrogram => "spectrogram",
+            VizMode::Vu => "vu",
         }
     }
 
@@ -46,49 +47,67 @@ impl VizMode {
     }
 }
 
-/// Everything the visualiser remembers between frames. Bars fall from where
-/// they were and the spectrogram is nothing but history, so neither can be
+/// What the visualiser remembers between frames. Bars fall from where they
+/// were and a VU meter is nothing but its ballistics, so neither can be
 /// worked out from one buffer of audio.
 #[derive(Debug, Default)]
 pub struct Visualizer {
     pub mode: VizMode,
     bars: Bars,
-    /// One spectrum per column, oldest first.
-    history: VecDeque<Vec<f32>>,
+    vu: Vu,
+    /// When the last frame was drawn. Every smoothing constant here is a rate
+    /// per second, not per frame — the panel is redrawn on a timer that a
+    /// slow terminal will miss, and smoothing that quietly changes speed with
+    /// the frame rate is how a visualiser ends up feeling different on
+    /// someone else's machine.
+    drawn: Option<Instant>,
 }
+
+/// Assumed for the first frame, and the ceiling for a long gap — coming back
+/// to a window left in the background should not make everything lurch.
+const FRAME: f32 = 1.0 / 30.0;
 
 impl Visualizer {
     pub fn draw(&mut self, canvas: &mut Canvas, heard: &TapFrame) {
+        let now = Instant::now();
+        let elapsed = self
+            .drawn
+            .replace(now)
+            .map_or(FRAME, |then| now.duration_since(then).as_secs_f32())
+            .clamp(0.004, 0.25);
+        self.draw_after(canvas, heard, elapsed);
+    }
+
+    fn draw_after(&mut self, canvas: &mut Canvas, heard: &TapFrame, elapsed: f32) {
         match self.mode {
             VizMode::Bars => {
-                let bars = self.bars.update(heard, canvas.width() as usize / BAR_STRIDE);
+                let bars = self.bars.update(heard, canvas.width() as usize / BAR_STRIDE, elapsed);
                 draw_bars(canvas, bars);
             }
             VizMode::Scope => draw_scope(canvas, heard),
             VizMode::Vectorscope => draw_vectorscope(canvas, heard),
-            VizMode::Spectrogram => {
-                let spectrum = log_bins(&spectrum(&heard.mono()), heard.rate, canvas.height() as usize);
-                self.history.push_back(spectrum);
-                while self.history.len() > canvas.width() as usize {
-                    self.history.pop_front();
-                }
-                draw_spectrogram(canvas, &self.history);
+            VizMode::Vu => {
+                self.vu.update(heard, elapsed);
+                draw_vu(canvas, &self.vu);
             }
         }
     }
 
     /// Leaving one mode should not leave its state to surprise the next
-    /// visit — a spectrogram of what was playing ten minutes ago is a lie.
+    /// visit.
     pub fn forget(&mut self) {
         self.bars = Bars::default();
-        self.history.clear();
+        self.vu = Vu::default();
+        self.drawn = None;
     }
 }
 
 // ── Spectrum ────────────────────────────────────────────────────────────────
 
 /// Samples per transform. At 44.1 kHz this is 46 ms — long enough to resolve
-/// a bass note, short enough that the bars move with the music.
+/// a bass note, short enough that the bars move with the music. cava reaches
+/// for a second, longer transform to do better in the bass; at 2048 we are
+/// already past the resolution its bass buffer gets, so one will do.
 const WINDOW: usize = 2048;
 
 /// The band worth drawing. Below 50 Hz is rumble that swamps everything;
@@ -158,32 +177,46 @@ fn spectrum(mono: &[f32]) -> Vec<f32> {
     }
     fft(&mut re, &mut im);
     // Scaled so a full-scale tone comes out near 1.0 rather than near 500.
-    // Without it every gain downstream has to carry a factor of the window
-    // length, and the automatic one would spend ten seconds finding it.
+    // Without it every gain downstream carries a factor of the window length,
+    // and the automatic one spends ten seconds finding it.
     let scale = 4.0 / WINDOW as f32;
     (0..WINDOW / 2).map(|k| (re[k] * re[k] + im[k] * im[k]).sqrt() * scale).collect()
 }
 
+/// How steeply the bands are tilted upward with frequency, from cava's `eq`
+/// curve: `eq[n] *= pow(cut_off_frequency[n + 1], 0.85)`.
+///
+/// This is the single biggest thing separating a spectrum that looks alive
+/// from one where everything happens in the left quarter. Recorded music
+/// falls off with frequency — somewhere between pink and steeper — so an
+/// untilted spectrum is a bass hill with a dead plain beside it. Across
+/// 50 Hz to 10 kHz this lifts the top by about 40 dB, which is the same
+/// order as the fall it is answering.
+const TILT: f32 = 0.85;
+
 /// Fold the bins into `count` bands spaced logarithmically, because that is
-/// how octaves are spaced and how hearing works. Linear bands give a picture
-/// where the bottom two bars carry the entire song.
+/// how octaves are spaced and how hearing works, then tilt them.
 fn log_bins(magnitudes: &[f32], rate: u32, count: usize) -> Vec<f32> {
     if count == 0 || magnitudes.is_empty() || rate == 0 {
         return Vec::new();
     }
     let hz_per_bin = rate as f32 / WINDOW as f32;
     let ratio = HIGH_HZ / LOW_HZ;
+    // Tilt of one in the middle of the range rather than at an end, so the
+    // automatic gain starts near where it will settle.
+    let middle = (LOW_HZ * HIGH_HZ).sqrt().powf(TILT);
     (0..count)
         .map(|band| {
             let from = LOW_HZ * ratio.powf(band as f32 / count as f32);
             let to = LOW_HZ * ratio.powf((band + 1) as f32 / count as f32);
-            let first = (from / hz_per_bin) as usize;
+            let first = ((from / hz_per_bin) as usize).min(magnitudes.len() - 1);
             let last = ((to / hz_per_bin) as usize).max(first + 1).min(magnitudes.len());
-            // The loudest bin in the band, not the average: an average buries
-            // a single strong partial under the silence either side of it.
-            magnitudes[first.min(magnitudes.len().saturating_sub(1))..last]
-                .iter()
-                .fold(0.0f32, |loudest, m| loudest.max(*m))
+            // The mean across the band, as cava takes it: its `eq` divides by
+            // the bin count. A maximum is punchier and wronger — one strong
+            // partial then speaks for a whole octave.
+            let bins = &magnitudes[first..last];
+            let mean = bins.iter().sum::<f32>() / bins.len() as f32;
+            mean * to.powf(TILT) / middle
         })
         .collect()
 }
@@ -193,8 +226,22 @@ fn log_bins(magnitudes: &[f32], rate: u32, count: usize) -> Vec<f32> {
 /// Cells across per bar, so bars are wide enough to read as bars.
 const BAR_STRIDE: usize = 2;
 
-/// How fast a bar picks up speed on the way down, per frame squared.
-const FALL_STEP: f32 = 0.028;
+/// How long a bar takes to fall its whole height.
+///
+/// cava reaches this in about a quarter of a second, but by a route that
+/// doesn't quite hold still: its fall accumulates per *frame* and its gravity
+/// scales as `(66/framerate)^2.5`, which leaves a residual square root of the
+/// frame interval. On a machine drawing at ten frames a second rather than
+/// thirty the bars fall almost twice as fast. Working in seconds instead
+/// keeps cava's quarter-second while making it the same quarter-second
+/// everywhere.
+const FALL_SECS: f32 = 0.26;
+
+/// How quickly the raw band settles. Short — the transform is jittery frame
+/// to frame and this is only there to take the flicker off, with gravity
+/// doing the actual shaping. cava folds both jobs into one constant and
+/// accepts a slower attack for it.
+const SMOOTH_SECS: f32 = 0.03;
 
 /// How much of a bar's height its neighbours inherit, per step away. A spike
 /// on its own reads as noise; a spike with shoulders reads as a note.
@@ -210,17 +257,25 @@ struct Bars {
     /// Where each bar started falling from, and how long it has been falling.
     peaks: Vec<f32>,
     falls: Vec<f32>,
+    /// The integral filter's memory — one per bar.
+    memory: Vec<f32>,
     sensitivity: f32,
 }
 
 impl Default for Bars {
     fn default() -> Self {
-        Bars { heights: Vec::new(), peaks: Vec::new(), falls: Vec::new(), sensitivity: 1.0 }
+        Bars {
+            heights: Vec::new(),
+            peaks: Vec::new(),
+            falls: Vec::new(),
+            memory: Vec::new(),
+            sensitivity: 1.0,
+        }
     }
 }
 
 impl Bars {
-    fn update(&mut self, heard: &TapFrame, count: usize) -> &[f32] {
+    fn update(&mut self, heard: &TapFrame, count: usize, elapsed: f32) -> &[f32] {
         if count == 0 {
             self.heights.clear();
             return &self.heights;
@@ -229,16 +284,18 @@ impl Bars {
             self.heights = vec![0.0; count];
             self.peaks = vec![0.0; count];
             self.falls = vec![0.0; count];
+            self.memory = vec![0.0; count];
         }
 
         let bands = log_bins(&spectrum(&heard.mono()), heard.rate, count);
         if bands.len() != count {
             return &self.heights;
         }
-        // Decibels, over a fixed range with a floor under it. Loudness is
+
+        // Decibels over a fixed range with a floor under it. Loudness is
         // logarithmic and so is the ear, but the floor is what matters for
-        // the picture: without it every band keeps a sliver of bar and the
-        // bottom of the panel is a permanent slab.
+        // the picture: without one every band keeps a sliver of bar and the
+        // bottom of the panel becomes a permanent slab.
         let raised: Vec<f32> = bands
             .iter()
             .map(|band| {
@@ -258,37 +315,42 @@ impl Bars {
             }
         }
 
+        let settle = (-elapsed / SMOOTH_SECS).exp();
         let mut loudest = 0.0f32;
         for (i, &target) in spread.iter().enumerate() {
-            if target >= self.heights[i] {
-                // Rising is instant. A transient you cannot see is a
-                // transient the visualiser missed.
-                self.heights[i] = target;
-                self.peaks[i] = target;
-                self.falls[i] = 0.0;
+            // Everything below is in one domain — smoothed height against
+            // smoothed height. Comparing a raw band to a smoothed one lets a
+            // bar "fall" upwards, because the peak it falls from was measured
+            // on a different scale from the height it is being compared to.
+            let smoothed = self.memory[i] * settle + target * (1.0 - settle);
+            self.memory[i] = smoothed;
+
+            if smoothed < self.heights[i] {
+                // Falling accelerates, as cava's does: a linear decay reads
+                // as a lift being lowered, gravity reads as a drop.
+                self.falls[i] += elapsed;
+                let fallen = (self.falls[i] / FALL_SECS).powi(2);
+                self.heights[i] = (self.peaks[i] * (1.0 - fallen)).max(smoothed).max(0.0);
             } else {
-                // Falling accelerates. A linear decay reads as a lift being
-                // lowered; gravity reads as something dropping.
-                self.falls[i] += FALL_STEP;
-                let fallen = self.peaks[i] - self.falls[i] * self.falls[i];
-                self.heights[i] = fallen.max(target).max(0.0);
-                if self.heights[i] <= target {
-                    self.peaks[i] = target;
-                    self.falls[i] = 0.0;
-                }
+                // Rising goes straight there. A transient you cannot see is a
+                // transient the visualiser missed.
+                self.heights[i] = smoothed;
+                self.peaks[i] = smoothed;
+                self.falls[i] = 0.0;
             }
             loudest = loudest.max(self.heights[i]);
         }
 
         // Autosens: a quiet track and a loud one should both fill the panel.
         // Back off quickly when it clips and creep up when there is headroom,
-        // so it settles instead of pumping.
-        if loudest > 1.0 {
-            self.sensitivity *= 0.98;
+        // so it settles instead of pumping. cava's shape, at rates per second
+        // rather than per frame.
+        if loudest > 0.98 {
+            self.sensitivity *= 1.0 - 1.2 * elapsed;
         } else if loudest > 0.001 && loudest < 0.6 {
-            self.sensitivity *= 1.002;
+            self.sensitivity *= 1.0 + 0.6 * elapsed;
         }
-        self.sensitivity = self.sensitivity.clamp(0.05, 200.0);
+        self.sensitivity = self.sensitivity.clamp(0.02, 500.0);
 
         &self.heights
     }
@@ -303,44 +365,67 @@ fn draw_bars(canvas: &mut Canvas, bars: &[f32]) {
             // Colour by how high the pixel is rather than how tall the bar
             // is, so the gradient stands still while the bars move through
             // it — the whole picture flashing at once is a headache.
-            let heat = 1.0 - y as f32 / height as f32;
-            for across in 0..BAR_STRIDE as i32 - 1 {
-                canvas.set(x + across, y, ramp(heat));
-            }
+            canvas.set(x, y, ramp(1.0 - y as f32 / height as f32));
         }
     }
 }
 
 // ── Scope ───────────────────────────────────────────────────────────────────
 
+/// How many samples past a crossing have to agree before it counts as the
+/// start of a wave, from scope-tui. The first crossing you find is as likely
+/// to be noise wobbling across zero as the foot of a wave, and locking onto
+/// noise is exactly the jitter the trigger exists to remove.
+const TRIGGER_DEPTH: usize = 8;
+
 fn draw_scope(canvas: &mut Canvas, heard: &TapFrame) {
-    let mono = heard.mono();
     let width = canvas.width() as usize;
-    if mono.is_empty() || width == 0 {
+    let height = canvas.height() as i32;
+    if width == 0 || height == 0 || heard.samples.is_empty() {
+        return;
+    }
+    let channels = heard.channels.max(1) as usize;
+    let frames: Vec<&[f32]> = heard.samples.chunks_exact(channels).collect();
+    if frames.is_empty() {
         return;
     }
 
-    // Start at a rising zero crossing. Without it the wave slides sideways a
-    // random distance every frame and the whole thing shimmers; with it a
-    // steady note stands still, which is what an oscilloscope is for.
-    let span = (width * 4).min(mono.len());
-    let searchable = mono.len() - span;
-    let start = (0..searchable)
-        .find(|&i| mono[i] <= 0.0 && mono[i + 1] > 0.0)
-        .unwrap_or(0);
-    let shown = &mono[start..start + span];
-
-    let middle = canvas.height() as f32 / 2.0;
-    let at = |x: usize| -> i32 {
-        let sample = shown[(x * shown.len() / width).min(shown.len() - 1)];
-        (middle - sample.clamp(-1.0, 1.0) * middle) as i32
-    };
-    let mut previous = at(0);
-    for x in 0..width {
-        let y = at(x);
-        canvas.line((x as i32, previous), (x as i32, y), accent());
-        previous = y;
+    // The zero line, so a quiet passage is visibly quiet rather than blank.
+    let middle = height / 2;
+    for x in 0..canvas.width() as i32 {
+        canvas.set(x, middle, dim());
     }
+
+    let span = (width * 4).min(frames.len());
+    let start = trigger(&frames, frames.len() - span);
+    let shown = &frames[start..start + span];
+
+    // Each channel its own trace and its own colour. Drawn back to front so
+    // the left channel, which most ears follow, sits on top.
+    let half = height as f32 / 2.0;
+    for channel in (0..channels.min(2)).rev() {
+        let colour = if channel == 0 { accent() } else { folder() };
+        let at = |x: usize| -> i32 {
+            let frame = shown[(x * shown.len() / width).min(shown.len() - 1)];
+            (half - frame[channel].clamp(-1.0, 1.0) * half) as i32
+        };
+        let mut previous = at(0);
+        for x in 0..width {
+            let y = at(x);
+            // Joined, not dotted: a wave drawn as points reads as static.
+            canvas.line((x as i32, previous), (x as i32, y), colour);
+            previous = y;
+        }
+    }
+}
+
+/// The first rising crossing that holds, searching only as far as `limit` so
+/// there is always a full sweep of samples after it.
+fn trigger(frames: &[&[f32]], limit: usize) -> usize {
+    let held = |from: usize| {
+        (1..=TRIGGER_DEPTH).all(|step| frames.get(from + step).is_some_and(|f| f[0] > 0.0))
+    };
+    (0..limit).find(|&i| frames[i][0] <= 0.0 && held(i)).unwrap_or(0)
 }
 
 // ── Vectorscope ─────────────────────────────────────────────────────────────
@@ -352,45 +437,171 @@ fn draw_vectorscope(canvas: &mut Canvas, heard: &TapFrame) {
         return;
     }
 
-    // The goniometer turn: mid up the middle, side across. Mono collapses to
-    // a vertical line, a wide mix opens into a cloud, and anything out of
-    // phase leans over. Cells are half as wide as they are tall even after
-    // the half blocks, so the horizontal gets the shorter radius.
     let radius = (width / 2.0).min(height / 2.0);
     let (cx, cy) = (width / 2.0, height / 2.0);
-    let root_half = std::f32::consts::FRAC_1_SQRT_2;
 
-    for (index, frame) in heard.samples.chunks_exact(heard.channels as usize).enumerate() {
+    // Crosshair, from scope-tui: without it a quiet passage is a dot in a
+    // void and there is nothing to judge the lean against.
+    for x in 0..canvas.width() as i32 {
+        canvas.set(x, cy as i32, dim());
+    }
+    for y in 0..canvas.height() as i32 {
+        canvas.set(cx as i32, y, dim());
+    }
+
+    // The goniometer turn: mid up the middle, side across. Mono collapses to
+    // a vertical line, a wide mix opens into a cloud, and anything out of
+    // phase leans over. scope-tui plots the channels straight onto the axes,
+    // which puts mono on the diagonal; the turn is what broadcast metering
+    // does and it makes "is this mono" a glance rather than a judgement.
+    let root_half = std::f32::consts::FRAC_1_SQRT_2;
+    let frames = heard.samples.chunks_exact(heard.channels as usize);
+    let total = frames.len().max(1);
+    for (index, frame) in frames.enumerate() {
         let (left, right) = (frame[0], frame[1]);
         let side = (right - left) * root_half;
         let mid = (right + left) * root_half;
         let x = cx + side.clamp(-1.0, 1.0) * radius;
         let y = cy - mid.clamp(-1.0, 1.0) * radius;
-        // Older samples sit further back in the buffer and are drawn dimmer,
-        // which gives the trace a direction instead of a static scribble.
-        let age = index as f32 / (heard.samples.len() / heard.channels as usize).max(1) as f32;
+        // Older samples are drawn dimmer, so the trace has a direction
+        // instead of being a static scribble.
+        let age = index as f32 / total as f32;
         canvas.set(x as i32, y as i32, if age > 0.65 { accent() } else { folder() });
     }
 }
 
-// ── Spectrogram ─────────────────────────────────────────────────────────────
+// ── VU ──────────────────────────────────────────────────────────────────────
 
-fn draw_spectrogram(canvas: &mut Canvas, history: &VecDeque<Vec<f32>>) {
-    let width = canvas.width() as usize;
+/// How long a VU meter takes to reach 99% of a steady tone, and the thing
+/// that makes it a VU meter rather than a level bar. A one-pole reaches 99%
+/// in about 4.6 time constants, so this is the 300 ms of the standard.
+const VU_ATTACK: f32 = 0.300 / 4.6;
+
+/// How long the peak marker sits before it starts to fall, and how fast it
+/// falls once it does. A meter that only shows the average hides clipping;
+/// one that only shows peaks tells you nothing about how loud it feels.
+const PEAK_HOLD: f32 = 0.9;
+const PEAK_FALL_DB: f32 = 24.0;
+
+/// The quietest the meter bothers to show.
+const VU_FLOOR_DB: f32 = -48.0;
+
+#[derive(Debug, Default)]
+struct Vu {
+    /// Mean square per channel, under the VU ballistic.
+    power: [f32; 2],
+    /// Peak per channel, in decibels, and how long it has been held.
+    peak_db: [f32; 2],
+    held: [f32; 2],
+    channels: usize,
+}
+
+impl Vu {
+    fn update(&mut self, heard: &TapFrame, elapsed: f32) {
+        let channels = (heard.channels.max(1) as usize).min(2);
+        self.channels = channels;
+        let settle = (-elapsed / VU_ATTACK).exp();
+
+        for channel in 0..channels {
+            let samples = heard.samples.iter().skip(channel).step_by(heard.channels.max(1) as usize);
+            let (mut sum, mut count, mut loudest) = (0.0f32, 0usize, 0.0f32);
+            for sample in samples {
+                sum += sample * sample;
+                count += 1;
+                loudest = loudest.max(sample.abs());
+            }
+            if count == 0 {
+                continue;
+            }
+            // Power averaged, then rooted for display: that is what RMS is,
+            // and averaging the samples themselves would read zero on any
+            // symmetrical waveform.
+            let mean_square = sum / count as f32;
+            self.power[channel] = self.power[channel] * settle + mean_square * (1.0 - settle);
+
+            let peak = 20.0 * loudest.max(1e-9).log10();
+            if peak >= self.peak_db[channel] {
+                self.peak_db[channel] = peak;
+                self.held[channel] = 0.0;
+            } else {
+                self.held[channel] += elapsed;
+                if self.held[channel] > PEAK_HOLD {
+                    self.peak_db[channel] -= PEAK_FALL_DB * elapsed;
+                }
+            }
+            self.peak_db[channel] = self.peak_db[channel].max(VU_FLOOR_DB);
+        }
+    }
+
+    /// Where each channel sits on the meter, 0..=1, and where its peak is.
+    fn readings(&self) -> Vec<(f32, f32)> {
+        (0..self.channels)
+            .map(|channel| {
+                let rms = self.power[channel].max(1e-18).sqrt();
+                let db = 20.0 * rms.max(1e-9).log10();
+                (scale(db), scale(self.peak_db[channel]))
+            })
+            .collect()
+    }
+}
+
+fn scale(db: f32) -> f32 {
+    ((db - VU_FLOOR_DB) / -VU_FLOOR_DB).clamp(0.0, 1.0)
+}
+
+fn draw_vu(canvas: &mut Canvas, vu: &Vu) {
+    let width = canvas.width() as i32;
     let height = canvas.height() as i32;
-    // Newest on the right, so it scrolls the way reading does.
-    let start = width.saturating_sub(history.len());
-    for (column, spectrum) in history.iter().enumerate() {
-        let x = (start + column) as i32;
-        for (band, &magnitude) in spectrum.iter().enumerate() {
-            // Low frequencies at the bottom, like every other spectrogram.
-            let y = height - 1 - band as i32;
-            let db = 20.0 * magnitude.max(1e-9).log10();
-            let heat = (db - FLOOR_DB) / -FLOOR_DB;
-            if heat > 0.05 {
-                canvas.set(x, y, ramp(heat.min(1.0)));
+    let readings = vu.readings();
+    if width < 4 || height < 4 || readings.is_empty() {
+        return;
+    }
+
+    // Two bars and a row of marks, with the bars given the room.
+    let ticks = height - 1;
+    let per_bar = (ticks / readings.len() as i32).max(1);
+    let thickness = (per_bar - 1).max(1);
+
+    for (channel, &(level, peak)) in readings.iter().enumerate() {
+        let top = channel as i32 * per_bar;
+        let filled = (level * width as f32).round() as i32;
+        for x in 0..filled {
+            // Coloured by where the pixel is on the scale, not by how loud
+            // it is now, so the hot end stays where it is and the bar walks
+            // into it.
+            let colour = zone(x as f32 / width as f32);
+            for y in top..top + thickness {
+                canvas.set(x, y, colour);
             }
         }
+        // The peak, held: the gap between it and the bar is the crest
+        // factor, which is to say how hard the track has been squashed.
+        let marker = ((peak * width as f32).round() as i32).clamp(0, width - 1);
+        if marker > filled {
+            for y in top..top + thickness {
+                canvas.set(marker, y, Color::White);
+            }
+        }
+    }
+
+    // Where the scale changes character: -24, -12 and -6 dB. Numbers would
+    // need character rows the picture is using, and the colour says it.
+    for db in [-24.0, -12.0, -6.0] {
+        let x = (scale(db) * width as f32) as i32;
+        canvas.set(x, height - 1, zone(scale(db)));
+    }
+}
+
+/// Green while there is room, the accent as it fills, red where it is asking
+/// for trouble.
+fn zone(across: f32) -> Color {
+    let db = VU_FLOOR_DB + across * -VU_FLOOR_DB;
+    if db >= -6.0 {
+        Color::Red
+    } else if db >= -18.0 {
+        accent()
+    } else {
+        folder()
     }
 }
 
@@ -438,6 +649,11 @@ mod tests {
         TapFrame { samples, rate, channels }
     }
 
+    fn stereo(left: Vec<f32>, right: Vec<f32>, rate: u32) -> TapFrame {
+        let samples = left.into_iter().zip(right).flat_map(|(l, r)| [l, r]).collect();
+        frame(samples, rate, 2)
+    }
+
     #[test]
     fn the_transform_puts_a_tone_in_the_right_bin() {
         // A 1 kHz tone at 44.1 kHz over 2048 samples belongs in bin
@@ -452,7 +668,6 @@ mod tests {
             .unwrap();
         assert!((45..=47).contains(&peak), "1 kHz landed in bin {peak}");
 
-        // And silence has no peak to find.
         let quiet = spectrum(&vec![0.0; WINDOW]);
         assert!(quiet.iter().all(|m| *m < 1e-3), "silence is silent");
     }
@@ -472,12 +687,9 @@ mod tests {
 
     #[test]
     fn bands_are_spaced_by_octave_not_by_hertz() {
-        // Two tones an octave apart should land the same distance apart in
-        // bands, which is the whole point of log spacing.
         let rate = 44100;
-        let bands = |hz: f32| {
-            let magnitudes = spectrum(&sine(hz, rate, WINDOW));
-            let bands = log_bins(&magnitudes, rate, 32);
+        let loudest_band = |hz: f32| {
+            let bands = log_bins(&spectrum(&sine(hz, rate, WINDOW)), rate, 32);
             bands
                 .iter()
                 .enumerate()
@@ -485,7 +697,7 @@ mod tests {
                 .map(|(band, _)| band as i32)
                 .unwrap()
         };
-        let (low, mid, high) = (bands(400.0), bands(800.0), bands(1600.0));
+        let (low, mid, high) = (loudest_band(400.0), loudest_band(800.0), loudest_band(1600.0));
         let (first, second) = (mid - low, high - mid);
         // 32 bands across 50 Hz to 10 kHz is 7.6 octaves, so an octave is
         // about 4.2 bands and consecutive ones round to 4 or 5. The point is
@@ -496,22 +708,43 @@ mod tests {
     }
 
     #[test]
+    fn the_tilt_lifts_the_top_of_the_range_against_the_bottom() {
+        // A flat spectrum — every bin the same — is what the tilt exists to
+        // bend. Recorded music falls off with frequency, so drawn flat it is
+        // a bass hill with a dead plain beside it.
+        //
+        // Not tested with tones: a band up at 8 kHz spans dozens of bins and
+        // a band at 100 Hz spans one, so averaging across the band cancels
+        // most of the tilt for a signal that occupies a single bin. Which is
+        // right — real music is broadband — but it makes a pure tone the one
+        // signal that says nothing about this.
+        let bands = log_bins(&vec![1.0; WINDOW / 2], 44100, 32);
+        let (low, high) = (bands[0], bands[31]);
+        assert!(high > low * 20.0, "the top should be lifted well clear: {low} vs {high}");
+        // And it climbs all the way rather than jumping at one end.
+        assert!(
+            bands.windows(2).all(|pair| pair[1] > pair[0]),
+            "each band above the last: {bands:?}"
+        );
+    }
+
+    #[test]
     fn bars_rise_at_once_and_fall_under_gravity() {
         let mut bars = Bars::default();
         let rate = 44100;
         let loud = frame(sine(1000.0, rate, WINDOW), rate, 1);
         let silence = frame(vec![0.0; WINDOW], rate, 1);
 
-        bars.update(&loud, 16);
+        for _ in 0..4 {
+            bars.update(&loud, 16, FRAME);
+        }
         let struck = bars.heights.iter().cloned().fold(0.0f32, f32::max);
         assert!(struck > 0.0, "a tone should move something");
 
-        // The first frame of silence has barely dropped; several frames later
-        // it has dropped much further than the difference between them.
-        bars.update(&silence, 16);
+        bars.update(&silence, 16, FRAME);
         let after_one = bars.heights.iter().cloned().fold(0.0f32, f32::max);
         for _ in 0..8 {
-            bars.update(&silence, 16);
+            bars.update(&silence, 16, FRAME);
         }
         let after_nine = bars.heights.iter().cloned().fold(0.0f32, f32::max);
         assert!(after_one < struck, "it should be falling");
@@ -523,10 +756,36 @@ mod tests {
     }
 
     #[test]
+    fn a_slow_terminal_gets_the_same_fall_as_a_fast_one() {
+        // Every constant here is a rate per second, so nine frames at a
+        // thirtieth should land where three frames at a tenth do. Without
+        // that, the visualiser feels different on a machine that cannot keep
+        // up — which is exactly the machine you would want it to behave on.
+        let rate = 44100;
+        let loud = frame(sine(1000.0, rate, WINDOW), rate, 1);
+        let silence = frame(vec![0.0; WINDOW], rate, 1);
+
+        let settle = |bars: &mut Bars, step: f32, frames: usize| {
+            for _ in 0..4 {
+                bars.update(&loud, 16, step);
+            }
+            for _ in 0..frames {
+                bars.update(&silence, 16, step);
+            }
+            bars.heights.iter().cloned().fold(0.0f32, f32::max)
+        };
+        let fast = settle(&mut Bars::default(), 1.0 / 30.0, 9);
+        let slow = settle(&mut Bars::default(), 1.0 / 10.0, 3);
+        assert!((fast - slow).abs() < 0.12, "three tenths either way: {fast} vs {slow}");
+    }
+
+    #[test]
     fn a_neighbour_of_a_struck_bar_is_lifted_but_not_as_far() {
         let mut bars = Bars::default();
         let rate = 44100;
-        bars.update(&frame(sine(1000.0, rate, WINDOW), rate, 1), 24);
+        for _ in 0..4 {
+            bars.update(&frame(sine(1000.0, rate, WINDOW), rate, 1), 24, FRAME);
+        }
 
         let peak = bars
             .heights
@@ -541,23 +800,95 @@ mod tests {
     }
 
     #[test]
+    fn the_trigger_waits_for_a_crossing_that_holds() {
+        // A single sample flicking across zero, then the real wave. Taking
+        // the first crossing would lock onto the flick and the picture would
+        // jump about; the depth check walks past it.
+        let mut samples: Vec<f32> = vec![-0.01; 4];
+        samples.push(0.02); // noise: up for one sample only
+        samples.extend([-0.01; 4]);
+        samples.extend(sine(200.0, 44100, 400)); // starts at zero and rises
+        let frames: Vec<&[f32]> = samples.chunks_exact(1).collect();
+
+        let at = trigger(&frames, frames.len() - 64);
+        assert!(at >= 8, "walked past the single-sample flick, landed at {at}");
+        assert!(frames[at][0] <= 0.0 && frames[at + 1][0] > 0.0, "and it is a real crossing");
+    }
+
+    #[test]
+    fn the_vu_meter_settles_towards_the_level_rather_than_jumping_to_it() {
+        let rate = 44100;
+        // A full-scale tone is 0.707 RMS, which is -3 dB.
+        let loud = stereo(sine(440.0, rate, 2048), sine(440.0, rate, 2048), rate);
+
+        let mut vu = Vu::default();
+        vu.update(&loud, FRAME);
+        let (first, _) = vu.readings()[0];
+        assert!(first > 0.0, "it should have started moving");
+
+        // The standard is 99% of the way in 300 ms, so most of the journey
+        // is done by then and the rest of the second adds almost nothing.
+        // (The needle covers ground fast at the start because the scale is
+        // in decibels: 40% of the power is already 85% of the way up.)
+        for _ in 1..(0.3 / FRAME) as usize {
+            vu.update(&loud, FRAME);
+        }
+        let (at_300ms, _) = vu.readings()[0];
+        for _ in 0..30 {
+            vu.update(&loud, FRAME);
+        }
+        let (settled, peak) = vu.readings()[0];
+        assert!(at_300ms > first, "still climbing at 300 ms: {first} -> {at_300ms}");
+        assert!(
+            (settled - at_300ms).abs() < 0.02,
+            "and all but arrived by then: {at_300ms} vs {settled}"
+        );
+        assert!(settled > 0.85, "a second of a loud tone should be near the top: {settled}");
+        assert!(peak >= settled, "the peak is never under the average: {peak} vs {settled}");
+
+        // And it falls back rather than sticking.
+        let silence = stereo(vec![0.0; 2048], vec![0.0; 2048], rate);
+        for _ in 0..30 {
+            vu.update(&silence, FRAME);
+        }
+        let (quiet, _) = vu.readings()[0];
+        assert!(quiet < 0.3, "a second of silence should have dropped it: {quiet}");
+    }
+
+    #[test]
+    fn the_peak_marker_holds_before_it_falls() {
+        let rate = 44100;
+        let mut vu = Vu::default();
+        vu.update(&stereo(sine(440.0, rate, 2048), sine(440.0, rate, 2048), rate), FRAME);
+        let struck = vu.readings()[0].1;
+
+        let silence = stereo(vec![0.0; 2048], vec![0.0; 2048], rate);
+        // Inside the hold it has not moved.
+        for _ in 0..((PEAK_HOLD / FRAME) as usize - 4) {
+            vu.update(&silence, FRAME);
+        }
+        assert_eq!(vu.readings()[0].1, struck, "held");
+
+        for _ in 0..30 {
+            vu.update(&silence, FRAME);
+        }
+        assert!(vu.readings()[0].1 < struck, "and then released");
+    }
+
+    #[test]
     fn every_mode_draws_something_and_none_of_them_panic() {
         let rate = 44100;
-        // Interleaved stereo, the channels deliberately different so the
-        // vectorscope has something other than a line to draw.
-        let samples: Vec<f32> = sine(440.0, rate, 4096)
-            .into_iter()
-            .zip(sine(660.0, rate, 4096))
-            .flat_map(|(l, r)| [l, r])
-            .collect();
-        let heard = frame(samples, rate, 2);
+        // The channels deliberately different, so the vectorscope has
+        // something other than a line to draw.
+        let heard = stereo(sine(440.0, rate, 4096), sine(660.0, rate, 4096), rate);
 
         for mode in VIZ_MODES {
             let mut viz = Visualizer { mode, ..Default::default() };
             let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 40, height: 10 });
-            // Twice, so the modes that carry state over a frame do.
-            viz.draw(&mut canvas, &heard);
-            viz.draw(&mut canvas, &heard);
+            // Several times, so the modes that carry state across a frame do.
+            for _ in 0..6 {
+                viz.draw_after(&mut canvas, &heard, FRAME);
+            }
             let drawn: usize = canvas
                 .into_lines()
                 .iter()
@@ -575,14 +906,22 @@ mod tests {
     #[test]
     fn a_canvas_with_no_room_is_not_a_crash() {
         let rate = 44100;
-        let heard = frame(sine(440.0, rate, 512), rate, 1);
-        for (width, height) in [(0, 0), (1, 1), (0, 6), (6, 0)] {
+        let heard = stereo(sine(440.0, rate, 512), sine(440.0, rate, 512), rate);
+        for (width, height) in [(0, 0), (1, 1), (0, 6), (6, 0), (3, 2)] {
             let mut viz = Visualizer::default();
             for mode in VIZ_MODES {
                 viz.mode = mode;
                 let mut canvas = Canvas::new(Rect { x: 0, y: 0, width, height });
-                viz.draw(&mut canvas, &heard);
+                viz.draw_after(&mut canvas, &heard, FRAME);
             }
+        }
+        // And mono, which the vectorscope has nothing to say about.
+        let mono = frame(sine(440.0, rate, 512), rate, 1);
+        let mut viz = Visualizer::default();
+        for mode in VIZ_MODES {
+            viz.mode = mode;
+            let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 20, height: 6 });
+            viz.draw_after(&mut canvas, &mono, FRAME);
         }
     }
 
