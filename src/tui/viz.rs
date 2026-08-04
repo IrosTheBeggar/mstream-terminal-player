@@ -532,7 +532,7 @@ const PEAK_FALL_DB: f32 = 24.0;
 /// The quietest the meter bothers to show.
 const VU_FLOOR_DB: f32 = -48.0;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Vu {
     /// Mean square per channel, under the VU ballistic.
     power: [f32; 2],
@@ -540,6 +540,17 @@ struct Vu {
     peak_db: [f32; 2],
     held: [f32; 2],
     channels: usize,
+}
+
+/// Hand-written for one field: a derived `Default` would start the peaks at
+/// 0.0 dB — full scale — and `forget()` rebuilds this state every time the
+/// mode is entered, so every visit would open on a phantom peak spending
+/// seconds falling from the right edge. Peaks start on the floor: nothing
+/// has been heard yet.
+impl Default for Vu {
+    fn default() -> Self {
+        Vu { power: [0.0; 2], peak_db: [VU_FLOOR_DB; 2], held: [0.0; 2], channels: 0 }
+    }
 }
 
 impl Vu {
@@ -919,6 +930,18 @@ mod tests {
             vu.update(&silence, FRAME);
         }
         assert!(vu.readings()[0].1 < struck, "and then released");
+    }
+
+    #[test]
+    fn the_meter_opens_with_no_phantom_peak_pinned_at_the_top() {
+        // A derived `Default` started `peak_db` at 0.0 — full scale — and
+        // `forget()` rebuilds this state on every visit to the mode, so
+        // every visit opened on a peak nothing had struck, spending seconds
+        // walking it down from the right edge.
+        let mut vu = Vu::default();
+        vu.update(&frame(vec![0.0; 2048], 44100, 1), FRAME);
+        let (_, peak) = vu.readings()[0];
+        assert!(peak < 0.05, "silence has struck no peak, got {peak}");
     }
 
     /// How many pixels a mode lights.

@@ -1106,7 +1106,12 @@ fn render_now_placeholder(frame: &mut Frame, area: Rect, what: &str, why: &str) 
 /// The queue as the full-screen view draws it. It shares the browser screen's
 /// selection rather than keeping its own, so `d` removes the row under the
 /// cursor whichever screen you are looking at.
-fn render_now_queue(frame: &mut Frame, area: Rect, app: &App) {
+///
+/// The state is borrowed, not copied: `ListState` is `Copy`, so a tempting
+/// local `let mut state = …` compiles — and throws the corrected scroll
+/// offset away with every frame, pinning the selection to the bottom edge
+/// while the list slides underneath it.
+fn render_now_queue(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.queue.items.is_empty() {
         render_now_placeholder(frame, area, "nothing queued", "0 back, then 'a' on a track");
         return;
@@ -1139,11 +1144,10 @@ fn render_now_queue(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let mut state = app.queue.state;
     frame.render_stateful_widget(
         List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
         area,
-        &mut state,
+        &mut app.queue.state,
     );
 }
 
@@ -2689,6 +2693,28 @@ mod tests {
         app.now_playing = Some(tagged_track());
         assert_eq!(app.now_tab(), NowTab::Queue);
         assert!(!draw(&mut app).contains("Lyrics"));
+    }
+
+    #[test]
+    fn the_fullscreen_queue_keeps_the_scroll_its_render_worked_out() {
+        // `ListState` is `Copy`, so rendering into a local copy threw the
+        // corrected offset away with every frame: the selection stuck to
+        // the bottom edge and the list slid underneath it.
+        let mut app = connected_app();
+        app.queue.replace(
+            (0..40)
+                .map(|i| Track {
+                    filepath: format!("lib/{i:02}.mp3"),
+                    metadata: Default::default(),
+                })
+                .collect(),
+        );
+        app.handle_action(Action::ToggleNowPlaying);
+        app.now_tab = NowTab::Queue;
+        app.queue.state.select(Some(39));
+
+        draw_sized(&mut app, 60, 12);
+        assert!(app.queue.state.offset() > 0, "the render's scroll correction survives it");
     }
 
     #[test]

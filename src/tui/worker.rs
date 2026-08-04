@@ -161,6 +161,24 @@ impl AutoDjMode {
         next
     }
 
+    /// The same ring, leftwards. Walks forward until the lap closes rather
+    /// than hopping twice: two hops is only "back" when all three modes are
+    /// on offer, and without discovery the ring is two long.
+    pub fn prev_available(self, caps: Capabilities) -> Self {
+        let mut at = self;
+        // Bounded by the number of modes rather than by getting home, so a
+        // mode this server cannot offer — which nothing walks back round
+        // to — settles on something available instead of spinning.
+        for _ in 0..3 {
+            let next = at.next_available(caps);
+            if next == self {
+                break;
+            }
+            at = next;
+        }
+        at
+    }
+
     /// Whether this mode can work against the given server.
     pub fn available(self, caps: Capabilities) -> bool {
         self != AutoDjMode::Similar || caps.discovery
@@ -1013,6 +1031,21 @@ mod tests {
             Some("http://x/b.mp3"),
             "a later track still ends on its own"
         );
+    }
+
+    #[test]
+    fn the_mode_ring_steps_back_one_whatever_its_length() {
+        let all = Capabilities { discovery: true, ..Default::default() };
+        for mode in [AutoDjMode::Off, AutoDjMode::Similar, AutoDjMode::BpmKey] {
+            assert_eq!(mode.next_available(all).prev_available(all), mode);
+        }
+        // Without discovery the ring is two long, where "forward twice" —
+        // the old way back — is a lap.
+        let few = Capabilities::default();
+        for mode in [AutoDjMode::Off, AutoDjMode::BpmKey] {
+            assert_eq!(mode.next_available(few).prev_available(few), mode);
+            assert_ne!(mode.prev_available(few), mode, "left always moves");
+        }
     }
 
     #[test]

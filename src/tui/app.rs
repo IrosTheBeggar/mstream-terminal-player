@@ -426,6 +426,10 @@ pub struct Queue {
     pub state: ListState,
     pub repeat: Repeat,
     pub shuffle: bool,
+    /// Tracks started since playback last began from nothing. Linear play
+    /// can see the end of the queue coming positionally; shuffle has no
+    /// position, so its end is this count reaching the queue's length.
+    played: usize,
 }
 
 impl Default for Repeat {
@@ -483,6 +487,19 @@ impl Queue {
         was_current
     }
 
+    /// Note that the track at `index` is starting, and move the cursor to
+    /// it. Also the pass clock: starting from nothing deals a fresh pass,
+    /// and every start — chosen, skipped to, or advanced to — spends one
+    /// of its plays.
+    pub fn start(&mut self, index: usize) {
+        if self.current.is_none() {
+            self.played = 0;
+        }
+        self.played += 1;
+        self.current = Some(index);
+        self.state.select(Some(index));
+    }
+
     /// Next track to play. `manual` marks a user-pressed skip, which is never
     /// trapped by repeat-one — the same rule the engine uses.
     pub fn next_index(&self, manual: bool) -> Option<usize> {
@@ -496,6 +513,13 @@ impl Queue {
             return Some(current);
         }
         if self.shuffle {
+            // No position to run out of, so the end is counted instead:
+            // the pass is over once as many tracks have started as the
+            // queue holds. Picks repeat, so this bounds the pass rather
+            // than promising that everything in it was played.
+            if self.repeat == Repeat::Off && self.played >= self.items.len() {
+                return None;
+            }
             if self.items.len() <= 1 {
                 return Some(0);
             }
@@ -520,6 +544,20 @@ impl Queue {
             Some(0) if self.repeat == Repeat::All => Some(self.items.len() - 1),
             Some(0) | None => Some(0),
             Some(cur) => Some(cur - 1),
+        }
+    }
+
+    // The cursor, not playback: these move what Enter and `d` act on.
+
+    pub fn select_first(&mut self) {
+        if !self.items.is_empty() {
+            self.state.select(Some(0));
+        }
+    }
+
+    pub fn select_last(&mut self) {
+        if !self.items.is_empty() {
+            self.state.select(Some(self.items.len() - 1));
         }
     }
 }
@@ -1319,23 +1357,34 @@ impl App {
             Action::HalfPageUp => self.move_selection(-PAGE_STEP / 2),
             Action::HalfPageDown => self.move_selection(PAGE_STEP / 2),
             Action::First => {
-                match self.focus {
-                    Focus::Browser => self.pane_mut().select_first(),
-                    Focus::Queue => {
-                        if !self.queue.items.is_empty() {
-                            self.queue.state.select(Some(0));
-                        }
+                // The same ownership rule as `move_selection`: the
+                // full-screen view keeps the jump keys while it is up, and
+                // on its scrolling tabs First means the top.
+                if self.fullscreen {
+                    match self.now_tab() {
+                        NowTab::Queue => self.queue.select_first(),
+                        _ => self.now_scroll = 0,
+                    }
+                } else {
+                    match self.focus {
+                        Focus::Browser => self.pane_mut().select_first(),
+                        Focus::Queue => self.queue.select_first(),
                     }
                 }
                 Vec::new()
             }
             Action::Last => {
-                match self.focus {
-                    Focus::Browser => self.pane_mut().select_last(),
-                    Focus::Queue => {
-                        if !self.queue.items.is_empty() {
-                            self.queue.state.select(Some(self.queue.items.len() - 1));
-                        }
+                if self.fullscreen {
+                    // The scrolling tabs have no bottom to know about, so
+                    // in the full-screen view Last only means something on
+                    // the queue.
+                    if self.now_tab() == NowTab::Queue {
+                        self.queue.select_last();
+                    }
+                } else {
+                    match self.focus {
+                        Focus::Browser => self.pane_mut().select_last(),
+                        Focus::Queue => self.queue.select_last(),
                     }
                 }
                 Vec::new()
@@ -1808,10 +1857,7 @@ impl App {
                 self.autodj = if delta > 0 {
                     self.autodj.next_available(self.capabilities)
                 } else {
-                    // Three modes, so stepping forward twice is stepping back.
-                    self.autodj
-                        .next_available(self.capabilities)
-                        .next_available(self.capabilities)
+                    self.autodj.prev_available(self.capabilities)
                 };
                 if self.autodj == AutoDjMode::Off {
                     self.autodj_pending = false;
@@ -2379,7 +2425,16 @@ impl App {
             self.info("nothing is playing");
             return Vec::new();
         };
-        self.focus = Focus::Queue;
+        // Put the queue on screen before handing it the cursor. Focus alone
+        // is not that: with the column hidden it left every later key
+        // driving a list nobody could see — and the full-screen view keeps
+        // its queue on a tab, where focus means nothing at all.
+        if self.fullscreen {
+            self.now_tab = NowTab::Queue;
+        } else {
+            self.queue_column = true;
+            self.focus = Focus::Queue;
+        }
         self.queue.state.select(Some(index));
         if let Some(track) = self.queue.items.get(index) {
             self.info(format!("playing {}", track.display_name()));
@@ -2465,8 +2520,7 @@ impl App {
                 return Vec::new();
             }
         };
-        self.queue.current = Some(index);
-        self.queue.state.select(Some(index));
+        self.queue.start(index);
         let hint = track.metadata.duration;
         self.remember_played(&track);
         self.now_playing = Some(track);
@@ -4073,6 +4127,107 @@ mod tests {
         assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
         assert_eq!(app.queue.current, None);
         assert!(app.now_playing.is_none());
+    }
+
+    #[test]
+    fn a_shuffled_queue_still_ends_when_repeat_is_off() {
+        // Shuffle has no position to run out of, so the end has to be
+        // counted: it used to draw another track forever while the
+        // indicator said repeat was off.
+        let mut app = connected_app();
+        app.queue.replace(vec![track("a"), track("b"), track("c")]);
+        app.queue.shuffle = true;
+
+        let mut effects = app.handle_action(Action::PlayPause);
+        for started in 1..3 {
+            effects = app.apply_event(ended(&effects));
+            assert!(
+                matches!(effects.first(), Some(Effect::Audio(AudioCmd::Play { .. }))),
+                "track {started} ended, the pass goes on"
+            );
+        }
+        let effects = app.apply_event(ended(&effects));
+        assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)], "three starts was the pass");
+        assert_eq!(app.queue.current, None);
+
+        // Stopped is not stuck: the engine reports idle, and space deals a
+        // fresh pass rather than the queue being spent for good.
+        app.apply_event(Event::Status(PlayerStatus::default()));
+        let effects = app.handle_action(Action::PlayPause);
+        assert!(matches!(effects.first(), Some(Effect::Audio(AudioCmd::Play { .. }))));
+        let effects = app.apply_event(ended(&effects));
+        assert!(
+            matches!(effects.first(), Some(Effect::Audio(AudioCmd::Play { .. }))),
+            "the new pass is not billed for the old one's plays"
+        );
+    }
+
+    #[test]
+    fn jump_to_playing_puts_the_queue_on_screen_before_handing_it_the_cursor() {
+        // `i` used to move focus without showing the column, leaving the
+        // arrows driving a list nobody could see, Enter restarting the
+        // current track, and `d` deleting an unseen row.
+        let mut app = connected_app();
+        app.queue.replace(vec![track("a"), track("b")]);
+        app.handle_action(Action::PlayPause);
+        assert!(!app.queue_column, "the column starts hidden");
+
+        app.handle_action(Action::JumpToPlaying);
+        assert!(app.queue_column, "the cursor's list is put on screen with it");
+        assert_eq!(app.focus, Focus::Queue);
+        assert_eq!(app.queue.state.selected(), app.queue.current);
+    }
+
+    #[test]
+    fn jump_to_playing_in_the_fullscreen_view_turns_to_the_queue_tab() {
+        // The full-screen view keeps its queue on a tab, where focus means
+        // nothing — and a focus quietly parked on the queue would leave the
+        // browser screen driving the hidden column after `0` back.
+        let mut app = connected_app();
+        app.queue.replace(vec![track("a")]);
+        app.handle_action(Action::PlayPause);
+        app.handle_action(Action::ToggleNowPlaying);
+        app.now_tab = NowTab::Visualizer;
+
+        app.handle_action(Action::JumpToPlaying);
+        assert_eq!(app.now_tab(), NowTab::Queue, "the tab with the cursor comes up");
+        assert_eq!(app.focus, Focus::Browser, "the other screen's focus is left alone");
+        assert!(!app.queue_column, "and no hidden column is armed behind the view");
+    }
+
+    #[test]
+    fn the_jump_keys_follow_the_fullscreen_view_like_the_arrows_do() {
+        // In the full-screen view Tab means "next panel tab", so focus can
+        // never reach the queue there: G dispatched on focus alone looked
+        // dead while it silently moved the browser nobody could see.
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &["sub"], &["a.mp3"]))));
+        app.queue.replace(vec![track("a"), track("b"), track("c")]);
+        app.handle_action(Action::ToggleNowPlaying);
+        app.now_tab = NowTab::Queue;
+
+        let browser_at = app.files.state.selected();
+        app.handle_action(Action::Last);
+        assert_eq!(app.queue.state.selected(), Some(2), "G reaches the end of the queue");
+        app.handle_action(Action::First);
+        assert_eq!(app.queue.state.selected(), Some(0), "g comes back to the top");
+        assert_eq!(app.files.state.selected(), browser_at, "the hidden browser never moved");
+    }
+
+    #[test]
+    fn the_dj_mode_row_steps_left_even_when_the_ring_is_two_long() {
+        // Stepping back by going forward twice assumed all three modes were
+        // on offer. Without a similarity index the ring is Off and BpmKey,
+        // and two steps forward is a lap: left looked dead on a default
+        // server while right worked.
+        let mut app = connected_app();
+        app.capabilities = crate::api::types::Capabilities::default();
+        app.handle_action(Action::OpenDjPanel);
+
+        app.handle_action(Action::Back); // left on the Mode row
+        assert_eq!(app.autodj, AutoDjMode::BpmKey, "left from Off reaches the other mode");
+        app.handle_action(Action::Back);
+        assert_eq!(app.autodj, AutoDjMode::Off, "and left again comes back round");
     }
 
     #[test]
