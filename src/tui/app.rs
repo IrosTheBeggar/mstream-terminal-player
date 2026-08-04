@@ -5,6 +5,8 @@
 //! channels. That keeps the interesting behaviour — navigation, queue
 //! advancement, repeat/shuffle — testable without a terminal or a server.
 
+use std::sync::Arc;
+
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 
@@ -792,6 +794,10 @@ pub struct App {
     pub volume: f32,
     pub now_playing: Option<Track>,
     pub audio_available: bool,
+    /// A copy of the audio coming out of the engine, for the visualiser to
+    /// draw. Read-only from here and `None` off the real audio thread, so a
+    /// test or a replay run without one draws the same as silence.
+    pub tap: Option<Arc<crate::engine::tap::AudioTap>>,
     /// The full-screen now-playing view. A view rather than an overlay: every
     /// normal key still means what it meant, so `space`, `n` and the seek keys
     /// keep working while you are looking at it.
@@ -864,6 +870,7 @@ impl App {
             volume: 1.0,
             now_playing: None,
             audio_available: true,
+            tap: None,
             fullscreen: false,
             spinner: 0,
             now_tab: NowTab::Queue,
@@ -1125,6 +1132,12 @@ impl App {
     /// Whether we have asked for a track and not yet heard it start.
     pub fn is_starting(&self) -> bool {
         self.starting.is_some()
+    }
+
+    /// Whether what is on screen is drawn from the audio, and so wants
+    /// redrawing far more often than a progress bar does.
+    pub fn drawing_audio(&self) -> bool {
+        self.fullscreen && self.now_tab() == NowTab::Visualizer
     }
 
     /// The path the file browser treats as the top.

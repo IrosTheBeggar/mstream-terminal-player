@@ -9,6 +9,7 @@
 //!
 //! The UI thread owns only state and rendering, and communicates by message.
 
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
@@ -21,6 +22,7 @@ use crate::api::{ApiError, Client};
 use crate::discovery::DiscoveredServer;
 use crate::dj;
 use crate::engine::Engine;
+use crate::engine::tap::AudioTap;
 use crate::player::{PlayerCtl, PlayerStatus};
 
 /// How often the audio thread ticks the engine and publishes status. Also the
@@ -260,16 +262,21 @@ pub enum Event {
 
 // ── Audio thread ────────────────────────────────────────────────────────────
 
-pub fn spawn_audio(events: Sender<Event>) -> Sender<AudioCmd> {
+/// Returns the tap alongside the command channel: the engine is built on the
+/// audio thread, so the UI cannot reach in for it afterwards, but the tap
+/// itself is just a buffer and can be made here and handed to both.
+pub fn spawn_audio(events: Sender<Event>) -> (Sender<AudioCmd>, Arc<AudioTap>) {
     let (tx, rx) = mpsc::channel();
+    let tap = AudioTap::new();
+    let theirs = tap.clone();
     thread::Builder::new()
         .name("mstream-audio".into())
-        .spawn(move || audio_loop(&rx, &events))
+        .spawn(move || audio_loop(&rx, &events, theirs))
         .expect("failed to spawn audio thread");
-    tx
+    (tx, tap)
 }
 
-fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
+fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>, tap: Arc<AudioTap>) {
     let engine = match Engine::new() {
         Ok(e) => e,
         Err(e) => {
@@ -284,6 +291,7 @@ fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
             return;
         }
     };
+    engine.attach_tap(tap);
     let player: &dyn PlayerCtl = &engine;
     let mut watch = EndWatch::default();
 

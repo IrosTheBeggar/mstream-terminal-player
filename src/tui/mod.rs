@@ -22,6 +22,11 @@ use worker::{ApiCmd, AudioCmd, Event};
 /// the progress bar advances on screen.
 const POLL: Duration = Duration::from_millis(100);
 
+/// The same, while something is being drawn from the audio itself. Ten frames
+/// a second is fine for a progress bar and visibly steppy for a waveform, and
+/// this is the only screen that earns the extra wakeups.
+const POLL_DRAWING_AUDIO: Duration = Duration::from_millis(33);
+
 /// How often the spinner steps. Off the wall clock rather than the draw count,
 /// so it turns at one speed whether the loop is idle or churning.
 const SPIN_EVERY: Duration = Duration::from_millis(90);
@@ -141,12 +146,13 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     let start = startup(server, token);
 
     let (event_tx, event_rx) = std::sync::mpsc::channel();
-    let audio_tx = worker::spawn_audio(event_tx.clone());
+    let (audio_tx, tap) = worker::spawn_audio(event_tx.clone());
     let api_tx = worker::spawn_api(event_tx.clone());
 
     ui::set_theme(theme_for(&start.theme));
 
     let mut app = app_from(start);
+    app.tap = Some(tap);
     let pending = app.start();
 
     let mut terminal = ratatui::init();
@@ -212,7 +218,8 @@ fn event_loop(
 
         terminal.draw(|frame| ui::render(frame, app))?;
 
-        if event::poll(POLL)? {
+        let poll = if app.drawing_audio() { POLL_DRAWING_AUDIO } else { POLL };
+        if event::poll(poll)? {
             match event::read()? {
                 // Windows reports key releases as well as presses; without this
                 // filter every keystroke would act twice.

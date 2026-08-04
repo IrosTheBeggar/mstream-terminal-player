@@ -260,8 +260,9 @@ pub fn run(args: ReplayArgs) -> i32 {
 
     let live = args.live.then(|| {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
-        let audio_tx = worker::spawn_audio(event_tx.clone());
+        let (audio_tx, tap) = worker::spawn_audio(event_tx.clone());
         let api_tx = worker::spawn_api(event_tx.clone());
+        app.tap = Some(tap);
         (event_tx, event_rx, audio_tx, api_tx)
     });
 

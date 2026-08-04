@@ -12,6 +12,7 @@
 //! a costly second fetch to probe duration.
 
 pub(crate) mod http;
+pub(crate) mod tap;
 
 use std::fmt;
 use std::fs::File;
@@ -197,6 +198,9 @@ enum Opened {
 
 struct State {
     sink: Player,
+    /// Where a copy of the audio goes, when someone is drawing it. Serve mode
+    /// attaches none and pays nothing.
+    tap: Option<Arc<tap::AudioTap>>,
     current_file: String,
     duration: f64,
     stopped: bool,
@@ -269,9 +273,11 @@ impl State {
         self.sink.stop();
         let sink = Player::connect_new(mixer);
         sink.set_volume(self.volume);
-        match opened {
-            Opened::Local(d) => sink.append(d),
-            Opened::Http(d) => sink.append(d),
+        match (opened, self.tap.clone()) {
+            (Opened::Local(d), Some(tap)) => sink.append(tap::Tapped::new(d, tap)),
+            (Opened::Local(d), None) => sink.append(d),
+            (Opened::Http(d), Some(tap)) => sink.append(tap::Tapped::new(d, tap)),
+            (Opened::Http(d), None) => sink.append(d),
         }
         self.sink = sink;
         self.current_file = path;
@@ -303,6 +309,7 @@ impl Engine {
 
         let state = Arc::new(Mutex::new(State {
             sink,
+            tap: None,
             current_file: String::new(),
             duration: 0.0,
             stopped: true,
@@ -316,6 +323,12 @@ impl Engine {
         }));
 
         Ok(Engine { state, device })
+    }
+
+    /// Send a copy of everything played from here on to `tap`. Takes effect
+    /// on the next source, since the one already in the sink is past reach.
+    pub fn attach_tap(&self, tap: Arc<tap::AudioTap>) {
+        self.state.lock().unwrap().tap = Some(tap);
     }
 
     /// Clear the queue, add one source (path or URL), play it.
@@ -570,6 +583,44 @@ fn probe_duration(path: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tap hears real decoded audio, not silence and not nothing.
+    ///
+    /// `MSTREAM_TRACK="<library path>" cargo test the_tap_hears -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs a live server and MSTREAM_TRACK"]
+    fn the_tap_hears_what_is_playing() {
+        let path = std::env::var("MSTREAM_TRACK").expect("MSTREAM_TRACK");
+        let client = crate::api::Client::resolve(None, None).unwrap();
+        let url = client.media_url(&path).unwrap();
+
+        let engine = Engine::new().unwrap();
+        // The tap sits inside the source, so it sees the music at full
+        // amplitude however loud you are listening. That is what you want
+        // drawn: the track, not the volume knob.
+        engine.set_volume(0.0);
+        let tap = tap::AudioTap::new();
+        engine.attach_tap(tap.clone());
+        engine.play_source(url, None).unwrap();
+
+        // Past any leading silence, and past the first batch.
+        std::thread::sleep(Duration::from_secs(3));
+        let frame = tap.frame().expect("the tap should be holding audio by now");
+        let peak = frame.samples.iter().fold(0.0f32, |loudest, s| loudest.max(s.abs()));
+        println!(
+            ">>> {} samples  {} Hz  {} ch  peak {peak:.3}",
+            frame.samples.len(),
+            frame.rate,
+            frame.channels
+        );
+        engine.stop();
+
+        assert_eq!(frame.samples.len(), tap::TAP_SAMPLES, "the ring should be full");
+        assert!(frame.rate >= 8000, "a real sample rate, got {}", frame.rate);
+        assert!((1..=8).contains(&frame.channels), "a real channel count");
+        assert!(peak > 0.01, "the tap heard silence: peak {peak}");
+        assert_eq!(frame.mono().len(), tap::TAP_SAMPLES / frame.channels as usize);
+    }
 
     /// Seeking repeatedly in one streamed track keeps playing.
     ///

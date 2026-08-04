@@ -988,10 +988,68 @@ fn render_now_panel(frame: &mut Frame, area: Rect, app: &App) {
         NowTab::Discover => {
             render_now_placeholder(frame, content, "what this sounds like", "not wired up yet")
         }
-        NowTab::Visualizer => {
-            render_now_placeholder(frame, content, "the spectrum goes here", "needs the audio tap")
+        NowTab::Visualizer => render_now_waveform(frame, content, app),
+    }
+}
+
+/// The waveform, as loud as it is being played.
+///
+/// Deliberately the plainest thing that proves the audio is arriving — the
+/// spectrum, the vectorscope and the rest come next. Half blocks, because a
+/// terminal cell is twice as tall as it is wide and a trace needs somewhere
+/// to go: each cell carries two rows of the picture.
+fn render_now_waveform(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(tap) = &app.tap else {
+        return render_now_placeholder(frame, area, "the waveform goes here", "no audio thread");
+    };
+    // No frame means either nothing has played or the audio thread is
+    // mid-handover. Both are "not this tick", and neither is worth a message
+    // that would flicker.
+    let Some(heard) = tap.frame() else {
+        return render_now_placeholder(frame, area, "the waveform goes here", "nothing playing");
+    };
+
+    let mono = heard.mono();
+    let width = area.width as usize;
+    let rows = area.height as usize;
+    if width == 0 || rows == 0 || mono.is_empty() {
+        return;
+    }
+
+    // Two picture rows per cell, and the trace hangs off the middle of them.
+    let cells = rows * 2;
+    let middle = cells as f32 / 2.0;
+    let mut lit = vec![vec![false; cells]; width];
+    let per_column = mono.len().div_ceil(width).max(1);
+    for (x, chunk) in mono.chunks(per_column).take(width).enumerate() {
+        // The loudest and quietest sample in the slice, filled between: at
+        // this many samples per column a single value would alias into
+        // nonsense, and the envelope is what a waveform looks like anyway.
+        let low = chunk.iter().copied().fold(f32::MAX, f32::min).clamp(-1.0, 1.0);
+        let high = chunk.iter().copied().fold(f32::MIN, f32::max).clamp(-1.0, 1.0);
+        // Rows count downward, so the loudest positive sample is the highest.
+        let top = ((middle - high * middle) as usize).min(cells - 1);
+        let bottom = ((middle - low * middle) as usize).min(cells - 1);
+        for cell in lit[x].iter_mut().take(bottom + 1).skip(top) {
+            *cell = true;
         }
     }
+
+    let lines: Vec<Line> = (0..rows)
+        .map(|row| {
+            let text: String = lit
+                .iter()
+                .map(|column| match (column[row * 2], column[row * 2 + 1]) {
+                    (true, true) => '\u{2588}',
+                    (true, false) => '\u{2580}',
+                    (false, true) => '\u{2584}',
+                    (false, false) => ' ',
+                })
+                .collect();
+            Line::from(Span::styled(text, Style::new().fg(accent())))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_now_placeholder(frame: &mut Frame, area: Rect, what: &str, why: &str) {
