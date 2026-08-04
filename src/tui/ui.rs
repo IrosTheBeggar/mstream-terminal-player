@@ -7,7 +7,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Tabs, Wrap,
+    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
 };
 
 use crate::cmd_library::fmt_duration;
@@ -271,42 +271,77 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn render_header(frame: &mut Frame, area: Rect, app: &App) {
+/// One labelled key. Brackets mark the one that is on, not just colour — the
+/// labels already pad with a space either side, so it costs nothing in width
+/// and survives a terminal that has taken the colour away.
+fn shortcut(label: String, on: bool) -> Vec<Span<'static>> {
+    let (left, right) = if on { ("[", "]") } else { (" ", " ") };
+    let style = if on {
+        Style::new().fg(accent()).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new()
+    };
+    vec![Span::styled(left, style), Span::styled(label, style), Span::styled(right, style)]
+}
+
+/// The numbered tabs, then the two keys that are not tabs.
+///
+/// `0` and `Tab` reach a whole screen and a whole column, and nothing else
+/// said so — they were in the help and nowhere a user would look first. The
+/// tabs are navigation and the extras are a reminder, so the extras shorten
+/// and then go entirely rather than push a tab off the row.
+fn header_shortcuts(app: &App, width: u16) -> Line<'static> {
     // Only the tabs this server can serve, so the numbers run 1..n with no
     // gaps and none of them lead somewhere empty.
-    // Brackets on the open tab, not just colour -- the titles already pad
-    // with a space either side, so this costs nothing in width and survives a
-    // terminal that has taken the colour away.
     let open = app.tab_index();
-    let titles: Vec<Line> = app
-        .tabs()
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            let (left, right) = if i == open { ('[', ']') } else { (' ', ' ') };
-            Line::from(format!("{left}{}:{}{right}", i + 1, t.title()))
-        })
-        .collect();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, tab) in app.tabs().iter().enumerate() {
+        spans.extend(shortcut(format!("{}:{}", i + 1, tab.title()), i == open));
+    }
+    let tabs_width = line_width(&spans);
+    // Room kept back for the server label: enough that it can still say who
+    // as well as where. The scheme is the part worth giving up for a reminder
+    // of a key — the username is not, and reserving only the bare host made
+    // the header worse at 96 columns than it was at 80.
+    let labels = server_labels(app);
+    let keep = labels
+        .get(labels.len().saturating_sub(2))
+        .or_else(|| labels.last())
+        .map_or(0, |label| width_of(label) + 1);
 
-    // The tabs are how you move around, so they get the space they need and
-    // the server label takes what is left — a fixed split truncated "4:Search"
-    // clean off at 80 columns. The titles carry their own spacing, so the
-    // widget's default padding is turned off below and this sum is exact.
-    let tabs_width: u16 =
-        titles.iter().map(|line| line.width() as u16).sum::<u16>().min(area.width);
+    for (now, queue) in [("0:Now Playing", "Tab:Queue"), ("0:Now", "Tab:Queue")] {
+        // A gap wider than the one between tabs, so the two families read as
+        // two families: these are a view and a toggle, not more tabs.
+        let mut extra = vec![Span::raw("  ")];
+        extra.extend(shortcut(now.to_string(), false));
+        // The queue column really is either open or not, so it says which.
+        extra.extend(shortcut(queue.to_string(), app.queue_column));
+        if tabs_width + line_width(&extra) + keep <= width as usize {
+            spans.extend(extra);
+            break;
+        }
+    }
+    Line::from(spans)
+}
+
+fn line_width(spans: &[Span<'static>]) -> usize {
+    spans.iter().map(|span| width_of(span.content.as_ref())).sum()
+}
+
+fn render_header(frame: &mut Frame, area: Rect, app: &App) {
+    // The shortcuts are how you move around, so they get the space they need
+    // and the server label takes what is left — a fixed split truncated
+    // "4:Search" clean off at 80 columns.
+    let strip = header_shortcuts(app, area.width);
+    let strip_width = (strip.width() as u16).min(area.width);
     let [tabs_area, server_area] =
-        Layout::horizontal([Constraint::Length(tabs_width), Constraint::Min(0)]).areas(area);
+        Layout::horizontal([Constraint::Length(strip_width), Constraint::Min(0)]).areas(area);
 
-    frame.render_widget(
-        Tabs::new(titles)
-            .select(app.tab_index())
-            .highlight_style(Style::new().fg(accent()).add_modifier(Modifier::BOLD))
-            .divider("")
-            .padding("", ""),
-        tabs_area,
-    );
+    frame.render_widget(Paragraph::new(strip), tabs_area);
 
-    let who = server_label(app, server_area.width as usize);
+    // One column short of the room it has, so the label never ends up flush
+    // against the shortcuts when the two happen to fill the row exactly.
+    let who = server_label(app, server_area.width.saturating_sub(1) as usize);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(who, Style::new().fg(dim()))))
             .alignment(Alignment::Right),
@@ -316,7 +351,9 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
 /// The most informative form of "who and where" that fits, down to nothing.
 /// Dropping the scheme first keeps the host visible on a narrow terminal.
-fn server_label(app: &App, width: usize) -> String {
+/// What the server label can shrink to, longest first. The last is the least
+/// it will settle for, and the header keeps that much back.
+fn server_labels(app: &App) -> Vec<String> {
     // A tunnel session shows its identity, not the loopback port it happens
     // to be riding on today.
     let shown = app.server_display();
@@ -333,6 +370,10 @@ fn server_label(app: &App, width: usize) -> String {
     }
     candidates.push(host);
     candidates
+}
+
+fn server_label(app: &App, width: usize) -> String {
+    server_labels(app)
         .into_iter()
         .find(|candidate| candidate.chars().count() <= width)
         .unwrap_or_default()
@@ -3430,20 +3471,42 @@ mod tests {
     }
 
     #[test]
+    fn the_queue_key_says_whether_the_column_is_open() {
+        let mut app = connected_app();
+        app.queue.replace(vec![tagged_track()]);
+
+        let closed = draw_sized(&mut app, 140, 20);
+        assert!(closed.contains(" Tab:Queue "), "{}", closed.lines().next().unwrap());
+
+        app.handle_action(Action::CycleFocus);
+        let open = draw_sized(&mut app, 140, 20);
+        assert!(open.contains("[Tab:Queue]"), "{}", open.lines().next().unwrap());
+    }
+
+    #[test]
     fn the_server_label_sheds_detail_before_the_tabs_do() {
         let mut app = connected_app();
         app.username = Some("tester".into());
 
-        // Roomy: the whole thing, scheme and all.
-        assert!(draw_sized(&mut app, 140, 20).contains("tester@http://host:3000"));
-        assert!(draw_sized(&mut app, 88, 20).contains("tester@http://host:3000"));
+        // Roomy: the whole thing, scheme and all, next to both extras.
+        let wide = draw_sized(&mut app, 140, 20);
+        assert!(wide.contains("tester@http://host:3000"));
+        assert!(wide.contains("0:Now Playing") && wide.contains("Tab:Queue"));
 
-        // Genuinely tight: the scheme goes first, the host stays, and every
-        // tab is still whole — including the fifth, which only exists on a
-        // server with discovery and is what made the header longer.
+        // Less room: the scheme is the first thing worth giving up, and it
+        // goes to a reminder of a key. The username is not up for trade, so
+        // the extras shorten before it does.
+        let mid = draw_sized(&mut app, 96, 20);
+        assert!(mid.contains("tester@host:3000"), "kept who as well as where");
+        assert!(mid.contains("0:Now") && mid.contains("Tab:Queue"));
+        assert!(!mid.contains("0:Now Playing"), "the long form is what gave way: {mid}");
+
+        // Genuinely tight: the extras go entirely, and every tab is still
+        // whole — including the fifth, which only exists on a server with
+        // discovery and is what made the header longer.
         let narrow = draw_sized(&mut app, 72, 20);
-        assert!(narrow.contains("tester@host:3000"), "kept the useful part");
-        assert!(!narrow.contains("tester@http://host:3000"));
+        assert!(!narrow.contains("0:Now"), "a hint is not worth a tab: {narrow}");
+        assert!(narrow.contains("tester@host:3000"));
         assert!(narrow.contains("5:Discover"));
 
         // A server without discovery has no fifth tab, so the same label
