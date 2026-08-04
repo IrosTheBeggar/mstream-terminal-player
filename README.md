@@ -367,6 +367,23 @@ legacy alias for the old spawn contract. Changes from the original engine:
   loop-one, no panic when no audio device exists, removing a queue entry while stopped no
   longer starts playback
 
+Requests must arrive under the address the server is bound to, and anything carrying a body
+must say `Content-Type: application/json`. The routes and their JSON are unchanged; this is
+about who is allowed to reach them. Without it, any page you happen to be visiting can drive
+the jukebox — a `fetch` with a string body needs no preflight, so `/play`, `/stop` and
+`/queue/*` are all reachable from a browser tab, and `/play` will open a URL of the caller's
+choosing. A `POST` carrying an `Origin` header is refused outright for the same reason.
+
+Addresses and `localhost` always pass; any other name has to be the one the server was bound
+under, so if you reach a `--host 0.0.0.0` jukebox as `jukebox.local`, bind it under that name
+instead. (A name is the only thing an attacker can point at your machine — an address can't be
+rebound.) The other habit this breaks is `curl -d`, which sends form-encoded by default: pass
+`-H 'Content-Type: application/json'`. Bodies are capped at 64 KB.
+
+```bash
+curl -sX POST -H 'Content-Type: application/json' -d '{"file":"/music/a.flac"}' http://127.0.0.1:3333/play
+```
+
 ## Build
 
 ```

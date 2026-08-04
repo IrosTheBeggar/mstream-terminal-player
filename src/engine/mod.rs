@@ -355,12 +355,10 @@ impl Engine {
     }
 
     pub fn seek(&self, position: f64) -> Result<(), EngineError> {
-        if !position.is_finite() || position < 0.0 {
-            return Err(EngineError::Seek("invalid position".to_string()));
-        }
+        let target = seek_target(position)?;
         let s = self.state.lock().unwrap();
         s.sink
-            .try_seek(Duration::from_secs_f64(position))
+            .try_seek(target)
             .map_err(|e| EngineError::Seek(e.to_string()))
     }
 
@@ -538,6 +536,19 @@ impl Engine {
 
 // ── Duration detection via symphonia (local files only) ────────────────────
 
+/// Turn a wire position into a Duration, or refuse it. Finite and
+/// non-negative have been checked since finding #11; magnitude was the
+/// dimension that check missed (finding #27) — from_secs_f64 panics past
+/// what a Duration can hold, so `POST /seek {"position":1e300}` was a
+/// remote abort of the whole jukebox.
+fn seek_target(position: f64) -> Result<Duration, EngineError> {
+    if !position.is_finite() || position < 0.0 {
+        return Err(EngineError::Seek("invalid position".to_string()));
+    }
+    Duration::try_from_secs_f64(position)
+        .map_err(|_| EngineError::Seek("position out of range".to_string()))
+}
+
 fn probe_duration(path: &str) -> f64 {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -583,6 +594,17 @@ fn probe_duration(path: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_seek_too_large_for_a_duration_is_refused_not_a_panic() {
+        assert_eq!(seek_target(12.5).unwrap(), Duration::from_secs_f64(12.5));
+        assert!(seek_target(0.0).is_ok());
+        // 1e300 went straight into Duration::from_secs_f64, which panics —
+        // one POST /seek and the process was gone with exit 101.
+        for bad in [1e300, 1e20, f64::NAN, f64::INFINITY, -1.0] {
+            assert!(seek_target(bad).is_err(), "{bad} must be refused");
+        }
+    }
 
     /// The tap hears real decoded audio, not silence and not nothing.
     ///
