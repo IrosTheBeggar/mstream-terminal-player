@@ -1891,11 +1891,34 @@ impl App {
     }
 
     fn go_back(&mut self) -> Vec<Effect> {
-        self.pane_mut().trail.pop();
-        match self.tab {
+        // Where we are going is already in hand: the trail holds the listing
+        // captured on the way in. Restoring it is instant, puts the cursor
+        // back on the row you came through, and costs no request at all.
+        //
+        // Asking the server again left the deeper listing on screen with one
+        // fewer column beside it until the reply landed — which reads as the
+        // middle column blinking out and then coming back.
+        let Some(effects) = self.step_out() else {
+            return Vec::new();
+        };
+        let Some(step) = self.pane_mut().trail.pop() else {
+            return effects;
+        };
+        let pane = self.pane_mut();
+        pane.entries = step.entries;
+        pane.state.select(Some(step.chosen));
+        pane.loading = false;
+        Vec::new()
+    }
+
+    /// Move the position one level out, returning what the old way of getting
+    /// there would have cost. `None` means there was nowhere to go, which is
+    /// what stops [`App::go_back`] restoring a column it never left.
+    fn step_out(&mut self) -> Option<Vec<Effect>> {
+        Some(match self.tab {
             Tab::Files => {
                 if self.path.is_empty() {
-                    return Vec::new();
+                    return None;
                 }
                 let parent = match self.path.rsplit_once('/') {
                     Some((head, _)) => head.to_string(),
@@ -1906,7 +1929,7 @@ impl App {
             }
             Tab::Search => {
                 if self.search_stack.len() <= 1 {
-                    return Vec::new(); // already at the class menu
+                    return None; // already at the class menu
                 }
                 self.search_stack.pop();
                 match self.search_node().clone() {
@@ -1926,7 +1949,7 @@ impl App {
             }
             Tab::Library => {
                 if self.library_stack.len() <= 1 {
-                    return Vec::new(); // already at the mode menu
+                    return None; // already at the mode menu
                 }
                 self.library_stack.pop();
                 match self.library_node().clone() {
@@ -1946,7 +1969,7 @@ impl App {
             }
             Tab::Discover => {
                 if self.discover_stack.len() <= 1 {
-                    return Vec::new(); // already at the mode menu
+                    return None; // already at the mode menu
                 }
                 self.discover_stack.pop();
                 match self.discover_node().clone() {
@@ -1968,7 +1991,7 @@ impl App {
                 }
             }
             _ => Vec::new(),
-        }
+        })
     }
 
     // ── Discover ────────────────────────────────────────────────────────────
@@ -3384,11 +3407,17 @@ mod tests {
         let effects = app.handle_action(Action::Activate);
         assert_eq!(effects, vec![Effect::Api(ApiCmd::Browse("lib/Artist".into()))]);
 
-        // Back up one level, then back to the root.
+        // Back up one level. The listing is already in hand, so this costs
+        // nothing and lands on the row we came through rather than the top.
         let effects = app.handle_action(Action::Back);
-        assert_eq!(effects, vec![Effect::Api(ApiCmd::Browse("lib".into()))]);
+        assert!(effects.is_empty(), "going back asks the server for nothing");
+        assert_eq!(app.path, "lib");
+        assert_eq!(app.files.entries.len(), 2, "'..' and Artist, restored");
+        assert_eq!(app.files.state.selected(), Some(1), "back on Artist");
+
         let effects = app.handle_action(Action::Back);
-        assert_eq!(effects, vec![Effect::Api(ApiCmd::Browse(String::new()))]);
+        assert!(effects.is_empty());
+        assert_eq!(app.path, "");
         // At the root there is nowhere further up.
         assert!(app.handle_action(Action::Back).is_empty());
     }
@@ -4252,8 +4281,9 @@ mod tests {
         assert_eq!(app.playlist_open.as_deref(), Some("Roadtrip"));
 
         let effects = app.handle_action(Action::Back);
-        assert_eq!(effects, vec![Effect::Api(ApiCmd::Playlists)]);
+        assert!(effects.is_empty(), "the playlist list came back off the trail");
         assert!(app.playlist_open.is_none());
+        assert_eq!(app.playlists.entries.len(), 1, "the one playlist, restored");
     }
 
     #[test]
@@ -4341,7 +4371,8 @@ mod tests {
         app.handle_action(Action::Activate); // → Artist("Solo")
 
         let effects = app.handle_action(Action::Back);
-        assert_eq!(effects, vec![Effect::Api(ApiCmd::Library(LibraryNode::Artists))]);
+        assert!(effects.is_empty(), "the artist list came back off the trail");
+        assert_eq!(app.library_node(), &LibraryNode::Artists);
 
         let effects = app.handle_action(Action::Back);
         assert!(effects.is_empty(), "returning to the static menu needs no request");
