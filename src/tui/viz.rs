@@ -79,11 +79,9 @@ pub struct Visualizer {
 const FRAME: f32 = 1.0 / 30.0;
 
 impl Visualizer {
-    /// `sounding` is whether audio is actually being played. When it is
-    /// not, nothing advances: the picture holds exactly as it was rather
-    /// than carrying on from a buffer that has stopped changing. Pausing
-    /// stops the clock, the progress bar and the position, and the picture
-    /// is the one part of the screen that should not go on without them.
+    /// `sounding` is whether audio is actually being played. When it is not,
+    /// the visualiser is given silence and falls to nothing, rather than
+    /// holding the last thing it saw.
     pub fn draw(&mut self, canvas: &mut Canvas, heard: &TapFrame, sounding: bool) {
         let now = Instant::now();
         let elapsed = self
@@ -101,19 +99,28 @@ impl Visualizer {
         elapsed: f32,
         sounding: bool,
     ) {
+        // Nothing sounding means silence, not the last thing that sounded.
+        // The tap goes on holding the tenth of a second before the pause, and
+        // reusing it would leave the picture settling out of audio that is no
+        // longer being played. Given silence, everything falls the way it
+        // falls when a track goes quiet — which is what pausing is.
+        let quiet;
+        let heard = if sounding {
+            heard
+        } else {
+            quiet = TapFrame { samples: vec![0.0; heard.samples.len()], ..heard.clone() };
+            &quiet
+        };
+
         match self.mode {
             VizMode::Bars => {
-                if sounding {
-                    self.bars.update(heard, canvas.width() as usize / BAR_STRIDE, elapsed);
-                }
+                self.bars.update(heard, canvas.width() as usize / BAR_STRIDE, elapsed);
                 draw_bars(canvas, &self.bars.heights);
             }
             VizMode::Scope => draw_scope(canvas, heard, self.scatter),
             VizMode::Vectorscope => draw_vectorscope(canvas, heard, self.scatter),
             VizMode::Vu => {
-                if sounding {
-                    self.vu.update(heard, elapsed);
-                }
+                self.vu.update(heard, elapsed);
                 draw_vu(canvas, &self.vu);
             }
         }
@@ -955,44 +962,95 @@ mod tests {
     }
 
     #[test]
-    fn nothing_moves_while_nothing_is_sounding() {
+    fn the_values_fall_to_zero_while_nothing_is_sounding() {
+        // Measured on the state rather than the picture. What "empty" looks
+        // like differs by mode — a meter keeps its held peak and its scale, a
+        // scope draws silence as a flat line — but underneath, every value
+        // the visualiser is holding should reach zero.
         let rate = 44100;
         let loud = stereo(sine(440.0, rate, 4096), sine(660.0, rate, 4096), rate);
-        let quiet = stereo(vec![0.0; 4096], vec![0.0; 4096], rate);
-        let picture = |viz: &mut Visualizer, heard: &TapFrame, sounding: bool| -> Vec<String> {
+        let canvas = || Canvas::new(Rect { x: 0, y: 0, width: 50, height: 10 });
+
+        let mut viz = Visualizer { mode: VizMode::Bars, ..Default::default() };
+        for _ in 0..12 {
+            viz.draw_after(&mut canvas(), &loud, FRAME, true);
+        }
+        assert!(viz.bars.heights.iter().cloned().fold(0.0f32, f32::max) > 0.1, "playing");
+
+        // Fed the loud buffer throughout — which is what the tap really holds
+        // after a pause. Reusing it is exactly the thing being ruled out.
+        for _ in 0..40 {
+            viz.draw_after(&mut canvas(), &loud, FRAME, false);
+        }
+        let left = viz.bars.heights.iter().cloned().fold(0.0f32, f32::max);
+        assert!(left < 0.01, "the bars should be down: {left}");
+
+        let mut viz = Visualizer { mode: VizMode::Vu, ..Default::default() };
+        for _ in 0..12 {
+            viz.draw_after(&mut canvas(), &loud, FRAME, true);
+        }
+        assert!(viz.vu.readings()[0].0 > 0.5, "playing");
+        for _ in 0..40 {
+            viz.draw_after(&mut canvas(), &loud, FRAME, false);
+        }
+        assert_eq!(viz.vu.readings()[0].0, 0.0, "the meter should read nothing");
+    }
+
+    #[test]
+    fn a_trace_of_silence_is_a_flat_line_across_the_middle() {
+        let rate = 44100;
+        // Deliberately the *loud* buffer throughout the paused stretch: that
+        // is what the tap really holds after a pause, and a visualiser that
+        // reused it would sit there showing a track that is not playing.
+        let loud = stereo(sine(440.0, rate, 4096), sine(660.0, rate, 4096), rate);
+        // Which character rows carry signal. The reference lines are drawn in
+        // the dim colour and are furniture, not signal: a scope showing
+        // silence still draws its zero line, and should.
+        let signal_rows = |viz: &mut Visualizer, sounding: bool| -> Vec<usize> {
             let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 50, height: 10 });
-            viz.draw_after(&mut canvas, heard, FRAME, sounding);
+            viz.draw_after(&mut canvas, &loud, FRAME, sounding);
             canvas
                 .into_lines()
                 .iter()
-                .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+                .enumerate()
+                .filter(|(_, line)| {
+                    line.spans.iter().any(|span| {
+                        span.content.chars().any(|c| c != ' ') && span.style.fg != Some(dim())
+                    })
+                })
+                .map(|(row, _)| row)
                 .collect()
         };
 
-        for mode in VIZ_MODES {
+        for mode in [VizMode::Scope, VizMode::Vectorscope] {
             let mut viz = Visualizer { mode, ..Default::default() };
-            // Play for a while so there is something to hold still.
             for _ in 0..12 {
-                picture(&mut viz, &loud, true);
+                signal_rows(&mut viz, true);
             }
-            let paused = picture(&mut viz, &loud, false);
+            let playing = signal_rows(&mut viz, true);
+            assert!(playing.len() > 2, "{} barely drew while playing: {playing:?}", mode.title());
 
-            // The tap keeps holding the same audio, so left to itself the
-            // picture would go on settling out of it. Frozen means frozen.
-            for tick in 0..20 {
-                let held = picture(&mut viz, &loud, false);
-                assert_eq!(held, paused, "{} moved at {tick}", mode.title());
+            // A second of not sounding. What "fallen away" looks like differs
+            // by mode: bars and a meter have nothing left to draw at all,
+            // while a scope drawing silence honestly is a flat line on the
+            // centre and a vectorscope is a point on it.
+            for _ in 0..30 {
+                signal_rows(&mut viz, false);
             }
+            let paused = signal_rows(&mut viz, false);
+            assert!(!paused.is_empty(), "{} lost its trace entirely", mode.title());
+            assert!(
+                paused.iter().all(|row| row.abs_diff(5) <= 1),
+                "{} should have collapsed onto the middle: {paused:?}",
+                mode.title()
+            );
 
-            // ...and picks up again when the audio does. Checked against a
-            // different signal, because with the same buffer a settled
-            // picture is legitimately identical from one frame to the next —
-            // it would pass whether anything had restarted or not.
-            let mut moved = false;
+            // And it comes back when the audio does.
             for _ in 0..12 {
-                moved |= picture(&mut viz, &quiet, true) != paused;
+                signal_rows(&mut viz, true);
             }
-            assert!(moved, "{} never started again", mode.title());
+            let again = signal_rows(&mut viz, true);
+            assert!(again.len() > paused.len(), "{} never came back: {again:?}", mode.title());
         }
     }
 
