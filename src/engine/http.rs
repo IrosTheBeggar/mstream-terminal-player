@@ -87,11 +87,38 @@ pub(crate) fn clean_spool_dir(dir: &Path) -> usize {
     removed
 }
 
-/// Bound the time we can stall while opening a stream: the engine holds its
-/// state lock during open, so a dead server must fail fast, not hang the
-/// control API. (Reads after open happen on the runtime's own threads and
-/// don't need a timeout.)
+// ── Timeouts ────────────────────────────────────────────────────────────────
+//
+// The engine holds its state lock while a stream opens, so every wait in
+// open() needs a floor under it — pause, stop and seek all queue behind that
+// lock, and an unbounded wait here is a player that can't even be told to
+// stop (finding #18). Two bounds, because a dead server stalls us at two
+// points:
+//
+//   * CONNECT_TIMEOUT — the TCP connect. No help against Quick Connect,
+//     where the connect is to our own loopback bridge and succeeds even
+//     when the tunnel behind it is gone.
+//   * OPEN_TIMEOUT — all of open(): request, response headers, download
+//     start. This is the one a dead tunnel actually hits.
+//
+// Deliberately absent: a read or total timeout on the reqwest client. The
+// body is stream-download's job — its watchdog abandons a read that goes 5s
+// without a byte and reconnects (`Settings::retry_timeout`), so a client
+// read_timeout would either lose that race or, set tighter, turn every
+// recoverable blip into a dead track. A total timeout is simply wrong for
+// streaming: a ten-minute track takes ten minutes to download. What stays
+// unbounded is a stream that goes silent *after* the headers — reconnection
+// retries forever by design — which today can still park the decode probe
+// under the same lock; findings #48–#50 move that work off the lock rather
+// than putting a clock on it here.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(not(test))]
+const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// The test build waits this out against a socket that really stalls, and
+/// nobody wants the full ten seconds in every run of the suite.
+#[cfg(test)]
+const OPEN_TIMEOUT: Duration = Duration::from_millis(400);
 
 fn client() -> Result<&'static Client, String> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
@@ -114,14 +141,28 @@ pub(crate) fn open(url_str: &str) -> Result<(HttpReader, Option<u64>), String> {
     let url: Url = url_str.parse().map_err(|e| format!("invalid URL: {e}"))?;
     let client = client()?.clone();
     runtime::block_on(async move {
-        let stream = HttpStream::new(client, url)
-            .await
-            .map_err(|e| format!("request failed: {e}"))?;
-        let content_length = stream.content_length();
-        let reader = StreamDownload::from_stream(stream, spool_provider(), Settings::default())
-            .await
-            .map_err(|e| format!("stream init failed: {e}"))?;
-        Ok((reader, content_length))
+        let open = async {
+            let stream = HttpStream::new(client, url)
+                .await
+                .map_err(|e| format!("request failed: {e}"))?;
+            let content_length = stream.content_length();
+            let reader =
+                StreamDownload::from_stream(stream, spool_provider(), Settings::default())
+                    .await
+                    .map_err(|e| format!("stream init failed: {e}"))?;
+            Ok((reader, content_length))
+        };
+        // Timing out abandons the future, which aborts the request in
+        // flight. Safe to abandon: every await in there runs before the
+        // download task is spawned (spawn-to-return has no await point), so
+        // a timeout can't orphan a task or its spool file.
+        match tokio::time::timeout(OPEN_TIMEOUT, open).await {
+            Ok(opened) => opened,
+            Err(_) => Err(format!(
+                "no answer from the server after {}s",
+                OPEN_TIMEOUT.as_secs()
+            )),
+        }
     })?
 }
 
@@ -209,6 +250,28 @@ mod tests {
         let missing = std::env::temp_dir().join("mstream-player-test-no-such-dir");
         assert_eq!(clean_spool_dir(&missing), 0, "a missing dir is a no-op");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_server_that_never_answers_fails_the_open_instead_of_hanging() {
+        // Bound but never accepted: on loopback the handshake still
+        // completes into the listen backlog, so the connect succeeds and
+        // then nothing ever comes back — the shape of a Quick Connect
+        // bridge whose tunnel has died, the case CONNECT_TIMEOUT can never
+        // catch. Without OPEN_TIMEOUT this call does not return.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let started = std::time::Instant::now();
+        let err = open(&format!("http://{addr}/track.flac")).unwrap_err();
+        let waited = started.elapsed();
+
+        assert!(err.contains("no answer from the server"), "{err}");
+        // OPEN_TIMEOUT is 400ms in the test build; the ceiling is loose
+        // because a busy CI box wakes timers late, and the claim being
+        // tested is bounded-at-all, not sharp-at-400.
+        assert!(waited < Duration::from_secs(5), "took {waited:?}");
+        drop(listener);
     }
 
     #[test]
