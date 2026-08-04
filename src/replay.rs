@@ -323,6 +323,7 @@ pub fn run(args: ReplayArgs) -> i32 {
         }
     };
 
+    let mut just_printed = false;
     for (index, (label, step)) in steps.iter().enumerate() {
         match step {
             Step::Key(key) => {
@@ -360,7 +361,8 @@ pub fn run(args: ReplayArgs) -> i32 {
             eprintln!("error: render failed: {e}");
             return 1;
         }
-        if args.frames || matches!(step, Step::Frame) {
+        just_printed = args.frames || matches!(step, Step::Frame);
+        if just_printed {
             println!("{}", buffer_text(&terminal));
         }
         if app.should_quit {
@@ -369,7 +371,11 @@ pub fn run(args: ReplayArgs) -> i32 {
         }
     }
 
-    if !args.frames {
+    // The closing screen, unless the script already asked for it as its last
+    // step. The same buffer twice reads as two samples that did not change,
+    // which is exactly how a perfectly healthy player looks stalled — it cost
+    // an afternoon chasing a seek bug that was never there.
+    if !just_printed {
         println!("{}", buffer_text(&terminal));
     }
     // Mirror what the real binary does on the way out, so a scripted run

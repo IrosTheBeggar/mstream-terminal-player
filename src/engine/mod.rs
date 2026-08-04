@@ -571,6 +571,54 @@ fn probe_duration(path: &str) -> f64 {
 mod tests {
     use super::*;
 
+    /// Seeking repeatedly in one streamed track keeps playing.
+    ///
+    /// Kept because the opposite was reported, investigated and wrong: a
+    /// replay script that ended on a `frame` step printed its last screen
+    /// twice, and two identical samples read as a stall. This asks the engine
+    /// directly, where there is no screen to misread.
+    ///
+    /// `MSTREAM_TRACK="<library path>" cargo test seeking_more_than_once -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs a live server and MSTREAM_TRACK"]
+    fn seeking_more_than_once_keeps_playing() {
+        let path = std::env::var("MSTREAM_TRACK").expect("MSTREAM_TRACK");
+        let client = crate::api::Client::resolve(None, None).unwrap();
+        let url = client.media_url(&path).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.play_source(url, None).unwrap();
+
+        let report = |label: &str| {
+            let s = engine.status();
+            println!(">>> {label}: pos={:.2} playing={} dur={:.2}", s.position, s.playing, s.duration);
+            s.position
+        };
+
+        std::thread::sleep(Duration::from_secs(4));
+        report("after 4s");
+
+        println!(">>> SEEK 1 -> 70");
+        engine.seek(70.0).unwrap();
+        for i in 0..6 {
+            std::thread::sleep(Duration::from_secs(1));
+            report(&format!("seek1 +{}s", i + 1));
+        }
+
+        println!(">>> SEEK 2 -> 20");
+        engine.seek(20.0).unwrap();
+        let mut positions = Vec::new();
+        for i in 0..10 {
+            std::thread::sleep(Duration::from_secs(1));
+            positions.push(report(&format!("seek2 +{}s", i + 1)));
+        }
+
+        let moved = positions.last().unwrap() - positions.first().unwrap();
+        println!(">>> advanced {moved:.2}s over the 9s after the second seek");
+        assert!(moved > 5.0, "playback stalled after the second seek");
+    }
+
     fn q(len: usize, index: usize) -> QueueState {
         QueueState {
             queue: (0..len).map(|i| QueueEntry::new(format!("t{}", i))).collect(),
