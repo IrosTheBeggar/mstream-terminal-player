@@ -19,7 +19,10 @@ use std::time::{Duration, Instant};
 use clap::Args;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::api::types::Ping;
 use crate::discovery::DiscoveredServer;
@@ -32,7 +35,8 @@ pub struct ReplayArgs {
     /// Comma-separated steps. Keys by name (Down, Enter, Esc, Tab,
     /// Backspace, Space, PageDown, ctrl+c), single characters (q, a, 2),
     /// quoted text to type ('hunter2'), `@event` to inject a worker reply,
-    /// `wait:500` to pause, and `frame` to print the screen.
+    /// `wait:500` to pause, `click:20x22` and `move:20x22` for the pointer, and
+    /// `frame` to print the screen.
     pub script: String,
 
     /// Talk to a real server with real workers instead of injected replies.
@@ -66,6 +70,8 @@ pub struct ReplayArgs {
 
 enum Step {
     Key(KeyEvent),
+    /// A pointer event at a screen position.
+    Mouse(MouseEvent),
     Inject(Event),
     Wait(Duration),
     Frame,
@@ -110,6 +116,22 @@ fn parse_step(raw: &str, app_server: &str) -> Result<Step, String> {
             KeyCode::Char(text.chars().next().unwrap_or(' ')),
             KeyModifiers::NONE,
         )));
+    }
+
+    // `click:20x22` presses the left button there; `move:20x22` only moves
+    // the pointer over it, which is what the progress bar lights up for.
+    // Crossed rather than comma'd because the script itself is comma-separated
+    // — a position written with a comma in it arrives as two steps.
+    for (prefix, kind) in
+        [("click:", MouseEventKind::Down(MouseButton::Left)), ("move:", MouseEventKind::Moved)]
+    {
+        let Some(at) = token.strip_prefix(prefix) else { continue };
+        let (x, y) = at
+            .split_once(['x', 'X'])
+            .ok_or_else(|| format!("bad position '{token}' — write it as click:20x22"))?;
+        let column: u16 = x.trim().parse().map_err(|_| format!("bad column in '{token}'"))?;
+        let row: u16 = y.trim().parse().map_err(|_| format!("bad row in '{token}'"))?;
+        return Ok(Step::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE }));
     }
 
     if let Some(ms) = token.strip_prefix("wait:") {
@@ -353,6 +375,13 @@ pub fn run(args: ReplayArgs) -> i32 {
                     _ => unreachable!("re-parsed an injected event"),
                 };
                 let effects = app.apply_event(event);
+                report(&effects);
+                pending.extend(effects);
+            }
+            Step::Mouse(mouse) => {
+                println!("── {}. {label}", index + 1);
+                let area = Rect { x: 0, y: 0, width: args.width, height: args.height };
+                let effects = crate::tui::on_mouse(&mut app, *mouse, area);
                 report(&effects);
                 pending.extend(effects);
             }

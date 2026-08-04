@@ -209,7 +209,7 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
 /// lists for a while and was taken out again — moving a cursor three rows a
 /// notch is not what a wheel feels like it should do, and the lists are
 /// already well served by the keys.
-fn on_mouse(app: &mut App, mouse: event::MouseEvent, area: Rect) -> Vec<Effect> {
+pub(crate) fn on_mouse(app: &mut App, mouse: event::MouseEvent, area: Rect) -> Vec<Effect> {
     let at = ratatui::layout::Position { x: mouse.column, y: mouse.row };
     // Every event, moves included: the bar lights under the pointer, and
     // that only works if we know where the pointer went.
