@@ -195,6 +195,7 @@ pub enum Action {
     OpenDjPanel,
     StartJourney,
     StartSearch,
+    StartFilter,
     Input(char),
     Backspace,
     Submit,
@@ -216,6 +217,29 @@ pub enum Entry {
     /// how close, how much the guess rests on, what it sounds like.
     Discover { label: String, detail: String, node: DiscoverNode },
     Track { label: String, track: Box<Track> },
+}
+
+impl Entry {
+    /// What this row is called. Also what a filter matches on: the thing you
+    /// can read on screen is the thing you would think to type.
+    pub fn label(&self) -> &str {
+        match self {
+            Entry::Parent => "..",
+            Entry::Dir { label, .. } => label,
+            Entry::Node { label, .. } => label,
+            Entry::Playlist { name } => name,
+            Entry::Search { label, .. } => label,
+            Entry::Discover { label, .. } => label,
+            Entry::Track { label, .. } => label,
+        }
+    }
+
+    /// `needle` is already lowercase. `..` always survives: it is the way out
+    /// of the directory, not a result in it, and filtering yourself into a
+    /// listing with no way back is a trap.
+    fn matches(&self, needle: &str) -> bool {
+        matches!(self, Entry::Parent) || self.label().to_lowercase().contains(needle)
+    }
 }
 
 /// Which of the five things a search matched on. The server answers all of
@@ -285,22 +309,68 @@ pub struct Pane {
     pub loading: bool,
     /// The columns to the left of this one, innermost last.
     pub trail: Vec<Trail>,
+    /// Text narrowing what is shown. Empty when everything is.
+    pub filter: String,
+    /// The list before the filter, kept so clearing it is instant and nothing
+    /// has to be asked for again. `None` when nothing is hidden, so a pane
+    /// with no filter — nearly always — holds one copy of its rows.
+    unfiltered: Option<Vec<Entry>>,
 }
 
 impl Pane {
     pub fn set(&mut self, entries: Vec<Entry>) {
-        // Start on the first real row rather than on "..", so entering a
-        // folder and pressing Enter doesn't just walk back out of it.
-        let selected = match entries.first() {
-            None => None,
-            Some(Entry::Parent) if entries.len() > 1 => Some(1),
-            Some(_) => Some(0),
-        };
+        // A filter describes the list it was typed against. This is a
+        // different list, so it goes.
+        self.filter.clear();
+        self.unfiltered = None;
         self.entries = entries;
-        self.state.select(selected);
+        self.rest_cursor();
         // Every reply lands here, so this is the one place that has to
         // remember to stop the spinner.
         self.loading = false;
+    }
+
+    /// Put the cursor on the first row worth being on: not "..", so entering
+    /// a folder and pressing Enter doesn't just walk back out of it.
+    fn rest_cursor(&mut self) {
+        let selected = match self.entries.first() {
+            None => None,
+            Some(Entry::Parent) if self.entries.len() > 1 => Some(1),
+            Some(_) => Some(0),
+        };
+        self.state.select(selected);
+    }
+
+    /// Narrow to the rows whose name contains `filter`, ignoring case. An
+    /// empty filter puts everything back.
+    pub fn apply_filter(&mut self, filter: String) {
+        let all = self
+            .unfiltered
+            .take()
+            .unwrap_or_else(|| std::mem::take(&mut self.entries));
+        let needle = filter.trim().to_lowercase();
+        self.filter = filter;
+        if needle.is_empty() {
+            self.entries = all;
+        } else {
+            self.entries = all.iter().filter(|entry| entry.matches(&needle)).cloned().collect();
+            self.unfiltered = Some(all);
+        }
+        self.rest_cursor();
+    }
+
+    pub fn clear_filter(&mut self) {
+        if !self.filter.is_empty() {
+            self.apply_filter(String::new());
+        }
+    }
+
+    /// How many rows are on screen, and how many there would be with no
+    /// filter. `..` counts as neither: it is the way out, not a result.
+    pub fn counts(&self) -> (usize, usize) {
+        let real = |list: &[Entry]| list.iter().filter(|e| !matches!(e, Entry::Parent)).count();
+        let shown = real(&self.entries);
+        (shown, self.unfiltered.as_ref().map_or(shown, |all| real(all)))
     }
 
     pub fn selected(&self) -> Option<&Entry> {
@@ -676,6 +746,10 @@ pub struct App {
     pub search: Pane,
     pub query: String,
     pub editing_query: bool,
+    /// The filter prompt is open and taking keys. Distinct from the filter
+    /// itself, which stays applied after you stop typing — the whole point is
+    /// to narrow a list and then move around what's left.
+    pub filtering: bool,
     pub search_summary: Option<String>,
 
     pub queue: Queue,
@@ -772,6 +846,7 @@ impl App {
             search: Pane::default(),
             query: String::new(),
             editing_query: false,
+            filtering: false,
             search_summary: None,
             queue: Queue::default(),
             capabilities: Default::default(),
@@ -937,7 +1012,7 @@ impl App {
     }
 
     pub fn input_mode(&self) -> InputMode {
-        if !self.connected || self.editing_query {
+        if !self.connected || self.editing_query || self.filtering {
             InputMode::Editing
         } else if self.dj_panel.is_some() || self.journey.is_some() {
             // A modal drawn over the full-screen view still owns the keyboard.
@@ -1152,10 +1227,17 @@ impl App {
         if self.journey.is_some() {
             return self.handle_journey_action(action);
         }
-        if self.editing_query {
-            if let Some(effects) = self.handle_query_action(&action) {
-                return effects;
-            }
+        if self.editing_query
+            && let Some(effects) = self.handle_query_action(&action)
+        {
+            return effects;
+        }
+        // Only the keys that edit the filter are claimed. Up and Down fall
+        // through, so the list can be narrowed and walked in one breath.
+        if self.filtering
+            && let Some(effects) = self.handle_filter_action(&action)
+        {
+            return effects;
         }
 
         match action {
@@ -1273,6 +1355,13 @@ impl App {
                 self.tab = Tab::Search;
                 self.focus = Focus::Browser;
                 self.editing_query = true;
+                Vec::new()
+            }
+            // Reopens on whatever is already typed, so a filter can be
+            // widened or backed out of rather than only started again.
+            Action::StartFilter => {
+                self.focus = Focus::Browser;
+                self.filtering = true;
                 Vec::new()
             }
 
@@ -1750,6 +1839,37 @@ impl App {
 
     /// Text entry for the search box. Returns `None` for keys the search box
     /// doesn't claim, so they fall through to the normal bindings.
+    /// The filter prompt. Narrowing happens on every keystroke — there is
+    /// nothing to submit, only somewhere to stop typing.
+    fn handle_filter_action(&mut self, action: &Action) -> Option<Vec<Effect>> {
+        let mut text = self.pane().filter.clone();
+        match action {
+            Action::Input(c) => text.push(*c),
+            Action::Backspace => {
+                // Backspacing past the start is how you leave without having
+                // meant to type anything at all.
+                if text.pop().is_none() {
+                    self.filtering = false;
+                    return Some(Vec::new());
+                }
+            }
+            Action::Cancel => {
+                self.filtering = false;
+                self.pane_mut().clear_filter();
+                return Some(Vec::new());
+            }
+            // Stop typing, keep what was typed: the narrowed list is the
+            // point, and it is no use if it goes when you reach for it.
+            Action::Submit => {
+                self.filtering = false;
+                return Some(Vec::new());
+            }
+            _ => return None,
+        }
+        self.pane_mut().apply_filter(text);
+        Some(Vec::new())
+    }
+
     fn handle_query_action(&mut self, action: &Action) -> Option<Vec<Effect>> {
         match action {
             Action::Input(c) => {
@@ -1944,7 +2064,19 @@ impl App {
             return;
         }
         let chosen = pane.state.selected().unwrap_or(0);
+        // The column behind keeps the whole listing, not the narrowed view of
+        // it. A filter is a way of finding one row, and once it has been found
+        // the rest of the folder is the context worth having — which also
+        // means coming back out is a list with nothing hidden and no filter
+        // left over to explain.
         let entries = pane.entries.clone();
+        let (entries, chosen) = match &pane.unfiltered {
+            Some(all) => {
+                let row = all.iter().position(|entry| entry == &entries[chosen]);
+                (all.clone(), row.unwrap_or(0))
+            }
+            None => (entries, chosen),
+        };
         pane.trail.push(Trail { title, entries, chosen });
     }
 
@@ -1963,6 +2095,8 @@ impl App {
             return effects;
         };
         let pane = self.pane_mut();
+        pane.filter.clear();
+        pane.unfiltered = None;
         pane.entries = step.entries;
         pane.state.select(Some(step.chosen));
         pane.loading = false;
@@ -3020,6 +3154,7 @@ impl Action {
             Action::SelectTab(3) => "tab-4",
             Action::SelectTab(4) => "tab-5",
             Action::StartSearch => "search",
+            Action::StartFilter => "filter",
             Action::PlayPause => "play-pause",
             Action::NextTrack => "next-track",
             Action::PrevTrack => "previous-track",
@@ -3126,6 +3261,9 @@ fn default_normal() -> Vec<Binding> {
         help: Some("Discover, if enabled"),
     },
     Binding { keys: vec![ch('/')], action: Action::StartSearch, help: Some("search") },
+    // `/` already asks the server. This one narrows what is already on
+    // screen, which is a different enough job to want its own key.
+    Binding { keys: vec![ch('f')], action: Action::StartFilter, help: Some("filter this list") },
     Binding { keys: vec![ch(' ')], action: Action::PlayPause, help: Some("play or pause") },
     Binding { keys: vec![ch('n')], action: Action::NextTrack, help: Some("next track") },
     Binding { keys: vec![ch('p')], action: Action::PrevTrack, help: Some("previous track") },
@@ -3530,6 +3668,132 @@ mod tests {
             app.handle_action(Action::Back),
             vec![Effect::Api(ApiCmd::Browse(String::new()))]
         );
+    }
+
+    fn type_filter(app: &mut App, text: &str) {
+        app.handle_action(Action::StartFilter);
+        for c in text.chars() {
+            app.handle_action(Action::Input(c));
+        }
+    }
+
+    fn labels(app: &App) -> Vec<&str> {
+        app.pane().entries.iter().map(Entry::label).collect()
+    }
+
+    #[test]
+    fn a_filter_narrows_the_list_without_losing_the_way_out() {
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing(
+            "/lib/",
+            &["Bassnectar", "Basshunter", "Portishead"],
+            &["bass solo.mp3"],
+        ))));
+
+        type_filter(&mut app, "BASS");
+        // Case folds both ways, files and folders alike, and `..` is not a
+        // result so it is never filtered away.
+        assert_eq!(labels(&app), vec!["..", "Bassnectar", "Basshunter", "bass solo.mp3"]);
+        assert_eq!(app.pane().counts(), (3, 4));
+        assert_eq!(app.input_mode(), InputMode::Editing, "the prompt has the keys");
+
+        // Narrowing further happens on the keystroke, with nothing to submit.
+        app.handle_action(Action::Input('h'));
+        assert_eq!(labels(&app), vec!["..", "Basshunter"]);
+
+        // Backspacing widens again, from the list that was never thrown away.
+        app.handle_action(Action::Backspace);
+        assert_eq!(labels(&app).len(), 4);
+    }
+
+    #[test]
+    fn a_filter_survives_being_typed_but_not_a_new_listing() {
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Alpha", "Beta"], &[]))));
+
+        type_filter(&mut app, "alp");
+        app.handle_action(Action::Submit);
+        assert!(!app.filtering, "the prompt closes");
+        assert_eq!(app.pane().filter, "alp", "and what was typed stays");
+        assert_eq!(app.input_mode(), InputMode::Normal, "the list has the keys back");
+        assert_eq!(labels(&app), vec!["..", "Alpha"]);
+
+        // A different list is not the list the filter was typed against.
+        app.apply_event(Event::Listing(Box::new(listing("/lib/Alpha/", &["One", "Two"], &[]))));
+        assert!(app.pane().filter.is_empty());
+        assert_eq!(labels(&app), vec!["..", "One", "Two"]);
+    }
+
+    #[test]
+    fn escaping_a_filter_puts_the_whole_list_back() {
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Alpha", "Beta"], &[]))));
+
+        type_filter(&mut app, "alp");
+        app.handle_action(Action::Cancel);
+        assert!(!app.filtering);
+        assert!(app.pane().filter.is_empty());
+        assert_eq!(labels(&app), vec!["..", "Alpha", "Beta"]);
+
+        // Backspacing past the start leaves too, having changed nothing.
+        type_filter(&mut app, "");
+        app.handle_action(Action::Backspace);
+        assert!(!app.filtering);
+        assert_eq!(labels(&app).len(), 3);
+    }
+
+    #[test]
+    fn the_column_behind_a_filtered_pick_holds_the_whole_folder() {
+        // The filter found the row; the folder it was in is the context worth
+        // keeping. Coming back out has nothing hidden and no filter left to
+        // explain why.
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing(
+            "/lib/",
+            &["Alpha", "Beta", "Betamax"],
+            &[],
+        ))));
+
+        type_filter(&mut app, "betam");
+        assert_eq!(labels(&app), vec!["..", "Betamax"]);
+        app.handle_action(Action::Submit);
+        app.handle_action(Action::Activate);
+        assert_eq!(app.path, "lib/Betamax");
+
+        let step = &app.files.trail[0];
+        assert_eq!(
+            step.entries.iter().map(Entry::label).collect::<Vec<_>>(),
+            vec!["..", "Alpha", "Beta", "Betamax"]
+        );
+        assert_eq!(step.entries[step.chosen].label(), "Betamax", "marked where we went in");
+
+        app.apply_event(Event::Listing(Box::new(listing("/lib/Betamax/", &["Tape"], &[]))));
+        app.handle_action(Action::Back);
+        assert_eq!(labels(&app), vec!["..", "Alpha", "Beta", "Betamax"]);
+        assert!(app.pane().filter.is_empty(), "and no filter came back with it");
+    }
+
+    #[test]
+    fn every_tab_filters_its_own_list() {
+        use crate::tui::worker::{LibraryData, LibraryNode};
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Alpha", "Beta"], &[]))));
+        type_filter(&mut app, "alp");
+        app.handle_action(Action::Submit);
+
+        app.handle_action(Action::SelectTab(1));
+        app.apply_event(Event::Library {
+            node: LibraryNode::Root,
+            data: LibraryData::Artists(vec!["Bassnectar".into(), "Portishead".into()]),
+        });
+        assert!(app.pane().filter.is_empty(), "a tab does not inherit another's filter");
+        type_filter(&mut app, "port");
+        app.handle_action(Action::Submit);
+        assert_eq!(labels(&app), vec!["..", "Portishead"]);
+
+        app.handle_action(Action::SelectTab(0));
+        assert_eq!(app.pane().filter, "alp", "and keeps its own when you come back");
+        assert_eq!(labels(&app), vec!["..", "Alpha"]);
     }
 
     #[test]

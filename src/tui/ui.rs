@@ -472,7 +472,11 @@ fn render_current_column(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|entry| ListItem::new(entry_line(entry, content, playing)))
         .collect();
-    let empty = items.is_empty();
+    // A filter never hides the way out, so a pane with nothing left in it is
+    // one row rather than none. Both are "nothing to see", and both want the
+    // hint — just not drawn over the row that is there.
+    let rows = items.len();
+    let nothing = app.pane().entries.iter().all(|entry| matches!(entry, Entry::Parent));
     let list = List::new(items)
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .highlight_symbol(CURSOR);
@@ -486,10 +490,10 @@ fn render_current_column(frame: &mut Frame, area: Rect, app: &mut App) {
     };
     frame.render_stateful_widget(list, inner, state);
 
-    if empty {
+    if nothing && (rows as u16) < inner.height {
         frame.render_widget(
             Paragraph::new(Span::styled(empty_hint(app), Style::new().fg(dim()))),
-            Rect { height: 1.min(inner.height), ..inner },
+            Rect { y: inner.y + rows as u16, height: 1, ..inner },
         );
     }
 }
@@ -568,6 +572,12 @@ fn divider(frame: &mut Frame, area: Rect) {
 fn empty_hint(app: &App) -> String {
     if app.pane().loading {
         return format!("{} loading\u{2026}", SPINNER[app.spinner % SPINNER.len()]);
+    }
+    // "(empty directory)" under a filter that matched nothing is a lie about
+    // the directory.
+    let filter = app.pane().filter.trim();
+    if !filter.is_empty() {
+        return format!("nothing here matches {filter:?}");
     }
     match app.tab {
         Tab::Files => "(empty directory)",
@@ -1198,6 +1208,22 @@ fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// What the footer says about a narrowed list. The count is the useful part:
+/// it says how much is hidden, which is the question a short list raises.
+fn filter_readout(app: &App) -> String {
+    let pane = app.pane();
+    let caret = if app.filtering { "\u{258F}" } else { "" };
+    let mut out = format!("filter: {}{caret}", pane.filter);
+    if !pane.filter.trim().is_empty() {
+        let (shown, total) = pane.counts();
+        out.push_str(&format!("   {shown} of {total}"));
+    }
+    if !app.filtering {
+        out.push_str("   (f to change)");
+    }
+    out
+}
+
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let full = mode_readout(app, false);
     // Abbreviate rather than let the mode readout crowd the message off the
@@ -1209,18 +1235,29 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let [message_area, modes_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(modes_width)]).areas(area);
 
-    let message = match &app.message {
-        Some(m) => Span::styled(
-            fit(&m.text, message_area.width as usize),
-            match m.kind {
-                MessageKind::Error => Style::new().fg(Color::Red),
-                MessageKind::Info => Style::new().fg(dim()),
-            },
-        ),
-        None => Span::styled(
-            fit(idle_hint(app), message_area.width as usize),
-            Style::new().fg(dim()),
-        ),
+    // A filter outranks both the message and the hint while one is on: it is
+    // the explanation for a list that is shorter than it should be, and
+    // leaving that unsaid is how a filtered pane gets mistaken for an empty
+    // library.
+    let message = if app.filtering || !app.pane().filter.is_empty() {
+        Span::styled(
+            fit(&filter_readout(app), message_area.width as usize),
+            Style::new().fg(accent()),
+        )
+    } else {
+        match &app.message {
+            Some(m) => Span::styled(
+                fit(&m.text, message_area.width as usize),
+                match m.kind {
+                    MessageKind::Error => Style::new().fg(Color::Red),
+                    MessageKind::Info => Style::new().fg(dim()),
+                },
+            ),
+            None => Span::styled(
+                fit(idle_hint(app), message_area.width as usize),
+                Style::new().fg(dim()),
+            ),
+        }
     };
     frame.render_widget(Paragraph::new(Line::from(message)), message_area);
     frame.render_widget(
@@ -1236,8 +1273,10 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 /// being in the help screen is no use to someone who does not know to look.
 fn idle_hint(app: &App) -> &'static str {
     match app.tab {
-        Tab::Search if app.search_hits.is_some() => "/ new search   ? help   q quit",
-        _ => "? help   q quit",
+        Tab::Search if app.search_hits.is_some() => {
+            "/ new search   f filter   ? help   q quit"
+        }
+        _ => "f filter   ? help   q quit",
     }
 }
 
@@ -2983,6 +3022,54 @@ mod tests {
             let row: String = (0..20).map(|x| buffer[(x, *y)].symbol()).collect();
             row.trim_start().starts_with(label)
         })
+    }
+
+    #[test]
+    fn a_filtered_list_says_so_and_says_how_much_it_is_hiding() {
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing(
+            "/lib/",
+            &["Bassnectar", "Basshunter", "Portishead"],
+            &[],
+        ))));
+
+        app.handle_action(Action::StartFilter);
+        for c in "bass".chars() {
+            app.handle_action(Action::Input(c));
+        }
+        let text = draw(&mut app);
+        // The caret says the keys are going here; the count says why the list
+        // is short. Both matter more than whatever the footer held before.
+        assert!(text.contains("filter: bass\u{258F}"), "{text}");
+        assert!(text.contains("2 of 3"), "{text}");
+        assert!(text.contains("Bassnectar") && text.contains("Basshunter"), "{text}");
+        assert!(!text.contains("Portishead"), "the filtered-out row is gone: {text}");
+
+        // Once typing stops the filter is still on, so it still says so.
+        app.handle_action(Action::Submit);
+        let text = draw(&mut app);
+        assert!(text.contains("filter: bass"), "{text}");
+        assert!(!text.contains("filter: bass\u{258F}"), "the caret goes with the prompt: {text}");
+        assert!(text.contains("f to change"), "{text}");
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_says_that_rather_than_looking_empty() {
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Alpha"], &[]))));
+
+        app.handle_action(Action::StartFilter);
+        for c in "zzz".chars() {
+            app.handle_action(Action::Input(c));
+        }
+        let text = draw(&mut app);
+        assert!(text.contains("nothing here matches \"zzz\""), "{text}");
+        // Drawn under the way out rather than over it — the row that is still
+        // there is the one that gets you out of here.
+        let lines: Vec<&str> = text.lines().collect();
+        let out = lines.iter().position(|l| l.contains("..")).expect("the way out");
+        let said = lines.iter().position(|l| l.contains("nothing here matches")).unwrap();
+        assert_eq!(said, out + 1, "{text}");
     }
 
     #[test]
