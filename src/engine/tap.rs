@@ -16,10 +16,12 @@ use std::time::Duration;
 use rodio::source::SeekError;
 use rodio::{ChannelCount, Sample, SampleRate, Source};
 
-/// How much audio the tap holds. Two FFT windows at any rate we are likely to
-/// meet — enough to draw from, short enough that what it holds is what you
-/// are hearing.
-pub const TAP_SAMPLES: usize = 8192;
+/// How much audio the tap holds, in frames — one sample per channel, so the
+/// stretch of time held does not depend on how many channels the source has.
+/// Sized in interleaved samples it did: 7.1 kept an eighth of what mono kept,
+/// permanently short of one FFT window. Two windows' worth — enough to draw
+/// from, short enough that what it holds is what you are hearing.
+pub const TAP_FRAMES: usize = 4096;
 
 /// How many samples a source gathers before handing them over. Taking the
 /// lock per sample would be ninety thousand times a second for no benefit;
@@ -105,13 +107,14 @@ impl Ring {
             self.rate = rate;
             self.channels = channels;
         }
-        if self.samples.len() != TAP_SAMPLES {
-            self.samples = vec![0.0; TAP_SAMPLES];
+        let want = TAP_FRAMES * channels.max(1) as usize;
+        if self.samples.len() != want {
+            self.samples = vec![0.0; want];
         }
         for &sample in batch {
             self.samples[self.write] = sample;
             self.write += 1;
-            if self.write == TAP_SAMPLES {
+            if self.write == self.samples.len() {
                 self.write = 0;
                 self.wrapped = true;
             }
@@ -122,7 +125,8 @@ impl Ring {
         if self.samples.is_empty() || (!self.wrapped && self.write == 0) {
             return None;
         }
-        let mut samples = Vec::with_capacity(if self.wrapped { TAP_SAMPLES } else { self.write });
+        let mut samples =
+            Vec::with_capacity(if self.wrapped { self.samples.len() } else { self.write });
         if self.wrapped {
             samples.extend_from_slice(&self.samples[self.write..]);
         }
@@ -275,11 +279,12 @@ mod tests {
         assert_eq!(frame.samples[BATCH - 1], BATCH as Sample);
 
         // Past the ring's length it keeps the newest and drops the oldest.
-        drain(&mut source, TAP_SAMPLES * 2);
+        let held = TAP_FRAMES * 2; // interleaved, and this source is stereo
+        drain(&mut source, held * 2);
         let frame = tap.frame().unwrap();
-        assert_eq!(frame.samples.len(), TAP_SAMPLES);
-        let newest = frame.samples[TAP_SAMPLES - 1];
-        assert_eq!(frame.samples[0], newest - (TAP_SAMPLES - 1) as Sample, "one run, in order");
+        assert_eq!(frame.samples.len(), held);
+        let newest = frame.samples[held - 1];
+        assert_eq!(frame.samples[0], newest - (held - 1) as Sample, "one run, in order");
     }
 
     #[test]
@@ -296,6 +301,20 @@ mod tests {
 
         drain(&mut source, BATCH);
         assert_eq!(tap.frame().unwrap().samples[0], 1.0, "and it fills again from there");
+    }
+
+    #[test]
+    fn the_ring_spans_the_same_frames_however_many_channels() {
+        // Sized in interleaved samples, a 7.1 source kept an eighth of the
+        // frames a mono one did — permanently too few for one FFT window,
+        // however long it played.
+        let frames_held = |channels: u16| {
+            let tap = AudioTap::new();
+            let mut source = Tapped::new(Ramp::new(44100, channels), tap.clone());
+            drain(&mut source, 8 * 8192);
+            tap.frame().expect("a full ring").mono().len()
+        };
+        assert_eq!(frames_held(8), frames_held(1), "7.1 holds the frames mono holds");
     }
 
     #[test]

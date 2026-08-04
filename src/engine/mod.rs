@@ -637,11 +637,12 @@ mod tests {
         );
         engine.stop();
 
-        assert_eq!(frame.samples.len(), tap::TAP_SAMPLES, "the ring should be full");
+        let held = tap::TAP_FRAMES * frame.channels as usize;
+        assert_eq!(frame.samples.len(), held, "the ring should be full");
         assert!(frame.rate >= 8000, "a real sample rate, got {}", frame.rate);
         assert!((1..=8).contains(&frame.channels), "a real channel count");
         assert!(peak > 0.01, "the tap heard silence: peak {peak}");
-        assert_eq!(frame.mono().len(), tap::TAP_SAMPLES / frame.channels as usize);
+        assert_eq!(frame.mono().len(), tap::TAP_FRAMES, "the same frames whatever the shape");
     }
 
     /// Seeking repeatedly in one streamed track keeps playing.

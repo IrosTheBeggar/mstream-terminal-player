@@ -200,19 +200,28 @@ fn fft(re: &mut [f32], im: &mut [f32]) {
 /// Magnitudes of the most recent [`WINDOW`] samples, one per bin up to
 /// Nyquist. Hann-windowed: an abrupt cut at each end of the buffer is a step
 /// change, and a step change is broadband noise smeared across every bin.
+///
+/// The window's period is the data present, not the buffer. Just after a
+/// seek the tap holds less than [`WINDOW`]; windowed over the whole buffer
+/// that fill would stop mid-slope, which is the very step the Hann is here
+/// to remove.
 fn spectrum(mono: &[f32]) -> Vec<f32> {
     let mut re = vec![0.0f32; WINDOW];
     let mut im = vec![0.0f32; WINDOW];
     let take = mono.len().min(WINDOW);
+    if take == 0 {
+        return vec![0.0; WINDOW / 2];
+    }
     for (i, &sample) in mono[mono.len() - take..].iter().enumerate() {
-        let hann = 0.5 - 0.5 * (2.0 * PI * i as f32 / WINDOW as f32).cos();
+        let hann = 0.5 - 0.5 * (2.0 * PI * i as f32 / take as f32).cos();
         re[i] = sample * hann;
     }
     fft(&mut re, &mut im);
-    // Scaled so a full-scale tone comes out near 1.0 rather than near 500.
-    // Without it every gain downstream carries a factor of the window length,
-    // and the automatic one spends ten seconds finding it.
-    let scale = 4.0 / WINDOW as f32;
+    // Scaled so a full-scale tone comes out near 1.0 rather than near 500 —
+    // by what was transformed, since a short fill carries that much less
+    // energy. Without it every gain downstream carries a factor of the fill
+    // length, and the automatic one spends ten seconds finding it.
+    let scale = 4.0 / take as f32;
     (0..WINDOW / 2).map(|k| (re[k] * re[k] + im[k] * im[k]).sqrt() * scale).collect()
 }
 
@@ -930,6 +939,29 @@ mod tests {
             vu.update(&silence, FRAME);
         }
         assert!(vu.readings()[0].1 < struck, "and then released");
+    }
+
+    #[test]
+    fn a_short_fill_is_windowed_over_what_is_there_not_the_full_buffer() {
+        // What 5.1 used to hand the transform: 1365 frames, permanently
+        // short of WINDOW. Windowed over WINDOW the data stops at
+        // three-quarter weight, and that step is broadband leakage in
+        // every bin — which the tilt then amplifies in the top bands.
+        let rate = 44100;
+        // On the transform's own grid, so the tone lands in one bin and
+        // whatever is far from it is leakage rather than scalloping.
+        let hz = 20.0 * rate as f32 / WINDOW as f32;
+        let short = spectrum(&sine(hz, rate, 1365));
+
+        let peak = short[20];
+        assert!(peak > 0.9, "a full-scale tone reads full scale whatever the fill, got {peak}");
+        let far: f32 = short
+            .iter()
+            .enumerate()
+            .filter(|(bin, _)| bin.abs_diff(20) > 40)
+            .map(|(_, magnitude)| magnitude)
+            .sum();
+        assert!(far < 0.1 * peak, "the rest of the range stays quiet: {far} against {peak}");
     }
 
     #[test]
