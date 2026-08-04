@@ -39,6 +39,13 @@ pub struct ReplayArgs {
     #[arg(long)]
     pub live: bool,
 
+    /// Save settings and the browse path on the way out, the way the real
+    /// binary does. Off by default: a script that turns the volume down to
+    /// listen to nothing, or walks into some folder to have something to
+    /// walk out of, should not leave the player that way afterwards.
+    #[arg(long)]
+    pub remember: bool,
+
     /// Print the screen after every step, not just at the end.
     #[arg(long)]
     pub frames: bool,
@@ -401,9 +408,13 @@ pub fn run(args: ReplayArgs) -> i32 {
     if !just_printed {
         println!("{}", buffer_text(&terminal));
     }
-    // Mirror what the real binary does on the way out, so a scripted run
-    // exercises the save path too.
-    if args.live {
+    // Only when asked. This mirrors what the real binary does on the way out,
+    // which is worth being able to exercise — but it writes the volume and
+    // the browse path into the settings the player really starts from, and a
+    // script is a poor author of those. Left on by default it quietly turned
+    // the volume to nothing and moved the file browser three folders deep,
+    // and the player had to be asked why it started that way.
+    if args.live && args.remember {
         crate::tui::remember(&app);
     }
     0
