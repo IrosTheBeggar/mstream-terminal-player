@@ -66,7 +66,6 @@ pub struct Visualizer {
     pub scatter: bool,
     bars: Bars,
     vu: Vu,
-    envelope: Envelope,
     /// When the last frame was drawn. Every smoothing constant here is a rate
     /// per second, not per frame — the panel is redrawn on a timer that a
     /// slow terminal will miss, and smoothing that quietly changes speed with
@@ -96,10 +95,7 @@ impl Visualizer {
                 let bars = self.bars.update(heard, canvas.width() as usize / BAR_STRIDE, elapsed);
                 draw_bars(canvas, bars);
             }
-            VizMode::Scope => {
-                self.envelope.update(heard, elapsed);
-                draw_scope(canvas, heard, self.scatter, &self.envelope);
-            }
+            VizMode::Scope => draw_scope(canvas, heard, self.scatter),
             VizMode::Vectorscope => draw_vectorscope(canvas, heard, self.scatter),
             VizMode::Vu => {
                 self.vu.update(heard, elapsed);
@@ -113,7 +109,6 @@ impl Visualizer {
     pub fn forget(&mut self) {
         self.bars = Bars::default();
         self.vu = Vu::default();
-        self.envelope = Envelope::default();
         self.drawn = None;
     }
 }
@@ -394,62 +389,7 @@ fn draw_bars(canvas: &mut Canvas, bars: &[f32]) {
 /// noise is exactly the jitter the trigger exists to remove.
 const TRIGGER_DEPTH: usize = 8;
 
-/// How long the envelope marks sit at a new extreme before sliding back, and
-/// how much of their height they give up each second after that. Long enough
-/// that a snare is still readable a beat later; short enough that the marks
-/// follow the track rather than recording its loudest moment forever.
-const ENVELOPE_HOLD: f32 = 0.8;
-const ENVELOPE_FALL: f32 = 0.7;
-
-/// The furthest each channel has swung lately, held.
-///
-/// scope-tui puts this behind its `p` key. Here it is always on and drawn as
-/// a dotted rule rather than a solid one, so it reads as annotation over the
-/// trace instead of competing with it: the trace is what the signal is doing
-/// now, and these are what it has been doing.
-#[derive(Debug, Default)]
-struct Envelope {
-    high: [f32; 2],
-    low: [f32; 2],
-    held: [f32; 2],
-}
-
-impl Envelope {
-    fn update(&mut self, heard: &TapFrame, elapsed: f32) {
-        let channels = (heard.channels.max(1) as usize).min(2);
-        let stride = heard.channels.max(1) as usize;
-        for channel in 0..channels {
-            let mut high = f32::MIN;
-            let mut low = f32::MAX;
-            for sample in heard.samples.iter().skip(channel).step_by(stride) {
-                high = high.max(*sample);
-                low = low.min(*sample);
-            }
-            if high == f32::MIN {
-                continue;
-            }
-            // Kept apart rather than made symmetrical: a waveform that leans
-            // one way is a real thing to be able to see, and averaging the
-            // two would hide it.
-            let reached = high > self.high[channel] || low < self.low[channel];
-            self.high[channel] = self.high[channel].max(high);
-            self.low[channel] = self.low[channel].min(low);
-            if reached {
-                self.held[channel] = 0.0;
-            } else {
-                self.held[channel] += elapsed;
-                if self.held[channel] > ENVELOPE_HOLD {
-                    // Proportional, so it eases back rather than marching.
-                    let keep = 1.0 - ENVELOPE_FALL * elapsed;
-                    self.high[channel] *= keep;
-                    self.low[channel] *= keep;
-                }
-            }
-        }
-    }
-}
-
-fn draw_scope(canvas: &mut Canvas, heard: &TapFrame, scatter: bool, envelope: &Envelope) {
+fn draw_scope(canvas: &mut Canvas, heard: &TapFrame, scatter: bool) {
     let width = canvas.width() as usize;
     let height = canvas.height() as i32;
     if width == 0 || height == 0 || heard.samples.is_empty() {
@@ -471,29 +411,14 @@ fn draw_scope(canvas: &mut Canvas, heard: &TapFrame, scatter: bool, envelope: &E
     let start = trigger(&frames, frames.len() - span);
     let shown = &frames[start..start + span];
 
-    let half = height as f32 / 2.0;
-    let level_at = |level: f32| (half - level.clamp(-1.0, 1.0) * half) as i32;
-
-    // The envelope first, so the trace is drawn over it. Dotted, and in a
-    // muted version of the channel's own colour: solid it would be mistaken
-    // for signal, and in plain grey it would not say whose it was.
-    for channel in 0..channels.min(2) {
-        let muted = mute(channel_colour(channel));
-        for level in [envelope.high[channel], envelope.low[channel]] {
-            let y = level_at(level);
-            for x in (0..canvas.width() as i32).step_by(3) {
-                canvas.set(x, y, muted);
-            }
-        }
-    }
-
     // Each channel its own trace and its own colour. Drawn back to front so
     // the left channel, which most ears follow, sits on top.
+    let half = height as f32 / 2.0;
     for channel in (0..channels.min(2)).rev() {
-        let colour = channel_colour(channel);
+        let colour = if channel == 0 { accent() } else { folder() };
         let at = |x: usize| -> i32 {
             let frame = shown[(x * shown.len() / width).min(shown.len() - 1)];
-            level_at(frame[channel])
+            (half - frame[channel].clamp(-1.0, 1.0) * half) as i32
         };
         let mut previous = at(0);
         for x in 0..width {
@@ -708,21 +633,6 @@ fn zone(across: f32) -> Color {
 
 // ── Colour ──────────────────────────────────────────────────────────────────
 
-/// Left is the accent, right is the folder colour. Two hues from the theme
-/// rather than two arbitrary ones, so a configured palette still applies.
-fn channel_colour(channel: usize) -> Color {
-    if channel == 0 { accent() } else { folder() }
-}
-
-/// The same colour, turned down. For marks that annotate the picture rather
-/// than being part of it.
-fn mute(colour: Color) -> Color {
-    match (rgb(colour), rgb(dim())) {
-        (Some(from), Some(to)) => blend(from, to, 0.55),
-        _ => dim(),
-    }
-}
-
 /// Quiet to loud, through the theme's own colours so a configured accent
 /// carries into the visualiser.
 fn ramp(heat: f32) -> Color {
@@ -929,39 +839,6 @@ mod tests {
         let at = trigger(&frames, frames.len() - 64);
         assert!(at >= 8, "walked past the single-sample flick, landed at {at}");
         assert!(frames[at][0] <= 0.0 && frames[at + 1][0] > 0.0, "and it is a real crossing");
-    }
-
-    #[test]
-    fn the_envelope_marks_hold_the_swing_and_keep_the_channels_apart() {
-        let rate = 44100;
-        // Left swings wide, right barely moves, and the left leans upward —
-        // all three are things the marks should be able to say.
-        let left: Vec<f32> = sine(300.0, rate, 2048).iter().map(|s| s * 0.9 + 0.05).collect();
-        let right: Vec<f32> = sine(300.0, rate, 2048).iter().map(|s| s * 0.2).collect();
-
-        let mut envelope = Envelope::default();
-        envelope.update(&stereo(left, right, rate), FRAME);
-        assert!(envelope.high[0] > 0.9 && envelope.low[0] < -0.8, "{envelope:?}");
-        assert!(envelope.high[1] < 0.25, "the quiet channel keeps its own mark: {envelope:?}");
-        assert!(
-            envelope.high[0] + envelope.low[0] > 0.05,
-            "the lean is visible rather than averaged away: {envelope:?}"
-        );
-
-        // Silence holds the marks where they were...
-        let quiet = stereo(vec![0.0; 2048], vec![0.0; 2048], rate);
-        let struck = envelope.high[0];
-        for _ in 0..((ENVELOPE_HOLD / FRAME) as usize - 4) {
-            envelope.update(&quiet, FRAME);
-        }
-        assert_eq!(envelope.high[0], struck, "held");
-
-        // ...and then lets them slide back.
-        for _ in 0..60 {
-            envelope.update(&quiet, FRAME);
-        }
-        assert!(envelope.high[0] < struck * 0.5, "and released: {}", envelope.high[0]);
-        assert!(envelope.low[0] > -struck * 0.5, "both ways");
     }
 
     #[test]
