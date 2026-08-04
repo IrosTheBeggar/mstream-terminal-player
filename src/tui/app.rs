@@ -682,6 +682,9 @@ pub struct App {
     /// What the connected server offers. Default (nothing) until a ping says
     /// otherwise, so an optional feature is never assumed present.
     pub capabilities: crate::api::types::Capabilities,
+    /// The server's libraries, as the ping named them. Empty until it answers,
+    /// which is the same as "no reason to stop anywhere in particular".
+    libraries: Vec<String>,
     pub autodj: AutoDjMode,
     /// How Auto-DJ chooses, beyond the mode.
     pub dj: dj::Settings,
@@ -772,6 +775,7 @@ impl App {
             search_summary: None,
             queue: Queue::default(),
             capabilities: Default::default(),
+            libraries: Vec::new(),
             autodj: AutoDjMode::Off,
             dj: dj::Settings::default(),
             dj_panel: None,
@@ -1047,6 +1051,24 @@ impl App {
     /// Whether we have asked for a track and not yet heard it start.
     pub fn is_starting(&self) -> bool {
         self.starting.is_some()
+    }
+
+    /// The path the file browser treats as the top.
+    ///
+    /// A server with one library has nothing above it worth showing: the list
+    /// of libraries is that one row, so going up is a step everyone has to
+    /// take back. The web UI stops at the library for exactly that reason and
+    /// this follows it. Two or more libraries make the list a real choice, so
+    /// the top stays where it was.
+    fn browser_root(&self) -> &str {
+        match self.libraries.as_slice() {
+            [only] => only,
+            _ => "",
+        }
+    }
+
+    fn at_browser_root(&self) -> bool {
+        self.path.trim_matches('/') == self.browser_root()
     }
 
     /// A request that failed answers nothing, so nothing calls `Pane::set` and
@@ -1953,7 +1975,7 @@ impl App {
     fn step_out(&mut self) -> Option<Vec<Effect>> {
         Some(match self.tab {
             Tab::Files => {
-                if self.path.is_empty() {
+                if self.at_browser_root() {
                     return None;
                 }
                 let parent = match self.path.rsplit_once('/') {
@@ -2382,6 +2404,7 @@ impl App {
                     self.username = username;
                 }
                 self.capabilities = crate::api::types::Capabilities::from(ping.as_ref());
+                self.libraries = ping.vpaths.clone();
                 let libraries = ping.vpaths.len();
                 self.info(format!(
                     "connected to {} ({} librar{})",
@@ -2449,7 +2472,8 @@ impl App {
             }
             Event::Listing(listing) => {
                 self.path = listing.path.trim_matches('/').to_string();
-                self.files.set(entries_from_listing(&listing));
+                let root = self.browser_root().to_string();
+                self.files.set(entries_from_listing(&listing, &root));
                 Vec::new()
             }
             Event::Library { node, data } => {
@@ -2787,10 +2811,12 @@ fn qualify(prefix: &str, name: &str) -> String {
     }
 }
 
-fn entries_from_listing(listing: &DirListing) -> Vec<Entry> {
+/// `root` is the path with nothing above it worth offering — empty for the
+/// list of libraries, or the one library on a server that has only one.
+fn entries_from_listing(listing: &DirListing, root: &str) -> Vec<Entry> {
     let prefix = listing.path.trim_matches('/');
     let mut entries = Vec::new();
-    if !prefix.is_empty() {
+    if !prefix.is_empty() && prefix != root {
         entries.push(Entry::Parent);
     }
     for dir in &listing.directories {
@@ -3440,7 +3466,7 @@ mod tests {
 
     #[test]
     fn listing_becomes_entries_with_qualified_paths() {
-        let entries = entries_from_listing(&listing("/lib/Artist/", &["Album"], &["song.mp3"]));
+        let entries = entries_from_listing(&listing("/lib/Artist/", &["Album"], &["song.mp3"]), "");
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0], Entry::Parent);
         assert!(matches!(&entries[1], Entry::Dir { path, .. } if path == "lib/Artist/Album"));
@@ -3449,9 +3475,66 @@ mod tests {
         );
     }
 
+    /// Connect for real, so the library list comes from a ping rather than
+    /// being poked into the field the browser reads.
+    fn app_with_libraries(vpaths: &[&str]) -> App {
+        let mut app = connected_app();
+        app.apply_event(Event::Connected {
+            server: "http://host:3000".into(),
+            id: "http://host:3000".into(),
+            username: None,
+            token: None,
+            ping: Box::new(crate::api::types::Ping {
+                vpaths: vpaths.iter().map(|v| (*v).to_string()).collect(),
+                ..Default::default()
+            }),
+        });
+        app
+    }
+
+    #[test]
+    fn the_only_library_is_the_top_of_the_browser() {
+        let mut app = app_with_libraries(&["library"]);
+        app.path = "library".into();
+        app.apply_event(Event::Listing(Box::new(listing("library", &["Artist"], &[]))));
+
+        // Nothing above it: the list of libraries would be this one row.
+        assert!(!app.files.entries.contains(&Entry::Parent), "{:?}", app.files.entries);
+        assert!(app.handle_action(Action::Back).is_empty(), "back asks for nothing");
+        assert_eq!(app.path, "library", "and stays put");
+
+        // A folder inside it still has its way back.
+        app.handle_action(Action::Activate);
+        assert_eq!(app.path, "library/Artist");
+        app.apply_event(Event::Listing(Box::new(listing(
+            "library/Artist",
+            &["Album"],
+            &[],
+        ))));
+        assert!(app.files.entries.contains(&Entry::Parent));
+        // No request: the trail already holds the listing we came through.
+        assert!(app.handle_action(Action::Back).is_empty());
+        assert_eq!(app.path, "library");
+        assert!(!app.files.entries.contains(&Entry::Parent), "and the top has no way up");
+    }
+
+    #[test]
+    fn several_libraries_keep_the_list_of_them_reachable() {
+        // With a choice to make, the top-level listing is worth going back to.
+        let mut app = app_with_libraries(&["music", "podcasts"]);
+        app.path = "music".into();
+        app.apply_event(Event::Listing(Box::new(listing("music", &["Artist"], &[]))));
+
+        assert!(app.files.entries.contains(&Entry::Parent));
+        assert_eq!(
+            app.handle_action(Action::Back),
+            vec![Effect::Api(ApiCmd::Browse(String::new()))]
+        );
+    }
+
     #[test]
     fn root_listing_has_no_parent_entry() {
-        let entries = entries_from_listing(&listing("/", &["lib"], &[]));
+        let entries = entries_from_listing(&listing("/", &["lib"], &[]), "");
         assert_eq!(entries.len(), 1);
         assert!(matches!(&entries[0], Entry::Dir { .. }));
     }
@@ -4879,7 +4962,7 @@ mod tests {
             ],
         };
 
-        let tracks: Vec<Track> = entries_from_listing(&listing)
+        let tracks: Vec<Track> = entries_from_listing(&listing, "")
             .into_iter()
             .filter_map(|e| match e {
                 Entry::Track { track, .. } => Some(*track),
@@ -4910,7 +4993,7 @@ mod tests {
                 metadata: None,
             }],
         };
-        match &entries_from_listing(&listing)[1] {
+        match &entries_from_listing(&listing, "")[1] {
             Entry::Track { track, .. } => {
                 assert_eq!(track.filepath, "library/Artist/loose.mp3");
                 assert_eq!(track.metadata, TrackMetadata::default());
@@ -4941,7 +5024,7 @@ mod tests {
                 },
             ],
         };
-        let entries = entries_from_listing(&listing);
+        let entries = entries_from_listing(&listing, "");
         let labels: Vec<&str> = entries
             .iter()
             .filter_map(|e| match e {
