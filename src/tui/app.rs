@@ -199,6 +199,7 @@ pub enum Action {
     StartSearch,
     StartFilter,
     CycleViz,
+    ToggleScatter,
     Input(char),
     Backspace,
     Submit,
@@ -1382,6 +1383,13 @@ impl App {
                 self.viz.mode = self.viz.mode.next();
                 // The last mode's history describes the last mode.
                 self.viz.forget();
+                Vec::new()
+            }
+            // Kept across a mode change and across leaving the view: it is a
+            // preference about how you like to read a trace, not a property
+            // of the trace.
+            Action::ToggleScatter => {
+                self.viz.scatter = !self.viz.scatter;
                 Vec::new()
             }
             // Reopens on whatever is already typed, so a filter can be
@@ -3182,6 +3190,7 @@ impl Action {
             Action::StartSearch => "search",
             Action::StartFilter => "filter",
             Action::CycleViz => "visualiser-mode",
+            Action::ToggleScatter => "visualiser-dots",
             Action::PlayPause => "play-pause",
             Action::NextTrack => "next-track",
             Action::PrevTrack => "previous-track",
@@ -3387,6 +3396,10 @@ fn default_now() -> Vec<Binding> {
     // The visualiser's own tab, on its own key: `←→` already belongs to the
     // panel's tabs and `↑↓` to whatever list is in them.
     Binding { keys: vec![ch('v')], action: Action::CycleViz, help: None },
+    // A dot, for the mode that draws dots. `s` and `p` would have been
+    // the mnemonic picks and both are taken by transport keys that this
+    // view deliberately lets through.
+    Binding { keys: vec![ch('.')], action: Action::ToggleScatter, help: None },
     // Esc leaves, because a screen filling the terminal should close the way
     // every other full-screen thing does. `0` still toggles.
     Binding { keys: vec![key(KeyCode::Esc)], action: Action::ToggleNowPlaying, help: None },

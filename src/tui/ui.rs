@@ -959,6 +959,9 @@ fn rule_with_junction(width: u16, at: u16) -> String {
 fn now_keys_hint(app: &App) -> &'static str {
     match app.now_tab() {
         NowTab::Queue => "←→ tab   ↑↓ list   Enter play   d remove   0 back",
+        NowTab::Visualizer if app.viz.mode.plots_samples() => {
+            "←→ tab   v mode   . dots   0 back"
+        }
         NowTab::Visualizer => "←→ tab   v mode   0 back",
         _ => "←→ tab   ↑↓ scroll   0 back",
     }
@@ -1006,11 +1009,15 @@ fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
 
     // Named whether or not there is anything to draw. Pressing `v` with the
-    // player paused should still show that something happened.
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(app.viz.mode.title(), Style::new().fg(dim())))),
-        label,
-    );
+    // player paused should still show that something happened — and the same
+    // for `.`, which changes only how the samples are joined and would
+    // otherwise be a key with no visible effect on a still picture.
+    let mut named = vec![Span::styled(app.viz.mode.title(), Style::new().fg(dim()))];
+    if app.viz.mode.plots_samples() {
+        let how = if app.viz.scatter { "   dots" } else { "   lines" };
+        named.push(Span::styled(how, Style::new().fg(dim())));
+    }
+    frame.render_widget(Paragraph::new(Line::from(named)), label);
 
     let Some(tap) = &app.tap else {
         return render_now_placeholder(frame, picture, "the visualiser goes here", "no audio thread");
@@ -3261,6 +3268,21 @@ mod tests {
         }
         // A mode change is not news anyone needs in the browser's footer.
         assert!(app.message.is_none());
+
+        // `.` says which way it is drawing, and only where that means
+        // something — a bar chart has no samples to join.
+        app.viz.mode = VizMode::Scope;
+        let text = draw(&mut app);
+        assert!(text.contains("lines") && text.contains(". dots"), "{text}");
+        app.handle_action(Action::ToggleScatter);
+        assert!(app.viz.scatter);
+        assert!(draw(&mut app).contains("dots"));
+
+        app.viz.mode = VizMode::Bars;
+        let text = draw(&mut app);
+        assert!(!text.contains("dots") && !text.contains("lines"), "nothing to join: {text}");
+        // ...but the preference is still held for when you go back to one.
+        assert!(app.viz.scatter);
     }
 
     #[test]

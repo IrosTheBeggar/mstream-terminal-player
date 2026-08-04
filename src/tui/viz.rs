@@ -45,6 +45,12 @@ impl VizMode {
         let at = VIZ_MODES.iter().position(|m| *m == self).unwrap_or(0);
         VIZ_MODES[(at + 1) % VIZ_MODES.len()]
     }
+
+    /// Whether this mode plots samples, and so has a say in whether they are
+    /// joined up. Bars and a meter are drawn from numbers, not from samples.
+    pub fn plots_samples(self) -> bool {
+        matches!(self, VizMode::Scope | VizMode::Vectorscope)
+    }
 }
 
 /// What the visualiser remembers between frames. Bars fall from where they
@@ -53,6 +59,11 @@ impl VizMode {
 #[derive(Debug, Default)]
 pub struct Visualizer {
     pub mode: VizMode,
+    /// Leave the samples as points instead of joining them, scope-tui's
+    /// "vintage" mode. A line through samples invents a path between them
+    /// that the signal never took, which at high frequencies is a lie the
+    /// picture tells confidently; dots only ever claim what was measured.
+    pub scatter: bool,
     bars: Bars,
     vu: Vu,
     /// When the last frame was drawn. Every smoothing constant here is a rate
@@ -84,8 +95,8 @@ impl Visualizer {
                 let bars = self.bars.update(heard, canvas.width() as usize / BAR_STRIDE, elapsed);
                 draw_bars(canvas, bars);
             }
-            VizMode::Scope => draw_scope(canvas, heard),
-            VizMode::Vectorscope => draw_vectorscope(canvas, heard),
+            VizMode::Scope => draw_scope(canvas, heard, self.scatter),
+            VizMode::Vectorscope => draw_vectorscope(canvas, heard, self.scatter),
             VizMode::Vu => {
                 self.vu.update(heard, elapsed);
                 draw_vu(canvas, &self.vu);
@@ -378,7 +389,7 @@ fn draw_bars(canvas: &mut Canvas, bars: &[f32]) {
 /// noise is exactly the jitter the trigger exists to remove.
 const TRIGGER_DEPTH: usize = 8;
 
-fn draw_scope(canvas: &mut Canvas, heard: &TapFrame) {
+fn draw_scope(canvas: &mut Canvas, heard: &TapFrame, scatter: bool) {
     let width = canvas.width() as usize;
     let height = canvas.height() as i32;
     if width == 0 || height == 0 || heard.samples.is_empty() {
@@ -412,8 +423,14 @@ fn draw_scope(canvas: &mut Canvas, heard: &TapFrame) {
         let mut previous = at(0);
         for x in 0..width {
             let y = at(x);
-            // Joined, not dotted: a wave drawn as points reads as static.
-            canvas.line((x as i32, previous), (x as i32, y), colour);
+            if scatter {
+                canvas.set(x as i32, y, colour);
+            } else {
+                // Joined, so a wave reads as a wave. Each column spans from
+                // where the last one ended, or a steep edge comes out as two
+                // dots with nothing between them.
+                canvas.line((x as i32, previous), (x as i32, y), colour);
+            }
             previous = y;
         }
     }
@@ -430,7 +447,7 @@ fn trigger(frames: &[&[f32]], limit: usize) -> usize {
 
 // ── Vectorscope ─────────────────────────────────────────────────────────────
 
-fn draw_vectorscope(canvas: &mut Canvas, heard: &TapFrame) {
+fn draw_vectorscope(canvas: &mut Canvas, heard: &TapFrame, scatter: bool) {
     let width = canvas.width() as f32;
     let height = canvas.height() as f32;
     if heard.channels < 2 || width == 0.0 || height == 0.0 {
@@ -457,16 +474,25 @@ fn draw_vectorscope(canvas: &mut Canvas, heard: &TapFrame) {
     let root_half = std::f32::consts::FRAC_1_SQRT_2;
     let frames = heard.samples.chunks_exact(heard.channels as usize);
     let total = frames.len().max(1);
+    let mut previous: Option<(i32, i32)> = None;
     for (index, frame) in frames.enumerate() {
         let (left, right) = (frame[0], frame[1]);
         let side = (right - left) * root_half;
         let mid = (right + left) * root_half;
-        let x = cx + side.clamp(-1.0, 1.0) * radius;
-        let y = cy - mid.clamp(-1.0, 1.0) * radius;
+        let x = (cx + side.clamp(-1.0, 1.0) * radius) as i32;
+        let y = (cy - mid.clamp(-1.0, 1.0) * radius) as i32;
         // Older samples are drawn dimmer, so the trace has a direction
         // instead of being a static scribble.
         let age = index as f32 / total as f32;
-        canvas.set(x as i32, y as i32, if age > 0.65 { accent() } else { folder() });
+        let colour = if age > 0.65 { accent() } else { folder() };
+        match previous.filter(|_| !scatter) {
+            // Joined, the samples make one continuous figure — the Lissajous
+            // curve a hardware goniometer draws, because its beam has to
+            // travel between the points too.
+            Some(from) => canvas.line(from, (x, y), colour),
+            None => canvas.set(x, y, colour),
+        }
+        previous = Some((x, y));
     }
 }
 
@@ -873,6 +899,46 @@ mod tests {
             vu.update(&silence, FRAME);
         }
         assert!(vu.readings()[0].1 < struck, "and then released");
+    }
+
+    /// How many pixels a mode lights.
+    fn lit(mode: VizMode, scatter: bool, heard: &TapFrame) -> usize {
+        let mut viz = Visualizer { mode, scatter, ..Default::default() };
+        let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 60, height: 12 });
+        viz.draw_after(&mut canvas, heard, FRAME);
+        canvas
+            .into_lines()
+            .iter()
+            .map(|line| {
+                line.spans.iter().map(|s| s.content.chars().filter(|c| *c != ' ').count()).sum::<usize>()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn dots_draw_less_than_joining_them_up_does() {
+        // The whole of the trade: a line invents the path between two
+        // samples, so it always covers more ground than the samples do. If
+        // dots were not sparser, the toggle would not be doing anything.
+        let rate = 44100;
+        let heard = stereo(sine(2000.0, rate, 4096), sine(3000.0, rate, 4096), rate);
+
+        for mode in [VizMode::Scope, VizMode::Vectorscope] {
+            let joined = lit(mode, false, &heard);
+            let dotted = lit(mode, true, &heard);
+            assert!(dotted > 0, "{} drew nothing as dots", mode.title());
+            assert!(
+                dotted < joined,
+                "{}: dots {dotted} should be sparser than lines {joined}",
+                mode.title()
+            );
+        }
+
+        // And the modes drawn from numbers rather than samples ignore it.
+        for mode in [VizMode::Bars, VizMode::Vu] {
+            assert!(!mode.plots_samples());
+            assert_eq!(lit(mode, false, &heard), lit(mode, true, &heard), "{}", mode.title());
+        }
     }
 
     #[test]
