@@ -198,6 +198,7 @@ pub enum Action {
     StartJourney,
     StartSearch,
     StartFilter,
+    CycleViz,
     Input(char),
     Backspace,
     Submit,
@@ -798,6 +799,10 @@ pub struct App {
     /// draw. Read-only from here and `None` off the real audio thread, so a
     /// test or a replay run without one draws the same as silence.
     pub tap: Option<Arc<crate::engine::tap::AudioTap>>,
+    /// Which visualiser is showing, and everything it remembers between
+    /// frames — bars fall from where they were, and a spectrogram is nothing
+    /// but where it has been.
+    pub viz: crate::tui::viz::Visualizer,
     /// The full-screen now-playing view. A view rather than an overlay: every
     /// normal key still means what it meant, so `space`, `n` and the seek keys
     /// keep working while you are looking at it.
@@ -871,6 +876,7 @@ impl App {
             now_playing: None,
             audio_available: true,
             tap: None,
+            viz: Default::default(),
             fullscreen: false,
             spinner: 0,
             now_tab: NowTab::Queue,
@@ -1367,6 +1373,15 @@ impl App {
                 self.tab = Tab::Search;
                 self.focus = Focus::Browser;
                 self.editing_query = true;
+                Vec::new()
+            }
+            // No message: the panel names the mode under the picture, and one
+            // set here would still be sitting in the browser's footer long
+            // after you left the visualiser.
+            Action::CycleViz => {
+                self.viz.mode = self.viz.mode.next();
+                // The last mode's history describes the last mode.
+                self.viz.forget();
                 Vec::new()
             }
             // Reopens on whatever is already typed, so a filter can be
@@ -3166,6 +3181,7 @@ impl Action {
             Action::SelectTab(4) => "tab-5",
             Action::StartSearch => "search",
             Action::StartFilter => "filter",
+            Action::CycleViz => "visualiser-mode",
             Action::PlayPause => "play-pause",
             Action::NextTrack => "next-track",
             Action::PrevTrack => "previous-track",
@@ -3368,6 +3384,9 @@ fn default_now() -> Vec<Binding> {
         help: None,
     },
     Binding { keys: vec![key(KeyCode::Left), ch('h')], action: Action::NowTabPrev, help: None },
+    // The visualiser's own tab, on its own key: `←→` already belongs to the
+    // panel's tabs and `↑↓` to whatever list is in them.
+    Binding { keys: vec![ch('v')], action: Action::CycleViz, help: None },
     // Esc leaves, because a screen filling the terminal should close the way
     // every other full-screen thing does. `0` still toggles.
     Binding { keys: vec![key(KeyCode::Esc)], action: Action::ToggleNowPlaying, help: None },

@@ -5,7 +5,9 @@
 //! the decisions live in [`app`].
 
 pub mod app;
+pub mod canvas;
 pub mod ui;
+pub mod viz;
 pub mod worker;
 
 use std::sync::mpsc::{Receiver, Sender};

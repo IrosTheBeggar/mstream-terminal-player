@@ -74,15 +74,15 @@ fn theme() -> &'static Theme {
     THEME.get_or_init(Theme::default)
 }
 
-fn accent() -> Color {
+pub(crate) fn accent() -> Color {
     theme().accent
 }
 
-fn dim() -> Color {
+pub(crate) fn dim() -> Color {
     theme().dim
 }
 
-fn folder() -> Color {
+pub(crate) fn folder() -> Color {
     theme().folder
 }
 
@@ -799,7 +799,7 @@ fn fmt_span(seconds: f64) -> String {
     }
 }
 
-fn render_now_playing(frame: &mut Frame, area: Rect, app: &App) {
+fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
     // No box. The browser page draws its columns against a rule rather than
     // inside borders, and a full-screen view framed in a rectangle it does not
     // need was the odd one out -- it also spent two rows and two columns
@@ -959,12 +959,13 @@ fn rule_with_junction(width: u16, at: u16) -> String {
 fn now_keys_hint(app: &App) -> &'static str {
     match app.now_tab() {
         NowTab::Queue => "←→ tab   ↑↓ list   Enter play   d remove   0 back",
+        NowTab::Visualizer => "←→ tab   v mode   0 back",
         _ => "←→ tab   ↑↓ scroll   0 back",
     }
 }
 
 /// The tab strip, and whichever tab is open under it.
-fn render_now_panel(frame: &mut Frame, area: Rect, app: &App) {
+fn render_now_panel(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.width < 12 || area.height < 3 {
         return;
     }
@@ -988,68 +989,44 @@ fn render_now_panel(frame: &mut Frame, area: Rect, app: &App) {
         NowTab::Discover => {
             render_now_placeholder(frame, content, "what this sounds like", "not wired up yet")
         }
-        NowTab::Visualizer => render_now_waveform(frame, content, app),
+        NowTab::Visualizer => render_now_visualizer(frame, content, app),
     }
 }
 
-/// The waveform, as loud as it is being played.
+/// Whichever visualiser is showing, drawn from the audio itself.
 ///
-/// Deliberately the plainest thing that proves the audio is arriving — the
-/// spectrum, the vectorscope and the rest come next. Half blocks, because a
-/// terminal cell is twice as tall as it is wide and a trace needs somewhere
-/// to go: each cell carries two rows of the picture.
-fn render_now_waveform(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(tap) = &app.tap else {
-        return render_now_placeholder(frame, area, "the waveform goes here", "no audio thread");
-    };
-    // No frame means either nothing has played or the audio thread is
-    // mid-handover. Both are "not this tick", and neither is worth a message
-    // that would flicker.
-    let Some(heard) = tap.frame() else {
-        return render_now_placeholder(frame, area, "the waveform goes here", "nothing playing");
-    };
-
-    let mono = heard.mono();
-    let width = area.width as usize;
-    let rows = area.height as usize;
-    if width == 0 || rows == 0 || mono.is_empty() {
+/// The mode's name goes on the last row rather than the first: it is the
+/// least interesting thing on this panel and it should not cost the picture
+/// its top. What changes it is in the footer hint, with the other keys.
+fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
+    if area.height < 2 {
         return;
     }
+    let [picture, label] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
 
-    // Two picture rows per cell, and the trace hangs off the middle of them.
-    let cells = rows * 2;
-    let middle = cells as f32 / 2.0;
-    let mut lit = vec![vec![false; cells]; width];
-    let per_column = mono.len().div_ceil(width).max(1);
-    for (x, chunk) in mono.chunks(per_column).take(width).enumerate() {
-        // The loudest and quietest sample in the slice, filled between: at
-        // this many samples per column a single value would alias into
-        // nonsense, and the envelope is what a waveform looks like anyway.
-        let low = chunk.iter().copied().fold(f32::MAX, f32::min).clamp(-1.0, 1.0);
-        let high = chunk.iter().copied().fold(f32::MIN, f32::max).clamp(-1.0, 1.0);
-        // Rows count downward, so the loudest positive sample is the highest.
-        let top = ((middle - high * middle) as usize).min(cells - 1);
-        let bottom = ((middle - low * middle) as usize).min(cells - 1);
-        for cell in lit[x].iter_mut().take(bottom + 1).skip(top) {
-            *cell = true;
-        }
+    // Named whether or not there is anything to draw. Pressing `v` with the
+    // player paused should still show that something happened.
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(app.viz.mode.title(), Style::new().fg(dim())))),
+        label,
+    );
+
+    let Some(tap) = &app.tap else {
+        return render_now_placeholder(frame, picture, "the visualiser goes here", "no audio thread");
+    };
+    // No frame means either nothing has played or the audio thread is
+    // mid-handover. Both mean "not this tick", and neither is worth a message
+    // that would flicker at thirty frames a second.
+    let Some(heard) = tap.frame() else {
+        return render_now_placeholder(frame, picture, "the visualiser goes here", "nothing playing");
+    };
+
+    let mut canvas = crate::tui::canvas::Canvas::new(picture);
+    if !canvas.is_empty() {
+        app.viz.draw(&mut canvas, &heard);
+        frame.render_widget(Paragraph::new(canvas.into_lines()), picture);
     }
-
-    let lines: Vec<Line> = (0..rows)
-        .map(|row| {
-            let text: String = lit
-                .iter()
-                .map(|column| match (column[row * 2], column[row * 2 + 1]) {
-                    (true, true) => '\u{2588}',
-                    (true, false) => '\u{2580}',
-                    (false, true) => '\u{2584}',
-                    (false, false) => ' ',
-                })
-                .collect();
-            Line::from(Span::styled(text, Style::new().fg(accent())))
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_now_placeholder(frame: &mut Frame, area: Rect, what: &str, why: &str) {
@@ -3258,6 +3235,51 @@ mod tests {
             let row: String = (0..20).map(|x| buffer[(x, *y)].symbol()).collect();
             row.trim_start().starts_with(label)
         })
+    }
+
+    #[test]
+    fn the_visualizer_names_its_mode_and_v_moves_between_them() {
+        use crate::tui::viz::{VIZ_MODES, VizMode};
+        let mut app = connected_app();
+        app.queue.replace(vec![tagged_track()]);
+        app.play_index(0);
+        app.handle_action(Action::ToggleNowPlaying);
+        while app.now_tab() != NowTab::Visualizer {
+            app.handle_action(Action::NowTabNext);
+        }
+
+        // No tap in a test, so the panel says so rather than drawing noise.
+        let text = draw(&mut app);
+        assert!(text.contains("no audio thread"), "{text}");
+        assert!(text.contains("spectrum"), "the mode is named: {text}");
+        assert!(text.contains("v mode"), "and the key that changes it: {text}");
+
+        for expected in VIZ_MODES.iter().skip(1).chain(std::iter::once(&VizMode::Bars)) {
+            app.handle_action(Action::CycleViz);
+            assert_eq!(app.viz.mode, *expected);
+            assert!(draw(&mut app).contains(expected.title()));
+        }
+        // A mode change is not news anyone needs in the browser's footer.
+        assert!(app.message.is_none());
+    }
+
+    #[test]
+    fn the_visualizer_only_costs_extra_redraws_while_it_is_showing() {
+        let mut app = connected_app();
+        assert!(!app.drawing_audio(), "the browser does not need thirty frames a second");
+
+        app.queue.replace(vec![tagged_track()]);
+        app.play_index(0);
+        app.handle_action(Action::ToggleNowPlaying);
+        assert!(!app.drawing_audio(), "nor does the queue tab of the now-playing view");
+
+        while app.now_tab() != NowTab::Visualizer {
+            app.handle_action(Action::NowTabNext);
+        }
+        assert!(app.drawing_audio());
+
+        app.handle_action(Action::ToggleNowPlaying);
+        assert!(!app.drawing_audio(), "and leaving the view stops it");
     }
 
     #[test]
