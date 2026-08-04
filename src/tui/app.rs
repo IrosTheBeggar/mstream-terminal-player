@@ -723,6 +723,16 @@ pub struct App {
     pub focus: Focus,
 
     pub path: String,
+    /// Whether the next listing is the one that gets to say where we are.
+    ///
+    /// Every other listing has to agree with `path`, which works because
+    /// `path` moves when the request goes out rather than when the reply
+    /// lands. The browse that opens the browser is the exception both ways:
+    /// it asks for [`crate::api::BEST_START`], which only the server can
+    /// resolve, or for a remembered path the server may spell back
+    /// differently — and there is nothing on screen yet for a wrong answer
+    /// to overwrite.
+    opening: bool,
     pub files: Pane,
     pub library: Pane,
     /// Breadcrumb through the tag hierarchy; the last element is the view on
@@ -844,6 +854,7 @@ impl App {
             tab: Tab::Files,
             focus: Focus::Browser,
             path: String::new(),
+            opening: true,
             files: Pane::default(),
             library: Pane::default(),
             library_stack: Vec::new(),
@@ -1142,6 +1153,18 @@ impl App {
     /// Whether we have asked for a track and not yet heard it start.
     pub fn is_starting(&self) -> bool {
         self.starting.is_some()
+    }
+
+    /// Whether something the audio thread said is about the track we are on.
+    ///
+    /// The thread answers about the source it was holding when it spoke, and
+    /// on a slow open that can be a track the user has long since moved past.
+    /// `status.source` is the name to check against because it is set from
+    /// the play we asked for rather than from the answer — so it says what we
+    /// are on from the moment we ask, which is exactly the window that a late
+    /// reply arrives in.
+    fn is_current_source(&self, source: &str) -> bool {
+        self.status.source == source
     }
 
     /// Whether what is on screen is drawn from the audio, and so wants
@@ -2092,6 +2115,12 @@ impl App {
             Entry::Playlist { name } => {
                 self.push_trail();
                 self.info(format!("loading playlist {name}…"));
+                // Open now rather than when the tracks land, so this is a
+                // record of where the user went instead of a record of what
+                // last answered — which is what lets a late reply be told
+                // apart from a wanted one, and lets Back close a playlist
+                // that has not answered yet.
+                self.playlist_open = Some(name.clone());
                 vec![Effect::Api(ApiCmd::LoadPlaylist(name))]
             }
             Entry::Track { .. } => {
@@ -2146,6 +2175,13 @@ impl App {
         let Some(step) = self.pane_mut().trail.pop() else {
             return effects;
         };
+        // A "loading…" note is about the view being left, and now that its
+        // reply is one we drop rather than apply, nothing else would ever
+        // clear it. An error stays: it is about something that already
+        // happened, and is still worth reading here.
+        if matches!(self.message, Some(Message { kind: MessageKind::Info, .. })) {
+            self.message = None;
+        }
         let pane = self.pane_mut();
         pane.filter.clear();
         pane.unfiltered = None;
@@ -2544,13 +2580,29 @@ impl App {
                 self.status = status;
                 Vec::new()
             }
-            Event::TrackEnded => self.skip(false),
+            Event::TrackEnded { source } => {
+                // The end of a track we are no longer on. Advancing on it
+                // would skip past the one the user chose instead.
+                if !self.is_current_source(&source) {
+                    return Vec::new();
+                }
+                self.skip(false)
+            }
             Event::AudioFailed(e) => {
                 self.audio_available = false;
                 self.error(format!("audio unavailable: {e}"));
                 Vec::new()
             }
-            Event::PlaybackFailed(e) => {
+            Event::PlaybackFailed { source, error } => {
+                // Same rule, and this is where it earns its keep: an open can
+                // take as long as the network does to give up, so a failure
+                // for the track before this one lands while this one is
+                // starting. Everything below would then be about the wrong
+                // track — the name in the message, the failure count, and the
+                // skip that moves past a track nothing has been tried on.
+                if !self.is_current_source(&source) {
+                    return Vec::new();
+                }
                 // The source we were waiting on is never going to arrive, and
                 // a wait with nothing coming would discard every status after
                 // it. Whatever we move to next sets its own.
@@ -2573,7 +2625,7 @@ impl App {
                     self.error(format!("{what} could not be played, and nor could the rest"));
                     return vec![Effect::Audio(AudioCmd::Stop)];
                 }
-                self.error(format!("skipping {what} — {e}"));
+                self.error(format!("skipping {what} — {error}"));
                 // Manual, so repeat-one doesn't sit on the broken track.
                 self.skip(true)
             }
@@ -2611,6 +2663,10 @@ impl App {
                     ));
                 }
 
+                // Opening the browser again: whatever this browse comes back
+                // with is where we are, since neither `~` nor a remembered
+                // path is a promise about how the server will spell it.
+                self.opening = true;
                 let mut effects = vec![
                     Effect::Api(ApiCmd::Browse(self.opening_path())),
                     Effect::Audio(AudioCmd::SetVolume(self.volume)),
@@ -2657,7 +2713,18 @@ impl App {
                 Vec::new()
             }
             Event::Listing(listing) => {
-                self.path = listing.path.trim_matches('/').to_string();
+                let path = listing.path.trim_matches('/');
+                // A reply for a folder we have since left. Taking it would put
+                // that folder's rows on screen and drag `path` back in after
+                // them, while the trail beside it still describes the way to
+                // where the user actually is — and nothing afterwards repairs
+                // that, because going back is answered from the trail rather
+                // than by asking again.
+                if !self.opening && path != self.path {
+                    return Vec::new();
+                }
+                self.opening = false;
+                self.path = path.to_string();
                 let root = self.browser_root().to_string();
                 self.files.set(entries_from_listing(&listing, &root));
                 Vec::new()
@@ -2779,7 +2846,12 @@ impl App {
                 Vec::new()
             }
             Event::PlaylistTracks { name, tracks } => {
-                self.playlist_open = Some(name);
+                // A playlist the user has closed, or moved off to another —
+                // its tracks would otherwise open over the top of whatever
+                // they went to instead, under that one's name.
+                if self.playlist_open.as_deref() != Some(name.as_str()) {
+                    return Vec::new();
+                }
                 let mut entries = vec![Entry::Parent];
                 entries.extend(tracks.into_iter().map(|t| Entry::Track {
                     label: t.display_name(),
@@ -3626,6 +3698,18 @@ mod tests {
             .expect("expected a play effect")
     }
 
+    /// What the audio thread would send when the track those effects started
+    /// runs out. Built from the play rather than named by hand for the same
+    /// reason [`played_url`] exists: an event about a source nobody asked for
+    /// is one the app is entitled to ignore.
+    fn ended(effects: &[Effect]) -> Event {
+        Event::TrackEnded { source: played_url(effects) }
+    }
+
+    fn failed(effects: &[Effect], error: &str) -> Event {
+        Event::PlaybackFailed { source: played_url(effects), error: error.to_string() }
+    }
+
     fn track_by(path: &str, artist: &str) -> Track {
         Track {
             filepath: path.to_string(),
@@ -3780,6 +3864,8 @@ mod tests {
         assert_eq!(labels(&app), vec!["..", "Alpha"]);
 
         // A different list is not the list the filter was typed against.
+        app.handle_action(Action::Down); // onto Alpha, the only row it left
+        app.handle_action(Action::Activate);
         app.apply_event(Event::Listing(Box::new(listing("/lib/Alpha/", &["One", "Two"], &[]))));
         assert!(app.pane().filter.is_empty());
         assert_eq!(labels(&app), vec!["..", "One", "Two"]);
@@ -3894,6 +3980,43 @@ mod tests {
     }
 
     #[test]
+    fn a_listing_for_a_folder_already_left_does_not_teleport_the_view() {
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Alpha", "Beta"], &[]))));
+
+        // Into Alpha on a slow link, and straight back out before it answers.
+        app.handle_action(Action::Activate);
+        assert_eq!(app.path, "lib/Alpha");
+        app.handle_action(Action::Back);
+        assert_eq!(app.path, "lib");
+
+        // Alpha answers now. It used to be applied whatever had happened in
+        // the meantime, putting its rows and its path back on a screen the
+        // user had left — and the trail beside them still described the way
+        // out of lib, so the two disagreed with nothing to settle it.
+        app.apply_event(Event::Listing(Box::new(listing("/lib/Alpha/", &["One", "Two"], &[]))));
+        assert_eq!(app.path, "lib");
+        assert_eq!(labels(&app), vec!["..", "Alpha", "Beta"]);
+    }
+
+    #[test]
+    fn the_listing_that_opens_the_browser_is_taken_whatever_it_says() {
+        // `~` is a question only the server can answer, and a remembered path
+        // is a hope about how it spells things. Either way the first listing
+        // is the one that says where we are, and there is nothing on screen
+        // yet for it to overwrite.
+        let mut app = connected_app();
+        app.path = "music/Artist".into();
+        app.apply_event(Event::Listing(Box::new(listing("/library/", &["Alpha"], &[]))));
+        assert_eq!(app.path, "library");
+
+        // And only the first: from here on the rule is the ordinary one.
+        app.apply_event(Event::Listing(Box::new(listing("/elsewhere/", &["Beta"], &[]))));
+        assert_eq!(app.path, "library");
+        assert_eq!(labels(&app), vec!["..", "Alpha"]);
+    }
+
+    #[test]
     fn enter_on_a_track_queues_the_directory_and_starts_there() {
         let mut app = connected_app();
         app.apply_event(Event::Listing(Box::new(listing(
@@ -3920,17 +4043,33 @@ mod tests {
     }
 
     #[test]
+    fn an_end_from_the_track_left_behind_does_not_walk_the_queue_on() {
+        // The audio thread notices an end by polling, so an end and a skip
+        // can cross in the post. Taking one for the other costs the user the
+        // track they just chose: it is passed over without a note played.
+        let mut app = connected_app();
+        app.queue.replace(vec![track("a"), track("b"), track("c")]);
+        let first = app.handle_action(Action::PlayPause);
+        app.handle_action(Action::NextTrack);
+        assert_eq!(app.queue.current, Some(1));
+
+        let effects = app.apply_event(ended(&first));
+        assert!(effects.is_empty(), "nothing is asked of the audio thread");
+        assert_eq!(app.queue.current, Some(1), "b is still what we are on, not c");
+    }
+
+    #[test]
     fn queue_advances_on_track_end_and_stops_at_the_end() {
         let mut app = connected_app();
         app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
-        app.play_index(0);
+        let effects = app.handle_action(Action::PlayPause);
 
-        let effects = app.apply_event(Event::TrackEnded);
+        let effects = app.apply_event(ended(&effects));
         assert_eq!(app.queue.current, Some(1));
         assert!(matches!(effects[0], Effect::Audio(AudioCmd::Play { .. })));
 
         // End of the last track with repeat off: stop, don't wrap.
-        let effects = app.apply_event(Event::TrackEnded);
+        let effects = app.apply_event(ended(&effects));
         assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
         assert_eq!(app.queue.current, None);
         assert!(app.now_playing.is_none());
@@ -3954,7 +4093,7 @@ mod tests {
         // It runs out and the queue moves on. Nothing is sounding yet, and
         // saying so under the next track's name is what read as the player
         // stopping between every song.
-        let effects = app.apply_event(Event::TrackEnded);
+        let effects = app.apply_event(Event::TrackEnded { source: first.clone() });
         assert_eq!(app.queue.current, Some(1));
         assert!(app.is_starting());
         assert_eq!(app.status.position, 0.0, "the old position does not carry over");
@@ -4809,6 +4948,47 @@ mod tests {
     }
 
     #[test]
+    fn a_playlist_answering_after_it_was_left_does_not_open_over_the_top() {
+        let mut app = connected_app();
+        app.handle_action(Action::SelectTab(2));
+        app.apply_event(Event::Playlists(
+            ["Roadtrip", "Dinner"]
+                .iter()
+                .map(|name| crate::api::types::PlaylistSummary { name: (*name).to_string() })
+                .collect(),
+        ));
+
+        // Open one and change your mind before it answers. Which playlist is
+        // open is now decided on the way in rather than by whatever replied
+        // last, so the way out has something to close.
+        app.handle_action(Action::Activate);
+        assert_eq!(app.playlist_open.as_deref(), Some("Roadtrip"));
+        assert!(app.message.as_ref().unwrap().text.contains("loading playlist"));
+        app.handle_action(Action::Back);
+        assert!(app.playlist_open.is_none());
+        assert!(app.message.is_none(), "and the note about loading it goes too");
+
+        app.apply_event(Event::PlaylistTracks {
+            name: "Roadtrip".into(),
+            tracks: vec![track("lib/a.mp3")],
+        });
+        assert!(app.playlist_open.is_none(), "closed stays closed");
+        assert_eq!(labels(&app), vec!["Roadtrip", "Dinner"], "and the list is still the list");
+
+        // The same rule when the change of mind is another playlist: the one
+        // on screen must be the one named at the top of it.
+        app.handle_action(Action::Down);
+        app.handle_action(Action::Activate);
+        assert_eq!(app.playlist_open.as_deref(), Some("Dinner"));
+        app.apply_event(Event::PlaylistTracks {
+            name: "Roadtrip".into(),
+            tracks: vec![track("lib/a.mp3")],
+        });
+        assert_eq!(app.playlist_open.as_deref(), Some("Dinner"));
+        assert_eq!(labels(&app), vec!["Roadtrip", "Dinner"], "Roadtrip's tracks are not it");
+    }
+
+    #[test]
     fn library_tab_opens_on_a_static_menu_without_a_request() {
         let mut app = connected_app();
         let effects = app.handle_action(Action::SelectTab(1));
@@ -5376,14 +5556,41 @@ mod tests {
         // track, not the session.
         let mut app = connected_app();
         app.queue.replace(vec![track("broken"), track("fine"), track("also-fine")]);
-        app.play_index(0);
+        let started = app.handle_action(Action::PlayPause);
 
-        let effects = app.apply_event(Event::PlaybackFailed("unrecognised format".into()));
+        let effects = app.apply_event(failed(&started, "unrecognised format"));
         assert_eq!(app.queue.current, Some(1), "moved on to the next track");
         assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
         let message = &app.message.as_ref().unwrap().text;
         assert!(message.contains("skipping"), "got: {message}");
         assert!(message.contains("broken"), "and names the track: {message}");
+    }
+
+    #[test]
+    fn a_failure_from_a_track_already_left_is_not_pinned_on_this_one() {
+        // An open can take as long as the network does to give up, and the
+        // user does not wait. The answer used to arrive with no name on it
+        // and be read as being about whatever was playing by then: it said
+        // "skipping <the track they had just chosen>", stepped past it
+        // unheard, and counted a failure against a track nothing had been
+        // tried on.
+        let mut app = connected_app();
+        app.queue.replace(vec![track("stalled.mp3"), track("chosen.mp3"), track("after.mp3")]);
+        let stalled = app.handle_action(Action::PlayPause);
+        let chosen = app.handle_action(Action::NextTrack);
+
+        let effects = app.apply_event(failed(&stalled, "connection timed out"));
+        let message = app.message.as_ref().map(|m| m.text.as_str()).unwrap_or_default();
+        assert!(!message.contains("chosen"), "the wrong track is blamed: {message}");
+        assert!(effects.is_empty(), "and the queue does not move");
+        assert_eq!(app.queue.current, Some(1), "it stays on the track that was chosen");
+        assert_eq!(app.failures, 0, "which has not failed — nothing has been tried on it");
+        assert!(app.is_starting(), "and is still starting, so its own status is still wanted");
+
+        // The failure that really is about it still lands.
+        app.apply_event(failed(&chosen, "unrecognised format"));
+        assert_eq!(app.queue.current, Some(2));
+        assert!(app.message.as_ref().unwrap().text.contains("chosen"));
     }
 
     #[test]
@@ -5393,10 +5600,10 @@ mod tests {
         let mut app = connected_app();
         app.queue.repeat = Repeat::All;
         app.queue.replace(vec![track("a"), track("b")]);
-        app.play_index(0);
+        let started = app.handle_action(Action::PlayPause);
 
-        app.apply_event(Event::PlaybackFailed("nope".into()));
-        let effects = app.apply_event(Event::PlaybackFailed("nope".into()));
+        let next = app.apply_event(failed(&started, "nope"));
+        let effects = app.apply_event(failed(&next, "nope"));
         assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)], "it stops rather than wrapping");
         assert_eq!(app.queue.current, None);
         assert!(app.message.as_ref().unwrap().text.contains("nor could the rest"));
@@ -5408,8 +5615,8 @@ mod tests {
         // bad file every few tracks must keep going indefinitely.
         let mut app = connected_app();
         app.queue.replace(vec![track("a"), track("b")]);
-        app.play_index(0);
-        let effects = app.apply_event(Event::PlaybackFailed("nope".into()));
+        let started = app.handle_action(Action::PlayPause);
+        let effects = app.apply_event(failed(&started, "nope"));
         assert_eq!(app.failures, 1);
 
         let url = played_url(&effects);
