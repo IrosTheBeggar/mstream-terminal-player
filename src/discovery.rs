@@ -10,6 +10,9 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent};
+use reqwest::Url;
+
+use crate::api::server_url;
 
 const SERVICE_TYPE: &str = "_mstream._tcp.local.";
 
@@ -63,18 +66,9 @@ fn to_server(info: &mdns_sd::ResolvedService) -> Option<DiscoveredServer> {
     let address = pick_address(&info.addresses)?;
     let txt = |key: &str| info.get_property_val_str(key).map(str::to_string);
 
-    let scheme = txt("scheme").unwrap_or_else(|| "http".to_string());
     // The advert's own port is authoritative when present; the SRV port is the
     // fallback.
     let port = txt("port").and_then(|p| p.parse::<u16>().ok()).unwrap_or(info.port);
-    let path = txt("path").unwrap_or_default();
-    let path = path.trim_matches('/');
-
-    let mut base_url = format!("{scheme}://{address}:{port}");
-    if !path.is_empty() {
-        base_url.push('/');
-        base_url.push_str(path);
-    }
 
     let name = txt("name")
         .filter(|n| !n.trim().is_empty())
@@ -82,10 +76,48 @@ fn to_server(info: &mdns_sd::ResolvedService) -> Option<DiscoveredServer> {
 
     Some(DiscoveredServer {
         name,
-        base_url,
+        base_url: base_url(txt("scheme").as_deref(), &address, port, txt("path").as_deref())?,
         version: txt("v"),
         quick_connect: txt("iroh").as_deref() == Some("1"),
     })
+}
+
+/// Where an advert says its server lives, or `None` for one we won't offer.
+///
+/// This is the only place a stranger gets to choose part of a URL the player
+/// will later post a password to, and everything here is about holding that
+/// choice down to the part they're entitled to. A TXT record is publishable by
+/// anyone on the network and can say anything: `scheme` used to be
+/// interpolated straight into `format!("{scheme}://{address}:{port}")`, so a
+/// responder advertising `scheme=https://evil.example/#` produced a base URL
+/// whose real host was the attacker's, with the LAN address the user
+/// recognised tucked after a '#' that `Url::join` then quietly dropped
+/// (finding #29). Quick Connect showed an ordinary login form, and the
+/// username and password went to evil.example over TLS with no warning to see.
+///
+/// So the scheme is an allowlist — one we don't speak is no use to us even
+/// when it's honest — and the path is assembled by the parser rather than by
+/// `format!`, because `extend` percent-encodes whatever would end the path and
+/// start a host, a query or a fragment.
+fn base_url(scheme: Option<&str>, address: &str, port: u16, path: Option<&str>) -> Option<String> {
+    let scheme = match scheme.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("http") {
+        s if s.eq_ignore_ascii_case("http") => "http",
+        s if s.eq_ignore_ascii_case("https") => "https",
+        _ => return None,
+    };
+
+    // The authority is entirely ours: an address picked out of the advert's A
+    // records and a port that survived parse::<u16>.
+    let mut base = Url::parse(&format!("{scheme}://{address}:{port}")).ok()?;
+    if let Some(path) = path {
+        base.path_segments_mut().ok()?.extend(path.split('/').filter(|s| !s.is_empty()));
+    }
+
+    // normalize is the canonicaliser here, not the guard — offered
+    // "https://evil.example" it would hand it back without a murmur. It runs
+    // so a discovered server is spelled the same way a typed one is, which is
+    // what keeps the config file from holding two entries for one machine.
+    server_url::normalize(base.as_str()).ok()
 }
 
 /// How much we want to route to a given IPv4 address. Lower is better.
@@ -217,6 +249,81 @@ mod tests {
     fn falls_back_to_ipv6_in_brackets() {
         // Bracketed so it can go straight into a URL.
         assert_eq!(pick_address(&addresses(&["fe80::1"])).as_deref(), Some("[fe80::1]"));
+    }
+
+    #[test]
+    fn an_honest_advert_still_becomes_the_url_it_always_did() {
+        assert_eq!(base_url(None, "192.168.1.71", 3000, None).unwrap(), "http://192.168.1.71:3000");
+        assert_eq!(
+            base_url(Some("https"), "192.168.1.71", 3999, None).unwrap(),
+            "https://192.168.1.71:3999"
+        );
+        // A reverse-proxy subpath is load-bearing, however it's spelled.
+        assert_eq!(
+            base_url(None, "10.0.0.5", 3000, Some("/mstream/")).unwrap(),
+            "http://10.0.0.5:3000/mstream"
+        );
+        assert_eq!(
+            base_url(None, "10.0.0.5", 3000, Some("music/mstream")).unwrap(),
+            "http://10.0.0.5:3000/music/mstream"
+        );
+        assert_eq!(
+            base_url(Some("HTTPS"), "[fe80::1]", 3000, None).unwrap(),
+            "https://[fe80::1]:3000"
+        );
+        // Malformed rather than hostile: an empty scheme meant nothing at all,
+        // and the default is what the record would have carried anyway.
+        assert_eq!(base_url(Some("  "), "10.0.0.5", 3000, None).unwrap(), "http://10.0.0.5:3000");
+    }
+
+    #[test]
+    fn a_scheme_we_do_not_speak_takes_the_whole_advert_with_it() {
+        // The first two are finding #29 itself: interpolated into the old
+        // format! they moved the host and hid the move behind a fragment.
+        for hostile in [
+            "https://evil.example/#",
+            "http://evil.example/?",
+            "https://user@evil.example",
+            "javascript",
+            "file",
+            "ftp",
+        ] {
+            assert_eq!(
+                base_url(Some(hostile), "192.168.1.71", 3000, None),
+                None,
+                "{hostile:?} was accepted as a scheme"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hostile_path_is_still_only_a_path() {
+        // Whatever the record spells, the host we end up talking to is the one
+        // picked off the network: a subpath is the whole of what an advert is
+        // allowed to choose.
+        for hostile in [
+            "#@evil.example",
+            "?x=1#@evil.example",
+            "..",
+            "../../../..",
+            "x/../../..",
+            "\\\\evil.example",
+            "/@evil.example/",
+            "a#b?c",
+            "mstream#@evil.example",
+        ] {
+            let built = base_url(None, "192.168.1.71", 3000, Some(hostile))
+                .unwrap_or_else(|| panic!("{hostile:?} was rejected outright"));
+            let parsed = Url::parse(&built).unwrap();
+            let moved = format!("{hostile:?} moved the host: {built}");
+            assert_eq!(parsed.host_str(), Some("192.168.1.71"), "{moved}");
+            assert_eq!(parsed.port(), Some(3000), "{hostile:?} moved the port: {built}");
+            assert!(parsed.username().is_empty(), "{hostile:?} grew credentials: {built}");
+            assert!(
+                parsed.query().is_none() && parsed.fragment().is_none(),
+                "{hostile:?} grew a tail the client would drop: {built}"
+            );
+        }
     }
 
     #[test]
