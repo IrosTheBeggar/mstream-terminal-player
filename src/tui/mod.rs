@@ -232,7 +232,18 @@ pub(crate) fn on_mouse(app: &mut App, mouse: event::MouseEvent, area: Rect) -> V
 /// Write preferences and where we were, on the way out. Saving here rather
 /// than on every keystroke keeps a volume nudge from becoming a disk write.
 pub(crate) fn remember(app: &App) {
-    let mut config = config::load().unwrap_or_default();
+    // Never a default here. Startup runs on defaults when the file won't
+    // parse, so falling back a second time would write those defaults over a
+    // config we only failed to *read* — servers, keys and theme deleted by a
+    // typo, on the way out of a session that otherwise went fine. A file too
+    // broken to load is the user's to fix; this run just doesn't get saved.
+    let mut config = match config::load() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("warning: settings not saved, and the file left as it is — {e}");
+            return;
+        }
+    };
     config.player = app.prefs();
     // Keyed on the identity, never the endpoint: a tunnel session's loopback
     // port is meaningless by the next run.
@@ -439,6 +450,36 @@ mod tests {
 
         // Moving the pointer about is not an event worth an effect.
         assert!(on_mouse(&mut app, mouse_at(MouseEventKind::Moved, 10, 10), area).is_empty());
+    }
+
+    #[test]
+    fn a_config_that_would_not_load_is_left_alone_rather_than_replaced() {
+        let scratch = crate::config::testing::Scratch::new("remember-broken");
+        let path = config::config_path().unwrap();
+        // A typo in a file the docs invite you to edit. Startup runs on
+        // defaults after this, so the danger is quitting: `remember` used to
+        // save those defaults back and take the servers and keys with them.
+        let broken = "[theme\naccent = \"cyan\"\n\n[[server]]\nurl = \"http://host:3000\"\n";
+        std::fs::write(&path, broken).unwrap();
+
+        let mut app = App::new(Some("http://host:3000".into()), None, Some("alice".into()));
+        app.server_id = "http://host:3000".into();
+        app.path = "music/Artist".into();
+        remember(&app);
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            broken,
+            "the file is the user's to fix, byte for byte"
+        );
+        assert!(scratch.dir.join("config.tmp").symlink_metadata().is_err(), "and no temp left");
+
+        // A config that *does* load is still written, or this would prove
+        // nothing but that saving is broken.
+        std::fs::write(&path, "version = 1\n").unwrap();
+        remember(&app);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("music/Artist"), "got: {saved}");
     }
 
     #[test]

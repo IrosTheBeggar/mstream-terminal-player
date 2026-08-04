@@ -309,7 +309,17 @@ pub fn login(args: LoginArgs) -> i32 {
     };
     config::touch_server(&mut config, &server, Some(args.user.clone()));
 
-    let mut credentials = config::load_credentials().unwrap_or_default();
+    // Same care as the config above, and for a bigger stake: defaulting here
+    // would write a file holding only the token just issued, dropping every
+    // other server's token and every pairing code with it. A code can only be
+    // fetched over a live connection by an admin — see `forget_all_tokens`.
+    let mut credentials = match config::load_credentials() {
+        Ok(credentials) => credentials,
+        Err(e) => {
+            eprintln!("error: signed in, but could not read the credentials: {e}");
+            return 1;
+        }
+    };
     config::store_token(&mut credentials, &server, Some(resp.token));
 
     if let Err(e) = config::save(&config).and_then(|()| config::save_credentials(&credentials)) {

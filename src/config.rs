@@ -24,6 +24,14 @@ use serde::{Deserialize, Serialize};
 /// doesn't count — everything here is `#[serde(default)]`.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// What a file with no `version` line is read as. The number exists to keep a
+/// *newer* player's file from being misread; someone hand-writing a `[theme]`
+/// section shouldn't have to know it, and refusing the whole file over the
+/// missing line is the opposite of "fixable in an editor". Saving adds it.
+fn current_version() -> u32 {
+    SCHEMA_VERSION
+}
+
 const CONFIG_FILE: &str = "config.toml";
 const CREDENTIALS_FILE: &str = "credentials.toml";
 /// What Phase 3 wrote. Read once, then folded into the two files above.
@@ -33,6 +41,7 @@ const LEGACY_SESSION_FILE: &str = "session.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default = "current_version")]
     pub version: u32,
     #[serde(default)]
     pub player: PlayerPrefs,
@@ -228,6 +237,7 @@ pub struct ServerEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
+    #[serde(default = "current_version")]
     pub version: u32,
     #[serde(default, rename = "token")]
     pub tokens: Vec<TokenEntry>,
@@ -517,6 +527,43 @@ pub fn forget_all_tokens() -> Result<bool, String> {
     Ok(true)
 }
 
+/// Test scaffolding, here rather than in a test module because the config
+/// directory is set by an environment variable — one process-wide switch that
+/// every test touching a config file has to take turns holding, whichever
+/// module the test lives in.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// Point the config directory at a scratch path for the duration of a
+    /// test. Serialised because the override is process-wide.
+    pub(crate) struct Scratch {
+        pub(crate) dir: PathBuf,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl Scratch {
+        pub(crate) fn new(name: &str) -> Self {
+            let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = std::env::temp_dir().join(format!("mstream-player-test-{name}"));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            // SAFETY: the lock serialises tests that touch this variable.
+            unsafe { std::env::set_var("MSTREAM_PLAYER_CONFIG_DIR", &dir) };
+            Scratch { dir, _guard: guard }
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("MSTREAM_PLAYER_CONFIG_DIR") };
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
 // ── Migration ───────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -567,34 +614,7 @@ fn restrict_permissions(_path: &Path) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Point the config directory at a scratch path for the duration of a
-    /// test. Serialised because the override is process-wide.
-    struct Scratch {
-        dir: PathBuf,
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    impl Scratch {
-        fn new(name: &str) -> Self {
-            let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let dir = std::env::temp_dir().join(format!("mstream-player-test-{name}"));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(&dir).unwrap();
-            // SAFETY: the lock serialises tests that touch this variable.
-            unsafe { std::env::set_var("MSTREAM_PLAYER_CONFIG_DIR", &dir) };
-            Scratch { dir, _guard: guard }
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            unsafe { std::env::remove_var("MSTREAM_PLAYER_CONFIG_DIR") };
-            let _ = fs::remove_dir_all(&self.dir);
-        }
-    }
+    use super::testing::Scratch;
 
     #[test]
     fn round_trips_config_and_credentials_separately() {
@@ -646,6 +666,35 @@ mod tests {
         let config = load().unwrap();
         assert!(config.servers.is_empty());
         assert_eq!(config.player, PlayerPrefs::default());
+    }
+
+    #[test]
+    fn a_hand_written_file_without_a_version_line_still_loads() {
+        let scratch = Scratch::new("versionless");
+        // What someone reaching for an editor actually writes: the section
+        // they came for, and nothing else. Refusing this would make every
+        // later start fail over a line the docs never told them to add.
+        fs::write(
+            scratch.dir.join(CONFIG_FILE),
+            "[theme]\naccent = \"cyan\"\n\n[[server]]\nurl = \"http://host:3000\"\n",
+        )
+        .unwrap();
+        let config = load().unwrap();
+        assert_eq!(config.version, SCHEMA_VERSION, "read as the current schema");
+        assert_eq!(config.theme.accent.as_deref(), Some("cyan"));
+        assert_eq!(config.servers.len(), 1, "the rest of the file survived");
+
+        fs::write(
+            scratch.dir.join(CREDENTIALS_FILE),
+            "[[token]]\nserver = \"http://host:3000\"\ntoken = \"t\"\n",
+        )
+        .unwrap();
+        assert_eq!(load_credentials().unwrap().tokens.len(), 1);
+
+        // Saving puts the line back, so the file self-heals on the way out.
+        save(&load().unwrap()).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(text.contains("version = 1"), "got: {text}");
     }
 
     #[test]
