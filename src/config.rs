@@ -42,6 +42,10 @@ pub struct Config {
     /// means palette names, so the terminal's own scheme picks the hues.
     #[serde(default, skip_serializing_if = "ThemePrefs::is_unset")]
     pub theme: ThemePrefs,
+
+    /// `[mouse]` — the wheel and clicking the progress bar.
+    #[serde(default, skip_serializing_if = "MousePrefs::is_default")]
+    pub mouse: MousePrefs,
     /// `[keys]` — action name to the keys that should fire it. Empty means
     /// the built-in bindings, and only the actions named here are changed.
     /// See `mstream-player keys` for the full list in this format.
@@ -60,6 +64,7 @@ impl Default for Config {
             player: PlayerPrefs::default(),
             cache: CachePrefs::default(),
             theme: ThemePrefs::default(),
+            mouse: MousePrefs::default(),
             keys: std::collections::BTreeMap::new(),
             servers: Vec::new(),
         }
@@ -182,6 +187,31 @@ pub struct ThemePrefs {
 impl ThemePrefs {
     fn is_unset(&self) -> bool {
         self.accent.is_none() && self.dim.is_none() && self.folder.is_none()
+    }
+}
+
+/// `[mouse]`. On by default: a wheel that scrolls and a bar you can click at
+/// are what anyone expects of a pointer.
+///
+/// Worth being able to turn off, though. A terminal asked to report the mouse
+/// stops doing its own click-drag selection, so copying a path off the screen
+/// becomes shift-drag instead of drag. Anyone who copies more often than they
+/// scroll should be able to have that back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MousePrefs {
+    pub enabled: bool,
+}
+
+impl Default for MousePrefs {
+    fn default() -> Self {
+        MousePrefs { enabled: true }
+    }
+}
+
+impl MousePrefs {
+    fn is_default(&self) -> bool {
+        *self == MousePrefs::default()
     }
 }
 

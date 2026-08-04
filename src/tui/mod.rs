@@ -14,7 +14,12 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event as TermEvent, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEventKind,
+    MouseButton, MouseEventKind,
+};
+use ratatui::crossterm::execute;
+use ratatui::layout::Rect;
 
 use crate::config;
 use app::{App, Effect};
@@ -56,6 +61,8 @@ pub(crate) struct Startup {
     pub keys: std::collections::BTreeMap<String, Vec<String>>,
     /// The `[theme]` section, likewise.
     pub theme: config::ThemePrefs,
+    /// Whether to ask the terminal to report the mouse.
+    pub mouse: config::MousePrefs,
 }
 
 /// Resolve the starting point from stored config plus any overrides. Shared
@@ -109,6 +116,7 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
         tunnel_code,
         keys: config.keys,
         theme: config.theme,
+        mouse: config.mouse,
     }
 }
 
@@ -160,16 +168,28 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     let api_tx = worker::spawn_api(event_tx.clone());
 
     ui::set_theme(theme_for(&start.theme));
+    let mouse = start.mouse.enabled;
 
     let mut app = app_from(start);
     app.tap = Some(tap);
     let pending = app.start();
 
     let mut terminal = ratatui::init();
+    // Asking for mouse reports takes click-drag selection away from the
+    // terminal, so a failure to turn it on is not worth refusing to start
+    // over — the player is a keyboard app that also answers a pointer.
+    if mouse && execute!(std::io::stdout(), EnableMouseCapture).is_err() {
+        eprintln!("warning: this terminal would not report the mouse");
+    }
     push_window_title();
     let result =
         event_loop(&mut terminal, &mut app, &event_rx, &audio_tx, &api_tx, &event_tx, pending);
     pop_window_title();
+    if mouse {
+        // Left on, the terminal goes on emitting escape sequences at whatever
+        // runs next, which looks like the shell has been broken.
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    }
     ratatui::restore();
 
     remember(&app);
@@ -180,6 +200,33 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
             eprintln!("mstream-player: {e}");
             1
         }
+    }
+}
+
+/// What a mouse event means, given where on the screen it happened.
+///
+/// Two things only: the wheel moves the list under the pointer, and a click
+/// on the progress bar seeks there. Both are things a pointer is genuinely
+/// better at than a key — everything else on this screen already has one.
+fn on_mouse(app: &mut App, mouse: event::MouseEvent, area: Rect) -> Vec<Effect> {
+    let at = ratatui::layout::Position { x: mouse.column, y: mouse.row };
+    match mouse.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let notches = if mouse.kind == MouseEventKind::ScrollUp { -1 } else { 1 };
+            let body = ui::regions(area).body;
+            app.wheel(notches, ui::over_queue(app, body, mouse.column))
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            let bar = ui::progress_area(app, area);
+            if !bar.contains(at) {
+                return Vec::new();
+            }
+            match ui::seek_target(app, bar.width, mouse.column - bar.x) {
+                Some(position) => app.seek_to(position),
+                None => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -236,6 +283,15 @@ fn event_loop(
                     if let Some(action) = app.keymap.action(key, app.input_mode()) {
                         pending.extend(app.handle_action(action));
                     }
+                }
+                // Only arrives when capture is on, so there is nothing to
+                // check here. Where a thing was drawn is worked out from the
+                // screen size rather than remembered by the drawing, which is
+                // what keeps this to a handful of lines.
+                TermEvent::Mouse(mouse) => {
+                    let size = terminal.size()?;
+                    let area = Rect { x: 0, y: 0, width: size.width, height: size.height };
+                    pending.extend(on_mouse(app, mouse, area));
                 }
                 _ => {}
             }
@@ -329,6 +385,69 @@ pub(crate) fn dispatch(
 mod tests {
     use super::*;
     use crate::api::types::{Track, TrackMetadata};
+
+    fn mouse_at(kind: MouseEventKind, column: u16, row: u16) -> event::MouseEvent {
+        event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn the_wheel_and_the_bar_are_the_only_two_things_the_mouse_does() {
+        let area = Rect { x: 0, y: 0, width: 80, height: 24 };
+        let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
+        app.connected = true;
+        app.files.set(
+            ["A", "B", "C", "D", "E", "F"]
+                .iter()
+                .map(|label| app::Entry::Dir { label: (*label).into(), path: (*label).into() })
+                .collect(),
+        );
+        app.status.duration = 300.0;
+        app.status.source = "http://host/a.mp3".into();
+
+        // The wheel, anywhere over the lists.
+        let body = ui::regions(area).body;
+        let before = app.files.state.selected().unwrap();
+        assert!(on_mouse(&mut app, mouse_at(MouseEventKind::ScrollDown, 4, body.y + 2), area).is_empty());
+        assert_eq!(app.files.state.selected(), Some(before + 3));
+        on_mouse(&mut app, mouse_at(MouseEventKind::ScrollUp, 4, body.y + 2), area);
+        assert_eq!(app.files.state.selected(), Some(before));
+
+        // A click on the bar seeks to where it was clicked.
+        let bar = ui::progress_area(&app, area);
+        let effects = on_mouse(
+            &mut app,
+            mouse_at(MouseEventKind::Down(MouseButton::Left), bar.x, bar.y),
+            area,
+        );
+        assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(0.0))], "the left edge is the start");
+
+        let effects = on_mouse(
+            &mut app,
+            mouse_at(MouseEventKind::Down(MouseButton::Left), bar.x + 20, bar.y),
+            area,
+        );
+        let Some(Effect::Audio(AudioCmd::Seek(to))) = effects.first() else {
+            panic!("expected a seek, got {effects:?}");
+        };
+        assert!(*to > 60.0 && *to < 120.0, "a fifth or so of the way in: {to}");
+
+        // A click anywhere else is not a seek, and nor is one on the clock.
+        for (column, row) in [(4, body.y + 2), (4, 0), (bar.right() - 2, bar.y)] {
+            let kind = MouseEventKind::Down(MouseButton::Left);
+            assert!(
+                on_mouse(&mut app, mouse_at(kind, column, row), area).is_empty(),
+                "({column}, {row}) should not seek"
+            );
+        }
+
+        // Moving the pointer about is not an event worth an effect.
+        assert!(on_mouse(&mut app, mouse_at(MouseEventKind::Moved, 10, 10), area).is_empty());
+    }
 
     #[test]
     fn the_window_title_says_what_is_playing_and_whether_it_stopped() {

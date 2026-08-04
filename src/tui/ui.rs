@@ -219,6 +219,85 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Where the main screen's rows go.
+pub(crate) struct Regions {
+    pub header: Rect,
+    pub body: Rect,
+    pub rule: Rect,
+    pub transport: Rect,
+    pub footer: Rect,
+}
+
+/// Split the screen into its rows.
+///
+/// A pure function of the area rather than something the drawing remembers,
+/// so a mouse click can ask where a thing was drawn without the render path
+/// having to keep notes for it. Both callers get their answer from here, so
+/// there is nothing to drift.
+/// Where the full-screen view's rows go, under its one-line title.
+///
+/// Body, then a rule, then the transport band and the key hints along the
+/// foot. The band spans the full width rather than sitting in a column, so
+/// the bar is long enough to read as a position rather than a stepper.
+pub(crate) struct NowRegions {
+    pub body: Rect,
+    pub rule: Rect,
+    pub gauge: Rect,
+    pub keys: Rect,
+}
+
+pub(crate) fn now_regions(area: Rect) -> NowRegions {
+    let inner = Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(1),
+    };
+    let [body, rule, gauge, keys] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    NowRegions { body, rule, gauge, keys }
+}
+
+/// Where the progress bar is, whichever screen is up — so a click and the
+/// drawing cannot disagree about it.
+pub(crate) fn progress_area(app: &App, area: Rect) -> Rect {
+    if app.fullscreen {
+        now_regions(area).gauge
+    } else {
+        let transport = regions(area).transport;
+        // The band is two rows: what is playing, then the bar under it.
+        Rect { y: transport.y + 1, height: 1, ..transport }
+    }
+}
+
+/// Whether a screen column falls on the queue, when it is open beside the
+/// browser. The widths come from the same function that lays them out.
+pub(crate) fn over_queue(app: &App, body: Rect, x: u16) -> bool {
+    if app.fullscreen || !app.queue_column {
+        return false;
+    }
+    let widths = column_widths(body.width, app.pane().trail.len(), true);
+    let queue = widths.last().copied().unwrap_or(0);
+    queue > 0 && x >= body.right().saturating_sub(queue)
+}
+
+pub(crate) fn regions(area: Rect) -> Regions {
+    let [header, body, rule, transport, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    Regions { header, body, rule, transport, footer }
+}
+
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
@@ -242,14 +321,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // queue panes already close with a rule right above it, so a box of its own
     // would only spend two rows drawing a line next to a line. On an 80x24
     // terminal those two rows are an eighth of the list.
-    let [header, body, rule, transport, footer] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(1),
-        Constraint::Length(2),
-        Constraint::Length(1),
-    ])
-    .areas(area);
+    let Regions { header, body, rule, transport, footer } = regions(area);
 
     render_header(frame, header, app);
     render_columns(frame, body, app);
@@ -817,16 +889,7 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
     );
     let inner = Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner };
 
-    // Body, then a rule, then the transport band and the key hints along the
-    // foot. The band spans the full width rather than sitting in a column, so
-    // the bar is long enough to read as a position rather than a stepper.
-    let [body, rule, gauge_area, keys_area] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
+    let NowRegions { body, rule, gauge: gauge_area, keys: keys_area } = now_regions(area);
 
     // The tab strip gets the width it needs and the facts take what is left,
     // down to a floor where the labelled rows stop fitting. Splitting down the
@@ -1339,15 +1402,38 @@ fn transport_state(app: &App) -> (&'static str, &'static str) {
 /// it a background instead paints a solid slab heavier than the bar itself.
 /// Blocks and a lighter shade for the track say the same thing more quietly,
 /// and put the time beside the bar where there is room for it to be read.
-fn progress_line(app: &App, width: usize) -> Line<'static> {
+/// The time as the progress line writes it, and how many columns the bar
+/// gets beside it. `None` when there is not enough room for a bar at all.
+fn progress_parts(app: &App, width: usize) -> (String, String, Option<usize>) {
     let position = fmt_duration(app.status.position);
     let total =
         if app.status.duration > 0.0 { fmt_duration(app.status.duration) } else { "--:--".into() };
-    let time = format!("{position} / {total}");
-    let bar_width = width.saturating_sub(width_of(&time) + 3);
-    if bar_width < 4 {
-        return Line::from(Span::styled(fit(&time, width), Style::new().fg(dim())));
+    let bar = width.saturating_sub(width_of(&format!("{position} / {total}")) + 3);
+    (position, total, (bar >= 4).then_some(bar))
+}
+
+/// Where along the track a click at `column` landed, if it landed on the bar.
+///
+/// `None` for a click on the time beside it, for a track whose length is not
+/// known — seeking into an unknown duration means nothing — and for a bar too
+/// narrow to have been drawn.
+pub(crate) fn seek_target(app: &App, width: u16, column: u16) -> Option<f64> {
+    let (_, _, bar) = progress_parts(app, width as usize);
+    let bar = bar?;
+    if app.status.duration <= 0.0 || usize::from(column) >= bar {
+        return None;
     }
+    // The left edge of a column is the moment it starts, so clicking the
+    // first column seeks to the beginning rather than to half a column in.
+    Some(f64::from(column) / bar as f64 * app.status.duration)
+}
+
+fn progress_line(app: &App, width: usize) -> Line<'static> {
+    let (position, total, bar_width) = progress_parts(app, width);
+    let Some(bar_width) = bar_width else {
+        let time = format!("{position} / {total}");
+        return Line::from(Span::styled(fit(&time, width), Style::new().fg(dim())));
+    };
 
     let filled = (app.status.progress() * bar_width as f64).round() as usize;
     let filled = filled.min(bar_width);
@@ -3248,6 +3334,87 @@ mod tests {
             let row: String = (0..20).map(|x| buffer[(x, *y)].symbol()).collect();
             row.trim_start().starts_with(label)
         })
+    }
+
+    #[test]
+    fn a_click_lands_where_the_bar_says_it_should() {
+        let mut app = connected_app();
+        app.status.duration = 200.0;
+        app.status.source = "http://host/a.mp3".into();
+
+        // At width 90 the time reads "0:00 / 3:20", eleven columns, and the
+        // bar takes what is left after it and its gap.
+        let width = 90;
+        assert_eq!(seek_target(&app, width, 0), Some(0.0), "the first column is the start");
+        let (_, _, bar) = progress_parts(&app, width as usize);
+        let bar = bar.unwrap();
+        // The last column of the bar is one column short of the end, not the
+        // end: a bar of n columns divides the track into n, and the last one
+        // starts at (n-1)/n through it.
+        let last = seek_target(&app, width, bar as u16 - 1).unwrap();
+        let expected = 200.0 * (bar as f64 - 1.0) / bar as f64;
+        assert!((last - expected).abs() < 1e-6, "{last} vs {expected}");
+        assert!(last < 200.0, "clicking the far end is not past the end");
+
+        // Past the bar is the clock, which is not a seek control.
+        assert_eq!(seek_target(&app, width, bar as u16), None);
+        assert_eq!(seek_target(&app, width, width - 1), None);
+
+        // A length we do not know is a length we cannot seek into.
+        app.status.duration = 0.0;
+        assert_eq!(seek_target(&app, width, 4), None);
+        // ...and a terminal too narrow to have drawn a bar has none to click.
+        app.status.duration = 200.0;
+        assert_eq!(seek_target(&app, 12, 1), None);
+    }
+
+    #[test]
+    fn the_wheel_moves_what_it_is_pointing_at() {
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing(
+            "/lib/",
+            &["A", "B", "C", "D", "E", "F", "G"],
+            &[],
+        ))));
+        app.queue.replace(vec![tagged_track(), tagged_track(), tagged_track()]);
+
+        // Three rows a notch, and it stops at the ends rather than wrapping.
+        let start = app.files.state.selected().unwrap();
+        app.wheel(1, false);
+        assert_eq!(app.files.state.selected(), Some(start + 3));
+        app.wheel(-1, false);
+        assert_eq!(app.files.state.selected(), Some(start));
+        app.wheel(-1, false);
+        assert_eq!(app.files.state.selected(), Some(0), "and stays put at the top");
+
+        // Over the queue it moves the queue, whatever has focus — which is
+        // the whole difference between a wheel and the arrow keys.
+        assert_eq!(app.focus, Focus::Browser);
+        let browser_row = app.files.state.selected();
+        app.wheel(1, true);
+        assert_eq!(app.queue.state.selected(), Some(2));
+        assert_eq!(app.files.state.selected(), browser_row, "the browser did not move");
+    }
+
+    #[test]
+    fn the_bar_is_where_the_click_handler_looks_for_it() {
+        // Both screens draw a progress bar in a different place, and the one
+        // function that answers "where" is the one the drawing uses.
+        let mut app = connected_app();
+        let area = Rect { x: 0, y: 0, width: 80, height: 24 };
+
+        let bar = progress_area(&app, area);
+        assert_eq!(bar.height, 1);
+        assert_eq!(bar.y, regions(area).transport.y + 1, "the row under what is playing");
+
+        app.handle_action(Action::ToggleNowPlaying);
+        let full = progress_area(&app, area);
+        assert_eq!(full.height, 1);
+        assert_eq!(full, now_regions(area).gauge, "and the one the view itself lays out");
+        // The full-screen view insets by a column either side; the rows the
+        // two land on happen to coincide at some heights, which is why this
+        // checks the width rather than the row.
+        assert_eq!((full.x, full.width), (bar.x + 1, bar.width - 2));
     }
 
     #[test]

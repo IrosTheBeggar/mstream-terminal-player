@@ -105,6 +105,20 @@ A value it can't read costs you that colour and nothing else — it says what wa
 wrong on the first screen and keeps the default. Errors stay red and aren't
 configurable; an error that isn't red is a trap.
 
+## Mouse
+
+The wheel scrolls whichever list it is pointing at, and clicking the progress
+bar seeks there. Everything else is keys.
+
+Asking the terminal to report the mouse means it stops doing its own
+click-drag selection — hold shift to select text as before. If you copy off
+the screen more often than you scroll, turn it off:
+
+```toml
+[mouse]
+enabled = false
+```
+
 ## Library commands
 
 ```

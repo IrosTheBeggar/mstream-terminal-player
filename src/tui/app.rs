@@ -1981,6 +1981,28 @@ impl App {
         }
     }
 
+    /// The wheel. Three rows a notch, which is what everything else does.
+    ///
+    /// `over_queue` is whether the pointer was over the queue column, which
+    /// the arrows cannot express: they move whatever has focus, and a wheel
+    /// should move whatever it is pointing at.
+    pub fn wheel(&mut self, notches: isize, over_queue: bool) -> Vec<Effect> {
+        const ROWS_PER_NOTCH: isize = 3;
+        let delta = notches * ROWS_PER_NOTCH;
+        if over_queue {
+            return self.move_queue_selection(delta);
+        }
+        self.move_selection(delta)
+    }
+
+    /// A click on the progress bar, in seconds from the start.
+    pub fn seek_to(&mut self, position: f64) -> Vec<Effect> {
+        if self.status.is_idle() || !position.is_finite() {
+            return Vec::new();
+        }
+        vec![Effect::Audio(AudioCmd::Seek(position.max(0.0)))]
+    }
+
     fn move_selection(&mut self, delta: isize) -> Vec<Effect> {
         // The full-screen view owns the arrows while it is up, and what they
         // move depends on which of its tabs is showing.
