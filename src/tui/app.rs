@@ -800,6 +800,8 @@ pub struct App {
     /// draw. Read-only from here and `None` off the real audio thread, so a
     /// test or a replay run without one draws the same as silence.
     pub tap: Option<Arc<crate::engine::tap::AudioTap>>,
+    /// The last place the pointer was seen, when the terminal reports it.
+    pub pointer: Option<ratatui::layout::Position>,
     /// Which visualiser is showing, and everything it remembers between
     /// frames — bars fall from where they were, and a spectrogram is nothing
     /// but where it has been.
@@ -877,6 +879,7 @@ impl App {
             now_playing: None,
             audio_available: true,
             tap: None,
+            pointer: None,
             viz: Default::default(),
             fullscreen: false,
             spinner: 0,
@@ -1981,18 +1984,11 @@ impl App {
         }
     }
 
-    /// The wheel. Three rows a notch, which is what everything else does.
-    ///
-    /// `over_queue` is whether the pointer was over the queue column, which
-    /// the arrows cannot express: they move whatever has focus, and a wheel
-    /// should move whatever it is pointing at.
-    pub fn wheel(&mut self, notches: isize, over_queue: bool) -> Vec<Effect> {
-        const ROWS_PER_NOTCH: isize = 3;
-        let delta = notches * ROWS_PER_NOTCH;
-        if over_queue {
-            return self.move_queue_selection(delta);
-        }
-        self.move_selection(delta)
+    /// Where the pointer last was, so the drawing can light what is under
+    /// it. A terminal will not change the mouse cursor for us, so the
+    /// affordance has to be on our side of the glass.
+    pub fn note_pointer(&mut self, at: ratatui::layout::Position) {
+        self.pointer = Some(at);
     }
 
     /// A click on the progress bar, in seconds from the start.

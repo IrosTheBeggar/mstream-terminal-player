@@ -205,17 +205,16 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
 
 /// What a mouse event means, given where on the screen it happened.
 ///
-/// Two things only: the wheel moves the list under the pointer, and a click
-/// on the progress bar seeks there. Both are things a pointer is genuinely
-/// better at than a key — everything else on this screen already has one.
+/// One thing: a click on the progress bar seeks there. The wheel scrolled
+/// lists for a while and was taken out again — moving a cursor three rows a
+/// notch is not what a wheel feels like it should do, and the lists are
+/// already well served by the keys.
 fn on_mouse(app: &mut App, mouse: event::MouseEvent, area: Rect) -> Vec<Effect> {
     let at = ratatui::layout::Position { x: mouse.column, y: mouse.row };
+    // Every event, moves included: the bar lights under the pointer, and
+    // that only works if we know where the pointer went.
+    app.note_pointer(at);
     match mouse.kind {
-        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-            let notches = if mouse.kind == MouseEventKind::ScrollUp { -1 } else { 1 };
-            let body = ui::regions(area).body;
-            app.wheel(notches, ui::over_queue(app, body, mouse.column))
-        }
         MouseEventKind::Down(MouseButton::Left) => {
             let bar = ui::progress_area(app, area);
             if !bar.contains(at) {
@@ -396,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn the_wheel_and_the_bar_are_the_only_two_things_the_mouse_does() {
+    fn a_click_on_the_bar_seeks_and_nothing_else_does_anything() {
         let area = Rect { x: 0, y: 0, width: 80, height: 24 };
         let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
         app.connected = true;
@@ -408,14 +407,6 @@ mod tests {
         );
         app.status.duration = 300.0;
         app.status.source = "http://host/a.mp3".into();
-
-        // The wheel, anywhere over the lists.
-        let body = ui::regions(area).body;
-        let before = app.files.state.selected().unwrap();
-        assert!(on_mouse(&mut app, mouse_at(MouseEventKind::ScrollDown, 4, body.y + 2), area).is_empty());
-        assert_eq!(app.files.state.selected(), Some(before + 3));
-        on_mouse(&mut app, mouse_at(MouseEventKind::ScrollUp, 4, body.y + 2), area);
-        assert_eq!(app.files.state.selected(), Some(before));
 
         // A click on the bar seeks to where it was clicked.
         let bar = ui::progress_area(&app, area);
@@ -437,6 +428,7 @@ mod tests {
         assert!(*to > 60.0 && *to < 120.0, "a fifth or so of the way in: {to}");
 
         // A click anywhere else is not a seek, and nor is one on the clock.
+        let body = ui::regions(area).body;
         for (column, row) in [(4, body.y + 2), (4, 0), (bar.right() - 2, bar.y)] {
             let kind = MouseEventKind::Down(MouseButton::Left);
             assert!(

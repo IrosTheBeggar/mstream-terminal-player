@@ -107,8 +107,10 @@ configurable; an error that isn't red is a trap.
 
 ## Mouse
 
-The wheel scrolls whichever list it is pointing at, and clicking the progress
-bar seeks there. Everything else is keys.
+Clicking the progress bar seeks there. The bar lights up under the pointer
+and marks the column a click would land on — a terminal will not change the
+mouse cursor for us, so the affordance is on this side of the glass.
+Everything else is keys.
 
 Asking the terminal to report the mouse means it stops doing its own
 click-drag selection — hold shift to select text as before. If you copy off

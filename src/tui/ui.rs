@@ -275,17 +275,6 @@ pub(crate) fn progress_area(app: &App, area: Rect) -> Rect {
     }
 }
 
-/// Whether a screen column falls on the queue, when it is open beside the
-/// browser. The widths come from the same function that lays them out.
-pub(crate) fn over_queue(app: &App, body: Rect, x: u16) -> bool {
-    if app.fullscreen || !app.queue_column {
-        return false;
-    }
-    let widths = column_widths(body.width, app.pane().trail.len(), true);
-    let queue = widths.last().copied().unwrap_or(0);
-    queue > 0 && x >= body.right().saturating_sub(queue)
-}
-
 pub(crate) fn regions(area: Rect) -> Regions {
     let [header, body, rule, transport, footer] = Layout::vertical([
         Constraint::Length(1),
@@ -926,7 +915,7 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
     );
 
     frame.render_widget(
-        Paragraph::new(progress_line(app, gauge_area.width as usize)),
+        Paragraph::new(progress_line(app, gauge_area.width as usize, hovering(app, gauge_area))),
         gauge_area,
     );
 
@@ -1428,7 +1417,20 @@ pub(crate) fn seek_target(app: &App, width: u16, column: u16) -> Option<f64> {
     Some(f64::from(column) / bar as f64 * app.status.duration)
 }
 
-fn progress_line(app: &App, width: usize) -> Line<'static> {
+/// `hovered` is where the pointer is along the bar, when it is on it.
+///
+/// A terminal will not change the mouse pointer for us — there is an escape
+/// code for it, OSC 22, but the Windows console documents no such sequence
+/// and it is the console this runs in. So the affordance goes the other way:
+/// the bar lights under the pointer, and shows where a click would land. That
+/// works in any terminal that reports the mouse at all, which is the same set
+/// that could click it in the first place.
+/// Where along `bar` the pointer is, if it is on it at all.
+fn hovering(app: &App, bar: Rect) -> Option<u16> {
+    app.pointer.filter(|at| bar.contains(*at)).map(|at| at.x - bar.x)
+}
+
+fn progress_line(app: &App, width: usize, hovered: Option<u16>) -> Line<'static> {
     let (position, total, bar_width) = progress_parts(app, width);
     let Some(bar_width) = bar_width else {
         let time = format!("{position} / {total}");
@@ -1437,13 +1439,50 @@ fn progress_line(app: &App, width: usize) -> Line<'static> {
 
     let filled = (app.status.progress() * bar_width as f64).round() as usize;
     let filled = filled.min(bar_width);
-    Line::from(vec![
-        Span::styled("\u{2588}".repeat(filled), Style::new().fg(accent())),
-        Span::styled("\u{2591}".repeat(bar_width - filled), Style::new().fg(dim())),
-        Span::raw("  "),
-        Span::styled(position, Style::new().fg(accent())),
-        Span::styled(format!(" / {total}"), Style::new().fg(dim())),
-    ])
+    // Only where a click would do something: hovering a track whose length we
+    // do not know should not promise a seek we will refuse.
+    let at = hovered
+        .filter(|_| app.status.duration > 0.0)
+        .map(usize::from)
+        .filter(|at| *at < bar_width);
+
+    // The unplayed part brightens under the pointer, so the bar reads as a
+    // control rather than a readout, and one column carries a marker for
+    // where a click would land. Built a column at a time and then run
+    // together — splicing the marker into three or five segments took more
+    // arithmetic than it saved and got the edges wrong.
+    let rest = if at.is_some() { folder() } else { dim() };
+    let played = Style::new().fg(accent());
+    let unplayed = Style::new().fg(rest);
+    let marker = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run: Option<(&'static str, Style, usize)> = None;
+    for column in 0..bar_width {
+        let (glyph, style) = if Some(column) == at {
+            ("\u{258f}", marker)
+        } else if column < filled {
+            ("\u{2588}", played)
+        } else {
+            ("\u{2591}", unplayed)
+        };
+        match &mut run {
+            Some((g, s, count)) if *g == glyph && *s == style => *count += 1,
+            Some((g, s, count)) => {
+                spans.push(Span::styled(g.repeat(*count), *s));
+                run = Some((glyph, style, 1));
+            }
+            None => run = Some((glyph, style, 1)),
+        }
+    }
+    if let Some((glyph, style, count)) = run {
+        spans.push(Span::styled(glyph.repeat(count), style));
+    }
+
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(position, Style::new().fg(accent())));
+    spans.push(Span::styled(format!(" / {total}"), Style::new().fg(dim())));
+    Line::from(spans)
 }
 
 fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
@@ -1464,7 +1503,7 @@ fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Span::styled(label, style)), title_area);
 
     frame.render_widget(
-        Paragraph::new(progress_line(app, gauge_area.width as usize)),
+        Paragraph::new(progress_line(app, gauge_area.width as usize, hovering(app, gauge_area))),
         gauge_area,
     );
 }
@@ -2732,7 +2771,7 @@ mod tests {
         app.status.position = 30.0;
         app.status.duration = 60.0;
 
-        let line = progress_line(&app, 40);
+        let line = progress_line(&app, 40, None);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.ends_with("0:30 / 1:00"), "{text}");
         // Half filled, and the other half is a visible track: ratatui's Gauge
@@ -2745,7 +2784,7 @@ mod tests {
 
         // No room for a bar: the time still gets said.
         let cramped: String =
-            progress_line(&app, 12).spans.iter().map(|s| s.content.as_ref()).collect();
+            progress_line(&app, 12, None).spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(cramped.contains("0:30"), "{cramped}");
     }
 
@@ -3337,6 +3376,40 @@ mod tests {
     }
 
     #[test]
+    fn the_bar_lights_up_under_the_pointer() {
+        let mut app = connected_app();
+        app.status.position = 30.0;
+        app.status.duration = 60.0;
+        let text = |line: Line<'static>| -> String {
+            line.spans.iter().map(|s| s.content.as_ref()).collect()
+        };
+
+        // No pointer on it: half played, half track, and no marker.
+        let cold = progress_line(&app, 40, None);
+        assert!(!text(cold.clone()).contains('\u{258f}'), "{}", text(cold.clone()));
+        let track_colour = cold.spans.iter().find(|s| s.content.contains('\u{2591}')).unwrap();
+        assert_eq!(track_colour.style.fg, Some(dim()));
+
+        // Pointer on it: a marker in that column, and the unplayed part comes
+        // up out of the dim so the bar reads as something you can press.
+        let warm = progress_line(&app, 40, Some(20));
+        let drawn = text(warm.clone());
+        assert_eq!(drawn.chars().filter(|c| *c == '\u{258f}').count(), 1, "{drawn}");
+        assert_eq!(drawn.chars().count(), text(cold).chars().count(), "same width either way");
+        let track_colour = warm.spans.iter().find(|s| s.content.contains('\u{2591}')).unwrap();
+        assert_eq!(track_colour.style.fg, Some(folder()));
+
+        // The marker sits where the pointer is, not where the playhead is.
+        let early = text(progress_line(&app, 40, Some(2)));
+        assert_eq!(early.chars().position(|c| c == '\u{258f}'), Some(2), "{early}");
+
+        // A length we do not know is a seek we would refuse, so it does not
+        // offer one.
+        app.status.duration = 0.0;
+        assert!(!text(progress_line(&app, 40, Some(20))).contains('\u{258f}'));
+    }
+
+    #[test]
     fn a_click_lands_where_the_bar_says_it_should() {
         let mut app = connected_app();
         app.status.duration = 200.0;
@@ -3366,34 +3439,6 @@ mod tests {
         // ...and a terminal too narrow to have drawn a bar has none to click.
         app.status.duration = 200.0;
         assert_eq!(seek_target(&app, 12, 1), None);
-    }
-
-    #[test]
-    fn the_wheel_moves_what_it_is_pointing_at() {
-        let mut app = connected_app();
-        app.apply_event(Event::Listing(Box::new(listing(
-            "/lib/",
-            &["A", "B", "C", "D", "E", "F", "G"],
-            &[],
-        ))));
-        app.queue.replace(vec![tagged_track(), tagged_track(), tagged_track()]);
-
-        // Three rows a notch, and it stops at the ends rather than wrapping.
-        let start = app.files.state.selected().unwrap();
-        app.wheel(1, false);
-        assert_eq!(app.files.state.selected(), Some(start + 3));
-        app.wheel(-1, false);
-        assert_eq!(app.files.state.selected(), Some(start));
-        app.wheel(-1, false);
-        assert_eq!(app.files.state.selected(), Some(0), "and stays put at the top");
-
-        // Over the queue it moves the queue, whatever has focus — which is
-        // the whole difference between a wheel and the arrow keys.
-        assert_eq!(app.focus, Focus::Browser);
-        let browser_row = app.files.state.selected();
-        app.wheel(1, true);
-        assert_eq!(app.queue.state.selected(), Some(2));
-        assert_eq!(app.files.state.selected(), browser_row, "the browser did not move");
     }
 
     #[test]
