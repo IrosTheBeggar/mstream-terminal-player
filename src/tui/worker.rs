@@ -285,22 +285,18 @@ fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
         }
     };
     let player: &dyn PlayerCtl = &engine;
-
-    // Track-end detection lives here rather than in the UI: this thread sees
-    // every status transition, so it can tell "the track finished" from "the
-    // user pressed stop" without the UI having to infer it from polling.
-    let mut had_source = false;
-    let mut suppress_end = false;
+    let mut watch = EndWatch::default();
 
     loop {
         match rx.recv_timeout(TICK) {
             Ok(AudioCmd::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(cmd) => {
+                watch.note(&cmd);
                 // A source that won't play is a different kind of problem
                 // from a command that failed: the queue can carry on past it,
                 // and should, so it gets its own event.
                 let starting = matches!(cmd, AudioCmd::Play { .. });
-                if let Some(err) = apply_audio_cmd(player, cmd, &mut suppress_end) {
+                if let Some(err) = apply_audio_cmd(player, cmd) {
                     let event = if starting {
                         Event::PlaybackFailed(err)
                     } else {
@@ -314,15 +310,9 @@ fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
 
         player.tick();
         let status = player.status();
-        let has_source = !status.source.is_empty();
-        if had_source && !has_source {
-            if suppress_end {
-                suppress_end = false;
-            } else {
-                let _ = events.send(Event::TrackEnded);
-            }
+        if watch.ended(!status.source.is_empty()) {
+            let _ = events.send(Event::TrackEnded);
         }
-        had_source = has_source;
 
         if events.send(Event::Status(status)).is_err() {
             break; // UI is gone
@@ -332,29 +322,56 @@ fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
     player.stop();
 }
 
-fn apply_audio_cmd(
-    player: &dyn PlayerCtl,
-    cmd: AudioCmd,
-    suppress_end: &mut bool,
-) -> Option<String> {
+fn apply_audio_cmd(player: &dyn PlayerCtl, cmd: AudioCmd) -> Option<String> {
     match cmd {
-        AudioCmd::Play { url, duration_hint } => {
-            // Swapping tracks keeps a source loaded throughout, so this is not
-            // an end-of-track transition.
-            *suppress_end = true;
-            return player.play(&url, duration_hint).err();
-        }
+        AudioCmd::Play { url, duration_hint } => return player.play(&url, duration_hint).err(),
         AudioCmd::Pause => player.pause(),
         AudioCmd::Resume => player.resume(),
-        AudioCmd::Stop => {
-            *suppress_end = true;
-            player.stop();
-        }
+        AudioCmd::Stop => player.stop(),
         AudioCmd::Seek(pos) => return player.seek(pos).err(),
         AudioCmd::SetVolume(v) => player.set_volume(v),
         AudioCmd::Shutdown => {}
     }
     None
+}
+
+/// Whether the source that just went away did so on its own.
+///
+/// Track-end detection lives on this thread rather than in the UI: it sees
+/// every status transition, so it can tell "the track finished" from "the
+/// user pressed stop" without the UI having to infer it from polling.
+///
+/// `asked_to_stop` is a standing answer, not a one-shot flag, and that is the
+/// whole point. It used to be armed by anything that *might* empty the source
+/// and disarmed by the next transition — but a play never empties anything
+/// (the engine decodes the new source, then swaps sinks, with a file loaded
+/// throughout). So the flag went up at the start of every track and was still
+/// up when that track ended, where it ate the one transition it was never
+/// meant to cover. Playback stopped after a single song, every time.
+#[derive(Default)]
+struct EndWatch {
+    had_source: bool,
+    asked_to_stop: bool,
+}
+
+impl EndWatch {
+    /// Note what a command asks of playback. Only a stop can account for a
+    /// source disappearing; everything else either replaces one source with
+    /// another or acts on the source already loaded.
+    fn note(&mut self, cmd: &AudioCmd) {
+        match cmd {
+            AudioCmd::Stop => self.asked_to_stop = true,
+            AudioCmd::Play { .. } => self.asked_to_stop = false,
+            _ => {}
+        }
+    }
+
+    /// True when the source went away and nobody asked it to.
+    fn ended(&mut self, has_source: bool) -> bool {
+        let ended = self.had_source && !has_source && !self.asked_to_stop;
+        self.had_source = has_source;
+        ended
+    }
 }
 
 /// Browse for servers on its own thread — mDNS listens for a fixed window, and
@@ -912,6 +929,57 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn play(url: &str) -> AudioCmd {
+        AudioCmd::Play { url: url.to_string(), duration_hint: None }
+    }
+
+    #[test]
+    fn a_track_running_out_is_an_end_even_though_starting_it_took_a_command() {
+        let mut watch = EndWatch::default();
+        watch.note(&play("http://x/a.mp3"));
+        assert!(!watch.ended(true), "it is playing, not ending");
+        assert!(watch.ended(false), "and then it ran out on its own");
+    }
+
+    #[test]
+    fn swapping_tracks_never_looks_like_an_ending() {
+        let mut watch = EndWatch::default();
+        watch.note(&play("http://x/a.mp3"));
+        watch.ended(true);
+
+        // The engine decodes the next source before it drops the old sink, so
+        // the polls either side of a skip both see a file loaded.
+        watch.note(&play("http://x/b.mp3"));
+        assert!(!watch.ended(true));
+        // Pausing and seeking leave the source exactly where it was.
+        watch.note(&AudioCmd::Pause);
+        assert!(!watch.ended(true));
+        watch.note(&AudioCmd::Seek(30.0));
+        assert!(!watch.ended(true));
+
+        assert!(watch.ended(false), "and the track swapped in ends normally");
+    }
+
+    #[test]
+    fn stopping_is_not_an_ending_but_it_only_answers_for_itself() {
+        let mut watch = EndWatch::default();
+        watch.note(&play("http://x/a.mp3"));
+        watch.ended(true);
+
+        // Silence that was asked for must not walk the queue on.
+        watch.note(&AudioCmd::Stop);
+        assert!(!watch.ended(false));
+
+        // A stop that lands with nothing playing has no transition to explain
+        // — and it is exactly what the app sends when the queue runs out. It
+        // must not still be answering for a track started long afterwards.
+        watch.note(&AudioCmd::Stop);
+        assert!(!watch.ended(false));
+        watch.note(&play("http://x/b.mp3"));
+        watch.ended(true);
+        assert!(watch.ended(false), "a later track still ends on its own");
+    }
 
     #[test]
     fn a_tunnel_login_goes_over_the_bridge_but_is_filed_under_the_identity() {
