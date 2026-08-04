@@ -293,7 +293,6 @@ pub enum SearchNode {
 /// up costs no request, and neither does drawing the context.
 #[derive(Debug)]
 pub struct Trail {
-    pub title: String,
     pub entries: Vec<Entry>,
     /// Which row of this listing was taken to get to the next column.
     pub chosen: usize,
@@ -2058,7 +2057,6 @@ impl App {
     /// one. Called before the request goes out, so the context is there while
     /// the reply is still coming.
     fn push_trail(&mut self) {
-        let title = crate::tui::ui::browser_title(self);
         let pane = self.pane_mut();
         if pane.entries.is_empty() {
             return;
@@ -2077,7 +2075,7 @@ impl App {
             }
             None => (entries, chosen),
         };
-        pane.trail.push(Trail { title, entries, chosen });
+        pane.trail.push(Trail { entries, chosen });
     }
 
     fn go_back(&mut self) -> Vec<Effect> {

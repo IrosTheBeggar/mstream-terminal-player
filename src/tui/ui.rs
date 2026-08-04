@@ -345,6 +345,16 @@ fn server_label(app: &App, width: usize) -> String {
 /// columns on vertical lines and read as two separate windows; a rule says the
 /// same thing in one column and reads as one surface.
 fn render_columns(frame: &mut Frame, area: Rect, app: &mut App) {
+    // Where you are, once, across the whole width.
+    //
+    // Every column used to carry its own title, which for the file browser
+    // meant three headers that were prefixes of one another and a middle one
+    // squeezed down to `/library/10 Ft. G…`. Said once at full width it
+    // cannot be truncated, and the columns get on with being lists.
+    let [location, area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    render_location(frame, location, app);
+
     let widths = column_widths(area.width, app.pane().trail.len(), app.queue_column);
     let constraints: Vec<Constraint> =
         widths.iter().map(|w| Constraint::Length(*w)).collect();
@@ -364,6 +374,47 @@ fn render_columns(frame: &mut Frame, area: Rect, app: &mut App) {
         render_queue_column(frame, areas[current + 1], app);
     }
     render_current_column(frame, areas[current], app);
+}
+
+/// The line above the columns: where you are on the left, and what the queue
+/// holds on the right when it is open — that column's own heading, kept on
+/// this row so every list starts level with every other.
+fn render_location(frame: &mut Frame, area: Rect, app: &mut App) {
+    let area = inset(area);
+    let queue = app.queue_column.then(|| queue_title(&app.queue).trim().to_string());
+    let queue_width = queue.as_deref().map_or(0, |t| width_of(t) as u16 + 2);
+    // The path is the point, so it is fed first and the queue summary drops
+    // off rather than crowd it.
+    let queue_width = queue_width.min(area.width.saturating_sub(20));
+    let [here, right] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(queue_width)]).areas(area);
+
+    let focused = app.focus == Focus::Browser;
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            fit(browser_title(app).trim(), here.width as usize),
+            if focused {
+                Style::new().add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(dim())
+            },
+        )),
+        here,
+    );
+    if let Some(queue) = queue.filter(|_| queue_width > 0) {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                fit(&queue, right.width as usize),
+                if focused {
+                    Style::new().fg(dim())
+                } else {
+                    Style::new().add_modifier(Modifier::BOLD)
+                },
+            ))
+            .alignment(Alignment::Right),
+            right,
+        );
+    }
 }
 
 /// How wide each column gets. The one you are in is the one you are reading,
@@ -408,17 +459,6 @@ fn restyle(mut line: Line<'static>, style: Style) -> Line<'static> {
 /// A column you came through. Never focused, so it is drawn quietly, with the
 /// row you took marked rather than a cursor.
 fn render_trail_column(frame: &mut Frame, area: Rect, step: &crate::tui::app::Trail) {
-    let [head, body] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    let head = inset(head);
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            fit(step.title.trim(), head.width as usize),
-            Style::new().fg(dim()),
-        )),
-        head,
-    );
-
     let width = area.width.saturating_sub(2) as usize;
     let items: Vec<ListItem> = step
         .entries
@@ -440,30 +480,13 @@ fn render_trail_column(frame: &mut Frame, area: Rect, step: &crate::tui::app::Tr
         .collect();
     let mut state = ListState::default();
     state.select(Some(step.chosen));
-    frame.render_stateful_widget(List::new(items), inset(body), &mut state);
+    frame.render_stateful_widget(List::new(items), inset(area), &mut state);
     divider(frame, area);
 }
 
 /// The column the cursor is in.
 fn render_current_column(frame: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.focus == Focus::Browser;
-    let [head, body] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    let title = browser_title(app);
-    let head = inset(head);
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            fit(title.trim(), head.width as usize),
-            if focused {
-                Style::new().add_modifier(Modifier::BOLD)
-            } else {
-                Style::new().fg(dim())
-            },
-        )),
-        head,
-    );
-
-    let inner = inset(body);
+    let inner = inset(area);
     let content = inner.width.saturating_sub(CURSOR.len() as u16) as usize;
     let playing = app.now_playing.as_ref().map(|track| track.filepath.as_str());
     let items: Vec<ListItem> = app
@@ -502,23 +525,7 @@ fn render_current_column(frame: &mut Frame, area: Rect, app: &mut App) {
 /// columns walk -- artist, album, track, queued -- so it belongs on the right
 /// of them rather than in a pane of its own.
 fn render_queue_column(frame: &mut Frame, area: Rect, app: &mut App) {
-    let focused = app.focus == Focus::Queue;
-    let [head, body] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    let head = inset(head);
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            fit(queue_title(&app.queue).trim(), head.width as usize),
-            if focused {
-                Style::new().add_modifier(Modifier::BOLD)
-            } else {
-                Style::new().fg(dim())
-            },
-        )),
-        head,
-    );
-
-    let inner = inset(body);
+    let inner = inset(area);
     if app.queue.items.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled("'a' queues a track", Style::new().fg(dim())))
@@ -3075,6 +3082,48 @@ mod tests {
     }
 
     #[test]
+    fn the_path_is_said_once_above_the_columns() {
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Artist"], &[]))));
+        app.handle_action(Action::Activate);
+        app.apply_event(Event::Listing(Box::new(listing("/lib/Artist/", &["Album"], &[]))));
+        app.handle_action(Action::Activate);
+        app.apply_event(Event::Listing(Box::new(listing(
+            "/lib/Artist/Album/",
+            &[],
+            &["a.mp3"],
+        ))));
+        assert_eq!(app.files.trail.len(), 2, "two columns behind");
+
+        let text = draw(&mut app);
+        assert_eq!(
+            text.matches("/lib/Artist/Album").count(),
+            1,
+            "every column used to carry its own copy of this: {text}"
+        );
+
+        let lines: Vec<&str> = text.lines().collect();
+        let path = lines.iter().position(|l| l.contains("/lib/Artist/Album")).unwrap();
+        assert!(!lines[path].contains('\u{2502}'), "it runs the full width: {}", lines[path]);
+        assert!(lines[path + 1].contains('\u{2502}'), "and the columns start under it");
+    }
+
+    #[test]
+    fn the_queue_heading_shares_that_line_so_the_lists_start_level() {
+        let mut app = connected_app();
+        app.queue.replace(vec![tagged_track()]);
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Artist"], &[]))));
+        app.handle_action(Action::CycleFocus);
+
+        let text = draw(&mut app);
+        let lines: Vec<&str> = text.lines().collect();
+        let path = lines.iter().position(|l| l.contains("/lib")).unwrap();
+        assert!(lines[path].contains("Queue (1)"), "{}", lines[path]);
+        // The first row under it is a list row in both columns, not a heading.
+        assert!(lines[path + 1].contains(".."), "{}", lines[path + 1]);
+    }
+
+    #[test]
     fn the_columns_build_up_as_you_go_in_and_fall_away_as_you_come_out() {
         use crate::tui::worker::{LibraryData, LibraryNode};
         let mut app = connected_app();
@@ -3090,7 +3139,7 @@ mod tests {
         // Captured on the way in, from what was already on screen — going a
         // level deeper costs one request, not two.
         assert_eq!(app.library.trail.len(), 1);
-        assert_eq!(app.library.trail[0].title.trim(), "Library");
+        assert_eq!(app.library.trail[0].entries.len(), 3, "the menu we came through");
         let text = draw(&mut app);
         assert!(text.contains("Bassnectar"), "the column behind is still drawn: {text}");
 
