@@ -143,6 +143,26 @@ pub struct TrackMetadata {
     pub has_lyrics: bool,
     #[serde(rename = "has-synced-lyrics")]
     pub has_synced_lyrics: bool,
+    /// What the file is, as the scanner read it — "mp3", "flac". Not the
+    /// extension: a mislabelled file is described by what is inside it.
+    pub format: Option<String>,
+    /// Bits per second, so 320000 rather than 320.
+    pub bitrate: Option<u64>,
+    #[serde(rename = "sample-rate")]
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u16>,
+    /// Only lossless formats carry one, so its absence is itself a fact.
+    #[serde(rename = "bit-depth")]
+    pub bit_depth: Option<u16>,
+    #[serde(rename = "file-size")]
+    pub file_size: Option<u64>,
+    /// The scanner returns a list; most files name one.
+    pub genres: Vec<String>,
+    /// How many tracks the release has, for "3 of 12".
+    #[serde(rename = "track-total")]
+    pub track_total: Option<u32>,
+    #[serde(rename = "disc-total")]
+    pub disc_total: Option<u32>,
 }
 
 impl TrackMetadata {
@@ -552,7 +572,9 @@ mod tests {
             "metadata":{"artist":"3-1 Remixes","album":"13 Horrible Remixes By 3-1","track":1,
             "disk":null,"title":"My Rave (Nid & Sancy)","duration":238.655,"year":2009,
             "album-art":null,"rating":null,"play-count":null,"bpm":130,"musical-key":"G major",
-            "genres":["Progressive Electronic"],"bitrate":271000,"sample-rate":44100,
+            "genres":["Progressive Electronic"],"bitrate":271000,"format":"mp3",
+            "sample-rate":44100,"channels":2,"bit-depth":null,"file-size":8087296,
+            "track-total":13,"disc-total":1,"audio-hash":"51dbe5b4","bpm-source":"essentia",
             "has-lyrics":false,"has-synced-lyrics":false}}},
             {"type":"m3u","name":"13 Horrible Remixes.m3u","metadata":{
             "filepath":"library/3-1 Remixes/13 Horrible Remixes/13 Horrible Remixes.m3u",
@@ -567,6 +589,19 @@ mod tests {
         assert_eq!(meta.musical_key.as_deref(), Some("G major"));
         assert_eq!(meta.title.as_deref(), Some("My Rave (Nid & Sancy)"));
         assert_eq!(meta.year, Some(2009));
+
+        // What the file is. Every one of these rode along on the listing and
+        // was thrown away for months because the struct did not name it —
+        // `bitrate` and `genres` were sitting in this very capture, unread.
+        assert_eq!(meta.format.as_deref(), Some("mp3"));
+        assert_eq!(meta.bitrate, Some(271000), "bits per second, not kilobits");
+        assert_eq!(meta.sample_rate, Some(44100));
+        assert_eq!(meta.channels, Some(2));
+        assert_eq!(meta.bit_depth, None, "lossy, so there is none to give");
+        assert_eq!(meta.file_size, Some(8087296));
+        assert_eq!(meta.genres, vec!["Progressive Electronic".to_string()]);
+        assert_eq!(meta.track_total, Some(13));
+        assert_eq!(meta.disc_total, Some(1));
 
         // Present but empty: on disk, not in the database.
         assert!(listing.files[1].metadata.as_ref().unwrap().metadata.is_none());

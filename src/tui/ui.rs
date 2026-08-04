@@ -17,7 +17,7 @@ use super::app::{
     SearchNode, Tab,
 };
 use super::worker::{AutoDjMode, DiscoverNode, LibraryNode};
-use crate::api::types::Track;
+use crate::api::types::{Track, TrackMetadata};
 
 /// The colours the drawing code varies, resolved once at startup.
 ///
@@ -1050,6 +1050,59 @@ fn autodj_summary(app: &App) -> Vec<Line<'static>> {
 /// A ladder rather than the one-line run of separators the compact transport
 /// uses — there is room here, and a column of labels can be read for one value
 /// where `2:54 · 85 BPM · 10B · ★★★★` has to be read whole.
+/// "FLAC · 1006 kbps". The container and how much of it there is per second,
+/// which together are what people mean when they ask what a file is.
+fn file_format(meta: &TrackMetadata) -> Option<String> {
+    let format = meta.format.as_deref().map(str::trim).filter(|f| !f.is_empty());
+    // Rounded to whole kbps: the server counts in bits per second, and nobody
+    // reads a rip as 320.0 kbps rather than 320.
+    let kbps = meta.bitrate.filter(|b| *b > 0).map(|b| (b as f64 / 1000.0).round() as u64);
+    match (format, kbps) {
+        (Some(format), Some(kbps)) => Some(format!("{}   {kbps} kbps", format.to_uppercase())),
+        (Some(format), None) => Some(format.to_uppercase()),
+        (None, Some(kbps)) => Some(format!("{kbps} kbps")),
+        (None, None) => None,
+    }
+}
+
+/// "44.1 kHz · 24-bit · stereo". Bit depth only exists for lossless, so its
+/// absence says something too and it is left out rather than guessed at.
+fn audio_shape(meta: &TrackMetadata) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(rate) = meta.sample_rate.filter(|r| *r > 0) {
+        let khz = f64::from(rate) / 1000.0;
+        // 44.1 and 48 both want to look right, so the decimal only appears
+        // when there is something after it.
+        parts.push(if (khz.fract() * 10.0).round() == 0.0 {
+            format!("{khz:.0} kHz")
+        } else {
+            format!("{khz:.1} kHz")
+        });
+    }
+    if let Some(depth) = meta.bit_depth.filter(|d| *d > 0) {
+        parts.push(format!("{depth}-bit"));
+    }
+    match meta.channels {
+        Some(1) => parts.push("mono".to_string()),
+        Some(2) => parts.push("stereo".to_string()),
+        Some(n) if n > 2 => parts.push(format!("{n} channels")),
+        _ => {}
+    }
+    (!parts.is_empty()).then(|| parts.join("   "))
+}
+
+fn fmt_bytes(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    let mb = bytes as f64 / MB;
+    if mb >= 100.0 {
+        format!("{mb:.0} MB")
+    } else if mb >= 1.0 {
+        format!("{mb:.1} MB")
+    } else {
+        format!("{:.0} KB", bytes as f64 / 1024.0)
+    }
+}
+
 fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
     let Some(track) = &app.now_playing else {
         return vec![
@@ -1087,8 +1140,25 @@ fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
     if let Some(album) = meta.album.as_deref().filter(|a| !a.is_empty()) {
         fact_row(&mut lines, "Album", plain(album.to_string()));
     }
+    // Where this sits on the release. The total is what makes it worth
+    // saying: "3" alone is a number, "3 of 12" is a position.
+    if let Some(track) = meta.track {
+        let mut value = match meta.track_total {
+            Some(total) if total >= track => format!("{track} of {total}"),
+            _ => track.to_string(),
+        };
+        if let Some(disc) = meta.disk.filter(|_| meta.disc_total.is_some_and(|t| t > 1)) {
+            value.push_str(&format!("   disc {disc}"));
+        }
+        fact_row(&mut lines, "Track", plain(value));
+    }
     if let Some(year) = meta.year {
         fact_row(&mut lines, "Year", plain(year.to_string()));
+    }
+    let genres: Vec<&str> =
+        meta.genres.iter().map(|g| g.trim()).filter(|g| !g.is_empty()).collect();
+    if !genres.is_empty() {
+        fact_row(&mut lines, "Genre", plain(genres.join(", ")));
     }
     if let Some(bpm) = meta.bpm {
         fact_row(&mut lines, "Tempo", plain(format!("{bpm} BPM")));
@@ -1110,6 +1180,15 @@ fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
     }
     if let Some(plays) = meta.play_count.filter(|p| *p > 0) {
         fact_row(&mut lines, "Plays", plain(plays.to_string()));
+    }
+    if let Some(format) = file_format(meta) {
+        fact_row(&mut lines, "Format", plain(format));
+    }
+    if let Some(audio) = audio_shape(meta) {
+        fact_row(&mut lines, "Audio", plain(audio));
+    }
+    if let Some(size) = meta.file_size.filter(|b| *b > 0) {
+        fact_row(&mut lines, "Size", plain(fmt_bytes(size)));
     }
 
     lines.push(Line::raw(""));
@@ -2267,6 +2346,15 @@ mod tests {
                 musical_key: Some("A minor".into()),
                 rating: Some(7),
                 play_count: Some(23),
+                track: Some(3),
+                track_total: Some(12),
+                genres: vec!["Dubstep".into()],
+                format: Some("flac".into()),
+                bitrate: Some(1025000),
+                sample_rate: Some(44100),
+                channels: Some(2),
+                bit_depth: Some(16),
+                file_size: Some(39691544),
                 ..Default::default()
             },
         }
@@ -3022,6 +3110,65 @@ mod tests {
             let row: String = (0..20).map(|x| buffer[(x, *y)].symbol()).collect();
             row.trim_start().starts_with(label)
         })
+    }
+
+    #[test]
+    fn the_card_says_what_the_file_is() {
+        let mut app = connected_app();
+        app.queue.replace(vec![tagged_track()]);
+        app.play_index(0);
+        app.handle_action(Action::ToggleNowPlaying);
+
+        let text = draw(&mut app);
+        assert!(text.contains("FLAC   1025 kbps"), "{text}");
+        assert!(text.contains("44.1 kHz   16-bit   stereo"), "{text}");
+        assert!(text.contains("37.9 MB"), "{text}");
+        assert!(text.contains("3 of 12"), "a position, not a bare number: {text}");
+        assert!(text.contains("Dubstep"), "{text}");
+    }
+
+    #[test]
+    fn the_file_facts_leave_out_what_the_server_did_not_say() {
+        // Every one of these is optional and a good few come back null on a
+        // thin scan, so a row missing has to mean the row is absent, not
+        // "unknown" or "0".
+        let bare = TrackMetadata::default();
+        assert_eq!(file_format(&bare), None);
+        assert_eq!(audio_shape(&bare), None);
+
+        // A lossy file has no bit depth; saying nothing is the fact.
+        let lossy = TrackMetadata {
+            format: Some("mp3".into()),
+            bitrate: Some(320000),
+            sample_rate: Some(44100),
+            channels: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(file_format(&lossy).as_deref(), Some("MP3   320 kbps"));
+        assert_eq!(audio_shape(&lossy).as_deref(), Some("44.1 kHz   stereo"));
+
+        // A whole number of kHz drops the decimal; one channel is mono.
+        let mono = TrackMetadata {
+            sample_rate: Some(48000),
+            channels: Some(1),
+            bit_depth: Some(24),
+            ..Default::default()
+        };
+        assert_eq!(audio_shape(&mono).as_deref(), Some("48 kHz   24-bit   mono"));
+
+        // Either half of the format row stands on its own.
+        let format_only = TrackMetadata { format: Some("opus".into()), ..Default::default() };
+        assert_eq!(file_format(&format_only).as_deref(), Some("OPUS"));
+        let rate_only = TrackMetadata { bitrate: Some(96000), ..Default::default() };
+        assert_eq!(file_format(&rate_only).as_deref(), Some("96 kbps"));
+    }
+
+    #[test]
+    fn sizes_read_the_way_a_file_manager_says_them() {
+        assert_eq!(fmt_bytes(7886891), "7.5 MB");
+        assert_eq!(fmt_bytes(39691544), "37.9 MB");
+        assert_eq!(fmt_bytes(524_288_000), "500 MB", "no decimal once it stops mattering");
+        assert_eq!(fmt_bytes(48_000), "47 KB", "and below a megabyte it is not 0.0 MB");
     }
 
     #[test]
