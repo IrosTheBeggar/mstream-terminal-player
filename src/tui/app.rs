@@ -700,6 +700,15 @@ pub struct App {
     /// A request is in flight; don't pile on another.
     autodj_pending: bool,
     pub status: PlayerStatus,
+    /// The source asked for but not yet heard back about.
+    ///
+    /// Playback state arrives a tick behind the decision to play, and opening
+    /// a remote track takes as long as it takes. In that gap the last status
+    /// still describes the track that just finished, so the transport read
+    /// "<the next track> · stopped" at 2:54 of a track nobody was on. Holding
+    /// the source we are waiting for lets a status about anything else be
+    /// recognised as describing where we no longer are.
+    starting: Option<String>,
     /// Tracks that failed to start since the last one that played. Bounds the
     /// skipping so a queue of nothing but broken files stops rather than
     /// looping.
@@ -772,6 +781,7 @@ impl App {
             autodj_ignore: Vec::new(),
             autodj_pending: false,
             status: PlayerStatus::default(),
+            starting: None,
             failures: 0,
             volume: 1.0,
             now_playing: None,
@@ -1001,6 +1011,27 @@ impl App {
     /// still clears the right spinner.
     fn note_pending(&mut self, effects: &[Effect]) {
         for effect in effects {
+            // Playback is answered by the audio thread rather than a pane, so
+            // it gets recorded here rather than lighting a spinner.
+            if let Effect::Audio(cmd) = effect {
+                match cmd {
+                    AudioCmd::Play { url, duration_hint } => {
+                        self.starting = Some(url.clone());
+                        // Describe what was asked for, so the bar shows the
+                        // new track's length from nothing rather than the old
+                        // track's position against no length at all.
+                        self.status = PlayerStatus {
+                            source: url.clone(),
+                            duration: duration_hint.unwrap_or(0.0),
+                            volume: self.status.volume,
+                            ..PlayerStatus::default()
+                        };
+                    }
+                    AudioCmd::Stop => self.starting = None,
+                    _ => {}
+                }
+                continue;
+            }
             let tab = match effect {
                 Effect::Api(ApiCmd::Browse(_)) => Tab::Files,
                 Effect::Api(ApiCmd::Library(_)) => Tab::Library,
@@ -1011,6 +1042,11 @@ impl App {
             };
             self.pane_for_mut(tab).loading = true;
         }
+    }
+
+    /// Whether we have asked for a track and not yet heard it start.
+    pub fn is_starting(&self) -> bool {
+        self.starting.is_some()
     }
 
     /// A request that failed answers nothing, so nothing calls `Pane::set` and
@@ -2281,6 +2317,17 @@ impl App {
     fn consume(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::Status(status) => {
+                // While a track is starting, a status about any other source
+                // is the tail of the one we left — the empty poll after it ran
+                // out, or the last of a track being skipped away from. Taking
+                // it would hang that track's position and its "stopped" under
+                // the name of the one coming up.
+                if let Some(wanted) = &self.starting {
+                    if status.source != *wanted {
+                        return Vec::new();
+                    }
+                    self.starting = None;
+                }
                 // Something loaded and is playing, so whatever went wrong
                 // before is behind us — the run of failures starts over.
                 if !status.source.is_empty() {
@@ -2296,6 +2343,10 @@ impl App {
                 Vec::new()
             }
             Event::PlaybackFailed(e) => {
+                // The source we were waiting on is never going to arrive, and
+                // a wait with nothing coming would discard every status after
+                // it. Whatever we move to next sets its own.
+                self.starting = None;
                 // One bad file used to end the listening session: the message
                 // appeared and the queue simply stopped. Say which track, and
                 // carry on to the next.
@@ -3338,6 +3389,18 @@ mod tests {
         Track { filepath: path.to_string(), metadata: TrackMetadata::default() }
     }
 
+    /// The source the app actually asked for. A status has to name it to be
+    /// about the track now playing, so tests cannot invent one.
+    fn played_url(effects: &[Effect]) -> String {
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::Audio(AudioCmd::Play { url, .. }) => Some(url.clone()),
+                _ => None,
+            })
+            .expect("expected a play effect")
+    }
+
     fn track_by(path: &str, artist: &str) -> Track {
         Track {
             filepath: path.to_string(),
@@ -3463,6 +3526,57 @@ mod tests {
         assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
         assert_eq!(app.queue.current, None);
         assert!(app.now_playing.is_none());
+    }
+
+    #[test]
+    fn the_track_coming_up_never_wears_the_state_of_the_one_that_ended() {
+        let mut app = connected_app();
+        app.queue.replace(vec![track("a"), track("b")]);
+        let effects = app.handle_action(Action::PlayPause);
+        let first = played_url(&effects);
+        app.apply_event(Event::Status(PlayerStatus {
+            source: first.clone(),
+            playing: true,
+            position: 174.0,
+            duration: 174.0,
+            ..Default::default()
+        }));
+        assert!(app.status.playing);
+
+        // It runs out and the queue moves on. Nothing is sounding yet, and
+        // saying so under the next track's name is what read as the player
+        // stopping between every song.
+        let effects = app.apply_event(Event::TrackEnded);
+        assert_eq!(app.queue.current, Some(1));
+        assert!(app.is_starting());
+        assert_eq!(app.status.position, 0.0, "the old position does not carry over");
+
+        // The poll that comes next is the engine still describing the track
+        // that ended -- an empty source, because it cleared it.
+        app.apply_event(Event::Status(PlayerStatus::default()));
+        assert!(app.is_starting(), "a status about nothing is not the answer");
+        assert_eq!(app.status.source, played_url(&effects));
+
+        // The answer names what was asked for.
+        app.apply_event(Event::Status(PlayerStatus {
+            source: played_url(&effects),
+            playing: true,
+            ..Default::default()
+        }));
+        assert!(!app.is_starting());
+        assert!(app.status.playing);
+    }
+
+    #[test]
+    fn a_length_already_known_is_shown_before_the_engine_confirms_it() {
+        // The bar had no total until the first status came back, so a track
+        // whose length the library already told us started out as `--:--`.
+        let mut app = connected_app();
+        let mut long = track("a");
+        long.metadata.duration = Some(221.0);
+        app.queue.replace(vec![long]);
+        app.handle_action(Action::PlayPause);
+        assert_eq!(app.status.duration, 221.0);
     }
 
     #[test]
@@ -4887,13 +5001,11 @@ mod tests {
         let mut app = connected_app();
         app.queue.replace(vec![track("a"), track("b")]);
         app.play_index(0);
-        app.apply_event(Event::PlaybackFailed("nope".into()));
+        let effects = app.apply_event(Event::PlaybackFailed("nope".into()));
         assert_eq!(app.failures, 1);
 
-        app.apply_event(Event::Status(PlayerStatus {
-            source: "http://host/b.mp3".into(),
-            ..Default::default()
-        }));
+        let url = played_url(&effects);
+        app.apply_event(Event::Status(PlayerStatus { source: url, ..Default::default() }));
         assert_eq!(app.failures, 0, "a track that loaded clears the run");
     }
 

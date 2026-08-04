@@ -1092,13 +1092,7 @@ fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
         )));
         return lines;
     }
-    let (glyph, word) = if app.status.paused {
-        ("⏸", "paused")
-    } else if app.status.playing {
-        ("▶", "playing")
-    } else {
-        ("■", "stopped")
-    };
+    let (glyph, word) = transport_state(app);
     lines.push(Line::from(vec![
         Span::styled(glyph, Style::new().fg(accent())),
         Span::raw(format!(" {word}")),
@@ -1112,6 +1106,26 @@ fn fact_row(lines: &mut Vec<Line<'static>>, label: &str, value: Vec<Span<'static
     let mut spans = vec![Span::styled(format!("{label:<8}"), Style::new().fg(dim()))];
     spans.extend(value);
     lines.push(Line::from(spans));
+}
+
+/// The glyph and the word for what playback is doing.
+///
+/// "starting" is a state of its own rather than a shade of stopped. Between
+/// asking for a track and the engine reporting it there is a real gap — a tick
+/// at best, and as long as opening a remote source takes at worst — and
+/// calling that stopped printed the word under the name of the track that was
+/// about to play. The spinner is the one already used for a pane waiting on a
+/// reply, which is the same thing happening.
+fn transport_state(app: &App) -> (&'static str, &'static str) {
+    if app.is_starting() {
+        (SPINNER[app.spinner % SPINNER.len()], "starting")
+    } else if app.status.paused {
+        ("⏸", "paused")
+    } else if app.status.playing {
+        ("▶", "playing")
+    } else {
+        ("■", "stopped")
+    }
 }
 
 /// The progress bar, drawn rather than handed to ratatui's `Gauge`.
@@ -1150,13 +1164,7 @@ fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
     let (label, style) = match (&app.now_playing, app.audio_available) {
         (_, false) => ("audio device unavailable".to_string(), Style::new().fg(Color::Red)),
         (Some(track), _) => {
-            let state = if app.status.paused {
-                "paused"
-            } else if app.status.playing {
-                "playing"
-            } else {
-                "stopped"
-            };
+            let (_, state) = transport_state(app);
             (
                 format!("{} · {}", track.display_name(), state),
                 Style::new().add_modifier(Modifier::BOLD),
@@ -2158,6 +2166,34 @@ mod tests {
             !text.contains("repeat off") && !text.contains("dj off"),
             "modes that are off are not worth the width: {text}"
         );
+    }
+
+    #[test]
+    fn the_gap_before_a_track_starts_reads_as_starting_not_stopped() {
+        let mut app = connected_app();
+        app.queue.replace(vec![Track {
+            filepath: "lib/a.mp3".into(),
+            metadata: TrackMetadata {
+                title: Some("Moonlight".into()),
+                artist: Some("Trio".into()),
+                duration: Some(200.0),
+                ..Default::default()
+            },
+        }]);
+        // Through the wrapper, so the ask is recorded the way it is in the app.
+        app.handle_action(Action::PlayPause);
+
+        let text = draw(&mut app);
+        assert!(text.contains("Trio - Moonlight · starting"), "{text}");
+        assert!(!text.contains("stopped"), "the word that made it look broken: {text}");
+        // The length came from the library, so the bar has its total already.
+        assert!(text.contains("0:00 / 3:20"), "{text}");
+
+        // The full-screen view says the same thing.
+        app.handle_action(Action::ToggleNowPlaying);
+        let text = draw(&mut app);
+        assert!(text.contains("starting"), "{text}");
+        assert!(!text.contains("stopped"), "{text}");
     }
 
     /// A track with every tag mStream can give us, for the now-playing card.
