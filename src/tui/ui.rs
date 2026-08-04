@@ -391,6 +391,20 @@ fn column_widths(total: u16, trail: usize, queue: bool) -> Vec<u16> {
     widths
 }
 
+/// Force a style across a whole row, spans included.
+///
+/// `Line::patch_style` sets the line's own style and leaves the spans alone,
+/// and a span that sets its own colour — every folder, every right-flushed
+/// duration — paints over it at render time. So a trail column asking to be
+/// drawn quietly still came out in full folder colour, and a highlight meant
+/// to cover the row would have shown those colours through it.
+fn restyle(mut line: Line<'static>, style: Style) -> Line<'static> {
+    for span in &mut line.spans {
+        span.style = span.style.patch(style);
+    }
+    line.patch_style(style)
+}
+
 /// A column you came through. Never focused, so it is drawn quietly, with the
 /// row you took marked rather than a cursor.
 fn render_trail_column(frame: &mut Frame, area: Rect, step: &crate::tui::app::Trail) {
@@ -412,12 +426,16 @@ fn render_trail_column(frame: &mut Frame, area: Rect, step: &crate::tui::app::Tr
         .enumerate()
         .map(|(i, entry)| {
             let line = entry_line(entry, width, None);
+            // The row you came through keeps a bar of its own, so a chain of
+            // columns reads as the path it is: this artist, then that album,
+            // then the track you are on. Quieter than the cursor's bar, and
+            // without its symbol, so which column has the keys is still plain.
             let style = if i == step.chosen {
-                Style::new().add_modifier(Modifier::BOLD)
+                Style::new().fg(dim()).add_modifier(Modifier::REVERSED)
             } else {
                 Style::new().fg(dim())
             };
-            ListItem::new(line.patch_style(style))
+            ListItem::new(restyle(line, style))
         })
         .collect();
     let mut state = ListState::default();
@@ -2951,6 +2969,57 @@ mod tests {
 
         app.handle_action(Action::Back);
         assert!(app.library.trail.is_empty(), "and it falls away coming out");
+    }
+
+    fn draw_buffer(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// The row of the leftmost column whose text starts with `label`.
+    fn trail_row(buffer: &ratatui::buffer::Buffer, label: &str) -> Option<u16> {
+        (0..buffer.area.height).find(|y| {
+            let row: String = (0..20).map(|x| buffer[(x, *y)].symbol()).collect();
+            row.trim_start().starts_with(label)
+        })
+    }
+
+    #[test]
+    fn the_row_you_came_through_keeps_a_mark_of_its_own() {
+        // A chain of columns should read as the path it is: this artist, then
+        // that album. Bold alone barely registered against a column of folders
+        // that were all in colour anyway.
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Artist", "Other"], &[]))));
+        app.handle_action(Action::Activate);
+        app.apply_event(Event::Listing(Box::new(listing("/lib/Artist/", &["Album"], &[]))));
+        assert_eq!(app.files.trail.len(), 1);
+
+        let buffer = draw_buffer(&mut app, 90, 26);
+        let came_through = trail_row(&buffer, "Artist/").expect("the row we went in by");
+        let passed_over = trail_row(&buffer, "Other/").expect("a row we did not");
+
+        assert!(
+            buffer[(2, came_through)].modifier.contains(Modifier::REVERSED),
+            "the way in is marked with a bar of its own"
+        );
+        assert!(
+            !buffer[(2, passed_over)].modifier.contains(Modifier::REVERSED),
+            "and only that row is"
+        );
+        assert!(
+            buffer[(15, came_through)].modifier.contains(Modifier::REVERSED),
+            "the bar runs the width of the column, not the width of the word"
+        );
+        // The cursor's bar keeps its symbol, so which column has the keys is
+        // still plain even with two bars on screen.
+        let row: String = (0..20).map(|x| buffer[(x, came_through)].symbol()).collect();
+        assert!(!row.contains(CURSOR.trim()), "the trail carries no cursor: {row:?}");
+
+        // The rest of the column is quiet, folders included -- their own
+        // colour used to paint straight over the line style asking for dim.
+        assert_eq!(buffer[(2, passed_over)].fg, dim(), "a trail column is context, not content");
     }
 
     #[test]
