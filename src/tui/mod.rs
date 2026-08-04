@@ -33,6 +33,14 @@ const POLL_DRAWING_AUDIO: Duration = Duration::from_millis(33);
 /// so it turns at one speed whether the loop is idle or churning.
 const SPIN_EVERY: Duration = Duration::from_millis(90);
 
+/// How long to wait before drawing again. Shared with the replay harness,
+/// which has to draw on the same schedule or it measures the app under one it
+/// never runs at: anything that moves on a timer sees a different number of
+/// frames there than here, and reports a different answer because of it.
+pub(crate) fn poll_interval(app: &App) -> Duration {
+    if app.drawing_audio() { POLL_DRAWING_AUDIO } else { POLL }
+}
+
 /// Everything remembered about how to start: which server, with what
 /// credentials, where we were browsing, and the player's settings.
 pub(crate) struct Startup {
@@ -220,8 +228,7 @@ fn event_loop(
 
         terminal.draw(|frame| ui::render(frame, app))?;
 
-        let poll = if app.drawing_audio() { POLL_DRAWING_AUDIO } else { POLL };
-        if event::poll(poll)? {
+        if event::poll(poll_interval(app))? {
             match event::read()? {
                 // Windows reports key releases as well as presses; without this
                 // filter every keystroke would act twice.

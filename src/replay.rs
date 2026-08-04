@@ -351,7 +351,29 @@ pub fn run(args: ReplayArgs) -> i32 {
             }
             Step::Wait(duration) => {
                 println!("── {}. {label}", index + 1);
-                std::thread::sleep(*duration);
+                // Drawn through, at the rate the real loop draws at, rather
+                // than slept through and drawn once at the end.
+                //
+                // Anything that moves on a timer — the visualiser's
+                // smoothing, a meter's ballistics — advances per frame from
+                // the time since the last one. Sleeping through a wait gave
+                // it a single frame carrying the whole gap, which its own
+                // clamp then cut back to a quarter of a second. A VU meter
+                // that had had two and a half seconds of silence looked
+                // barely moved, and the harness was the only thing wrong.
+                let until = Instant::now() + *duration;
+                loop {
+                    let left = until.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    std::thread::sleep(crate::tui::poll_interval(&app).min(left));
+                    settle(&mut app, &mut pending);
+                    if let Err(e) = terminal.draw(|frame| ui::render(frame, &mut app)) {
+                        eprintln!("error: render failed: {e}");
+                        return 1;
+                    }
+                }
             }
             Step::Frame => {}
         }

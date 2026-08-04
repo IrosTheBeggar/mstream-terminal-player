@@ -79,26 +79,41 @@ pub struct Visualizer {
 const FRAME: f32 = 1.0 / 30.0;
 
 impl Visualizer {
-    pub fn draw(&mut self, canvas: &mut Canvas, heard: &TapFrame) {
+    /// `sounding` is whether audio is actually being played. When it is
+    /// not, nothing advances: the picture holds exactly as it was rather
+    /// than carrying on from a buffer that has stopped changing. Pausing
+    /// stops the clock, the progress bar and the position, and the picture
+    /// is the one part of the screen that should not go on without them.
+    pub fn draw(&mut self, canvas: &mut Canvas, heard: &TapFrame, sounding: bool) {
         let now = Instant::now();
         let elapsed = self
             .drawn
             .replace(now)
             .map_or(FRAME, |then| now.duration_since(then).as_secs_f32())
             .clamp(0.004, 0.25);
-        self.draw_after(canvas, heard, elapsed);
+        self.draw_after(canvas, heard, elapsed, sounding);
     }
 
-    fn draw_after(&mut self, canvas: &mut Canvas, heard: &TapFrame, elapsed: f32) {
+    fn draw_after(
+        &mut self,
+        canvas: &mut Canvas,
+        heard: &TapFrame,
+        elapsed: f32,
+        sounding: bool,
+    ) {
         match self.mode {
             VizMode::Bars => {
-                let bars = self.bars.update(heard, canvas.width() as usize / BAR_STRIDE, elapsed);
-                draw_bars(canvas, bars);
+                if sounding {
+                    self.bars.update(heard, canvas.width() as usize / BAR_STRIDE, elapsed);
+                }
+                draw_bars(canvas, &self.bars.heights);
             }
             VizMode::Scope => draw_scope(canvas, heard, self.scatter),
             VizMode::Vectorscope => draw_vectorscope(canvas, heard, self.scatter),
             VizMode::Vu => {
-                self.vu.update(heard, elapsed);
+                if sounding {
+                    self.vu.update(heard, elapsed);
+                }
                 draw_vu(canvas, &self.vu);
             }
         }
@@ -286,10 +301,10 @@ impl Default for Bars {
 }
 
 impl Bars {
-    fn update(&mut self, heard: &TapFrame, count: usize, elapsed: f32) -> &[f32] {
+    fn update(&mut self, heard: &TapFrame, count: usize, elapsed: f32) {
         if count == 0 {
             self.heights.clear();
-            return &self.heights;
+            return;
         }
         if self.heights.len() != count {
             self.heights = vec![0.0; count];
@@ -300,7 +315,7 @@ impl Bars {
 
         let bands = log_bins(&spectrum(&heard.mono()), heard.rate, count);
         if bands.len() != count {
-            return &self.heights;
+            return;
         }
 
         // Decibels over a fixed range with a floor under it. Loudness is
@@ -362,8 +377,6 @@ impl Bars {
             self.sensitivity *= 1.0 + 0.6 * elapsed;
         }
         self.sensitivity = self.sensitivity.clamp(0.02, 500.0);
-
-        &self.heights
     }
 }
 
@@ -905,7 +918,7 @@ mod tests {
     fn lit(mode: VizMode, scatter: bool, heard: &TapFrame) -> usize {
         let mut viz = Visualizer { mode, scatter, ..Default::default() };
         let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 60, height: 12 });
-        viz.draw_after(&mut canvas, heard, FRAME);
+        viz.draw_after(&mut canvas, heard, FRAME, true);
         canvas
             .into_lines()
             .iter()
@@ -942,6 +955,48 @@ mod tests {
     }
 
     #[test]
+    fn nothing_moves_while_nothing_is_sounding() {
+        let rate = 44100;
+        let loud = stereo(sine(440.0, rate, 4096), sine(660.0, rate, 4096), rate);
+        let quiet = stereo(vec![0.0; 4096], vec![0.0; 4096], rate);
+        let picture = |viz: &mut Visualizer, heard: &TapFrame, sounding: bool| -> Vec<String> {
+            let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 50, height: 10 });
+            viz.draw_after(&mut canvas, heard, FRAME, sounding);
+            canvas
+                .into_lines()
+                .iter()
+                .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect()
+        };
+
+        for mode in VIZ_MODES {
+            let mut viz = Visualizer { mode, ..Default::default() };
+            // Play for a while so there is something to hold still.
+            for _ in 0..12 {
+                picture(&mut viz, &loud, true);
+            }
+            let paused = picture(&mut viz, &loud, false);
+
+            // The tap keeps holding the same audio, so left to itself the
+            // picture would go on settling out of it. Frozen means frozen.
+            for tick in 0..20 {
+                let held = picture(&mut viz, &loud, false);
+                assert_eq!(held, paused, "{} moved at {tick}", mode.title());
+            }
+
+            // ...and picks up again when the audio does. Checked against a
+            // different signal, because with the same buffer a settled
+            // picture is legitimately identical from one frame to the next —
+            // it would pass whether anything had restarted or not.
+            let mut moved = false;
+            for _ in 0..12 {
+                moved |= picture(&mut viz, &quiet, true) != paused;
+            }
+            assert!(moved, "{} never started again", mode.title());
+        }
+    }
+
+    #[test]
     fn every_mode_draws_something_and_none_of_them_panic() {
         let rate = 44100;
         // The channels deliberately different, so the vectorscope has
@@ -953,7 +1008,7 @@ mod tests {
             let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 40, height: 10 });
             // Several times, so the modes that carry state across a frame do.
             for _ in 0..6 {
-                viz.draw_after(&mut canvas, &heard, FRAME);
+                viz.draw_after(&mut canvas, &heard, FRAME, true);
             }
             let drawn: usize = canvas
                 .into_lines()
@@ -978,7 +1033,7 @@ mod tests {
             for mode in VIZ_MODES {
                 viz.mode = mode;
                 let mut canvas = Canvas::new(Rect { x: 0, y: 0, width, height });
-                viz.draw_after(&mut canvas, &heard, FRAME);
+                viz.draw_after(&mut canvas, &heard, FRAME, true);
             }
         }
         // And mono, which the vectorscope has nothing to say about.
@@ -987,7 +1042,7 @@ mod tests {
         for mode in VIZ_MODES {
             viz.mode = mode;
             let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 20, height: 6 });
-            viz.draw_after(&mut canvas, &mono, FRAME);
+            viz.draw_after(&mut canvas, &mono, FRAME, true);
         }
     }
 

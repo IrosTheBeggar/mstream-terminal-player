@@ -18,8 +18,6 @@ use super::app::{
 };
 use super::worker::{AutoDjMode, DiscoverNode, LibraryNode};
 use crate::api::types::{Track, TrackMetadata};
-use crate::engine::tap::TapFrame;
-use crate::player::PlayerStatus;
 
 /// The colours the drawing code varies, resolved once at startup.
 ///
@@ -1003,22 +1001,6 @@ fn render_now_panel(frame: &mut Frame, area: Rect, app: &mut App) {
 /// The mode's name goes on the last row rather than the first: it is the
 /// least interesting thing on this panel and it should not cost the picture
 /// its top. What changes it is in the footer hint, with the other keys.
-/// What the visualiser should draw from — silence, when nothing is sounding.
-///
-/// The tap holds the last tenth of a second that was played and goes on
-/// holding it, so a paused player sits there as a still spectrum, which reads
-/// as playing-but-stuck rather than stopped. Handing over silence instead
-/// lets the bars fall, the trace flatten and the meter drop, which is what
-/// stopping looks like. Same for a player that has reached the end of its
-/// queue: nothing is coming, and the picture should say so.
-fn sounding(status: &PlayerStatus, heard: TapFrame) -> TapFrame {
-    if status.playing {
-        heard
-    } else {
-        TapFrame { samples: vec![0.0; heard.samples.len()], ..heard }
-    }
-}
-
 fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
     if area.height < 2 {
         return;
@@ -1047,10 +1029,15 @@ fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
         return render_now_placeholder(frame, picture, "the visualiser goes here", "nothing playing");
     };
 
-    let heard = sounding(&app.status, heard);
+    // Pausing stops the clock, the progress bar and the position. The tap
+    // goes on holding the last tenth of a second that was played, so left to
+    // itself the picture would carry on settling out of audio that is not
+    // being played any more — neither moving nor still. Frozen is what the
+    // rest of the screen does.
+    let sounding = app.status.playing;
     let mut canvas = crate::tui::canvas::Canvas::new(picture);
     if !canvas.is_empty() {
-        app.viz.draw(&mut canvas, &heard);
+        app.viz.draw(&mut canvas, &heard, sounding);
         frame.render_widget(Paragraph::new(canvas.into_lines()), picture);
     }
 }
@@ -3302,26 +3289,6 @@ mod tests {
         assert!(!text.contains("dots") && !text.contains("lines"), "nothing to join: {text}");
         // ...but the preference is still held for when you go back to one.
         assert!(app.viz.scatter);
-    }
-
-    #[test]
-    fn a_player_that_is_not_sounding_hands_the_visualizer_silence() {
-        let heard = TapFrame { samples: vec![0.5, -0.5, 0.25, -0.25], rate: 44100, channels: 2 };
-
-        let playing = PlayerStatus { playing: true, ..Default::default() };
-        assert_eq!(sounding(&playing, heard.clone()).samples, heard.samples, "left alone");
-
-        // Paused, and stopped at the end of a queue. Both hold a tap full of
-        // whatever was last played, and both should look like nothing.
-        for status in [
-            PlayerStatus { paused: true, ..Default::default() },
-            PlayerStatus::default(),
-        ] {
-            let quiet = sounding(&status, heard.clone());
-            assert!(quiet.samples.iter().all(|s| *s == 0.0), "silence: {:?}", quiet.samples);
-            assert_eq!(quiet.samples.len(), heard.samples.len(), "the same shape of silence");
-            assert_eq!((quiet.rate, quiet.channels), (heard.rate, heard.channels));
-        }
     }
 
     #[test]
