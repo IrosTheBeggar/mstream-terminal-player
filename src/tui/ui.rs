@@ -3366,7 +3366,7 @@ mod tests {
         // The columns are laid out by padding to a fixed width, so one
         // over-long entry shunts everything to its right out of line — which
         // is exactly what a 25-character description did.
-        for (keys, what) in crate::tui::app::Keymap::default().help_rows() {
+        for (keys, what) in crate::tui::keymap::Keymap::default().help_rows() {
             assert!(
                 keys.chars().count() <= HELP_KEYS_WIDTH,
                 "keys {keys:?} are wider than the column ({HELP_KEYS_WIDTH})"

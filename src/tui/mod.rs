@@ -6,6 +6,7 @@
 
 pub mod app;
 pub mod canvas;
+pub mod keymap;
 pub mod ui;
 pub mod viz;
 pub mod worker;
@@ -124,8 +125,8 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
 /// stderr — which the player can't do mid-draw, but a command can.
 pub(crate) fn keymap_for(
     keys: &std::collections::BTreeMap<String, Vec<String>>,
-) -> app::Keymap {
-    let (keymap, warnings) = app::Keymap::default().with_overrides(keys);
+) -> keymap::Keymap {
+    let (keymap, warnings) = keymap::Keymap::default().with_overrides(keys);
     for warning in &warnings {
         eprintln!("warning: {warning}");
     }

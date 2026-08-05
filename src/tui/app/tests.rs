@@ -2341,25 +2341,6 @@ fn key_specs_round_trip_and_forgive_the_obvious_variants() {
 }
 
 #[test]
-fn every_bindable_action_has_a_name_and_finds_its_way_back() {
-    for binding in default_normal() {
-        let name = binding
-            .action
-            .name()
-            .unwrap_or_else(|| panic!("{:?} is bound but unnameable", binding.action));
-        assert_eq!(
-            Action::from_name(name),
-            Some(binding.action.clone()),
-            "'{name}' does not resolve back to what it names"
-        );
-        assert!(
-            name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
-            "'{name}' is not a kebab-case name"
-        );
-    }
-}
-
-#[test]
 fn the_dumped_config_is_the_config_that_would_be_read_back() {
     // `mstream-player keys` is only useful if pasting its output changes
     // nothing — which means the writer and the parser have to agree.
@@ -2389,29 +2370,6 @@ fn a_modifier_is_part_of_the_key_not_decoration() {
     assert_eq!(map_key(ctrl_r, InputMode::Panel), None);
     let plain_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
     assert_eq!(map_key(plain_p, InputMode::Panel), Some(Action::Input('p')));
-}
-
-#[test]
-fn every_binding_is_reachable_and_unambiguous() {
-    // Two rows claiming the same key means the second is dead code, and
-    // which one wins depends on table order — worth catching here rather
-    // than as "that key stopped working".
-    for table in [default_normal(), default_panel()] {
-        let mut seen = std::collections::HashMap::new();
-        for binding in &table {
-            for key in &binding.keys {
-                let previous = seen.insert(*key, binding.action.clone());
-                assert!(
-                    previous.is_none(),
-                    "{} is bound twice: {:?} and {:?}",
-                    key.label(),
-                    previous.unwrap(),
-                    binding.action
-                );
-            }
-            assert!(!binding.keys.is_empty(), "{:?} has no key", binding.action);
-        }
-    }
 }
 
 #[test]
