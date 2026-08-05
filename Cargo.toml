@@ -75,6 +75,24 @@ ratzilla = "0.3.1"
 # spawn_local — how the web api worker runs the async client without a
 # runtime: the browser's event loop is the executor.
 wasm-bindgen-futures = "0.4"
+# The playback path: an <audio> element for sound, an AudioContext with
+# per-channel analysers for the visualizer tap. See src/web/audio.rs for
+# why this and not cpal or an AudioWorklet.
+web-sys = { version = "0.3", features = [
+    "AnalyserNode",
+    "AudioContext",
+    "AudioContextState",
+    "AudioDestinationNode",
+    "AudioNode",
+    "BaseAudioContext",
+    "ChannelSplitterNode",
+    "HtmlAudioElement",
+    "HtmlMediaElement",
+    "Location",
+    "MediaElementAudioSourceNode",
+    "MediaError",
+    "Window",
+] }
 # std::time::Instant panics on wasm32-unknown-unknown; this is the same API
 # over performance.now(). See src/clock.rs.
 web-time = "1"

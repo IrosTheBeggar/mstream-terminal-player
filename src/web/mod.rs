@@ -9,13 +9,13 @@
 //! The api worker is real ([`api_worker`]): the same command→endpoint logic
 //! the native thread runs, awaited on the browser's event loop against
 //! whatever server the page came from (a trunk/static-host proxy in front of
-//! a real mStream — see Trunk.toml). Audio stays a stub ([`stub`]): playback
-//! is a clock and the visualizer draws a synthesised signal, until the
-//! WebAudio milestone lands.
+//! a real mStream — see Trunk.toml). Audio is real too ([`audio`]): the
+//! browser's own decoder plays the stream, and analyser taps hand the
+//! visualizer what is actually sounding.
 
 mod api_worker;
+mod audio;
 mod canned;
-mod stub;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -31,7 +31,7 @@ use crate::tui::ui;
 use crate::tui::worker::Event;
 use crate::tui::{Startup, app_from};
 use api_worker::WebApi;
-use stub::Stub;
+use audio::WebAudioPlayer;
 
 /// The native loop steps its spinner off the wall clock at this cadence
 /// (tui::SPIN_EVERY); the demo matches it so the two feel the same.
@@ -39,7 +39,7 @@ const SPIN_EVERY_MS: u128 = 90;
 
 struct Shell {
     app: App,
-    audio: Stub,
+    audio: WebAudioPlayer,
     api: WebApi,
     /// Replies from the api worker's futures, drained each frame.
     replies: Rc<RefCell<VecDeque<Event>>>,
@@ -104,7 +104,7 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     let replies: Rc<RefCell<VecDeque<Event>>> = Rc::new(RefCell::new(VecDeque::new()));
     let shell = Rc::new(RefCell::new(Shell {
         app,
-        audio: Stub::new(tap),
+        audio: WebAudioPlayer::new(tap),
         api: WebApi::new(replies.clone()),
         replies,
         pending,
