@@ -158,6 +158,12 @@ fn banner_lines(area: Rect) -> Vec<Line<'static>> {
 /// the startup screens are a splash, not a dialog, so the art keeps its own
 /// internal alignment and the whole block is centred as one unit.
 fn render_centered_block(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
+    // A zero-area frame has no centre, and clamp(1, 0) panics. Terminals
+    // never report zero columns, but the browser build's first frame arrives
+    // before the DOM grid has measured itself, and it is exactly that.
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
     let width = width.clamp(1, area.width);
     let height = (lines.len() as u16).clamp(1, area.height);
@@ -4023,6 +4029,18 @@ mod tests {
         let text = draw(&mut app);
         assert!(text.contains("(empty playlist)"), "{text}");
         assert!(!text.contains("(no playlists)"), "{text}");
+    }
+
+    #[test]
+    fn a_zero_area_frame_is_survived_rather_than_centred() {
+        // The browser build's first frame arrives before its grid has
+        // measured itself: zero columns, zero rows. A terminal never reports
+        // that, and clamp(1, 0) in the splash centring panicked (min > max)
+        // — which in a tab is the whole player gone at boot.
+        let backend = ratatui::backend::TestBackend::new(0, 0);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new(Some("http://host:3000".into()), None, None);
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
     }
 
     #[test]
