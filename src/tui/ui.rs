@@ -195,6 +195,11 @@ fn connect_message(app: &App, area: Rect) -> Vec<Line<'static>> {
 
 /// Break text on word boundaries. A word longer than `width` (a URL, say) is
 /// left whole and allowed to overhang rather than being chopped mid-token.
+///
+/// Budgeted in display columns, like everything else that decides how much
+/// fits: counting chars sized a CJK message at up to half the room it needs,
+/// and the Paragraph that draws it does not wrap, so the overhang was simply
+/// cut — taking the instruction these messages end with.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![text.to_string()];
@@ -202,7 +207,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
-        let fits = line.chars().count() + 1 + word.chars().count() <= width;
+        let fits = width_of(&line) + 1 + width_of(word) <= width;
         if line.is_empty() {
             line.push_str(word);
         } else if fits {
@@ -935,7 +940,10 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
 
     frame.render_widget(
         Paragraph::new(Span::styled(
-            rule_with_junction(rule.width, left_width),
+            // The divider is the facts column's right border, which is its
+            // last column — not the one after it. A junction at left_width
+            // sat one to the right of the line it is meant to join.
+            rule_with_junction(rule.width, left_width.saturating_sub(1)),
             Style::new().fg(dim()),
         )),
         rule,
@@ -1790,14 +1798,11 @@ fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
             Style::new().fg(dim()),
         )));
     } else {
-        // Line the columns up the way the method chooser does.
-        let name_column = form
-            .found
-            .iter()
-            .map(|server| server.name.chars().count())
-            .max()
-            .unwrap_or(0)
-            + 2;
+        // Line the columns up the way the method chooser does — in display
+        // columns, since `{:<width$}` pads by chars and a name of wide
+        // characters would push its own URL out of line with the rest.
+        let name_column =
+            form.found.iter().map(|server| width_of(&server.name)).max().unwrap_or(0) + 2;
         for (i, server) in form.found.iter().enumerate() {
             let selected = form.row == i;
             let style = if selected {
@@ -1805,14 +1810,10 @@ fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::new()
             };
+            let pad = " ".repeat(name_column.saturating_sub(width_of(&server.name)));
             let mut spans = vec![
                 Span::styled(
-                    format!(
-                        "{} {:<width$}",
-                        if selected { ">" } else { " " },
-                        server.name,
-                        width = name_column
-                    ),
+                    format!("{} {}{pad}", if selected { ">" } else { " " }, server.name),
                     style,
                 ),
                 Span::styled(server.base_url.clone(), Style::new().fg(dim())),
@@ -2220,7 +2221,10 @@ fn render_help(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
-    let width = (area.width * width_percent / 100).min(area.width);
+    // In u32: 937 columns times 70 already passes what a u16 holds, which is
+    // a panic in debug and a wrapped-round width in release.
+    let width = (u32::from(area.width) * u32::from(width_percent) / 100) as u16;
+    let width = width.min(area.width);
     let height = height.min(area.height);
     Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -2996,6 +3000,91 @@ mod tests {
         let text = draw(&mut app);
         assert!(text.contains("nothing playing"), "{text}");
         assert!(text.contains("0 goes back to the browser"), "{text}");
+    }
+
+    #[test]
+    fn the_rule_joins_the_divider_it_is_drawn_under() {
+        // The junction exists to make the facts column's right border meet
+        // the rule below it. Off by one it is a dangling join: a ┴ under
+        // nothing, and the border stopping at a blank cell.
+        let mut app = connected_app();
+        app.queue.replace(vec![tagged_track()]);
+        app.play_index(0);
+        app.handle_action(Action::ToggleNowPlaying);
+
+        for width in [80u16, 90, 120] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 26)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+
+            let column_of = |row: u16, symbol: &str| {
+                (0..buffer.area.width).find(|x| buffer[(*x, row)].symbol() == symbol)
+            };
+            // The rule is the row holding the junction; the divider is the
+            // vertical border on the row above it.
+            let rule_row = (0..buffer.area.height)
+                .find(|y| column_of(*y, "┴").is_some())
+                .unwrap_or_else(|| panic!("no junction drawn at {width} columns"));
+            let junction = column_of(rule_row, "┴").unwrap();
+            let divider = column_of(rule_row - 1, "│")
+                .unwrap_or_else(|| panic!("no divider above the rule at {width} columns"));
+            assert_eq!(
+                junction, divider,
+                "at {width} columns the junction is in {junction} and the divider in {divider}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_message_is_measured_in_the_columns_it_will_occupy() {
+        // wrap() budgeted by chars while everything around it measures
+        // display columns, so a CJK message was sized at up to twice its
+        // budget and the un-wrapped Paragraph cut the tail off — losing the
+        // instruction these messages end with.
+        // Two words of 26 columns each. By char count they are 13 apiece, so
+        // both used to be packed onto one 30-column line — 53 columns drawn
+        // into 30, with the second half clipped away by the Paragraph.
+        let cjk = "这个服务器使用的是明文连接 再按一次回车键仍然发送密码";
+        // 26 + a space + 26 is 53, so anything under that needs two lines.
+        for width in [30usize, 40, 52] {
+            let lines = wrap(cjk, width);
+            for line in &lines {
+                assert!(
+                    width_of(line) <= width,
+                    "{:?} is {} columns wide, budget was {width}",
+                    line,
+                    width_of(line)
+                );
+            }
+            assert_eq!(lines.len(), 2, "at {width} columns the two words need two lines");
+        }
+        // With room for both they share a line, as they always would have.
+        assert_eq!(wrap(cjk, 53).len(), 1);
+        assert_eq!(wrap(cjk, MESSAGE_WIDTH).len(), 1);
+
+        // A word longer than the budget still goes out whole rather than
+        // being chopped mid-token, which is the rule that keeps a URL
+        // copyable — the documented exception, in columns as it was in chars.
+        assert_eq!(wrap("http://a-very-long-host.example/path", 10).len(), 1);
+        assert_eq!(wrap("这个服务器使用的是明文连接", 10).len(), 1);
+
+        // And an ordinary ASCII message wraps where it always did.
+        assert_eq!(wrap("one two three", 7), vec!["one two", "three"]);
+    }
+
+    #[test]
+    fn a_wide_terminal_does_not_overflow_the_panel_arithmetic() {
+        // centered_rect multiplied a u16 width by a percent: at 937 columns
+        // 937 * 70 passes 65535, which is a panic in debug and a nonsense
+        // width in release. Every other size calculation here saturates.
+        for width in [937u16, 2000, 10_000, u16::MAX] {
+            let area = Rect { x: 0, y: 0, width, height: 40 };
+            let box_area = centered_rect(70, 20, area);
+            assert!(box_area.width <= width);
+            assert!(box_area.x + box_area.width <= width, "the box left the screen");
+            // 70% of the width, worked out without wrapping round.
+            assert_eq!(box_area.width, (u32::from(width) * 70 / 100) as u16);
+        }
     }
 
     #[test]
