@@ -4,7 +4,7 @@
 //! token as a `?token=` query parameter, which is what makes a bare URL
 //! self-contained enough to hand straight to the playback engine.
 
-use reqwest::Url;
+use url::Url;
 
 /// Codecs we are willing to ask mStream to transcode to.
 ///

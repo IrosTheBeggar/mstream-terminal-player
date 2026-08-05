@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>mstream-player · web demo</title>
+    <!-- rustc emits bulk-memory ops by default now; trunk's wasm-opt
+         validates with them off unless told, and fails the release build.
+         (data-wasm-opt-params needs trunk >= 0.21.) -->
+    <link
+      data-trunk
+      rel="rust"
+      data-bin="mstream-player"
+      data-wasm-opt="2"
+      data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int"
+    />
+    <script>
+      // Spike scaffolding: collect boot-time failures somewhere a headless
+      // probe can read them, since a hidden pane surfaces no console.
+      window.__bootErrors = [];
+      window.addEventListener("error", function (e) {
+        window.__bootErrors.push("error: " + (e.message || String(e.error)));
+      });
+      window.addEventListener("unhandledrejection", function (e) {
+        window.__bootErrors.push("rejection: " + String(e.reason));
+      });
+    </script>
+    <script>
+      // The terminal renders on requestAnimationFrame, which browsers stop
+      // delivering to hidden pages — an embedded or backgrounded demo would
+      // sit unpainted until first shown. While hidden, substitute a slow
+      // timer (browsers throttle it to ~1Hz, which is plenty); hand back to
+      // real frames the moment the page is visible.
+      (function () {
+        const native = window.requestAnimationFrame.bind(window);
+        window.requestAnimationFrame = function (cb) {
+          if (document.visibilityState === "hidden") {
+            return setTimeout(function () { cb(performance.now()); }, 250);
+          }
+          return native(cb);
+        };
+      })();
+    </script>
+    <script>
+      // ratzilla attaches its key listener to the grid element it creates
+      // (tabindex="0"), which starts unfocused — without this, the keyboard
+      // is dead until someone happens to click the terminal.
+      new MutationObserver(function (_mutations, observer) {
+        const grid = document.querySelector('[tabindex="0"]');
+        if (grid) {
+          grid.focus();
+          observer.disconnect();
+        }
+      }).observe(document.documentElement, { childList: true, subtree: true });
+    </script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: #101014;
+      }
+      body {
+        font-family: "Cascadia Mono", "JetBrains Mono", Consolas, "DejaVu Sans Mono", monospace;
+        font-size: 16px;
+      }
+    </style>
+  </head>
+  <body></body>
+</html>

@@ -1,0 +1,11 @@
+# Build config for the wasm demo (`trunk serve` / `trunk build --release`).
+# The native player is untouched by this file — it exists for the web target
+# described at the top of Cargo.toml.
+
+[build]
+target = "index.html"
+
+[serve]
+# Fixed rather than trunk's default 8080, so the demo has a stable address.
+port = 8975
+open = false

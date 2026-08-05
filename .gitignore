@@ -1,1 +1,3 @@
 /target
+# trunk's staging output for the wasm demo
+/dist

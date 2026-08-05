@@ -14,17 +14,26 @@ pub mod types;
 pub mod urls;
 
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
+#[cfg(not(target_arch = "wasm32"))]
 use reqwest::{Method, StatusCode, Url};
+#[cfg(not(target_arch = "wasm32"))]
 use serde::de::DeserializeOwned;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::runtime;
+#[cfg(not(target_arch = "wasm32"))]
 use types::*;
+#[cfg(not(target_arch = "wasm32"))]
 use urls::TranscodeCodec;
 
+#[cfg(not(target_arch = "wasm32"))]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(target_arch = "wasm32"))]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The directory to ask [`Client::file_explorer`] for when what you want is
@@ -75,6 +84,11 @@ impl fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
+// The whole HTTP client is native-only: it blocks on the shared tokio
+// runtime, which the single-threaded wasm build can't have. The browser
+// spike answers API commands from a stub instead (src/web); a real web
+// client would be this file's methods again, async over fetch.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Client {
     http: reqwest::Client,
     /// Always ends in `/` so `Url::join` appends instead of replacing the last
@@ -87,6 +101,7 @@ pub struct Client {
     plain_listings: AtomicBool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Client {
     pub fn new(server: &str) -> Result<Self, ApiError> {
         let mut base = Url::parse(server)
@@ -488,6 +503,7 @@ impl Client {
 
 /// Pull mStream's `{"error": "..."}` out of a failure body, falling back to a
 /// trimmed excerpt of whatever was actually returned.
+#[cfg(not(target_arch = "wasm32"))]
 fn extract_error(body: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
         if let Some(msg) = v.get("error").and_then(|e| e.as_str()) {

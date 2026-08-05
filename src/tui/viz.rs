@@ -11,7 +11,8 @@
 //! crossing to hold rather than taking the first one it sees.
 
 use std::f32::consts::PI;
-use std::time::Instant;
+
+use crate::clock::Instant;
 
 use ratatui::style::Color;
 

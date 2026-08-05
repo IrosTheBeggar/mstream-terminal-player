@@ -9,26 +9,36 @@
 //!
 //! The UI thread owns only state and rendering, and communicates by message.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use crate::api::types::{
     Album, Capabilities, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults,
     SimilarArtist, Track,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use crate::api::{ApiError, Client};
 use crate::discovery::DiscoveredServer;
 use crate::dj;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::engine::Engine;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::engine::tap::AudioTap;
-use crate::player::{PlayerCtl, PlayerStatus};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::player::PlayerCtl;
+use crate::player::PlayerStatus;
 use crate::tui::app::Tab;
 use crate::tui::art;
 
 /// How often the audio thread ticks the engine and publishes status. Also the
 /// upper bound on command latency, so keep it small enough to feel instant.
+#[cfg(not(target_arch = "wasm32"))]
 const TICK: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Clone, PartialEq)]
@@ -230,10 +240,12 @@ impl AutoDjMode {
 }
 
 /// How many tracks "Recently Added" asks for.
+#[cfg(not(target_arch = "wasm32"))]
 const RECENT_LIMIT: u32 = 100;
 
 /// Candidates to request from the similarity index. More than one because the
 /// nearest neighbour is often already sitting in the queue.
+#[cfg(not(target_arch = "wasm32"))]
 const SIMILAR_LIMIT: u32 = 15;
 
 #[derive(Debug)]
@@ -339,6 +351,7 @@ pub fn panics_are_caught(thread: Option<&str>) -> bool {
 /// Returns the tap alongside the command channel: the engine is built on the
 /// audio thread, so the UI cannot reach in for it afterwards, but the tap
 /// itself is just a buffer and can be made here and handed to both.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn spawn_audio(events: Sender<Event>) -> (Sender<AudioCmd>, Arc<AudioTap>) {
     let (tx, rx) = mpsc::channel();
     let tap = AudioTap::new();
@@ -352,6 +365,7 @@ pub fn spawn_audio(events: Sender<Event>) -> (Sender<AudioCmd>, Arc<AudioTap>) {
 
 /// Keep answering the door so the UI's sends never error; the player stays
 /// usable for browsing with no audio at all.
+#[cfg(not(target_arch = "wasm32"))]
 fn drain_until_shutdown(rx: &Receiver<AudioCmd>) {
     while let Ok(cmd) = rx.recv() {
         if cmd == AudioCmd::Shutdown {
@@ -361,6 +375,7 @@ fn drain_until_shutdown(rx: &Receiver<AudioCmd>) {
 }
 
 /// The words inside a panic payload, if it carried any.
+#[cfg(not(target_arch = "wasm32"))]
 fn panic_note(panic: &(dyn std::any::Any + Send)) -> &str {
     panic
         .downcast_ref::<&str>()
@@ -384,6 +399,7 @@ fn panic_note(panic: &(dyn std::any::Any + Send)) -> &str {
 /// batch has already moved past. Volume and the crossfade length are
 /// sticky, so the last of each is kept wherever it was said. A Shutdown
 /// makes everything else moot.
+#[cfg(not(target_arch = "wasm32"))]
 fn collapse(batch: Vec<AudioCmd>) -> Vec<AudioCmd> {
     if batch.contains(&AudioCmd::Shutdown) {
         return vec![AudioCmd::Shutdown];
@@ -420,6 +436,7 @@ fn collapse(batch: Vec<AudioCmd>) -> Vec<AudioCmd> {
     kept
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>, tap: Arc<AudioTap>) {
     let engine = match Engine::new() {
         Ok(e) => e,
@@ -440,6 +457,7 @@ fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>, tap: Arc<AudioTap
 /// #32). Caught, it is just a worse kind of [`Event::AudioFailed`]: the
 /// same event, and the same degraded-but-browsable player the no-device
 /// path has always produced.
+#[cfg(not(target_arch = "wasm32"))]
 fn listen_guarded(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
     // The player is never touched again after a caught panic — whatever it
     // was mid-way through stays where it fell — which is what makes the
@@ -455,6 +473,7 @@ fn listen_guarded(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Send
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
     let mut watch = EndWatch::default();
 
@@ -520,6 +539,7 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
     player.stop();
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn apply_audio_cmd(player: &dyn PlayerCtl, cmd: AudioCmd) -> Option<String> {
     match cmd {
         AudioCmd::Play { url, duration_hint } => return player.play(&url, duration_hint).err(),
@@ -569,6 +589,7 @@ enum Passing {
 /// cleared when the expected source arrives — or when its play fails, so a
 /// doomed open cannot masquerade as a later handover's excuse.
 #[derive(Default)]
+#[cfg(not(target_arch = "wasm32"))]
 struct EndWatch {
     /// The source last seen loaded. Kept rather than a bare "there was one"
     /// because it is the only place the name still exists when the end is
@@ -579,6 +600,7 @@ struct EndWatch {
     expecting: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl EndWatch {
     /// Note what a command asks of playback. Only a stop can account for a
     /// source disappearing, and only a play for one source becoming another;
@@ -624,6 +646,7 @@ impl EndWatch {
 
 /// Browse for servers on its own thread — mDNS listens for a fixed window, and
 /// that shouldn't hold up a pairing attempt queued behind it.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn spawn_discovery(events: Sender<Event>) {
     thread::Builder::new()
         .name("mstream-mdns".into())
@@ -636,10 +659,12 @@ pub fn spawn_discovery(events: Sender<Event>) {
 
 /// How long to listen for adverts. Long enough for a quiet network to answer,
 /// short enough not to feel stuck.
+#[cfg(not(target_arch = "wasm32"))]
 const DISCOVERY_WINDOW: Duration = Duration::from_secs(3);
 
 // ── API thread ──────────────────────────────────────────────────────────────
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn spawn_api(events: Sender<Event>) -> Sender<ApiCmd> {
     let (tx, rx) = mpsc::channel();
     thread::Builder::new()
@@ -649,6 +674,7 @@ pub fn spawn_api(events: Sender<Event>) -> Sender<ApiCmd> {
     tx
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     let mut client: Option<Arc<Client>> = None;
     // Held for as long as this thread lives; dropping it closes the tunnel out
@@ -746,6 +772,7 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
 /// and nothing else. In-flight replies against a client that has since been
 /// replaced still arrive; the app's stale-reply guards are what drop them,
 /// the same as any other answer about somewhere the user no longer is.
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_read(
     client: Option<Arc<Client>>,
     caps: Capabilities,
@@ -764,6 +791,7 @@ fn spawn_read(
 /// One read, answered. Failures map onto events here: only 401 means the
 /// session is no good; 403 is a permission or feature-flag answer that
 /// shouldn't bounce the user to a login form.
+#[cfg(not(target_arch = "wasm32"))]
 fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
     let Some(c) = client else {
         return Event::Error("not connected to a server".into());
@@ -819,6 +847,7 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
 /// shutdown), the next sample fails to upgrade and the thread ends. The
 /// first sample is sent unconditionally so a fresh session shows its state
 /// within a beat of connecting.
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_path_sampler(
     bridge: std::sync::Weak<crate::quickconnect::TunnelBridge>,
     events: Sender<Event>,
@@ -842,6 +871,7 @@ fn spawn_path_sampler(
 
 /// Parse a pairing code, bring the tunnel up on loopback, and report the
 /// identity the code names alongside it.
+#[cfg(not(target_arch = "wasm32"))]
 fn quick_connect(code: &str) -> Result<(String, crate::quickconnect::TunnelBridge), String> {
     let parsed = crate::quickconnect::parse_code(code)?;
     let id = parsed.server_id();
@@ -852,6 +882,7 @@ fn quick_connect(code: &str) -> Result<(String, crate::quickconnect::TunnelBridg
 /// They differ only for a tunnel, which the UI names either way round: by its
 /// identity when reconnecting, by the loopback URL when the login form is
 /// carrying what the tunnel just published.
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_target(server: &str, tunnel: Option<&(String, String)>) -> (String, String) {
     match tunnel {
         Some((local_url, id)) if server == id || server == local_url => {
@@ -866,6 +897,7 @@ fn resolve_target(server: &str, tunnel: Option<&(String, String)>) -> (String, S
 /// An allowlist rather than "not an error", because this decides whether a
 /// working tunnel gets torn down: an outcome nobody has thought about yet
 /// should keep the session that is already up, not replace it.
+#[cfg(not(target_arch = "wasm32"))]
 fn tunnel_answered(answer: &Option<Event>) -> bool {
     matches!(answer, Some(Event::Connected { .. } | Event::NeedsLogin { .. }))
 }
@@ -875,6 +907,7 @@ fn tunnel_answered(answer: &Option<Event>) -> bool {
 ///
 /// Installing the client before the ping would leave a session pointing at a
 /// server that never replied, so the order here is the point.
+#[cfg(not(target_arch = "wasm32"))]
 fn establish(
     client: &mut Option<Arc<Client>>,
     c: Client,
@@ -888,6 +921,7 @@ fn establish(
     Ok(Event::Connected { server, id: id.to_string(), username, token, ping: Box::new(ping) })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn connect(
     client: &mut Option<Arc<Client>>,
     server: &str,
@@ -910,6 +944,7 @@ fn connect(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn login(
     client: &mut Option<Arc<Client>>,
     server: &str,
@@ -934,6 +969,7 @@ fn login(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn load_library(client: &Client, node: &LibraryNode) -> Result<LibraryData, ApiError> {
     Ok(match node {
         // The mode menu is static; the UI fills it in without asking.
@@ -951,6 +987,7 @@ fn load_library(client: &Client, node: &LibraryNode) -> Result<LibraryData, ApiE
 }
 
 /// One answer from the picker.
+#[cfg(not(target_arch = "wasm32"))]
 struct Picked {
     tracks: Vec<Track>,
     ignore_list: Vec<u32>,
@@ -958,6 +995,7 @@ struct Picked {
     pool: Option<crate::api::types::SonicReport>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 type AutoDjResult = Result<Picked, ApiError>;
 
 /// Choose what Auto-DJ should play next.
@@ -965,6 +1003,7 @@ type AutoDjResult = Result<Picked, ApiError>;
 /// Similarity is best-effort: the server may have discovery switched off, or
 /// simply not have embedded this track yet. Rather than stalling, both cases
 /// fall through to tempo/key matching and say why.
+#[cfg(not(target_arch = "wasm32"))]
 fn autodj_pick(client: &Client, caps: Capabilities, request: &DjRequest) -> AutoDjResult {
     let ignore_list = request.ignore_list.clone();
     match request.mode {
@@ -1016,6 +1055,7 @@ fn autodj_pick(client: &Client, caps: Capabilities, request: &DjRequest) -> Auto
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn pick_by_tempo_and_key(
     client: &Client,
     request: &DjRequest,
@@ -1069,6 +1109,7 @@ fn pick_by_tempo_and_key(
 /// Take several picks in a row without committing to any of them, feeding
 /// each back into the next call's cooldown so the sample shows variety rather
 /// than the same track three times.
+#[cfg(not(target_arch = "wasm32"))]
 fn autodj_sample(
     client: &Client,
     caps: Capabilities,
@@ -1112,6 +1153,7 @@ fn autodj_sample(
 
 /// How many neighbours a Discover view asks for. Deep enough to browse,
 /// short enough that the tail is still relevant rather than noise.
+#[cfg(not(target_arch = "wasm32"))]
 const DISCOVER_LIMIT: u32 = 40;
 
 /// Fill a Discover view.
@@ -1120,6 +1162,7 @@ const DISCOVER_LIMIT: u32 = 40;
 /// seed hasn't been embedded yet, or the ranking was walked as far as the
 /// server was willing to go. None is a failure, so each gets a sentence and
 /// an empty list rather than an error.
+#[cfg(not(target_arch = "wasm32"))]
 fn discover(
     client: &Client,
     node: &DiscoverNode,
@@ -1197,6 +1240,7 @@ fn discover(
 
 /// Fetch a journey and translate the ways it can legitimately come up short
 /// into something worth reading.
+#[cfg(not(target_arch = "wasm32"))]
 fn journey(client: &Client, start: &str, end: &str, length: u32) -> Result<Event, ApiError> {
     let Some(response) = client.journey(start, end, length)? else {
         // Gated on `discoveryPath`, so this only happens if the server was
@@ -1220,6 +1264,7 @@ fn journey(client: &Client, start: &str, end: &str, length: u32) -> Result<Event
 /// Every case here is one the route produces deliberately — an unanalysed
 /// end, two identical seeds, a library that ran out of visible waypoints —
 /// so none of them is an error, and each deserves its own sentence.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn journey_note(
     response: &crate::api::types::JourneyResponse,
     asked: u32,
@@ -1242,6 +1287,7 @@ pub(crate) fn journey_note(
     None
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn trim_period(message: &str) -> String {
     message.trim().trim_end_matches('.').to_string()
 }
