@@ -250,7 +250,7 @@ pub(crate) fn remember(app: &App) {
             return;
         }
     };
-    config.player = app.prefs();
+    config.player.adopt(app.prefs());
     // Keyed on the identity, never the endpoint: a tunnel session's loopback
     // port is meaningless by the next run.
     if !app.session.server_id.is_empty() {
@@ -408,7 +408,7 @@ fn pop_window_title() {
 pub(crate) fn save_login(app: &App) -> Result<(), String> {
     let mut config = config::load()?;
     config::touch_server(&mut config, &app.session.server_id, app.session.username.clone());
-    config.player = app.prefs();
+    config.player.adopt(app.prefs());
     config::save(&config)?;
 
     let mut credentials = config::load_credentials()?;

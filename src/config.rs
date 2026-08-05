@@ -22,7 +22,21 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when a change can't be read by older players. Adding optional fields
 /// doesn't count — everything here is `#[serde(default)]`.
+///
+/// That promise is what makes [`Keep`] load-bearing: a newer player's file
+/// passes this gate on an older binary, so the older binary has to write back
+/// the settings it didn't understand rather than delete them.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// Whatever a file held that this build doesn't model.
+///
+/// Every table in these two files carries one. Without it, `save()` writes
+/// only the fields this binary knows, so running an older player once — even
+/// just starting and quitting it, which saves on exit — silently deletes the
+/// newer player's settings. Two players sharing a config directory is the
+/// ordinary case: a release and a build from source, or two machines syncing
+/// the same dotfiles.
+pub type Keep = toml::Table;
 
 /// What a file with no `version` line is read as. The number exists to keep a
 /// *newer* player's file from being misread; someone hand-writing a `[theme]`
@@ -64,6 +78,11 @@ pub struct Config {
     /// without needing a timestamp or a "current" pointer.
     #[serde(default, rename = "server")]
     pub servers: Vec<ServerEntry>,
+    /// Sections and keys from a newer player. Last so that what it holds is
+    /// written after the fields above, which is also what TOML requires of
+    /// anything that turns out to be a table.
+    #[serde(flatten)]
+    pub extra: Keep,
 }
 
 impl Default for Config {
@@ -76,6 +95,7 @@ impl Default for Config {
             mouse: MousePrefs::default(),
             keys: std::collections::BTreeMap::new(),
             servers: Vec::new(),
+            extra: Keep::new(),
         }
     }
 }
@@ -91,6 +111,8 @@ pub struct PlayerPrefs {
     pub autodj: String,
     /// How Auto-DJ chooses, beyond the mode.
     pub dj: AutoDjPrefs,
+    #[serde(flatten)]
+    pub extra: Keep,
 }
 
 impl Default for PlayerPrefs {
@@ -101,7 +123,25 @@ impl Default for PlayerPrefs {
             shuffle: false,
             autodj: "off".to_string(),
             dj: AutoDjPrefs::default(),
+            extra: Keep::new(),
         }
+    }
+}
+
+impl PlayerPrefs {
+    /// Take the settings a running player is holding, and keep the ones it
+    /// never knew about.
+    ///
+    /// The app rebuilds these from its live state on the way out, so an
+    /// assignment would put an empty [`Keep`] over the one that was loaded —
+    /// preserving unknown keys through the read only to drop them at the
+    /// write. Going through here is what makes the round trip complete.
+    pub fn adopt(&mut self, fresh: PlayerPrefs) {
+        let extra = std::mem::take(&mut self.extra);
+        let dj_extra = std::mem::take(&mut self.dj.extra);
+        *self = fresh;
+        self.extra = extra;
+        self.dj.extra = dj_extra;
     }
 }
 
@@ -132,6 +172,8 @@ pub struct AutoDjPrefs {
     /// "off", "whitelist" (only these) or "blacklist" (anything but these).
     pub genre_mode: String,
     pub genres: Vec<String>,
+    #[serde(flatten)]
+    pub extra: Keep,
 }
 
 impl Default for AutoDjPrefs {
@@ -148,6 +190,7 @@ impl Default for AutoDjPrefs {
             sonic_anchor: "session".to_string(),
             genre_mode: "off".to_string(),
             genres: Vec::new(),
+            extra: Keep::new(),
         }
     }
 }
@@ -162,12 +205,16 @@ pub struct CachePrefs {
     /// platform cache directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dir: Option<PathBuf>,
+    #[serde(flatten)]
+    pub extra: Keep,
 }
 
 impl CachePrefs {
-    /// Keeps an empty `[cache]` header out of config.toml.
+    /// Keeps an empty `[cache]` header out of config.toml. A section holding
+    /// only a newer player's keys is not empty — skipping it would delete
+    /// them.
     fn is_unset(&self) -> bool {
-        self.dir.is_none()
+        self.dir.is_none() && self.extra.is_empty()
     }
 }
 
@@ -191,11 +238,16 @@ pub struct ThemePrefs {
     /// Directories and library nodes in the browser.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+    #[serde(flatten)]
+    pub extra: Keep,
 }
 
 impl ThemePrefs {
     fn is_unset(&self) -> bool {
-        self.accent.is_none() && self.dim.is_none() && self.folder.is_none()
+        self.accent.is_none()
+            && self.dim.is_none()
+            && self.folder.is_none()
+            && self.extra.is_empty()
     }
 }
 
@@ -210,11 +262,13 @@ impl ThemePrefs {
 #[serde(default)]
 pub struct MousePrefs {
     pub enabled: bool,
+    #[serde(flatten)]
+    pub extra: Keep,
 }
 
 impl Default for MousePrefs {
     fn default() -> Self {
-        MousePrefs { enabled: true }
+        MousePrefs { enabled: true, extra: Keep::new() }
     }
 }
 
@@ -233,6 +287,8 @@ pub struct ServerEntry {
     /// Where you were last browsing on this server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_path: Option<String>,
+    #[serde(flatten)]
+    pub extra: Keep,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,11 +302,22 @@ pub struct Credentials {
     /// that opens the tunnel — knowing it is enough to reach the server.
     #[serde(default, rename = "pairing")]
     pub pairings: Vec<PairingEntry>,
+    /// Secrets of a kind this build has no name for. Losing one of these is
+    /// worse than losing a setting: this file is the only copy, and a token
+    /// deleted here is a sign-in that has to be done again on a machine that
+    /// may not be the one in front of you.
+    #[serde(flatten)]
+    pub extra: Keep,
 }
 
 impl Default for Credentials {
     fn default() -> Self {
-        Credentials { version: SCHEMA_VERSION, tokens: Vec::new(), pairings: Vec::new() }
+        Credentials {
+            version: SCHEMA_VERSION,
+            tokens: Vec::new(),
+            pairings: Vec::new(),
+            extra: Keep::new(),
+        }
     }
 }
 
@@ -370,13 +437,25 @@ fn expand_home_from(path: PathBuf, home: Option<PathBuf>) -> PathBuf {
 /// A rename is atomic on both platforms, so a crash mid-write leaves the old
 /// contents rather than a truncated file.
 fn write_atomic(path: &Path, contents: &str, owner_only: bool) -> Result<(), String> {
+    use std::io::Write;
+
     let dir = path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
     fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
 
-    let temp = path.with_extension("tmp");
-    fs::write(&temp, contents).map_err(|e| format!("could not write {}: {e}", temp.display()))?;
+    let temp = temp_path(path);
+    let write = |temp: &Path| -> std::io::Result<()> {
+        let mut file = fs::File::create(temp)?;
+        file.write_all(contents.as_bytes())?;
+        // The rename orders itself against the file's *metadata*, not its
+        // contents: without this, a power loss just after the rename can
+        // leave the new name pointing at a file whose bytes never landed —
+        // an empty config where the crash-safety was supposed to leave the
+        // old one.
+        file.sync_all()
+    };
+    write(&temp).map_err(|e| format!("could not write {}: {e}", temp.display()))?;
     if owner_only {
         // Tighten before the rename so the file is never briefly readable by
         // others under its real name.
@@ -385,7 +464,57 @@ fn write_atomic(path: &Path, contents: &str, owner_only: bool) -> Result<(), Str
     fs::rename(&temp, path).map_err(|e| {
         let _ = fs::remove_file(&temp);
         format!("could not replace {}: {e}", path.display())
-    })
+    })?;
+    sweep_abandoned_temps(dir);
+    Ok(())
+}
+
+/// A scratch name beside `path` that no other writer will choose.
+///
+/// One fixed name (`config.tmp`) was a race with teeth: a CLI `login` and the
+/// player saving on exit both wrote that file, and whichever renamed second
+/// published a file the other was still halfway through — corruption produced
+/// by the crash-safety machinery itself. The process id separates the
+/// processes and the counter separates writers inside one.
+///
+/// It stays in the target's own directory because a rename is only atomic
+/// within a file system, and the temp directory is often a different one.
+fn temp_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(".{name}.{}.{serial}.tmp", std::process::id()))
+}
+
+/// Delete scratch files a crashed writer left behind.
+///
+/// Unique names mean nothing overwrites them, so without this they would
+/// collect in the config directory forever. Only ones a day old go: a live
+/// writer's file is seconds old, and deleting one out from under it would
+/// turn someone else's save into an error.
+fn sweep_abandoned_temps(dir: &Path) {
+    const A_DAY: std::time::Duration = std::time::Duration::from_secs(60 * 60 * 24);
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_temp = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with('.') && n.ends_with(".tmp"));
+        if !is_temp {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .and_then(|t| t.elapsed().map_err(std::io::Error::other))
+            .is_ok_and(|age| age > A_DAY);
+        if stale {
+            let _ = fs::remove_file(&path);
+        }
+    }
 }
 
 fn read_versioned<T: for<'de> Deserialize<'de>>(
@@ -650,6 +779,96 @@ mod tests {
             Some("secret-token".into()),
             "a trailing slash is the same server"
         );
+    }
+
+    #[test]
+    fn settings_this_player_has_never_heard_of_survive_its_save() {
+        let scratch = Scratch::new("unknown-keys");
+        // A file written by a newer player. The schema version is deliberately
+        // unchanged, because the policy at the top of this file promises that
+        // added optional fields don't bump it — which is exactly what puts
+        // this file in front of this binary.
+        fs::write(
+            scratch.dir.join(CONFIG_FILE),
+            "version = 1\n\
+             lyrics_offset = 250\n\
+             \n\
+             [player]\n\
+             volume = 0.5\n\
+             crossfade_seconds = 4\n\
+             \n\
+             [player.dj]\n\
+             energy_curve = \"rising\"\n\
+             \n\
+             [visualizer]\n\
+             mode = \"bars\"\n",
+        )
+        .unwrap();
+
+        // Exactly what a run does: read at startup, write back on the way
+        // out — except that the player rebuilds the settings it owns from
+        // its live state, which is where a preserved key gets dropped again
+        // if `adopt` isn't in the path.
+        let mut config = load().unwrap();
+        config.player.adopt(PlayerPrefs { volume: 0.8, ..PlayerPrefs::default() });
+        save(&config).unwrap();
+
+        // Read it back the way the next run would. Each key has to be in the
+        // table it came from: "somewhere in the file" would also be true of a
+        // key that had fallen into the wrong section.
+        let again = load().unwrap();
+        let int = |t: &Keep, k: &str| t.get(k).and_then(toml::Value::as_integer);
+        assert_eq!(int(&again.extra, "lyrics_offset"), Some(250));
+        assert!(again.extra.contains_key("visualizer"), "a whole unknown section survived");
+        assert_eq!(int(&again.player.extra, "crossfade_seconds"), Some(4));
+        assert_eq!(
+            again.player.dj.extra.get("energy_curve").and_then(toml::Value::as_str),
+            Some("rising")
+        );
+        // And this player's own setting is the one it just chose.
+        assert_eq!(again.player.volume, 0.8);
+
+        let raw = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(raw.contains("[visualizer]"), "written as a section, not inlined:\n{raw}");
+    }
+
+    #[test]
+    fn an_unknown_credential_kind_is_not_dropped_on_sign_out() {
+        let scratch = Scratch::new("unknown-credentials");
+        fs::write(
+            scratch.dir.join(CREDENTIALS_FILE),
+            "version = 1\n\
+             \n\
+             [[token]]\n\
+             server = \"http://host:3000\"\n\
+             token = \"t\"\n\
+             \n\
+             [[api_key]]\n\
+             server = \"http://host:3000\"\n\
+             key = \"newer-players-secret\"\n",
+        )
+        .unwrap();
+
+        assert!(forget_all_tokens().unwrap(), "there was a token to forget");
+        let raw = fs::read_to_string(scratch.dir.join(CREDENTIALS_FILE)).unwrap();
+        assert!(!raw.contains("token = \"t\""), "signing out forgets the token");
+        assert!(
+            raw.contains("newer-players-secret"),
+            "and nothing else — this is the only copy:\n{raw}"
+        );
+    }
+
+    #[test]
+    fn two_writers_never_share_a_temp_file() {
+        // One fixed temp name means the second writer renames the first
+        // writer's half-written file into place: corruption produced by the
+        // crash-safety machinery itself. A CLI `login` while the player exits
+        // is enough.
+        let target = std::env::temp_dir().join("mstream-player-test-temps/config.toml");
+        let first = temp_path(&target);
+        let second = temp_path(&target);
+        assert_ne!(first, second, "two writers picked the same temp file");
+        assert_eq!(first.parent(), target.parent(), "the rename has to stay on one volume");
     }
 
     #[test]

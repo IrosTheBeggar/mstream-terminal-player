@@ -2879,6 +2879,7 @@ mod tests {
             accent: Some("#4fc3d6".into()),
             dim: Some("chartreuse".into()),
             folder: None,
+            extra: Default::default(),
         });
         assert_eq!(theme.accent, Color::Rgb(0x4f, 0xc3, 0xd6), "the good one applies");
         assert_eq!(theme.dim, Theme::default().dim, "the bad one keeps the default");

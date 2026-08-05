@@ -1649,6 +1649,7 @@ fn remembered_preferences_are_applied_and_handed_back() {
         shuffle: true,
         autodj: "tempo+key".into(),
         dj: Default::default(),
+        extra: Default::default(),
     };
     let app = App::new(None, None, None).with_prefs(&saved);
     assert_eq!(app.volume, 0.35);
@@ -1669,6 +1670,7 @@ fn nonsense_preferences_fall_back_rather_than_refusing_to_start() {
         shuffle: false,
         autodj: "disco".into(),
         dj: Default::default(),
+        extra: Default::default(),
     };
     let app = App::new(None, None, None).with_prefs(&saved);
     assert_eq!(app.volume, 1.0, "volume is clamped");
@@ -2804,6 +2806,7 @@ fn a_remembered_similar_mode_is_dropped_on_a_server_without_the_index() {
         shuffle: false,
         autodj: "similar".into(),
         dj: Default::default(),
+        extra: Default::default(),
     };
     let mut app = App::new(None, None, None).with_prefs(&saved);
     assert_eq!(app.autodj, AutoDjMode::Similar);

@@ -945,6 +945,9 @@ impl App {
             shuffle: self.queue.shuffle,
             autodj: self.autodj.label().to_string(),
             dj: self.dj.to_prefs(),
+            // Settings from a newer player belong to the file, not to this
+            // app's state; `PlayerPrefs::adopt` is what carries them across.
+            ..Default::default()
         }
     }
 

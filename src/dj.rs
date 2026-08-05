@@ -332,6 +332,10 @@ impl Settings {
             sonic_anchor: self.sonic_anchor.label().to_string(),
             genre_mode: self.genre_mode.label().to_string(),
             genres: self.genres.clone(),
+            // Only the panel's own settings are here; whatever a newer
+            // player wrote alongside them is held by the loaded prefs and
+            // put back by `PlayerPrefs::adopt`.
+            ..Default::default()
         }
     }
 
