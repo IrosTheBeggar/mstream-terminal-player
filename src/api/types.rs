@@ -197,6 +197,20 @@ impl Track {
     }
 }
 
+/// Seconds as `m:ss`, and `--:--` for anything that isn't a length.
+///
+/// Here beside [`Track::display_name`] because it is the same kind of thing:
+/// how the client renders a fact about a track. It lived in `cmd_library`,
+/// which meant the whole render layer imported the CLI smoke-test harness to
+/// print a duration (finding #66).
+pub fn fmt_duration(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return "--:--".to_string();
+    }
+    let total = seconds.round() as u64;
+    format!("{}:{:02}", total / 60, total % 60)
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Album {
@@ -321,7 +335,9 @@ pub struct SearchTrack {
 
 // ── Auto-DJ ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, Serialize)]
+/// A tempo window, inclusive. Also what [`crate::dj::bpm_windows`] works in —
+/// it had its own identical `BpmRange` and a closure to convert between them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct BpmWindow {
     pub min: f64,
     pub max: f64,
@@ -559,6 +575,16 @@ pub struct PlaylistSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_durations() {
+        assert_eq!(fmt_duration(0.0), "0:00");
+        assert_eq!(fmt_duration(59.6), "1:00");
+        assert_eq!(fmt_duration(60.029), "1:00");
+        assert_eq!(fmt_duration(3725.0), "62:05");
+        assert_eq!(fmt_duration(f64::NAN), "--:--");
+        assert_eq!(fmt_duration(-1.0), "--:--");
+    }
 
     #[test]
     fn parses_live_file_explorer_metadata() {

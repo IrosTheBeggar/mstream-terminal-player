@@ -27,7 +27,10 @@ reqwest = "0.13.4"
 ratatui = "0.30.2"
 iroh = "1"
 iroh-tickets = "1"
-base64 = "0.23.0"
+# 0.22 rather than 0.23: reqwest, iroh, portmapper and tokio-websockets are
+# all on 0.22.1, and pinning a major of our own put two copies of base64 in
+# the tree for one decode call (PLAN.md finding #70).
+base64 = "0.22"
 mdns-sd = "0.20.3"
 toml = "1.1.4"
 

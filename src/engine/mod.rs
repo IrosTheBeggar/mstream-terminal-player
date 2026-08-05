@@ -436,14 +436,16 @@ impl Engine {
 
     /// Append one source; if the queue was empty and nothing is playing, start.
     /// Failure to start is deliberately not an error (matches the original).
+    ///
+    /// No duration hint: the only way into this queue is a serve route, and
+    /// a route is handed a path and nothing else. `queue_add_entry` used to
+    /// sit here taking one, but every caller it ever had passed `None`
+    /// (finding #68). Hints still reach the player that has them, through
+    /// [`Engine::play_source`].
     pub fn queue_add(&self, file: String) {
-        self.queue_add_entry(QueueEntry::new(file));
-    }
-
-    pub fn queue_add_entry(&self, entry: QueueEntry) {
         let mut s = self.state.lock().unwrap();
         let was_empty = s.q.queue.is_empty();
-        s.q.queue.push(entry);
+        s.q.queue.push(QueueEntry::new(file));
         if was_empty && s.sink.empty() {
             s.q.index = 0;
             let _ = s.start_current(self.device.mixer());

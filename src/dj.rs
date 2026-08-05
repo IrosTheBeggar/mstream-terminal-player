@@ -374,16 +374,11 @@ pub fn build_random_request(
     if let Some(seed) = seed {
         if settings.tempo_tolerance > 0 {
             if let Some(bpm) = seed.metadata.bpm {
-                let to_window = |r: BpmRange| BpmWindow { min: r.min, max: r.max };
                 let tolerance = settings.tolerance();
-                request.bpm_ranges =
-                    bpm_windows(f64::from(bpm), tolerance).into_iter().map(to_window).collect();
+                request.bpm_ranges = bpm_windows(f64::from(bpm), tolerance);
                 // The server relaxes to the wide set before dropping tempo
                 // altogether; twice the tolerance is that second chance.
-                request.bpm_ranges_wide = bpm_windows(f64::from(bpm), tolerance * 2.0)
-                    .into_iter()
-                    .map(to_window)
-                    .collect();
+                request.bpm_ranges_wide = bpm_windows(f64::from(bpm), tolerance * 2.0);
             }
         }
         request.musical_keys = match settings.key_matching {
@@ -441,13 +436,6 @@ pub fn build_random_request(
     (request, note)
 }
 
-/// A tempo window, inclusive.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BpmRange {
-    pub min: f64,
-    pub max: f64,
-}
-
 /// Plausible tempo for a music track. Half/double-time windows outside this
 /// are dropped rather than sent as noise.
 const BPM_FLOOR: f64 = 40.0;
@@ -461,14 +449,14 @@ pub const WIDE_TOLERANCE: f64 = 0.12;
 /// Sending all three is what the server's docs recommend: a 140 BPM track
 /// mixes naturally into 70 BPM, and matching only the literal number would
 /// reject those.
-pub fn bpm_windows(bpm: f64, tolerance: f64) -> Vec<BpmRange> {
+pub fn bpm_windows(bpm: f64, tolerance: f64) -> Vec<BpmWindow> {
     if !bpm.is_finite() || bpm <= 0.0 {
         return Vec::new();
     }
     [bpm, bpm / 2.0, bpm * 2.0]
         .into_iter()
         .filter(|center| (BPM_FLOOR..=BPM_CEILING).contains(center))
-        .map(|center| BpmRange {
+        .map(|center| BpmWindow {
             min: (center * (1.0 - tolerance) * 10.0).round() / 10.0,
             max: (center * (1.0 + tolerance) * 10.0).round() / 10.0,
         })
@@ -579,9 +567,9 @@ mod tests {
     fn bpm_windows_cover_half_and_double_time() {
         let windows = bpm_windows(100.0, TIGHT_TOLERANCE);
         assert_eq!(windows.len(), 3);
-        assert_eq!(windows[0], BpmRange { min: 94.0, max: 106.0 });
-        assert_eq!(windows[1], BpmRange { min: 47.0, max: 53.0 }, "half time");
-        assert_eq!(windows[2], BpmRange { min: 188.0, max: 212.0 }, "double time");
+        assert_eq!(windows[0], BpmWindow { min: 94.0, max: 106.0 });
+        assert_eq!(windows[1], BpmWindow { min: 47.0, max: 53.0 }, "half time");
+        assert_eq!(windows[2], BpmWindow { min: 188.0, max: 212.0 }, "double time");
     }
 
     #[test]
@@ -596,7 +584,7 @@ mod tests {
         // anything real libraries tag, while 60 is perfectly ordinary.
         let windows = bpm_windows(120.0, TIGHT_TOLERANCE);
         assert_eq!(windows.len(), 2);
-        assert_eq!(windows[1], BpmRange { min: 56.4, max: 63.6 }, "half time survives");
+        assert_eq!(windows[1], BpmWindow { min: 56.4, max: 63.6 }, "half time survives");
         assert_eq!(bpm_windows(170.0, TIGHT_TOLERANCE).len(), 2);
     }
 

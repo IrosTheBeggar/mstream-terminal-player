@@ -10,7 +10,7 @@ use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
 };
 
-use crate::cmd_library::fmt_duration;
+use crate::api::types::fmt_duration;
 
 use super::app::{
     App, CONNECT_METHODS, ConnectStage, DjRow, Entry, Focus, MessageKind, NowTab, Queue, Repeat,

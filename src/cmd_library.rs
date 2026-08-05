@@ -8,6 +8,7 @@ use std::io::Read;
 
 use clap::Args;
 
+use crate::api::types::{Capabilities, fmt_duration};
 use crate::api::{ApiError, Client};
 use crate::config;
 
@@ -171,7 +172,29 @@ pub fn dj(args: DjArgs) -> i32 {
                 None => None,
             };
 
-            let mut request = crate::api::types::RandomSongRequest::default();
+            // The panel's saved settings, because this command claims to
+            // show what the player would do. Hand-assembling the request
+            // here meant it ignored artist cooldown, minimum rating, genre
+            // filters and the sonic pool outright, and disagreed with the
+            // player for any key matching or tolerance but the default
+            // (finding #65). A config too broken to read is not worth
+            // failing over here: the defaults are what a fresh install runs.
+            let settings = match config::load() {
+                Ok(config) => crate::dj::Settings::from_prefs(&config.player.dj),
+                Err(e) => {
+                    eprintln!("warning: using default Auto-DJ settings — {e}");
+                    crate::dj::Settings::default()
+                }
+            };
+
+            // Whether the sonic pool may be asked for at all. Without the
+            // index the whole call 403s, so this is a question for the
+            // server, not the settings.
+            let sonic_available = match client.ping() {
+                Ok(ping) => Capabilities::from(&ping).discovery,
+                Err(e) => return fail(e),
+            };
+
             if let Some(seed) = &seed_meta {
                 println!(
                     "seed: {}  bpm {}  key {}",
@@ -179,39 +202,23 @@ pub fn dj(args: DjArgs) -> i32 {
                     seed.metadata.bpm.map(|b| b.to_string()).unwrap_or("—".into()),
                     seed.metadata.musical_key.as_deref().unwrap_or("—")
                 );
-                if let Some(bpm) = seed.metadata.bpm {
-                    let to_window = |r: crate::dj::BpmRange| crate::api::types::BpmWindow {
-                        min: r.min,
-                        max: r.max,
-                    };
-                    request.bpm_ranges =
-                        crate::dj::bpm_windows(f64::from(bpm), crate::dj::TIGHT_TOLERANCE)
-                            .into_iter()
-                            .map(to_window)
-                            .collect();
-                    request.bpm_ranges_wide =
-                        crate::dj::bpm_windows(f64::from(bpm), crate::dj::WIDE_TOLERANCE)
-                            .into_iter()
-                            .map(to_window)
-                            .collect();
-                }
-                request.musical_keys =
-                    crate::dj::compatible_keys(seed.metadata.musical_key.as_deref());
+            }
 
-                let windows: Vec<String> = request
-                    .bpm_ranges
-                    .iter()
-                    .map(|w| format!("{:.1}-{:.1}", w.min, w.max))
-                    .collect();
-                println!(
-                    "matching: bpm [{}]  keys [{}]",
-                    if windows.is_empty() { "none".into() } else { windows.join(", ") },
-                    if request.musical_keys.is_empty() {
-                        "none".to_string()
-                    } else {
-                        request.musical_keys.join(", ")
-                    }
-                );
+            // One session's worth of history is what the player would pass;
+            // a command that runs once has none, so the cooldown and the
+            // session anchor have nothing to work from here.
+            let (mut request, tag_note) = crate::dj::build_random_request(
+                &settings,
+                seed_meta.as_ref(),
+                Vec::new(),
+                &[],
+                &[],
+                sonic_available,
+            );
+
+            print_dj_request(&settings, &request);
+            if let Some(note) = tag_note {
+                println!("note: {note}");
             }
 
             // The endpoint returns one track per call, so ask repeatedly and
@@ -244,6 +251,50 @@ pub fn dj(args: DjArgs) -> i32 {
             2
         }
     }
+}
+
+/// Say what is actually being asked of the server, filter by filter.
+///
+/// The point of this command is to be the scriptable view of the player's
+/// pick, so what it prints has to be the request that goes out — including
+/// the constraints that come from saved settings rather than from the seed.
+fn print_dj_request(
+    settings: &crate::dj::Settings,
+    request: &crate::api::types::RandomSongRequest,
+) {
+    let windows: Vec<String> =
+        request.bpm_ranges.iter().map(|w| format!("{:.1}-{:.1}", w.min, w.max)).collect();
+    let list = |items: &[String]| {
+        if items.is_empty() { "none".to_string() } else { items.join(", ") }
+    };
+    println!(
+        "matching: bpm [{}]  keys [{}]",
+        if windows.is_empty() { "none".to_string() } else { windows.join(", ") },
+        list(&request.musical_keys)
+    );
+
+    let mut filters: Vec<String> = Vec::new();
+    if settings.tempo_tolerance > 0 {
+        filters.push(format!("tolerance ±{}%", settings.tempo_tolerance));
+    }
+    filters.push(format!("key matching {}", settings.key_matching.label()));
+    if let Some(rating) = request.min_rating {
+        filters.push(format!("rating ≥{rating}"));
+    }
+    if !request.ignore_artists.is_empty() {
+        filters.push(format!("skipping {}", list(&request.ignore_artists)));
+    }
+    if let Some(mode) = &request.genre_mode {
+        filters.push(format!("genres {mode} [{}]", list(&request.genres)));
+    }
+    match request.min_similarity {
+        Some(threshold) => filters.push(format!("sonic pool ≥{threshold:.3}")),
+        None if settings.sonic_tightness > 0 => {
+            filters.push("sonic pool off (this server has no index)".to_string());
+        }
+        None => {}
+    }
+    println!("settings: {}", filters.join("  ·  "));
 }
 
 /// Turn an `ApiError` into a printed message plus an exit code.
@@ -682,25 +733,3 @@ fn print_tracks(tracks: &[crate::api::types::Track]) -> i32 {
     0
 }
 
-pub fn fmt_duration(seconds: f64) -> String {
-    if !seconds.is_finite() || seconds < 0.0 {
-        return "--:--".to_string();
-    }
-    let total = seconds.round() as u64;
-    format!("{}:{:02}", total / 60, total % 60)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn formats_durations() {
-        assert_eq!(fmt_duration(0.0), "0:00");
-        assert_eq!(fmt_duration(59.6), "1:00");
-        assert_eq!(fmt_duration(60.029), "1:00");
-        assert_eq!(fmt_duration(3725.0), "62:05");
-        assert_eq!(fmt_duration(f64::NAN), "--:--");
-        assert_eq!(fmt_duration(-1.0), "--:--");
-    }
-}

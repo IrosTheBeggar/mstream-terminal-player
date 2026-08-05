@@ -12,7 +12,8 @@ use clap::Args;
 
 use crate::api::Client;
 use crate::api::urls::TranscodeCodec;
-use crate::cmd_library::{ConnArgs, fmt_duration};
+use crate::api::types::fmt_duration;
+use crate::cmd_library::ConnArgs;
 use crate::engine::Engine;
 use crate::engine::http::redact_source;
 
