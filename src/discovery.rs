@@ -83,16 +83,26 @@ fn to_server(info: &mdns_sd::ResolvedService) -> Option<DiscoveredServer> {
 /// The one name a discovered row will ever draw, whoever chose it.
 ///
 /// Both candidates — the TXT `name` and the instance label behind it — are
-/// bytes a stranger on the network typed (finding #71). A responder calling
-/// itself "Porch\r\n\x1b[41m ROGUE" drew two rows and a red background,
-/// through `discover`'s println! and the Quick Connect list alike: a CR
-/// inside a ratatui Span lands in a cell, crossterm emits it, and the frame
-/// below it shifts — so the row a user reads is no longer the row their
-/// cursor is on. The gate sits here, where the record is read, so every
-/// screen downstream draws plain text.
+/// bytes a stranger on the network typed (finding #71), and the two screens
+/// that draw them are hurt in different ways, so the gate covers both by
+/// sitting here, where the record is read.
+///
+/// `discover` prints its rows with println!, so a name goes to the terminal
+/// as bytes: a responder calling itself "Porch\r\n\x1b[41m ROGUE" put a red
+/// band on its own line with the URL beside it, one advert wiped the screen
+/// mid-listing with \x1b[2J, and another rang the bell. Measured against a
+/// hostile responder on the LAN, that listing carried 9 ESC, 2 CR and a BEL.
+///
+/// The Quick Connect list is not that: ratatui drops zero-width characters
+/// as it fills cells, so no ESC or CR ever reached the terminal from there.
+/// What did reach it was layout — the picker pads every row to the widest
+/// name, and a 240-character advert (mDNS allows 255) pushed every URL off
+/// a 110-column screen, while a name of nothing but controls drew as an
+/// empty row that could still be selected. A row you cannot read is a row
+/// you cannot choose between, which is the same problem by another route.
 fn display_name(advertised: Option<&str>, fullname: &str) -> String {
-    // Wide enough for any honest name. The picker pads every row to the
-    // widest name, so one long advert would push every URL off the screen.
+    // Wide enough for any honest name, and narrow enough that the padded
+    // name column cannot push the URLs off an ordinary terminal.
     const CAP: usize = 40;
     let name = advertised
         .map(|n| printable(n, CAP))
@@ -123,8 +133,8 @@ fn printable(raw: &str, cap: usize) -> String {
 /// controls (CR and LF split a row; ESC and the C1 CSI open ANSI sequences
 /// that recolour, wipe or move things), plus the bidi embedding, override
 /// and isolate marks, which draw nothing but visually reorder everything
-/// after them — in a picker, the difference between the row a user reads
-/// and the row they select.
+/// after them — in a listing, the difference between the name a user reads
+/// and the name that is really there.
 fn steers(c: char) -> bool {
     c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
