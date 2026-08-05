@@ -728,6 +728,9 @@ fn empty_hint(app: &App) -> String {
     match app.tab {
         Tab::Files => "(empty directory)",
         Tab::Library => "(nothing here)",
+        // Inside an opened playlist the pane is that playlist's tracks;
+        // "(no playlists)" there would deny the ones sitting in the list.
+        Tab::Playlists if app.playlist_open.is_some() => "(empty playlist)",
         Tab::Playlists => "(no playlists)",
         Tab::Search => "type a query and press Enter",
         Tab::Discover => "(nothing similar)",
@@ -4005,6 +4008,21 @@ mod tests {
         let answered = draw(&mut app);
         assert!(answered.contains("(no playlists)"), "{answered}");
         assert!(!answered.contains("loading…"), "{answered}");
+    }
+
+    #[test]
+    fn an_empty_playlist_is_not_a_claim_about_the_list() {
+        use crate::api::types::PlaylistSummary;
+        let mut app = connected_app();
+        app.handle_action(Action::SelectTab(2));
+        app.apply_event(Event::Playlists(vec![PlaylistSummary { name: "phone".into() }]));
+        // Open the (empty) playlist: the pane now shows its tracks, and the
+        // message must be about them — the list plainly has an entry.
+        app.handle_action(Action::Activate);
+        app.apply_event(Event::PlaylistTracks { name: "phone".into(), tracks: Vec::new() });
+        let text = draw(&mut app);
+        assert!(text.contains("(empty playlist)"), "{text}");
+        assert!(!text.contains("(no playlists)"), "{text}");
     }
 
     #[test]

@@ -14,8 +14,9 @@ pub mod worker;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{Receiver, Sender};
+use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 #[cfg(not(target_arch = "wasm32"))]
 use ratatui::DefaultTerminal;
@@ -38,13 +39,11 @@ use worker::{ApiCmd, AudioCmd, Event};
 
 /// How long to wait for a key before redrawing anyway. Also sets how quickly
 /// the progress bar advances on screen.
-#[cfg(not(target_arch = "wasm32"))]
 const POLL: Duration = Duration::from_millis(100);
 
 /// The same, while something is being drawn from the audio itself. Ten frames
 /// a second is fine for a progress bar and visibly steppy for a waveform, and
 /// this is the only screen that earns the extra wakeups.
-#[cfg(not(target_arch = "wasm32"))]
 const POLL_DRAWING_AUDIO: Duration = Duration::from_millis(33);
 
 /// How often the spinner steps. Off the wall clock rather than the draw count,
@@ -56,7 +55,6 @@ const SPIN_EVERY: Duration = Duration::from_millis(90);
 /// which has to draw on the same schedule or it measures the app under one it
 /// never runs at: anything that moves on a timer sees a different number of
 /// frames there than here, and reports a different answer because of it.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn poll_interval(app: &App) -> Duration {
     if app.drawing_audio() { POLL_DRAWING_AUDIO } else { POLL }
 }

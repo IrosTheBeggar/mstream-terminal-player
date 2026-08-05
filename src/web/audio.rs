@@ -171,8 +171,13 @@ impl WebAudioPlayer {
                     let source = std::mem::take(&mut self.source);
                     self.playing = false;
                     self.tap.clear();
-                    events.push(Event::Status(self.status()));
+                    // TrackEnded before any status that no longer carries the
+                    // source: the app checks the ending against what its last
+                    // status said was playing, and a cleared status arriving
+                    // first makes the end look stale — dropped, no advance,
+                    // and the queue dies at the first track boundary.
                     events.push(Event::TrackEnded { source });
+                    events.push(Event::Status(self.status()));
                 } else if !self.paused {
                     self.feed_tap(dt);
                 }

@@ -45,6 +45,16 @@ struct Shell {
     replies: Rc<RefCell<VecDeque<Event>>>,
     pending: Vec<Effect>,
     spun: Instant,
+    /// Something the user did is waiting to be seen — draw now, not at the
+    /// next poll tick.
+    dirty: bool,
+    last_render: Instant,
+    /// What the last real render produced. Browsers call the draw closure at
+    /// display rate, and building the whole TUI sixty times a second is
+    /// wasted work the native player never does — between poll ticks the
+    /// stored buffer is handed back, ratzilla diffs it against itself, and
+    /// nothing touches the DOM.
+    last_buffer: Option<ratatui::buffer::Buffer>,
 }
 
 impl Shell {
@@ -109,6 +119,9 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         replies,
         pending,
         spun: Instant::now(),
+        dirty: true,
+        last_render: Instant::now(),
+        last_buffer: None,
     }));
 
     let backend = DomBackend::new()?;
@@ -121,6 +134,7 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(action) = shell.app.keymap.action(key, shell.app.input_mode()) {
             let effects = shell.app.handle_action(action);
             shell.pending.extend(effects);
+            shell.dirty = true;
         }
     })?;
 
@@ -132,6 +146,9 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         for effect in std::mem::take(&mut shell.pending) {
             shell.dispatch(effect);
         }
+        // Audio status arrives every frame by construction; it waits for the
+        // poll tick like it does natively. Api replies are answers to
+        // something the user asked — those show up straight away.
         for event in shell.audio.tick() {
             shell.pending.extend(shell.app.apply_event(event));
         }
@@ -140,6 +157,7 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
             // queue effects whose replies want this same queue.
             let Some(event) = shell.replies.borrow_mut().pop_front() else { break };
             shell.pending.extend(shell.app.apply_event(event));
+            shell.dirty = true;
         }
         if shell.spun.elapsed().as_millis() >= SPIN_EVERY_MS {
             shell.app.spinner = shell.app.spinner.wrapping_add(1);
@@ -149,7 +167,20 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         // into a no-op instead of a frozen screen.
         shell.app.should_quit = false;
 
-        ui::render(frame, &mut shell.app);
+        // The native loop draws once per poll wakeup; matching it here is
+        // both the frame budget and the feel. A resize invalidates the
+        // stored buffer, so a stale size never gets blitted back.
+        let due = shell.dirty
+            || shell.last_render.elapsed() >= crate::tui::poll_interval(&shell.app)
+            || shell.last_buffer.as_ref().is_none_or(|b| b.area != frame.area());
+        if due {
+            ui::render(frame, &mut shell.app);
+            shell.last_buffer = Some(frame.buffer_mut().clone());
+            shell.last_render = Instant::now();
+            shell.dirty = false;
+        } else if let Some(buffer) = &shell.last_buffer {
+            *frame.buffer_mut() = buffer.clone();
+        }
     });
 
     Ok(())

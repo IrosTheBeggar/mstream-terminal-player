@@ -52,6 +52,28 @@
           observer.disconnect();
         }
       }).observe(document.documentElement, { childList: true, subtree: true });
+
+      // The browser has its own ideas about these keys — Space and the
+      // arrows scroll, "/" and "'" open Firefox's quick-find, Tab walks
+      // focus off the terminal and takes the keyboard with it. ratzilla
+      // deliberately doesn't preventDefault, so the page has to. Modified
+      // combinations pass through untouched: Ctrl+R is still reload, Ctrl+C
+      // is still copy.
+      (function () {
+        const claimed = new Set([
+          " ", "Tab", "Backspace", "/", "'",
+          "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+          "PageUp", "PageDown", "Home", "End",
+        ]);
+        document.addEventListener(
+          "keydown",
+          function (e) {
+            if (e.ctrlKey || e.metaKey || e.altKey) return;
+            if (claimed.has(e.key)) e.preventDefault();
+          },
+          { capture: true }
+        );
+      })();
     </script>
     <style>
       html,
@@ -59,10 +81,23 @@
         margin: 0;
         padding: 0;
         background-color: #101014;
+        /* The grid is sized to the window; a one-pixel overhang otherwise
+           grows scrollbars, and Space/arrows would bounce the page. */
+        overflow: hidden;
+        height: 100%;
       }
       body {
         font-family: "Cascadia Mono", "JetBrains Mono", Consolas, "DejaVu Sans Mono", monospace;
         font-size: 16px;
+        /* It's an application, not a document: no I-beam, no drag-select
+           highlighting, and no focus ring around the whole terminal (the
+           grid holds focus permanently by design). */
+        cursor: default;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      [tabindex]:focus {
+        outline: none;
       }
     </style>
   </head>
