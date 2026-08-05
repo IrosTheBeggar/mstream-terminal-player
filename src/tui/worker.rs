@@ -284,6 +284,18 @@ pub enum Event {
 
 // ── Audio thread ────────────────────────────────────────────────────────────
 
+/// The audio thread's name — also how the panic hook recognises it.
+const AUDIO_THREAD: &str = "mstream-audio";
+
+/// Whether a panicking thread cleans up after itself. The audio loop runs
+/// under an unwind guard and reports its own death as
+/// [`Event::AudioFailed`], so the process-wide hook must stand back for it:
+/// "recovering" the terminal there would tear the screen down under a UI
+/// that is still running (audit #32).
+pub fn panics_are_caught(thread: Option<&str>) -> bool {
+    thread == Some(AUDIO_THREAD)
+}
+
 /// Returns the tap alongside the command channel: the engine is built on the
 /// audio thread, so the UI cannot reach in for it afterwards, but the tap
 /// itself is just a buffer and can be made here and handed to both.
@@ -292,10 +304,29 @@ pub fn spawn_audio(events: Sender<Event>) -> (Sender<AudioCmd>, Arc<AudioTap>) {
     let tap = AudioTap::new();
     let theirs = tap.clone();
     thread::Builder::new()
-        .name("mstream-audio".into())
+        .name(AUDIO_THREAD.into())
         .spawn(move || audio_loop(&rx, &events, theirs))
         .expect("failed to spawn audio thread");
     (tx, tap)
+}
+
+/// Keep answering the door so the UI's sends never error; the player stays
+/// usable for browsing with no audio at all.
+fn drain_until_shutdown(rx: &Receiver<AudioCmd>) {
+    while let Ok(cmd) = rx.recv() {
+        if cmd == AudioCmd::Shutdown {
+            break;
+        }
+    }
+}
+
+/// The words inside a panic payload, if it carried any.
+fn panic_note(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message")
 }
 
 /// Boil a burst of queued commands down to what it all amounted to.
@@ -340,18 +371,37 @@ fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>, tap: Arc<AudioTap
         Ok(e) => e,
         Err(e) => {
             let _ = events.send(Event::AudioFailed(e.to_string()));
-            // Keep draining commands so the UI's sends don't fail; it stays
-            // usable for browsing even with no audio device.
-            while let Ok(cmd) = rx.recv() {
-                if cmd == AudioCmd::Shutdown {
-                    break;
-                }
-            }
+            drain_until_shutdown(rx);
             return;
         }
     };
     engine.attach_tap(tap);
-    let player: &dyn PlayerCtl = &engine;
+    listen_guarded(&engine, rx, events);
+}
+
+/// Run the command loop under an unwind guard: symphonia has known panics
+/// on malformed files, and uncaught, one killed this thread — the global
+/// hook then restored the terminal under the still-running UI, and every
+/// later command vanished into a dead channel with nothing said (audit
+/// #32). Caught, it is just a worse kind of [`Event::AudioFailed`]: the
+/// same event, and the same degraded-but-browsable player the no-device
+/// path has always produced.
+fn listen_guarded(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
+    // The player is never touched again after a caught panic — whatever it
+    // was mid-way through stays where it fell — which is what makes the
+    // unwind-safety assertion honest.
+    let listened =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| listen(player, rx, events)));
+    if let Err(panic) = listened {
+        let _ = events.send(Event::AudioFailed(format!(
+            "the audio engine crashed: {}",
+            panic_note(panic.as_ref())
+        )));
+        drain_until_shutdown(rx);
+    }
+}
+
+fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
     let mut watch = EndWatch::default();
 
     'listening: loop {
@@ -1080,6 +1130,59 @@ mod tests {
             Some("http://x/b.mp3"),
             "a later track still ends on its own"
         );
+    }
+
+    /// A player whose open blows up, the way symphonia can on a malformed
+    /// file. Everything else is inert.
+    struct Grenade;
+
+    impl crate::player::PlayerCtl for Grenade {
+        fn play(&self, source: &str, _hint: Option<f64>) -> Result<(), String> {
+            panic!("decoder exploded on {source}");
+        }
+        fn pause(&self) {}
+        fn resume(&self) {}
+        fn stop(&self) {}
+        fn seek(&self, _position: f64) -> Result<(), String> {
+            Ok(())
+        }
+        fn set_volume(&self, _volume: f32) {}
+        fn status(&self) -> crate::player::PlayerStatus {
+            crate::player::PlayerStatus::default()
+        }
+        fn tick(&self) {}
+    }
+
+    #[test]
+    fn a_decoder_panic_becomes_audio_failed_not_a_dead_thread() {
+        // (The panic message this prints is the test's own grenade going
+        // off — cargo captures it unless the test fails.)
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let listener = thread::spawn(move || listen_guarded(&Grenade, &cmd_rx, &event_tx));
+        cmd_tx.send(play("http://x/bad.flac")).unwrap();
+
+        // The crash is reported on the channel, not left as a hole where
+        // the audio thread used to be.
+        let failed = loop {
+            match event_rx.recv_timeout(Duration::from_secs(5)).expect("an event") {
+                Event::AudioFailed(what) => break what,
+                _ => continue, // status ticks may land first
+            }
+        };
+        assert!(failed.contains("decoder exploded"), "the cause is named: {failed}");
+
+        // Later commands still have somewhere to go, and Shutdown lands.
+        cmd_tx.send(play("http://x/next.mp3")).expect("the channel is still alive");
+        cmd_tx.send(AudioCmd::Shutdown).unwrap();
+        listener.join().expect("the thread ended on its own terms");
+    }
+
+    #[test]
+    fn the_panic_hook_stands_back_only_for_the_thread_that_catches() {
+        assert!(panics_are_caught(Some(AUDIO_THREAD)));
+        assert!(!panics_are_caught(Some("mstream-api")), "the api thread is not caught");
+        assert!(!panics_are_caught(None), "an unnamed thread is not caught");
     }
 
     #[test]

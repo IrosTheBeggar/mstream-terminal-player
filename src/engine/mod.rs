@@ -233,14 +233,18 @@ impl State {
         let entry = self.q.queue[self.q.index].clone();
         let path = entry.path;
 
+        // Diagnostics here go through `stderrln!`: these fire mid-session
+        // from the audio thread, and in the TUI that stderr lands raw on
+        // the alternate screen — where the same news already arrives as
+        // PlaybackFailed. Serve and the CLI keep the lines (audit #43).
         let (opened, duration) = if http::is_http_url(&path) {
             let redacted = http::redact_source(&path);
             let (reader, content_length) = http::open(&path).map_err(|e| {
-                eprintln!("[engine] open failed for {}: {}", redacted, e);
+                crate::stderrln!("[engine] open failed for {}: {}", redacted, e);
                 EngineError::Unplayable(e)
             })?;
             if content_length.is_none() {
-                eprintln!(
+                crate::stderrln!(
                     "[engine] {}: no content length — seek limited to downloaded data",
                     redacted
                 );
@@ -250,7 +254,7 @@ impl State {
                 builder = builder.with_byte_len(len);
             }
             let decoder = builder.build().map_err(|e| {
-                eprintln!("[engine] decode failed for {}: {}", redacted, e);
+                crate::stderrln!("[engine] decode failed for {}: {}", redacted, e);
                 EngineError::Unplayable(e.to_string())
             })?;
             let duration = entry
@@ -260,7 +264,7 @@ impl State {
             (Opened::Http(decoder), duration)
         } else {
             let file = File::open(&path).map_err(|e| {
-                eprintln!("[engine] open failed for {}: {}", path, e);
+                crate::stderrln!("[engine] open failed for {}: {}", path, e);
                 EngineError::Unplayable(e.to_string())
             })?;
             let byte_len = file.metadata().ok().map(|m| m.len());
@@ -270,7 +274,7 @@ impl State {
                 builder = builder.with_byte_len(len);
             }
             let decoder = builder.build().map_err(|e| {
-                eprintln!("[engine] decode failed for {}: {}", path, e);
+                crate::stderrln!("[engine] decode failed for {}: {}", path, e);
                 EngineError::Unplayable(e.to_string())
             })?;
             let duration = entry.duration_hint.unwrap_or_else(|| probe_duration(&path));

@@ -181,7 +181,28 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     if mouse && execute!(std::io::stdout(), EnableMouseCapture).is_err() {
         eprintln!("warning: this terminal would not report the mouse");
     }
+    crate::console::claim_terminal();
     push_window_title();
+
+    // ratatui's own panic hook puts back raw mode and the alternate screen,
+    // and nothing else. Mouse capture and the window title were turned on
+    // outside that pair, so they are ours to turn off — without this, a
+    // panic dropped the shell into a stream of motion escapes, wearing our
+    // title (audit #31). Chained in front so ratatui's restore still runs.
+    // The audio thread is the exception: its panics are caught and become
+    // AudioFailed, so the hook stands back rather than tearing the
+    // terminal down under a UI that is still running.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if worker::panics_are_caught(std::thread::current().name()) {
+            return;
+        }
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        pop_window_title();
+        crate::console::release_terminal();
+        previous(info);
+    }));
+
     let result =
         event_loop(&mut terminal, &mut app, &event_rx, &audio_tx, &api_tx, &event_tx, pending);
     pop_window_title();
@@ -191,6 +212,7 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
     }
     ratatui::restore();
+    crate::console::release_terminal();
 
     remember(&app);
 
@@ -404,7 +426,13 @@ pub(crate) fn dispatch(
     for effect in pending.drain(..) {
         match effect {
             Effect::Audio(cmd) => {
-                let _ = audio_tx.send(cmd);
+                // A send with nobody listening means the audio thread died
+                // un-caught. Say so through the ordinary event path — the
+                // silent discard here was every later keypress vanishing
+                // with no word as to why (audit #32).
+                if audio_tx.send(cmd).is_err() {
+                    let _ = event_tx.send(Event::AudioFailed("the audio thread is gone".into()));
+                }
             }
             Effect::Api(cmd) => {
                 let _ = api_tx.send(cmd);

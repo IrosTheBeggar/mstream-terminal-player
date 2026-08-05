@@ -51,11 +51,11 @@ fn provider_for(dir: Option<&Path>) -> TempStorageProvider {
         if fs::create_dir_all(dir).is_ok() {
             return TempStorageProvider::with_prefix_in(SPOOL_PREFIX, dir);
         }
-        // Once per process, not per track: this fires mid-playback, where a
-        // stderr line already costs a blemish on the raw-mode TUI.
+        // Once per process, not per track — and through `stderrln!`, so the
+        // one telling costs nothing when the TUI owns the terminal.
         static WARNED: Once = Once::new();
         WARNED.call_once(|| {
-            eprintln!(
+            crate::stderrln!(
                 "[engine] cannot create spool dir {} — using the OS temp dir",
                 dir.display()
             );

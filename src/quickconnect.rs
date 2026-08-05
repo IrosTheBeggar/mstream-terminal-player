@@ -270,8 +270,10 @@ async fn accept_loop(
         tokio::spawn(async move {
             if let Err(e) = bridge_one(socket, tunnel).await {
                 // Individual connections failing is normal (the client hangs
-                // up on keep-alive idle); only worth a line for diagnosis.
-                eprintln!("[quickconnect] stream ended: {e}");
+                // up on keep-alive idle); only worth a line for diagnosis —
+                // and not worth smearing across a session that is drawing,
+                // where "normal" made it a repeat offender (audit #44).
+                crate::stderrln!("[quickconnect] stream ended: {e}");
             }
         });
     }
