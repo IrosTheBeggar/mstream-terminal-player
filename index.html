@@ -96,6 +96,16 @@
         user-select: none;
         -webkit-user-select: none;
       }
+      pre {
+        /* The terminal's rows are <pre> elements. The browser default gives
+           each a 1em vertical margin and its own idea of a monospace font —
+           the margins alone once pushed the bottom three rows 559px past
+           the fold. Zero margin, and the same font the cell probe measures,
+           or rows and measurements disagree. */
+        margin: 0;
+        font-family: inherit;
+        font-size: inherit;
+      }
       [tabindex]:focus {
         outline: none;
       }
