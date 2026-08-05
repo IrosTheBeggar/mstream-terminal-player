@@ -253,9 +253,9 @@ pub(crate) fn remember(app: &App) {
     config.player = app.prefs();
     // Keyed on the identity, never the endpoint: a tunnel session's loopback
     // port is meaningless by the next run.
-    if !app.server_id.is_empty() {
-        config::touch_server(&mut config, &app.server_id, app.username.clone());
-        config::set_last_path(&mut config, &app.server_id, &app.path);
+    if !app.session.server_id.is_empty() {
+        config::touch_server(&mut config, &app.session.server_id, app.session.username.clone());
+        config::set_last_path(&mut config, &app.session.server_id, &app.path);
     }
     if let Err(e) = config::save(&config) {
         eprintln!("warning: could not save settings: {e}");
@@ -407,16 +407,17 @@ fn pop_window_title() {
 
 pub(crate) fn save_login(app: &App) -> Result<(), String> {
     let mut config = config::load()?;
-    config::touch_server(&mut config, &app.server_id, app.username.clone());
+    config::touch_server(&mut config, &app.session.server_id, app.session.username.clone());
     config.player = app.prefs();
     config::save(&config)?;
 
     let mut credentials = config::load_credentials()?;
-    config::store_token(&mut credentials, &app.server_id, app.token.clone());
+    config::store_token(&mut credentials, &app.session.server_id, app.session.token.clone());
     // The pairing code goes in beside the token: both are secrets, and the
     // code is what turns a remembered tunnel identity back into a connection.
-    if crate::quickconnect::is_tunnel_id(&app.server_id) {
-        config::store_pairing(&mut credentials, &app.server_id, app.tunnel_code.clone());
+    if crate::quickconnect::is_tunnel_id(&app.session.server_id) {
+        let session = &app.session;
+        config::store_pairing(&mut credentials, &session.server_id, session.tunnel_code.clone());
     }
     config::save_credentials(&credentials)
 }
@@ -588,7 +589,7 @@ mod tests {
         std::fs::write(&path, broken).unwrap();
 
         let mut app = App::new(Some("http://host:3000".into()), None, Some("alice".into()));
-        app.server_id = "http://host:3000".into();
+        app.session.server_id = "http://host:3000".into();
         app.path = "music/Artist".into();
         remember(&app);
 

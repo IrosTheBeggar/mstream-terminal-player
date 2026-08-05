@@ -423,7 +423,7 @@ fn server_labels(app: &App) -> Vec<String> {
         .trim_start_matches("http://")
         .to_string();
     let mut candidates = Vec::new();
-    if let Some(user) = &app.username {
+    if let Some(user) = &app.session.username {
         candidates.push(format!("{user}@{shown}"));
         candidates.push(format!("{user}@{host}"));
     } else {
@@ -1877,7 +1877,7 @@ fn render_connect_quick(frame: &mut Frame, area: Rect, app: &App) {
 fn render_connecting(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines = banner_lines(area);
     lines.push(Line::from(Span::styled(
-        format!("Connecting to {}…", app.server),
+        format!("Connecting to {}…", app.session.server),
         Style::new().add_modifier(Modifier::BOLD),
     )));
     lines.push(Line::from(Span::styled("Ctrl+C to quit", Style::new().fg(dim()))));
@@ -3909,7 +3909,7 @@ mod tests {
         // Found by walking the flow at 76 columns: a fixed 40-column server
         // label squeezed the tab bar and cut "4:Search" off entirely.
         let mut app = connected_app();
-        app.username = Some("tester".into());
+        app.session.username = Some("tester".into());
         for width in [76, 80, 100, 140] {
             let text = draw_sized(&mut app, width, 20);
             for tab in ["1:Files", "2:Library", "3:Playlists", "4:Search"] {
@@ -3934,7 +3934,7 @@ mod tests {
     #[test]
     fn the_server_label_sheds_detail_before_the_tabs_do() {
         let mut app = connected_app();
-        app.username = Some("tester".into());
+        app.session.username = Some("tester".into());
 
         // Roomy: the whole thing, scheme and all, next to both extras.
         let wide = draw_sized(&mut app, 140, 20);
@@ -3961,7 +3961,7 @@ mod tests {
         // survives in a narrower terminal.
         let mut plain = connected_app();
         plain.capabilities = Default::default();
-        plain.username = Some("tester".into());
+        plain.session.username = Some("tester".into());
         let text = draw_sized(&mut plain, 72, 20);
         assert!(!text.contains("Discover"), "no tab for a feature this server lacks");
         assert!(text.contains("tester@http://host:3000"), "and the freed width shows");

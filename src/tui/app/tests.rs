@@ -715,7 +715,7 @@ fn unauthorized_returns_to_the_connect_screen() {
     let mut app = connected_app();
     app.apply_event(Event::Unauthorized);
     assert!(!app.connected);
-    assert!(app.token.is_none());
+    assert!(app.session.token.is_none());
     assert_eq!(app.input_mode(), InputMode::Editing);
 }
 
@@ -845,7 +845,7 @@ fn a_late_needs_login_cannot_unseat_a_live_session() {
     let mut app = connected_app();
     app.apply_event(Event::NeedsLogin { server: "http://192.168.1.71:3999".into() });
     assert!(app.connected, "the live session survives");
-    assert_eq!(app.server, "http://host:3000", "and stays on its own server");
+    assert_eq!(app.session.server, "http://host:3000", "and stays on its own server");
 }
 
 #[test]
@@ -928,10 +928,11 @@ fn a_tunnel_session_is_remembered_by_identity_not_by_its_loopback_port() {
     });
 
     // What gets written down is the identity...
-    assert_eq!(app.server_id, "mstream+iroh://endpointabc");
+    assert_eq!(app.session.server_id, "mstream+iroh://endpointabc");
     // ...while requests and stream URLs still go over the bridge.
-    assert_eq!(app.server, "http://127.0.0.1:51234");
-    assert_eq!(app.tunnel_code.as_deref(), Some("mstr1:abc"), "kept, or there's no way back");
+    assert_eq!(app.session.server, "http://127.0.0.1:51234");
+    let kept = app.session.tunnel_code.as_deref();
+    assert_eq!(kept, Some("mstr1:abc"), "kept, or there's no way back");
 }
 
 #[test]
@@ -960,7 +961,7 @@ fn reconnecting_to_a_tunnel_server_dials_its_code_again() {
     let app = App::new(Some("mstream+iroh://endpointabc".into()), Some("tok".into()), None);
     // The identity is not an address, so it must not reach the form or
     // the endpoint — only the dialler.
-    assert!(app.server.is_empty(), "nothing can be requested from an identity");
+    assert!(app.session.server.is_empty(), "nothing can be requested from an identity");
     assert!(app.connect.server.is_empty(), "and it cannot be typed or edited");
 
     let mut app = app.with_tunnel(Some("mstr1:saved".into()));
@@ -983,7 +984,7 @@ fn a_remembered_tunnel_with_no_code_says_so_instead_of_hanging() {
     let mut app = App::new(Some("mstream+iroh://endpointabc".into()), None, None);
     assert!(app.start().is_empty(), "nothing to dial, so nothing is attempted");
     assert!(!app.connecting, "and it doesn't sit on a connecting screen forever");
-    assert!(app.server_id.is_empty(), "the unreachable server is let go");
+    assert!(app.session.server_id.is_empty(), "the unreachable server is let go");
     let message = &app.message.as_ref().unwrap().text;
     assert!(message.contains("pairing code"), "got: {message}");
 }
@@ -995,9 +996,9 @@ fn an_expired_tunnel_session_signs_back_in_over_the_open_bridge() {
     // client can dial.
     let mut app = App::new(None, None, None);
     app.connected = true;
-    app.server = "http://127.0.0.1:51234".into();
-    app.server_id = "mstream+iroh://endpointabc".into();
-    app.token = Some("stale".into());
+    app.session.server = "http://127.0.0.1:51234".into();
+    app.session.server_id = "mstream+iroh://endpointabc".into();
+    app.session.token = Some("stale".into());
 
     app.apply_event(Event::Unauthorized);
     assert_eq!(app.connect.stage, ConnectStage::Direct);
@@ -1021,16 +1022,16 @@ fn an_expired_tunnel_session_signs_back_in_over_the_open_bridge() {
 #[test]
 fn a_tunnel_is_shown_by_name_rather_than_by_port() {
     let mut app = App::new(None, None, None);
-    app.server = "http://127.0.0.1:51234".into();
-    app.server_id = "mstream+iroh://endpointabcdef123456".into();
+    app.session.server = "http://127.0.0.1:51234".into();
+    app.session.server_id = "mstream+iroh://endpointabcdef123456".into();
     let shown = app.server_display();
     assert!(shown.starts_with("quick connect"), "got: {shown}");
     assert!(!shown.contains("127.0.0.1"), "the port is an implementation detail");
 
     // A direct server is shown as itself.
     let mut app = App::new(None, None, None);
-    app.server = "https://demo.mstream.io".into();
-    app.server_id = "https://demo.mstream.io".into();
+    app.session.server = "https://demo.mstream.io".into();
+    app.session.server_id = "https://demo.mstream.io".into();
     assert_eq!(app.server_display(), "https://demo.mstream.io");
 }
 
@@ -1058,7 +1059,7 @@ fn an_open_tunnel_leads_to_the_login_form() {
     assert_eq!(app.connect.server, "http://127.0.0.1:51234");
     assert_eq!(app.connect.field, 1, "focus lands on the username");
     assert!(!app.connecting);
-    assert_eq!(app.server_id, "mstream+iroh://abc123", "already filed under its identity");
+    assert_eq!(app.session.server_id, "mstream+iroh://abc123", "already filed under its identity");
 }
 
 #[test]
@@ -1095,7 +1096,7 @@ fn an_expired_session_offers_a_login_for_the_same_server() {
     assert!(!app.connected);
     assert_eq!(app.connect.stage, ConnectStage::Direct);
     assert_eq!(app.connect.server, "http://host:3000", "stays on the server in use");
-    assert!(app.token.is_none());
+    assert!(app.session.token.is_none());
 }
 
 #[test]
