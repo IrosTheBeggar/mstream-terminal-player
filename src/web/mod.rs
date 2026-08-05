@@ -1,17 +1,24 @@
 //! The browser build: the same App and drawing code, rendered by ratzilla.
 //!
-//! A spike, not a product. The real player's run loop (tui::event_loop) owns
-//! the terminal and polls; a browser owns *us*, so the loop inverts — ratzilla
-//! calls the draw closure once per animation frame and the key handler as
-//! events arrive. Each frame does exactly what one pass of the native loop
-//! does: dispatch pending effects, fold in worker events, draw. The workers
-//! are the [`stub`]; the library is [`canned`]; nothing touches the network
-//! and nothing makes sound.
+//! The real player's run loop (tui::event_loop) owns the terminal and polls;
+//! a browser owns *us*, so the loop inverts — ratzilla calls the draw closure
+//! once per animation frame and the key handler as events arrive. Each frame
+//! does exactly what one pass of the native loop does: dispatch pending
+//! effects, fold in worker events, draw.
+//!
+//! The api worker is real ([`api_worker`]): the same command→endpoint logic
+//! the native thread runs, awaited on the browser's event loop against
+//! whatever server the page came from (a trunk/static-host proxy in front of
+//! a real mStream — see Trunk.toml). Audio stays a stub ([`stub`]): playback
+//! is a clock and the visualizer draws a synthesised signal, until the
+//! WebAudio milestone lands.
 
+mod api_worker;
 mod canned;
 mod stub;
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use ratzilla::{DomBackend, WebRenderer};
@@ -19,9 +26,11 @@ use ratzilla::{DomBackend, WebRenderer};
 use crate::clock::Instant;
 use crate::config;
 use crate::input::{KeyCode, KeyEvent, KeyModifiers};
-use crate::tui::app::App;
+use crate::tui::app::{App, Effect};
 use crate::tui::ui;
+use crate::tui::worker::Event;
 use crate::tui::{Startup, app_from};
+use api_worker::WebApi;
 use stub::Stub;
 
 /// The native loop steps its spinner off the wall clock at this cadence
@@ -30,9 +39,29 @@ const SPIN_EVERY_MS: u128 = 90;
 
 struct Shell {
     app: App,
-    stub: Stub,
-    pending: Vec<crate::tui::app::Effect>,
+    audio: Stub,
+    api: WebApi,
+    /// Replies from the api worker's futures, drained each frame.
+    replies: Rc<RefCell<VecDeque<Event>>>,
+    pending: Vec<Effect>,
     spun: Instant,
+}
+
+impl Shell {
+    fn dispatch(&mut self, effect: Effect) {
+        match effect {
+            Effect::Audio(cmd) => self.audio.dispatch(cmd),
+            Effect::Api(cmd) => self.api.dispatch(cmd),
+            // mDNS cannot exist in a browser; a canned answer keeps the
+            // Discover-servers view demonstrating itself instead of hanging.
+            Effect::Discover => {
+                self.replies.borrow_mut().push_back(Event::ServersDiscovered(canned::lan_servers()));
+            }
+            // Nothing durable to save to in a spike. localStorage is the
+            // obvious home when this grows up.
+            Effect::SaveSession => {}
+        }
+    }
 }
 
 pub fn run() {
@@ -45,8 +74,16 @@ pub fn run() {
 }
 
 fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
+    // The server is wherever this page came from: the host proxies the
+    // mStream routes (see Trunk.toml), so the app talks same-origin and no
+    // CORS is involved. Connecting elsewhere still works for any server
+    // that answers preflights.
+    let origin = ratzilla::web_sys::window()
+        .and_then(|w| w.location().origin().ok())
+        .ok_or("no window.location.origin — not running in a browser?")?;
+
     let start = Startup {
-        server: Some(canned::SERVER.to_string()),
+        server: Some(origin),
         token: None,
         username: None,
         last_path: None,
@@ -64,9 +101,12 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     app.tap = Some(tap.clone());
     let pending = app.start();
 
+    let replies: Rc<RefCell<VecDeque<Event>>> = Rc::new(RefCell::new(VecDeque::new()));
     let shell = Rc::new(RefCell::new(Shell {
         app,
-        stub: Stub::new(tap),
+        audio: Stub::new(tap),
+        api: WebApi::new(replies.clone()),
+        replies,
         pending,
         spun: Instant::now(),
     }));
@@ -89,10 +129,16 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         let mut shell = on_frame.borrow_mut();
         let shell = &mut *shell;
 
-        for effect in shell.pending.drain(..) {
-            shell.stub.dispatch(effect);
+        for effect in std::mem::take(&mut shell.pending) {
+            shell.dispatch(effect);
         }
-        for event in shell.stub.tick() {
+        for event in shell.audio.tick() {
+            shell.pending.extend(shell.app.apply_event(event));
+        }
+        loop {
+            // Popped one at a time rather than held borrowed: apply_event can
+            // queue effects whose replies want this same queue.
+            let Some(event) = shell.replies.borrow_mut().pop_front() else { break };
             shell.pending.extend(shell.app.apply_event(event));
         }
         if shell.spun.elapsed().as_millis() >= SPIN_EVERY_MS {
@@ -110,8 +156,8 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Browser key events, translated to the crate's input types. `None` is a key
-/// the player has no meaning for (function keys, Delete) — dropped here, the
-/// same way an unbound key falls through the keymap.
+/// the player has no meaning for — dropped here, the same way an unbound key
+/// falls through the keymap.
 fn translate(event: ratzilla::event::KeyEvent) -> Option<KeyEvent> {
     use ratzilla::event::KeyCode as Web;
 

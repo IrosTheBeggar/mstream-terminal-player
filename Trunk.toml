@@ -9,3 +9,20 @@ target = "index.html"
 # Fixed rather than trunk's default 8080, so the demo has a stable address.
 port = 8975
 open = false
+
+# The page talks to "its own" server and the host forwards to a real
+# mStream — same-origin, so no CORS anywhere. A deployed demo does the same
+# with its static host's redirects. /api is the JSON surface; /media and
+# /transcode are the streams, proxied now so the audio milestone finds them
+# already reachable.
+[[proxy]]
+rewrite = "/api/"
+backend = "https://demo.mstream.io/api/"
+
+[[proxy]]
+rewrite = "/media/"
+backend = "https://demo.mstream.io/media/"
+
+[[proxy]]
+rewrite = "/transcode/"
+backend = "https://demo.mstream.io/transcode/"

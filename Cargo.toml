@@ -16,6 +16,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 fastrand = "2"
 toml = "1.1.4"
+# Shared: on wasm this is the fetch backend (its TLS/socket internals are
+# target-gated inside reqwest itself), which is what makes api::Client's
+# async core one implementation for both builds.
+reqwest = "0.13.4"
 # The Url type api::urls builds with. On native this is the same crate
 # reqwest re-exports (cargo unifies the 2.x line), so the two spellings are
 # one type where they meet.
@@ -54,7 +58,6 @@ stream-download = "0.24.2"
 # "time" is for the open() timeout in engine::http — the runtime already ran
 # with enable_all(), the timer just wasn't compiled in (PLAN.md finding #69).
 tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
-reqwest = "0.13.4"
 # platform-verifier: trust what the operating system trusts for the relay's
 # TLS, not just the compiled-in Mozilla bundle — corporate networks put a
 # TLS-inspecting proxy in front of :443 and re-sign with a CA that only the
@@ -69,6 +72,9 @@ mdns-sd = "0.20.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 ratzilla = "0.3.1"
+# spawn_local — how the web api worker runs the async client without a
+# runtime: the browser's event loop is the executor.
+wasm-bindgen-futures = "0.4"
 # std::time::Instant panics on wasm32-unknown-unknown; this is the same API
 # over performance.now(). See src/clock.rs.
 web-time = "1"

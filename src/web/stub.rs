@@ -1,25 +1,19 @@
-//! Stand-ins for the two worker threads, answering synchronously from
-//! [`canned`] data.
+//! Stand-in for the audio thread, until the WebAudio milestone.
 //!
-//! The native player runs an audio thread (rodio) and an api thread (HTTP);
-//! the browser spike runs neither. Commands the App dispatches land here,
-//! and events come back out of [`Stub::tick`] on the next frame — the same
-//! message flow, minus the latency and minus the sound. Playback is a clock,
-//! not a decoder; the one honest signal is the synthesised waveform pushed
-//! into the [`AudioTap`] so the visualizer has something true to draw.
+//! The native player runs an audio thread (rodio); the browser build doesn't
+//! yet. Audio commands land here and playback is a clock, not a decoder —
+//! but the queue, transport and end-of-track flow upstairs are all real. The
+//! one honest signal is the synthesised waveform pushed into the [`AudioTap`]
+//! so the visualizer has something true to draw.
 
 use std::collections::VecDeque;
 use std::f32::consts::TAU;
 use std::sync::Arc;
 
-use crate::api::types::SonicReport;
 use crate::clock::Instant;
 use crate::engine::tap::AudioTap;
 use crate::player::PlayerStatus;
-use crate::tui::app::Effect;
-use crate::tui::worker::{ApiCmd, AudioCmd, AutoDjMode, DiscoverData, DiscoverNode, Event};
-
-use super::canned;
+use crate::tui::worker::{AudioCmd, Event};
 
 const RATE: u32 = 44_100;
 /// When a Play carries no duration hint (a transcode would), pretend this.
@@ -62,19 +56,8 @@ impl Stub {
         }
     }
 
-    pub fn dispatch(&mut self, effect: Effect) {
-        match effect {
-            Effect::Audio(cmd) => self.audio(cmd),
-            Effect::Api(cmd) => self.api(cmd),
-            Effect::Discover => self.events.push_back(Event::ServersDiscovered(canned::lan_servers())),
-            // Nothing durable to save to in a spike. localStorage is the
-            // obvious home when this grows up.
-            Effect::SaveSession => {}
-        }
-    }
-
     /// Advance the fake clock, feed the visualizer, and hand back what the
-    /// workers would have sent since last frame.
+    /// audio thread would have sent since last frame.
     pub fn tick(&mut self) -> Vec<Event> {
         let now = Instant::now();
         let dt = match self.last_tick.replace(now) {
@@ -114,7 +97,7 @@ impl Stub {
         }
     }
 
-    fn audio(&mut self, cmd: AudioCmd) {
+    pub fn dispatch(&mut self, cmd: AudioCmd) {
         match cmd {
             AudioCmd::Play { url, duration_hint } => {
                 self.source = url;
@@ -153,98 +136,14 @@ impl Stub {
         }
         self.events.push_back(Event::Status(self.status()));
     }
-
-    fn api(&mut self, cmd: ApiCmd) {
-        let event = match cmd {
-            ApiCmd::Connect { server, .. } => Event::Connected {
-                server: server.clone(),
-                id: server,
-                username: None,
-                token: None,
-                ping: Box::new(canned::ping()),
-            },
-            ApiCmd::Login { server, username, .. } => Event::Connected {
-                server: server.clone(),
-                id: server,
-                username: Some(username),
-                token: Some("demo-token".to_string()),
-                ping: Box::new(canned::ping()),
-            },
-            ApiCmd::QuickConnect { .. } => Event::Error(
-                "Quick Connect needs the native player — the tunnel is iroh, not HTTP".to_string(),
-            ),
-            ApiCmd::Browse(path) => Event::Listing(Box::new(canned::listing(&path))),
-            ApiCmd::Library { node, dest } => {
-                Event::Library { data: canned::library_data(&node), node, dest }
-            }
-            ApiCmd::AutoDj(request) => {
-                let mut ignore_list = request.ignore_list.clone();
-                let pool: Vec<_> = canned::tracks()
-                    .into_iter()
-                    .filter(|t| canned::track_id(t).is_none_or(|id| !ignore_list.contains(&id)))
-                    .collect();
-                match pool.get(fastrand::usize(0..pool.len().max(1))) {
-                    Some(pick) => {
-                        ignore_list.extend(canned::track_id(pick));
-                        Event::AutoDjPick {
-                            candidates: vec![pick.clone()],
-                            ignore_list,
-                            note: None,
-                        }
-                    }
-                    // Everything played once: the server would reset here.
-                    None => Event::AutoDjPick {
-                        candidates: canned::tracks().into_iter().take(1).collect(),
-                        ignore_list: Vec::new(),
-                        note: Some("every track played once — starting the pool over".to_string()),
-                    },
-                }
-            }
-            ApiCmd::AutoDjSample { request, count } => {
-                let mut tracks = canned::tracks();
-                fastrand::shuffle(&mut tracks);
-                tracks.truncate(count);
-                let pool = (request.sonic_available && request.mode == AutoDjMode::Similar)
-                    .then_some(SonicReport { similarity: Some(0.72), pool_size: 847 });
-                Event::AutoDjSample { tracks, pool, note: None }
-            }
-            ApiCmd::Genres => Event::Genres(canned::genres()),
-            ApiCmd::Journey { length, .. } => {
-                Event::Journey { stops: canned::journey(length), note: None, length }
-            }
-            ApiCmd::Discover { node, seed } => {
-                let data = match node {
-                    DiscoverNode::Artists | DiscoverNode::Artist(_) => {
-                        DiscoverData::Artists(canned::similar_artists(&seed))
-                    }
-                    _ => DiscoverData::Tracks(canned::similar_tracks(&seed)),
-                };
-                Event::Discover { node, data, note: None }
-            }
-            ApiCmd::Playlists => Event::Playlists(canned::playlists()),
-            ApiCmd::LoadPlaylist(name) => {
-                let tracks = canned::playlist_tracks(&name);
-                Event::PlaylistTracks { name, tracks }
-            }
-            ApiCmd::Search(query) => {
-                let results = Box::new(canned::search(&query));
-                Event::SearchResults { query, results }
-            }
-            // The canned library has no covers; "no art" is the same answer
-            // the real worker gives for a track whose art went missing.
-            ApiCmd::AlbumArt { file } => Event::AlbumArt { file, art: None },
-            ApiCmd::Shutdown => return,
-        };
-        self.events.push_back(event);
-    }
 }
 
 // ── The signal the visualizer draws ─────────────────────────────────────────
 
 /// A tiny groove box: kick and hats on a 124 BPM grid, a bass line walking a
-/// four-bar loop, an arpeggio on top. Not the track "playing" — there isn't
-/// one — but honest input for the waveform, FFT and vectorscope, which is
-/// what the visualizer screens are demoing.
+/// four-bar loop, an arpeggio on top. Not the track "playing" — decode is the
+/// next milestone — but honest input for the waveform, FFT and vectorscope,
+/// which is what the visualizer screens are demoing.
 struct Synth {
     t: f64,
     bass_phase: f32,

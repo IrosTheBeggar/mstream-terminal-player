@@ -22,7 +22,6 @@ use crate::api::types::{
     Album, Capabilities, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults,
     SimilarArtist, Track,
 };
-#[cfg(not(target_arch = "wasm32"))]
 use crate::api::{ApiError, Client};
 use crate::discovery::DiscoveredServer;
 use crate::dj;
@@ -240,12 +239,10 @@ impl AutoDjMode {
 }
 
 /// How many tracks "Recently Added" asks for.
-#[cfg(not(target_arch = "wasm32"))]
 const RECENT_LIMIT: u32 = 100;
 
 /// Candidates to request from the similarity index. More than one because the
 /// nearest neighbour is often already sitting in the queue.
-#[cfg(not(target_arch = "wasm32"))]
 const SIMILAR_LIMIT: u32 = 15;
 
 #[derive(Debug)]
@@ -746,10 +743,12 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 Err(e) => Some(Event::Error(e)),
             },
 
+
             read => {
                 spawn_read(client.clone(), caps, events.clone(), read);
                 None
             }
+
         };
 
         // One place to learn what the server offers, so a new way of
@@ -800,20 +799,23 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         ApiCmd::Browse(path) => {
             c.file_explorer(&path).map(|l| Event::Listing(Box::new(l)))
         }
-        ApiCmd::Library { node, dest } => {
-            load_library(c, &node).map(|data| Event::Library { node, dest, data })
-        }
+        ApiCmd::Library { node, dest } => crate::api::wait(load_library(c, &node))
+            .map(|data| Event::Library { node, dest, data }),
         ApiCmd::AutoDj(request) => {
-            autodj_pick(c, caps, &request).map(|picked| Event::AutoDjPick {
+            crate::api::wait(autodj_pick(c, caps, &request)).map(|picked| Event::AutoDjPick {
                 candidates: picked.tracks,
                 ignore_list: picked.ignore_list,
                 note: picked.note,
             })
         }
-        ApiCmd::AutoDjSample { request, count } => autodj_sample(c, caps, &request, count),
+        ApiCmd::AutoDjSample { request, count } => {
+            crate::api::wait(autodj_sample(c, caps, &request, count))
+        }
         ApiCmd::Genres => c.genres().map(Event::Genres),
-        ApiCmd::Journey { start, end, length } => journey(c, &start, &end, length),
-        ApiCmd::Discover { node, seed } => discover(c, &node, &seed),
+        ApiCmd::Journey { start, end, length } => {
+            crate::api::wait(journey(c, &start, &end, length))
+        }
+        ApiCmd::Discover { node, seed } => crate::api::wait(discover(c, &node, &seed)),
         ApiCmd::Playlists => c.playlists().map(Event::Playlists),
         ApiCmd::LoadPlaylist(name) => {
             c.playlist_load(&name).map(|tracks| Event::PlaylistTracks { name, tracks })
@@ -969,33 +971,42 @@ fn login(
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn load_library(client: &Client, node: &LibraryNode) -> Result<LibraryData, ApiError> {
+/// Shared by the native api thread (via `api::wait`) and the web worker
+/// (awaited on the browser's event loop) — as is everything below it that
+/// takes a `&Client`. One brain, two drivers.
+pub(crate) async fn load_library(
+    client: &Client,
+    node: &LibraryNode,
+) -> Result<LibraryData, ApiError> {
     Ok(match node {
         // The mode menu is static; the UI fills it in without asking.
         LibraryNode::Root => LibraryData::Artists(Vec::new()),
-        LibraryNode::Artists => LibraryData::Artists(client.artists()?),
-        LibraryNode::Artist(artist) => LibraryData::Albums(client.artist_albums(artist)?),
-        LibraryNode::Albums => LibraryData::Albums(client.albums()?),
-        LibraryNode::Album { name, artist } => {
-            LibraryData::Tracks(client.album_songs(name, artist.as_deref())?)
+        LibraryNode::Artists => LibraryData::Artists(client.artists_async().await?),
+        LibraryNode::Artist(artist) => {
+            LibraryData::Albums(client.artist_albums_async(artist).await?)
         }
-        LibraryNode::Genres => LibraryData::Genres(client.genres()?),
-        LibraryNode::Genre(genre) => LibraryData::Tracks(client.genre_songs(genre)?),
-        LibraryNode::Recent => LibraryData::Tracks(client.recently_added(RECENT_LIMIT)?),
+        LibraryNode::Albums => LibraryData::Albums(client.albums_async().await?),
+        LibraryNode::Album { name, artist } => {
+            LibraryData::Tracks(client.album_songs_async(name, artist.as_deref()).await?)
+        }
+        LibraryNode::Genres => LibraryData::Genres(client.genres_async().await?),
+        LibraryNode::Genre(genre) => {
+            LibraryData::Tracks(client.genre_songs_async(genre).await?)
+        }
+        LibraryNode::Recent => {
+            LibraryData::Tracks(client.recently_added_async(RECENT_LIMIT).await?)
+        }
     })
 }
 
 /// One answer from the picker.
-#[cfg(not(target_arch = "wasm32"))]
-struct Picked {
-    tracks: Vec<Track>,
-    ignore_list: Vec<u32>,
-    note: Option<String>,
+pub(crate) struct Picked {
+    pub(crate) tracks: Vec<Track>,
+    pub(crate) ignore_list: Vec<u32>,
+    pub(crate) note: Option<String>,
     pool: Option<crate::api::types::SonicReport>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 type AutoDjResult = Result<Picked, ApiError>;
 
 /// Choose what Auto-DJ should play next.
@@ -1003,19 +1014,22 @@ type AutoDjResult = Result<Picked, ApiError>;
 /// Similarity is best-effort: the server may have discovery switched off, or
 /// simply not have embedded this track yet. Rather than stalling, both cases
 /// fall through to tempo/key matching and say why.
-#[cfg(not(target_arch = "wasm32"))]
-fn autodj_pick(client: &Client, caps: Capabilities, request: &DjRequest) -> AutoDjResult {
+pub(crate) async fn autodj_pick(
+    client: &Client,
+    caps: Capabilities,
+    request: &DjRequest,
+) -> AutoDjResult {
     let ignore_list = request.ignore_list.clone();
     match request.mode {
         AutoDjMode::Off => {
             Ok(Picked { tracks: Vec::new(), ignore_list, note: None, pool: None })
         }
 
-        AutoDjMode::BpmKey => pick_by_tempo_and_key(client, request, None),
+        AutoDjMode::BpmKey => pick_by_tempo_and_key(client, request, None).await,
 
         AutoDjMode::Similar => {
             let Some(seed) = request.seed.as_deref() else {
-                return pick_by_tempo_and_key(client, request, None);
+                return pick_by_tempo_and_key(client, request, None).await;
             };
             // No flag, no probe: ping already said there is no index here, so
             // asking would spend a round trip to be told 403.
@@ -1024,26 +1038,36 @@ fn autodj_pick(client: &Client, caps: Capabilities, request: &DjRequest) -> Auto
                     client,
                     request,
                     Some("this server has no similarity index — matching tempo and key"),
-                );
+                )
+                .await;
             }
-            match client.similar_tracks(&seed.filepath, SIMILAR_LIMIT)? {
+            match client.similar_tracks_async(&seed.filepath, SIMILAR_LIMIT).await? {
                 // Backstop for a server reconfigured mid-session; the flag
                 // above is what normally keeps us out of here.
-                None => pick_by_tempo_and_key(
-                    client,
-                    request,
-                    Some("similarity was switched off on this server — matching tempo and key"),
-                ),
-                Some(found) if found.not_analyzed => pick_by_tempo_and_key(
-                    client,
-                    request,
-                    Some("this track hasn't been analysed yet — matching tempo and key"),
-                ),
-                Some(found) if found.results.is_empty() => pick_by_tempo_and_key(
-                    client,
-                    request,
-                    Some("nothing sounded similar — matching tempo and key"),
-                ),
+                None => {
+                    pick_by_tempo_and_key(
+                        client,
+                        request,
+                        Some("similarity was switched off on this server — matching tempo and key"),
+                    )
+                    .await
+                }
+                Some(found) if found.not_analyzed => {
+                    pick_by_tempo_and_key(
+                        client,
+                        request,
+                        Some("this track hasn't been analysed yet — matching tempo and key"),
+                    )
+                    .await
+                }
+                Some(found) if found.results.is_empty() => {
+                    pick_by_tempo_and_key(
+                        client,
+                        request,
+                        Some("nothing sounded similar — matching tempo and key"),
+                    )
+                    .await
+                }
                 Some(found) => Ok(Picked {
                     tracks: found.results.into_iter().map(|r| r.into_track()).collect(),
                     ignore_list,
@@ -1055,8 +1079,7 @@ fn autodj_pick(client: &Client, caps: Capabilities, request: &DjRequest) -> Auto
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn pick_by_tempo_and_key(
+async fn pick_by_tempo_and_key(
     client: &Client,
     request: &DjRequest,
     note: Option<&str>,
@@ -1071,7 +1094,7 @@ fn pick_by_tempo_and_key(
     );
     let sonic_asked = body.min_similarity.is_some();
 
-    let response = match client.random_song(&body) {
+    let response = match client.random_song_async(&body).await {
         Ok(response) => response,
         // A hard sonic pool fails loudly by design — the server would rather
         // say "nothing is that similar" than quietly play something that
@@ -1087,7 +1110,7 @@ fn pick_by_tempo_and_key(
                 &request.recent_artists,
                 false,
             );
-            let response = client.random_song(&relaxed)?;
+            let response = client.random_song_async(&relaxed).await?;
             return Ok(Picked {
                 tracks: response.songs,
                 ignore_list: response.ignore_list,
@@ -1109,8 +1132,7 @@ fn pick_by_tempo_and_key(
 /// Take several picks in a row without committing to any of them, feeding
 /// each back into the next call's cooldown so the sample shows variety rather
 /// than the same track three times.
-#[cfg(not(target_arch = "wasm32"))]
-fn autodj_sample(
+pub(crate) async fn autodj_sample(
     client: &Client,
     caps: Capabilities,
     request: &DjRequest,
@@ -1125,7 +1147,7 @@ fn autodj_sample(
     let mut pool = None;
     let mut note = None;
     for _ in 0..count {
-        let picked = match autodj_pick(client, caps, &scratch) {
+        let picked = match autodj_pick(client, caps, &scratch).await {
             Ok(picked) => picked,
             // A sample that finds nothing is an answer, not an error: it is
             // exactly what a too-tight setting looks like.
@@ -1153,7 +1175,6 @@ fn autodj_sample(
 
 /// How many neighbours a Discover view asks for. Deep enough to browse,
 /// short enough that the tail is still relevant rather than noise.
-#[cfg(not(target_arch = "wasm32"))]
 const DISCOVER_LIMIT: u32 = 40;
 
 /// Fill a Discover view.
@@ -1162,8 +1183,7 @@ const DISCOVER_LIMIT: u32 = 40;
 /// seed hasn't been embedded yet, or the ranking was walked as far as the
 /// server was willing to go. None is a failure, so each gets a sentence and
 /// an empty list rather than an error.
-#[cfg(not(target_arch = "wasm32"))]
-fn discover(
+pub(crate) async fn discover(
     client: &Client,
     node: &DiscoverNode,
     seed: &Track,
@@ -1184,7 +1204,9 @@ fn discover(
         }),
 
         DiscoverNode::Tracks => {
-            let Some(found) = client.similar_tracks(&seed.filepath, DISCOVER_LIMIT)? else {
+            let Some(found) =
+                client.similar_tracks_async(&seed.filepath, DISCOVER_LIMIT).await?
+            else {
                 return Ok(disabled(DiscoverData::Tracks(Vec::new())));
             };
             let note = if found.not_analyzed {
@@ -1212,7 +1234,7 @@ fn discover(
                     note: Some("this track has no artist tag to compare against".into()),
                 });
             };
-            let Some(found) = client.similar_artists(artist, DISCOVER_LIMIT)? else {
+            let Some(found) = client.similar_artists_async(artist, DISCOVER_LIMIT).await? else {
                 return Ok(disabled(DiscoverData::Artists(Vec::new())));
             };
             let note = if found.not_analyzed {
@@ -1240,9 +1262,13 @@ fn discover(
 
 /// Fetch a journey and translate the ways it can legitimately come up short
 /// into something worth reading.
-#[cfg(not(target_arch = "wasm32"))]
-fn journey(client: &Client, start: &str, end: &str, length: u32) -> Result<Event, ApiError> {
-    let Some(response) = client.journey(start, end, length)? else {
+pub(crate) async fn journey(
+    client: &Client,
+    start: &str,
+    end: &str,
+    length: u32,
+) -> Result<Event, ApiError> {
+    let Some(response) = client.journey_async(start, end, length).await? else {
         // Gated on `discoveryPath`, so this only happens if the server was
         // reconfigured since the ping.
         return Ok(Event::Journey {
@@ -1264,7 +1290,6 @@ fn journey(client: &Client, start: &str, end: &str, length: u32) -> Result<Event
 /// Every case here is one the route produces deliberately — an unanalysed
 /// end, two identical seeds, a library that ran out of visible waypoints —
 /// so none of them is an error, and each deserves its own sentence.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn journey_note(
     response: &crate::api::types::JourneyResponse,
     asked: u32,
@@ -1287,7 +1312,6 @@ pub(crate) fn journey_note(
     None
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn trim_period(message: &str) -> String {
     message.trim().trim_end_matches('.').to_string()
 }
