@@ -324,6 +324,11 @@ impl Default for Credentials {
 pub struct TokenEntry {
     pub server: String,
     pub token: String,
+    /// A newer player's notes on this row — an expiry, say. The catch-all on
+    /// [`Credentials`] covers whole kinds of secret; this covers the level
+    /// below it, because storing a token for one server rewrites every row.
+    #[serde(flatten)]
+    pub extra: Keep,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -331,6 +336,8 @@ pub struct PairingEntry {
     /// The tunnel identity this code reaches — never a URL.
     pub server: String,
     pub code: String,
+    #[serde(flatten)]
+    pub extra: Keep,
 }
 
 // ── Locations ───────────────────────────────────────────────────────────────
@@ -619,7 +626,11 @@ pub fn set_last_path(config: &mut Config, url: &str, path: &str) {
 pub fn store_token(credentials: &mut Credentials, server: &str, token: Option<String>) {
     credentials.tokens.retain(|entry| !same_server(&entry.server, server));
     if let Some(token) = token {
-        credentials.tokens.push(TokenEntry { server: server.to_string(), token });
+        credentials.tokens.push(TokenEntry {
+            server: server.to_string(),
+            token,
+            extra: Keep::new(),
+        });
     }
 }
 
@@ -634,7 +645,11 @@ pub fn pairing_for(credentials: &Credentials, server: &str) -> Option<String> {
 pub fn store_pairing(credentials: &mut Credentials, server: &str, code: Option<String>) {
     credentials.pairings.retain(|entry| !same_server(&entry.server, server));
     if let Some(code) = code {
-        credentials.pairings.push(PairingEntry { server: server.to_string(), code });
+        credentials.pairings.push(PairingEntry {
+            server: server.to_string(),
+            code,
+            extra: Keep::new(),
+        });
     }
 }
 
@@ -855,6 +870,40 @@ mod tests {
             raw.contains("newer-players-secret"),
             "and nothing else — this is the only copy:\n{raw}"
         );
+    }
+
+    #[test]
+    fn a_newer_players_note_on_a_token_survives_storing_another() {
+        // The catch-all on Credentials covers kinds of secret this build has
+        // no name for; this is the level below it. A newer player annotating
+        // its rows — an expiry on a token, a label on a pairing — hands this
+        // binary a row it half-understands, and storing a token for some
+        // *other* server rewrites every row it is holding.
+        let scratch = Scratch::new("token-notes");
+        fs::write(
+            scratch.dir.join(CREDENTIALS_FILE),
+            "version = 1\n\
+             \n\
+             [[token]]\n\
+             server = \"http://host:3000\"\n\
+             token = \"t\"\n\
+             expires = 1234567890\n\
+             \n\
+             [[pairing]]\n\
+             server = \"mstream+iroh://endpointabc\"\n\
+             code = \"c\"\n\
+             label = \"the attic machine\"\n",
+        )
+        .unwrap();
+
+        let mut credentials = load_credentials().unwrap();
+        store_token(&mut credentials, "http://elsewhere:3000", Some("t2".into()));
+        save_credentials(&credentials).unwrap();
+
+        let raw = fs::read_to_string(scratch.dir.join(CREDENTIALS_FILE)).unwrap();
+        assert!(raw.contains("expires = 1234567890"), "the note went with the row:\n{raw}");
+        assert!(raw.contains("the attic machine"), "the pairing's label too:\n{raw}");
+        assert!(raw.contains("token = \"t\""), "and the row itself is still there");
     }
 
     #[test]
