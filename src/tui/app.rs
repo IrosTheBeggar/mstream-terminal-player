@@ -996,8 +996,22 @@ impl App {
         Vec::new()
     }
 
+    // The Tab → pane mapping lives in this adjacent pair and nowhere else
+    // (audit #59). It used to be five tables — two of them uncheckable, so
+    // a missed arm was a spinner that never lit or never stopped — and
+    // every other reader now routes through these exhaustive matches.
+
     pub fn pane(&self) -> &Pane {
-        match self.tab {
+        self.pane_for(self.tab)
+    }
+
+    fn pane_mut(&mut self) -> &mut Pane {
+        let tab = self.tab;
+        self.pane_for_mut(tab)
+    }
+
+    pub(crate) fn pane_for(&self, tab: Tab) -> &Pane {
+        match tab {
             Tab::Files => &self.files,
             Tab::Library => &self.library,
             Tab::Playlists => &self.playlists,
@@ -1006,12 +1020,7 @@ impl App {
         }
     }
 
-    fn pane_mut(&mut self) -> &mut Pane {
-        let tab = self.tab;
-        self.pane_for_mut(tab)
-    }
-
-    fn pane_for_mut(&mut self, tab: Tab) -> &mut Pane {
+    pub(crate) fn pane_for_mut(&mut self, tab: Tab) -> &mut Pane {
         match tab {
             Tab::Files => &mut self.files,
             Tab::Library => &mut self.library,
@@ -1105,15 +1114,8 @@ impl App {
     /// nothing would otherwise stop the spinner. A stuck spinner is a worse
     /// lie than an empty list.
     fn clear_pending(&mut self) {
-        let panes = [
-            &mut self.files,
-            &mut self.library,
-            &mut self.playlists,
-            &mut self.search,
-            &mut self.discover,
-        ];
-        for pane in panes {
-            pane.loading = false;
+        for tab in Tab::ALL {
+            self.pane_for_mut(tab).loading = false;
         }
     }
 

@@ -624,14 +624,8 @@ fn render_current_column(frame: &mut Frame, area: Rect, app: &mut App) {
     let inner = inset(area);
     let content = inner.width.saturating_sub(CURSOR.len() as u16) as usize;
     let len = app.pane().entries.len();
-    let state = match app.tab {
-        Tab::Files => &mut app.files.state,
-        Tab::Library => &mut app.library.state,
-        Tab::Playlists => &mut app.playlists.state,
-        Tab::Search => &mut app.search.state,
-        Tab::Discover => &mut app.discover.state,
-    };
-    let (window, mut shown) = visible_rows(state, len, inner.height);
+    let (window, mut shown) =
+        visible_rows(&mut app.pane_for_mut(app.tab).state, len, inner.height);
     let playing = app.now_playing.as_ref().map(|track| track.filepath.as_str());
     let items: Vec<ListItem> = app.pane().entries[window.clone()]
         .iter()
