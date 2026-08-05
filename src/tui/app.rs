@@ -584,8 +584,13 @@ pub struct Message {
 // the connect screen, and the [`Session`] it produces — lives in `session`
 // (audit #56), re-exported so every caller keeps saying `app::ConnectForm`.
 mod autodj;
+mod entries;
 mod nav;
 mod session;
+
+// The row builders moved out whole (audit #61); the app and its tests
+// go on naming them exactly as they did.
+use entries::*;
 pub use nav::Drill;
 pub use session::{CONNECT_METHODS, ConnectForm, ConnectStage, Session};
 
@@ -2079,89 +2084,14 @@ impl App {
                 // Manual, so repeat-one doesn't sit on the broken track.
                 self.skip(true)
             }
-            Event::Connected { server, id, username, token, ping } => {
-                self.connected = true;
-                self.connecting = false;
-                self.connect.submitting = false;
-                self.session.server = server;
-                self.session.server_id = id;
-                if token.is_some() {
-                    self.session.token = token;
-                }
-                if username.is_some() {
-                    self.session.username = username;
-                }
-                self.capabilities = crate::api::types::Capabilities::from(ping.as_ref());
-                self.libraries = ping.vpaths.clone();
-                let libraries = ping.vpaths.len();
-                self.info(format!(
-                    "connected to {} ({} librar{})",
-                    self.server_display(),
-                    libraries,
-                    if libraries == 1 { "y" } else { "ies" }
-                ));
-
-                // A remembered mode can outlive the server that supported it —
-                // preferences are global, capabilities are per-server. Say so
-                // rather than leaving a mode selected that quietly does
-                // something else.
-                if !self.autodj.available(self.capabilities) {
-                    self.autodj = self.autodj.next_available(self.capabilities);
-                    self.info(format!(
-                        "this server has no similarity index — auto-dj is on {}",
-                        self.autodj.label()
-                    ));
-                }
-
-                // Opening the browser again: whatever this browse comes back
-                // with is where we are, since neither `~` nor a remembered
-                // path is a promise about how the server will spell it.
-                self.opening = true;
-                let mut effects = vec![
-                    Effect::Api(ApiCmd::Browse(self.opening_path())),
-                    Effect::Audio(AudioCmd::SetVolume(self.volume)),
-                ];
-                // Worth persisting when we hold a token we logged in for — or
-                // a pairing code, which is the only way back to this server
-                // even when it needs no login at all.
-                let signed_in = self.session.token.is_some() && self.session.username.is_some();
-                if signed_in || self.session.tunnel_code.is_some() {
-                    effects.push(Effect::SaveSession);
-                }
-                effects
-            }
-            Event::ServersDiscovered(found) => {
-                // Results can land after the user has already made a choice.
-                // Row 0 means "the paste row" while the list is empty and
-                // "the first server" once it isn't, so without this the
-                // cursor silently retargets and Enter connects somewhere the
-                // user never picked.
-                let entered_a_code = !self.connect.code.trim().is_empty();
-                self.connect.searching = false;
-                self.connect.found = found;
-                self.connect.row = if entered_a_code {
-                    // Someone mid-paste keeps their place; otherwise the
-                    // cursor lands on the first server, which is what a user
-                    // who simply waited expects.
-                    self.connect.paste_row()
-                } else {
-                    self.connect.row.min(self.connect.paste_row())
-                };
-                Vec::new()
-            }
-            Event::TunnelReady { local_url, id } => {
-                self.connecting = false;
-                self.connect.submitting = false;
-                // The form carries the loopback address, which is a real,
-                // working endpoint for the sign-in about to happen; the
-                // identity is what the session will be filed under.
-                self.connect.server = local_url;
-                self.session.server_id = id;
-                self.connect.stage = ConnectStage::Direct;
-                self.connect.field = 1; // straight to the username
-                self.info("tunnel open — sign in to continue");
-                Vec::new()
-            }
+            // Everything about who we are connected to and how goes
+            // through one door into session.rs, which owns the connect
+            // screen those replies land on (audit #60).
+            event @ (Event::Connected { .. }
+            | Event::ServersDiscovered(_)
+            | Event::TunnelReady { .. }
+            | Event::NeedsLogin { .. }
+            | Event::Unauthorized) => self.consume_session(event),
             Event::Listing(listing) => {
                 let path = listing.path.trim_matches('/');
                 // A reply for a folder we have since left. Taking it would put
@@ -2276,37 +2206,6 @@ impl App {
                 self.message = None;
                 Vec::new()
             }
-            Event::NeedsLogin { server } => {
-                // A reply from a connection attempt that has been overtaken —
-                // we already reached somewhere else. Applying it would drag a
-                // connected session back to a login form.
-                if self.connected {
-                    return Vec::new();
-                }
-                self.connecting = false;
-                self.connect.submitting = false;
-                self.connect.server = server;
-                self.connect.stage = ConnectStage::Direct;
-                self.connect.field = 1; // straight to the username
-                self.info("this server needs a sign-in");
-                Vec::new()
-            }
-            Event::Unauthorized => {
-                // An established session went bad. Offer the login form for
-                // the server we were already using rather than dumping the
-                // user back at "how do you want to connect?".
-                self.connected = false;
-                self.connecting = false;
-                self.connect.submitting = false;
-                if !self.session.server.is_empty() {
-                    self.connect.server = self.session.server.clone();
-                }
-                self.connect.stage = ConnectStage::Direct;
-                self.connect.field = 1;
-                self.session.token = None;
-                self.error("session expired — sign in again");
-                Vec::new()
-            }
             Event::Error(e) => {
                 self.connecting = false;
                 self.connect.submitting = false;
@@ -2317,206 +2216,6 @@ impl App {
     }
 }
 
-/// The Library tab's mode menu — static, so opening the tab costs no request.
-fn library_root_entries() -> Vec<Entry> {
-    [
-        ("Artists", LibraryNode::Artists),
-        ("Albums", LibraryNode::Albums),
-        ("Genres", LibraryNode::Genres),
-        ("Recently Added", LibraryNode::Recent),
-    ]
-    .into_iter()
-    .map(|(label, node)| Entry::Node { label: label.to_string(), node })
-    .collect()
-}
-
-fn album_label(album: &Album) -> String {
-    let name = album.name.as_deref().unwrap_or("(untitled album)");
-    let year = album.year.map(|y| format!(" ({y})")).unwrap_or_default();
-    match album.artist.as_deref() {
-        Some(artist) if !artist.is_empty() => format!("{artist} — {name}{year}"),
-        _ => format!("{name}{year}"),
-    }
-}
-
-fn genre_label(genre: &Genre) -> String {
-    match genre.track_count {
-        Some(count) => format!("{} ({count})", genre.name),
-        None => genre.name.clone(),
-    }
-}
-
-/// Rows for a loaded library view. Every one of these sits below the mode
-/// menu, so they all get a ".." to climb back out.
-/// How many hits each class holds, in menu order.
-fn search_counts(results: &crate::api::types::SearchResults) -> [usize; 5] {
-    [
-        results.artists.len(),
-        results.albums.len(),
-        results.title.len(),
-        results.files.len(),
-        results.lyrics.len(),
-    ]
-}
-
-impl App {
-    /// The class menu: what matched, and how many. Classes that matched
-    /// nothing are left out -- a row saying zero is a row you have to read to
-    /// learn it was not worth reading.
-    fn search_root_entries(&self) -> Vec<Entry> {
-        let Some(hits) = &self.search_hits else {
-            return Vec::new();
-        };
-        let counts = search_counts(hits);
-        SEARCH_CLASSES
-            .iter()
-            .zip(counts)
-            .filter(|(_, n)| *n > 0)
-            .map(|(class, n)| Entry::Search {
-                label: class.title().to_string(),
-                detail: n.to_string(),
-                node: SearchNode::Class(*class),
-            })
-            .collect()
-    }
-
-    /// The hits inside whichever class is open. Artists and albums become the
-    /// same nodes the Library tab drills, because that is what they are.
-    fn search_class_entries(&self) -> Vec<Entry> {
-        let (Some(hits), SearchNode::Class(class)) = (&self.search_hits, self.search_node())
-        else {
-            return Vec::new();
-        };
-        let track_rows = |rows: &[crate::api::types::SearchTrack]| {
-            rows.iter()
-                .map(|hit| {
-                    let track =
-                        Track { filepath: hit.filepath.clone(), metadata: hit.metadata.clone() };
-                    Entry::Track { label: track.display_name(), track: Box::new(track) }
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let mut entries = vec![Entry::Parent];
-        match class {
-            SearchClass::Artists => entries.extend(hits.artists.iter().map(|group| Entry::Node {
-                label: group.name.clone(),
-                node: LibraryNode::Artist(group.name.clone()),
-            })),
-            SearchClass::Albums => entries.extend(hits.albums.iter().map(|group| Entry::Node {
-                label: group.name.clone(),
-                node: LibraryNode::Album { name: group.name.clone(), artist: None },
-            })),
-            SearchClass::Titles => entries.extend(track_rows(&hits.title)),
-            SearchClass::Files => entries.extend(track_rows(&hits.files)),
-            SearchClass::Lyrics => entries.extend(track_rows(&hits.lyrics)),
-        }
-        entries
-    }
-}
-
-fn entries_from_library(data: LibraryData) -> Vec<Entry> {
-    let mut entries = vec![Entry::Parent];
-    match data {
-        LibraryData::Artists(artists) => entries.extend(artists.into_iter().map(|name| {
-            Entry::Node { label: name.clone(), node: LibraryNode::Artist(name) }
-        })),
-        LibraryData::Albums(albums) => entries.extend(albums.into_iter().map(|album| {
-            let label = album_label(&album);
-            let node = LibraryNode::Album {
-                name: album.name.unwrap_or_default(),
-                artist: album.artist,
-            };
-            Entry::Node { label, node }
-        })),
-        LibraryData::Genres(genres) => entries.extend(genres.into_iter().map(|genre| {
-            let label = genre_label(&genre);
-            Entry::Node { label, node: LibraryNode::Genre(genre.name) }
-        })),
-        LibraryData::Tracks(tracks) => entries.extend(tracks.into_iter().map(|track| {
-            Entry::Track { label: track.display_name(), track: Box::new(track) }
-        })),
-    }
-    entries
-}
-
-/// The model writes hierarchical tags — "Electronic---Dubstep". In a list of
-/// artists similar to each other the prefix is the same on every row, so only
-/// the leaf carries information; it is also the difference between two tags
-/// fitting on a line and none of them fitting.
-fn tidy_tag(tag: &str) -> &str {
-    tag.rsplit("---").next().unwrap_or(tag).trim()
-}
-
-/// Join a directory prefix and an entry name into a library path.
-fn qualify(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() {
-        name.to_string()
-    } else {
-        format!("{prefix}/{name}")
-    }
-}
-
-/// `root` is the path with nothing above it worth offering — empty for the
-/// list of libraries, or the one library on a server that has only one.
-fn entries_from_listing(listing: &DirListing, root: &str) -> Vec<Entry> {
-    let prefix = listing.path.trim_matches('/');
-    let mut entries = Vec::new();
-    if !prefix.is_empty() && prefix != root {
-        entries.push(Entry::Parent);
-    }
-    for dir in &listing.directories {
-        entries.push(Entry::Dir {
-            label: dir.name.clone(),
-            path: qualify(prefix, &dir.name),
-        });
-    }
-    for file in &listing.files {
-        // A playlist file is a list of tracks, not a track. The server
-        // indexes them all the same, and `Enter` queues everything on screen,
-        // so leaving one here puts something undecodable in the queue.
-        if !is_audio(file.kind.as_deref()) {
-            continue;
-        }
-        // The server's own filepath when it sent one: it is the canonical
-        // form, and it is what these tags were looked up under. Falling back
-        // to the joined path keeps listings without metadata working exactly
-        // as before.
-        let tags = file.metadata.as_ref();
-        let filepath = tags
-            .map(|m| m.filepath.clone())
-            .filter(|path| !path.is_empty())
-            .unwrap_or_else(|| qualify(prefix, &file.name));
-        // The label stays the filename — this is the view of what is on disk,
-        // and that is what people are looking for here. The tags ride along
-        // for the queue, the now-playing screen and Auto-DJ, which all read
-        // them off the track rather than the row.
-        entries.push(Entry::Track {
-            label: file.name.clone(),
-            track: Box::new(Track {
-                filepath,
-                metadata: tags.and_then(|m| m.metadata.clone()).unwrap_or_default(),
-            }),
-        });
-    }
-    entries
-}
-
-/// Whether the file explorer should offer this as something to play.
-///
-/// mStream indexes playlist files alongside audio — its ping even reports
-/// `m3u: false` under `supportedAudioFiles`, and its own Auto-DJ picker
-/// excludes them with the note that a client cannot stream one. The file
-/// browser is the one place they still reach a queue.
-///
-/// Anything unrecognised is treated as audio: a format this player cannot
-/// decode should fail loudly when played, not vanish from the listing.
-fn is_audio(kind: Option<&str>) -> bool {
-    !matches!(
-        kind.map(str::to_ascii_lowercase).as_deref(),
-        Some("m3u" | "m3u8" | "pls" | "cue" | "xspf" | "asx")
-    )
-}
 
 // The keymap lives in `super::keymap` (audit #55); these imports keep
 // the app's tests reading exactly as they did through `use super::*`.

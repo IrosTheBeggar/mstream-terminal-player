@@ -9,7 +9,7 @@
 use crate::discovery::DiscoveredServer;
 
 use super::{Action, App, Effect};
-use crate::tui::worker::{ApiCmd, AudioCmd};
+use crate::tui::worker::{ApiCmd, AudioCmd, Event};
 
 /// Which server this session is talking to, as one value.
 ///
@@ -315,5 +315,133 @@ impl App {
             username,
             password: std::mem::take(&mut self.connect.password),
         })]
+    }
+
+    /// Every reply about who we are connected to, and how.
+    ///
+    /// One door, like the DJ panel's (audit #57), for the same reason:
+    /// these five all land on the connect screen this module owns, and
+    /// they all decide the same three flags -- connected, connecting, and
+    /// whether the form is still submitting. Reading them together is how
+    /// you can see that they agree.
+    pub(super) fn consume_session(&mut self, event: Event) -> Vec<Effect> {
+        match event {
+            Event::Connected { server, id, username, token, ping } => {
+                self.connected = true;
+                self.connecting = false;
+                self.connect.submitting = false;
+                self.session.server = server;
+                self.session.server_id = id;
+                if token.is_some() {
+                    self.session.token = token;
+                }
+                if username.is_some() {
+                    self.session.username = username;
+                }
+                self.capabilities = crate::api::types::Capabilities::from(ping.as_ref());
+                self.libraries = ping.vpaths.clone();
+                let libraries = ping.vpaths.len();
+                self.info(format!(
+                    "connected to {} ({} librar{})",
+                    self.server_display(),
+                    libraries,
+                    if libraries == 1 { "y" } else { "ies" }
+                ));
+
+                // A remembered mode can outlive the server that supported it —
+                // preferences are global, capabilities are per-server. Say so
+                // rather than leaving a mode selected that quietly does
+                // something else.
+                if !self.autodj.available(self.capabilities) {
+                    self.autodj = self.autodj.next_available(self.capabilities);
+                    self.info(format!(
+                        "this server has no similarity index — auto-dj is on {}",
+                        self.autodj.label()
+                    ));
+                }
+
+                // Opening the browser again: whatever this browse comes back
+                // with is where we are, since neither `~` nor a remembered
+                // path is a promise about how the server will spell it.
+                self.opening = true;
+                let mut effects = vec![
+                    Effect::Api(ApiCmd::Browse(self.opening_path())),
+                    Effect::Audio(AudioCmd::SetVolume(self.volume)),
+                ];
+                // Worth persisting when we hold a token we logged in for — or
+                // a pairing code, which is the only way back to this server
+                // even when it needs no login at all.
+                let signed_in = self.session.token.is_some() && self.session.username.is_some();
+                if signed_in || self.session.tunnel_code.is_some() {
+                    effects.push(Effect::SaveSession);
+                }
+                effects
+            }
+            Event::ServersDiscovered(found) => {
+                // Results can land after the user has already made a choice.
+                // Row 0 means "the paste row" while the list is empty and
+                // "the first server" once it isn't, so without this the
+                // cursor silently retargets and Enter connects somewhere the
+                // user never picked.
+                let entered_a_code = !self.connect.code.trim().is_empty();
+                self.connect.searching = false;
+                self.connect.found = found;
+                self.connect.row = if entered_a_code {
+                    // Someone mid-paste keeps their place; otherwise the
+                    // cursor lands on the first server, which is what a user
+                    // who simply waited expects.
+                    self.connect.paste_row()
+                } else {
+                    self.connect.row.min(self.connect.paste_row())
+                };
+                Vec::new()
+            }
+            Event::TunnelReady { local_url, id } => {
+                self.connecting = false;
+                self.connect.submitting = false;
+                // The form carries the loopback address, which is a real,
+                // working endpoint for the sign-in about to happen; the
+                // identity is what the session will be filed under.
+                self.connect.server = local_url;
+                self.session.server_id = id;
+                self.connect.stage = ConnectStage::Direct;
+                self.connect.field = 1; // straight to the username
+                self.info("tunnel open — sign in to continue");
+                Vec::new()
+            }
+            Event::NeedsLogin { server } => {
+                // A reply from a connection attempt that has been overtaken —
+                // we already reached somewhere else. Applying it would drag a
+                // connected session back to a login form.
+                if self.connected {
+                    return Vec::new();
+                }
+                self.connecting = false;
+                self.connect.submitting = false;
+                self.connect.server = server;
+                self.connect.stage = ConnectStage::Direct;
+                self.connect.field = 1; // straight to the username
+                self.info("this server needs a sign-in");
+                Vec::new()
+            }
+            Event::Unauthorized => {
+                // An established session went bad. Offer the login form for
+                // the server we were already using rather than dumping the
+                // user back at "how do you want to connect?".
+                self.connected = false;
+                self.connecting = false;
+                self.connect.submitting = false;
+                if !self.session.server.is_empty() {
+                    self.connect.server = self.session.server.clone();
+                }
+                self.connect.stage = ConnectStage::Direct;
+                self.connect.field = 1;
+                self.session.token = None;
+                self.error("session expired — sign in again");
+                Vec::new()
+            }
+            // The caller matches exactly the five arms above.
+            _ => Vec::new(),
+        }
     }
 }
