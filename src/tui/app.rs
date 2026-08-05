@@ -584,7 +584,9 @@ pub struct Message {
 // the connect screen, and the [`Session`] it produces — lives in `session`
 // (audit #56), re-exported so every caller keeps saying `app::ConnectForm`.
 mod autodj;
+mod nav;
 mod session;
+pub use nav::Drill;
 pub use session::{CONNECT_METHODS, ConnectForm, ConnectStage, Session};
 
 /// How many recent tracks to keep for anchoring and cooldown. The sonic
@@ -710,11 +712,11 @@ pub struct App {
     pub library: Pane,
     /// Breadcrumb through the tag hierarchy; the last element is the view on
     /// screen. Always non-empty once the Library tab has been opened.
-    pub library_stack: Vec<LibraryNode>,
+    pub library_stack: Drill<LibraryNode>,
     /// The whole search reply, kept rather than flattened. Every class comes
     /// back in one response, so moving between them costs nothing.
     pub search_hits: Option<Box<crate::api::types::SearchResults>>,
-    pub search_stack: Vec<SearchNode>,
+    pub search_stack: Drill<SearchNode>,
     /// Whether the queue is showing as the last column. It is the end of the
     /// same chain -- artist, album, track, queued -- so it reads better as one
     /// more column than as a separate pane that is always there.
@@ -723,7 +725,7 @@ pub struct App {
     pub playlist_open: Option<String>,
     pub discover: Pane,
     /// Breadcrumb through the Discover tab, mirroring `library_stack`.
-    pub discover_stack: Vec<DiscoverNode>,
+    pub discover_stack: Drill<DiscoverNode>,
     /// The track every Discover view hangs off. Captured when a view is
     /// opened so the list doesn't quietly re-anchor when the song changes.
     pub discover_seed: Option<Track>,
@@ -832,14 +834,14 @@ impl App {
             opening: true,
             files: Pane::default(),
             library: Pane::default(),
-            library_stack: Vec::new(),
+            library_stack: Drill::new(LibraryNode::Root),
             search_hits: None,
-            search_stack: Vec::new(),
+            search_stack: Drill::new(SearchNode::Root),
             queue_column: false,
             playlists: Pane::default(),
             playlist_open: None,
             discover: Pane::default(),
-            discover_stack: Vec::new(),
+            discover_stack: Drill::new(DiscoverNode::Root),
             discover_seed: None,
             discover_artists: Vec::new(),
             search: Pane::default(),
@@ -1122,16 +1124,16 @@ impl App {
     /// Where the Search tab is: the class menu, one class, or something
     /// opened out of it.
     pub fn search_node(&self) -> &SearchNode {
-        self.search_stack.last().unwrap_or(&SearchNode::Root)
+        self.search_stack.here()
     }
 
     /// The library view currently on screen.
     pub fn library_node(&self) -> &LibraryNode {
-        self.library_stack.last().unwrap_or(&LibraryNode::Root)
+        self.library_stack.here()
     }
 
     pub fn discover_node(&self) -> &DiscoverNode {
-        self.discover_stack.last().unwrap_or(&DiscoverNode::Root)
+        self.discover_stack.here()
     }
 
     /// The tabs this server can actually serve, in order. The numbers on the
@@ -1397,7 +1399,7 @@ impl App {
                     return Some(Vec::new());
                 }
                 self.info(format!("searching for {query:?}…"));
-                self.search_stack.clear();
+                self.search_stack.reset();
                 self.search.trail.clear();
                 Some(vec![Effect::Api(ApiCmd::Search(query))])
             }
@@ -1419,15 +1421,15 @@ impl App {
 
         // Load a tab's contents the first time it's opened.
         match tab {
-            Tab::Library if self.library_stack.is_empty() => {
-                self.library_stack.push(LibraryNode::Root);
+            Tab::Library if self.library_stack.unopened() => {
+                self.library_stack.enter(LibraryNode::Root);
                 self.library.set(library_root_entries());
                 Vec::new()
             }
             Tab::Discover => {
                 self.set_discover_seed(carried);
-                if self.discover_stack.is_empty() {
-                    self.discover_stack.push(DiscoverNode::Root);
+                if self.discover_stack.unopened() {
+                    self.discover_stack.enter(DiscoverNode::Root);
                 }
                 if *self.discover_node() == DiscoverNode::Root {
                     self.discover.set(self.discover_root_entries());
@@ -1525,21 +1527,21 @@ impl App {
             }
             Entry::Node { node, label } if self.tab == Tab::Search => {
                 self.push_trail();
-                self.search_stack.push(SearchNode::Library(node.clone()));
+                self.search_stack.enter(SearchNode::Library(node.clone()));
                 self.search.set(Vec::new());
                 self.info(format!("loading {label}…"));
                 vec![Effect::Api(ApiCmd::SearchDrill(node))]
             }
             Entry::Node { node, label } => {
                 self.push_trail();
-                self.library_stack.push(node.clone());
+                self.library_stack.enter(node.clone());
                 self.library.set(Vec::new());
                 self.info(format!("loading {label}…"));
                 vec![Effect::Api(ApiCmd::Library(node))]
             }
             Entry::Search { node, label, .. } => {
                 self.push_trail();
-                self.search_stack.push(node.clone());
+                self.search_stack.enter(node.clone());
                 match node {
                     // Every class is already in hand -- no request.
                     SearchNode::Class(_) | SearchNode::Root => {
@@ -1653,11 +1655,10 @@ impl App {
                 vec![Effect::Api(ApiCmd::Browse(parent))]
             }
             Tab::Search => {
-                if self.search_stack.len() <= 1 {
+                let Some(node) = self.search_stack.back() else {
                     return None; // already at the class menu
-                }
-                self.search_stack.pop();
-                match self.search_node().clone() {
+                };
+                match node {
                     SearchNode::Root => {
                         self.search.set(self.search_root_entries());
                         Vec::new()
@@ -1673,11 +1674,10 @@ impl App {
                 }
             }
             Tab::Library => {
-                if self.library_stack.len() <= 1 {
+                let Some(node) = self.library_stack.back() else {
                     return None; // already at the mode menu
-                }
-                self.library_stack.pop();
-                match self.library_node().clone() {
+                };
+                match node {
                     LibraryNode::Root => {
                         self.library.set(library_root_entries());
                         Vec::new()
@@ -1693,11 +1693,10 @@ impl App {
                 vec![Effect::Api(ApiCmd::Playlists)]
             }
             Tab::Discover => {
-                if self.discover_stack.len() <= 1 {
+                let Some(node) = self.discover_stack.back() else {
                     return None; // already at the mode menu
-                }
-                self.discover_stack.pop();
-                match self.discover_node().clone() {
+                };
+                match node {
                     DiscoverNode::Root => {
                         // Back at the top: re-anchor on whatever is current,
                         // so the next look starts from where you are now.
@@ -1794,12 +1793,12 @@ impl App {
         // An artist's ways in are already here; going in costs nothing.
         if let DiscoverNode::Artist(artist) = &node {
             let entries = self.discover_entry_point_entries(artist);
-            self.discover_stack.push(node);
+            self.discover_stack.enter(node);
             self.discover.set(entries);
             self.message = None;
             return Vec::new();
         }
-        self.discover_stack.push(node.clone());
+        self.discover_stack.enter(node.clone());
         self.discover.set(Vec::new());
         self.info(format!("looking for {}…", label.to_lowercase()));
         self.request_discover(node)
@@ -2166,7 +2165,7 @@ impl App {
             Event::Library { node, data } => {
                 // Drop a reply for a view the user has already navigated away
                 // from, so a slow request can't overwrite the current screen.
-                if self.library_node() != &node {
+                if !self.library_stack.wants(&node) {
                     return Vec::new();
                 }
                 self.library.set(entries_from_library(data));
@@ -2176,7 +2175,7 @@ impl App {
             Event::Discover { node, data, note } => {
                 // Drop a reply for a view the user has already left, the same
                 // rule the Library tab follows.
-                if *self.discover_node() != node {
+                if !self.discover_stack.wants(&node) {
                     return Vec::new();
                 }
                 match data {
@@ -2242,7 +2241,7 @@ impl App {
                     n => format!("{n} matches"),
                 });
                 self.search_hits = Some(results);
-                self.search_stack = vec![SearchNode::Root];
+                self.search_stack.restart();
                 self.search.trail.clear();
                 self.search.set(self.search_root_entries());
                 self.message = None;
@@ -2251,7 +2250,7 @@ impl App {
             Event::SearchDrill { node, data } => {
                 // Drop a reply for a view already left, the same rule the
                 // Library and Discover tabs follow.
-                if self.search_node() != &SearchNode::Library(node) {
+                if !self.search_stack.wants(&SearchNode::Library(node)) {
                     return Vec::new();
                 }
                 self.search.set(entries_from_library(data));

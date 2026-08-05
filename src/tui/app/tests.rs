@@ -1540,7 +1540,8 @@ fn a_reply_for_an_abandoned_view_is_discarded() {
 fn genres_show_track_counts_and_lead_to_songs() {
     let mut app = connected_app();
     app.tab = Tab::Library;
-    app.library_stack = vec![LibraryNode::Root, LibraryNode::Genres];
+    app.library_stack.restart();
+    app.library_stack.enter(LibraryNode::Genres);
     app.apply_event(Event::Library {
         node: LibraryNode::Genres,
         data: LibraryData::Genres(vec![
@@ -1570,7 +1571,8 @@ fn albums_without_an_artist_still_resolve() {
     // The all-albums endpoint omits the artist field; the album name alone
     // has to be enough to fetch tracks.
     let mut app = connected_app();
-    app.library_stack = vec![LibraryNode::Root, LibraryNode::Albums];
+    app.library_stack.restart();
+    app.library_stack.enter(LibraryNode::Albums);
     app.apply_event(Event::Library {
         node: LibraryNode::Albums,
         data: LibraryData::Albums(vec![Album {
@@ -1593,7 +1595,8 @@ fn albums_without_an_artist_still_resolve() {
 #[test]
 fn recently_added_lists_tracks_directly() {
     let mut app = connected_app();
-    app.library_stack = vec![LibraryNode::Root, LibraryNode::Recent];
+    app.library_stack.restart();
+    app.library_stack.enter(LibraryNode::Recent);
     app.apply_event(Event::Library {
         node: LibraryNode::Recent,
         data: LibraryData::Tracks(vec![track("testlib/new.mp3")]),

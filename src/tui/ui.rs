@@ -3063,7 +3063,9 @@ mod tests {
         assert!(text.contains("Genres"));
         assert!(text.contains("Recently Added"));
 
-        app.library_stack = vec![LibraryNode::Root, LibraryNode::Genre("Ambient".into())];
+        app.library_stack.restart();
+
+        app.library_stack.enter(LibraryNode::Genre("Ambient".into()));
         app.apply_event(crate::tui::worker::Event::Library {
             node: LibraryNode::Genre("Ambient".into()),
             data: LibraryData::Tracks(vec![Track {
