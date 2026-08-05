@@ -184,24 +184,7 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     crate::console::claim_terminal();
     push_window_title();
 
-    // ratatui's own panic hook puts back raw mode and the alternate screen,
-    // and nothing else. Mouse capture and the window title were turned on
-    // outside that pair, so they are ours to turn off — without this, a
-    // panic dropped the shell into a stream of motion escapes, wearing our
-    // title (audit #31). Chained in front so ratatui's restore still runs.
-    // The audio thread is the exception: its panics are caught and become
-    // AudioFailed, so the hook stands back rather than tearing the
-    // terminal down under a UI that is still running.
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        if worker::panics_are_caught(std::thread::current().name()) {
-            return;
-        }
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
-        pop_window_title();
-        crate::console::release_terminal();
-        previous(info);
-    }));
+    install_panic_hook();
 
     let result =
         event_loop(&mut terminal, &mut app, &event_rx, &audio_tx, &api_tx, &event_tx, pending);
@@ -380,6 +363,27 @@ pub(crate) fn window_title(app: &App) -> String {
     }
 }
 
+/// Chain the terminal-cleanup hook in front of whatever hook is current —
+/// ratatui's, once init has run. ratatui puts back raw mode and the
+/// alternate screen, and nothing else: mouse capture and the pushed window
+/// title were turned on outside that pair, so a panic used to drop the
+/// shell into a stream of motion escapes wearing our title (audit #31).
+/// The audio thread is the exception — its panics are caught and become
+/// AudioFailed, so the hook stands back rather than tearing the terminal
+/// down under a UI that is still running (audit #32).
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if worker::panics_are_caught(std::thread::current().name()) {
+            return;
+        }
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        pop_window_title();
+        crate::console::release_terminal();
+        previous(info);
+    }));
+}
+
 fn set_window_title(title: &str) {
     use ratatui::crossterm::{execute, terminal::SetTitle};
     let _ = execute!(std::io::stdout(), SetTitle(title));
@@ -461,6 +465,47 @@ mod tests {
             row,
             modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
         }
+    }
+
+    /// `cargo test the_panic_hook -- --ignored` — swaps the process-global
+    /// panic hook, so it must run alone, not beside parallel tests.
+    /// (The cleanup bytes go to the real stdout: a mouse-off and a
+    /// title-pop, both no-ops on a terminal that never turned them on.)
+    #[test]
+    #[ignore = "swaps the process-global panic hook; run alone"]
+    fn the_panic_hook_cleans_up_then_hands_over_except_where_panics_are_caught() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let base_ran = Arc::new(AtomicUsize::new(0));
+        let counting = base_ran.clone();
+        let original = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |_| {
+            counting.fetch_add(1, Ordering::SeqCst);
+        }));
+        install_panic_hook();
+
+        // An ordinary thread's panic runs the cleanup and reaches the
+        // hook that was installed before ours — ratatui's, in real life.
+        let _ = std::thread::Builder::new()
+            .name("smoke-ordinary".into())
+            .spawn(|| panic!("ordinary"))
+            .unwrap()
+            .join();
+        assert_eq!(base_ran.load(Ordering::SeqCst), 1, "chained through to the previous hook");
+
+        // The audio thread's panic is caught downstream and reported as
+        // AudioFailed; the hook must not "recover" a terminal that is
+        // still being drawn, so nothing runs — ratatui's restore included.
+        let _ = std::thread::Builder::new()
+            .name(worker::AUDIO_THREAD.into())
+            .spawn(|| panic!("caught elsewhere"))
+            .unwrap()
+            .join();
+        assert_eq!(base_ran.load(Ordering::SeqCst), 1, "stood back for the audio thread");
+
+        let _ = std::panic::take_hook();
+        std::panic::set_hook(original);
     }
 
     #[test]

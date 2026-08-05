@@ -285,7 +285,7 @@ pub enum Event {
 // ── Audio thread ────────────────────────────────────────────────────────────
 
 /// The audio thread's name — also how the panic hook recognises it.
-const AUDIO_THREAD: &str = "mstream-audio";
+pub(crate) const AUDIO_THREAD: &str = "mstream-audio";
 
 /// Whether a panicking thread cleans up after itself. The audio loop runs
 /// under an unwind guard and reports its own death as
