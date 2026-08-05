@@ -286,24 +286,34 @@ fn event_loop(
         terminal.draw(|frame| ui::render(frame, app))?;
 
         if event::poll(poll_interval(app))? {
-            match event::read()? {
-                // Windows reports key releases as well as presses; without this
-                // filter every keystroke would act twice.
-                TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(action) = app.keymap.action(key, app.input_mode()) {
-                        pending.extend(app.handle_action(action));
+            // Everything already queued is handled before the next draw.
+            // Mouse capture arms any-motion tracking, so a sweep of the
+            // pointer is one event per cell crossed — serviced one frame
+            // apiece, with every keystroke waiting in line behind them.
+            let mut inputs = vec![event::read()?];
+            while event::poll(Duration::ZERO)? {
+                inputs.push(event::read()?);
+            }
+            for input in collapse_moves(inputs) {
+                match input {
+                    // Windows reports key releases as well as presses; without
+                    // this filter every keystroke would act twice.
+                    TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                        if let Some(action) = app.keymap.action(key, app.input_mode()) {
+                            pending.extend(app.handle_action(action));
+                        }
                     }
+                    // Only arrives when capture is on, so there is nothing to
+                    // check here. Where a thing was drawn is worked out from the
+                    // screen size rather than remembered by the drawing, which is
+                    // what keeps this to a handful of lines.
+                    TermEvent::Mouse(mouse) => {
+                        let size = terminal.size()?;
+                        let area = Rect { x: 0, y: 0, width: size.width, height: size.height };
+                        pending.extend(on_mouse(app, mouse, area));
+                    }
+                    _ => {}
                 }
-                // Only arrives when capture is on, so there is nothing to
-                // check here. Where a thing was drawn is worked out from the
-                // screen size rather than remembered by the drawing, which is
-                // what keeps this to a handful of lines.
-                TermEvent::Mouse(mouse) => {
-                    let size = terminal.size()?;
-                    let area = Rect { x: 0, y: 0, width: size.width, height: size.height };
-                    pending.extend(on_mouse(app, mouse, area));
-                }
-                _ => {}
             }
         }
 
@@ -316,6 +326,26 @@ fn event_loop(
             return Ok(());
         }
     }
+}
+
+/// Runs of pointer moves collapse to where the pointer ended up. The places
+/// it passed through between two draws could never have been seen, and each
+/// one kept is a full frame of work. Everything else — clicks, keys, and the
+/// order they came in — is kept exactly.
+fn collapse_moves(inputs: Vec<TermEvent>) -> Vec<TermEvent> {
+    let mut kept: Vec<TermEvent> = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        if let TermEvent::Mouse(now) = &input
+            && now.kind == MouseEventKind::Moved
+            && let Some(TermEvent::Mouse(last)) = kept.last_mut()
+            && last.kind == MouseEventKind::Moved
+        {
+            *last = *now;
+            continue;
+        }
+        kept.push(input);
+    }
+    kept
 }
 
 /// What the terminal's title bar should read. Paused is worth saying, because
@@ -403,6 +433,27 @@ mod tests {
             row,
             modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
         }
+    }
+
+    #[test]
+    fn a_sweep_of_pointer_moves_collapses_to_where_it_ended() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let moved = |x, y| TermEvent::Mouse(mouse_at(MouseEventKind::Moved, x, y));
+        let click = TermEvent::Mouse(mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 5));
+        let key = TermEvent::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        // Two sweeps around a click and a key: each sweep keeps only its
+        // final position, and nothing changes order or goes missing.
+        let inputs = vec![
+            moved(1, 1),
+            moved(2, 1),
+            moved(3, 1),
+            click.clone(),
+            moved(4, 2),
+            moved(9, 9),
+            key.clone(),
+        ];
+        assert_eq!(collapse_moves(inputs), vec![moved(3, 1), click, moved(9, 9), key]);
     }
 
     #[test]

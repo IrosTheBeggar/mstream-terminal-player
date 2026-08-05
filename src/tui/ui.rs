@@ -558,21 +558,56 @@ fn restyle(mut line: Line<'static>, style: Style) -> Line<'static> {
     line.patch_style(style)
 }
 
+/// The rows a `height`-row list will actually show — the correction `List`
+/// applies at render time, applied first, so only these rows need building.
+/// Every list here was building all of its rows to draw the thirty that fit:
+/// eight milliseconds a frame in a 10,000-entry folder, at ten frames a
+/// second, for nothing (audit #46).
+///
+/// The caller's state keeps the absolute offset and selection; the state
+/// returned is for rendering the slice, with both rebased onto it.
+fn visible_rows(
+    state: &mut ListState,
+    len: usize,
+    height: u16,
+) -> (std::ops::Range<usize>, ListState) {
+    let height = height as usize;
+    if len == 0 || height == 0 {
+        return (0..0, ListState::default());
+    }
+    let selected = state.selected().map(|selected| selected.min(len - 1));
+    let mut offset = state.offset().min(len - 1);
+    if let Some(selected) = selected {
+        if selected < offset {
+            offset = selected;
+        } else if selected + 1 > offset + height {
+            offset = selected + 1 - height;
+        }
+    }
+    *state.offset_mut() = offset;
+    let mut window = ListState::default();
+    window.select(selected.map(|selected| selected - offset));
+    (offset..(offset + height).min(len), window)
+}
+
 /// A column you came through. Never focused, so it is drawn quietly, with the
 /// row you took marked rather than a cursor.
 fn render_trail_column(frame: &mut Frame, area: Rect, step: &crate::tui::app::Trail) {
+    let inner = inset(area);
     let width = area.width.saturating_sub(2) as usize;
-    let items: Vec<ListItem> = step
-        .entries
+    let mut state = ListState::default();
+    state.select(Some(step.chosen));
+    let (window, mut shown) = visible_rows(&mut state, step.entries.len(), inner.height);
+    let items: Vec<ListItem> = step.entries[window.clone()]
         .iter()
         .enumerate()
-        .map(|(i, entry)| {
+        .map(|(row, entry)| {
             let line = entry_line(entry, width, None);
             // The row you came through keeps a bar of its own, so a chain of
             // columns reads as the path it is: this artist, then that album,
             // then the track you are on. Quieter than the cursor's bar, and
             // without its symbol, so which column has the keys is still plain.
-            let style = if i == step.chosen {
+            let style = if window.start + row == step.chosen {
                 Style::new().fg(dim()).add_modifier(Modifier::REVERSED)
             } else {
                 Style::new().fg(dim())
@@ -580,9 +615,7 @@ fn render_trail_column(frame: &mut Frame, area: Rect, step: &crate::tui::app::Tr
             ListItem::new(restyle(line, style))
         })
         .collect();
-    let mut state = ListState::default();
-    state.select(Some(step.chosen));
-    frame.render_stateful_widget(List::new(items), inset(area), &mut state);
+    frame.render_stateful_widget(List::new(items), inner, &mut shown);
     divider(frame, area);
 }
 
@@ -590,22 +623,7 @@ fn render_trail_column(frame: &mut Frame, area: Rect, step: &crate::tui::app::Tr
 fn render_current_column(frame: &mut Frame, area: Rect, app: &mut App) {
     let inner = inset(area);
     let content = inner.width.saturating_sub(CURSOR.len() as u16) as usize;
-    let playing = app.now_playing.as_ref().map(|track| track.filepath.as_str());
-    let items: Vec<ListItem> = app
-        .pane()
-        .entries
-        .iter()
-        .map(|entry| ListItem::new(entry_line(entry, content, playing)))
-        .collect();
-    // A filter never hides the way out, so a pane with nothing left in it is
-    // one row rather than none. Both are "nothing to see", and both want the
-    // hint — just not drawn over the row that is there.
-    let rows = items.len();
-    let nothing = app.pane().entries.iter().all(|entry| matches!(entry, Entry::Parent));
-    let list = List::new(items)
-        .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
-        .highlight_symbol(CURSOR);
-
+    let len = app.pane().entries.len();
     let state = match app.tab {
         Tab::Files => &mut app.files.state,
         Tab::Library => &mut app.library.state,
@@ -613,7 +631,22 @@ fn render_current_column(frame: &mut Frame, area: Rect, app: &mut App) {
         Tab::Search => &mut app.search.state,
         Tab::Discover => &mut app.discover.state,
     };
-    frame.render_stateful_widget(list, inner, state);
+    let (window, mut shown) = visible_rows(state, len, inner.height);
+    let playing = app.now_playing.as_ref().map(|track| track.filepath.as_str());
+    let items: Vec<ListItem> = app.pane().entries[window.clone()]
+        .iter()
+        .map(|entry| ListItem::new(entry_line(entry, content, playing)))
+        .collect();
+    // A filter never hides the way out, so a pane with nothing left in it is
+    // one row rather than none. Both are "nothing to see", and both want the
+    // hint — just not drawn over the row that is there. (A pane that small is
+    // never scrolled, so the window's row count is the pane's.)
+    let rows = items.len();
+    let nothing = app.pane().entries.iter().all(|entry| matches!(entry, Entry::Parent));
+    let list = List::new(items)
+        .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
+        .highlight_symbol(CURSOR);
+    frame.render_stateful_widget(list, inner, &mut shown);
 
     if nothing && (rows as u16) < inner.height {
         frame.render_widget(
@@ -637,14 +670,14 @@ fn render_queue_column(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
+    let (window, mut shown) =
+        visible_rows(&mut app.queue.state, app.queue.items.len(), inner.height);
     let current = app.queue.current;
-    let items: Vec<ListItem> = app
-        .queue
-        .items
+    let items: Vec<ListItem> = app.queue.items[window.clone()]
         .iter()
         .enumerate()
-        .map(|(i, track)| {
-            let playing = Some(i) == current;
+        .map(|(row, track)| {
+            let playing = Some(window.start + row) == current;
             let style = if playing { Style::new().fg(accent()) } else { Style::new() };
             let marker = if playing { "\u{25b6} " } else { "  " };
             ListItem::new(Line::from(Span::styled(
@@ -656,7 +689,7 @@ fn render_queue_column(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_stateful_widget(
         List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
         inner,
-        &mut app.queue.state,
+        &mut shown,
     );
 }
 
@@ -1107,10 +1140,11 @@ fn render_now_placeholder(frame: &mut Frame, area: Rect, what: &str, why: &str) 
 /// selection rather than keeping its own, so `d` removes the row under the
 /// cursor whichever screen you are looking at.
 ///
-/// The state is borrowed, not copied: `ListState` is `Copy`, so a tempting
-/// local `let mut state = …` compiles — and throws the corrected scroll
-/// offset away with every frame, pinning the selection to the bottom edge
-/// while the list slides underneath it.
+/// The scroll correction lands in `app.queue.state`, where `visible_rows`
+/// writes it before the slice is drawn. `ListState` is `Copy`, so a version
+/// that corrects into a local compiles happily — and throws the offset away
+/// with every frame, pinning the selection to the bottom edge while the
+/// list slides underneath it.
 fn render_now_queue(frame: &mut Frame, area: Rect, app: &mut App) {
     if app.queue.items.is_empty() {
         render_now_placeholder(frame, area, "nothing queued", "0 back, then 'a' on a track");
@@ -1118,14 +1152,14 @@ fn render_now_queue(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let width = area.width as usize;
+    let (window, mut shown) =
+        visible_rows(&mut app.queue.state, app.queue.items.len(), area.height);
     let current = app.queue.current;
-    let items: Vec<ListItem> = app
-        .queue
-        .items
+    let items: Vec<ListItem> = app.queue.items[window.clone()]
         .iter()
         .enumerate()
-        .map(|(i, track)| {
-            let playing = Some(i) == current;
+        .map(|(row, track)| {
+            let playing = Some(window.start + row) == current;
             let style = if playing { Style::new().fg(accent()) } else { Style::new() };
             let marker = if playing { "\u{25b6} " } else { "  " };
             let name = format!("{marker}{}", track.display_name());
@@ -1147,7 +1181,7 @@ fn render_now_queue(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_stateful_widget(
         List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
         area,
-        &mut app.queue.state,
+        &mut shown,
     );
 }
 
@@ -2693,6 +2727,74 @@ mod tests {
         app.now_playing = Some(tagged_track());
         assert_eq!(app.now_tab(), NowTab::Queue);
         assert!(!draw(&mut app).contains("Lyrics"));
+    }
+
+    #[test]
+    fn only_the_window_around_the_cursor_is_drawn_and_it_tracks_the_cursor() {
+        // The windowing that keeps huge folders cheap has to agree exactly
+        // with what List used to show: the cursor visible, the rows around
+        // it the right ones, and the window holding still on the way back
+        // up rather than re-deriving from the top.
+        let names: Vec<String> = (0..100).map(|i| format!("dir-{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &refs, &[]))));
+        app.files.state.select(Some(80)); // "dir-79", behind the ".." row
+
+        let text = draw(&mut app);
+        assert!(text.contains("> dir-79"), "the cursor row is drawn, with the cursor");
+        assert!(!text.contains("dir-09"), "the top of the folder scrolled away");
+
+        for _ in 0..3 {
+            app.handle_action(Action::Up);
+        }
+        let text = draw(&mut app);
+        assert!(text.contains("> dir-76"), "the cursor climbs");
+        assert!(text.contains("dir-79"), "inside a window that holds still");
+
+        app.handle_action(Action::First);
+        let text = draw(&mut app);
+        assert!(text.contains(".."), "back at the top, the parent row is the window");
+        assert!(!text.contains("dir-79"), "and the deep rows are gone");
+    }
+
+    #[test]
+    fn the_trail_column_scrolls_to_the_row_you_took() {
+        // The trail marks the row you came through; with the fix it also
+        // only builds what shows, so the marked row must still be brought
+        // into the window when it sits deep in a big folder.
+        let names: Vec<String> = (0..100).map(|i| format!("dir-{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &refs, &[]))));
+        app.files.state.select(Some(80));
+        app.handle_action(Action::Activate); // into dir-79
+        app.apply_event(Event::Listing(Box::new(listing("/lib/dir-79/", &[], &["a.mp3"]))));
+
+        let text = draw(&mut app);
+        assert!(text.contains("dir-79"), "the trail shows the row you took");
+        assert!(!text.contains("dir-19"), "not the top of the folder it lives in");
+    }
+
+    /// Not a check, a measurement — the audit's throwaway benchmark, kept:
+    /// `cargo test --release render_ten_thousand -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check; run --release with --nocapture"]
+    fn render_ten_thousand_rows_and_time_it() {
+        let names: Vec<String> = (0..10_000).map(|i| format!("dir-{i:05}")).collect();
+        let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &refs, &[]))));
+        app.files.state.select(Some(5_000));
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 26)).unwrap();
+        let frames = 200;
+        let started = std::time::Instant::now();
+        for _ in 0..frames {
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        }
+        let per_frame = started.elapsed() / frames;
+        println!(">>> {per_frame:?} per frame at 10,000 entries");
     }
 
     #[test]
