@@ -2334,6 +2334,24 @@ mod tests {
     }
 
     #[test]
+    fn a_remembered_tunnel_with_no_code_left_says_so_where_you_land() {
+        // Noticed during #62's smoke round: the error is set while deciding
+        // there is nothing to dial, and what shows next is the method
+        // chooser. If that screen didn't draw messages, the session would
+        // just be gone with no explanation.
+        let mut app = App::new(Some("mstream+iroh://endpointabc".into()), None, None);
+        let effects = app.start();
+        assert!(effects.is_empty(), "there is no code to dial with");
+
+        let text = draw(&mut app);
+        assert!(text.contains("Quick Connect"), "the chooser is what follows: {text}");
+        // Wrapped over two rows at this width, so the sentence is checked in
+        // the halves the screen really shows.
+        assert!(text.contains("the pairing code for the last server is gone"), "{text}");
+        assert!(text.contains("reconnect"), "and what to do about it: {text}");
+    }
+
+    #[test]
     fn wrapping_breaks_on_words_and_keeps_every_one() {
         let wrapped = wrap("the quick brown fox jumps", 10);
         assert_eq!(wrapped, vec!["the quick", "brown fox", "jumps"]);

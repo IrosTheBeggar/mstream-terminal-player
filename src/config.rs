@@ -1062,7 +1062,12 @@ mod tests {
 
     #[test]
     fn the_spool_dir_prefers_the_env_var_then_the_config_then_the_platform() {
-        let scratch = Scratch::new("spool");
+        // Not "spool": a Scratch name is a directory name, and engine::http's
+        // spool test hard-codes mstream-player-test-spool. Sharing it meant
+        // one test writing a config into the directory the other was
+        // counting the files in, or removing it under a save in progress —
+        // a flake in whichever of the two lost the race.
+        let scratch = Scratch::new("spool-prefs");
 
         // Nothing configured: the platform cache dir, plus our spool folder.
         let fallback = spool_dir().expect("this machine has a home directory");
@@ -1071,7 +1076,7 @@ mod tests {
 
         let mut config = Config::default();
         config.cache.dir = Some(scratch.dir.join("from-config"));
-        save(&config).unwrap();
+        save(&config).expect("saving into a scratch dir");
         assert_eq!(spool_dir(), Some(scratch.dir.join("from-config").join("spool")));
 
         // SAFETY: the Scratch guard's lock serialises env manipulation.
