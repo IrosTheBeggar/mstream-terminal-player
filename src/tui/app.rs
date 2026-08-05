@@ -115,6 +115,17 @@ impl Repeat {
     }
 }
 
+/// The one place the config file's repeat meets the shared advance rules.
+impl From<Repeat> for crate::advance::Loop {
+    fn from(repeat: Repeat) -> Self {
+        match repeat {
+            Repeat::Off => crate::advance::Loop::Off,
+            Repeat::All => crate::advance::Loop::All,
+            Repeat::One => crate::advance::Loop::One,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
@@ -462,6 +473,10 @@ impl Queue {
 
     /// Remove `index`, keeping `current` pointing at the same track.
     /// Returns true when the removed entry was the one playing.
+    ///
+    /// The index arithmetic is [`crate::advance::shift_current`]'s, shared
+    /// with the engine's queue; dropping `current` on `RemovedCurrent` —
+    /// stop, rather than restart in place — is this side's policy.
     pub fn remove(&mut self, index: usize) -> bool {
         if index >= self.items.len() {
             return false;
@@ -469,16 +484,25 @@ impl Queue {
         self.items.remove(index);
 
         let was_current = match self.current {
-            Some(cur) if cur == index => true,
-            Some(cur) if cur > index => {
-                self.current = Some(cur - 1);
-                false
+            Some(cur) => {
+                use crate::advance::RemoveOutcome;
+                let (shifted, outcome) =
+                    crate::advance::shift_current(self.items.len(), cur, index);
+                match outcome {
+                    // Emptying the queue removed the playing row too — a
+                    // one-track queue has nowhere else to point.
+                    RemoveOutcome::EmptiedQueue | RemoveOutcome::RemovedCurrent => {
+                        self.current = None;
+                        true
+                    }
+                    _ => {
+                        self.current = Some(shifted);
+                        false
+                    }
+                }
             }
-            _ => false,
+            None => false,
         };
-        if was_current {
-            self.current = None;
-        }
 
         if self.items.is_empty() {
             self.state.select(None);
@@ -502,40 +526,19 @@ impl Queue {
         self.state.select(Some(index));
     }
 
-    /// Next track to play. `manual` marks a user-pressed skip, which is never
-    /// trapped by repeat-one — the same rule the engine uses.
+    /// Next track to play. The rules live in [`crate::advance`], shared with
+    /// the engine's queue — this used to be its own copy, synced by hand
+    /// (audit #62). This is the queue that counts its shuffle pass, so
+    /// repeat-off ends even shuffled (audit #35).
     pub fn next_index(&self, manual: bool) -> Option<usize> {
-        if self.items.is_empty() {
-            return None;
-        }
-        let Some(current) = self.current else {
-            return Some(0);
-        };
-        if !manual && self.repeat == Repeat::One {
-            return Some(current);
-        }
-        if self.shuffle {
-            // No position to run out of, so the end is counted instead:
-            // the pass is over once as many tracks have started as the
-            // queue holds. Picks repeat, so this bounds the pass rather
-            // than promising that everything in it was played.
-            if self.repeat == Repeat::Off && self.played >= self.items.len() {
-                return None;
-            }
-            if self.items.len() <= 1 {
-                return Some(0);
-            }
-            let offset = fastrand::usize(1..self.items.len());
-            return Some((current + offset) % self.items.len());
-        }
-        let next = current + 1;
-        if next < self.items.len() {
-            Some(next)
-        } else if self.repeat == Repeat::All {
-            Some(0)
-        } else {
-            None
-        }
+        crate::advance::pick_next(
+            self.items.len(),
+            self.current,
+            self.shuffle,
+            self.repeat.into(),
+            manual,
+            Some(self.played),
+        )
     }
 
     pub fn prev_index(&self) -> Option<usize> {

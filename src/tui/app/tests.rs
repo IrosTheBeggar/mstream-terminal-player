@@ -8,6 +8,18 @@ fn track(path: &str) -> Track {
     Track { filepath: path.to_string(), metadata: TrackMetadata::default() }
 }
 
+#[test]
+fn removing_the_only_track_while_it_plays_reports_it_was_current() {
+    // The emptied-queue outcome has to count as removing the current row —
+    // a one-track queue has nowhere else to point, and reporting false
+    // here would leave playback running on a track no longer queued.
+    let mut queue = Queue::default();
+    queue.replace(vec![track("solo")]);
+    queue.start(0);
+    assert!(queue.remove(0), "the emptied queue took the playing row with it");
+    assert_eq!(queue.current, None);
+}
+
 /// The source the app actually asked for. A status has to name it to be
 /// about the track now playing, so tests cannot invent one.
 fn played_url(effects: &[Effect]) -> String {

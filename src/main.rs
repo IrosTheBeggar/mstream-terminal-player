@@ -1,3 +1,4 @@
+mod advance;
 mod api;
 mod cmd_library;
 mod cmd_play;

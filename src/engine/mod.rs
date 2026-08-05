@@ -54,6 +54,17 @@ impl LoopMode {
     }
 }
 
+/// The one place the serve API's loop mode meets the shared advance rules.
+impl From<LoopMode> for crate::advance::Loop {
+    fn from(mode: LoopMode) -> Self {
+        match mode {
+            LoopMode::None => crate::advance::Loop::Off,
+            LoopMode::One => crate::advance::Loop::One,
+            LoopMode::All => crate::advance::Loop::All,
+        }
+    }
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -107,59 +118,32 @@ pub(crate) struct QueueState {
     pub loop_mode: LoopMode,
 }
 
-/// Pick the next index based on shuffle/loop settings. `manual` skips honor
-/// shuffle and loop-all wrapping but are never trapped by loop-one — that mode
-/// only applies to automatic track-end advancement.
+/// Pick the next index based on shuffle/loop settings. The rules live in
+/// [`crate::advance`], shared with the TUI's queue — this used to be its own
+/// copy, synced by hand (audit #62). Nobody counts the shuffle pass here, so
+/// a shuffled queue under loop=none still never ends (audit #9, deferred).
 pub(crate) fn pick_next(q: &QueueState, manual: bool) -> Option<usize> {
-    if q.queue.is_empty() {
-        return None;
-    }
-    if !manual && q.loop_mode == LoopMode::One {
-        return Some(q.index);
-    }
-    if q.shuffle {
-        if q.queue.len() <= 1 {
-            return Some(0);
-        }
-        let offset = fastrand::usize(1..q.queue.len());
-        return Some((q.index + offset) % q.queue.len());
-    }
-    let next = q.index + 1;
-    if next < q.queue.len() {
-        Some(next)
-    } else if q.loop_mode == LoopMode::All {
-        Some(0)
-    } else {
-        None
-    }
+    crate::advance::pick_next(
+        q.queue.len(),
+        Some(q.index),
+        q.shuffle,
+        q.loop_mode.into(),
+        manual,
+        None,
+    )
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum RemoveOutcome {
-    EmptiedQueue,
-    RemovedBeforeCurrent,
-    RemovedCurrent,
-    RemovedAfterCurrent,
-}
+pub(crate) use crate::advance::RemoveOutcome;
 
 /// Remove `index` (caller has bounds-checked) and fix up the current index.
+/// The arithmetic is [`crate::advance::shift_current`]'s, shared with the
+/// TUI's queue; keeping the clamped index and restarting in place on
+/// `RemovedCurrent` is this side's policy.
 pub(crate) fn apply_remove(q: &mut QueueState, index: usize) -> RemoveOutcome {
     q.queue.remove(index);
-    if q.queue.is_empty() {
-        q.index = 0;
-        return RemoveOutcome::EmptiedQueue;
-    }
-    if index < q.index {
-        q.index -= 1;
-        return RemoveOutcome::RemovedBeforeCurrent;
-    }
-    if index == q.index {
-        if q.index >= q.queue.len() {
-            q.index = q.queue.len() - 1;
-        }
-        return RemoveOutcome::RemovedCurrent;
-    }
-    RemoveOutcome::RemovedAfterCurrent
+    let (shifted, outcome) = crate::advance::shift_current(q.queue.len(), q.index, index);
+    q.index = shifted;
+    outcome
 }
 
 // ── Status snapshots ────────────────────────────────────────────────────────
