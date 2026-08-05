@@ -19,8 +19,10 @@ const SERVICE_TYPE: &str = "_mstream._tcp.local.";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredServer {
     /// Friendly name from the advert, falling back to the instance label.
+    /// Network-chosen, so it arrives gated: printable, one line, bounded.
     pub name: String,
     pub base_url: String,
+    /// Advertised version, through the same gate as `name`.
     pub version: Option<String>,
     /// The server advertises an Iroh tunnel, so a pairing code can be used.
     pub quick_connect: bool,
@@ -70,16 +72,61 @@ fn to_server(info: &mdns_sd::ResolvedService) -> Option<DiscoveredServer> {
     // fallback.
     let port = txt("port").and_then(|p| p.parse::<u16>().ok()).unwrap_or(info.port);
 
-    let name = txt("name")
-        .filter(|n| !n.trim().is_empty())
-        .unwrap_or_else(|| instance_label(&info.fullname));
-
     Some(DiscoveredServer {
-        name,
+        name: display_name(txt("name").as_deref(), &info.fullname),
         base_url: base_url(txt("scheme").as_deref(), &address, port, txt("path").as_deref())?,
-        version: txt("v"),
+        version: display_version(txt("v").as_deref()),
         quick_connect: txt("iroh").as_deref() == Some("1"),
     })
+}
+
+/// The one name a discovered row will ever draw, whoever chose it.
+///
+/// Both candidates — the TXT `name` and the instance label behind it — are
+/// bytes a stranger on the network typed (finding #71). A responder calling
+/// itself "Porch\r\n\x1b[41m ROGUE" drew two rows and a red background,
+/// through `discover`'s println! and the Quick Connect list alike: a CR
+/// inside a ratatui Span lands in a cell, crossterm emits it, and the frame
+/// below it shifts — so the row a user reads is no longer the row their
+/// cursor is on. The gate sits here, where the record is read, so every
+/// screen downstream draws plain text.
+fn display_name(advertised: Option<&str>, fullname: &str) -> String {
+    // Wide enough for any honest name. The picker pads every row to the
+    // widest name, so one long advert would push every URL off the screen.
+    const CAP: usize = 40;
+    let name = advertised
+        .map(|n| printable(n, CAP))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| printable(&instance_label(fullname), CAP));
+    if name.is_empty() {
+        // Both candidates gated away to nothing; the row still needs a label.
+        "(unnamed)".to_string()
+    } else {
+        name
+    }
+}
+
+/// The advertised version, if anything printable is left of it.
+fn display_version(advertised: Option<&str>) -> Option<String> {
+    // "5.13.0" needs six; nothing past sixteen is still a version string.
+    advertised.map(|v| printable(v, 16)).filter(|v| !v.is_empty())
+}
+
+/// `raw` minus every character that steers a terminal or a reader instead of
+/// showing itself, trimmed, and cut to `cap` characters.
+fn printable(raw: &str, cap: usize) -> String {
+    let kept: String = raw.chars().filter(|c| !steers(*c)).collect();
+    kept.trim().chars().take(cap).collect()
+}
+
+/// Characters that act on the terminal rather than appear in it: the C0/C1
+/// controls (CR and LF split a row; ESC and the C1 CSI open ANSI sequences
+/// that recolour, wipe or move things), plus the bidi embedding, override
+/// and isolate marks, which draw nothing but visually reorder everything
+/// after them — in a picker, the difference between the row a user reads
+/// and the row they select.
+fn steers(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// Where an advert says its server lives, or `None` for one we won't offer.
@@ -331,5 +378,75 @@ mod tests {
         assert_eq!(instance_label("Living Room._mstream._tcp.local."), "Living Room");
         // Anything unexpected is passed through rather than mangled.
         assert_eq!(instance_label("odd-name"), "odd-name");
+    }
+
+    #[test]
+    fn the_rogue_porch_advert_draws_as_one_plain_row() {
+        // Finding #71's live proof, byte for byte: CR LF to split the row,
+        // ESC [41m to paint it red. What survives is text on one line.
+        let name =
+            display_name(Some("Porch\r\n\x1b[41m  ROGUE  \x1b[0m"), "x._mstream._tcp.local.");
+        assert_eq!(name, "Porch[41m  ROGUE  [0m");
+    }
+
+    #[test]
+    fn nothing_that_steers_a_terminal_survives_the_gate() {
+        for hostile in [
+            "two\rrows",
+            "two\nrows",
+            "wipe\x1b[2J",
+            "c1 csi \u{9b}31m",
+            "bell \x07",
+            "tab\tstop",
+            "reorder \u{202E}me",
+            "isolate \u{2066}me\u{2069}",
+        ] {
+            let name = display_name(Some(hostile), "x._mstream._tcp.local.");
+            assert!(
+                name.chars().all(|c| !c.is_control()),
+                "{hostile:?} kept a control character: {name:?}"
+            );
+            assert!(
+                !name.contains(|c| ('\u{202A}'..='\u{202E}').contains(&c)
+                    || ('\u{2066}'..='\u{2069}').contains(&c)),
+                "{hostile:?} kept a bidi mark: {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_honest_advert_is_untouched() {
+        assert_eq!(display_name(Some("Living Room"), "x._mstream._tcp.local."), "Living Room");
+        assert_eq!(display_name(Some("Büro 🎵"), "x._mstream._tcp.local."), "Büro 🎵");
+        assert_eq!(display_version(Some("5.13.0")), Some("5.13.0".to_string()));
+        assert_eq!(display_version(None), None);
+    }
+
+    #[test]
+    fn a_name_with_nothing_printable_falls_back_like_a_blank_one_always_has() {
+        // Whitespace-only names have always fallen back to the instance
+        // label; a name that is all ESC and CR is the same advert in gloves.
+        assert_eq!(display_name(Some("   "), "Porch._mstream._tcp.local."), "Porch");
+        assert_eq!(display_name(Some("\x1b\r\n"), "Porch._mstream._tcp.local."), "Porch");
+        // Outer whitespace goes too: it only skews the column.
+        assert_eq!(display_name(Some("  Porch  "), "x._mstream._tcp.local."), "Porch");
+    }
+
+    #[test]
+    fn the_instance_label_is_a_strangers_bytes_too() {
+        // No TXT name, and the mDNS instance itself is hostile: the fallback
+        // goes through the same gate.
+        assert_eq!(display_name(None, "Rogue\x1b[2J._mstream._tcp.local."), "Rogue[2J");
+        // Every candidate gated away: the row still needs a label to click.
+        assert_eq!(display_name(Some("\x1b"), "\u{7}._mstream._tcp.local."), "(unnamed)");
+    }
+
+    #[test]
+    fn an_endless_name_cannot_push_the_urls_off_the_screen() {
+        // The picker pads every row to the widest name; a 300-character name
+        // would carry every URL past the right edge.
+        let name = display_name(Some(&"x".repeat(300)), "y._mstream._tcp.local.");
+        assert_eq!(name.chars().count(), 40);
+        assert_eq!(display_version(Some(&"9".repeat(300))).unwrap().chars().count(), 16);
     }
 }
