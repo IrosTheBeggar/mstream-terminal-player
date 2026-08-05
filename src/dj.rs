@@ -441,8 +441,12 @@ pub fn build_random_request(
 const BPM_FLOOR: f64 = 40.0;
 const BPM_CEILING: f64 = 220.0;
 
-pub const TIGHT_TOLERANCE: f64 = 0.06;
-pub const WIDE_TOLERANCE: f64 = 0.12;
+/// The tempo tolerance a fresh install runs, as the percentage the panel
+/// shows and the config file stores. It was a pair of f64 fractions here
+/// (0.06 and 0.12) for the `dj` command to hand-build windows with; now that
+/// the command asks the builder like everything else, the tolerance comes
+/// from the settings and the wide set is twice it, worked out in one place.
+pub const DEFAULT_TEMPO_TOLERANCE: u32 = 6;
 
 /// Windows around a seed tempo at the same, half and double time.
 ///
@@ -466,6 +470,12 @@ pub fn bpm_windows(bpm: f64, tolerance: f64) -> Vec<BpmWindow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default tolerance as a fraction, and the wide set the server
+    /// relaxes to — derived from the shipped default rather than restated,
+    /// so changing it moves these windows with it.
+    const TIGHT: f64 = DEFAULT_TEMPO_TOLERANCE as f64 / 100.0;
+    const WIDE: f64 = TIGHT * 2.0;
 
     fn code(raw: &str) -> Option<String> {
         to_camelot(raw).map(|c| c.code())
@@ -565,7 +575,7 @@ mod tests {
 
     #[test]
     fn bpm_windows_cover_half_and_double_time() {
-        let windows = bpm_windows(100.0, TIGHT_TOLERANCE);
+        let windows = bpm_windows(100.0, TIGHT);
         assert_eq!(windows.len(), 3);
         assert_eq!(windows[0], BpmWindow { min: 94.0, max: 106.0 });
         assert_eq!(windows[1], BpmWindow { min: 47.0, max: 53.0 }, "half time");
@@ -576,22 +586,22 @@ mod tests {
     fn bpm_windows_drop_implausible_centers() {
         // Half of 70 is 35 — below anything a track is actually tagged at, so
         // a slow seed only gets its own window and the double-time one.
-        let windows = bpm_windows(70.0, TIGHT_TOLERANCE);
+        let windows = bpm_windows(70.0, TIGHT);
         assert_eq!(windows.len(), 2);
         assert!(windows.iter().all(|w| w.min > BPM_FLOOR));
 
         // Symmetrically, a fast seed loses double-time: 120 → 240 is past
         // anything real libraries tag, while 60 is perfectly ordinary.
-        let windows = bpm_windows(120.0, TIGHT_TOLERANCE);
+        let windows = bpm_windows(120.0, TIGHT);
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[1], BpmWindow { min: 56.4, max: 63.6 }, "half time survives");
-        assert_eq!(bpm_windows(170.0, TIGHT_TOLERANCE).len(), 2);
+        assert_eq!(bpm_windows(170.0, TIGHT).len(), 2);
     }
 
     #[test]
     fn wide_windows_are_wider_than_tight_ones() {
-        let tight = bpm_windows(128.0, TIGHT_TOLERANCE)[0];
-        let wide = bpm_windows(128.0, WIDE_TOLERANCE)[0];
+        let tight = bpm_windows(128.0, TIGHT)[0];
+        let wide = bpm_windows(128.0, WIDE)[0];
         assert!(wide.min < tight.min && wide.max > tight.max);
     }
 
@@ -873,8 +883,8 @@ mod tests {
 
     #[test]
     fn bpm_windows_reject_nonsense_input() {
-        assert!(bpm_windows(0.0, TIGHT_TOLERANCE).is_empty());
-        assert!(bpm_windows(-5.0, TIGHT_TOLERANCE).is_empty());
-        assert!(bpm_windows(f64::NAN, TIGHT_TOLERANCE).is_empty());
+        assert!(bpm_windows(0.0, TIGHT).is_empty());
+        assert!(bpm_windows(-5.0, TIGHT).is_empty());
+        assert!(bpm_windows(f64::NAN, TIGHT).is_empty());
     }
 }

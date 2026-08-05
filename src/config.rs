@@ -179,8 +179,7 @@ pub struct AutoDjPrefs {
 impl Default for AutoDjPrefs {
     fn default() -> Self {
         AutoDjPrefs {
-            // Matches dj::TIGHT_TOLERANCE, the value Phase 4 shipped with.
-            tempo_tolerance: 6,
+            tempo_tolerance: crate::dj::DEFAULT_TEMPO_TOLERANCE,
             key_matching: "compatible".to_string(),
             min_rating: 0,
             // A little variety by default; a session that repeats an artist
