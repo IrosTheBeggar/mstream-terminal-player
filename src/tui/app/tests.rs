@@ -264,6 +264,7 @@ fn every_tab_filters_its_own_list() {
 
     app.handle_action(Action::SelectTab(1));
     app.apply_event(Event::Library {
+        dest: Tab::Library,
         node: LibraryNode::Root,
         data: LibraryData::Artists(vec!["Bassnectar".into(), "Portishead".into()]),
     });
@@ -677,13 +678,17 @@ fn every_class_a_search_matched_is_reachable() {
         album_art_file: None,
         metadata: TrackMetadata::default(),
     };
-    app.apply_event(Event::SearchResults(Box::new(SearchResults {
-        artists: vec![SearchGroup { name: "Moon Hooch".into(), album_art_file: None }],
-        albums: vec![],
-        title: vec![hit("lib/a.mp3")],
-        files: vec![hit("lib/a.mp3"), hit("lib/b.mp3")],
-        lyrics: vec![],
-    })));
+    app.search_submitted = Some("moon".into());
+    app.apply_event(Event::SearchResults {
+        query: "moon".into(),
+        results: Box::new(SearchResults {
+            artists: vec![SearchGroup { name: "Moon Hooch".into(), album_art_file: None }],
+            albums: vec![],
+            title: vec![hit("lib/a.mp3")],
+            files: vec![hit("lib/a.mp3"), hit("lib/b.mp3")],
+            lyrics: vec![],
+        }),
+    });
 
     // The artist hit used to be counted into a sentence and thrown away.
     // Classes that matched nothing stay out of the menu.
@@ -703,12 +708,16 @@ fn every_class_a_search_matched_is_reachable() {
     assert!(app.handle_action(Action::Activate).is_empty(), "no request to open a class");
     assert_eq!(app.search_node(), &SearchNode::Class(SearchClass::Artists));
 
-    // And the artist opens the same place the Library tab would, under a
-    // command of its own so the reply cannot land in the wrong column.
+    // And the artist opens the same place the Library tab would, with the
+    // search tab named as the destination so the reply cannot land in the
+    // wrong column.
     let effects = app.handle_action(Action::Activate);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::SearchDrill(LibraryNode::Artist("Moon Hooch".into())))]
+        vec![Effect::Api(ApiCmd::Library {
+            node: LibraryNode::Artist("Moon Hooch".into()),
+            dest: Tab::Search,
+        })]
     );
 
     // A track that matched on two classes is listed under both, which is
@@ -1451,8 +1460,12 @@ fn drilling_from_artists_to_an_album_of_tracks() {
 
     // Artists
     let effects = app.handle_action(Action::Activate);
-    assert_eq!(effects, vec![Effect::Api(ApiCmd::Library(LibraryNode::Artists))]);
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::Library { node: LibraryNode::Artists, dest: Tab::Library })]
+    );
     app.apply_event(Event::Library {
+        dest: Tab::Library,
         node: LibraryNode::Artists,
         data: LibraryData::Artists(vec!["Signal Chain".into(), "Terminal Test".into()]),
     });
@@ -1462,9 +1475,13 @@ fn drilling_from_artists_to_an_album_of_tracks() {
     let effects = app.handle_action(Action::Activate);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::Library(LibraryNode::Artist("Signal Chain".into())))]
+        vec![Effect::Api(ApiCmd::Library {
+            node: LibraryNode::Artist("Signal Chain".into()),
+            dest: Tab::Library,
+        })]
     );
     app.apply_event(Event::Library {
+        dest: Tab::Library,
         node: LibraryNode::Artist("Signal Chain".into()),
         data: LibraryData::Albums(vec![Album {
             name: Some("Second Album".into()),
@@ -1478,12 +1495,16 @@ fn drilling_from_artists_to_an_album_of_tracks() {
     let effects = app.handle_action(Action::Activate);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::Library(LibraryNode::Album {
-            name: "Second Album".into(),
-            artist: Some("Signal Chain".into()),
-        }))]
+        vec![Effect::Api(ApiCmd::Library {
+            node: LibraryNode::Album {
+                name: "Second Album".into(),
+                artist: Some("Signal Chain".into()),
+            },
+            dest: Tab::Library,
+        })]
     );
     app.apply_event(Event::Library {
+        dest: Tab::Library,
         node: LibraryNode::Album {
             name: "Second Album".into(),
             artist: Some("Signal Chain".into()),
@@ -1503,6 +1524,7 @@ fn back_walks_the_library_stack_to_the_menu() {
     app.handle_action(Action::SelectTab(1));
     app.handle_action(Action::Activate); // → Artists
     app.apply_event(Event::Library {
+        dest: Tab::Library,
         node: LibraryNode::Artists,
         data: LibraryData::Artists(vec!["Solo".into()]),
     });
@@ -1529,6 +1551,7 @@ fn a_reply_for_an_abandoned_view_is_discarded() {
     app.handle_action(Action::Back); // …then changed our mind
 
     app.apply_event(Event::Library {
+        dest: Tab::Library,
         node: LibraryNode::Artists,
         data: LibraryData::Artists(vec!["Ghost".into()]),
     });
@@ -1543,6 +1566,7 @@ fn genres_show_track_counts_and_lead_to_songs() {
     app.library_stack.restart();
     app.library_stack.enter(LibraryNode::Genres);
     app.apply_event(Event::Library {
+        dest: Tab::Library,
         node: LibraryNode::Genres,
         data: LibraryData::Genres(vec![
             Genre { name: "Ambient".into(), track_count: Some(2) },
@@ -1562,7 +1586,10 @@ fn genres_show_track_counts_and_lead_to_songs() {
     let effects = app.handle_action(Action::Activate);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::Library(LibraryNode::Genre("Ambient".into())))]
+        vec![Effect::Api(ApiCmd::Library {
+            node: LibraryNode::Genre("Ambient".into()),
+            dest: Tab::Library,
+        })]
     );
 }
 
@@ -1574,6 +1601,7 @@ fn albums_without_an_artist_still_resolve() {
     app.library_stack.restart();
     app.library_stack.enter(LibraryNode::Albums);
     app.apply_event(Event::Library {
+        dest: Tab::Library,
         node: LibraryNode::Albums,
         data: LibraryData::Albums(vec![Album {
             name: Some("Phase Three".into()),
@@ -1598,6 +1626,7 @@ fn recently_added_lists_tracks_directly() {
     app.library_stack.restart();
     app.library_stack.enter(LibraryNode::Recent);
     app.apply_event(Event::Library {
+        dest: Tab::Library,
         node: LibraryNode::Recent,
         data: LibraryData::Tracks(vec![track("testlib/new.mp3")]),
     });
@@ -2141,9 +2170,11 @@ fn changing_the_length_asks_for_a_different_arc() {
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
+    let asked = app.journey.as_ref().unwrap().length;
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
+        length: asked,
     });
     assert!(!app.journey.as_ref().unwrap().pending);
 
@@ -2170,9 +2201,11 @@ fn queueing_a_journey_replaces_the_queue_and_starts_it() {
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
+    let asked = app.journey.as_ref().unwrap().length;
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
+        length: asked,
     });
 
     let effects = app.handle_action(Action::Submit);
@@ -2187,6 +2220,94 @@ fn queueing_a_journey_replaces_the_queue_and_starts_it() {
 }
 
 #[test]
+fn search_replies_that_pass_each_other_cannot_swap_the_results() {
+    // Reads answer on their own threads now, so the reply for an old
+    // search can land after the reply for the current one. Only the
+    // query last submitted is still wanted.
+    let mut app = connected_app();
+    app.handle_action(Action::SelectTab(3));
+    for c in "one".chars() {
+        app.handle_action(Action::Input(c));
+    }
+    app.handle_action(Action::Submit);
+    app.handle_action(Action::StartSearch);
+    for _ in 0.."one".len() {
+        app.handle_action(Action::Backspace);
+    }
+    for c in "two".chars() {
+        app.handle_action(Action::Input(c));
+    }
+    app.handle_action(Action::Submit);
+
+    let stale = app.apply_event(Event::SearchResults {
+        query: "one".into(),
+        results: Box::default(),
+    });
+    assert!(stale.is_empty());
+    assert_eq!(app.search_summary, None, "the overtaken search says nothing");
+
+    app.apply_event(Event::SearchResults {
+        query: "two".into(),
+        results: Box::default(),
+    });
+    assert_eq!(app.search_summary.as_deref(), Some("0 matches"), "the current one lands");
+}
+
+#[test]
+fn a_journey_reply_for_a_length_since_changed_keeps_waiting() {
+    let mut app = connected_app();
+    app.queue.replace(vec![track("from")]);
+    app.play_index(0);
+    browsing(&mut app, &["to"], 0);
+    app.handle_action(Action::StartJourney);
+    let first = app.journey.as_ref().unwrap().length;
+    app.handle_action(Action::SeekForward); // ask for a longer arc
+
+    // The reply to the original length answers a request nobody is
+    // tracking any more: the stops stay empty and the panel keeps waiting.
+    app.apply_event(Event::Journey {
+        stops: vec![stop("stale", 0.0)],
+        note: None,
+        length: first,
+    });
+    let journey = app.journey.as_ref().unwrap();
+    assert!(journey.stops.is_empty(), "an arc of the wrong length is not this arc");
+    assert!(journey.pending, "still waiting on the length actually asked for");
+
+    app.apply_event(Event::Journey {
+        stops: vec![stop("fresh", 0.0)],
+        note: None,
+        length: first + 2,
+    });
+    let journey = app.journey.as_ref().unwrap();
+    assert_eq!(journey.stops.len(), 1);
+    assert!(!journey.pending);
+}
+
+#[test]
+fn drilling_out_of_search_lights_the_search_tab_spinner() {
+    // The destination now travels with the command, so note_pending can't
+    // forget a case: the old SearchDrill command wasn't in its table at
+    // all, and this spinner never lit.
+    let mut app = connected_app();
+    app.handle_action(Action::SelectTab(3));
+    app.search_submitted = Some("moon".into());
+    app.apply_event(Event::SearchResults {
+        query: "moon".into(),
+        results: Box::new(crate::api::types::SearchResults {
+            artists: vec![crate::api::types::SearchGroup {
+                name: "Moon Hooch".into(),
+                album_art_file: None,
+            }],
+            ..Default::default()
+        }),
+    });
+    app.handle_action(Action::Activate); // into the Artists class
+    app.handle_action(Action::Activate); // into the artist — a request
+    assert!(app.search.loading, "the tab that asked is the tab that spins");
+}
+
+#[test]
 fn a_journey_reply_that_arrives_after_it_is_closed_is_dropped() {
     let mut app = connected_app();
     app.queue.replace(vec![track("from")]);
@@ -2195,7 +2316,7 @@ fn a_journey_reply_that_arrives_after_it_is_closed_is_dropped() {
     app.handle_action(Action::StartJourney);
     app.handle_action(Action::Cancel);
 
-    app.apply_event(Event::Journey { stops: vec![stop("late", 0.0)], note: None });
+    app.apply_event(Event::Journey { stops: vec![stop("late", 0.0)], note: None, length: 14 });
     assert!(app.journey.is_none(), "it stays closed");
     assert_eq!(app.queue.items.len(), 1, "and nothing is queued behind the user's back");
 }

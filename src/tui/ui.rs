@@ -3067,6 +3067,7 @@ mod tests {
 
         app.library_stack.enter(LibraryNode::Genre("Ambient".into()));
         app.apply_event(crate::tui::worker::Event::Library {
+            dest: Tab::Library,
             node: LibraryNode::Genre("Ambient".into()),
             data: LibraryData::Tracks(vec![Track {
                 filepath: "lib/a.mp3".into(),
@@ -3202,6 +3203,7 @@ mod tests {
                 },
             ],
             note: None,
+            length: app.journey.as_ref().unwrap().length,
         });
 
         let text = draw_sized(&mut app, 100, 30);
@@ -3234,6 +3236,7 @@ mod tests {
                 })
                 .collect(),
             note: None,
+            length: app.journey.as_ref().unwrap().length,
         });
         // A 32-stop arc in a short terminal must scroll, not overflow.
         let text = draw_sized(&mut app, 60, 20);
@@ -3467,6 +3470,7 @@ mod tests {
         let mut app = connected_app();
         app.handle_action(Action::SelectTab(1));
         app.apply_event(Event::Library {
+            dest: Tab::Library,
             node: LibraryNode::Root,
             data: LibraryData::Artists(vec!["Bassnectar".into(), "ill Gates".into()]),
         });
@@ -3858,7 +3862,10 @@ mod tests {
         assert!(draw(&mut app).contains("Search: moon"));
 
         app.handle_action(Action::Submit);
-        app.apply_event(Event::SearchResults(Box::new(Default::default())));
+        app.apply_event(Event::SearchResults {
+            query: "moon".into(),
+            results: Box::default(),
+        });
         assert!(draw(&mut app).contains("0 matches"));
     }
 
@@ -3867,22 +3874,29 @@ mod tests {
         use crate::api::types::{SearchGroup, SearchResults, SearchTrack};
         let mut app = connected_app();
         app.handle_action(Action::SelectTab(3));
+        for c in "moon".chars() {
+            app.handle_action(Action::Input(c));
+        }
+        app.handle_action(Action::Submit);
         let hit = |name: &str| SearchTrack {
             name: name.into(),
             filepath: format!("lib/{name}.mp3"),
             album_art_file: None,
             metadata: TrackMetadata::default(),
         };
-        app.apply_event(Event::SearchResults(Box::new(SearchResults {
-            artists: vec![
-                SearchGroup { name: "Moon Hooch".into(), album_art_file: None },
-                SearchGroup { name: "Moondog".into(), album_art_file: None },
-            ],
-            albums: vec![],
-            title: vec![hit("Moonlight")],
-            files: vec![],
-            lyrics: vec![hit("Harvest")],
-        })));
+        app.apply_event(Event::SearchResults {
+            query: "moon".into(),
+            results: Box::new(SearchResults {
+                artists: vec![
+                    SearchGroup { name: "Moon Hooch".into(), album_art_file: None },
+                    SearchGroup { name: "Moondog".into(), album_art_file: None },
+                ],
+                albums: vec![],
+                title: vec![hit("Moonlight")],
+                files: vec![],
+                lyrics: vec![hit("Harvest")],
+            }),
+        });
 
         let text = draw(&mut app);
         assert!(text.contains("Artists"), "{text}");

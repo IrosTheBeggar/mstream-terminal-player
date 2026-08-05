@@ -739,6 +739,10 @@ pub struct App {
     /// to narrow a list and then move around what's left.
     pub filtering: bool,
     pub search_summary: Option<String>,
+    /// The query whose results are still wanted — the last one submitted.
+    /// Replies answer on their own threads and can pass each other, so a
+    /// result set has to name the search it belongs to.
+    search_submitted: Option<String>,
 
     pub queue: Queue,
     /// What the connected server offers. Default (nothing) until a ping says
@@ -849,6 +853,7 @@ impl App {
             editing_query: false,
             filtering: false,
             search_summary: None,
+            search_submitted: None,
             queue: Queue::default(),
             capabilities: Default::default(),
             libraries: Vec::new(),
@@ -1061,7 +1066,7 @@ impl App {
             }
             let tab = match effect {
                 Effect::Api(ApiCmd::Browse(_)) => Tab::Files,
-                Effect::Api(ApiCmd::Library(_)) => Tab::Library,
+                Effect::Api(ApiCmd::Library { dest, .. }) => *dest,
                 Effect::Api(ApiCmd::Playlists | ApiCmd::LoadPlaylist(_)) => Tab::Playlists,
                 Effect::Api(ApiCmd::Search(_)) => Tab::Search,
                 Effect::Api(ApiCmd::Discover { .. }) => Tab::Discover,
@@ -1401,6 +1406,7 @@ impl App {
                 self.info(format!("searching for {query:?}…"));
                 self.search_stack.reset();
                 self.search.trail.clear();
+                self.search_submitted = Some(query.clone());
                 Some(vec![Effect::Api(ApiCmd::Search(query))])
             }
             _ => None,
@@ -1530,14 +1536,14 @@ impl App {
                 self.search_stack.enter(SearchNode::Library(node.clone()));
                 self.search.set(Vec::new());
                 self.info(format!("loading {label}…"));
-                vec![Effect::Api(ApiCmd::SearchDrill(node))]
+                vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Search })]
             }
             Entry::Node { node, label } => {
                 self.push_trail();
                 self.library_stack.enter(node.clone());
                 self.library.set(Vec::new());
                 self.info(format!("loading {label}…"));
-                vec![Effect::Api(ApiCmd::Library(node))]
+                vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Library })]
             }
             Entry::Search { node, label, .. } => {
                 self.push_trail();
@@ -1551,7 +1557,7 @@ impl App {
                     SearchNode::Library(node) => {
                         self.search.set(Vec::new());
                         self.info(format!("loading {label}…"));
-                        vec![Effect::Api(ApiCmd::SearchDrill(node))]
+                        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Search })]
                     }
                 }
             }
@@ -1669,7 +1675,7 @@ impl App {
                     }
                     SearchNode::Library(node) => {
                         self.search.set(Vec::new());
-                        vec![Effect::Api(ApiCmd::SearchDrill(node))]
+                        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Search })]
                     }
                 }
             }
@@ -1684,7 +1690,7 @@ impl App {
                     }
                     node => {
                         self.library.set(Vec::new());
-                        vec![Effect::Api(ApiCmd::Library(node))]
+                        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Library })]
                     }
                 }
             }
@@ -2162,13 +2168,19 @@ impl App {
                 self.files.set(entries_from_listing(&listing, &root));
                 Vec::new()
             }
-            Event::Library { node, data } => {
+            Event::Library { node, dest, data } => {
                 // Drop a reply for a view the user has already navigated away
                 // from, so a slow request can't overwrite the current screen.
-                if !self.library_stack.wants(&node) {
+                // Which drill answers depends on who asked — the Search tab
+                // files library nodes under its own trail.
+                let fresh = match dest {
+                    Tab::Search => self.search_stack.wants(&SearchNode::Library(node)),
+                    _ => self.library_stack.wants(&node),
+                };
+                if !fresh {
                     return Vec::new();
                 }
-                self.library.set(entries_from_library(data));
+                self.pane_for_mut(dest).set(entries_from_library(data));
                 self.message = None;
                 Vec::new()
             }
@@ -2230,7 +2242,13 @@ impl App {
                 self.message = None;
                 Vec::new()
             }
-            Event::SearchResults(results) => {
+            Event::SearchResults { query, results } => {
+                // Replies can pass each other now that each answers on its
+                // own thread; only the search still standing in the box is
+                // the one anybody is waiting for.
+                if self.search_submitted.as_deref() != Some(query.as_str()) {
+                    return Vec::new();
+                }
                 // Kept whole. Flattening the three track classes into one list
                 // and counting the other two into a sentence was throwing the
                 // artist and album hits away entirely -- the server found
@@ -2244,16 +2262,6 @@ impl App {
                 self.search_stack.restart();
                 self.search.trail.clear();
                 self.search.set(self.search_root_entries());
-                self.message = None;
-                Vec::new()
-            }
-            Event::SearchDrill { node, data } => {
-                // Drop a reply for a view already left, the same rule the
-                // Library and Discover tabs follow.
-                if !self.search_stack.wants(&SearchNode::Library(node)) {
-                    return Vec::new();
-                }
-                self.search.set(entries_from_library(data));
                 self.message = None;
                 Vec::new()
             }

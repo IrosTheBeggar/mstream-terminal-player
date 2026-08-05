@@ -24,6 +24,7 @@ use crate::dj;
 use crate::engine::Engine;
 use crate::engine::tap::AudioTap;
 use crate::player::{PlayerCtl, PlayerStatus};
+use crate::tui::app::Tab;
 
 /// How often the audio thread ticks the engine and publishes status. Also the
 /// upper bound on command latency, so keep it small enough to feel instant.
@@ -50,7 +51,11 @@ pub enum ApiCmd {
     /// a tunnel server we have already signed in to.
     QuickConnect { code: String, token: Option<String> },
     Browse(String),
-    Library(LibraryNode),
+    /// Fetch a library view for `dest` — the Library tab, or the Search tab
+    /// drilling into an artist or album it found. The destination travels
+    /// with the command and comes back on the event, so a second view of
+    /// the same data costs a field, not a duplicated command (audit #64).
+    Library { node: LibraryNode, dest: Tab },
     /// Ask for the next Auto-DJ track, seeded on what's playing now.
     AutoDj(Box<DjRequest>),
     /// Ask for several picks at once without queueing any of them, so the
@@ -65,11 +70,6 @@ pub enum ApiCmd {
     Playlists,
     LoadPlaylist(String),
     Search(String),
-    /// Open an artist or album that a search turned up. The same request the
-    /// Library tab makes, under its own name so the reply can be told apart:
-    /// one event with two possible destinations is how a slow reply ends up
-    /// in the wrong column.
-    SearchDrill(LibraryNode),
     Shutdown,
 }
 
@@ -251,8 +251,11 @@ pub enum Event {
     /// server still wants credentials — the secret gates the pipe, not the API.
     TunnelReady { local_url: String, id: String },
     Listing(Box<DirListing>),
-    /// Contents of a library view, tagged with the node they belong to.
-    Library { node: LibraryNode, data: LibraryData },
+    /// Contents of a library view, tagged with the node they belong to and
+    /// the tab they were fetched for — the same data serves the Library tab
+    /// and a drill out of the search results, and carrying the destination
+    /// is what replaced a wholesale second command and event (audit #64).
+    Library { node: LibraryNode, dest: Tab, data: LibraryData },
     /// Auto-DJ candidates, best first. `note` explains any fallback that had
     /// to happen so the UI can say so out loud.
     AutoDjPick { candidates: Vec<Track>, ignore_list: Vec<u32>, note: Option<String> },
@@ -268,14 +271,16 @@ pub enum Event {
     Genres(Vec<Genre>),
     /// A journey's stops, in order. `note` explains a short or empty arc —
     /// both are answers the server gives deliberately rather than failures.
-    Journey { stops: Vec<JourneyStop>, note: Option<String> },
+    /// `length` names the request this answers, since asking for a longer
+    /// arc while one is still in flight is a race the UI can lose.
+    Journey { stops: Vec<JourneyStop>, note: Option<String>, length: u32 },
     /// A Discover view's contents, tagged with the node they belong to.
     Discover { node: DiscoverNode, data: DiscoverData, note: Option<String> },
-    /// Contents of an artist or album reached from the search results.
-    SearchDrill { node: LibraryNode, data: LibraryData },
     Playlists(Vec<PlaylistSummary>),
     PlaylistTracks { name: String, tracks: Vec<Track> },
-    SearchResults(Box<SearchResults>),
+    /// `query` is the search these results answer — replies can pass each
+    /// other now, and the box's contents name the one still wanted.
+    SearchResults { query: String, results: Box<SearchResults> },
     /// Credentials are missing or expired — the UI drops back to the
     /// connect screen.
     Unauthorized,
@@ -541,7 +546,7 @@ pub fn spawn_api(events: Sender<Event>) -> Sender<ApiCmd> {
 }
 
 fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
-    let mut client: Option<Client> = None;
+    let mut client: Option<Arc<Client>> = None;
     // Held for as long as this thread lives; dropping it closes the tunnel out
     // from under the client, so it is explicitly dropped on the way out.
     #[allow(unused_assignments)]
@@ -554,11 +559,18 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     let mut caps = Capabilities::default();
 
     while let Ok(cmd) = rx.recv() {
+        // Connection commands change who `client` *is*, so they stay
+        // serialized here — reaching a different server mid-dial is a
+        // contradiction, not a feature. Everything else is a read against
+        // the current client and answers on its own thread (audit #63):
+        // one stalled search used to block every pane behind a 20-second
+        // timeout, and a tunnel dial held the line for the better part of
+        // a minute.
         let result = match cmd {
             ApiCmd::Shutdown => break,
 
             ApiCmd::Connect { server, token } => {
-                connect(&mut client, &server, &server.clone(), token, events)
+                connect(&mut client, &server, &server.clone(), token)
             }
 
             ApiCmd::Login { server, username, password } => {
@@ -566,7 +578,7 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 // is filed under the endpoint id — the loopback port is gone
                 // by the next run.
                 let (endpoint, id) = resolve_target(&server, tunnel.as_ref());
-                login(&mut client, &endpoint, &id, &username, &password, events)
+                login(&mut client, &endpoint, &id, &username, &password)
             }
 
             ApiCmd::QuickConnect { code, token } => match quick_connect(&code) {
@@ -576,7 +588,7 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                     tunnel = Some((url.clone(), id.clone()));
                     // A public-mode server answers straight away; anything else
                     // needs a login over the freshly-opened tunnel.
-                    match connect(&mut client, &url, &id, token, events) {
+                    match connect(&mut client, &url, &id, token) {
                         Some(Event::NeedsLogin { .. }) => {
                             Some(Event::TunnelReady { local_url: url, id })
                         }
@@ -586,53 +598,10 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 Err(e) => Some(Event::Error(e)),
             },
 
-            ApiCmd::Browse(path) => with_client(client.as_ref(), |c| {
-                c.file_explorer(&path).map(|l| Event::Listing(Box::new(l)))
-            }),
-
-            ApiCmd::SearchDrill(node) => with_client(client.as_ref(), |c| {
-                load_library(c, &node).map(|data| Event::SearchDrill { node: node.clone(), data })
-            }),
-            ApiCmd::Library(node) => with_client(client.as_ref(), |c| {
-                load_library(c, &node).map(|data| Event::Library { node: node.clone(), data })
-            }),
-
-            ApiCmd::AutoDj(request) => with_client(client.as_ref(), |c| {
-                autodj_pick(c, caps, &request).map(|picked| Event::AutoDjPick {
-                    candidates: picked.tracks,
-                    ignore_list: picked.ignore_list,
-                    note: picked.note,
-                })
-            }),
-
-            ApiCmd::AutoDjSample { request, count } => with_client(client.as_ref(), |c| {
-                autodj_sample(c, caps, &request, count)
-            }),
-
-            ApiCmd::Genres => {
-                with_client(client.as_ref(), |c| c.genres().map(Event::Genres))
+            read => {
+                spawn_read(client.clone(), caps, events.clone(), read);
+                None
             }
-
-            ApiCmd::Journey { start, end, length } => with_client(client.as_ref(), |c| {
-                journey(c, &start, &end, length)
-            }),
-
-            ApiCmd::Discover { node, seed } => {
-                with_client(client.as_ref(), |c| discover(c, &node, &seed))
-            }
-
-            ApiCmd::Playlists => {
-                with_client(client.as_ref(), |c| c.playlists().map(Event::Playlists))
-            }
-
-            ApiCmd::LoadPlaylist(name) => with_client(client.as_ref(), |c| {
-                c.playlist_load(&name)
-                    .map(|tracks| Event::PlaylistTracks { name: name.clone(), tracks })
-            }),
-
-            ApiCmd::Search(query) => with_client(client.as_ref(), |c| {
-                c.search(&query).map(|r| Event::SearchResults(Box::new(r)))
-            }),
         };
 
         // One place to learn what the server offers, so a new way of
@@ -649,6 +618,70 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     }
 
     drop(bridge);
+}
+
+/// Answer one read on its own thread, so a slow server holds up this reply
+/// and nothing else. In-flight replies against a client that has since been
+/// replaced still arrive; the app's stale-reply guards are what drop them,
+/// the same as any other answer about somewhere the user no longer is.
+fn spawn_read(
+    client: Option<Arc<Client>>,
+    caps: Capabilities,
+    events: Sender<Event>,
+    cmd: ApiCmd,
+) {
+    thread::Builder::new()
+        .name("mstream-api-read".into())
+        .spawn(move || {
+            let event = answer(client.as_deref(), caps, cmd);
+            let _ = events.send(event);
+        })
+        .ok();
+}
+
+/// One read, answered. Failures map onto events here: only 401 means the
+/// session is no good; 403 is a permission or feature-flag answer that
+/// shouldn't bounce the user to a login form.
+fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
+    let Some(c) = client else {
+        return Event::Error("not connected to a server".into());
+    };
+    let answered = match cmd {
+        ApiCmd::Browse(path) => {
+            c.file_explorer(&path).map(|l| Event::Listing(Box::new(l)))
+        }
+        ApiCmd::Library { node, dest } => {
+            load_library(c, &node).map(|data| Event::Library { node, dest, data })
+        }
+        ApiCmd::AutoDj(request) => {
+            autodj_pick(c, caps, &request).map(|picked| Event::AutoDjPick {
+                candidates: picked.tracks,
+                ignore_list: picked.ignore_list,
+                note: picked.note,
+            })
+        }
+        ApiCmd::AutoDjSample { request, count } => autodj_sample(c, caps, &request, count),
+        ApiCmd::Genres => c.genres().map(Event::Genres),
+        ApiCmd::Journey { start, end, length } => journey(c, &start, &end, length),
+        ApiCmd::Discover { node, seed } => discover(c, &node, &seed),
+        ApiCmd::Playlists => c.playlists().map(Event::Playlists),
+        ApiCmd::LoadPlaylist(name) => {
+            c.playlist_load(&name).map(|tracks| Event::PlaylistTracks { name, tracks })
+        }
+        ApiCmd::Search(query) => {
+            c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r) })
+        }
+        // The connection commands never reach here; api_loop keeps them.
+        ApiCmd::Connect { .. }
+        | ApiCmd::Login { .. }
+        | ApiCmd::QuickConnect { .. }
+        | ApiCmd::Shutdown => return Event::Error("connection change routed as a read".into()),
+    };
+    match answered {
+        Ok(event) => event,
+        Err(ApiError::Unauthorized) => Event::Unauthorized,
+        Err(e) => Event::Error(e.to_string()),
+    }
 }
 
 /// Parse a pairing code, bring the tunnel up on loopback, and report the
@@ -673,11 +706,10 @@ fn resolve_target(server: &str, tunnel: Option<&(String, String)>) -> (String, S
 }
 
 fn connect(
-    client: &mut Option<Client>,
+    client: &mut Option<Arc<Client>>,
     server: &str,
     id: &str,
     token: Option<String>,
-    _events: &Sender<Event>,
 ) -> Option<Event> {
     let c = match Client::new(server) {
         Ok(c) => c.with_token(token.clone()),
@@ -686,7 +718,7 @@ fn connect(
     match c.ping() {
         Ok(ping) => {
             let server = c.server();
-            *client = Some(c);
+            *client = Some(Arc::new(c));
             Some(Event::Connected {
                 server,
                 id: id.to_string(),
@@ -703,12 +735,11 @@ fn connect(
 }
 
 fn login(
-    client: &mut Option<Client>,
+    client: &mut Option<Arc<Client>>,
     server: &str,
     id: &str,
     username: &str,
     password: &str,
-    _events: &Sender<Event>,
 ) -> Option<Event> {
     let mut c = match Client::new(server) {
         Ok(c) => c,
@@ -724,7 +755,7 @@ fn login(
     match c.ping() {
         Ok(ping) => {
             let server = c.server();
-            *client = Some(c);
+            *client = Some(Arc::new(c));
             Some(Event::Connected {
                 server,
                 id: id.to_string(),
@@ -1007,6 +1038,7 @@ fn journey(client: &Client, start: &str, end: &str, length: u32) -> Result<Event
         return Ok(Event::Journey {
             stops: Vec::new(),
             note: Some("discovery is switched off on this server".into()),
+            length,
         });
     };
 
@@ -1014,7 +1046,7 @@ fn journey(client: &Client, start: &str, end: &str, length: u32) -> Result<Event
     // An arc that couldn't be plotted has no stops worth showing; the note
     // carries the whole answer.
     let stops = if response.not_analyzed.any() { Vec::new() } else { response.results };
-    Ok(Event::Journey { stops, note })
+    Ok(Event::Journey { stops, note, length })
 }
 
 /// What, if anything, needs saying about a journey the server returned.
@@ -1046,23 +1078,6 @@ pub(crate) fn journey_note(
 
 fn trim_period(message: &str) -> String {
     message.trim().trim_end_matches('.').to_string()
-}
-
-/// Run a request against the connected client, mapping failures onto events.
-fn with_client<F>(client: Option<&Client>, f: F) -> Option<Event>
-where
-    F: FnOnce(&Client) -> Result<Event, ApiError>,
-{
-    let Some(client) = client else {
-        return Some(Event::Error("not connected to a server".into()));
-    };
-    match f(client) {
-        Ok(event) => Some(event),
-        // Only 401 means the session is no good; 403 is a permission or
-        // feature-flag answer that shouldn't bounce the user to a login form.
-        Err(ApiError::Unauthorized) => Some(Event::Unauthorized),
-        Err(e) => Some(Event::Error(e.to_string())),
-    }
 }
 
 #[cfg(test)]

@@ -369,8 +369,13 @@ impl App {
                     panel.sample_pending = false;
                 }
             }
-            Event::Journey { .. } => {
-                if let Some(journey) = self.journey.as_mut() {
+            Event::Journey { length, .. } => {
+                // Only the arc still being asked for settles the wait: the
+                // reply to a length the user has since changed answers a
+                // request nobody is tracking any more.
+                if let Some(journey) = self.journey.as_mut()
+                    && journey.length == *length
+                {
                     journey.pending = false;
                 }
             }
@@ -397,15 +402,18 @@ impl App {
                 }
                 Vec::new()
             }
-            Event::Journey { stops, note } => {
+            Event::Journey { stops, note, length } => {
                 // A journey the user closed while it was in flight stays
-                // closed; the reply is no longer wanted.
-                if let Some(journey) = self.journey.as_mut() {
+                // closed, and one whose length has since been changed keeps
+                // waiting for the arc it actually asked for.
+                if let Some(journey) =
+                    self.journey.as_mut().filter(|journey| journey.length == length)
+                {
                     journey.stops = stops;
                     journey.offset = 0;
-                }
-                if let Some(note) = note {
-                    self.info(note);
+                    if let Some(note) = note {
+                        self.info(note);
+                    }
                 }
                 Vec::new()
             }
