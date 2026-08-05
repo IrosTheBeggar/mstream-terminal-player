@@ -197,7 +197,11 @@ enum Opened {
 }
 
 struct State {
-    sink: Player,
+    /// Arc'd so a blocking call on the sink — a seek waiting for the device
+    /// callback to reach data that has not downloaded — can be made on a
+    /// clone with the state lock already released. Held across the wait,
+    /// the lock froze every other control with it (audit #48).
+    sink: Arc<Player>,
     /// Where a copy of the audio goes, when someone is drawing it. Serve mode
     /// attaches none and pays nothing.
     tap: Option<Arc<tap::AudioTap>>,
@@ -206,6 +210,9 @@ struct State {
     stopped: bool,
     /// Desired volume; survives sink recreation on track change (audit fix #1).
     volume: f32,
+    /// Failed opens in the current walk for something playable, counted
+    /// across ticks — [`Engine::advance_tick`] attempts one source per call.
+    advance_failures: usize,
     q: QueueState,
 }
 
@@ -279,10 +286,11 @@ impl State {
             (Opened::Http(d), Some(tap)) => sink.append(tap::Tapped::new(d, tap)),
             (Opened::Http(d), None) => sink.append(d),
         }
-        self.sink = sink;
+        self.sink = Arc::new(sink);
         self.current_file = path;
         self.duration = duration;
         self.stopped = false;
+        self.advance_failures = 0;
         Ok(())
     }
 
@@ -290,6 +298,7 @@ impl State {
         self.current_file.clear();
         self.duration = 0.0;
         self.stopped = true;
+        self.advance_failures = 0;
     }
 }
 
@@ -308,12 +317,13 @@ impl Engine {
         let sink = Player::connect_new(device.mixer());
 
         let state = Arc::new(Mutex::new(State {
-            sink,
+            sink: Arc::new(sink),
             tap: None,
             current_file: String::new(),
             duration: 0.0,
             stopped: true,
             volume: 1.0,
+            advance_failures: 0,
             q: QueueState {
                 queue: Vec::new(),
                 index: 0,
@@ -356,10 +366,14 @@ impl Engine {
 
     pub fn seek(&self, position: f64) -> Result<(), EngineError> {
         let target = seek_target(position)?;
-        let s = self.state.lock().unwrap();
-        s.sink
-            .try_seek(target)
-            .map_err(|e| EngineError::Seek(e.to_string()))
+        // Take a handle and let the state go before asking. try_seek blocks
+        // on rodio's feedback channel until the device callback performs
+        // the seek, and past the downloaded range that callback is waiting
+        // on the network — possibly forever, since the download loop never
+        // gives a dead server up. The wait is this caller's to make; the
+        // lock was making it everyone's (audit #48).
+        let sink = self.state.lock().unwrap().sink.clone();
+        sink.try_seek(target).map_err(|e| EngineError::Seek(e.to_string()))
     }
 
     pub fn set_volume(&self, volume: f32) {
@@ -408,7 +422,12 @@ impl Engine {
                 s.q.index = s.q.queue.len() - 1;
                 s.start_current(self.device.mixer())
             } else {
-                let _ = s.sink.try_seek(Duration::ZERO);
+                // The restart is a seek like any other — same discipline as
+                // [`Engine::seek`], even though the start of the track has
+                // almost always downloaded by now.
+                let sink = s.sink.clone();
+                drop(s);
+                let _ = sink.try_seek(Duration::ZERO);
                 Ok(())
             }
         } else {
@@ -502,32 +521,27 @@ impl Engine {
     }
 
     /// Advance to the next track if the current one finished. Called from the
-    /// serve poll loop (and later the TUI tick). Skips unplayable tracks, at
-    /// most one full pass over the queue per tick (same as the original).
+    /// serve poll loop and the TUI tick. Skips unplayable tracks one attempt
+    /// per call: every open can block for as long as the network cap allows,
+    /// and looping here held the state lock — and serve mode's whole request
+    /// loop — through every doomed open in the queue (audit #49). The count
+    /// of failures lives in [`State`], so the walk still gives up after one
+    /// lap; it just yields between steps.
     pub fn advance_tick(&self) {
         let mut s = self.state.lock().unwrap();
         if !(s.sink.empty() && !s.stopped && !s.q.queue.is_empty()) {
             return;
         }
-        let mut attempts = 0;
-        loop {
-            match pick_next(&s.q, false) {
-                Some(idx) => {
-                    s.q.index = idx;
-                    match s.start_current(self.device.mixer()) {
-                        Ok(()) => break,
-                        Err(_) => {
-                            attempts += 1;
-                            if attempts >= s.q.queue.len() {
-                                s.clear_current();
-                                break;
-                            }
-                        }
-                    }
+        match pick_next(&s.q, false) {
+            None => s.clear_current(),
+            Some(idx) => {
+                s.q.index = idx;
+                if s.start_current(self.device.mixer()).is_ok() {
+                    return;
                 }
-                None => {
+                s.advance_failures += 1;
+                if s.advance_failures >= s.q.queue.len() {
                     s.clear_current();
-                    break;
                 }
             }
         }
@@ -604,6 +618,138 @@ mod tests {
         for bad in [1e300, 1e20, f64::NAN, f64::INFINITY, -1.0] {
             assert!(seek_target(bad).is_err(), "{bad} must be refused");
         }
+    }
+
+    /// A playable WAV: 44.1k stereo 16-bit of quiet tone, `seconds` long.
+    fn wav_bytes(seconds: usize) -> Vec<u8> {
+        let rate = 44_100usize;
+        let frames = rate * seconds;
+        let mut data = Vec::with_capacity(44 + frames * 4);
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&((36 + frames * 4) as u32).to_le_bytes());
+        data.extend_from_slice(b"WAVEfmt ");
+        data.extend_from_slice(&16u32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&2u16.to_le_bytes());
+        data.extend_from_slice(&(rate as u32).to_le_bytes());
+        data.extend_from_slice(&((rate * 4) as u32).to_le_bytes());
+        data.extend_from_slice(&4u16.to_le_bytes());
+        data.extend_from_slice(&16u16.to_le_bytes());
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&((frames * 4) as u32).to_le_bytes());
+        for i in 0..frames {
+            let v = ((i as f32 * 0.05).sin() * 2000.0) as i16;
+            data.extend_from_slice(&v.to_le_bytes());
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        data
+    }
+
+    /// A server that answers one request with the start of a long WAV, goes
+    /// quiet for `stall`, and only then sends the rest — the shape of a
+    /// track whose tail has not downloaded yet.
+    fn stalling_wav_server(seconds: usize, sent_first: usize, stall: Duration) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let body = wav_bytes(seconds);
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut head = [0u8; 2048];
+                    let _ = stream.read(&mut head);
+                    let sent = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(sent.as_bytes());
+                    let _ = stream.write_all(&body[..sent_first]);
+                    let _ = stream.flush();
+                    std::thread::sleep(stall);
+                    let _ = stream.write_all(&body[sent_first..]);
+                });
+            }
+        });
+        format!("http://{addr}/stalling.wav")
+    }
+
+    /// `cargo test a_blocked_seek -- --ignored --nocapture` (local, no server)
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_blocked_seek_does_not_take_the_rest_of_the_controls_with_it() {
+        // Enough audio to play from, a tail that takes eight seconds to
+        // arrive, and a seek pointed straight into the gap. try_seek waits
+        // on the device callback, the callback waits on the network — and
+        // the state lock used to wait with them, so pause, stop and status
+        // were all frozen for as long as the server felt like (audit #48).
+        let url = stalling_wav_server(30, 500_000, Duration::from_secs(8));
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.play_source(url, Some(30.0)).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+
+        // The device sink cannot be shared across threads, but the state
+        // lock — the thing every other control queues on — can be probed
+        // directly. That is the wait a second caller would feel.
+        let state = engine.state.clone();
+        let (probed, waited) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            let asked = std::time::Instant::now();
+            drop(state.lock().unwrap());
+            let _ = probed.send(asked.elapsed());
+        });
+
+        // Blocks until the tail arrives; the result is not the point.
+        let _ = engine.seek(20.0);
+
+        let held = waited.recv_timeout(Duration::from_secs(20)).expect("the probe ran");
+        println!(">>> the state lock came free in {held:?}");
+        assert!(
+            held < Duration::from_millis(500),
+            "the lock was held {held:?} behind a seek that is waiting on the network"
+        );
+        engine.stop();
+    }
+
+    /// `cargo test giving_up_on_a_dead_queue -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn giving_up_on_a_dead_queue_takes_one_attempt_per_tick() {
+        // One real track that runs out, three that cannot open behind it.
+        // The old advance loop tried every one of them in a single call
+        // with the lock held; each attempt is now one tick's worth, so
+        // whatever is watching the engine gets a word in between (audit
+        // #49). Local paths fail in microseconds — the point here is the
+        // shape of the retreat, not its speed.
+        let tiny = std::env::temp_dir().join("mstream-advance-test.wav");
+        std::fs::write(&tiny, wav_bytes(1)).unwrap();
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.play_source(tiny.to_string_lossy().into_owned(), None).unwrap();
+        for missing in ["one", "two", "three"] {
+            engine.queue_add(format!("C:\\no\\such\\dir\\{missing}.wav"));
+        }
+
+        // Let the real track run out on its own.
+        let gone = std::time::Instant::now();
+        while !engine.status().file.is_empty() && engine.status().playing {
+            assert!(gone.elapsed() < Duration::from_secs(5), "the track never ended");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        for tick in 1..=3 {
+            engine.advance_tick();
+            assert!(
+                !engine.status().file.is_empty(),
+                "tick {tick} should have tried one dead track and kept the rest for later"
+            );
+        }
+        engine.advance_tick();
+        assert!(engine.status().file.is_empty(), "four ticks in, the queue is given up");
+        let _ = std::fs::remove_file(&tiny);
     }
 
     /// The tap hears real decoded audio, not silence and not nothing.

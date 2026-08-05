@@ -298,6 +298,43 @@ pub fn spawn_audio(events: Sender<Event>) -> (Sender<AudioCmd>, Arc<AudioTap>) {
     (tx, tap)
 }
 
+/// Boil a burst of queued commands down to what it all amounted to.
+///
+/// A Play holds this thread through a whole open and format probe, so a run
+/// of them — someone leaning on `n` through remote tracks — used to be paid
+/// for one doomed fetch at a time, with every later command waiting in line
+/// behind opens for tracks nobody wanted any more (audit #50).
+///
+/// What survives: the last Play or Stop decides the transport, and anything
+/// transport-shaped before it was about a source that is gone by the end of
+/// the batch. After the decider, pauses and resumes are kept in order and
+/// only the last Seek matters. Volume is sticky, so the last one is kept
+/// wherever it was said. A Shutdown makes everything else moot.
+fn collapse(batch: Vec<AudioCmd>) -> Vec<AudioCmd> {
+    if batch.contains(&AudioCmd::Shutdown) {
+        return vec![AudioCmd::Shutdown];
+    }
+    let decider =
+        batch.iter().rposition(|cmd| matches!(cmd, AudioCmd::Play { .. } | AudioCmd::Stop));
+    let volume = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetVolume(_)));
+
+    let mut kept: Vec<AudioCmd> = Vec::new();
+    kept.extend(volume.cloned());
+    if let Some(at) = decider {
+        kept.push(batch[at].clone());
+    }
+    let mut seek: Option<&AudioCmd> = None;
+    for cmd in &batch[decider.map_or(0, |at| at + 1)..] {
+        match cmd {
+            AudioCmd::Pause | AudioCmd::Resume => kept.push(cmd.clone()),
+            AudioCmd::Seek(_) => seek = Some(cmd),
+            _ => {}
+        }
+    }
+    kept.extend(seek.cloned());
+    kept
+}
+
 fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>, tap: Arc<AudioTap>) {
     let engine = match Engine::new() {
         Ok(e) => e,
@@ -317,30 +354,42 @@ fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>, tap: Arc<AudioTap
     let player: &dyn PlayerCtl = &engine;
     let mut watch = EndWatch::default();
 
-    loop {
-        match rx.recv_timeout(TICK) {
-            Ok(AudioCmd::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
-            Ok(cmd) => {
-                watch.note(&cmd);
-                // A source that won't play is a different kind of problem
-                // from a command that failed: the queue can carry on past it,
-                // and should, so it gets its own event. It goes out under the
-                // name of the source that would not play, because a play is
-                // the one command that can sit here long enough for the
-                // answer to be about a track nobody is waiting for any more.
-                let starting = match &cmd {
-                    AudioCmd::Play { url, .. } => Some(url.clone()),
-                    _ => None,
-                };
-                if let Some(err) = apply_audio_cmd(player, cmd) {
-                    let event = match starting {
-                        Some(source) => Event::PlaybackFailed { source, error: err },
-                        None => Event::Error(err),
-                    };
-                    let _ = events.send(event);
+    'listening: loop {
+        let batch = match rx.recv_timeout(TICK) {
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => Vec::new(),
+            Ok(first) => {
+                // Whatever else has queued up is taken now and boiled down,
+                // rather than paid for one blocking open at a time.
+                let mut batch = vec![first];
+                while let Ok(more) = rx.try_recv() {
+                    batch.push(more);
                 }
+                collapse(batch)
             }
-            Err(RecvTimeoutError::Timeout) => {}
+        };
+        for cmd in batch {
+            if cmd == AudioCmd::Shutdown {
+                break 'listening;
+            }
+            watch.note(&cmd);
+            // A source that won't play is a different kind of problem
+            // from a command that failed: the queue can carry on past it,
+            // and should, so it gets its own event. It goes out under the
+            // name of the source that would not play, because a play is
+            // the one command that can sit here long enough for the
+            // answer to be about a track nobody is waiting for any more.
+            let starting = match &cmd {
+                AudioCmd::Play { url, .. } => Some(url.clone()),
+                _ => None,
+            };
+            if let Some(err) = apply_audio_cmd(player, cmd) {
+                let event = match starting {
+                    Some(source) => Event::PlaybackFailed { source, error: err },
+                    None => Event::Error(err),
+                };
+                let _ = events.send(event);
+            }
         }
 
         player.tick();
@@ -1030,6 +1079,47 @@ mod tests {
             watch.ended("").as_deref(),
             Some("http://x/b.mp3"),
             "a later track still ends on its own"
+        );
+    }
+
+    #[test]
+    fn a_burst_of_commands_boils_down_to_what_it_amounted_to() {
+        let vol = |v| AudioCmd::SetVolume(v);
+        // Leaning on next: only the last of the run is opened at all.
+        assert_eq!(
+            collapse(vec![play("a"), play("b"), play("c")]),
+            vec![play("c")],
+            "one open for a run of skips"
+        );
+        // Scrubbing: the positions passed through were never wanted.
+        assert_eq!(
+            collapse(vec![AudioCmd::Seek(5.0), AudioCmd::Seek(6.0), AudioCmd::Seek(7.0)]),
+            vec![AudioCmd::Seek(7.0)]
+        );
+        // The last word on the transport wins, whichever way it fell.
+        assert_eq!(
+            collapse(vec![play("a"), AudioCmd::Seek(30.0), AudioCmd::Stop]),
+            vec![AudioCmd::Stop],
+            "a stop after skips means silence, not one more fetch"
+        );
+        assert_eq!(collapse(vec![AudioCmd::Stop, play("b")]), vec![play("b")]);
+        // A seek aimed at a track that got replaced dies with it; one aimed
+        // at the track that plays survives.
+        assert_eq!(collapse(vec![AudioCmd::Seek(30.0), play("b")]), vec![play("b")]);
+        assert_eq!(
+            collapse(vec![play("b"), AudioCmd::Seek(30.0)]),
+            vec![play("b"), AudioCmd::Seek(30.0)]
+        );
+        // Volume is sticky, so the last one said is kept wherever it was
+        // said — and a pause after the deciding play still lands.
+        assert_eq!(
+            collapse(vec![vol(0.2), play("a"), vol(0.8), play("b"), AudioCmd::Pause]),
+            vec![vol(0.8), play("b"), AudioCmd::Pause]
+        );
+        // Shutdown makes the rest moot.
+        assert_eq!(
+            collapse(vec![play("a"), AudioCmd::Shutdown, play("b")]),
+            vec![AudioCmd::Shutdown]
         );
     }
 
