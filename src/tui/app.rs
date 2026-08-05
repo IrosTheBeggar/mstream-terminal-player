@@ -1098,8 +1098,16 @@ impl App {
 
     /// Whether what is on screen is drawn from the audio, and so wants
     /// redrawing far more often than a progress bar does.
+    ///
+    /// Not while it is standing still. Paused, the picture falls to nothing
+    /// within a couple of seconds and every frame after that is identical —
+    /// but the loop went on waking thirty times a second to copy the ring
+    /// and run a 2048-point transform over silence, for as long as the tab
+    /// was left open (finding #51). The visualiser reports when it has
+    /// settled, and the wait goes back to the ordinary one until something
+    /// sounds again.
     pub fn drawing_audio(&self) -> bool {
-        self.fullscreen && self.now_tab() == NowTab::Visualizer
+        self.fullscreen && self.now_tab() == NowTab::Visualizer && !self.viz.still()
     }
 
     /// The path the file browser treats as the top.

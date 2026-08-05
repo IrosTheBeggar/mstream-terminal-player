@@ -73,15 +73,30 @@ pub struct TapFrame {
 impl TapFrame {
     /// One value per frame, channels averaged. What a waveform or an FFT
     /// wants; the vectorscope is the one that needs them kept apart.
+    /// Allocating, for tests and anyone who wants the answer once. The
+    /// visualiser is the hot caller and it keeps its own buffer.
+    #[cfg(test)]
     pub fn mono(&self) -> Vec<Sample> {
+        let mut out = Vec::new();
+        self.mono_into(&mut out);
+        out
+    }
+
+    /// The same, into a buffer the caller keeps. The visualiser asks thirty
+    /// times a second and the answer is the same size every time, so the
+    /// allocation is worth not making.
+    pub fn mono_into(&self, out: &mut Vec<Sample>) {
+        out.clear();
         let channels = self.channels.max(1) as usize;
         if channels == 1 {
-            return self.samples.clone();
+            out.extend_from_slice(&self.samples);
+            return;
         }
-        self.samples
-            .chunks_exact(channels)
-            .map(|frame| frame.iter().sum::<Sample>() / channels as Sample)
-            .collect()
+        out.extend(
+            self.samples
+                .chunks_exact(channels)
+                .map(|frame| frame.iter().sum::<Sample>() / channels as Sample),
+        );
     }
 
 }

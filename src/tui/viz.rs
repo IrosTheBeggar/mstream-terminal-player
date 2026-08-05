@@ -72,6 +72,10 @@ pub struct Visualizer {
     /// the frame rate is how a visualiser ends up feeling different on
     /// someone else's machine.
     drawn: Option<Instant>,
+    /// Whether the last frame drawn was the same as the next one would be.
+    /// Set from what the modes actually hold, not from a timer, because how
+    /// long a picture takes to fall still depends on how loud it was.
+    still: bool,
 }
 
 /// Assumed for the first frame, and the ceiling for a long gap — coming back
@@ -108,7 +112,15 @@ impl Visualizer {
         let heard = if sounding {
             heard
         } else {
-            quiet = TapFrame { samples: vec![0.0; heard.samples.len()], ..heard.clone() };
+            // Two fields, named: `..heard.clone()` evaluated the clone in
+            // full — copying the whole 32 KB sample vec — and then dropped
+            // it again, thirty times a second, for a rate and a channel
+            // count (finding #52).
+            quiet = TapFrame {
+                samples: vec![0.0; heard.samples.len()],
+                rate: heard.rate,
+                channels: heard.channels,
+            };
             &quiet
         };
 
@@ -124,6 +136,28 @@ impl Visualizer {
                 draw_vu(canvas, &self.vu);
             }
         }
+
+        self.still = !sounding
+            && match self.mode {
+                VizMode::Bars => self.bars.at_rest(),
+                VizMode::Vu => self.vu.at_rest(),
+                // Drawn straight from the samples, and the samples are
+                // silence: this frame is already the flat line the next one
+                // would be.
+                VizMode::Scope | VizMode::Vectorscope => true,
+            };
+    }
+
+    /// Whether the picture has stopped moving — nothing is sounding and
+    /// everything that decays has reached the bottom.
+    ///
+    /// What the event loop asks before deciding it still needs thirty frames
+    /// a second: paused, every value here reaches zero within a couple of
+    /// seconds and every frame after that is identical, so redrawing at that
+    /// rate buys nothing and costs an FFT over silence, indefinitely
+    /// (finding #51).
+    pub fn still(&self) -> bool {
+        self.still
     }
 
     /// Leaving one mode should not leave its state to surprise the next
@@ -132,6 +166,10 @@ impl Visualizer {
         self.bars = Bars::default();
         self.vu = Vu::default();
         self.drawn = None;
+        // Not still until a frame says so: the new mode has not drawn yet,
+        // and claiming otherwise would hold the slow poll over a picture
+        // that has never been painted.
+        self.still = false;
     }
 }
 
@@ -205,24 +243,62 @@ fn fft(re: &mut [f32], im: &mut [f32]) {
 /// seek the tap holds less than [`WINDOW`]; windowed over the whole buffer
 /// that fill would stop mid-slope, which is the very step the Hann is here
 /// to remove.
+/// The buffers one transform needs, kept between frames.
+///
+/// Held by [`Bars`], which already persists its heights and peaks, because
+/// allocating these per frame meant about 100 KB across ten allocations
+/// thirty times a second for numbers whose size never changes (finding #53).
+#[derive(Debug, Default)]
+struct Fft {
+    /// Channels averaged, filled from the tap.
+    mono: Vec<f32>,
+    re: Vec<f32>,
+    im: Vec<f32>,
+    /// One magnitude per bin up to Nyquist — what the bands are folded from.
+    mags: Vec<f32>,
+}
+
+impl Fft {
+    fn fill(&mut self, heard: &TapFrame) {
+        heard.mono_into(&mut self.mono);
+        self.transform();
+    }
+
+    fn transform(&mut self) {
+        self.re.clear();
+        self.re.resize(WINDOW, 0.0);
+        self.im.clear();
+        self.im.resize(WINDOW, 0.0);
+        self.mags.clear();
+        self.mags.resize(WINDOW / 2, 0.0);
+
+        let take = self.mono.len().min(WINDOW);
+        if take == 0 {
+            return;
+        }
+        for (i, &sample) in self.mono[self.mono.len() - take..].iter().enumerate() {
+            let hann = 0.5 - 0.5 * (2.0 * PI * i as f32 / take as f32).cos();
+            self.re[i] = sample * hann;
+        }
+        fft(&mut self.re, &mut self.im);
+        // Scaled so a full-scale tone comes out near 1.0 rather than near
+        // 500 — by what was transformed, since a short fill carries that
+        // much less energy. Without it every gain downstream carries a
+        // factor of the fill length, and the automatic one spends ten
+        // seconds finding it.
+        let scale = 4.0 / take as f32;
+        for k in 0..WINDOW / 2 {
+            self.mags[k] = (self.re[k] * self.re[k] + self.im[k] * self.im[k]).sqrt() * scale;
+        }
+    }
+}
+
+/// The same transform for a caller that has samples rather than a tap.
+#[cfg(test)]
 fn spectrum(mono: &[f32]) -> Vec<f32> {
-    let mut re = vec![0.0f32; WINDOW];
-    let mut im = vec![0.0f32; WINDOW];
-    let take = mono.len().min(WINDOW);
-    if take == 0 {
-        return vec![0.0; WINDOW / 2];
-    }
-    for (i, &sample) in mono[mono.len() - take..].iter().enumerate() {
-        let hann = 0.5 - 0.5 * (2.0 * PI * i as f32 / take as f32).cos();
-        re[i] = sample * hann;
-    }
-    fft(&mut re, &mut im);
-    // Scaled so a full-scale tone comes out near 1.0 rather than near 500 —
-    // by what was transformed, since a short fill carries that much less
-    // energy. Without it every gain downstream carries a factor of the fill
-    // length, and the automatic one spends ten seconds finding it.
-    let scale = 4.0 / take as f32;
-    (0..WINDOW / 2).map(|k| (re[k] * re[k] + im[k] * im[k]).sqrt() * scale).collect()
+    let mut scratch = Fft { mono: mono.to_vec(), ..Fft::default() };
+    scratch.transform();
+    scratch.mags
 }
 
 /// How steeply the bands are tilted upward with frequency, from cava's `eq`
@@ -302,6 +378,9 @@ struct Bars {
     /// The integral filter's memory — one per bar.
     memory: Vec<f32>,
     sensitivity: f32,
+    /// The transform's working buffers, kept for the same reason the heights
+    /// are: they are the same size every frame.
+    fft: Fft,
 }
 
 impl Default for Bars {
@@ -312,11 +391,20 @@ impl Default for Bars {
             falls: Vec::new(),
             memory: Vec::new(),
             sensitivity: 1.0,
+            fft: Fft::default(),
         }
     }
 }
 
 impl Bars {
+    /// Every bar and every falling peak at the bottom. Below a twentieth of
+    /// a cell nothing more will be drawn, so the picture has arrived even
+    /// though the numbers are still shrinking towards zero.
+    fn at_rest(&self) -> bool {
+        const NOTHING: f32 = 0.05;
+        self.heights.iter().chain(&self.peaks).all(|v| *v < NOTHING)
+    }
+
     fn update(&mut self, heard: &TapFrame, count: usize, elapsed: f32) {
         if count == 0 {
             self.heights.clear();
@@ -329,7 +417,8 @@ impl Bars {
             self.memory = vec![0.0; count];
         }
 
-        let bands = log_bins(&spectrum(&heard.mono()), heard.rate, count);
+        self.fft.fill(heard);
+        let bands = log_bins(&self.fft.mags, heard.rate, count);
         if bands.len() != count {
             return;
         }
@@ -425,8 +514,11 @@ fn draw_scope(canvas: &mut Canvas, heard: &TapFrame, scatter: bool) {
         return;
     }
     let channels = heard.channels.max(1) as usize;
-    let frames: Vec<&[f32]> = heard.samples.chunks_exact(channels).collect();
-    if frames.is_empty() {
+    // Frame `f`, channel `c` is `samples[f * channels + c]`. Collecting the
+    // chunks into a Vec of slices first cost ~64 KB a frame for indexing the
+    // arithmetic already gives (finding #53).
+    let count = heard.samples.len() / channels;
+    if count == 0 {
         return;
     }
 
@@ -436,9 +528,8 @@ fn draw_scope(canvas: &mut Canvas, heard: &TapFrame, scatter: bool) {
         canvas.set(x, middle, dim());
     }
 
-    let span = (width * 4).min(frames.len());
-    let start = trigger(&frames, frames.len() - span);
-    let shown = &frames[start..start + span];
+    let span = (width * 4).min(count);
+    let start = trigger(&heard.samples, channels, count - span);
 
     // Each channel its own trace and its own colour. Drawn back to front so
     // the left channel, which most ears follow, sits on top.
@@ -446,8 +537,9 @@ fn draw_scope(canvas: &mut Canvas, heard: &TapFrame, scatter: bool) {
     for channel in (0..channels.min(2)).rev() {
         let colour = if channel == 0 { accent() } else { folder() };
         let at = |x: usize| -> i32 {
-            let frame = shown[(x * shown.len() / width).min(shown.len() - 1)];
-            (half - frame[channel].clamp(-1.0, 1.0) * half) as i32
+            let frame = start + (x * span / width).min(span - 1);
+            let sample = heard.samples[frame * channels + channel];
+            (half - sample.clamp(-1.0, 1.0) * half) as i32
         };
         let mut previous = at(0);
         for x in 0..width {
@@ -467,11 +559,15 @@ fn draw_scope(canvas: &mut Canvas, heard: &TapFrame, scatter: bool) {
 
 /// The first rising crossing that holds, searching only as far as `limit` so
 /// there is always a full sweep of samples after it.
-fn trigger(frames: &[&[f32]], limit: usize) -> usize {
+///
+/// Reads the left channel out of the interleaved buffer directly: frame `f`
+/// is at `f * channels`.
+fn trigger(samples: &[f32], channels: usize, limit: usize) -> usize {
+    let left = |frame: usize| samples.get(frame * channels).copied();
     let held = |from: usize| {
-        (1..=TRIGGER_DEPTH).all(|step| frames.get(from + step).is_some_and(|f| f[0] > 0.0))
+        (1..=TRIGGER_DEPTH).all(|step| left(from + step).is_some_and(|s| s > 0.0))
     };
-    (0..limit).find(|&i| frames[i][0] <= 0.0 && held(i)).unwrap_or(0)
+    (0..limit).find(|&i| left(i).is_some_and(|s| s <= 0.0) && held(i)).unwrap_or(0)
 }
 
 // ── Vectorscope ─────────────────────────────────────────────────────────────
@@ -563,6 +659,14 @@ impl Default for Vu {
 }
 
 impl Vu {
+    /// Needle at the bottom and both peak markers back on the floor. The
+    /// power is a mean square, so the threshold is well under what the
+    /// quietest drawn division corresponds to.
+    fn at_rest(&self) -> bool {
+        self.power.iter().all(|p| *p < 1e-7)
+            && self.peak_db.iter().all(|db| *db <= VU_FLOOR_DB + 0.01)
+    }
+
     fn update(&mut self, heard: &TapFrame, elapsed: f32) {
         let channels = (heard.channels.max(1) as usize).min(2);
         self.channels = channels;
@@ -874,11 +978,10 @@ mod tests {
         samples.push(0.02); // noise: up for one sample only
         samples.extend([-0.01; 4]);
         samples.extend(sine(200.0, 44100, 400)); // starts at zero and rises
-        let frames: Vec<&[f32]> = samples.chunks_exact(1).collect();
 
-        let at = trigger(&frames, frames.len() - 64);
+        let at = trigger(&samples, 1, samples.len() - 64);
         assert!(at >= 8, "walked past the single-sample flick, landed at {at}");
-        assert!(frames[at][0] <= 0.0 && frames[at + 1][0] > 0.0, "and it is a real crossing");
+        assert!(samples[at] <= 0.0 && samples[at + 1] > 0.0, "and it is a real crossing");
     }
 
     #[test]
@@ -1049,6 +1152,46 @@ mod tests {
             viz.draw_after(&mut canvas(), &loud, FRAME, false);
         }
         assert_eq!(viz.vu.readings()[0].0, 0.0, "the meter should read nothing");
+    }
+
+    #[test]
+    fn a_settled_picture_says_so_and_stops_asking_for_frames() {
+        // Paused, every mode reaches a picture that will not change again.
+        // Until it says so the event loop keeps waking thirty times a second
+        // to run a transform over silence, for as long as the tab is open.
+        let rate = 44100;
+        let loud = stereo(sine(440.0, rate, 4096), sine(660.0, rate, 4096), rate);
+        let canvas = || Canvas::new(Rect { x: 0, y: 0, width: 50, height: 10 });
+
+        for mode in VIZ_MODES {
+            let mut viz = Visualizer { mode, ..Default::default() };
+            assert!(!viz.still(), "{mode:?}: nothing drawn yet, so nothing is known");
+
+            for _ in 0..12 {
+                viz.draw_after(&mut canvas(), &loud, FRAME, true);
+            }
+            assert!(!viz.still(), "{mode:?}: it is moving while audio is sounding");
+
+            // The tap still holds the loud buffer after a pause — being
+            // handed it is exactly the case that matters.
+            let mut frames = 0;
+            while !viz.still() && frames < 200 {
+                viz.draw_after(&mut canvas(), &loud, FRAME, false);
+                frames += 1;
+            }
+            assert!(viz.still(), "{mode:?}: never settled in {frames} frames");
+            // Seconds, not minutes. The falling peak markers are the slow
+            // part — measured at about 95 frames for the spectrum, where a
+            // scope is still the moment it draws silence.
+            assert!(
+                (frames as f32) * FRAME < 4.0,
+                "{mode:?}: took {frames} frames to settle"
+            );
+
+            // And it is moving again the moment something sounds.
+            viz.draw_after(&mut canvas(), &loud, FRAME, true);
+            assert!(!viz.still(), "{mode:?}: resuming has to bring the frames back");
+        }
     }
 
     #[test]
