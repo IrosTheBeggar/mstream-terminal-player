@@ -119,29 +119,17 @@ impl Client {
     /// Build a client from explicit overrides, falling back to the most
     /// recently used server. A stored token is looked up by server, so one is
     /// never sent to a host that didn't issue it.
+    ///
+    /// The config file is read only where an answer is actually missing.
+    /// Loading it up front made a broken config defeat `--server` and
+    /// `--token` together — the two flags whose whole job is to be the way
+    /// round a config you cannot load (finding #42).
     pub fn resolve(server: Option<&str>, token: Option<&str>) -> Result<Self, ApiError> {
-        let config = crate::config::load().map_err(ApiError::Config)?;
-        let server = match (server, crate::config::most_recent_server(&config)) {
+        let server = match server {
             // Whatever a `--server` flag carries gets the same treatment as
             // something typed into the connect screen.
-            (Some(server), _) => server_url::normalize(server).map_err(ApiError::Config)?,
-            // A tunnel server is remembered by identity, not address, and
-            // reaching it means dialling its pairing code — which only the
-            // player does. Say so rather than failing on a parse.
-            (None, Some(entry)) if crate::quickconnect::is_tunnel_id(&entry.url) => {
-                return Err(ApiError::Config(
-                    "the last server was reached with Quick Connect, which these commands \
-                     cannot dial — pass --server <url>, or use the player"
-                        .to_string(),
-                ));
-            }
-            (None, Some(entry)) => entry.url.clone(),
-            (None, None) => {
-                return Err(ApiError::Config(
-                    "no server given and none remembered — run `mstream-player login --server <url> --user <name>`"
-                        .to_string(),
-                ));
-            }
+            Some(server) => server_url::normalize(server).map_err(ApiError::Config)?,
+            None => Self::remembered_server()?,
         };
 
         let client = Client::new(&server)?;
@@ -153,6 +141,27 @@ impl Client {
             }
         };
         Ok(client.with_token(token))
+    }
+
+    /// The server a bare command means: the most recently used one.
+    fn remembered_server() -> Result<String, ApiError> {
+        let config = crate::config::load().map_err(ApiError::Config)?;
+        match crate::config::most_recent_server(&config) {
+            // A tunnel server is remembered by identity, not address, and
+            // reaching it means dialling its pairing code — which only the
+            // player does. Say so rather than failing on a parse.
+            Some(entry) if crate::quickconnect::is_tunnel_id(&entry.url) => Err(ApiError::Config(
+                "the last server was reached with Quick Connect, which these commands \
+                 cannot dial — pass --server <url>, or use the player"
+                    .to_string(),
+            )),
+            Some(entry) => Ok(entry.url.clone()),
+            None => Err(ApiError::Config(
+                "no server given and none remembered — run \
+                 `mstream-player login --server <url> --user <name>`"
+                    .to_string(),
+            )),
+        }
     }
 
     /// Server base URL, without the trailing slash, for building stream URLs.
@@ -463,6 +472,26 @@ fn extract_error(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_flags_that_exist_to_route_round_the_config_do_not_need_it() {
+        let scratch = crate::config::testing::Scratch::new("resolve-explicit");
+        std::fs::write(scratch.dir.join("config.toml"), "this is not toml [[[").unwrap();
+
+        // Both answers given: nothing about this command needs the file, so
+        // its state should not decide whether the command runs.
+        let Ok(client) = Client::resolve(Some("http://host:3000"), Some("t")) else {
+            panic!("--server and --token should not consult the config");
+        };
+        assert_eq!(client.server(), "http://host:3000");
+        assert_eq!(client.token(), Some("t"));
+
+        // A missing answer still reads it, and still reports it plainly.
+        let Err(err) = Client::resolve(None, None) else {
+            panic!("a config this broken cannot name a server");
+        };
+        assert!(err.to_string().contains("is not valid"), "got: {err}");
+    }
 
     #[test]
     fn normalizes_base_url_for_subpaths() {

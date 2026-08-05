@@ -64,7 +64,11 @@ enum Command {
     /// List mStream servers advertising themselves on this network
     Discover {
         /// How long to listen for adverts
-        #[arg(long, default_value_t = 3.0)]
+        ///
+        /// Bounded because the value reaches `Duration::from_secs_f64`, which
+        /// panics on a negative, a NaN or anything past what a Duration can
+        /// hold — a typo in a flag should print a sentence, not a backtrace.
+        #[arg(long, default_value_t = 3.0, value_parser = listening_seconds)]
         seconds: f64,
     },
     /// List playlists, or show one playlist's tracks
@@ -93,6 +97,21 @@ struct ServeArgs {
     /// would exit immediately.
     #[arg(long)]
     exit_with_parent: bool,
+}
+
+/// A listening window that `Duration::from_secs_f64` will accept.
+///
+/// The upper bound is a day rather than the type's limit: past that the flag
+/// is a typo, and a browse that never returns looks exactly like a hang.
+fn listening_seconds(raw: &str) -> Result<f64, String> {
+    let seconds: f64 = raw.parse().map_err(|_| format!("'{raw}' is not a number"))?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(format!("'{raw}' is not a length of time"));
+    }
+    if seconds > 86_400.0 {
+        return Err("that is longer than a day — try something under 86400".to_string());
+    }
+    Ok(seconds)
 }
 
 fn main() {
@@ -161,5 +180,33 @@ fn main() {
         }
         // Bare `mstream-player` launches the player.
         None => std::process::exit(tui::run(None, None)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_listening_window_a_duration_cannot_hold_is_refused_in_words() {
+        // Every one of these reached Duration::from_secs_f64 and panicked
+        // with a backtrace prompt — from a flag, which is the one place a
+        // typo should be answered with a sentence.
+        for bad in ["-1", "nan", "-0.5", "1e300", "inf", "banana"] {
+            let err = listening_seconds(bad).unwrap_err();
+            assert!(!err.is_empty(), "{bad:?} was accepted");
+            assert!(!err.contains("panic"), "{bad:?}: {err}");
+        }
+
+        assert_eq!(listening_seconds("3").unwrap(), 3.0);
+        assert_eq!(listening_seconds("0").unwrap(), 0.0, "an instant browse is a legal ask");
+        assert_eq!(listening_seconds("0.5").unwrap(), 0.5);
+        // The boundary is inclusive, and everything accepted here is a
+        // Duration the browse can actually be handed.
+        assert!(listening_seconds("86400").is_ok());
+        for good in ["0", "0.5", "3", "86400"] {
+            let seconds = listening_seconds(good).unwrap();
+            let _ = std::time::Duration::from_secs_f64(seconds);
+        }
     }
 }

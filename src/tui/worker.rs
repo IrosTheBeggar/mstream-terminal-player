@@ -584,15 +584,30 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
             ApiCmd::QuickConnect { code, token } => match quick_connect(&code) {
                 Ok((id, opened)) => {
                     let url = opened.local_url.clone();
-                    bridge = Some(opened);
-                    tunnel = Some((url.clone(), id.clone()));
-                    // A public-mode server answers straight away; anything else
-                    // needs a login over the freshly-opened tunnel.
-                    match connect(&mut client, &url, &id, token) {
-                        Some(Event::NeedsLogin { .. }) => {
-                            Some(Event::TunnelReady { local_url: url, id })
+                    // Dial over the new tunnel while the old one is still up.
+                    // Installing it here would drop the old bridge, and its
+                    // Drop closes the loopback listener the *current* session
+                    // is streaming through — so a code that opens but doesn't
+                    // answer used to leave the UI on a session whose port had
+                    // just been pulled out from under it (finding #20).
+                    let answer = connect(&mut client, &url, &id, token);
+                    if !tunnel_answered(&answer) {
+                        // `opened` drops here, closing the tunnel that just
+                        // failed and only that one. `client`, `bridge` and
+                        // `tunnel` are untouched, so the session the user is
+                        // on carries on working while they read the error.
+                        answer
+                    } else {
+                        bridge = Some(opened);
+                        tunnel = Some((url.clone(), id.clone()));
+                        // A public-mode server answers straight away; anything
+                        // else needs a login over the freshly-opened tunnel.
+                        match answer {
+                            Some(Event::NeedsLogin { .. }) => {
+                                Some(Event::TunnelReady { local_url: url, id })
+                            }
+                            other => other,
                         }
-                        other => other,
                     }
                 }
                 Err(e) => Some(Event::Error(e)),
@@ -705,6 +720,33 @@ fn resolve_target(server: &str, tunnel: Option<&(String, String)>) -> (String, S
     }
 }
 
+/// Whether a dial reached the server it was aimed at.
+///
+/// An allowlist rather than "not an error", because this decides whether a
+/// working tunnel gets torn down: an outcome nobody has thought about yet
+/// should keep the session that is already up, not replace it.
+fn tunnel_answered(answer: &Option<Event>) -> bool {
+    matches!(answer, Some(Event::Connected { .. } | Event::NeedsLogin { .. }))
+}
+
+/// The tail both ways in share: ping the server, and only once it answers
+/// make its client the one every later read goes through.
+///
+/// Installing the client before the ping would leave a session pointing at a
+/// server that never replied, so the order here is the point.
+fn establish(
+    client: &mut Option<Arc<Client>>,
+    c: Client,
+    id: &str,
+    username: Option<String>,
+    token: Option<String>,
+) -> Result<Event, ApiError> {
+    let ping = c.ping()?;
+    let server = c.server();
+    *client = Some(Arc::new(c));
+    Ok(Event::Connected { server, id: id.to_string(), username, token, ping: Box::new(ping) })
+}
+
 fn connect(
     client: &mut Option<Arc<Client>>,
     server: &str,
@@ -715,21 +757,14 @@ fn connect(
         Ok(c) => c.with_token(token.clone()),
         Err(e) => return Some(Event::Error(e.to_string())),
     };
-    match c.ping() {
-        Ok(ping) => {
-            let server = c.server();
-            *client = Some(Arc::new(c));
-            Some(Event::Connected {
-                server,
-                id: id.to_string(),
-                username: None,
-                token,
-                ping: Box::new(ping),
-            })
-        }
+    // Taken before the client moves; it is the address that was reached,
+    // which is not always the string that was asked for.
+    let reached = c.server();
+    match establish(client, c, id, None, token) {
+        Ok(event) => Some(event),
         // Reaching the server and being asked to sign in is a normal outcome
         // of picking one, not an authorization failure.
-        Err(ApiError::Unauthorized) => Some(Event::NeedsLogin { server: c.server() }),
+        Err(ApiError::Unauthorized) => Some(Event::NeedsLogin { server: reached }),
         Err(e) => Some(Event::Error(e.to_string())),
     }
 }
@@ -752,18 +787,8 @@ fn login(
         }
         Err(e) => return Some(Event::Error(e.to_string())),
     };
-    match c.ping() {
-        Ok(ping) => {
-            let server = c.server();
-            *client = Some(Arc::new(c));
-            Some(Event::Connected {
-                server,
-                id: id.to_string(),
-                username: Some(username.to_string()),
-                token: Some(token),
-                ping: Box::new(ping),
-            })
-        }
+    match establish(client, c, id, Some(username.to_string()), Some(token)) {
+        Ok(event) => Some(event),
         Err(e) => Some(Event::Error(e.to_string())),
     }
 }
@@ -1274,6 +1299,39 @@ mod tests {
             resolve_target("mstream+iroh://endpointabc", Some(&tunnel)),
             (tunnel.0.clone(), tunnel.1.clone())
         );
+    }
+
+    #[test]
+    fn only_a_tunnel_that_answered_may_replace_the_one_in_use() {
+        // Installing a new bridge drops the old one, and its Drop closes the
+        // loopback listener the current session streams through. So the test
+        // is not "did the code parse" but "did the server on the other end
+        // reply" — a pairing code can dial fine and reach nothing.
+        let ping = || Box::new(crate::api::types::Ping::default());
+        assert!(tunnel_answered(&Some(Event::Connected {
+            server: "http://127.0.0.1:51234".into(),
+            id: "mstream+iroh://endpointabc".into(),
+            username: None,
+            token: None,
+            ping: ping(),
+        })));
+        assert!(
+            tunnel_answered(&Some(Event::NeedsLogin { server: "http://127.0.0.1:51234".into() })),
+            "reached it and was asked to sign in — the tunnel works"
+        );
+
+        assert!(
+            !tunnel_answered(&Some(Event::Error("no route to host".into()))),
+            "the dial failed, so the session already up keeps its bridge"
+        );
+        assert!(!tunnel_answered(&None));
+        // Anything else is not a success either: this decides whether a
+        // working tunnel is torn down, so it lists what may do that.
+        assert!(!tunnel_answered(&Some(Event::Unauthorized)));
+        assert!(!tunnel_answered(&Some(Event::TunnelReady {
+            local_url: "http://127.0.0.1:51234".into(),
+            id: "mstream+iroh://endpointabc".into(),
+        })));
     }
 
     #[test]
