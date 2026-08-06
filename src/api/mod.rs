@@ -434,6 +434,38 @@ impl Client {
         )
     }
 
+    /// The cover image a track's `album-art` metadata names — raw bytes,
+    /// whatever format the server holds it in.
+    ///
+    /// This is the one non-JSON GET in the client, so it does its own small
+    /// version of [`Client::send`]: same header auth, same status mapping,
+    /// but the body stays bytes instead of being read as text.
+    pub fn album_art(&self, file: &str) -> Result<Vec<u8>, ApiError> {
+        let url = urls::album_art_url(&self.server(), file).map_err(ApiError::Config)?;
+        let mut req = self.http.get(&url);
+        if let Some(token) = &self.token {
+            req = req.header("x-access-token", token);
+        }
+
+        let (status, bytes) = runtime::block_on(async move {
+            let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
+            let status = resp.status();
+            let bytes = resp.bytes().await.map_err(|e| ApiError::Network(e.to_string()))?;
+            Ok::<_, ApiError>((status, bytes))
+        })
+        .map_err(ApiError::Network)??;
+
+        match status {
+            StatusCode::UNAUTHORIZED => Err(ApiError::Unauthorized),
+            StatusCode::NOT_FOUND => Err(ApiError::NotFound(format!("album-art/{file}"))),
+            s if !s.is_success() => Err(ApiError::Server {
+                status: s.as_u16(),
+                message: extract_error(&String::from_utf8_lossy(&bytes)),
+            }),
+            _ => Ok(bytes.to_vec()),
+        }
+    }
+
     // ── Stream URLs ─────────────────────────────────────────────────────────
 
     /// Direct (untranscoded) stream URL for a track's vpath.

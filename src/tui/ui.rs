@@ -932,10 +932,20 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
         .padding(Padding::horizontal(1));
     let facts_inner = divider.inner(facts_area);
     frame.render_widget(divider, facts_area);
-    frame.render_widget(
-        Paragraph::new(now_playing_card(app, facts_inner.width as usize)),
-        facts_inner,
-    );
+    let mut card = now_playing_card(app, facts_inner.width as usize);
+    // The cover goes under the facts, in whatever rows the ladder leaves
+    // over. `art::lines` drops it entirely when that space would make it a
+    // smudge — the same bargain the connect screen's banner makes — and
+    // when colour is off, where a halfblock mosaic is a grey rectangle.
+    if let Some(art) = app.now_art() {
+        let room = facts_inner.height.saturating_sub(card.len() as u16 + 1);
+        let picture = super::art::lines(art, facts_inner.width, room);
+        if !picture.is_empty() {
+            card.push(Line::raw(""));
+            card.extend(picture);
+        }
+    }
+    frame.render_widget(Paragraph::new(card), facts_inner);
     render_now_panel(frame, panel_area, app);
 
     frame.render_widget(
@@ -1109,11 +1119,15 @@ fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
     let Some(tap) = &app.tap else {
         return render_now_placeholder(frame, picture, "the visualiser goes here", "no audio thread");
     };
-    // No frame means either nothing has played or the audio thread is
-    // mid-handover. Both mean "not this tick", and neither is worth a message
-    // that would flicker at thirty frames a second. Refilled in place: the
-    // copy is the same size every frame, so the buffer lives on the App.
-    if !tap.frame_into(&mut app.heard) {
+    // Refilled in place: the copy is the same size every frame, so the
+    // buffer lives on the App. A miss is the audio thread holding the lock
+    // mid-push, or the ~50 ms after a seek cleared the ring — the frame
+    // already in hand carries the picture over those, because blinking
+    // into placeholder text for one tick reads as a glitch. The
+    // placeholder is only for when there is genuinely nothing behind the
+    // panel: no track on, or no audio ever handed over.
+    let fresh = tap.frame_into(&mut app.heard);
+    if !fresh && (app.now_playing.is_none() || app.heard.samples.is_empty()) {
         return render_now_placeholder(frame, picture, "the visualiser goes here", "nothing playing");
     }
 
@@ -1125,7 +1139,15 @@ fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
     let sounding = app.status.playing;
     let mut canvas = crate::tui::canvas::Canvas::new(picture);
     if !canvas.is_empty() {
-        app.viz.draw(&mut canvas, &app.heard, sounding);
+        // Spelled out rather than through `App::now_art`, so the borrow
+        // checker can see these fields are not the one `draw` mutates.
+        let cover = app
+            .now_playing
+            .as_ref()
+            .and_then(|track| track.metadata.album_art.as_deref())
+            .and_then(|file| app.art.get(file))
+            .and_then(|art| art.as_ref());
+        app.viz.draw(&mut canvas, &app.heard, sounding, cover);
         frame.render_widget(Paragraph::new(canvas.into_lines()), picture);
     }
 }
@@ -2292,6 +2314,34 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_missed_tap_tick_keeps_the_picture_instead_of_blinking_text() {
+        let mut app = connected_app();
+        app.fullscreen = true;
+        app.now_tab = NowTab::Visualizer;
+        app.now_playing = Some(tagged_track());
+        // An empty tap misses, which is exactly what a read that lands
+        // mid-push gets. With a track playing and a frame already in hand,
+        // that tick must not turn into placeholder text.
+        app.tap = Some(crate::engine::tap::AudioTap::new());
+        app.heard = crate::engine::tap::TapFrame {
+            samples: vec![0.5; 2048],
+            rate: 44100,
+            channels: 1,
+        };
+        let screen = draw(&mut app);
+        assert!(
+            !screen.contains("nothing playing"),
+            "the held frame should carry the picture over the gap"
+        );
+
+        // With nothing playing behind it, the placeholder is the truth —
+        // the held frame is history, not a picture worth keeping up.
+        app.now_playing = None;
+        let screen = draw(&mut app);
+        assert!(screen.contains("nothing playing"), "idle should still say so");
     }
 
     #[test]

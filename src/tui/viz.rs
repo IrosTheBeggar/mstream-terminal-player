@@ -1,8 +1,8 @@
 //! What the audio looks like.
 //!
-//! Four ways of drawing the same tap: bars, scope, vectorscope, VU. All of
-//! them paint onto [`Canvas`], so they get two pixels per cell and work in
-//! any terminal.
+//! Five ways of drawing the same tap: bars, the cover curtain, scope,
+//! vectorscope, VU. All of them paint onto [`Canvas`], so they get two
+//! pixels per cell and work in any terminal.
 //!
 //! The bars follow cava's `cavacore` (MIT), which is worth reading: almost
 //! none of what makes a spectrum look like music is in the transform. It is
@@ -16,6 +16,7 @@ use std::time::Instant;
 use ratatui::style::Color;
 
 use crate::engine::tap::TapFrame;
+use crate::tui::art::{self, Art};
 use crate::tui::canvas::Canvas;
 use crate::tui::ui::{accent, dim, folder};
 
@@ -23,18 +24,26 @@ use crate::tui::ui::{accent, dim, folder};
 pub enum VizMode {
     #[default]
     Bars,
+    /// The album cover with the spectrum as its lighting: the whole picture
+    /// is always there, dimmed, and each band lights its two columns to
+    /// full brightness as far up as it reaches — the music plays across
+    /// the art like light. The one place the cover gets the whole panel,
+    /// and being redrawn thirty times a second, its coarseness reads as
+    /// motion rather than as a bad photograph.
+    Cover,
     Scope,
     Vectorscope,
     Vu,
 }
 
-pub const VIZ_MODES: [VizMode; 4] =
-    [VizMode::Bars, VizMode::Scope, VizMode::Vectorscope, VizMode::Vu];
+pub const VIZ_MODES: [VizMode; 5] =
+    [VizMode::Bars, VizMode::Cover, VizMode::Scope, VizMode::Vectorscope, VizMode::Vu];
 
 impl VizMode {
     pub fn title(self) -> &'static str {
         match self {
             VizMode::Bars => "spectrum",
+            VizMode::Cover => "cover",
             VizMode::Scope => "scope",
             VizMode::Vectorscope => "vectorscope",
             VizMode::Vu => "vu",
@@ -66,6 +75,10 @@ pub struct Visualizer {
     pub scatter: bool,
     bars: Bars,
     vu: Vu,
+    /// The cover resampled to the panel, kept between frames — see
+    /// [`CoverGrid`]. A cache, not state, so [`Visualizer::forget`] leaves
+    /// it alone: it can never disagree with the art it is keyed on.
+    cover_grid: CoverGrid,
     /// When the last frame was drawn. Every smoothing constant here is a rate
     /// per second, not per frame — the panel is redrawn on a timer that a
     /// slow terminal will miss, and smoothing that quietly changes speed with
@@ -89,15 +102,23 @@ const FRAME: f32 = 1.0 / 30.0;
 impl Visualizer {
     /// `sounding` is whether audio is actually being played. When it is not,
     /// the visualiser is given silence and falls to nothing, rather than
-    /// holding the last thing it saw.
-    pub fn draw(&mut self, canvas: &mut Canvas, heard: &TapFrame, sounding: bool) {
+    /// holding the last thing it saw. `cover` is the playing track's art,
+    /// which only the Cover mode reads — passed every frame rather than
+    /// held, so a cover that arrives mid-song appears on the next frame.
+    pub fn draw(
+        &mut self,
+        canvas: &mut Canvas,
+        heard: &TapFrame,
+        sounding: bool,
+        cover: Option<&Art>,
+    ) {
         let now = Instant::now();
         let elapsed = self
             .drawn
             .replace(now)
             .map_or(FRAME, |then| now.duration_since(then).as_secs_f32())
             .clamp(0.004, 0.25);
-        self.draw_after(canvas, heard, elapsed, sounding);
+        self.draw_after(canvas, heard, elapsed, sounding, cover);
     }
 
     fn draw_after(
@@ -106,6 +127,7 @@ impl Visualizer {
         heard: &TapFrame,
         elapsed: f32,
         sounding: bool,
+        cover: Option<&Art>,
     ) {
         // Nothing sounding means silence, not the last thing that sounded.
         // The tap goes on holding the tenth of a second before the pause, and
@@ -133,6 +155,15 @@ impl Visualizer {
                 self.bars.update(heard, count, elapsed);
                 draw_bars(canvas, &self.bars.heights);
             }
+            // A band per two columns, like the spectrum, but drawn gapless —
+            // that is what lets the columns add up to a picture. The same
+            // state as Bars, which also means the sensitivity it has settled
+            // on carries across the toggle.
+            VizMode::Cover => {
+                let bands = (canvas.width() as usize).div_ceil(BAR_WIDTH);
+                self.bars.update(heard, bands, elapsed);
+                draw_cover(canvas, &self.bars.heights, cover, &mut self.cover_grid);
+            }
             VizMode::Scope => draw_scope(canvas, heard, self.scatter),
             VizMode::Vectorscope => draw_vectorscope(canvas, heard, self.scatter),
             VizMode::Vu => {
@@ -143,7 +174,7 @@ impl Visualizer {
 
         self.still = !sounding
             && match self.mode {
-                VizMode::Bars => self.bars.at_rest(),
+                VizMode::Bars | VizMode::Cover => self.bars.at_rest(),
                 VizMode::Vu => self.vu.at_rest(),
                 // Drawn straight from the samples, and the samples are
                 // silence: this frame is already the flat line the next one
@@ -520,6 +551,104 @@ fn draw_bars(canvas: &mut Canvas, bars: &[f32]) {
                 canvas.set(x + dx, y, colour);
             }
         }
+    }
+}
+
+/// How much taller the cover's columns stand than the raw bands. The
+/// picture is the point of this mode, so the light is cut generously — a
+/// band at 70% already reaches the top. The spectrum mode keeps honest
+/// heights; this one is allowed to flatter.
+const COVER_LIFT: f32 = 1.4;
+
+/// The cover's brightness where no bar reaches. Dark enough that the lit
+/// columns are unmistakably the moving part, light enough that the whole
+/// picture stays readable between beats.
+const COVER_REST: f32 = 0.30;
+
+/// The cover resampled to the panel, in both its brightnesses.
+///
+/// Box-averaging the art onto the panel is a pure function of (cover,
+/// panel size), and it was being recomputed for every pixel of every frame
+/// — thirty times a second of the same answer. Rebuilt only when the key
+/// changes: a new cover, or the panel a different size.
+#[derive(Default)]
+struct CoverGrid {
+    key: Option<(u64, u16, u16)>,
+    bright: Vec<Color>,
+    dim: Vec<Color>,
+}
+
+/// The key only — the derived form is thousands of colours.
+impl std::fmt::Debug for CoverGrid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CoverGrid({:?})", self.key)
+    }
+}
+
+impl CoverGrid {
+    fn refresh(&mut self, art: &Art, width: u16, height: u16) {
+        let key = Some((art.id(), width, height));
+        if self.key == key {
+            return;
+        }
+        self.key = key;
+        self.bright.clear();
+        self.dim.clear();
+        let (w, h) = (u32::from(width), u32::from(height));
+        self.bright.reserve(w as usize * h as usize);
+        self.dim.reserve(w as usize * h as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let color = art::cover_sample(art, w, h, x, y);
+                self.bright.push(color);
+                self.dim.push(dimmed(color, COVER_REST));
+            }
+        }
+    }
+}
+
+/// The album cover under the spectrum's light. Every pixel shows the art —
+/// scaled to fill the panel — at [`COVER_REST`] brightness, and each band
+/// lights its two columns to full brightness as far up as it reaches. Loud
+/// passages light the whole picture; a pause lets it settle back to the dim
+/// version, which then holds still and stops costing frames.
+///
+/// With no cover in hand yet the bars wear the ordinary ramp over an empty
+/// background: the mode keeps working, it just has nothing to light. No
+/// `NO_COLOR` gate, unlike the static card — a colourless curtain is still
+/// a working spectrum, where a colourless mosaic was a grey rectangle.
+fn draw_cover(canvas: &mut Canvas, bars: &[f32], cover: Option<&Art>, grid: &mut CoverGrid) {
+    let height = i32::from(canvas.height());
+    let width = i32::from(canvas.width());
+    if let Some(art) = cover {
+        grid.refresh(art, canvas.width(), canvas.height());
+    }
+    for x in 0..width {
+        let band = bars.get(x as usize / BAR_WIDTH).copied().unwrap_or(0.0);
+        let top = height - ((band * COVER_LIFT).clamp(0.0, 1.0) * height as f32).round() as i32;
+        if cover.is_some() {
+            for y in 0..height {
+                let at = (y * width + x) as usize;
+                canvas.set(x, y, if y >= top { grid.bright[at] } else { grid.dim[at] });
+            }
+        } else {
+            for y in top..height {
+                canvas.set(x, y, ramp(1.0 - y as f32 / height as f32));
+            }
+        }
+    }
+}
+
+/// A colour at a fraction of its brightness. [`art::cover_sample`] always
+/// answers in RGB; anything else passes through whole rather than guessed at.
+fn dimmed(color: Color, amount: f32) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (f32::from(r) * amount) as u8,
+            (f32::from(g) * amount) as u8,
+            (f32::from(b) * amount) as u8,
+        ),
+        other => other,
     }
 }
 
@@ -1107,7 +1236,7 @@ mod tests {
     fn lit(mode: VizMode, scatter: bool, heard: &TapFrame) -> usize {
         let mut viz = Visualizer { mode, scatter, ..Default::default() };
         let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 60, height: 12 });
-        viz.draw_after(&mut canvas, heard, FRAME, true);
+        viz.draw_after(&mut canvas, heard, FRAME, true, None);
         canvas
             .into_lines()
             .iter()
@@ -1137,10 +1266,100 @@ mod tests {
         }
 
         // And the modes drawn from numbers rather than samples ignore it.
-        for mode in [VizMode::Bars, VizMode::Vu] {
+        for mode in [VizMode::Bars, VizMode::Cover, VizMode::Vu] {
             assert!(!mode.plots_samples());
             assert_eq!(lit(mode, false, &heard), lit(mode, true, &heard), "{}", mode.title());
         }
+    }
+
+    /// A solid orange square, for the cover tests.
+    fn orange_art() -> Art {
+        let pixels = (0..16).flat_map(|_| [230u8, 120, 10]).collect();
+        Art::from_rgb(4, 4, pixels).unwrap()
+    }
+
+    #[test]
+    fn the_whole_cover_shows_with_the_bars_as_the_bright_part() {
+        // Bands at half height on an 8x10-pixel canvas, lifted by the mode's
+        // gain: 0.5 × 1.4 = 0.7, so the bottom seven pixel rows are the art
+        // at full brightness and the top three are the art dimmed — no
+        // pixel anywhere is left unpainted, because the picture always
+        // shows whole and the bars only decide its lighting.
+        let bright = Color::Rgb(230, 120, 10);
+        let rest = dimmed(bright, COVER_REST);
+        let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 8, height: 5 });
+        draw_cover(&mut canvas, &[0.5; 4], Some(&orange_art()), &mut CoverGrid::default());
+
+        let lines = canvas.into_lines();
+        // Cell row 0 holds pixel rows 0-1: both dim. Row 1 holds 2-3: the
+        // seam, dim over bright. Rows 2-4 are all bright.
+        assert_eq!(lines[0].spans[0].style.fg, Some(rest));
+        assert_eq!(lines[1].spans[0].style.fg, Some(rest));
+        assert_eq!(lines[1].spans[0].style.bg, Some(bright));
+        assert_eq!(lines[4].spans[0].style.fg, Some(bright));
+        for (row, line) in lines.iter().enumerate() {
+            let blanks: usize =
+                line.spans.iter().map(|s| s.content.chars().filter(|c| *c == ' ').count()).sum();
+            assert_eq!(blanks, 0, "row {row} left pixels unpainted");
+        }
+    }
+
+    #[test]
+    fn each_band_owns_two_columns() {
+        // Bands at full, nothing, full, nothing: the top pixel row should
+        // read as four runs of two cells — lit pair, dim pair, lit pair,
+        // dim pair — because a band's two columns always move together.
+        let bright = Color::Rgb(230, 120, 10);
+        let rest = dimmed(bright, COVER_REST);
+        let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 8, height: 5 });
+        let mut grid = CoverGrid::default();
+        draw_cover(&mut canvas, &[1.0, 0.0, 1.0, 0.0], Some(&orange_art()), &mut grid);
+
+        let lines = canvas.into_lines();
+        let row = &lines[0].spans;
+        assert_eq!(row.len(), 4, "four runs of two: {row:?}");
+        for (i, span) in row.iter().enumerate() {
+            assert_eq!(span.content.chars().count(), 2, "run {i} spans its band");
+            let want = if i % 2 == 0 { bright } else { rest };
+            assert_eq!(span.style.fg, Some(want), "run {i}");
+        }
+    }
+
+    #[test]
+    fn the_cover_mode_wears_only_the_art_and_its_dim_half() {
+        // Driven by real audio rather than fixed heights: whatever the
+        // spectrum does, every cell must wear the art's colour at one of
+        // its two brightnesses — the heat ramp showing through would mean
+        // the art is decoration rather than the point.
+        let bright = Color::Rgb(230, 120, 10);
+        let rest = dimmed(bright, COVER_REST);
+        let art = orange_art();
+
+        let rate = 44100;
+        let heard = stereo(sine(440.0, rate, 4096), sine(660.0, rate, 4096), rate);
+        let mut viz = Visualizer { mode: VizMode::Cover, ..Default::default() };
+        let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 40, height: 10 });
+        for _ in 0..6 {
+            viz.draw_after(&mut canvas, &heard, FRAME, true, Some(&art));
+        }
+
+        let (mut lit, mut dim_cells) = (0usize, 0usize);
+        for line in canvas.into_lines() {
+            for span in &line.spans {
+                assert!(!span.content.contains(' '), "an unpainted cell: {span:?}");
+                for color in [span.style.fg, span.style.bg].into_iter().flatten() {
+                    if color == bright {
+                        lit += 1;
+                    } else if color == rest {
+                        dim_cells += 1;
+                    } else {
+                        panic!("a colour that is neither the art nor its dim half: {color:?}");
+                    }
+                }
+            }
+        }
+        assert!(lit > 0, "a loud tone should light some of the picture");
+        assert!(dim_cells > 0, "and the quiet bands should leave some of it dim");
     }
 
     #[test]
@@ -1155,25 +1374,25 @@ mod tests {
 
         let mut viz = Visualizer { mode: VizMode::Bars, ..Default::default() };
         for _ in 0..12 {
-            viz.draw_after(&mut canvas(), &loud, FRAME, true);
+            viz.draw_after(&mut canvas(), &loud, FRAME, true, None);
         }
         assert!(viz.bars.heights.iter().cloned().fold(0.0f32, f32::max) > 0.1, "playing");
 
         // Fed the loud buffer throughout — which is what the tap really holds
         // after a pause. Reusing it is exactly the thing being ruled out.
         for _ in 0..40 {
-            viz.draw_after(&mut canvas(), &loud, FRAME, false);
+            viz.draw_after(&mut canvas(), &loud, FRAME, false, None);
         }
         let left = viz.bars.heights.iter().cloned().fold(0.0f32, f32::max);
         assert!(left < 0.01, "the bars should be down: {left}");
 
         let mut viz = Visualizer { mode: VizMode::Vu, ..Default::default() };
         for _ in 0..12 {
-            viz.draw_after(&mut canvas(), &loud, FRAME, true);
+            viz.draw_after(&mut canvas(), &loud, FRAME, true, None);
         }
         assert!(viz.vu.readings()[0].0 > 0.5, "playing");
         for _ in 0..40 {
-            viz.draw_after(&mut canvas(), &loud, FRAME, false);
+            viz.draw_after(&mut canvas(), &loud, FRAME, false, None);
         }
         assert_eq!(viz.vu.readings()[0].0, 0.0, "the meter should read nothing");
     }
@@ -1192,7 +1411,7 @@ mod tests {
             assert!(!viz.still(), "{mode:?}: nothing drawn yet, so nothing is known");
 
             for _ in 0..12 {
-                viz.draw_after(&mut canvas(), &loud, FRAME, true);
+                viz.draw_after(&mut canvas(), &loud, FRAME, true, None);
             }
             assert!(!viz.still(), "{mode:?}: it is moving while audio is sounding");
 
@@ -1200,7 +1419,7 @@ mod tests {
             // handed it is exactly the case that matters.
             let mut frames = 0;
             while !viz.still() && frames < 200 {
-                viz.draw_after(&mut canvas(), &loud, FRAME, false);
+                viz.draw_after(&mut canvas(), &loud, FRAME, false, None);
                 frames += 1;
             }
             assert!(viz.still(), "{mode:?}: never settled in {frames} frames");
@@ -1213,7 +1432,7 @@ mod tests {
             );
 
             // And it is moving again the moment something sounds.
-            viz.draw_after(&mut canvas(), &loud, FRAME, true);
+            viz.draw_after(&mut canvas(), &loud, FRAME, true, None);
             assert!(!viz.still(), "{mode:?}: resuming has to bring the frames back");
         }
     }
@@ -1255,7 +1474,7 @@ mod tests {
         // silence still draws its zero line, and should.
         let signal_rows = |viz: &mut Visualizer, sounding: bool| -> Vec<usize> {
             let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 50, height: 10 });
-            viz.draw_after(&mut canvas, &loud, FRAME, sounding);
+            viz.draw_after(&mut canvas, &loud, FRAME, sounding, None);
             canvas
                 .into_lines()
                 .iter()
@@ -1313,7 +1532,7 @@ mod tests {
             let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 40, height: 10 });
             // Several times, so the modes that carry state across a frame do.
             for _ in 0..6 {
-                viz.draw_after(&mut canvas, &heard, FRAME, true);
+                viz.draw_after(&mut canvas, &heard, FRAME, true, None);
             }
             let drawn: usize = canvas
                 .into_lines()
@@ -1338,7 +1557,7 @@ mod tests {
             for mode in VIZ_MODES {
                 viz.mode = mode;
                 let mut canvas = Canvas::new(Rect { x: 0, y: 0, width, height });
-                viz.draw_after(&mut canvas, &heard, FRAME, true);
+                viz.draw_after(&mut canvas, &heard, FRAME, true, None);
             }
         }
         // And mono, which the vectorscope has nothing to say about.
@@ -1347,7 +1566,7 @@ mod tests {
         for mode in VIZ_MODES {
             viz.mode = mode;
             let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 20, height: 6 });
-            viz.draw_after(&mut canvas, &mono, FRAME, true);
+            viz.draw_after(&mut canvas, &mono, FRAME, true, None);
         }
     }
 

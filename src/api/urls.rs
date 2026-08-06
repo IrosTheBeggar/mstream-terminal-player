@@ -70,6 +70,16 @@ pub fn media_url(server: &str, vpath: &str, token: Option<&str>) -> Result<Strin
     Ok(url.to_string())
 }
 
+/// `{server}/album-art/{file}` — the cover the server extracted and cached,
+/// named by the `album-art` field in track metadata.
+///
+/// No `?token=`: unlike the stream URLs this one is fetched by the client
+/// itself, so the token can travel in the header where it stays out of
+/// server logs.
+pub fn album_art_url(server: &str, file: &str) -> Result<String, String> {
+    build(server, "album-art", file).map(|url| url.to_string())
+}
+
 /// `{server}/transcode/{vpath}?codec=...&bitrate=...&token=...`
 ///
 /// The codec is always sent explicitly; see [`TranscodeCodec`].
@@ -125,6 +135,12 @@ mod tests {
         // Public-mode servers (no users configured) need no token at all.
         let u = media_url("http://host", "lib/a.mp3", None).unwrap();
         assert_eq!(u, "http://host/media/lib/a.mp3");
+    }
+
+    #[test]
+    fn album_art_url_carries_no_token() {
+        let u = album_art_url("http://host/mstream", "b0445bafc2e9a817.jpeg").unwrap();
+        assert_eq!(u, "http://host/mstream/album-art/b0445bafc2e9a817.jpeg");
     }
 
     #[test]

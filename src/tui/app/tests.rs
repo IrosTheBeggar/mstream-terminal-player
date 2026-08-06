@@ -2963,3 +2963,73 @@ fn selection_stays_in_bounds() {
     pane.move_by(1);
     assert_eq!(pane.state.selected(), None);
 }
+
+// ── Album art ───────────────────────────────────────────────────────────────
+
+fn track_with_cover(path: &str, cover: &str) -> Track {
+    let mut track = track(path);
+    track.metadata.album_art = Some(cover.to_string());
+    track
+}
+
+#[test]
+fn starting_a_track_asks_for_its_cover_once() {
+    let mut app = connected_app();
+    app.queue.replace(vec![
+        track_with_cover("lib/a.mp3", "aa.jpeg"),
+        track_with_cover("lib/b.mp3", "aa.jpeg"),
+        track("lib/plain.mp3"),
+    ]);
+
+    let effects = app.play_index(0);
+    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into() });
+    assert!(effects.contains(&asked), "got {effects:?}");
+
+    // The next track shares the cover and the first ask is still out; the
+    // placeholder in the cache is what keeps this from asking again.
+    let effects = app.play_index(1);
+    assert!(!effects.contains(&asked), "got {effects:?}");
+
+    // No tagged cover, nothing to ask for.
+    let effects = app.play_index(2);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::AlbumArt { .. }))),
+        "got {effects:?}"
+    );
+}
+
+#[test]
+fn a_cover_reply_reaches_the_playing_track_whenever_it_lands() {
+    let mut app = connected_app();
+    app.queue.replace(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
+    app.play_index(0);
+    assert_eq!(app.now_art(), None, "nothing has arrived yet");
+
+    // The reply lands — including one that took long enough for the track
+    // to have been paused, seeked, anything but skipped.
+    let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(art.clone()) });
+    assert_eq!(app.now_art(), Some(&art));
+
+    // "The server has no cover for this" is also an answer, and it must
+    // not leave the previous track's art on screen.
+    app.queue.replace(vec![track_with_cover("lib/b.mp3", "bb.jpeg")]);
+    app.play_index(0);
+    app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: None });
+    assert_eq!(app.now_art(), None);
+}
+
+#[test]
+fn the_art_cache_is_bounded() {
+    let mut app = connected_app();
+    for n in 0..ART_CACHE_CAP {
+        app.queue.replace(vec![track_with_cover("lib/a.mp3", &format!("{n}.jpeg"))]);
+        app.play_index(0);
+    }
+    assert_eq!(app.art.len(), ART_CACHE_CAP);
+
+    // One more starts the cache over rather than growing without bound.
+    app.queue.replace(vec![track_with_cover("lib/a.mp3", "again.jpeg")]);
+    app.play_index(0);
+    assert_eq!(app.art.len(), 1);
+}

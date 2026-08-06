@@ -340,6 +340,9 @@ impl App {
                 }
                 self.capabilities = crate::api::types::Capabilities::from(ping.as_ref());
                 self.libraries = ping.vpaths.clone();
+                // Cover filenames only mean anything to the server that
+                // minted them; a reconnect may be a different server.
+                self.art.clear();
                 let libraries = ping.vpaths.len();
                 self.info(format!(
                     "connected to {} ({} librar{})",

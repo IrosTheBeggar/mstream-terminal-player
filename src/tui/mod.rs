@@ -5,6 +5,7 @@
 //! the decisions live in [`app`].
 
 pub mod app;
+pub mod art;
 pub mod canvas;
 pub mod keymap;
 pub mod ui;

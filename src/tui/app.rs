@@ -5,6 +5,7 @@
 //! channels. That keeps the interesting behaviour — navigation, queue
 //! advancement, repeat/shuffle — testable without a terminal or a server.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // Key handling lives in `super::keymap` now; the app only meets key events
@@ -17,6 +18,7 @@ use crate::api::types::{Album, DirListing, Genre, Track};
 use crate::api::urls;
 use crate::dj;
 use crate::player::PlayerStatus;
+use crate::tui::art::Art;
 
 use super::worker::{
     ApiCmd, AudioCmd, AutoDjMode, DiscoverData, DiscoverNode, DjRequest, Event, LibraryData,
@@ -30,6 +32,12 @@ const SEEK_STEP_FAR: f64 = 60.0;
 const VOLUME_STEP: f32 = 0.05;
 /// Rows a page key moves. Ctrl+u/d move half of this, as they do in vim.
 const PAGE_STEP: isize = 10;
+/// Covers held before the cache is emptied wholesale. An evening of
+/// listening crosses fewer albums than this; the point is only that a
+/// player left running for a week cannot grow without bound. Wholesale
+/// rather than LRU because correctness needs only the bound, and by the
+/// time it is hit the oldest entries are hours stale anyway.
+const ART_CACHE_CAP: usize = 64;
 
 /// A side effect for the run loop to dispatch to a worker.
 #[derive(Debug, Clone, PartialEq)]
@@ -789,6 +797,11 @@ pub struct App {
     failures: usize,
     pub volume: f32,
     pub now_playing: Option<Track>,
+    /// Covers fetched this session, keyed by the server's art filename.
+    /// `None` records both "asked, nothing there" and "asked, still
+    /// waiting" — the two draw the same, and the entry is what stops a
+    /// second request either way.
+    pub art: HashMap<String, Option<Art>>,
     pub audio_available: bool,
     /// A copy of the audio coming out of the engine, for the visualiser to
     /// draw. Read-only from here and `None` off the real audio thread, so a
@@ -802,7 +815,10 @@ pub struct App {
     pub viz: crate::tui::viz::Visualizer,
     /// The tap's latest audio, refilled in place each frame. The visualiser
     /// asks thirty times a second and the answer is the same size every
-    /// time, so the buffer is kept rather than allocated per frame.
+    /// time, so the buffer is kept rather than allocated per frame — and
+    /// held across the reads that miss (the tap only ever *tries* its
+    /// lock), so one busy tick freezes the picture instead of blinking it
+    /// into placeholder text.
     pub heard: crate::engine::tap::TapFrame,
     /// The full-screen now-playing view. A view rather than an overlay: every
     /// normal key still means what it meant, so `space`, `n` and the seek keys
@@ -879,6 +895,7 @@ impl App {
             failures: 0,
             volume: 1.0,
             now_playing: None,
+            art: HashMap::new(),
             audio_available: true,
             tap: None,
             pointer: None,
@@ -1952,8 +1969,30 @@ impl App {
         self.now_playing = Some(track);
 
         let mut effects = vec![Effect::Audio(AudioCmd::Play { url, duration_hint: hint })];
+        effects.extend(self.fetch_art());
         effects.extend(self.maybe_autodj());
         effects
+    }
+
+    /// Ask for the cover of what just started, unless the cache already
+    /// holds it — or already holds the placeholder a previous ask left, so
+    /// skipping n-n-n through one album costs one request, not five.
+    fn fetch_art(&mut self) -> Option<Effect> {
+        let file = self.now_playing.as_ref()?.metadata.album_art.clone()?;
+        if self.art.contains_key(&file) {
+            return None;
+        }
+        if self.art.len() >= ART_CACHE_CAP {
+            self.art.clear();
+        }
+        self.art.insert(file.clone(), None);
+        Some(Effect::Api(ApiCmd::AlbumArt { file }))
+    }
+
+    /// The cover of what is playing, once it has arrived.
+    pub fn now_art(&self) -> Option<&Art> {
+        let file = self.now_playing.as_ref()?.metadata.album_art.as_ref()?;
+        self.art.get(file)?.as_ref()
     }
 
     fn play_pause(&mut self) -> Vec<Effect> {
@@ -2162,6 +2201,14 @@ impl App {
             | Event::Journey { .. }
             | Event::Genres(_)
             | Event::AutoDjPick { .. }) => self.consume_dj(event),
+            Event::AlbumArt { file, art } => {
+                // Keyed by the server's own filename, an answer is never
+                // stale: one that lands after the player has moved on just
+                // means the next track off that album finds its cover
+                // already here.
+                self.art.insert(file, art);
+                Vec::new()
+            }
             Event::Playlists(playlists) => {
                 self.playlist_open = None;
                 self.playlists.set(
