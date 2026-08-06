@@ -87,6 +87,50 @@ jobs:
             cargo build --release --target ${{ matrix.target }}
           fi
 
+      # Developer ID signing + notarization, only where the secrets exist:
+      # a fork or a dry run still builds, just unsigned. Bare Mach-O
+      # binaries cannot be stapled, so the notarization ticket lives on
+      # Apple's servers and Gatekeeper checks it online — the normal
+      # arrangement for CLI tools. Runs before staging so the manifest
+      # hashes cover the signed bytes.
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS' && secrets.MACOS_CERT_P12 != ''
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          ASC_API_KEY: ${{ secrets.ASC_API_KEY }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/mstream-player"
+
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 900 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S "apple-tool:,apple:" \
+            -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain
+
+          identity=$(security find-identity -v -p codesigning "$keychain" \
+            | sed -n 's/.*"\(Developer ID Application[^"]*\)".*/\1/p' | head -1)
+          codesign --force --timestamp --options runtime \
+            --identifier io.mstream.player --sign "$identity" "$bin"
+          codesign --verify --strict --verbose=2 "$bin"
+
+          echo "$ASC_API_KEY" > "$RUNNER_TEMP/asc.p8"
+          ditto -c -k "$bin" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/asc.p8" --key-id "$ASC_KEY_ID" \
+            --issuer "$ASC_ISSUER_ID" --wait --timeout 15m
+          rm "$RUNNER_TEMP/asc.p8"
+
       - name: Stage binary
         shell: bash
         run: |
