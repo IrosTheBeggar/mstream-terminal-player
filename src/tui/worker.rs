@@ -25,6 +25,7 @@ use crate::engine::Engine;
 use crate::engine::tap::AudioTap;
 use crate::player::{PlayerCtl, PlayerStatus};
 use crate::tui::app::Tab;
+use crate::tui::art;
 
 /// How often the audio thread ticks the engine and publishes status. Also the
 /// upper bound on command latency, so keep it small enough to feel instant.
@@ -70,6 +71,9 @@ pub enum ApiCmd {
     Playlists,
     LoadPlaylist(String),
     Search(String),
+    /// Fetch and decode one cover, named by the art file a track's metadata
+    /// carries. The app caches the answer under that name.
+    AlbumArt { file: String },
     Shutdown,
 }
 
@@ -281,6 +285,10 @@ pub enum Event {
     /// `query` is the search these results answer — replies can pass each
     /// other now, and the box's contents name the one still wanted.
     SearchResults { query: String, results: Box<SearchResults> },
+    /// A cover, decoded and shrunk to terminal scale — or `None` for any
+    /// kind of failure. Art is a nicety: nothing about it is ever worth a
+    /// message the user has to read.
+    AlbumArt { file: String, art: Option<art::Art> },
     /// Credentials are missing or expired — the UI drops back to the
     /// connect screen.
     Unauthorized,
@@ -685,6 +693,14 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         }
         ApiCmd::Search(query) => {
             c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r) })
+        }
+        ApiCmd::AlbumArt { file } => {
+            // Every failure is "no art" — a fetch that 404s, bytes that
+            // don't decode, even a dead session, which the next real
+            // request will report in its own voice. Decoded here so the
+            // render loop only ever meets covers already at terminal scale.
+            let art = c.album_art(&file).ok().and_then(|bytes| art::decode(&bytes));
+            Ok(Event::AlbumArt { file, art })
         }
         // The connection commands never reach here; api_loop keeps them.
         ApiCmd::Connect { .. }

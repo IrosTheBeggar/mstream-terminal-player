@@ -25,6 +25,10 @@ stream-download = "0.24.2"
 tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 reqwest = "0.13.4"
 ratatui = "0.30.2"
+# Decodes cover art, nothing else. jpeg and png are what mStream's art cache
+# actually holds; the default features would compile every codec the crate
+# knows plus rayon, for images this player never meets.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 iroh = "1"
 iroh-tickets = "1"
 # 0.22 rather than 0.23: reqwest, iroh, portmapper and tokio-websockets are
