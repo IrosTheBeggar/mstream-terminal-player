@@ -219,8 +219,9 @@ persisted preferences landed together; the spool relocation followed the same da
 - ✅ **Schema version** on both files from the start.
 - ✅ **Streaming scratch space** (was "configurable stream cache" — renamed because it is a
   *spool*, not a cache: only the playing track has a file, nothing is prefetched, nothing
-  persists — Phase C loosens the one-file rule by exactly one: while a crossfade prepares and
-  blends, the upcoming track spools alongside the playing one). The problem stands as stated: whole tracks landed in the OS temp dir, and `/tmp` is
+  persists — Phase C loosens the one-file rule: while a crossfade prepares and blends, the
+  upcoming track spools alongside the playing one, and a prepare cancelled by a queue edit
+  holds its spool until its open completes or times out, so churn can briefly hold more). The problem stands as stated: whole tracks landed in the OS temp dir, and `/tmp` is
   tmpfs on many Linux distros — a 400 MB FLAC silently cost 400 MB of RAM. Spool files now go to
   `<platform cache dir>/mstream-player/spool` (`%LOCALAPPDATA%`, `~/Library/Caches`,
   `$XDG_CACHE_HOME`/`~/.cache`), overridable with `[cache] dir` in config.toml or
@@ -551,6 +552,44 @@ for true gapless — the Phase 7 "append-to-sink redesign", reduced to a small s
 **Costs accepted**: two decoders and two spool files for a bounded window per transition;
 summed peaks can transiently exceed full scale on loud masters even at equal power (rodio has a
 `limit` source if that ever proves audible in practice).
+
+#### Phase C review ✅ 2026-08-06
+
+A seven-lens adversarial review of C1–C3 (concurrency, audio, state machine, app
+reconciliation, edge cases, performance, compat/tests; every finding re-verified by
+independent refuters, then a completeness critic over the survivors): 25 raw findings, 19
+confirmed, 2 more from the critic. Fixed the same day, each pinned by a test:
+
+- **Pause/resume popped the blend** — the outgoing's wall-clock deadline ran through a pause;
+  resume now re-arms it. Found independently by five of the seven lenses.
+- **A prepare-thread panic tore the terminal down** under a live TUI (audit #32's failure mode
+  on a new thread). Caught at the spawn *and* the panic hook stands back for the thread by
+  name — the catch alone was not enough, since the hook runs at the panic site.
+- **The fade window ignored the incoming track's length** — a short next track lived its whole
+  life at partial gain and its end hard-cut the outgoing. `blend_window` now applies the
+  half-track rule to both ends.
+- **A push behind the repeat-all wrap was skipped** — linear announcements now re-ask
+  `next_index` (deterministic, no dice); shuffle keeps the held roll, which is the point of it.
+- **Restarting the playing track silently cost the next blend** — every Play now drops the
+  app-side announcement so the refresh re-announces into the engine it just wiped.
+- **Duplicate tracks blended invisibly and played thrice** — a track never blends into itself:
+  refused app-side at announcement, refused engine-side as the belt.
+- **The handover fallback could rewind onto an earlier duplicate** — the scan now prefers rows
+  ahead of the cursor.
+- **A failed manual jump kept a stale committed pick** while `queue_index` moved; the
+  index-moving paths invalidate on error now — including `play_source` and the auto-advance
+  arm, two siblings the *fix-verification* pass (a second adversarial round over the fix diff)
+  caught after the first round missed them. And **`Failed` was a one-way latch** — a seek
+  back past the prepare window resets it, so a healed network blip gets its retry.
+- Seven test gaps closed: the new `collapse()` rules, invalidate-on-mutation (device),
+  `prepare_next` idempotency (re-announce loop in the device test), the `handle_action`
+  refresh funnel, `Faded` under a mid-stream rate change, the `HandedOver` staleness guards,
+  and integer `crossfade_seconds` in hand-written TOML.
+
+Deferred with eyes open: keeping a matching in-flight open across queue mutations and reusing
+a `Ready` decoder when the blend misses (both are C4-adjacent — the second *is* the gapless
+attach path); the remaining per-row URL builds in the fallback scan; and the no-headroom
+summation, which stays in Costs above until someone hears it.
 
 ### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
 Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install

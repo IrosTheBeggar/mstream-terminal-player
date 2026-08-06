@@ -818,6 +818,7 @@ mod tests {
              \n\
              [player]\n\
              volume = 0.5\n\
+             crossfade_seconds = 4\n\
              gapless = true\n\
              \n\
              [player.dj]\n\
@@ -833,6 +834,11 @@ mod tests {
         // its live state, which is where a preserved key gets dropped again
         // if `adopt` isn't in the path.
         let mut config = load().unwrap();
+        // A hand-written integer where the field is an f32: the file's
+        // stated design goal is "fixable in an editor", and a person writes
+        // 4, not 4.0. Pinned here, on the load, so a stricter future
+        // deserializer cannot quietly turn that into a whole-file refusal.
+        assert_eq!(config.player.crossfade_seconds, 4.0);
         config.player.adopt(PlayerPrefs { volume: 0.8, ..PlayerPrefs::default() });
         save(&config).unwrap();
 

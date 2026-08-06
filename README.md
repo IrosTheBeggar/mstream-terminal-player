@@ -404,9 +404,10 @@ Both are written by rename, so an interrupted write leaves the previous file int
 While a track plays it is spooled to one scratch file (that's what makes seeking instant), which
 goes in the platform cache directory — `%LOCALAPPDATA%\mstream-player\spool`,
 `~/Library/Caches/mstream-player/spool` or `~/.cache/mstream-player/spool` — rather than `/tmp`,
-which is RAM-backed on many Linux systems. Only the playing track is spooled — plus, briefly, the
-next one while a crossfade is being prepared; each file is deleted when its track stops, and
-leftovers from a crash are swept at the next start. To put it elsewhere, set
+which is RAM-backed on many Linux systems. Only the playing track is spooled — plus the next one
+while a crossfade is being prepared, and for a few seconds the file of a preparation a queue edit
+abandoned; each is deleted when its track stops or its download lets go, and leftovers from a
+crash are swept at the next start. To put it elsewhere, set
 `MSTREAM_PLAYER_CACHE_DIR` or add to config.toml:
 
 ```toml

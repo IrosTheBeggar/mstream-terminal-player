@@ -1996,21 +1996,39 @@ impl App {
     }
 
     /// The queue row whose media URL is `url`, if any. A scan, but of an
-    /// in-memory queue, on an event that fires once per blend.
+    /// in-memory queue, on an event that fires once per blend. Rows after
+    /// the playing one are asked first: duplicate filepaths are legal, and
+    /// adopting an earlier copy would walk the cursor backwards into
+    /// tracks already heard (review finding: the fallback rewound).
     fn index_of_url(&self, url: &str) -> Option<usize> {
-        self.queue.items.iter().position(|t| self.queue_url(t).as_deref() == Some(url))
+        let ahead = self.queue.current.map_or(0, |current| current + 1);
+        (ahead..self.queue.items.len())
+            .find(|&i| self.queue_url(&self.queue.items[i]).as_deref() == Some(url))
+            .or_else(|| {
+                self.queue.items[..ahead.min(self.queue.items.len())]
+                    .iter()
+                    .position(|t| self.queue_url(t).as_deref() == Some(url))
+            })
     }
 
     /// The standing announcement, if everything it was made against still
     /// holds: crossfade still on, same playing row, same track at the
-    /// announced index, same shuffle and repeat rules.
+    /// announced index, same shuffle and repeat rules — and, for linear
+    /// play, still the row the rules would pick. Linear picks are
+    /// deterministic, so asking again costs nothing and catches what the
+    /// snapshots cannot: a push that changes the answer without touching
+    /// anything they see, like the repeat-all wrap when a track lands
+    /// behind the last row (review finding: the new track was skipped).
+    /// Shuffle is the one that must NOT be re-asked — that rolls the dice
+    /// — which is the entire reason the announcement is held at all.
     fn announced_still_valid(&self) -> Option<usize> {
         let a = self.announced.as_ref()?;
         let holds = self.crossfade > 0.0
             && self.queue.current == Some(a.for_current)
             && self.queue.shuffle == a.shuffle
             && self.queue.repeat == a.repeat
-            && self.queue.items.get(a.index).is_some_and(|t| t.filepath == a.filepath);
+            && self.queue.items.get(a.index).is_some_and(|t| t.filepath == a.filepath)
+            && (self.queue.shuffle || self.queue.next_index(false) == Some(a.index));
         holds.then_some(a.index)
     }
 
@@ -2032,6 +2050,14 @@ impl App {
             return None;
         }
         let track = self.queue.items.get(index)?;
+        // The same file queued twice in a row: a blend into it would change
+        // nothing status can show — no HandedOver would ever fire, the
+        // cursor would stall, and the missed-blend path would play the copy
+        // again (review finding: duplicates played three times). Refuse,
+        // and the ordinary TrackEnded road walks the cursor forward.
+        if self.now_playing.as_ref().is_some_and(|t| t.filepath == track.filepath) {
+            return None;
+        }
         Some(AnnouncedNext {
             for_current,
             index,
@@ -2084,6 +2110,14 @@ impl App {
         let hint = track.metadata.duration;
         self.remember_played(&track);
         self.now_playing = Some(track);
+        // Every Play wipes the engine's pending next (play_source clears
+        // it), so whatever announcement stood is now this side's belief
+        // alone. Drop it and the trailing refresh re-announces — free when
+        // the pick is unchanged, since the engine treats a repeated URL as
+        // a no-op. Without this, restarting the playing track left the
+        // engine holding nothing while the app believed otherwise, and the
+        // next transition silently lost its blend (review finding).
+        self.announced = None;
 
         let mut effects = vec![Effect::Audio(AudioCmd::Play { url, duration_hint: hint })];
         effects.extend(self.fetch_art());
@@ -2221,16 +2255,12 @@ impl App {
                 // The engine crossfaded into the announced track by itself.
                 // Move the cursor the way play_index would — minus the Play,
                 // which the audio has already performed.
+                // The announcement already carries the exact URL it sent
+                // the engine, so the happy path is one string compare —
+                // no rebuilt URL (review note: the rebuild was waste).
                 let adopted = self
                     .announced_still_valid()
-                    .filter(|&index| {
-                        self.queue
-                            .items
-                            .get(index)
-                            .and_then(|t| self.queue_url(t))
-                            .as_deref()
-                            == Some(to.as_str())
-                    })
+                    .filter(|_| self.announced.as_ref().is_some_and(|a| a.url == to))
                     .or_else(|| self.index_of_url(&to));
                 match adopted {
                     Some(index) => {

@@ -357,6 +357,60 @@ mod tests {
         assert_eq!(faded.next().unwrap(), 1.0, "over-unity clamps to unity");
     }
 
+    /// A source that halves its sample rate partway through, the way a
+    /// decoder's spans legally can.
+    struct Shifty {
+        emitted: usize,
+        switch_at: usize,
+    }
+
+    impl Iterator for Shifty {
+        type Item = Sample;
+        fn next(&mut self) -> Option<Sample> {
+            self.emitted += 1;
+            Some(1.0)
+        }
+    }
+
+    impl Source for Shifty {
+        fn current_span_len(&self) -> Option<usize> {
+            None
+        }
+        fn channels(&self) -> ChannelCount {
+            ChannelCount::new(1).unwrap()
+        }
+        fn sample_rate(&self) -> SampleRate {
+            SampleRate::new(if self.emitted < self.switch_at { 1000 } else { 500 }).unwrap()
+        }
+        fn total_duration(&self) -> Option<Duration> {
+            None
+        }
+        fn try_seek(&mut self, _pos: Duration) -> Result<(), SeekError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_ramp_survives_a_mid_stream_rate_change() {
+        // The ramp is a count of frames, fixed when the command is picked
+        // up: a rate change mid-walk stretches its wall-clock time (100
+        // frames at half the rate take twice as long) but the walk still
+        // lands exactly on target, monotonically — no stall, no overshoot,
+        // no divide by the new rate. That wall-time stretch is the
+        // documented trade; this pins the landing.
+        let handle = FadeHandle::new(1.0);
+        let mut faded = Faded::new(Shifty { emitted: 0, switch_at: 50 }, handle.clone());
+        handle.ramp_to(0.0, Duration::from_millis(100)); // 100 frames at 1kHz
+        let heard = take_shifty(&mut faded, 100);
+        assert!(heard.windows(2).all(|w| w[1] < w[0]), "downward the whole way through");
+        assert_eq!(*heard.last().unwrap(), 0.0, "and it lands exactly, whatever the rate did");
+        assert_eq!(handle.position(), 0.0);
+    }
+
+    fn take_shifty(faded: &mut Faded<Shifty>, count: usize) -> Vec<Sample> {
+        (0..count).map(|_| faded.next().unwrap()).collect()
+    }
+
     #[test]
     fn a_seek_reaches_the_inner_source_and_leaves_the_ramp_alone() {
         let handle = FadeHandle::new(0.5);

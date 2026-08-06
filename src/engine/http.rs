@@ -22,9 +22,13 @@ pub(crate) type HttpReader = StreamDownload<TempStorageProvider>;
 //
 // Each playing track spools to one temp file (that is what makes seeking
 // instant), deleted when the track stops. This is a scratch buffer, not a
-// cache: nothing persists, and at most two tracks have files at once — the
-// one playing and, only while a crossfade prepares or blends, the one
-// coming up (Phase C). By default the files would land in the OS temp dir —
+// cache: nothing persists. At most two *live* tracks have files at once —
+// the one playing and, while a crossfade prepares or blends, the one
+// coming up (Phase C) — plus, briefly, the spools of cancelled prepares:
+// cancellation is dropping the opener's receiver, and the opener holds
+// its file until the open completes or OPEN_TIMEOUT expires, so queue
+// churn inside the prepare window can hold three or four for a few
+// seconds. By default the files would land in the OS temp dir —
 // RAM-backed tmpfs on many Linux systems — so main() points us at a real
 // cache directory instead (see config::spool_dir).
 

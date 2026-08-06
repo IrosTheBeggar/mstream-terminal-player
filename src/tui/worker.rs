@@ -318,9 +318,12 @@ pub(crate) const AUDIO_THREAD: &str = "mstream-audio";
 /// under an unwind guard and reports its own death as
 /// [`Event::AudioFailed`], so the process-wide hook must stand back for it:
 /// "recovering" the terminal there would tear the screen down under a UI
-/// that is still running (audit #32).
+/// that is still running (audit #32). The crossfade prepare thread is the
+/// same story with a smaller blast radius — its panics are caught at the
+/// spawn and read as a failed open, so a malformed file costs a blend, not
+/// the terminal.
 pub fn panics_are_caught(thread: Option<&str>) -> bool {
-    thread == Some(AUDIO_THREAD)
+    thread == Some(AUDIO_THREAD) || thread == Some(crate::engine::PREPARE_THREAD)
 }
 
 /// Returns the tap alongside the command channel: the engine is built on the
@@ -1359,8 +1362,12 @@ mod tests {
     }
 
     #[test]
-    fn the_panic_hook_stands_back_only_for_the_thread_that_catches() {
+    fn the_panic_hook_stands_back_only_for_the_threads_that_catch() {
         assert!(panics_are_caught(Some(AUDIO_THREAD)));
+        // The prepare thread catches at its spawn; the hook firing there
+        // would tear the terminal down for a panic already handled — a
+        // malformed file must cost a blend, not the screen (audit #32).
+        assert!(panics_are_caught(Some(crate::engine::PREPARE_THREAD)));
         assert!(!panics_are_caught(Some("mstream-api")), "the api thread is not caught");
         assert!(!panics_are_caught(None), "an unnamed thread is not caught");
     }
@@ -1403,6 +1410,35 @@ mod tests {
         assert_eq!(
             collapse(vec![play("a"), AudioCmd::Shutdown, play("b")]),
             vec![AudioCmd::Shutdown]
+        );
+    }
+
+    #[test]
+    fn announcements_collapse_to_the_last_word_after_the_decider() {
+        let prep = |url: &str| AudioCmd::PrepareNext { url: url.to_string(), duration_hint: None };
+        // An announcement before the decider was about a track the batch
+        // has already moved past — applying it late would hand the engine
+        // a next that belongs to nothing.
+        assert_eq!(collapse(vec![prep("b"), play("c")]), vec![play("c")]);
+        // After the decider, only the last announcement counts, whichever
+        // shape it takes.
+        assert_eq!(
+            collapse(vec![play("c"), prep("d"), AudioCmd::ClearNext]),
+            vec![play("c"), AudioCmd::ClearNext]
+        );
+        assert_eq!(
+            collapse(vec![play("c"), AudioCmd::ClearNext, prep("d")]),
+            vec![play("c"), prep("d")]
+        );
+        // The blend length is sticky like volume: kept wherever it was
+        // said, last one wins.
+        assert_eq!(
+            collapse(vec![AudioCmd::SetCrossfade(4.0), play("c")]),
+            vec![AudioCmd::SetCrossfade(4.0), play("c")]
+        );
+        assert_eq!(
+            collapse(vec![AudioCmd::SetCrossfade(2.0), play("c"), AudioCmd::SetCrossfade(6.0)]),
+            vec![AudioCmd::SetCrossfade(6.0), play("c")]
         );
     }
 

@@ -280,6 +280,22 @@ fn effective_fade(crossfade: f32, duration: f64) -> f64 {
     f64::from(crossfade).min(duration / 2.0)
 }
 
+/// The window a handover actually gets. The half-track rule guards both
+/// ends: the outgoing side through [`effective_fade`], and the incoming
+/// side here — a ramp longer than half the incoming track never reaches
+/// full volume before the track is over, and the outgoing's down-ramp
+/// then outlives the incoming sink and ends in the very cut the blend
+/// exists to remove (review finding: short-next hard cut). Clamped to
+/// what actually remains, floored so a late handover blends instead of
+/// clicking.
+fn blend_window(crossfade: f32, outgoing_dur: f64, remaining: f64, incoming_dur: f64) -> f64 {
+    let mut window = effective_fade(crossfade, outgoing_dur).min(remaining.max(0.0));
+    if incoming_dur > 0.0 {
+        window = window.min(incoming_dur / 2.0);
+    }
+    window.max(MIN_FADE)
+}
+
 /// What plays after the current track, as far as anyone has decided.
 enum NextTrack {
     /// Nothing decided — the resting state, and all of it when crossfade
@@ -314,15 +330,31 @@ fn next_candidate(q: &QueueState) -> Option<(QueueEntry, Option<usize>)> {
     Some((q.queue[index].clone(), Some(index)))
 }
 
+/// The prepare thread's name — the TUI's panic hook recognises it, the same
+/// way it recognises the audio thread, and stands back: its panics are
+/// caught below, and "recovering" the terminal for a caught panic tears the
+/// screen down under a UI that is still running (audit #32).
+pub(crate) const PREPARE_THREAD: &str = "mstream-prepare";
+
 /// Open `entry` on a short-lived thread of its own. The open can block for
 /// the network's full patience, and the whole point of preparing is that
 /// nobody holds the state lock — or the audio — waiting on it.
 fn spawn_prepare(entry: QueueEntry, index: Option<usize>) -> NextTrack {
     let (tx, rx) = mpsc::channel();
     let spawned = std::thread::Builder::new()
-        .name("mstream-prepare".into())
+        .name(PREPARE_THREAD.into())
         .spawn(move || {
-            let _ = tx.send(open_entry(&entry));
+            // Caught, because symphonia panics on malformed files (audit
+            // #32): the sender drops unfired and the tick reads the
+            // disconnect as a failed open. The catch alone is not the
+            // whole defence — the process panic hook runs at the panic
+            // site, *before* any catch — which is why the TUI's hook
+            // knows this thread by name and stands back for it.
+            let opened =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| open_entry(&entry)));
+            if let Ok(result) = opened {
+                let _ = tx.send(result);
+            }
         });
     match spawned {
         Ok(_) => NextTrack::Opening { index, rx },
@@ -342,6 +374,11 @@ struct Outgoing {
     /// stalled download can hold a silent sink open indefinitely, and the
     /// latch it holds would block every later blend.
     fade: Arc<fade::FadeHandle>,
+    /// The blend window, kept so the deadline can be re-armed: the wall
+    /// clock runs through a pause, and a deadline armed once at handover
+    /// would come due mid-pause — the first tick after resume then cut
+    /// the outgoing at audible gain (review finding: pause/resume pop).
+    fade_dur: Duration,
     deadline: Instant,
 }
 
@@ -538,8 +575,14 @@ impl Engine {
         s.q.queue.push(QueueEntry { path: source, duration_hint });
         s.q.index = 0;
         // A new track makes the old announcement about a future that is not
-        // happening; the caller re-announces once this one is playing.
+        // happening; the caller re-announces once this one is playing. The
+        // committed pick goes with it *now*, not via start_current's
+        // success path: the queue it was made against has just been
+        // replaced, and a failed start would otherwise leave it alive to
+        // blend a track from a queue that no longer exists (the sibling of
+        // the failed-jump review finding, caught by its verifier).
         s.pending_next = None;
+        s.invalidate_next();
         s.start_current(self.device.mixer())
     }
 
@@ -549,6 +592,13 @@ impl Engine {
     /// so a repeated announcement never throws away an open in flight.
     pub fn prepare_next(&self, source: String, duration_hint: Option<f64>) {
         let mut s = self.state.lock().unwrap();
+        // A track never blends into itself. The app refuses to announce
+        // one, and this is the belt to that suspender: a handover into the
+        // playing source would change nothing status can show, and the
+        // watchers upstream would never learn it happened.
+        if s.current_file == source {
+            return;
+        }
         if s.pending_next.as_ref().map(|e| e.path.as_str()) == Some(source.as_str()) {
             if let Some(entry) = &mut s.pending_next {
                 entry.duration_hint = duration_hint;
@@ -577,10 +627,16 @@ impl Engine {
     }
 
     pub fn resume(&self) {
-        let s = self.state.lock().unwrap();
+        let mut s = self.state.lock().unwrap();
         s.sink.play();
-        if let Some(out) = &s.outgoing {
+        if let Some(out) = &mut s.outgoing {
             out.sink.play();
+            // The wall clock ran through the pause while the blend stood
+            // frozen; a deadline that came due in that time would cut the
+            // outgoing at audible gain on the very next tick. Re-arm with
+            // the full window — the deadline is a pathology net, and a
+            // generous net still catches what it exists for.
+            out.deadline = Instant::now() + out.fade_dur + OUTGOING_SLACK;
         }
     }
 
@@ -655,7 +711,15 @@ impl Engine {
         match pick_next(&s.q, true) {
             Some(idx) => {
                 s.q.index = idx;
-                s.start_current(self.device.mixer())
+                let started = s.start_current(self.device.mixer());
+                if started.is_err() {
+                    // The index moved even though the start failed, so a
+                    // pick committed against the old position is now a lie
+                    // — the invariant handover leans on (review finding:
+                    // failed jumps kept stale commitments).
+                    s.invalidate_next();
+                }
+                started
             }
             None => Err(EngineError::EndOfQueue),
         }
@@ -666,7 +730,13 @@ impl Engine {
         if s.q.index == 0 {
             if s.q.loop_mode == LoopMode::All && !s.q.queue.is_empty() {
                 s.q.index = s.q.queue.len() - 1;
-                s.start_current(self.device.mixer())
+                let started = s.start_current(self.device.mixer());
+                if started.is_err() {
+                    // Same as next_manual: the index moved, the start did
+                    // not, and the committed pick answers for neither.
+                    s.invalidate_next();
+                }
+                started
             } else {
                 // The restart is a seek like any other — same discipline as
                 // [`Engine::seek`], even though the start of the track has
@@ -679,7 +749,11 @@ impl Engine {
             }
         } else {
             s.q.index -= 1;
-            s.start_current(self.device.mixer())
+            let started = s.start_current(self.device.mixer());
+            if started.is_err() {
+                s.invalidate_next();
+            }
+            started
         }
     }
 
@@ -734,7 +808,11 @@ impl Engine {
             return Err(EngineError::OutOfBounds);
         }
         s.q.index = index;
-        s.start_current(self.device.mixer())
+        let started = s.start_current(self.device.mixer());
+        if started.is_err() {
+            s.invalidate_next();
+        }
+        started
     }
 
     pub fn queue_remove(&self, index: usize) -> Result<(), EngineError> {
@@ -806,6 +884,9 @@ impl Engine {
                 if s.start_current(self.device.mixer()).is_ok() {
                     return;
                 }
+                // The index moved and the start did not — the same rule as
+                // the manual paths: a committed pick answers for neither.
+                s.invalidate_next();
                 s.advance_failures += 1;
                 if s.advance_failures >= s.q.queue.len() {
                     s.clear_current();
@@ -866,6 +947,15 @@ impl Engine {
         }
         let remaining = s.duration - s.sink.get_pos().as_secs_f64();
 
+        // A transient failure earns a fresh try when the window recedes: a
+        // seek back re-opens minutes of runway in which a network blip may
+        // well have healed. Resetting only *outside* the window keeps the
+        // no-retry-every-tick property inside it (review finding: the
+        // Failed latch was one-way).
+        if matches!(s.next, NextTrack::Failed) && remaining > fade + PREPARE_LEAD {
+            s.next = NextTrack::Idle;
+        }
+
         if matches!(s.next, NextTrack::Idle) && remaining <= fade + PREPARE_LEAD {
             // The TUI's announcement outranks the internal queue: where one
             // is set the queue is a single mirrored entry with no next of
@@ -897,9 +987,7 @@ impl Engine {
             return;
         };
         let remaining = (s.duration - s.sink.get_pos().as_secs_f64()).max(0.0);
-        // The window is whatever is actually left, floored so a handover
-        // that arrived late still blends instead of clicking.
-        let fade_secs = effective_fade(s.crossfade, s.duration).min(remaining).max(MIN_FADE);
+        let fade_secs = blend_window(s.crossfade, s.duration, remaining, prepared.duration);
         let fade_dur = Duration::from_secs_f64(fade_secs);
 
         s.fade.ramp_to(0.0, fade_dur);
@@ -907,6 +995,7 @@ impl Engine {
         s.outgoing = Some(Outgoing {
             sink: s.sink.clone(),
             fade: s.fade.clone(),
+            fade_dur,
             deadline: Instant::now() + fade_dur + OUTGOING_SLACK,
         });
 
@@ -1232,6 +1321,12 @@ mod tests {
         let started = std::time::Instant::now();
         let handed = loop {
             engine.advance_tick();
+            // Re-announcing the unchanged URL every poll: the engine
+            // promises this is a no-op that never restarts the open. If
+            // that promise broke, the open would restart every 50 ms,
+            // never reach Ready, and this test would time out (review
+            // finding: the idempotency contract was untested).
+            engine.prepare_next(second.to_string_lossy().into_owned(), Some(4.0));
             let status = engine.status();
             assert!(!status.file.is_empty(), "went quiet instead of blending");
             if status.file == second.to_string_lossy() {
@@ -1247,6 +1342,164 @@ mod tests {
         engine.stop();
         let _ = std::fs::remove_file(&first);
         let _ = std::fs::remove_file(&second);
+    }
+
+    /// A failed play must take the committed pick down with it: play_source
+    /// replaces the whole queue before it opens anything, and a pick
+    /// committed against the old queue surviving a failed open would blend
+    /// into a track from a queue that no longer exists (the fix-verify
+    /// pass caught this as the failed-jump finding's uncovered sibling).
+    ///
+    /// `cargo test a_failed_play_discards -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_failed_play_discards_the_committed_pick() {
+        let dir = std::env::temp_dir();
+        let first = dir.join("mstream-crossfade-m.wav");
+        let second = dir.join("mstream-crossfade-n.wav");
+        std::fs::write(&first, wav_bytes(4)).unwrap();
+        std::fs::write(&second, wav_bytes(4)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(1.5);
+        engine.queue_add_many(vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ]);
+
+        // Local opens land in microseconds: the pick of track n is
+        // committed and Ready almost immediately.
+        std::thread::sleep(Duration::from_millis(400));
+        engine.advance_tick();
+
+        // A play that cannot start replaces the queue and fails; the old
+        // playback carries on, and the old commitment must be gone.
+        let missing = dir.join("mstream-crossfade-no-such.wav");
+        assert!(engine.play_source(missing.to_string_lossy().into_owned(), None).is_err());
+
+        // Ride out the rest of the first track: the blend into n must
+        // never fire — n belongs to a queue that was thrown away.
+        let started = std::time::Instant::now();
+        loop {
+            engine.advance_tick();
+            let status = engine.status();
+            assert!(
+                status.file != second.to_string_lossy(),
+                "a stale committed pick blended out of a replaced queue"
+            );
+            if status.file.is_empty() {
+                break; // the old track ran out; the dead entry ends the queue
+            }
+            assert!(started.elapsed() < Duration::from_secs(8), "playback never wound down");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        engine.stop();
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
+
+    /// The wall clock runs through a pause; the blend must not. Deadline =
+    /// fade (1.5s) + slack (2s) = 3.5s, and the pause outlasts it.
+    ///
+    /// `cargo test a_paused_blend -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_paused_blend_survives_a_pause_longer_than_its_deadline() {
+        let dir = std::env::temp_dir();
+        let first = dir.join("mstream-crossfade-p.wav");
+        let second = dir.join("mstream-crossfade-q.wav");
+        std::fs::write(&first, wav_bytes(4)).unwrap();
+        std::fs::write(&second, wav_bytes(4)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(1.5);
+        engine.queue_add_many(vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ]);
+
+        let started = std::time::Instant::now();
+        while !engine.overlap_active() {
+            engine.advance_tick();
+            assert!(started.elapsed() < Duration::from_secs(6), "no blend ever started");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+
+        engine.pause();
+        std::thread::sleep(Duration::from_secs(4)); // well past the 3.5s deadline
+        engine.advance_tick(); // the ticks keep coming while paused
+        assert!(engine.overlap_active(), "the deadline must not fire mid-pause");
+
+        engine.resume();
+        engine.advance_tick();
+        assert!(engine.overlap_active(), "resume re-arms the net; the blend goes on");
+
+        // And the blend still ends on its own, the ordinary way.
+        let resumed = std::time::Instant::now();
+        while engine.overlap_active() {
+            engine.advance_tick();
+            assert!(resumed.elapsed() < Duration::from_secs(5), "the outgoing never retired");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(engine.status().playing, "the incoming carried on");
+
+        engine.stop();
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
+
+    /// A queue edit between prepare and handover must discard the committed
+    /// pick: the blend then lands on what the edited queue actually says
+    /// comes next, never on a track no longer in it.
+    ///
+    /// `cargo test a_queue_edit_mid_prepare -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_queue_edit_mid_prepare_discards_the_committed_pick() {
+        let dir = std::env::temp_dir();
+        let names: Vec<_> = ["h", "i", "j"]
+            .iter()
+            .map(|n| dir.join(format!("mstream-crossfade-{n}.wav")))
+            .collect();
+        for name in &names {
+            std::fs::write(name, wav_bytes(4)).unwrap();
+        }
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(1.5);
+        engine.queue_add_many(
+            names.iter().map(|n| n.to_string_lossy().into_owned()).collect(),
+        );
+
+        // Local files open in microseconds: by now track i is committed
+        // and Ready. Then i leaves the queue.
+        std::thread::sleep(Duration::from_millis(400));
+        engine.advance_tick();
+        engine.queue_remove(1).unwrap();
+
+        let started = std::time::Instant::now();
+        loop {
+            engine.advance_tick();
+            let status = engine.status();
+            if status.queue_index == 1 && status.file == names[2].to_string_lossy() {
+                break; // the blend landed on j, the re-committed pick
+            }
+            assert!(
+                status.file != names[1].to_string_lossy(),
+                "the blend landed on the removed track"
+            );
+            assert!(started.elapsed() < Duration::from_secs(8), "no handover ever came");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        engine.stop();
+        for name in &names {
+            let _ = std::fs::remove_file(name);
+        }
     }
 
     /// `cargo test a_manual_next_mid_blend -- --ignored --nocapture`
@@ -1453,6 +1706,25 @@ mod tests {
         assert_eq!(effective_fade(6.0, 0.0), 0.0, "no known length, no fade point");
         assert_eq!(effective_fade(-3.0, 300.0), 0.0);
         assert_eq!(effective_fade(f32::NAN, 300.0), 0.0);
+    }
+
+    #[test]
+    fn the_blend_window_respects_both_tracks() {
+        // The ordinary case: the configured length, nothing in the way.
+        assert_eq!(blend_window(6.0, 300.0, 100.0, 300.0), 6.0);
+        // A short incoming track halves the window against ITS length, or
+        // its whole life is a partial ramp and its end is a hard cut.
+        assert_eq!(blend_window(30.0, 300.0, 30.0, 12.0), 6.0);
+        // What actually remains bounds everything.
+        assert_eq!(blend_window(6.0, 300.0, 2.0, 300.0), 2.0);
+        // An unknown incoming length caps nothing — there is no length to
+        // halve. Nothing refuses to blend *into* the unknown (only out of
+        // it), so a hint-less stream that turns out short still ends in a
+        // cut; accepted, since a cap cannot exist without a number.
+        assert_eq!(blend_window(6.0, 300.0, 100.0, 0.0), 6.0);
+        // The floor holds against a window that arrived too late.
+        assert!(blend_window(6.0, 300.0, 0.0, 300.0) >= MIN_FADE);
+        assert!(blend_window(6.0, 300.0, -3.0, 300.0) >= MIN_FADE, "past the end still blends");
     }
 
     #[test]

@@ -3172,6 +3172,158 @@ fn a_missed_blend_still_plays_the_track_that_was_announced() {
 }
 
 #[test]
+fn a_push_behind_the_wrap_reannounces_the_new_tail() {
+    // Playing the last row under repeat-all announces the wrap to row 0.
+    // A pushed track changes the answer without touching anything the
+    // snapshots see — the linear re-check is what catches it (review
+    // finding: the new track was skipped for a whole pass).
+    let mut app = connected_app();
+    app.crossfade = 6.0;
+    app.queue.repeat = Repeat::All;
+    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    let play = app.play_index(1);
+    let url = played_url(&play);
+    let status = PlayerStatus { source: url.clone(), playing: true, ..Default::default() };
+    let effects = app.apply_event(Event::Status(status.clone()));
+    assert!(announced_url(&effects).expect("the wrap").contains("a.mp3"));
+
+    app.queue.push(track("lib/c.mp3"));
+    let effects = app.apply_event(Event::Status(status));
+    let announced = announced_url(&effects).expect("the push changed the answer");
+    assert!(announced.contains("c.mp3"), "{announced}");
+
+    // And the missed-blend path plays the same corrected pick.
+    let effects = app.apply_event(Event::TrackEnded { source: url });
+    assert_eq!(played_url(&effects), announced);
+}
+
+#[test]
+fn restarting_the_playing_track_reannounces_the_next() {
+    // A restart is a Play, and every Play wipes the engine's pending next.
+    // The announcement must not stand on this side while the engine holds
+    // nothing (review finding: restarts silently cost the next blend).
+    let mut app = connected_app();
+    let (url, first) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+
+    app.play_index(0); // Enter on the row already playing
+    let status = PlayerStatus { source: url, playing: true, ..Default::default() };
+    let effects = app.apply_event(Event::Status(status));
+    let again = announced_url(&effects).expect("the announcement was re-sent");
+    assert_eq!(again, first, "same pick, told to the engine afresh");
+}
+
+#[test]
+fn a_duplicate_next_is_never_announced_and_still_advances() {
+    // The same file twice in a row: a blend into it would change nothing
+    // status can show — no HandedOver, a stalled cursor, and the copy
+    // played again on the missed-blend path (review finding). So it is
+    // never announced, and the transition takes the ordinary road.
+    let mut app = connected_app();
+    app.crossfade = 6.0;
+    app.queue.replace(vec![track("lib/x.mp3"), track("lib/x.mp3"), track("lib/y.mp3")]);
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let status = PlayerStatus { source: url.clone(), playing: true, ..Default::default() };
+    let effects = app.apply_event(Event::Status(status));
+    assert_eq!(announced_url(&effects), None, "a track never blends into itself");
+
+    // The ordinary end walks the cursor to the second copy, once — and the
+    // same dispatch already announces y, the different track behind it.
+    let effects = app.apply_event(Event::TrackEnded { source: url.clone() });
+    assert_eq!(played_url(&effects), url, "the copy plays under its own name");
+    assert_eq!(app.queue.current, Some(1), "and the cursor moved to it");
+    assert!(announced_url(&effects).expect("y follows").contains("y.mp3"));
+}
+
+#[test]
+fn the_fallback_adopts_the_copy_ahead_not_behind() {
+    // Duplicate filepaths are legal; an engine handover reconciled through
+    // the fallback scan must land on the copy ahead of the cursor, not
+    // walk backwards into rows already heard (review finding).
+    let mut app = connected_app();
+    app.crossfade = 6.0;
+    app.queue.replace(vec![
+        track("lib/a.mp3"),
+        track("lib/b.mp3"),
+        track("lib/a.mp3"),
+        track("lib/c.mp3"),
+    ]);
+    let play = app.play_index(1);
+    let url = played_url(&play);
+    app.apply_event(Event::Status(PlayerStatus {
+        source: url.clone(),
+        playing: true,
+        ..Default::default()
+    }));
+    let to = app.queue_url(&app.queue.items[2]).unwrap();
+
+    // The announcement is gone (whatever invalidated it); only the scan
+    // remains to say which row the engine meant.
+    app.announced = None;
+    app.apply_event(Event::HandedOver { from: url, to });
+    assert_eq!(app.queue.current, Some(2), "the copy ahead, not row 0");
+}
+
+#[test]
+fn a_handover_racing_a_user_play_is_ignored() {
+    let mut app = connected_app();
+    let (url, announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+
+    // The user picked something else and its Play is still opening: the
+    // engine's handover describes a past that has been overruled.
+    app.starting = Some("http://host:3000/media/elsewhere.mp3".into());
+    app.apply_event(Event::HandedOver { from: url, to: announced });
+    assert_eq!(app.queue.current, Some(0), "the cursor stayed with the user's intent");
+    assert_eq!(app.now_playing.as_ref().unwrap().filepath, "lib/a.mp3");
+}
+
+#[test]
+fn a_handover_from_a_track_already_left_is_ignored() {
+    let mut app = connected_app();
+    let (_url, announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+
+    app.apply_event(Event::HandedOver {
+        from: "http://host:3000/media/somewhere-else.mp3".into(),
+        to: announced,
+    });
+    assert_eq!(app.queue.current, Some(0), "stale news moves nothing");
+}
+
+#[test]
+fn toggling_rules_reannounces_through_the_action_funnel() {
+    // The refresh hook rides handle_action too — a settings keystroke must
+    // carry its announcement change in the same action's effects, not wait
+    // for the next status tick (review finding: only the event funnel was
+    // ever exercised).
+    let mut app = connected_app();
+    let (_url, _announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+
+    let effects = app.handle_action(Action::ToggleShuffle);
+    assert!(
+        announced_url(&effects).is_some(),
+        "new rules, new roll, told to the engine in the same keystroke"
+    );
+
+    // A repeat change under SHUFFLE has only the snapshot to catch it —
+    // the linear re-check is skipped there — so it gets its own assert
+    // (the fix-verify pass called this the one uncovered corner).
+    let effects = app.handle_action(Action::ToggleRepeat); // All, shuffle still on
+    assert!(
+        announced_url(&effects).is_some(),
+        "a repeat change re-rolls a shuffled announcement via the snapshot"
+    );
+
+    // Off -> All keeps a next; All -> One withdraws it — repeat-one never
+    // blends, and the withdrawal must not wait for a status tick either.
+    app.handle_action(Action::ToggleShuffle); // shuffle back off
+    let effects = app.handle_action(Action::ToggleRepeat); // One
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::ClearNext))),
+        "repeat-one withdraws the announcement in the same keystroke"
+    );
+}
+
+#[test]
 fn connecting_tells_the_engine_the_blend_length() {
     let mut app = connected_app();
     app.crossfade = 4.0;
