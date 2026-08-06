@@ -569,24 +569,16 @@ impl Client {
     /// This is the one non-JSON GET in the client, so it does its own small
     /// version of [`Client::send`]: same header auth, same status mapping,
     /// but the body stays bytes instead of being read as text.
-    ///
-    /// Native-only for now: the one endpoint still blocking on the runtime
-    /// directly instead of splitting into the async core the browser shares.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn album_art(&self, file: &str) -> Result<Vec<u8>, ApiError> {
+    pub async fn album_art_async(&self, file: &str) -> Result<Vec<u8>, ApiError> {
         let url = urls::album_art_url(&self.server(), file).map_err(ApiError::Config)?;
         let mut req = self.http.get(&url);
         if let Some(token) = &self.token {
             req = req.header("x-access-token", token);
         }
 
-        let (status, bytes) = runtime::block_on(async move {
-            let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
-            let status = resp.status();
-            let bytes = resp.bytes().await.map_err(|e| ApiError::Network(e.to_string()))?;
-            Ok::<_, ApiError>((status, bytes))
-        })
-        .map_err(ApiError::Network)??;
+        let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
+        let status = resp.status();
+        let bytes = resp.bytes().await.map_err(|e| ApiError::Network(e.to_string()))?;
 
         match status {
             StatusCode::UNAUTHORIZED => Err(ApiError::Unauthorized),
@@ -597,6 +589,11 @@ impl Client {
             }),
             _ => Ok(bytes.to_vec()),
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn album_art(&self, file: &str) -> Result<Vec<u8>, ApiError> {
+        wait(self.album_art_async(file))
     }
 
     // ── Stream URLs ─────────────────────────────────────────────────────────

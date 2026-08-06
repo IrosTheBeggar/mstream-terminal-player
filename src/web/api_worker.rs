@@ -19,6 +19,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::api::types::Capabilities;
 use crate::api::{ApiError, Client};
+use crate::tui::art;
 use crate::tui::worker::{self, ApiCmd, Event};
 
 /// Client plus what its server said it can do — replaced wholesale on every
@@ -148,9 +149,20 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
-        // The art fetch hasn't crossed to the browser yet; "no art" keeps
-        // the cover pane honest instead of an error toast wrong.
-        ApiCmd::AlbumArt { file } => Some(Event::AlbumArt { file, art: None }),
+        ApiCmd::AlbumArt { file } => {
+            // Every failure is "no art", exactly as the native worker treats
+            // it — even a missing session, which the next real request will
+            // report in its own voice. Not `with_session`, whose "not
+            // connected" error toast is precisely what art must never raise.
+            let client = session.borrow().as_ref().map(|s| s.client.clone());
+            let art = match client {
+                Some(c) => {
+                    c.album_art_async(&file).await.ok().and_then(|bytes| art::decode(&bytes))
+                }
+                None => None,
+            };
+            Some(Event::AlbumArt { file, art })
+        }
     }
 }
 
