@@ -1,11 +1,12 @@
-# After a release publishes, push the version-and-hashes bump to the
-# Homebrew tap. The tap's own scripts/bump.sh regenerates the formula from
-# this release's manifest.json, so the tap follows releases without hands.
+# After a release publishes, push the version-and-hashes bump to each
+# package channel — the Homebrew tap and the Scoop bucket. Both carry a
+# scripts/bump.sh that regenerates their file whole from this release's
+# manifest.json, so the channels follow releases without hands.
 #
 # Needs TAP_PUSH_TOKEN: a fine-grained PAT with contents:write on
-# IrosTheBeggar/homebrew-mstream only — GITHUB_TOKEN cannot push to a
-# sibling repo.
-name: Update Homebrew tap
+# IrosTheBeggar/homebrew-mstream and IrosTheBeggar/scoop-mstream only —
+# GITHUB_TOKEN cannot push to sibling repos.
+name: Update package channels
 
 on:
   release:
@@ -18,24 +19,32 @@ on:
 
 jobs:
   bump:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: IrosTheBeggar/homebrew-mstream
+            file: Formula/mstream-player.rb
+          - channel: IrosTheBeggar/scoop-mstream
+            file: bucket/mstream-player.json
     runs-on: ubuntu-latest
     steps:
-      - name: Check out the tap
+      - name: Check out ${{ matrix.channel }}
         uses: actions/checkout@v6
         with:
-          repository: IrosTheBeggar/homebrew-mstream
+          repository: ${{ matrix.channel }}
           token: ${{ secrets.TAP_PUSH_TOKEN }}
 
-      - name: Regenerate the formula
+      - name: Regenerate ${{ matrix.file }}
         run: sh scripts/bump.sh "${{ github.event.release.tag_name || inputs.tag }}"
 
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/mstream-player.rb
+          git add "${{ matrix.file }}"
           if git diff --cached --quiet; then
-            echo "formula already at this version — nothing to push"
+            echo "already at this version — nothing to push"
             exit 0
           fi
           git commit -m "mstream-player ${{ github.event.release.tag_name || inputs.tag }}"

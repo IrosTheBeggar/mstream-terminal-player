@@ -133,9 +133,15 @@ jobs:
 
           echo "$ASC_API_KEY" > "$RUNNER_TEMP/asc.p8"
           ditto -c -k "$bin" "$RUNNER_TEMP/notarize.zip"
+          # Team keys carry an issuer UUID; individual keys must not pass
+          # --issuer at all, says notarytool itself.
+          issuer=()
+          if [ -n "${ASC_ISSUER_ID}" ]; then
+            issuer=(--issuer "$ASC_ISSUER_ID")
+          fi
           xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
             --key "$RUNNER_TEMP/asc.p8" --key-id "$ASC_KEY_ID" \
-            --issuer "$ASC_ISSUER_ID" --wait --timeout 15m
+            "${issuer[@]}" --wait --timeout 15m
           rm "$RUNNER_TEMP/asc.p8"
 
       - name: Stage binary
