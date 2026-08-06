@@ -35,8 +35,9 @@ pub struct ReplayArgs {
     /// Comma-separated steps. Keys by name (Down, Enter, Esc, Tab,
     /// Backspace, Space, PageDown, ctrl+c), single characters (q, a, 2),
     /// quoted text to type ('hunter2'), `@event` to inject a worker reply,
-    /// `wait:500` to pause, `click:20x22` and `move:20x22` for the pointer, and
-    /// `frame` to print the screen.
+    /// `wait:500` to pause, `click:20x22` and `move:20x22` for the pointer,
+    /// `frame` to print the screen, and `html` to print it with its colours
+    /// as a self-contained page.
     pub script: String,
 
     /// Talk to a real server with real workers instead of injected replies.
@@ -75,6 +76,10 @@ enum Step {
     Inject(Event),
     Wait(Duration),
     Frame,
+    /// A frame that keeps its colours: the buffer as a self-contained HTML
+    /// page. `frame` flattens every style away, which is right for asserting
+    /// on text and useless for showing anyone what the player looks like.
+    Html,
 }
 
 fn key(code: KeyCode) -> Step {
@@ -175,6 +180,10 @@ fn parse_step(raw: &str, app_server: &str) -> Result<Step, String> {
         return Ok(Step::Frame);
     }
 
+    if token.eq_ignore_ascii_case("html") {
+        return Ok(Step::Html);
+    }
+
     if let Some(rest) = token.strip_prefix("ctrl+") {
         let c = rest.chars().next().ok_or_else(|| format!("bad key '{token}'"))?;
         return Ok(Step::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)));
@@ -246,6 +255,153 @@ fn expand(raw: &str, app_server: &str) -> Result<Vec<Step>, String> {
             .map(|c| Step::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
             .collect()),
         None => Ok(vec![parse_step(token, app_server)?]),
+    }
+}
+
+/// The sixteen system colours as Windows Terminal's Campbell scheme paints
+/// them — the palette this player is developed against, so an exported frame
+/// looks like the terminal it came from rather than 1990s VGA.
+const CAMPBELL: [(u8, u8, u8); 16] = [
+    (0x0C, 0x0C, 0x0C),
+    (0xC5, 0x0F, 0x1F),
+    (0x13, 0xA1, 0x0E),
+    (0xC1, 0x9C, 0x00),
+    (0x00, 0x37, 0xDA),
+    (0x88, 0x17, 0x98),
+    (0x3A, 0x96, 0xDD),
+    (0xCC, 0xCC, 0xCC),
+    (0x76, 0x76, 0x76),
+    (0xE7, 0x48, 0x56),
+    (0x16, 0xC6, 0x0C),
+    (0xF9, 0xF1, 0xA5),
+    (0x3B, 0x78, 0xFF),
+    (0xB4, 0x00, 0x9E),
+    (0x61, 0xD6, 0xD6),
+    (0xF2, 0xF2, 0xF2),
+];
+
+/// An xterm-256 index as RGB: the system sixteen, the 6×6×6 cube, then the
+/// grayscale ramp.
+fn xterm(index: u8) -> (u8, u8, u8) {
+    match index {
+        0..=15 => CAMPBELL[index as usize],
+        16..=231 => {
+            let i = index - 16;
+            let level = |v: u8| if v == 0 { 0 } else { v * 40 + 55 };
+            (level(i / 36), level((i / 6) % 6), level(i % 6))
+        }
+        _ => {
+            let g = (index - 232) * 10 + 8;
+            (g, g, g)
+        }
+    }
+}
+
+/// A ratatui colour as `#rrggbb`, or `None` for the terminal default.
+fn css(colour: ratatui::style::Color) -> Option<String> {
+    use ratatui::style::Color;
+    let (r, g, b) = match colour {
+        Color::Reset => return None,
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(i) => xterm(i),
+        Color::Black => CAMPBELL[0],
+        Color::Red => CAMPBELL[1],
+        Color::Green => CAMPBELL[2],
+        Color::Yellow => CAMPBELL[3],
+        Color::Blue => CAMPBELL[4],
+        Color::Magenta => CAMPBELL[5],
+        Color::Cyan => CAMPBELL[6],
+        Color::Gray => CAMPBELL[7],
+        Color::DarkGray => CAMPBELL[8],
+        Color::LightRed => CAMPBELL[9],
+        Color::LightGreen => CAMPBELL[10],
+        Color::LightYellow => CAMPBELL[11],
+        Color::LightBlue => CAMPBELL[12],
+        Color::LightMagenta => CAMPBELL[13],
+        Color::LightCyan => CAMPBELL[14],
+        Color::White => CAMPBELL[15],
+    };
+    Some(format!("#{r:02x}{g:02x}{b:02x}"))
+}
+
+/// The screen with its colours, as one self-contained page. Runs of cells
+/// sharing a style become one span, the way the canvas merges its lines, so
+/// a mostly-plain frame is mostly plain text.
+fn buffer_html(terminal: &Terminal<TestBackend>) -> String {
+    use ratatui::style::Modifier;
+
+    let buffer = terminal.backend().buffer();
+    let mut rows = String::new();
+    for y in 0..buffer.area.height {
+        let mut run: Option<(String, String)> = None; // (style attr, text)
+        for x in 0..buffer.area.width {
+            let cell = &buffer[(x, y)];
+            let reversed = cell.modifier.contains(Modifier::REVERSED);
+            let (fg, bg) = if reversed { (cell.bg, cell.fg) } else { (cell.fg, cell.bg) };
+            let mut style = String::new();
+            if let Some(colour) = css(fg) {
+                style.push_str(&format!("color:{colour};"));
+            }
+            if let Some(colour) = css(bg) {
+                style.push_str(&format!("background:{colour};"));
+            } else if reversed {
+                // Reversed over the default background: paint the default
+                // foreground behind it, or the swap is invisible.
+                style.push_str("background:#cccccc;");
+            }
+            if cell.modifier.contains(Modifier::BOLD) {
+                style.push_str("font-weight:700;");
+            }
+            if cell.modifier.contains(Modifier::ITALIC) {
+                style.push_str("font-style:italic;");
+            }
+            if cell.modifier.contains(Modifier::UNDERLINED) {
+                style.push_str("text-decoration:underline;");
+            }
+            if cell.modifier.contains(Modifier::DIM) {
+                style.push_str("opacity:.6;");
+            }
+            let glyph: String = cell
+                .symbol()
+                .chars()
+                .map(|c| match c {
+                    '&' => "&amp;".to_string(),
+                    '<' => "&lt;".to_string(),
+                    '>' => "&gt;".to_string(),
+                    c => c.to_string(),
+                })
+                .collect();
+            match &mut run {
+                Some((current, text)) if *current == style => text.push_str(&glyph),
+                _ => {
+                    if let Some((style, text)) = run.take() {
+                        rows.push_str(&span(&style, &text));
+                    }
+                    run = Some((style, glyph));
+                }
+            }
+        }
+        if let Some((style, text)) = run.take() {
+            rows.push_str(&span(&style, &text));
+        }
+        rows.push('\n');
+    }
+
+    format!(
+        "<!doctype html>\n<meta charset=\"utf-8\">\n<style>\n\
+         body {{ background:#0c0c0c; margin:0; padding:24px; display:table }}\n\
+         pre {{ margin:0; color:#cccccc; font:14px/1.3 'Cascadia Mono', Consolas, \
+         'DejaVu Sans Mono', monospace }}\n\
+         </style>\n<pre>{}</pre>",
+        rows.trim_end()
+    )
+}
+
+fn span(style: &str, text: &str) -> String {
+    if style.is_empty() {
+        text.to_string()
+    } else {
+        format!("<span style=\"{style}\">{text}</span>")
     }
 }
 
@@ -411,7 +567,7 @@ pub fn run(args: ReplayArgs) -> i32 {
                     }
                 }
             }
-            Step::Frame => {}
+            Step::Frame | Step::Html => {}
         }
 
         settle(&mut app, &mut pending);
@@ -420,8 +576,10 @@ pub fn run(args: ReplayArgs) -> i32 {
             eprintln!("error: render failed: {e}");
             return 1;
         }
-        just_printed = args.frames || matches!(step, Step::Frame);
-        if just_printed {
+        just_printed = args.frames || matches!(step, Step::Frame | Step::Html);
+        if matches!(step, Step::Html) {
+            println!("{}", buffer_html(&terminal));
+        } else if just_printed {
             println!("{}", buffer_text(&terminal));
         }
         if app.should_quit {
@@ -478,8 +636,35 @@ mod tests {
             assert!(parse_step(name, "").is_ok(), "failed on {name}");
         }
         assert!(matches!(parse_step("ctrl+c", ""), Ok(Step::Key(k)) if k.modifiers == KeyModifiers::CONTROL));
+        assert!(matches!(parse_step("html", ""), Ok(Step::Html)));
         assert!(parse_step("nonsense", "").is_err());
         assert!(parse_step("@nope", "").is_err());
+    }
+
+    #[test]
+    fn an_html_frame_keeps_its_colours_and_escapes_its_text() {
+        let mut terminal = Terminal::new(TestBackend::new(12, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                let line = ratatui::text::Line::from(vec![
+                    ratatui::text::Span::styled(
+                        "a<b",
+                        ratatui::style::Style::new()
+                            .fg(ratatui::style::Color::Rgb(1, 2, 3))
+                            .bg(ratatui::style::Color::Indexed(196)),
+                    ),
+                    ratatui::text::Span::raw("plain"),
+                ]);
+                frame.render_widget(ratatui::widgets::Paragraph::new(line), frame.area());
+            })
+            .unwrap();
+
+        let html = buffer_html(&terminal);
+        assert!(html.starts_with("<!doctype html>"));
+        // Rgb passes through; 196 is the cube's full red.
+        assert!(html.contains("color:#010203;background:#ff0000;"), "{html}");
+        assert!(html.contains("a&lt;b"), "a symbol is data, not markup");
+        assert!(html.contains("plain"));
     }
 
     #[test]
