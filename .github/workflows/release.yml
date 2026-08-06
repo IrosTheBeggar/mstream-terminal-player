@@ -94,7 +94,7 @@ jobs:
       # arrangement for CLI tools. Runs before staging so the manifest
       # hashes cover the signed bytes.
       - name: Sign and notarize (macOS)
-        if: runner.os == 'macOS' && secrets.MACOS_CERT_P12 != ''
+        if: runner.os == 'macOS'
         env:
           CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
@@ -103,6 +103,13 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
           set -euo pipefail
+          # The secrets context is not allowed in a step-level `if`, so the
+          # gate lives here: absent secrets mean an unsigned build, not a
+          # failed one.
+          if [ -z "${CERT_P12}" ]; then
+            echo "signing secrets absent — shipping unsigned"
+            exit 0
+          fi
           bin="target/${{ matrix.target }}/release/mstream-player"
 
           keychain="$RUNNER_TEMP/signing.keychain-db"
