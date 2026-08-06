@@ -1111,10 +1111,11 @@ fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
     };
     // No frame means either nothing has played or the audio thread is
     // mid-handover. Both mean "not this tick", and neither is worth a message
-    // that would flicker at thirty frames a second.
-    let Some(heard) = tap.frame() else {
+    // that would flicker at thirty frames a second. Refilled in place: the
+    // copy is the same size every frame, so the buffer lives on the App.
+    if !tap.frame_into(&mut app.heard) {
         return render_now_placeholder(frame, picture, "the visualiser goes here", "nothing playing");
-    };
+    }
 
     // Pausing stops the clock, the progress bar and the position. The tap
     // goes on holding the last tenth of a second that was played, so left to
@@ -1124,7 +1125,7 @@ fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
     let sounding = app.status.playing;
     let mut canvas = crate::tui::canvas::Canvas::new(picture);
     if !canvas.is_empty() {
-        app.viz.draw(&mut canvas, &heard, sounding);
+        app.viz.draw(&mut canvas, &app.heard, sounding);
         frame.render_widget(Paragraph::new(canvas.into_lines()), picture);
     }
 }

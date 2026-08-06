@@ -800,6 +800,10 @@ pub struct App {
     /// frames — bars fall from where they were, and a spectrogram is nothing
     /// but where it has been.
     pub viz: crate::tui::viz::Visualizer,
+    /// The tap's latest audio, refilled in place each frame. The visualiser
+    /// asks thirty times a second and the answer is the same size every
+    /// time, so the buffer is kept rather than allocated per frame.
+    pub heard: crate::engine::tap::TapFrame,
     /// The full-screen now-playing view. A view rather than an overlay: every
     /// normal key still means what it meant, so `space`, `n` and the seek keys
     /// keep working while you are looking at it.
@@ -879,6 +883,7 @@ impl App {
             tap: None,
             pointer: None,
             viz: Default::default(),
+            heard: Default::default(),
             fullscreen: false,
             spinner: 0,
             now_tab: NowTab::Queue,

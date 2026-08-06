@@ -76,6 +76,10 @@ pub struct Visualizer {
     /// Set from what the modes actually hold, not from a timer, because how
     /// long a picture takes to fall still depends on how loud it was.
     still: bool,
+    /// The silence handed to the modes while paused. Kept because it is the
+    /// same size as the frame it stands in for, and it used to be a fresh
+    /// zero vec every paused frame — the other half of finding #52.
+    quiet: TapFrame,
 }
 
 /// Assumed for the first frame, and the ceiling for a long gap — coming back
@@ -108,25 +112,25 @@ impl Visualizer {
         // reusing it would leave the picture settling out of audio that is no
         // longer being played. Given silence, everything falls the way it
         // falls when a track goes quiet — which is what pausing is.
-        let quiet;
         let heard = if sounding {
             heard
         } else {
-            // Two fields, named: `..heard.clone()` evaluated the clone in
-            // full — copying the whole 32 KB sample vec — and then dropped
-            // it again, thirty times a second, for a rate and a channel
-            // count (finding #52).
-            quiet = TapFrame {
-                samples: vec![0.0; heard.samples.len()],
-                rate: heard.rate,
-                channels: heard.channels,
-            };
-            &quiet
+            // Rebuilt in place: the resize is a no-op except on the first
+            // paused frame or a shape change, where a fresh zero vec every
+            // frame was the tail end of finding #52.
+            self.quiet.samples.clear();
+            self.quiet.samples.resize(heard.samples.len(), 0.0);
+            self.quiet.rate = heard.rate;
+            self.quiet.channels = heard.channels;
+            &self.quiet
         };
 
         match self.mode {
             VizMode::Bars => {
-                self.bars.update(heard, canvas.width() as usize / BAR_STRIDE, elapsed);
+                // The last bar needs no trailing gap, hence the extra GAP of
+                // room before dividing.
+                let count = (canvas.width() as usize + BAR_GAP) / (BAR_WIDTH + BAR_GAP);
+                self.bars.update(heard, count, elapsed);
                 draw_bars(canvas, &self.bars.heights);
             }
             VizMode::Scope => draw_scope(canvas, heard, self.scatter),
@@ -313,36 +317,47 @@ fn spectrum(mono: &[f32]) -> Vec<f32> {
 const TILT: f32 = 0.85;
 
 /// Fold the bins into `count` bands spaced logarithmically, because that is
-/// how octaves are spaced and how hearing works, then tilt them.
-fn log_bins(magnitudes: &[f32], rate: u32, count: usize) -> Vec<f32> {
+/// how octaves are spaced and how hearing works, then tilt them. Into a
+/// buffer the caller keeps, for the reason [`Bars`] keeps all of its others.
+fn log_bins_into(magnitudes: &[f32], rate: u32, count: usize, out: &mut Vec<f32>) {
+    out.clear();
     if count == 0 || magnitudes.is_empty() || rate == 0 {
-        return Vec::new();
+        return;
     }
     let hz_per_bin = rate as f32 / WINDOW as f32;
     let ratio = HIGH_HZ / LOW_HZ;
     // Tilt of one in the middle of the range rather than at an end, so the
     // automatic gain starts near where it will settle.
     let middle = (LOW_HZ * HIGH_HZ).sqrt().powf(TILT);
-    (0..count)
-        .map(|band| {
-            let from = LOW_HZ * ratio.powf(band as f32 / count as f32);
-            let to = LOW_HZ * ratio.powf((band + 1) as f32 / count as f32);
-            let first = ((from / hz_per_bin) as usize).min(magnitudes.len() - 1);
-            let last = ((to / hz_per_bin) as usize).max(first + 1).min(magnitudes.len());
-            // The mean across the band, as cava takes it: its `eq` divides by
-            // the bin count. A maximum is punchier and wronger — one strong
-            // partial then speaks for a whole octave.
-            let bins = &magnitudes[first..last];
-            let mean = bins.iter().sum::<f32>() / bins.len() as f32;
-            mean * to.powf(TILT) / middle
-        })
-        .collect()
+    out.extend((0..count).map(|band| {
+        let from = LOW_HZ * ratio.powf(band as f32 / count as f32);
+        let to = LOW_HZ * ratio.powf((band + 1) as f32 / count as f32);
+        let first = ((from / hz_per_bin) as usize).min(magnitudes.len() - 1);
+        let last = ((to / hz_per_bin) as usize).max(first + 1).min(magnitudes.len());
+        // The mean across the band, as cava takes it: its `eq` divides by
+        // the bin count. A maximum is punchier and wronger — one strong
+        // partial then speaks for a whole octave.
+        let bins = &magnitudes[first..last];
+        let mean = bins.iter().sum::<f32>() / bins.len() as f32;
+        mean * to.powf(TILT) / middle
+    }));
+}
+
+/// The same, allocating — for tests that want the answer once.
+#[cfg(test)]
+fn log_bins(magnitudes: &[f32], rate: u32, count: usize) -> Vec<f32> {
+    let mut out = Vec::new();
+    log_bins_into(magnitudes, rate, count, &mut out);
+    out
 }
 
 // ── Bars ────────────────────────────────────────────────────────────────────
 
-/// Cells across per bar, so bars are wide enough to read as bars.
-const BAR_STRIDE: usize = 2;
+/// Cells across per bar. Two, with a one-cell gap: wide enough to read as a
+/// bar rather than a hairline, separated enough to still read as bars —
+/// which is also cava's default proportions.
+const BAR_WIDTH: usize = 2;
+const BAR_GAP: usize = 1;
 
 /// How long a bar takes to fall its whole height.
 ///
@@ -381,6 +396,10 @@ struct Bars {
     /// The transform's working buffers, kept for the same reason the heights
     /// are: they are the same size every frame.
     fft: Fft,
+    /// The band pipeline's two stages — folded bins raised to heights, then
+    /// the neighbour-spread copy — kept for the same reason again.
+    bands: Vec<f32>,
+    spread: Vec<f32>,
 }
 
 impl Default for Bars {
@@ -392,6 +411,8 @@ impl Default for Bars {
             memory: Vec::new(),
             sensitivity: 1.0,
             fft: Fft::default(),
+            bands: Vec::new(),
+            spread: Vec::new(),
         }
     }
 }
@@ -418,8 +439,8 @@ impl Bars {
         }
 
         self.fft.fill(heard);
-        let bands = log_bins(&self.fft.mags, heard.rate, count);
-        if bands.len() != count {
+        log_bins_into(&self.fft.mags, heard.rate, count, &mut self.bands);
+        if self.bands.len() != count {
             return;
         }
 
@@ -427,19 +448,18 @@ impl Bars {
         // logarithmic and so is the ear, but the floor is what matters for
         // the picture: without one every band keeps a sliver of bar and the
         // bottom of the panel becomes a permanent slab.
-        let raised: Vec<f32> = bands
-            .iter()
-            .map(|band| {
-                let db = 20.0 * (band * self.sensitivity).max(1e-9).log10();
-                ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0)
-            })
-            .collect();
+        let sensitivity = self.sensitivity;
+        for band in &mut self.bands {
+            let db = 20.0 * (*band * sensitivity).max(1e-9).log10();
+            *band = ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0);
+        }
 
         // Neighbour smoothing, cava's "monstercat": every bar lifts the ones
         // beside it by a share that decays with distance.
-        let mut spread = raised.clone();
-        for (i, &lifted) in raised.iter().enumerate() {
-            for (j, bar) in spread.iter_mut().enumerate() {
+        self.spread.clear();
+        self.spread.extend_from_slice(&self.bands);
+        for (i, &lifted) in self.bands.iter().enumerate() {
+            for (j, bar) in self.spread.iter_mut().enumerate() {
                 if i != j {
                     *bar = bar.max(lifted / SPREAD.powi(i.abs_diff(j) as i32));
                 }
@@ -448,7 +468,7 @@ impl Bars {
 
         let settle = (-elapsed / SMOOTH_SECS).exp();
         let mut loudest = 0.0f32;
-        for (i, &target) in spread.iter().enumerate() {
+        for (i, &target) in self.spread.iter().enumerate() {
             // Everything below is in one domain — smoothed height against
             // smoothed height. Comparing a raw band to a smoothed one lets a
             // bar "fall" upwards, because the peak it falls from was measured
@@ -489,12 +509,16 @@ fn draw_bars(canvas: &mut Canvas, bars: &[f32]) {
     let height = canvas.height() as i32;
     for (i, &bar) in bars.iter().enumerate() {
         let top = height - (bar.clamp(0.0, 1.0) * height as f32).round() as i32;
-        let x = (i * BAR_STRIDE) as i32;
+        let x = (i * (BAR_WIDTH + BAR_GAP)) as i32;
         for y in top..height {
             // Colour by how high the pixel is rather than how tall the bar
             // is, so the gradient stands still while the bars move through
-            // it — the whole picture flashing at once is a headache.
-            canvas.set(x, y, ramp(1.0 - y as f32 / height as f32));
+            // it — the whole picture flashing at once is a headache. One
+            // colour per row, shared across the bar's width.
+            let colour = ramp(1.0 - y as f32 / height as f32);
+            for dx in 0..BAR_WIDTH as i32 {
+                canvas.set(x + dx, y, colour);
+            }
         }
     }
 }
@@ -1192,6 +1216,31 @@ mod tests {
             viz.draw_after(&mut canvas(), &loud, FRAME, true);
             assert!(!viz.still(), "{mode:?}: resuming has to bring the frames back");
         }
+    }
+
+    #[test]
+    fn a_bar_is_two_cells_wide_with_a_gap_between_neighbours() {
+        // Four full-height bars on an 11-column canvas land on columns 0-1,
+        // 3-4, 6-7 and 9-10 with one dark column between neighbours — and
+        // the last bar sits flush against the right edge, which is why the
+        // caller budgets one trailing gap it never draws.
+        let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 11, height: 4 });
+        draw_bars(&mut canvas, &[1.0; 4]);
+
+        let mut lit = [false; 11];
+        for line in canvas.into_lines() {
+            let mut column = 0;
+            for span in &line.spans {
+                for glyph in span.content.chars() {
+                    if glyph != ' ' {
+                        lit[column] = true;
+                    }
+                    column += 1;
+                }
+            }
+        }
+        let expected: Vec<bool> = (0..11).map(|x| x % 3 != 2).collect();
+        assert_eq!(lit.to_vec(), expected, "bars at 0-1, 3-4, 6-7 and 9-10");
     }
 
     #[test]

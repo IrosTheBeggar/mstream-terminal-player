@@ -46,11 +46,23 @@ impl AudioTap {
         }
     }
 
-    /// From the UI thread. `None` means either nothing has played yet or the
-    /// audio thread is mid-handover; both say "ask again next frame".
+    /// From the UI thread. `false` means either nothing has played yet or
+    /// the audio thread is mid-handover; both say "ask again next frame".
+    ///
+    /// Fills a frame the caller keeps. The answer is the same size every
+    /// time and the visualiser asks thirty times a second, so what used to
+    /// be a fresh ~32 KB vec per frame is a copy into the same allocation.
+    pub fn frame_into(&self, out: &mut TapFrame) -> bool {
+        let Ok(ring) = self.ring.try_lock() else { return false };
+        ring.frame_into(out)
+    }
+
+    /// The same, allocating — for tests that want the answer once, like
+    /// [`TapFrame::mono`] beside it.
+    #[cfg(test)]
     pub fn frame(&self) -> Option<TapFrame> {
-        let ring = self.ring.try_lock().ok()?;
-        ring.frame()
+        let mut out = TapFrame::default();
+        self.frame_into(&mut out).then_some(out)
     }
 
     /// Everything held describes where we no longer are.
@@ -62,7 +74,7 @@ impl AudioTap {
 }
 
 /// A copy of the tap's contents, oldest sample first.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TapFrame {
     /// Interleaved by channel, as it was played.
     pub samples: Vec<Sample>,
@@ -136,17 +148,18 @@ impl Ring {
         }
     }
 
-    fn frame(&self) -> Option<TapFrame> {
+    fn frame_into(&self, out: &mut TapFrame) -> bool {
         if self.samples.is_empty() || (!self.wrapped && self.write == 0) {
-            return None;
+            return false;
         }
-        let mut samples =
-            Vec::with_capacity(if self.wrapped { self.samples.len() } else { self.write });
+        out.samples.clear();
         if self.wrapped {
-            samples.extend_from_slice(&self.samples[self.write..]);
+            out.samples.extend_from_slice(&self.samples[self.write..]);
         }
-        samples.extend_from_slice(&self.samples[..self.write]);
-        Some(TapFrame { samples, rate: self.rate, channels: self.channels })
+        out.samples.extend_from_slice(&self.samples[..self.write]);
+        out.rate = self.rate;
+        out.channels = self.channels;
+        true
     }
 
     fn reset(&mut self) {
@@ -330,6 +343,22 @@ mod tests {
             tap.frame().expect("a full ring").mono().len()
         };
         assert_eq!(frames_held(8), frames_held(1), "7.1 holds the frames mono holds");
+    }
+
+    #[test]
+    fn refilling_a_kept_frame_reuses_its_allocation() {
+        let tap = AudioTap::new();
+        let mut source = Tapped::new(Ramp::new(44100, 2), tap.clone());
+        drain(&mut source, TAP_FRAMES * 4);
+
+        let mut kept = TapFrame::default();
+        assert!(tap.frame_into(&mut kept));
+        let capacity = kept.samples.capacity();
+
+        drain(&mut source, BATCH);
+        assert!(tap.frame_into(&mut kept));
+        assert_eq!(kept.samples.capacity(), capacity, "the second fill reuses the buffer");
+        assert_eq!(Some(kept.clone()), tap.frame(), "and answers what frame() answers");
     }
 
     #[test]
