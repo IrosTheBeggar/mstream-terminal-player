@@ -45,3 +45,33 @@ toml = "1.1.4"
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# cargo-deb wraps the already-cross-built binaries in the release workflow
+# (--no-build --no-strip --target <triple>); nothing here compiles anything.
+# The dependency alternative below is the noble rename of libasound2 — the
+# whole point of shipping a .deb is that ALSA arrives with it.
+[package.metadata.deb]
+maintainer = "Paul Sori <paul@mstream.io>"
+copyright = "Paul Sori"
+extended-description = """
+Browse, queue and play music from an mStream server in the terminal, or
+run the same binary headless as mStream's server-audio jukebox engine."""
+section = "sound"
+priority = "optional"
+depends = "libasound2t64 | libasound2"
+assets = [
+    ["target/release/mstream-player", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/mstream-player/README.md", "644"],
+]
+
+# The same wrap for rpm; alsa-lib is libasound's spelling over there. The
+# auto-req scanner is off because the packaging host is not the target.
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/mstream-player", dest = "/usr/bin/mstream-player", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/mstream-player/README.md", mode = "644", doc = true },
+]
+auto-req = "no"
+
+[package.metadata.generate-rpm.requires]
+alsa-lib = "*"

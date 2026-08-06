@@ -192,13 +192,13 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           package() {
             asset="$1"; debarch="$2"; rpmarch="$3"; triple="$4"
-            mkdir -p target/release "target/${triple}/release"
-            install -m 755 "dist/${asset}" target/release/mstream-player
+            mkdir -p "target/${triple}/release"
             install -m 755 "dist/${asset}" "target/${triple}/release/mstream-player"
             cargo deb --no-build --no-strip --target "${triple}" \
               -o "dist/mstream-player_${version}_${debarch}.deb"
             if [ -n "${rpmarch}" ]; then
-              cargo generate-rpm --arch "${rpmarch}" \
+              cargo generate-rpm --arch "${rpmarch}" --target "${triple}" \
+                --target-dir target \
                 -o "dist/mstream-player-${version}.${rpmarch}.rpm"
             fi
           }
