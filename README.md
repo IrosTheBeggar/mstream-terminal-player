@@ -459,6 +459,8 @@ legacy alias for the old spawn contract. Changes from the original engine:
   sources of unknown length (a live transcode) fall back to the plain cut
 - `--gapless`: with no crossfade set, cross track boundaries sample-tight by feeding the next
   track into the playing sink ahead of time
+- Soft cuts everywhere, flags or no flags: manual next fades out over 150 ms, stop over 80 ms,
+  and seeks dip around the jump — where the original engine cut mid-waveform and clicked
 - Bug fixes: volume persists across track changes, manual next is no longer trapped by
   loop-one, no panic when no audio device exists, removing a queue entry while stopped no
   longer starts playback

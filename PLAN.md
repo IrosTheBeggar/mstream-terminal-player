@@ -471,8 +471,9 @@ Blend the end of each track into the start of the next, the way DJ software and 
 players do it. This is Phase 7's "next-track prefetch" with a fade on top: the prefetch —
 opening the upcoming track's reader before the current one ends — is most of the work either
 way, and it is also what removes the audible inter-track gap (finding #8) for anyone who turns
-the fade on. Off by default everywhere: with `crossfade_seconds = 0` the player is
-byte-identical to today.
+the fade on. Off by default everywhere: with `crossfade_seconds = 0` (and `gapless` off) the
+player prefetches nothing and transitions as it always did — C4's soft cuts on manual
+skip/stop/seek are the one deliberate global change, replacing clicks with short breaths.
 
 **Why rodio suffices** (checked against rodio 0.22.2 source, not docs): every track already
 plays as a `Player` connected to the one shared `Mixer` inside `MixerDeviceSink`, and that

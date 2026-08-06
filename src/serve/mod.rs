@@ -26,9 +26,11 @@ pub struct ServeOptions {
     pub auth_token: Option<String>,
     pub exit_with_parent: bool,
     /// Seconds of blend when one track ends and the next begins; 0 keeps
-    /// the original engine's hard cut. Not reachable from the legacy
-    /// `--port N` spawn contract, which is deliberate — mStream never sees
-    /// a behavior change it didn't ask for.
+    /// the plain cut between tracks. Not reachable from the legacy
+    /// `--port N` spawn contract, which is deliberate — the wire and the
+    /// queue behavior never change unasked. (The C4 soft cuts on manual
+    /// /next and /stop are the one global departure: 150/80 ms fade tails
+    /// where the original clicked.)
     pub crossfade: f32,
     /// Sample-tight transitions when no blend is configured. Same legacy
     /// stance: unreachable from `--port N`.
