@@ -6,6 +6,40 @@ Terminal player and headless audio engine for [mStream](https://github.com/IrosT
 play them with seeking, all from the terminal. See [PLAN.md](PLAN.md) for the roadmap and the
 control-API contract.
 
+## Install
+
+One line, no package manager. macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/IrosTheBeggar/mstream-terminal-player/main/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/IrosTheBeggar/mstream-terminal-player/main/install.ps1 | iex
+```
+
+Both fetch the binary for your machine from the latest release, verify its sha256 against the
+release's `manifest.json`, and install it as `mstream-player` — into `~/.local/bin` on unix, or
+`%LOCALAPPDATA%\Programs\mstream-player` (added to your user PATH) on Windows. Pin a version with
+`MSTREAM_PLAYER_VERSION=v0.1.0`; change the destination with `MSTREAM_PLAYER_INSTALL_DIR`.
+
+Or fetch a binary yourself from
+[Releases](https://github.com/IrosTheBeggar/mstream-terminal-player/releases) — every release
+carries a `manifest.json` with the sha256 of each file:
+
+| Platform | Asset |
+|---|---|
+| Windows x64 | `mstream-player-win32-x64.exe` |
+| macOS Intel / Apple Silicon | `mstream-player-darwin-x64` / `mstream-player-darwin-arm64` |
+| Linux x64 / arm64 / armv7 | `mstream-player-linux-x64` / `…-arm64` / `…-arm` |
+
+The Linux binaries run on glibc 2.31 or newer — Debian 11, Ubuntu 20.04, and the Pi and NAS
+images of that era — and need ALSA at runtime (`sudo apt install libasound2`). macOS quarantines
+binaries downloaded in a browser; the one-liner doesn't trip that. To build from source instead:
+`cargo install --git https://github.com/IrosTheBeggar/mstream-terminal-player`.
+
 ## The player
 
 ```

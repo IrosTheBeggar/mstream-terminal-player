@@ -1,0 +1,4 @@
+# A shell script with CRLF endings dies on its shebang line, and this repo
+# is CRLF everywhere else — so the exception is pinned here rather than
+# left to whatever core.autocrlf a clone happens to have.
+*.sh text eol=lf
