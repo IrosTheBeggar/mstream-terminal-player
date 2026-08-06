@@ -5,6 +5,11 @@
 # Adapted from mStream's build-rust-server-audio.yml — same target matrix and
 # cross setup, but artifacts go to a Release instead of being committed back
 # into the repo.
+#
+# Every Linux build goes through cross, x64 included: the containers bring
+# their own target-arch ALSA headers (Cross.toml), and the container's glibc
+# — 2.31, old enough for the NAS and Pi installs mStream actually runs on —
+# is a floor that does not move when ubuntu-latest does.
 
 name: Release
 
@@ -42,7 +47,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             binary_name: mstream-player-linux-x64
-            use_cross: false
+            use_cross: true
 
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-latest
@@ -61,10 +66,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Install ALSA dev headers (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2

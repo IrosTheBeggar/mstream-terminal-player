@@ -1,0 +1,31 @@
+# What the release containers must do before they can build us.
+#
+# The workflow's "install ALSA headers" step runs on the *runner*, and the
+# cross builds never see the runner: alsa-sys needs the target architecture's
+# libasound headers inside the container, and cross's stock images carry
+# none. Without this file every cross job dies in alsa-sys before the first
+# crate of ours compiles. $CROSS_DEB_ARCH is supplied by cross (amd64, arm64,
+# armhf), which is what lets the three sections stay word-for-word identical.
+#
+# x86_64 goes through a container too, though the runner could build it
+# natively: the container's glibc is the floor the binary inherits, and a
+# floor pinned here (2.31 — Debian 11, Ubuntu 20.04, the NAS and Pi images
+# in the field) does not silently move the day ubuntu-latest does.
+
+[target.x86_64-unknown-linux-gnu]
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update && apt-get install --assume-yes libasound2-dev:$CROSS_DEB_ARCH",
+]
+
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update && apt-get install --assume-yes libasound2-dev:$CROSS_DEB_ARCH",
+]
+
+[target.armv7-unknown-linux-gnueabihf]
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update && apt-get install --assume-yes libasound2-dev:$CROSS_DEB_ARCH",
+]
