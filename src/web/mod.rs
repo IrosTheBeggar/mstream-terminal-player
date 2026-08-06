@@ -22,6 +22,8 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use ratzilla::{DomBackend, WebRenderer};
+use wasm_bindgen::JsCast;
+use wasm_bindgen::closure::Closure;
 
 use crate::clock::Instant;
 use crate::config;
@@ -76,8 +78,43 @@ impl Shell {
 
 pub fn run() {
     console_error_panic_hook::set_once();
+    boot();
+}
+
+/// Start the shell — once there is somewhere to draw.
+///
+/// An embedded or backgrounded page can finish loading before its pane has
+/// any layout: the window measures 0×0, ratzilla builds a zero-cell grid
+/// from it, and the only thing that would ever rebuild the grid is a resize
+/// event a pane that is merely *revealed* may never send. Worse, a viewport
+/// that appears between the backend measuring and the first draw leaves the
+/// buffer and the grid disagreeing about the size, and the draw indexes out
+/// of ratzilla's empty cell list — the whole tab down. So: no layout yet, no
+/// boot; try again next frame. (index.html keeps animation frames ticking
+/// while the page is hidden, so the retry runs even unseen.)
+fn boot() {
+    let window = ratzilla::web_sys::window();
+    let px = |v: Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>| {
+        v.ok().and_then(|v| v.as_f64()).unwrap_or(0.0)
+    };
+    let laid_out = window
+        .as_ref()
+        .map(|w| px(w.inner_width()) > 0.0 && px(w.inner_height()) > 0.0)
+        // No window at all is not a layout still on its way — let run_inner
+        // say so in its own words instead of retrying forever.
+        .unwrap_or(true);
+    if !laid_out {
+        let retry = Closure::once_into_js(boot);
+        if let Some(w) = window
+            && w.request_animation_frame(retry.unchecked_ref()).is_ok()
+        {
+            return;
+        }
+        // Could not schedule the retry: fall through and let the boot take
+        // its chances rather than silently never starting.
+    }
     if let Err(e) = run_inner() {
-        // The hook above routes panics to the console; use the same channel
+        // The panic hook routes panics to the console; use the same channel
         // for a refusal to start.
         panic!("mstream-player web demo failed to start: {e}");
     }
@@ -125,18 +162,32 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     let backend = DomBackend::new()?;
-    let mut terminal = ratatui::Terminal::new(backend)?;
+    let terminal = ratatui::Terminal::new(backend)?;
 
+    // Not ratzilla's on_key_event: that hangs the listener on the grid
+    // element the DOM backend created, and the backend replaces that element
+    // wholesale on every resize without moving the listener — one window
+    // resize and the keyboard is dead. The document outlives every grid, and
+    // listening there also ends the focus dance a child listener needed.
     let on_key = shell.clone();
-    terminal.on_key_event(move |event| {
-        let mut shell = on_key.borrow_mut();
-        let Some(key) = translate(event) else { return };
-        if let Some(action) = shell.app.keymap.action(key, shell.app.input_mode()) {
-            let effects = shell.app.handle_action(action);
-            shell.pending.extend(effects);
-            shell.dirty = true;
-        }
-    })?;
+    let keydown =
+        Closure::<dyn FnMut(_)>::new(move |event: ratzilla::web_sys::KeyboardEvent| {
+            let mut shell = on_key.borrow_mut();
+            let Some(key) = translate(event.into()) else { return };
+            if let Some(action) = shell.app.keymap.action(key, shell.app.input_mode()) {
+                let effects = shell.app.handle_action(action);
+                shell.pending.extend(effects);
+                shell.dirty = true;
+            }
+        });
+    ratzilla::web_sys::window()
+        .and_then(|w| w.document())
+        .ok_or("no document to listen for keys on")?
+        .add_event_listener_with_callback("keydown", keydown.as_ref().unchecked_ref())
+        .map_err(|_| "could not attach the keydown listener")?;
+    // One listener for the life of the tab; there is no teardown to hold a
+    // handle for.
+    keydown.forget();
 
     let on_frame = shell;
     terminal.draw_web(move |frame| {

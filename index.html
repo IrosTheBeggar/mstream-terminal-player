@@ -42,16 +42,9 @@
       })();
     </script>
     <script>
-      // ratzilla attaches its key listener to the grid element it creates
-      // (tabindex="0"), which starts unfocused — without this, the keyboard
-      // is dead until someone happens to click the terminal.
-      new MutationObserver(function (_mutations, observer) {
-        const grid = document.querySelector('[tabindex="0"]');
-        if (grid) {
-          grid.focus();
-          observer.disconnect();
-        }
-      }).observe(document.documentElement, { childList: true, subtree: true });
+      // No focus dance here: the shell listens for keys on the document
+      // itself (see src/web/mod.rs), so no element needs focus for the
+      // keyboard to work.
 
       // The browser has its own ideas about these keys — Space and the
       // arrows scroll, "/" and "'" open Firefox's quick-find, Tab walks

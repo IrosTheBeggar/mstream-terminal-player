@@ -72,6 +72,9 @@ mdns-sd = "0.20.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 ratzilla = "0.3.1"
+# Closure — the shell's own document-level keydown listener (see
+# src/web/mod.rs for why ratzilla's on_key_event can't be trusted with it).
+wasm-bindgen = "0.2"
 # spawn_local — how the web api worker runs the async client without a
 # runtime: the browser's event loop is the executor.
 wasm-bindgen-futures = "0.4"
