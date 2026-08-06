@@ -2,6 +2,14 @@
 
 Terminal player and headless audio engine for [mStream](https://github.com/IrosTheBeggar/mStream).
 
+<p align="center">
+  <img src="docs/player.svg" alt="mstream-player: the Now Playing screen, with the Cover visualizer lighting the album art to the music" width="920">
+</p>
+
+*A real frame, not a mockup: the Cover visualizer plays the spectrum across the album art, drawn
+in half-blocks at thirty frames a second. Captured with the built-in replay harness
+(`mstream-player replay "…,html" --live`).*
+
 **Status: Phase 4** — the interactive player works: browse your libraries, queue tracks, and
 play them with seeking, all from the terminal. See [PLAN.md](PLAN.md) for the roadmap and the
 control-API contract.
@@ -12,6 +20,13 @@ Homebrew (macOS, or Homebrew on Linux):
 
 ```bash
 brew install irosthebeggar/mstream/mstream-player
+```
+
+Scoop (Windows):
+
+```powershell
+scoop bucket add mstream https://github.com/IrosTheBeggar/scoop-mstream
+scoop install mstream-player
 ```
 
 Or one line with no package manager. macOS / Linux:
