@@ -460,4 +460,100 @@ mod tests {
         let code = format!("  {}\n", encode(Some(1), TICKET, &[9u8; 32]));
         assert!(parse_code(&code).is_ok());
     }
+
+    /// The whole client path against a live endpoint speaking the server's
+    /// protocol — parse, dial, handshake, bridge, one HTTP round trip. The
+    /// peer is relay-free and dialled by its direct addresses, so a pass
+    /// means the client machinery is sound without any network beyond this
+    /// machine — which is exactly the half a corporate firewall can't touch.
+    #[test]
+    fn dials_handshakes_and_bridges_http_end_to_end() {
+        const SECRET: [u8; 32] = [42u8; 32];
+
+        // A one-answer HTTP server standing in for mStream's local port.
+        let http = std::net::TcpListener::bind("127.0.0.1:0").expect("bind http");
+        let http_port = http.local_addr().expect("http addr").port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            while let Ok((mut sock, _)) = http.accept() {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 256];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut byte) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&byte[..n]),
+                    }
+                }
+                let _ = sock.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nhi",
+                );
+            }
+        });
+
+        // The server half of the tunnel protocol, as mStream implements it:
+        // the first bi-stream carries the secret and is answered OK; every
+        // later one is one TCP connection's worth of bytes to the HTTP port.
+        let addr = crate::runtime::block_on(async move {
+            let endpoint = Endpoint::builder(presets::Minimal)
+                .alpns(vec![TUNNEL_ALPN.to_vec()])
+                .bind()
+                .await
+                .expect("bind server endpoint");
+            let addr = endpoint.addr();
+            tokio::spawn(async move {
+                while let Some(incoming) = endpoint.accept().await {
+                    let Ok(connection) = incoming.await else { continue };
+                    tokio::spawn(async move {
+                        let Ok((mut send, mut recv)) = connection.accept_bi().await else {
+                            return;
+                        };
+                        let secret = recv.read_to_end(256).await.unwrap_or_default();
+                        if secret != SECRET {
+                            let _ = send.write_all(b"NO").await;
+                            return;
+                        }
+                        let _ = send.write_all(b"OK").await;
+                        let _ = send.finish();
+                        while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+                            tokio::spawn(async move {
+                                let Ok(tcp) =
+                                    tokio::net::TcpStream::connect(("127.0.0.1", http_port)).await
+                                else {
+                                    return;
+                                };
+                                let (mut tcp_read, mut tcp_write) = tcp.into_split();
+                                let up = async {
+                                    let _ = tokio::io::copy(&mut recv, &mut tcp_write).await;
+                                };
+                                let down = async {
+                                    let _ = tokio::io::copy(&mut tcp_read, &mut send).await;
+                                    let _ = send.finish();
+                                };
+                                tokio::join!(up, down);
+                            });
+                        }
+                    });
+                }
+            });
+            addr
+        })
+        .expect("runtime");
+
+        let ticket = EndpointTicket::from(addr).to_string();
+        let code = encode(Some(1), &ticket, &SECRET);
+        let bridge = open_bridge(&parse_code(&code).expect("parse")).expect("open bridge");
+
+        use std::io::{Read, Write};
+        let target = bridge.local_url.strip_prefix("http://").expect("local url");
+        let mut sock = std::net::TcpStream::connect(target).expect("connect bridge");
+        sock.write_all(b"GET /api/v1/ping HTTP/1.1\r\nhost: tunnel\r\nconnection: close\r\n\r\n")
+            .expect("send request");
+        // Mirror what a real HTTP client does at end of request, and what the
+        // bridge needs to forward end-of-stream: half-close the write side.
+        sock.shutdown(std::net::Shutdown::Write).expect("half-close");
+        let mut reply = String::new();
+        let _ = sock.read_to_string(&mut reply);
+        assert!(reply.starts_with("HTTP/1.1 200 OK"), "got: {reply}");
+        assert!(reply.ends_with("hi"), "got: {reply}");
+    }
 }
