@@ -1,6 +1,6 @@
 [package]
 name = "mstream-player"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Terminal player and headless server-audio engine for mStream"
