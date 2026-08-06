@@ -370,6 +370,7 @@ impl App {
                 let mut effects = vec![
                     Effect::Api(ApiCmd::Browse(self.opening_path())),
                     Effect::Audio(AudioCmd::SetVolume(self.volume)),
+                    Effect::Audio(AudioCmd::SetCrossfade(self.crossfade)),
                 ];
                 // Worth persisting when we hold a token we logged in for — or
                 // a pairing code, which is the only way back to this server

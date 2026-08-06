@@ -372,6 +372,12 @@ struct State {
     /// Seconds of blend between tracks. 0.0 — the default — is off, and off
     /// means the pre-crossfade engine, byte for byte.
     crossfade: f32,
+    /// What the TUI said should play after the current track. The TUI keeps
+    /// its own queue and feeds this engine one source at a time, so unlike
+    /// serve mode the engine cannot pick a next; it has to be told. Consulted
+    /// ahead of the internal queue, consumed by the handover, withdrawn by
+    /// [`Engine::clear_next`] and by any new play or stop.
+    pending_next: Option<QueueEntry>,
     next: NextTrack,
     outgoing: Option<Outgoing>,
     q: QueueState,
@@ -475,6 +481,7 @@ impl State {
         self.duration = 0.0;
         self.stopped = true;
         self.advance_failures = 0;
+        self.pending_next = None;
         self.cancel_overlap();
     }
 }
@@ -504,6 +511,7 @@ impl Engine {
             volume: 1.0,
             advance_failures: 0,
             crossfade: 0.0,
+            pending_next: None,
             next: NextTrack::Idle,
             outgoing: None,
             q: QueueState {
@@ -529,7 +537,33 @@ impl Engine {
         s.q.queue.clear();
         s.q.queue.push(QueueEntry { path: source, duration_hint });
         s.q.index = 0;
+        // A new track makes the old announcement about a future that is not
+        // happening; the caller re-announces once this one is playing.
+        s.pending_next = None;
         s.start_current(self.device.mixer())
+    }
+
+    /// Announce what should play after the current track, so a blend can
+    /// open it ahead of the fade window. Replaces any earlier announcement;
+    /// announcing the same source again only refreshes its duration hint,
+    /// so a repeated announcement never throws away an open in flight.
+    pub fn prepare_next(&self, source: String, duration_hint: Option<f64>) {
+        let mut s = self.state.lock().unwrap();
+        if s.pending_next.as_ref().map(|e| e.path.as_str()) == Some(source.as_str()) {
+            if let Some(entry) = &mut s.pending_next {
+                entry.duration_hint = duration_hint;
+            }
+            return;
+        }
+        s.pending_next = Some(QueueEntry { path: source, duration_hint });
+        s.invalidate_next();
+    }
+
+    /// Withdraw the announcement: nothing follows the current track.
+    pub fn clear_next(&self) {
+        let mut s = self.state.lock().unwrap();
+        s.pending_next = None;
+        s.invalidate_next();
     }
 
     /// Pause everything audible — during a blend that is two sinks, and
@@ -833,7 +867,16 @@ impl Engine {
         let remaining = s.duration - s.sink.get_pos().as_secs_f64();
 
         if matches!(s.next, NextTrack::Idle) && remaining <= fade + PREPARE_LEAD {
-            if let Some((entry, index)) = next_candidate(&s.q) {
+            // The TUI's announcement outranks the internal queue: where one
+            // is set the queue is a single mirrored entry with no next of
+            // its own, and where the queue has answers (serve) nobody
+            // announces.
+            let candidate = s
+                .pending_next
+                .clone()
+                .map(|entry| (entry, None))
+                .or_else(|| next_candidate(&s.q));
+            if let Some((entry, index)) = candidate {
                 s.next = spawn_prepare(entry, index);
             }
         }
@@ -876,11 +919,23 @@ impl Engine {
         s.duration = prepared.duration;
         s.stopped = false;
         s.advance_failures = 0;
-        if let Some(index) = index {
-            // Any queue mutation since the prepare discarded it, so the
-            // committed index still holds; the bounds check is a seatbelt.
-            if index < s.q.queue.len() {
-                s.q.index = index;
+        match index {
+            Some(index) => {
+                // Any queue mutation since the prepare discarded it, so the
+                // committed index still holds; the bounds check is a seatbelt.
+                if index < s.q.queue.len() {
+                    s.q.index = index;
+                }
+            }
+            None => {
+                // A TUI announcement: the engine's queue mirrors what is
+                // playing, one entry at a time (play_source semantics), so
+                // the blend replaces that entry. The announcement is spent;
+                // the TUI sends a fresh one when it moves its own cursor.
+                let hint = (s.duration > 0.0).then_some(s.duration);
+                s.q.queue = vec![QueueEntry { path: s.current_file.clone(), duration_hint: hint }];
+                s.q.index = 0;
+                s.pending_next = None;
             }
         }
     }
@@ -1150,6 +1205,46 @@ mod tests {
         // queue must finish visibly sooner than the tracks played apart.
         assert!(started.elapsed() < Duration::from_secs_f64(7.6));
 
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
+
+    /// The TUI-mode shape of a blend: a single-entry queue via play_source,
+    /// the next track announced from outside, and the engine handing over
+    /// on its own — the contract Phase C3's worker wiring relies on.
+    ///
+    /// `cargo test an_announced_next -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn an_announced_next_blends_without_a_queue() {
+        let dir = std::env::temp_dir();
+        let first = dir.join("mstream-crossfade-f.wav");
+        let second = dir.join("mstream-crossfade-g.wav");
+        std::fs::write(&first, wav_bytes(4)).unwrap();
+        std::fs::write(&second, wav_bytes(4)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(1.5);
+        engine.play_source(first.to_string_lossy().into_owned(), Some(4.0)).unwrap();
+        engine.prepare_next(second.to_string_lossy().into_owned(), Some(4.0));
+
+        let started = std::time::Instant::now();
+        let handed = loop {
+            engine.advance_tick();
+            let status = engine.status();
+            assert!(!status.file.is_empty(), "went quiet instead of blending");
+            if status.file == second.to_string_lossy() {
+                break started.elapsed();
+            }
+            assert!(started.elapsed() < Duration::from_secs(6), "no handover ever came");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        println!(">>> announced next took over at {handed:?}");
+        assert!(handed > Duration::from_secs_f64(1.0), "a takeover this early is a skip");
+        assert!(handed < Duration::from_secs_f64(3.6), "the blend missed its window");
+
+        engine.stop();
         let _ = std::fs::remove_file(&first);
         let _ = std::fs::remove_file(&second);
     }

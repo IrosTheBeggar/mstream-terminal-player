@@ -1648,6 +1648,7 @@ fn remembered_preferences_are_applied_and_handed_back() {
         repeat: "all".into(),
         shuffle: true,
         autodj: "tempo+key".into(),
+        crossfade_seconds: 4.5,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -1656,6 +1657,7 @@ fn remembered_preferences_are_applied_and_handed_back() {
     assert_eq!(app.queue.repeat, Repeat::All);
     assert!(app.queue.shuffle);
     assert_eq!(app.autodj, AutoDjMode::BpmKey);
+    assert_eq!(app.crossfade, 4.5);
 
     // What goes out matches what came in, so a restart is a no-op.
     assert_eq!(app.prefs(), saved);
@@ -1669,6 +1671,7 @@ fn nonsense_preferences_fall_back_rather_than_refusing_to_start() {
         repeat: "sideways".into(),
         shuffle: false,
         autodj: "disco".into(),
+        crossfade_seconds: f32::NAN,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -1676,6 +1679,7 @@ fn nonsense_preferences_fall_back_rather_than_refusing_to_start() {
     assert_eq!(app.volume, 1.0, "volume is clamped");
     assert_eq!(app.queue.repeat, Repeat::Off);
     assert_eq!(app.autodj, AutoDjMode::Off);
+    assert_eq!(app.crossfade, 0.0, "a NaN blend is no blend");
 }
 
 #[test]
@@ -2805,6 +2809,7 @@ fn a_remembered_similar_mode_is_dropped_on_a_server_without_the_index() {
         repeat: "off".into(),
         shuffle: false,
         autodj: "similar".into(),
+        crossfade_seconds: 0.0,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -3039,4 +3044,148 @@ fn the_art_cache_is_bounded() {
     app.queue.replace(vec![track_with_cover("lib/a.mp3", "again.jpeg")]);
     app.play_index(0);
     assert_eq!(app.art.len(), 1);
+}
+
+// ── Crossfade announcements and handovers (Phase C3) ────────────────────────
+
+/// The last announcement in a batch of effects — what the engine will hold.
+fn announced_url(effects: &[Effect]) -> Option<String> {
+    effects.iter().rev().find_map(|effect| match effect {
+        Effect::Audio(AudioCmd::PrepareNext { url, .. }) => Some(url.clone()),
+        _ => None,
+    })
+}
+
+/// Play the first of `tracks` with the blend on, and let one status flow so
+/// the announcement hook has had its dispatch. Returns the playing URL and
+/// the announced one.
+fn blending(app: &mut App, tracks: &[&str]) -> (String, String) {
+    app.crossfade = 6.0;
+    app.queue.replace(tracks.iter().map(|t| track(t)).collect());
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let status = PlayerStatus { source: url.clone(), playing: true, ..Default::default() };
+    let effects = app.apply_event(Event::Status(status));
+    let announced = announced_url(&effects).expect("the next track should be announced");
+    (url, announced)
+}
+
+#[test]
+fn a_playing_queue_announces_its_next_track_once() {
+    let mut app = connected_app();
+    let (url, announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+    assert!(announced.contains("b.mp3"), "{announced}");
+
+    // The announcement stands: statuses keep flowing and nothing re-sends
+    // it while the queue it was made against holds.
+    let status = PlayerStatus { source: url, playing: true, ..Default::default() };
+    let again = app.apply_event(Event::Status(status));
+    assert_eq!(announced_url(&again), None, "no re-announcement without a change");
+}
+
+#[test]
+fn no_crossfade_means_no_announcements() {
+    let mut app = connected_app();
+    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let effects = app
+        .apply_event(Event::Status(PlayerStatus { source: url, playing: true, ..Default::default() }));
+    assert_eq!(announced_url(&effects), None);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::ClearNext))),
+        "nothing to withdraw either — the blend was never on"
+    );
+}
+
+#[test]
+fn editing_the_queue_reannounces_what_now_follows() {
+    let mut app = connected_app();
+    let (url, _) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+    let status = PlayerStatus { source: url, playing: true, ..Default::default() };
+
+    // The announced track leaves the queue: what follows is now c, and the
+    // next dispatch — any dispatch — says so.
+    app.queue.remove(1);
+    let effects = app.apply_event(Event::Status(status.clone()));
+    let announced = announced_url(&effects).expect("a replacement announcement");
+    assert!(announced.contains("c.mp3"), "{announced}");
+
+    // And when nothing follows at all, the announcement is withdrawn.
+    app.queue.remove(1);
+    let effects = app.apply_event(Event::Status(status));
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::ClearNext))),
+        "an announcement with no track behind it is taken back"
+    );
+}
+
+#[test]
+fn a_handover_moves_the_cursor_without_starting_anything() {
+    let mut app = connected_app();
+    let (url, announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+
+    let effects =
+        app.apply_event(Event::HandedOver { from: url, to: announced });
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))),
+        "the audio already moved; a Play would start the track over"
+    );
+    assert_eq!(app.queue.current, Some(1), "the cursor followed the blend");
+    assert_eq!(app.now_playing.as_ref().unwrap().filepath, "lib/b.mp3");
+    // The same dispatch announces what follows the adopted track.
+    assert!(announced_url(&effects).expect("the chain continues").contains("c.mp3"));
+}
+
+#[test]
+fn a_handover_the_queue_no_longer_describes_falls_back_to_a_real_play() {
+    let mut app = connected_app();
+    let (url, announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3"]);
+
+    // The engine blended into b, but by the time the event lands the queue
+    // has been rebuilt around different tracks entirely.
+    app.queue.replace(vec![track("lib/x.mp3"), track("lib/y.mp3")]);
+    let effects = app.apply_event(Event::HandedOver { from: url, to: announced });
+    assert!(
+        played_url(&effects).contains("x.mp3"),
+        "a queue that moved on plays its own front, properly"
+    );
+}
+
+#[test]
+fn a_missed_blend_still_plays_the_track_that_was_announced() {
+    // Shuffle rolls dice, and the announcement is the roll. When the blend
+    // misses — the track ran out before the engine could hand over, so a
+    // TrackEnded arrives instead — the same track must play. Re-rolling
+    // here would make the played order diverge from the announced one.
+    let mut app = connected_app();
+    app.queue.shuffle = true;
+    let (url, announced) =
+        blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3", "lib/d.mp3"]);
+
+    let effects = app.apply_event(Event::TrackEnded { source: url });
+    assert_eq!(
+        played_url(&effects),
+        announced,
+        "the roll made at announcement time is the roll that plays"
+    );
+}
+
+#[test]
+fn connecting_tells_the_engine_the_blend_length() {
+    let mut app = connected_app();
+    app.crossfade = 4.0;
+    let effects = app.apply_event(Event::Connected {
+        server: "http://host:3000".into(),
+        id: "http://host:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::new(Default::default()),
+    });
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Audio(AudioCmd::SetCrossfade(s)) if *s == 4.0)),
+        "the config's blend length reaches the audio thread with the session"
+    );
 }

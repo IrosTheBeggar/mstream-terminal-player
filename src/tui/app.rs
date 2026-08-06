@@ -699,6 +699,24 @@ pub struct GenrePicker {
     pub loading: bool,
 }
 
+/// The next track, as announced to the engine for a crossfade — plus
+/// everything the pick was made against, so its staleness can be seen from
+/// here. The pick is rolled once and then *held*: recomputed each refresh,
+/// a shuffled next would come up different every time, and the engine would
+/// open a track that stops being the answer before it plays.
+struct AnnouncedNext {
+    /// The playing row this pick is "next" relative to.
+    for_current: usize,
+    index: usize,
+    /// The track that was at `index` — how a queue edit shows up.
+    filepath: String,
+    url: String,
+    hint: Option<f64>,
+    /// The rules of the roll; either changing re-rolls it.
+    shuffle: bool,
+    repeat: Repeat,
+}
+
 pub struct App {
     /// Which server this is, whose token, as one value — not five parallel
     /// fields that every connect path had to remember together (audit #56).
@@ -796,6 +814,14 @@ pub struct App {
     /// looping.
     failures: usize,
     pub volume: f32,
+    /// Seconds of blend between tracks, from `crossfade_seconds` in
+    /// config.toml; 0 is off. Config-file only for now (Phase C3).
+    pub crossfade: f32,
+    /// The next track as told to the engine, so a blend can open it early.
+    /// Held to keep the answer stable: recomputing on every refresh would
+    /// re-roll a shuffled pick each time, and to know whether the engine's
+    /// announcement is stale without asking it.
+    announced: Option<AnnouncedNext>,
     pub now_playing: Option<Track>,
     /// Covers fetched this session, keyed by the server's art filename.
     /// `None` records both "asked, nothing there" and "asked, still
@@ -894,6 +920,8 @@ impl App {
             starting: None,
             failures: 0,
             volume: 1.0,
+            crossfade: 0.0,
+            announced: None,
             now_playing: None,
             art: HashMap::new(),
             audio_available: true,
@@ -958,6 +986,13 @@ impl App {
         self.queue.repeat = Repeat::from_label(&prefs.repeat);
         self.queue.shuffle = prefs.shuffle;
         self.autodj = AutoDjMode::from_label(&prefs.autodj);
+        // The same clamp as the engine's, so the file and the behavior
+        // agree; anything unreadable costs the blend and nothing else.
+        self.crossfade = if prefs.crossfade_seconds.is_finite() {
+            prefs.crossfade_seconds.clamp(0.0, 30.0)
+        } else {
+            0.0
+        };
         self.dj = dj::Settings::from_prefs(&prefs.dj);
         self
     }
@@ -971,6 +1006,7 @@ impl App {
             repeat: self.queue.repeat.label().to_string(),
             shuffle: self.queue.shuffle,
             autodj: self.autodj.label().to_string(),
+            crossfade_seconds: self.crossfade,
             dj: self.dj.to_prefs(),
             // Settings from a newer player belong to the file, not to this
             // app's state; `PlayerPrefs::adopt` is what carries them across.
@@ -1211,7 +1247,8 @@ impl App {
     // ── Actions ─────────────────────────────────────────────────────────────
 
     pub fn handle_action(&mut self, action: Action) -> Vec<Effect> {
-        let effects = self.act(action);
+        let mut effects = self.act(action);
+        effects.extend(self.refresh_prepared());
         self.note_pending(&effects);
         effects
     }
@@ -1951,6 +1988,86 @@ impl App {
         Vec::new()
     }
 
+    /// One row's media URL, by the same road [`App::play_index`] builds the
+    /// one it plays. None only when the URL cannot be built at all, which
+    /// play_index would have refused too.
+    fn queue_url(&self, track: &Track) -> Option<String> {
+        urls::media_url(&self.session.server, &track.filepath, self.session.token.as_deref()).ok()
+    }
+
+    /// The queue row whose media URL is `url`, if any. A scan, but of an
+    /// in-memory queue, on an event that fires once per blend.
+    fn index_of_url(&self, url: &str) -> Option<usize> {
+        self.queue.items.iter().position(|t| self.queue_url(t).as_deref() == Some(url))
+    }
+
+    /// The standing announcement, if everything it was made against still
+    /// holds: crossfade still on, same playing row, same track at the
+    /// announced index, same shuffle and repeat rules.
+    fn announced_still_valid(&self) -> Option<usize> {
+        let a = self.announced.as_ref()?;
+        let holds = self.crossfade > 0.0
+            && self.queue.current == Some(a.for_current)
+            && self.queue.shuffle == a.shuffle
+            && self.queue.repeat == a.repeat
+            && self.queue.items.get(a.index).is_some_and(|t| t.filepath == a.filepath);
+        holds.then_some(a.index)
+    }
+
+    /// Roll the pick an announcement would carry, or None when nothing
+    /// should follow: crossfade off, nothing playing, repeat-one (a track
+    /// never blends into itself), or no next at all.
+    fn pick_announcement(&self) -> Option<AnnouncedNext> {
+        if self.crossfade <= 0.0 {
+            return None;
+        }
+        let for_current = self.queue.current?;
+        self.now_playing.as_ref()?;
+        if self.queue.repeat == Repeat::One {
+            return None;
+        }
+        let index = self.queue.next_index(false)?;
+        if index == for_current {
+            // A one-track queue under repeat-all: repeat-one in effect.
+            return None;
+        }
+        let track = self.queue.items.get(index)?;
+        Some(AnnouncedNext {
+            for_current,
+            index,
+            filepath: track.filepath.clone(),
+            url: self.queue_url(track)?,
+            hint: track.metadata.duration,
+            shuffle: self.queue.shuffle,
+            repeat: self.queue.repeat,
+        })
+    }
+
+    /// Keep the engine's idea of what comes next in step with this queue.
+    /// Runs after every action and event — dispatch is the one funnel that
+    /// everything able to change the answer passes through — and is cheap
+    /// on the quiet path: a standing announcement that still holds is left
+    /// alone, which is also what keeps a shuffled pick from re-rolling.
+    fn refresh_prepared(&mut self) -> Option<Effect> {
+        if self.announced_still_valid().is_some() {
+            return None;
+        }
+        match (self.announced.take(), self.pick_announcement()) {
+            (None, None) => None,
+            (Some(_), None) => Some(Effect::Audio(AudioCmd::ClearNext)),
+            // Re-announcing an unchanged URL is a no-op engine-side, so a
+            // pick that survived a re-roll costs nothing extra.
+            (_, Some(next)) => {
+                let effect = Effect::Audio(AudioCmd::PrepareNext {
+                    url: next.url.clone(),
+                    duration_hint: next.hint,
+                });
+                self.announced = Some(next);
+                Some(effect)
+            }
+        }
+    }
+
     pub fn play_index(&mut self, index: usize) -> Vec<Effect> {
         let Some(track) = self.queue.items.get(index).cloned() else {
             return Vec::new();
@@ -2005,6 +2122,16 @@ impl App {
     }
 
     fn skip(&mut self, manual: bool) -> Vec<Effect> {
+        // Auto-advance plays what was announced whenever one stands. The
+        // announcement is a commitment: even when the blend missed (this
+        // path), honoring it keeps one roll of the shuffle dice per
+        // transition instead of one per code path. Manual skips are the
+        // user overruling all of that.
+        if !manual {
+            if let Some(index) = self.announced_still_valid() {
+                return self.play_index(index);
+            }
+        }
         match self.queue.next_index(manual) {
             Some(index) => self.play_index(index),
             None => {
@@ -2046,7 +2173,8 @@ impl App {
         if matches!(event, Event::Error(_) | Event::Unauthorized) {
             self.clear_pending();
         }
-        let effects = self.consume(event);
+        let mut effects = self.consume(event);
+        effects.extend(self.refresh_prepared());
         self.note_pending(&effects);
         effects
     }
@@ -2080,6 +2208,55 @@ impl App {
                     return Vec::new();
                 }
                 self.skip(false)
+            }
+            Event::HandedOver { from, to } => {
+                // A handover out of a track we are no longer on is stale —
+                // the same rule TrackEnded lives by — and one that raced a
+                // play the user just asked for is superseded: `starting`
+                // covers the gap where status still names the old track
+                // while the user's own pick is opening.
+                if !self.is_current_source(&from) || self.starting.is_some() {
+                    return Vec::new();
+                }
+                // The engine crossfaded into the announced track by itself.
+                // Move the cursor the way play_index would — minus the Play,
+                // which the audio has already performed.
+                let adopted = self
+                    .announced_still_valid()
+                    .filter(|&index| {
+                        self.queue
+                            .items
+                            .get(index)
+                            .and_then(|t| self.queue_url(t))
+                            .as_deref()
+                            == Some(to.as_str())
+                    })
+                    .or_else(|| self.index_of_url(&to));
+                match adopted {
+                    Some(index) => {
+                        let track = self.queue.items[index].clone();
+                        self.queue.start(index);
+                        self.remember_played(&track);
+                        self.now_playing = Some(track);
+                        // Spent; the refresh at the end of this dispatch
+                        // announces whatever follows the new track.
+                        self.announced = None;
+                        self.failures = 0;
+                        let mut effects: Vec<Effect> = Vec::new();
+                        effects.extend(self.fetch_art());
+                        effects.extend(self.maybe_autodj());
+                        effects
+                    }
+                    None => {
+                        // The queue was edited under a blend already in the
+                        // air, and the engine finished a plan this queue no
+                        // longer describes. Put the right track on properly —
+                        // a hard cut, once, in a race that takes deliberate
+                        // timing to hit.
+                        self.announced = None;
+                        self.skip(false)
+                    }
+                }
             }
             Event::AudioFailed(e) => {
                 self.audio_available = false;

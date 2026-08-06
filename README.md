@@ -165,6 +165,22 @@ A value it can't read costs you that colour and nothing else — it says what wa
 wrong on the first screen and keeps the default. Errors stay red and aren't
 configurable; an error that isn't red is a trap.
 
+### Crossfade
+
+```toml
+[player]
+crossfade_seconds = 6
+```
+
+Each track blends into the next as it ends — equal-power, with the coming track
+opened ahead of time so the blend never waits on the network. Off by default,
+and it only fires when a track ends *on its own*: `n` stays an honest cut, a
+seek keeps the track you're on and drops the one leaving, and pausing mid-blend
+freezes it exactly where it sits. Tracks the server can't state a length for (a
+live transcode on its first play) change over the plain way, since there is no
+known ending to fade toward. The jukebox has the same blend as
+`mstream-player serve --crossfade 6`.
+
 ## Mouse
 
 Clicking the progress bar seeks there. The bar lights up under the pointer

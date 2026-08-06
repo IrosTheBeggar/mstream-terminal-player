@@ -109,6 +109,9 @@ pub struct PlayerPrefs {
     pub shuffle: bool,
     /// "off", "similar" or "tempo+key".
     pub autodj: String,
+    /// Seconds of blend when one track ends and the next begins; 0 is off.
+    /// Config-file only for now — no key adjusts it live (Phase C3).
+    pub crossfade_seconds: f32,
     /// How Auto-DJ chooses, beyond the mode.
     pub dj: AutoDjPrefs,
     #[serde(flatten)]
@@ -122,6 +125,7 @@ impl Default for PlayerPrefs {
             repeat: "off".to_string(),
             shuffle: false,
             autodj: "off".to_string(),
+            crossfade_seconds: 0.0,
             dj: AutoDjPrefs::default(),
             extra: Keep::new(),
         }
@@ -767,6 +771,7 @@ mod tests {
         config.player.volume = 0.4;
         config.player.repeat = "all".into();
         config.player.autodj = "similar".into();
+        config.player.crossfade_seconds = 6.0;
         touch_server(&mut config, "http://host:3000", Some("alice".into()));
         set_last_path(&mut config, "http://host:3000", "music/Artist");
         save(&config).unwrap();
@@ -778,6 +783,7 @@ mod tests {
         let loaded = load().unwrap();
         assert_eq!(loaded.player.volume, 0.4);
         assert_eq!(loaded.player.repeat, "all");
+        assert_eq!(loaded.player.crossfade_seconds, 6.0);
         assert_eq!(loaded.servers[0].username.as_deref(), Some("alice"));
         assert_eq!(loaded.servers[0].last_path.as_deref(), Some("music/Artist"));
 
@@ -802,6 +808,9 @@ mod tests {
         // unchanged, because the policy at the top of this file promises that
         // added optional fields don't bump it — which is exactly what puts
         // this file in front of this binary.
+        // `crossfade_seconds` used to be this test's example of a future
+        // key — then Phase C arrived and the future key became a present
+        // one. `gapless` inherits the role until it, too, comes true (C4).
         fs::write(
             scratch.dir.join(CONFIG_FILE),
             "version = 1\n\
@@ -809,7 +818,7 @@ mod tests {
              \n\
              [player]\n\
              volume = 0.5\n\
-             crossfade_seconds = 4\n\
+             gapless = true\n\
              \n\
              [player.dj]\n\
              energy_curve = \"rising\"\n\
@@ -834,7 +843,7 @@ mod tests {
         let int = |t: &Keep, k: &str| t.get(k).and_then(toml::Value::as_integer);
         assert_eq!(int(&again.extra, "lyrics_offset"), Some(250));
         assert!(again.extra.contains_key("visualizer"), "a whole unknown section survived");
-        assert_eq!(int(&again.player.extra, "crossfade_seconds"), Some(4));
+        assert_eq!(again.player.extra.get("gapless").and_then(toml::Value::as_bool), Some(true));
         assert_eq!(
             again.player.dj.extra.get("energy_curve").and_then(toml::Value::as_str),
             Some("rising")

@@ -530,7 +530,7 @@ The engine gains a prepared-next slot and a retirement queue:
 Device tests ride the existing `#[ignore]` + `wav_bytes` pattern: a two-track queue whose
 handover must arrive early and whose status must never report an empty file mid-run.
 
-#### C3 — TUI wiring (todo)
+#### C3 — TUI wiring ✅ DONE 2026-08-06
 The TUI keeps its own queue and feeds the engine one URL at a time, so it must say what comes
 next: `AudioCmd::PrepareNext`/`ClearNext` (with a `collapse()` rule — a later Play or Stop
 makes a pending prepare moot), re-sent when queue edits change the answer. The delicate part is

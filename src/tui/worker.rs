@@ -39,6 +39,15 @@ pub enum AudioCmd {
     Stop,
     Seek(f64),
     SetVolume(f32),
+    /// Announce what should play after the current track, so a crossfade
+    /// can open it ahead of the fade window. Replaces any earlier
+    /// announcement; the engine treats a repeat of the same URL as a no-op,
+    /// so re-announcing is always safe.
+    PrepareNext { url: String, duration_hint: Option<f64> },
+    /// Withdraw the announcement: nothing follows the current track.
+    ClearNext,
+    /// Seconds of blend between tracks; 0 is off.
+    SetCrossfade(f32),
     Shutdown,
 }
 
@@ -228,6 +237,11 @@ pub enum Event {
     /// that ran out. The name is what lets the UI tell this from the end of a
     /// track it has already moved past.
     TrackEnded { source: String },
+    /// The engine crossfaded into the announced next track by itself: the
+    /// source changed with no Play asked for and nothing ran out. The UI
+    /// moves its cursor without starting anything — the audio has already
+    /// moved.
+    HandedOver { from: String, to: String },
     /// The audio device could not be opened; playback is unavailable.
     AudioFailed(String),
     /// One source would not play — wrong format, gone from the server, or
@@ -351,9 +365,12 @@ fn panic_note(panic: &(dyn std::any::Any + Send)) -> &str {
 ///
 /// What survives: the last Play or Stop decides the transport, and anything
 /// transport-shaped before it was about a source that is gone by the end of
-/// the batch. After the decider, pauses and resumes are kept in order and
-/// only the last Seek matters. Volume is sticky, so the last one is kept
-/// wherever it was said. A Shutdown makes everything else moot.
+/// the batch. After the decider, pauses and resumes are kept in order, only
+/// the last Seek matters, and only the last announcement (PrepareNext or
+/// ClearNext) — an announcement before the decider was about a track the
+/// batch has already moved past. Volume and the crossfade length are
+/// sticky, so the last of each is kept wherever it was said. A Shutdown
+/// makes everything else moot.
 fn collapse(batch: Vec<AudioCmd>) -> Vec<AudioCmd> {
     if batch.contains(&AudioCmd::Shutdown) {
         return vec![AudioCmd::Shutdown];
@@ -361,21 +378,26 @@ fn collapse(batch: Vec<AudioCmd>) -> Vec<AudioCmd> {
     let decider =
         batch.iter().rposition(|cmd| matches!(cmd, AudioCmd::Play { .. } | AudioCmd::Stop));
     let volume = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetVolume(_)));
+    let crossfade = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetCrossfade(_)));
 
     let mut kept: Vec<AudioCmd> = Vec::new();
     kept.extend(volume.cloned());
+    kept.extend(crossfade.cloned());
     if let Some(at) = decider {
         kept.push(batch[at].clone());
     }
     let mut seek: Option<&AudioCmd> = None;
+    let mut announced: Option<&AudioCmd> = None;
     for cmd in &batch[decider.map_or(0, |at| at + 1)..] {
         match cmd {
             AudioCmd::Pause | AudioCmd::Resume => kept.push(cmd.clone()),
             AudioCmd::Seek(_) => seek = Some(cmd),
+            AudioCmd::PrepareNext { .. } | AudioCmd::ClearNext => announced = Some(cmd),
             _ => {}
         }
     }
     kept.extend(seek.cloned());
+    kept.extend(announced.cloned());
     kept
 }
 
@@ -448,7 +470,10 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
             };
             if let Some(err) = apply_audio_cmd(player, cmd) {
                 let event = match starting {
-                    Some(source) => Event::PlaybackFailed { source, error: err },
+                    Some(source) => {
+                        watch.play_failed(&source);
+                        Event::PlaybackFailed { source, error: err }
+                    }
                     None => Event::Error(err),
                 };
                 let _ = events.send(event);
@@ -457,11 +482,15 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
 
         player.tick();
         let status = player.status();
-        // Sent before the status that reports the empty source, and down the
-        // same channel, so the UI always learns which track ended before it
-        // is told there is no track.
-        if let Some(source) = watch.ended(&status.source) {
-            let _ = events.send(Event::TrackEnded { source });
+        // Sent before the status that reports the transition, and down the
+        // same channel, so the UI always learns which track ended — or which
+        // one the engine blended into — before the status says so.
+        if let Some(passing) = watch.observe(&status.source) {
+            let event = match passing {
+                Passing::Ended(source) => Event::TrackEnded { source },
+                Passing::HandedOver { from, to } => Event::HandedOver { from, to },
+            };
+            let _ = events.send(event);
         }
 
         if events.send(Event::Status(status)).is_err() {
@@ -480,12 +509,25 @@ fn apply_audio_cmd(player: &dyn PlayerCtl, cmd: AudioCmd) -> Option<String> {
         AudioCmd::Stop => player.stop(),
         AudioCmd::Seek(pos) => return player.seek(pos).err(),
         AudioCmd::SetVolume(v) => player.set_volume(v),
+        AudioCmd::SetCrossfade(seconds) => player.set_crossfade(seconds),
+        AudioCmd::PrepareNext { url, duration_hint } => player.prepare_next(&url, duration_hint),
+        AudioCmd::ClearNext => player.clear_next(),
         AudioCmd::Shutdown => {}
     }
     None
 }
 
-/// Which source went away on its own, if one did.
+/// What a status transition meant, when it meant something.
+#[derive(Debug, PartialEq)]
+enum Passing {
+    /// A source ran out on its own.
+    Ended(String),
+    /// The engine crossfaded from one source into another by itself.
+    HandedOver { from: String, to: String },
+}
+
+/// Which source went away on its own, if one did — and since crossfade,
+/// which one the engine moved to on its own.
 ///
 /// Track-end detection lives on this thread rather than in the UI: it sees
 /// every status transition, so it can tell "the track finished" from "the
@@ -498,6 +540,12 @@ fn apply_audio_cmd(player: &dyn PlayerCtl, cmd: AudioCmd) -> Option<String> {
 /// throughout). So the flag went up at the start of every track and was still
 /// up when that track ended, where it ate the one transition it was never
 /// meant to cover. Playback stopped after a single song, every time.
+///
+/// `expecting` is what separates the two ways a source can change under a
+/// running player: a Play this thread performed (the UI already moved), and
+/// a blend handover the engine performed alone (the UI must be told). It is
+/// cleared when the expected source arrives — or when its play fails, so a
+/// doomed open cannot masquerade as a later handover's excuse.
 #[derive(Default)]
 struct EndWatch {
     /// The source last seen loaded. Kept rather than a bare "there was one"
@@ -505,24 +553,50 @@ struct EndWatch {
     /// noticed: the status that spotted it is the one reporting nothing.
     source: String,
     asked_to_stop: bool,
+    /// The source a Play command promised, until it shows up.
+    expecting: Option<String>,
 }
 
 impl EndWatch {
     /// Note what a command asks of playback. Only a stop can account for a
-    /// source disappearing; everything else either replaces one source with
-    /// another or acts on the source already loaded.
+    /// source disappearing, and only a play for one source becoming another;
+    /// everything else acts on the source already loaded.
     fn note(&mut self, cmd: &AudioCmd) {
         match cmd {
-            AudioCmd::Stop => self.asked_to_stop = true,
-            AudioCmd::Play { .. } => self.asked_to_stop = false,
+            AudioCmd::Stop => {
+                self.asked_to_stop = true;
+                self.expecting = None;
+            }
+            AudioCmd::Play { url, .. } => {
+                self.asked_to_stop = false;
+                self.expecting = Some(url.clone());
+            }
             _ => {}
         }
     }
 
-    /// The source that went away when nobody asked it to.
-    fn ended(&mut self, now: &str) -> Option<String> {
+    /// The play that was promised is not coming; stop watching for it.
+    fn play_failed(&mut self, source: &str) {
+        if self.expecting.as_deref() == Some(source) {
+            self.expecting = None;
+        }
+    }
+
+    /// What this status transition amounted to, if anything.
+    fn observe(&mut self, now: &str) -> Option<Passing> {
         let was = std::mem::replace(&mut self.source, now.to_string());
-        (!was.is_empty() && now.is_empty() && !self.asked_to_stop).then_some(was)
+        if now.is_empty() {
+            return (!was.is_empty() && !self.asked_to_stop).then(|| Passing::Ended(was));
+        }
+        if self.expecting.as_deref() == Some(now) {
+            // The start we asked for arrived; nothing to report.
+            self.expecting = None;
+            return None;
+        }
+        if !was.is_empty() && was != now {
+            return Some(Passing::HandedOver { from: was, to: now.to_string() });
+        }
+        None
     }
 }
 
@@ -1129,37 +1203,43 @@ mod tests {
         AudioCmd::Play { url: url.to_string(), duration_hint: None }
     }
 
+    fn ended(name: &str) -> Option<Passing> {
+        Some(Passing::Ended(name.to_string()))
+    }
+
     #[test]
     fn a_track_running_out_is_an_end_even_though_starting_it_took_a_command() {
         let mut watch = EndWatch::default();
         watch.note(&play("http://x/a.mp3"));
-        assert_eq!(watch.ended("http://x/a.mp3"), None, "it is playing, not ending");
+        assert_eq!(watch.observe("http://x/a.mp3"), None, "it is playing, not ending");
         assert_eq!(
-            watch.ended("").as_deref(),
-            Some("http://x/a.mp3"),
+            watch.observe(""),
+            ended("http://x/a.mp3"),
             "and then it ran out on its own, under its own name"
         );
     }
 
     #[test]
-    fn swapping_tracks_never_looks_like_an_ending() {
+    fn swapping_tracks_never_looks_like_an_ending_or_a_handover() {
         let mut watch = EndWatch::default();
         watch.note(&play("http://x/a.mp3"));
-        watch.ended("http://x/a.mp3");
+        watch.observe("http://x/a.mp3");
 
         // The engine decodes the next source before it drops the old sink, so
-        // the polls either side of a skip both see a file loaded.
+        // the polls either side of a skip both see a file loaded — and the
+        // swap this thread performed itself must not read as the engine
+        // moving on alone.
         watch.note(&play("http://x/b.mp3"));
-        assert_eq!(watch.ended("http://x/b.mp3"), None);
+        assert_eq!(watch.observe("http://x/b.mp3"), None);
         // Pausing and seeking leave the source exactly where it was.
         watch.note(&AudioCmd::Pause);
-        assert_eq!(watch.ended("http://x/b.mp3"), None);
+        assert_eq!(watch.observe("http://x/b.mp3"), None);
         watch.note(&AudioCmd::Seek(30.0));
-        assert_eq!(watch.ended("http://x/b.mp3"), None);
+        assert_eq!(watch.observe("http://x/b.mp3"), None);
 
         assert_eq!(
-            watch.ended("").as_deref(),
-            Some("http://x/b.mp3"),
+            watch.observe(""),
+            ended("http://x/b.mp3"),
             "and the track swapped in ends under its own name, not the one before it"
         );
     }
@@ -1168,23 +1248,64 @@ mod tests {
     fn stopping_is_not_an_ending_but_it_only_answers_for_itself() {
         let mut watch = EndWatch::default();
         watch.note(&play("http://x/a.mp3"));
-        watch.ended("http://x/a.mp3");
+        watch.observe("http://x/a.mp3");
 
         // Silence that was asked for must not walk the queue on.
         watch.note(&AudioCmd::Stop);
-        assert_eq!(watch.ended(""), None);
+        assert_eq!(watch.observe(""), None);
 
         // A stop that lands with nothing playing has no transition to explain
         // — and it is exactly what the app sends when the queue runs out. It
         // must not still be answering for a track started long afterwards.
         watch.note(&AudioCmd::Stop);
-        assert_eq!(watch.ended(""), None);
+        assert_eq!(watch.observe(""), None);
         watch.note(&play("http://x/b.mp3"));
-        watch.ended("http://x/b.mp3");
+        watch.observe("http://x/b.mp3");
         assert_eq!(
-            watch.ended("").as_deref(),
-            Some("http://x/b.mp3"),
+            watch.observe(""),
+            ended("http://x/b.mp3"),
             "a later track still ends on its own"
+        );
+    }
+
+    #[test]
+    fn a_source_change_nobody_asked_for_is_a_handover() {
+        let mut watch = EndWatch::default();
+        watch.note(&play("http://x/a.mp3"));
+        watch.observe("http://x/a.mp3");
+
+        // No command in between: the engine blended into the announced next
+        // on its own, and the UI must be told whose cursor to move.
+        assert_eq!(
+            watch.observe("http://x/b.mp3"),
+            Some(Passing::HandedOver {
+                from: "http://x/a.mp3".to_string(),
+                to: "http://x/b.mp3".to_string(),
+            })
+        );
+        // The blended-into track then runs out like any other.
+        assert_eq!(watch.observe(""), ended("http://x/b.mp3"));
+    }
+
+    #[test]
+    fn a_play_that_failed_cannot_excuse_a_later_handover() {
+        let mut watch = EndWatch::default();
+        watch.note(&play("http://x/a.mp3"));
+        watch.observe("http://x/a.mp3");
+
+        // The user asked for b, but its open failed — the thread reported
+        // PlaybackFailed and playback stayed on a. If the expectation of b
+        // survived that, a later blend into b would be eaten as "the start
+        // we asked for", and the cursor would stay behind.
+        watch.note(&play("http://x/b.mp3"));
+        watch.play_failed("http://x/b.mp3");
+        assert_eq!(
+            watch.observe("http://x/b.mp3"),
+            Some(Passing::HandedOver {
+                from: "http://x/a.mp3".to_string(),
+                to: "http://x/b.mp3".to_string(),
+            }),
+            "the failed play's promise expired with it"
         );
     }
 
@@ -1203,6 +1324,9 @@ mod tests {
             Ok(())
         }
         fn set_volume(&self, _volume: f32) {}
+        fn set_crossfade(&self, _seconds: f32) {}
+        fn prepare_next(&self, _source: &str, _duration_hint: Option<f64>) {}
+        fn clear_next(&self) {}
         fn status(&self) -> crate::player::PlayerStatus {
             crate::player::PlayerStatus::default()
         }
