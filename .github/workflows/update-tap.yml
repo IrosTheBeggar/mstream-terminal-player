@@ -1,0 +1,42 @@
+# After a release publishes, push the version-and-hashes bump to the
+# Homebrew tap. The tap's own scripts/bump.sh regenerates the formula from
+# this release's manifest.json, so the tap follows releases without hands.
+#
+# Needs TAP_PUSH_TOKEN: a fine-grained PAT with contents:write on
+# IrosTheBeggar/homebrew-mstream only — GITHUB_TOKEN cannot push to a
+# sibling repo.
+name: Update Homebrew tap
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.1.0"
+        required: true
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tap
+        uses: actions/checkout@v6
+        with:
+          repository: IrosTheBeggar/homebrew-mstream
+          token: ${{ secrets.TAP_PUSH_TOKEN }}
+
+      - name: Regenerate the formula
+        run: sh scripts/bump.sh "${{ github.event.release.tag_name || inputs.tag }}"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/mstream-player.rb
+          if git diff --cached --quiet; then
+            echo "formula already at this version — nothing to push"
+            exit 0
+          fi
+          git commit -m "mstream-player ${{ github.event.release.tag_name || inputs.tag }}"
+          git push

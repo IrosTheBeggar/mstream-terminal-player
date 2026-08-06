@@ -8,7 +8,13 @@ control-API contract.
 
 ## Install
 
-One line, no package manager. macOS / Linux:
+Homebrew (macOS, or Homebrew on Linux):
+
+```bash
+brew install irosthebeggar/mstream/mstream-player
+```
+
+Or one line with no package manager. macOS / Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/IrosTheBeggar/mstream-terminal-player/main/install.sh | sh
