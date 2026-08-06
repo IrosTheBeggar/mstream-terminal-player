@@ -1,16 +1,16 @@
-# After a release publishes, push the version-and-hashes bump to each
-# package channel — the Homebrew tap and the Scoop bucket. Both carry a
-# scripts/bump.sh that regenerates their file whole from this release's
-# manifest.json, so the channels follow releases without hands.
+# The hand-cranked channel bump: regenerate the Homebrew formula and the
+# Scoop manifest for a given tag. The automatic path is the `channels` job
+# inside release.yml — it cannot live here behind `release: published`,
+# because our releases are created with the workflow's own GITHUB_TOKEN
+# and GITHUB_TOKEN events never trigger workflows. This stays for re-runs
+# and repairs.
 #
 # Needs TAP_PUSH_TOKEN: a fine-grained PAT with contents:write on
 # IrosTheBeggar/homebrew-mstream and IrosTheBeggar/scoop-mstream only —
 # GITHUB_TOKEN cannot push to sibling repos.
-name: Update package channels
+name: Update package channels (manual)
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -36,7 +36,7 @@ jobs:
           token: ${{ secrets.TAP_PUSH_TOKEN }}
 
       - name: Regenerate ${{ matrix.file }}
-        run: sh scripts/bump.sh "${{ github.event.release.tag_name || inputs.tag }}"
+        run: sh scripts/bump.sh "${{ inputs.tag }}"
 
       - name: Commit and push
         run: |
@@ -47,5 +47,5 @@ jobs:
             echo "already at this version — nothing to push"
             exit 0
           fi
-          git commit -m "mstream-player ${{ github.event.release.tag_name || inputs.tag }}"
+          git commit -m "mstream-player ${{ inputs.tag }}"
           git push

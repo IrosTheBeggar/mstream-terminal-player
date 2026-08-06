@@ -166,17 +166,51 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # The packaging tools read Cargo.toml and ship the README, so this
+      # job checks the repo out even though it compiles nothing.
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Download all binaries
         uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
+      - name: Install packaging tools
+        run: cargo install cargo-deb cargo-generate-rpm --locked
+
+      # Native packages wrap the binaries that were just downloaded — no
+      # compilation. Their real value over the bare binary is the dependency
+      # line: apt and dnf bring ALSA along instead of the README explaining
+      # it. armv7 gets a deb only; Fedora retired 32-bit arm.
+      - name: Package deb and rpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          package() {
+            asset="$1"; debarch="$2"; rpmarch="$3"; triple="$4"
+            mkdir -p target/release "target/${triple}/release"
+            install -m 755 "dist/${asset}" target/release/mstream-player
+            install -m 755 "dist/${asset}" "target/${triple}/release/mstream-player"
+            cargo deb --no-build --no-strip --target "${triple}" \
+              -o "dist/mstream-player_${version}_${debarch}.deb"
+            if [ -n "${rpmarch}" ]; then
+              cargo generate-rpm --arch "${rpmarch}" \
+                -o "dist/mstream-player-${version}.${rpmarch}.rpm"
+            fi
+          }
+          package mstream-player-linux-x64 amd64 x86_64 x86_64-unknown-linux-gnu
+          package mstream-player-linux-arm64 arm64 aarch64 aarch64-unknown-linux-gnu
+          package mstream-player-linux-arm armhf "" armv7-unknown-linux-gnueabihf
+
       - name: Generate sha256 manifest
         shell: bash
         run: |
           cd dist
-          chmod +x mstream-player-*
+          chmod +x mstream-player-linux-* mstream-player-darwin-* mstream-player-win32-*
           version="${GITHUB_REF_NAME#v}"
           {
             echo '{'
@@ -185,7 +219,7 @@ jobs:
             echo '  "apiVersion": 1,'
             echo '  "assets": ['
             first=true
-            for f in mstream-player-*; do
+            for f in mstream-player*; do
               sum=$(sha256sum "$f" | cut -d' ' -f1)
               $first || echo ','
               first=false
@@ -201,3 +235,41 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+
+  # In this same workflow rather than reacting to `release: published`,
+  # because that event never fires here: the release is created with the
+  # workflow's own GITHUB_TOKEN, and GITHUB_TOKEN events do not trigger
+  # workflows. update-tap.yml remains as the hand-cranked fallback.
+  channels:
+    name: Update package channels
+    needs: release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: IrosTheBeggar/homebrew-mstream
+            file: Formula/mstream-player.rb
+          - channel: IrosTheBeggar/scoop-mstream
+            file: bucket/mstream-player.json
+    steps:
+      - name: Check out ${{ matrix.channel }}
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ matrix.channel }}
+          token: ${{ secrets.TAP_PUSH_TOKEN }}
+
+      - name: Regenerate ${{ matrix.file }}
+        run: sh scripts/bump.sh "$GITHUB_REF_NAME"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ matrix.file }}"
+          if git diff --cached --quiet; then
+            echo "already at this version — nothing to push"
+            exit 0
+          fi
+          git commit -m "mstream-player $GITHUB_REF_NAME"
+          git push
