@@ -2972,6 +2972,13 @@ fn track_with_cover(path: &str, cover: &str) -> Track {
     track
 }
 
+/// The lookup the cover visualizer performs each frame: the playing
+/// track's art, if the server had any and it has arrived.
+fn now_art(app: &App) -> Option<&crate::tui::art::Art> {
+    let file = app.now_playing.as_ref()?.metadata.album_art.as_ref()?;
+    app.art.get(file)?.as_ref()
+}
+
 #[test]
 fn starting_a_track_asks_for_its_cover_once() {
     let mut app = connected_app();
@@ -3003,20 +3010,20 @@ fn a_cover_reply_reaches_the_playing_track_whenever_it_lands() {
     let mut app = connected_app();
     app.queue.replace(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
     app.play_index(0);
-    assert_eq!(app.now_art(), None, "nothing has arrived yet");
+    assert_eq!(now_art(&app), None, "nothing has arrived yet");
 
     // The reply lands — including one that took long enough for the track
     // to have been paused, seeked, anything but skipped.
     let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
     app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(art.clone()) });
-    assert_eq!(app.now_art(), Some(&art));
+    assert_eq!(now_art(&app), Some(&art));
 
     // "The server has no cover for this" is also an answer, and it must
     // not leave the previous track's art on screen.
     app.queue.replace(vec![track_with_cover("lib/b.mp3", "bb.jpeg")]);
     app.play_index(0);
     app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: None });
-    assert_eq!(app.now_art(), None);
+    assert_eq!(now_art(&app), None);
 }
 
 #[test]
