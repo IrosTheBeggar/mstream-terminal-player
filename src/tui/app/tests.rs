@@ -3388,6 +3388,53 @@ fn gapless_repeat_one_announces_its_own_seam() {
 }
 
 #[test]
+fn a_fractional_crossfade_snaps_to_whole_steps() {
+    // A hand-written 4.5 must step to 5 and 4 — not 5.5 forever, which is
+    // what the plain +-1 gave it (fix-round review).
+    let mut app = connected_app();
+    app.crossfade = 4.5;
+    app.handle_action(Action::OpenDjPanel);
+    let row = app
+        .dj_panel
+        .as_ref()
+        .unwrap()
+        .rows
+        .iter()
+        .position(|r| *r == DjRow::Crossfade)
+        .unwrap();
+    app.dj_panel.as_mut().unwrap().row = row;
+
+    app.handle_action(Action::SeekForward);
+    assert_eq!(app.crossfade, 5.0, "up from 4.5 lands on the next whole second");
+    app.crossfade = 4.5;
+    app.handle_action(Action::SeekBackward);
+    assert_eq!(app.crossfade, 4.0, "down from 4.5 lands on the previous");
+}
+
+#[test]
+fn a_lone_track_under_repeat_all_gets_its_seam() {
+    // One track on repeat-all loops exactly like repeat-one, and the
+    // engine's candidate logic treats them alike; the app was starving
+    // this disguise of the seam (fix-round review).
+    let mut app = connected_app();
+    app.gapless = true;
+    app.queue.repeat = Repeat::All;
+    app.queue.replace(vec![track("lib/only.mp3")]);
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let effects = app.apply_event(Event::Status(PlayerStatus {
+        source: url.clone(),
+        playing: true,
+        ..Default::default()
+    }));
+    assert_eq!(
+        announced_url(&effects).as_deref(),
+        Some(url.as_str()),
+        "the disguised loop announces its seam too"
+    );
+}
+
+#[test]
 fn turning_crossfade_on_withdraws_a_standing_seam_announcement() {
     // The seam announces the track to itself, which is lawful only while
     // gapless-without-blend holds. Crossfade coming on must take the seam

@@ -536,7 +536,7 @@ impl State {
     /// (C4), and `prepared` becomes the current sound.
     fn install(&mut self, mixer: &Mixer, prepared: Prepared) {
         self.cancel_overlap();
-        self.silence_appended();
+        self.adopt_appended_for_retire();
         self.retire_softly(SKIP_FADE);
         let sink = Player::connect_new(mixer);
         sink.set_volume(self.volume);
@@ -585,23 +585,50 @@ impl State {
         });
     }
 
-    /// An appended gapless source cannot be taken back out of its sink, but
-    /// a still-QUEUED one can be made inaudible: snapped silent before its
-    /// first sample, it plays out under the retirement machinery without
-    /// ever being heard. A source whose boundary has already crossed is a
-    /// different animal — it is the sounding track, and snapping it is the
-    /// full-scale click this machinery exists to prevent (rodio crosses the
-    /// boundary on the audio thread; promotion waits for the next tick, a
-    /// window every stop or skip can land in; C4 review). So: promote
-    /// first, and let the caller's soft retire treat it as what it is.
-    fn silence_appended(&mut self) {
+    /// Catch up with a gapless boundary that crossed since the last look.
+    /// Public mutators call this FIRST, before staging any index or queue
+    /// state: promotion writes both, and it must never overwrite what a
+    /// caller has just decided (fix-round review: the promotion buried in
+    /// install() clobbered freshly staged state).
+    fn promote_if_crossed(&mut self) {
         if self.appended.is_some() && self.sink.len() <= 1 {
             self.promote_appended();
-            return;
         }
-        if let Some(appended) = self.appended.take() {
+    }
+
+    /// An appended source, at a caller about to retire the sink. Still
+    /// queued, it is snapped silent before its first sample — click-free —
+    /// and plays out unheard under the retirement. If its boundary crossed
+    /// while THIS caller held the lock (an open can take seconds), the
+    /// appended IS the sounding track: its fade and tap are adopted so the
+    /// retire breathes it out instead of snapping it at full scale — but
+    /// no queue bookkeeping happens here, because the caller's own staging
+    /// supersedes the appended slot's (fix-round review).
+    fn adopt_appended_for_retire(&mut self) {
+        let Some(appended) = self.appended.take() else { return };
+        if self.sink.len() <= 1 {
+            self.tap_live.store(false, Ordering::Relaxed);
+            self.fade = appended.fade;
+            self.tap_live = appended.tap_live;
+        } else {
             appended.fade.snap(0.0);
             appended.tap_live.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Hush the long drainers: a blend's outgoing half re-ramps to silence
+    /// over a stop's breath, from wherever its ramp stands, deadline
+    /// tightened to match. The short breaths are left entirely alone —
+    /// they ARE the click-free cut, and cutting a cut is how the fleet's
+    /// own reason for existing was being defeated (fix-round review: every
+    /// start hard-stopped the fleet; a stop let a 30s blend tail play on).
+    fn hush_drainers(&mut self) {
+        for out in &mut self.outgoing {
+            if out.fade_dur > SKIP_FADE {
+                out.fade.ramp_to(0.0, STOP_FADE);
+                out.fade_dur = STOP_FADE;
+                out.deadline = Instant::now() + STOP_FADE + OUTGOING_SLACK;
+            }
         }
     }
 
@@ -610,11 +637,12 @@ impl State {
     /// clears now — status says stopped immediately, the ear gets 80ms of
     /// mercy.
     fn stop_softly(&mut self) {
-        // Whatever else is draining — a blend's outgoing, a skip's breath —
-        // keeps its own ramp; the drainer list holds them all now, so a
-        // stop no longer buys its slot by hard-cutting the previous tenant
-        // at whatever gain it stood (C4 review).
-        self.silence_appended();
+        // A stop means everything winds down NOW: the blend's long tail is
+        // hushed to a stop-length ramp (left alone it played on for the
+        // whole blend window — fix-round review, critic), the breaths
+        // finish the few ms they have, and the playing sink joins them.
+        self.hush_drainers();
+        self.adopt_appended_for_retire();
         self.retire_softly(STOP_FADE);
         self.invalidate_next();
         self.pending_next = None;
@@ -670,13 +698,13 @@ impl State {
         self.next = NextTrack::Idle;
     }
 
-    /// A change of plan mid-blend: cut the outgoing sink now and forget the
-    /// prepared next. What every manual transport action wants — nobody
-    /// pressing next wants the old track audibly lingering under the new.
+    /// A change of plan mid-blend: hush the blend out of the air and forget
+    /// the prepared next. Nobody pressing next wants the old track
+    /// lingering under the new — but nobody wants the click of a hard cut
+    /// either, so the blend gets a stop-length ramp down, and the short
+    /// breaths already draining are left to finish in the fleet.
     fn cancel_overlap(&mut self) {
-        for out in self.outgoing.drain(..) {
-            out.sink.stop();
-        }
+        self.hush_drainers();
         self.invalidate_next();
     }
 
@@ -687,9 +715,10 @@ impl State {
         if self.outgoing.is_empty() {
             return;
         }
-        for out in self.outgoing.drain(..) {
-            out.sink.stop();
-        }
+        // Hushed, not stopped: the leaving half of the blend was mid-ramp
+        // at speaking gain, and a hard stop there is a click like any
+        // other (fix-round review made every audible cut a ramp).
+        self.hush_drainers();
         self.fade.snap(1.0);
     }
 
@@ -769,6 +798,10 @@ impl Engine {
     /// Clear the queue, add one source (path or URL), play it.
     pub fn play_source(&self, source: String, duration_hint: Option<f64>) -> Result<(), EngineError> {
         let mut s = self.state.lock().unwrap();
+        // Boundary first, staging second — every mutator's discipline now:
+        // promotion writes the index and queue, and must never overwrite
+        // what this caller is about to decide (fix-round review).
+        s.promote_if_crossed();
         s.q.queue.clear();
         s.q.queue.push(QueueEntry { path: source, duration_hint });
         s.q.index = 0;
@@ -860,9 +893,7 @@ impl Engine {
             // what is actually sounding; the residue — a boundary crossing
             // in the ~5ms between placing the order and the periodic access
             // consuming it — is accepted (C4 review).
-            if s.appended.is_some() && s.sink.len() <= 1 {
-                s.promote_appended();
-            }
+            s.promote_if_crossed();
             // Seeking mid-blend keeps the track being seeked; hearing the
             // old one still draining behind a jump is disorienting.
             s.snap_out_of_blend();
@@ -877,11 +908,16 @@ impl Engine {
         // stop or skip can retire this sink in the meantime — its fade then
         // belongs to a drainer ramping to silence, and the up-ramp would
         // resurrect a track the engine reports as gone, at full volume,
-        // until the deadline clicked it off (C4 review). Ramp up only if
-        // the handle still steers what is current.
+        // until the deadline clicked it off (C4 review). The ptr_eq alone
+        // was not enough: a stop parks the sink WITHOUT replacing s.fade,
+        // so the handle still compared current (fix-round review) — hence
+        // the stopped flag and the drainer-membership check.
         {
             let s = self.state.lock().unwrap();
-            if Arc::ptr_eq(&s.fade, &fade) {
+            let still_current = Arc::ptr_eq(&s.fade, &fade)
+                && !s.stopped
+                && !s.outgoing.iter().any(|out| Arc::ptr_eq(&out.fade, &fade));
+            if still_current {
                 fade.ramp_to(1.0, SEEK_DIP_UP);
             }
         }
@@ -922,9 +958,7 @@ impl Engine {
         // A crossed gapless boundary is promoted before answering, not a
         // tick later: without this, /status reported the old file carrying
         // the new track's position for up to a poll interval (C4 review).
-        if s.appended.is_some() && s.sink.len() <= 1 {
-            s.promote_appended();
-        }
+        s.promote_if_crossed();
         let is_empty = s.sink.empty();
         let is_paused = s.sink.is_paused();
         // `stopped` is ours and set synchronously; sink.empty() lags a stop()
@@ -946,6 +980,7 @@ impl Engine {
 
     pub fn next_manual(&self) -> Result<(), EngineError> {
         let mut s = self.state.lock().unwrap();
+        s.promote_if_crossed();
         match pick_next(&s.q, true) {
             Some(idx) => {
                 s.q.index = idx;
@@ -965,6 +1000,7 @@ impl Engine {
 
     pub fn previous_manual(&self) -> Result<(), EngineError> {
         let mut s = self.state.lock().unwrap();
+        s.promote_if_crossed();
         if s.q.index == 0 {
             if s.q.loop_mode == LoopMode::All && !s.q.queue.is_empty() {
                 s.q.index = s.q.queue.len() - 1;
@@ -986,10 +1022,13 @@ impl Engine {
                 drop(s);
                 fade.ramp_to(0.0, SEEK_DIP_DOWN);
                 let _ = sink.try_seek(Duration::ZERO);
-                // Same resurrection guard as Engine::seek: only the
-                // still-current handle gets the up-ramp.
+                // Same resurrection guard as Engine::seek, all three
+                // clauses: only the still-current handle gets the up-ramp.
                 let s = self.state.lock().unwrap();
-                if Arc::ptr_eq(&s.fade, &fade) {
+                let still_current = Arc::ptr_eq(&s.fade, &fade)
+                    && !s.stopped
+                    && !s.outgoing.iter().any(|out| Arc::ptr_eq(&out.fade, &fade));
+                if still_current {
                     fade.ramp_to(1.0, SEEK_DIP_UP);
                 }
                 Ok(())
@@ -1028,6 +1067,7 @@ impl Engine {
     /// [`Engine::play_source`].
     pub fn queue_add(&self, file: String) {
         let mut s = self.state.lock().unwrap();
+        s.promote_if_crossed();
         let was_empty = s.q.queue.is_empty();
         s.q.queue.push(QueueEntry::new(file));
         // A different queue can mean a different next.
@@ -1044,6 +1084,7 @@ impl Engine {
 
     pub fn queue_add_many(&self, files: Vec<String>) {
         let mut s = self.state.lock().unwrap();
+        s.promote_if_crossed();
         let was_empty = s.q.queue.is_empty();
         s.q.queue.extend(files.into_iter().map(QueueEntry::new));
         s.invalidate_next();
@@ -1055,6 +1096,7 @@ impl Engine {
 
     pub fn queue_play_index(&self, index: usize) -> Result<(), EngineError> {
         let mut s = self.state.lock().unwrap();
+        s.promote_if_crossed();
         if index >= s.q.queue.len() {
             return Err(EngineError::OutOfBounds);
         }
@@ -1068,10 +1110,34 @@ impl Engine {
 
     pub fn queue_remove(&self, index: usize) -> Result<(), EngineError> {
         let mut s = self.state.lock().unwrap();
+        s.promote_if_crossed();
         if index >= s.q.queue.len() {
             return Err(EngineError::OutOfBounds);
         }
-        match apply_remove(&mut s.q, index) {
+        // Deleting the very row that sits appended is the one queue edit
+        // the irrevocable-append race CAN heed: the source is still queued
+        // (a crossed boundary was promoted above), so the snap is silent
+        // and the deleted track is genuinely never heard. Without this the
+        // removal was cosmetic — the audio played anyway.
+        if s.appended.as_ref().and_then(|a| a.index) == Some(index) {
+            if let Some(appended) = s.appended.take() {
+                appended.fade.snap(0.0);
+                appended.tap_live.store(false, Ordering::Relaxed);
+            }
+        }
+        let outcome = apply_remove(&mut s.q, index);
+        // An appended commitment's slot moves with the queue like the
+        // current index does — for EVERY outcome, not just the arms that
+        // felt like it: the failed-restart path left it unshifted before
+        // (fix-round review).
+        let len = s.q.queue.len();
+        if let Some(appended) = &mut s.appended {
+            if let Some(committed) = appended.index {
+                let (shifted, _) = crate::advance::shift_current(len, committed, index);
+                appended.index = Some(shifted);
+            }
+        }
+        match outcome {
             RemoveOutcome::EmptiedQueue => {
                 s.stop_softly();
             }
@@ -1086,20 +1152,6 @@ impl Engine {
             }
             RemoveOutcome::RemovedBeforeCurrent | RemoveOutcome::RemovedAfterCurrent => {
                 s.invalidate_next();
-                // An appended source's committed slot moves with the queue
-                // like the current index does — unshifted, promotion after
-                // a shrink pointed the index at the wrong row and the
-                // advance from there double-played or skipped (C4 review).
-                // The audio itself is beyond reach; if the removed row WAS
-                // the appended one, the shift leaves the index on its
-                // successor, which is where the advance should resume.
-                let len = s.q.queue.len();
-                if let Some(appended) = &mut s.appended {
-                    if let Some(committed) = appended.index {
-                        let (shifted, _) = crate::advance::shift_current(len, committed, index);
-                        appended.index = Some(shifted);
-                    }
-                }
             }
         }
         Ok(())
@@ -1188,9 +1240,7 @@ impl Engine {
         // length, then it played twice; C4 review). A boundary cannot cross
         // while paused (no samples flow), so ordering past the pause gate
         // is tidiness; ordering past the off-gate is correctness.
-        if s.appended.is_some() && s.sink.len() <= 1 {
-            s.promote_appended();
-        }
+        s.promote_if_crossed();
 
         let blending = s.crossfade > 0.0;
         if !blending && !s.gapless {
@@ -1221,17 +1271,26 @@ impl Engine {
         };
 
         // A seam prepared for gapless must never survive into a blend: a
-        // crossfade toggled on mid-lap leaves a self-aimed pending (and
+        // crossfade toggled on mid-lap leaves a self-AIMED pending (and
         // possibly a self-opened Ready) behind, and blends do not
-        // self-blend — whatever an earlier mode left standing. The app
-        // withdraws its side in the same keystroke; this is the engine's
-        // own refusal, for whatever ordering the messages arrive in.
+        // self-blend. Self-aimed is the operative word: a TUI announcement
+        // (index None) naming the playing source, or a commitment to the
+        // playing ROW itself. A different row that happens to hold the
+        // same file is a lawful blend — refusing it by path alone respawned
+        // the same open every tick for the whole window (fix-round review).
+        // The app withdraws its side in the same keystroke; this is the
+        // engine's own refusal, for whatever ordering the messages arrive.
         if blending {
-            let self_prepared = s.pending_next.as_ref().is_some_and(|e| e.path == s.current_file)
-                || matches!(&s.next,
-                    NextTrack::Ready { prepared, .. } if prepared.path == s.current_file);
-            if self_prepared {
+            let self_pending =
+                s.pending_next.as_ref().is_some_and(|e| e.path == s.current_file);
+            let self_ready = matches!(&s.next,
+                NextTrack::Ready { prepared, index }
+                    if prepared.path == s.current_file
+                        && index.is_none_or(|committed| committed == s.q.index));
+            if self_pending {
                 s.pending_next = None;
+            }
+            if self_pending || self_ready {
                 s.invalidate_next();
             }
         }
@@ -1759,6 +1818,383 @@ mod tests {
         let _ = std::fs::remove_file(&tiny);
     }
 
+    /// A server that answers each request with a whole WAV and counts the
+    /// requests — how a test proves an open was reused, not repeated.
+    fn counting_wav_server(seconds: usize) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let body = wav_bytes(seconds);
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut head = [0u8; 2048];
+                    let _ = stream.read(&mut head);
+                    let sent = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(sent.as_bytes());
+                    let _ = stream.write_all(&body);
+                });
+            }
+        });
+        (format!("http://{addr}/counted.wav"), hits)
+    }
+
+    /// A duration hint running long is the usual road to a missed blend:
+    /// the sink empties while the fade point is still "seconds away", and
+    /// the prepared decoder must then be installed, not thrown away and
+    /// fetched again with the lock held (hush round pin for the reuse).
+    ///
+    /// `cargo test a_missed_blend_reuses -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_missed_blend_reuses_the_prepared_decoder() {
+        let local = std::env::temp_dir().join("mstream-reuse-a.wav");
+        std::fs::write(&local, wav_bytes(3)).unwrap();
+        let (url, hits) = counting_wav_server(3);
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(1.5);
+        // The hint says 8s; the audio is 3. The blend window never comes.
+        engine.play_source(local.to_string_lossy().into_owned(), Some(8.0)).unwrap();
+        engine.queue_add(url.clone());
+
+        let started = std::time::Instant::now();
+        loop {
+            engine.advance_tick();
+            if engine.status().file == url {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(8), "the next track never came");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "the prepared open was repeated instead of reused"
+        );
+        engine.stop();
+        let _ = std::fs::remove_file(&local);
+    }
+
+    /// Breaths frozen by a pause outlive their wall-clock deadlines and
+    /// drain after resume — the multi-drainer shape of the re-arm the
+    /// single-outgoing test already pins (hush round pin).
+    ///
+    /// `cargo test paused_breaths -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn paused_breaths_survive_resume_and_drain() {
+        let dir = std::env::temp_dir();
+        let names: Vec<_> = ["p1", "p2", "p3"]
+            .iter()
+            .map(|n| dir.join(format!("mstream-pbreath-{n}.wav")))
+            .collect();
+        for name in &names {
+            std::fs::write(name, wav_bytes(3)).unwrap();
+        }
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.queue_add_many(
+            names.iter().map(|n| n.to_string_lossy().into_owned()).collect(),
+        );
+        std::thread::sleep(Duration::from_millis(250));
+
+        engine.next_manual().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        engine.next_manual().unwrap();
+        assert!(engine.drainers() >= 2, "two skips, two breaths");
+
+        engine.pause();
+        std::thread::sleep(Duration::from_secs(3)); // far past both deadlines
+        engine.advance_tick();
+        assert!(engine.drainers() >= 2, "paused breaths are frozen, not late");
+
+        engine.resume();
+        let resumed = std::time::Instant::now();
+        while engine.overlap_active() {
+            engine.advance_tick();
+            assert!(resumed.elapsed() < Duration::from_secs(2), "the breaths never drained");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        engine.stop();
+        for name in &names {
+            let _ = std::fs::remove_file(name);
+        }
+    }
+
+    /// A second skip inside the first skip's breath: both breathe in the
+    /// fleet, and rapid fire caps at the bound instead of clicking — the
+    /// fleet finally doing the job its comment always claimed (hush round).
+    ///
+    /// `cargo test rapid_skips -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn rapid_skips_stack_breaths_and_the_bound_holds() {
+        let dir = std::env::temp_dir();
+        let names: Vec<_> = (0..5)
+            .map(|n| dir.join(format!("mstream-rapid-{n}.wav")))
+            .collect();
+        for name in &names {
+            std::fs::write(name, wav_bytes(3)).unwrap();
+        }
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.queue_add_many(
+            names.iter().map(|n| n.to_string_lossy().into_owned()).collect(),
+        );
+        std::thread::sleep(Duration::from_millis(250));
+
+        for _ in 0..4 {
+            engine.next_manual().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let stacked = engine.drainers();
+        assert!(stacked >= 2, "breaths were cut, not stacked: {stacked}");
+        assert!(stacked <= 3, "the fleet bound gave way: {stacked}");
+
+        let waited = std::time::Instant::now();
+        while engine.overlap_active() {
+            engine.advance_tick();
+            assert!(waited.elapsed() < Duration::from_secs(2), "the stack never drained");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        engine.stop();
+        for name in &names {
+            let _ = std::fs::remove_file(name);
+        }
+    }
+
+    /// A stop mid-blend hushes the blend's long tail to a stop-length ramp
+    /// — left alone it drained for the whole blend window, seconds of a
+    /// track the engine reported stopped (hush round, critic finding).
+    ///
+    /// `cargo test a_stop_mid_blend_hushes -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_stop_mid_blend_hushes_the_long_tail() {
+        let dir = std::env::temp_dir();
+        let first = dir.join("mstream-hush-a.wav");
+        let second = dir.join("mstream-hush-b.wav");
+        std::fs::write(&first, wav_bytes(9)).unwrap();
+        std::fs::write(&second, wav_bytes(9)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(4.0);
+        engine.queue_add_many(vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ]);
+
+        let started = std::time::Instant::now();
+        while !engine.overlap_active() {
+            engine.advance_tick();
+            assert!(started.elapsed() < Duration::from_secs(8), "no blend ever started");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(400)); // into the 4s blend
+
+        engine.stop();
+        // The 4s tail must be gone within a stop's breath plus slack, not
+        // the remaining ~3.6s of blend window.
+        let stopped = std::time::Instant::now();
+        while engine.overlap_active() {
+            engine.advance_tick();
+            assert!(
+                stopped.elapsed() < Duration::from_millis(1200),
+                "the blend tail played on past the hush"
+            );
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
+
+    /// The same file on two queue rows is a lawful blend, not a seam: the
+    /// path-scoped refusal churned a fresh open every tick and the blend
+    /// never came (hush round). Index-scoped, it blends.
+    ///
+    /// `cargo test duplicate_rows_blend -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn duplicate_rows_blend_like_any_other_neighbours() {
+        let tiny = std::env::temp_dir().join("mstream-duprows.wav");
+        std::fs::write(&tiny, wav_bytes(4)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(1.5);
+        let path = tiny.to_string_lossy().into_owned();
+        engine.queue_add_many(vec![path.clone(), path]);
+
+        let started = std::time::Instant::now();
+        loop {
+            engine.advance_tick();
+            let status = engine.status();
+            if status.queue_index == 1 {
+                assert!(
+                    engine.overlap_active(),
+                    "the duplicate advanced without its blend — refusal misfired"
+                );
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(6), "no handover ever came");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        engine.stop();
+        let _ = std::fs::remove_file(&tiny);
+    }
+
+    /// A manual jump staged while a gapless boundary sat crossed and
+    /// unpromoted: the promotion happens FIRST, at the top of the mutator,
+    /// so it can never overwrite the index the caller stages (hush round —
+    /// the promotion buried in install() clobbered it).
+    ///
+    /// `cargo test a_jump_over_a_crossed -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_jump_over_a_crossed_boundary_lands_where_aimed() {
+        let dir = std::env::temp_dir();
+        let names: Vec<_> = ["1", "2", "3"]
+            .iter()
+            .map(|n| dir.join(format!("mstream-jump-{n}.wav")))
+            .collect();
+        for name in &names {
+            std::fs::write(name, wav_bytes(3)).unwrap();
+        }
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_gapless(true);
+        engine.queue_add_many(
+            names.iter().map(|n| n.to_string_lossy().into_owned()).collect(),
+        );
+
+        // Arm the append, then stop ticking and sleep past the boundary so
+        // it sits crossed and unpromoted — then jump.
+        let started = std::time::Instant::now();
+        while !engine.appended_waiting() {
+            engine.advance_tick();
+            assert!(started.elapsed() < Duration::from_secs(3), "nothing was ever appended");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_secs_f64(
+            (3.2 - started.elapsed().as_secs_f64()).max(0.1),
+        ));
+
+        engine.queue_play_index(2).unwrap();
+        let status = engine.status();
+        assert_eq!(status.file, names[2].to_string_lossy(), "the jump landed where aimed");
+        assert_eq!(status.queue_index, 2, "and the index is the caller's, not the boundary's");
+
+        engine.stop();
+        for name in &names {
+            let _ = std::fs::remove_file(name);
+        }
+    }
+
+    /// Deleting the row that sits appended is the one append the race CAN
+    /// heed: still queued, it is snapped silent and genuinely never plays
+    /// (hush round — before, the removal was cosmetic).
+    ///
+    /// `cargo test a_removed_appended_row -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_removed_appended_row_is_never_heard() {
+        let dir = std::env::temp_dir();
+        let first = dir.join("mstream-heed-a.wav");
+        let second = dir.join("mstream-heed-b.wav");
+        std::fs::write(&first, wav_bytes(3)).unwrap();
+        std::fs::write(&second, wav_bytes(3)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_gapless(true);
+        engine.queue_add_many(vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ]);
+
+        let started = std::time::Instant::now();
+        while !engine.appended_waiting() {
+            engine.advance_tick();
+            assert!(started.elapsed() < Duration::from_secs(3), "nothing was ever appended");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        engine.queue_remove(1).unwrap();
+
+        // Ride out the rest: the deleted track's name must never surface.
+        while started.elapsed() < Duration::from_secs(6) {
+            engine.advance_tick();
+            let status = engine.status();
+            assert!(
+                status.file != second.to_string_lossy(),
+                "the deleted track played anyway"
+            );
+            if status.file.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        engine.stop();
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
+
+    /// The boundary is visible through a bare status() with no ticks at
+    /// all — the promote-on-read that keeps /status truthful (pin for the
+    /// d5cb417 change the fix-round review found untested).
+    ///
+    /// `cargo test a_bare_status_poll -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_bare_status_poll_sees_the_gapless_boundary() {
+        let dir = std::env::temp_dir();
+        let first = dir.join("mstream-bare-a.wav");
+        let second = dir.join("mstream-bare-b.wav");
+        std::fs::write(&first, wav_bytes(3)).unwrap();
+        std::fs::write(&second, wav_bytes(3)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_gapless(true);
+        engine.queue_add_many(vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ]);
+        let started = std::time::Instant::now();
+        while !engine.appended_waiting() {
+            engine.advance_tick();
+            assert!(started.elapsed() < Duration::from_secs(3), "nothing was ever appended");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // No more ticks — only status polls, straight through the boundary.
+        while started.elapsed() < Duration::from_secs(5) {
+            let status = engine.status();
+            if status.file == second.to_string_lossy() {
+                assert_eq!(status.queue_index, 1, "the read promoted the whole boundary");
+                engine.stop();
+                let _ = std::fs::remove_file(&first);
+                let _ = std::fs::remove_file(&second);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("a bare status poll never saw the boundary");
+    }
+
     /// Gapless repeat-one: the loop seam crosses sample-tight, lap after
     /// lap, self-sustained — the case the C4 review found always gapped.
     ///
@@ -1909,7 +2345,11 @@ mod tests {
     #[test]
     #[ignore = "needs an audio device"]
     fn a_blocked_seeks_up_ramp_cannot_resurrect_a_stopped_track() {
-        let url = stalling_wav_server(30, 500_000, Duration::from_secs(4));
+        // Two megabytes before the stall: ~11s of audio, so plenty remains
+        // playable when the seek unblocks — the earlier 500KB version
+        // passed by coincidence, its audio exhausted before the up-ramp
+        // could have sounded (fix-round review).
+        let url = stalling_wav_server(30, 2_000_000, Duration::from_secs(4));
         let engine = Engine::new().unwrap();
         engine.set_volume(0.0);
         engine.play_source(url, Some(30.0)).unwrap();
@@ -2132,6 +2572,11 @@ mod tests {
         let status = engine.status();
         assert_eq!(status.file, names[1].to_string_lossy(), "the added track started");
         assert!(status.playing);
+        // And the breath itself survived the start: install hushes long
+        // drainers but leaves breaths to finish — hard-cutting the very
+        // breath this gate was fixed to respect was the fleet-defeating
+        // click (hush round).
+        assert!(engine.drainers() >= 1, "the stop's breath was cut, not kept");
 
         engine.stop();
         for name in &names {

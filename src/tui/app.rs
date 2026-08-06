@@ -2073,8 +2073,13 @@ impl App {
         // is exactly what makes it safe where the duplicate-rows case is
         // not (C4 review: the loop seam, the case gapless exists for,
         // always gapped).
-        let self_seam =
-            self.gapless && self.crossfade <= 0.0 && self.queue.repeat == Repeat::One;
+        // Repeat-one, or its disguise: a one-track queue under repeat-all
+        // loops exactly the same seam (the engine's candidate logic already
+        // treats them alike; the fix-round review caught this side starving
+        // the disguised case).
+        let looping_alone = self.queue.repeat == Repeat::One
+            || (self.queue.repeat == Repeat::All && self.queue.items.len() == 1);
+        let self_seam = self.gapless && self.crossfade <= 0.0 && looping_alone;
         if self.queue.repeat == Repeat::One && !self_seam {
             return None;
         }
