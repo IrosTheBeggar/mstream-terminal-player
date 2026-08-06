@@ -1,6 +1,7 @@
-# Tag-driven releases: push a `v*` tag to build all six targets and publish a
-# GitHub Release with the binaries plus a sha256 manifest.json that mStream
-# vendors for its pinned-version download.
+# Tag-driven releases: push a `v*` tag to build all six native targets plus
+# the browser bundle, and publish a GitHub Release with the binaries, the web
+# tarball, and a sha256 manifest.json that mStream vendors for its
+# pinned-version download.
 #
 # Adapted from mStream's build-rust-server-audio.yml — same target matrix and
 # cross setup, but artifacts go to a Release instead of being committed back
@@ -161,9 +162,50 @@ jobs:
           path: staging/${{ matrix.binary_name }}
           retention-days: 1
 
+  # The seventh artifact: the same player built for a tab (see src/web),
+  # tarred as a static bundle. It rides the same manifest — the asset name
+  # matches the `mstream-player*` glob below, so the sha256 entry is free —
+  # and mStream serves it same-origin next to the /api routes it calls,
+  # which is why no host or proxy configuration ships inside it.
+  web:
+    name: Build mstream-player-web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm32-release
+
+      # Pinned, not latest: index.html's data-wasm-opt-params needs >= 0.21,
+      # and trunk fetches its own wasm-bindgen and wasm-opt at build time.
+      - name: Install trunk
+        run: |
+          curl -fsSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz \
+            | tar xz -C "$HOME/.cargo/bin"
+
+      # --public-url ./ keeps every asset link relative, so the bundle
+      # serves from /, /player/, or wherever a host mounts it — no rebuild
+      # per mount point.
+      - name: Build web bundle
+        run: |
+          trunk build --release --public-url ./
+          tar czf mstream-player-web.tar.gz -C dist .
+
+      - name: Upload web bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: mstream-player-web.tar.gz
+          path: mstream-player-web.tar.gz
+          retention-days: 1
+
   release:
     name: Publish release
-    needs: build
+    needs: [build, web]
     runs-on: ubuntu-latest
     steps:
       # The packaging tools read Cargo.toml and ship the README, so this
