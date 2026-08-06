@@ -268,7 +268,15 @@ impl App {
             // keystroke, and the announcement machinery is refreshed by the
             // handle_action funnel this returns through.
             DjRow::Crossfade => {
-                self.crossfade = (self.crossfade + delta as f32).clamp(0.0, 30.0);
+                // Snap toward the pressed direction: a hand-written 4.5 in
+                // the config steps to 5 and 4, not to 5.5 forever (C4
+                // review: the panel's step was permanently misaligned).
+                let snapped = if delta > 0 {
+                    self.crossfade.floor() + 1.0
+                } else {
+                    self.crossfade.ceil() - 1.0
+                };
+                self.crossfade = snapped.clamp(0.0, 30.0);
                 return vec![Effect::Audio(AudioCmd::SetCrossfade(self.crossfade))];
             }
             DjRow::Gapless => {

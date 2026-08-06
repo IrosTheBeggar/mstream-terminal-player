@@ -3353,6 +3353,41 @@ fn gapless_announces_the_next_track_without_a_blend() {
 }
 
 #[test]
+fn gapless_repeat_one_announces_its_own_seam() {
+    // The engine loops the seam only if it holds something appendable, and
+    // under repeat-one the only appendable thing is the track itself. The
+    // duplicate-refusal must stand aside for exactly this case — the
+    // cursor never moves, which is what makes it safe.
+    let mut app = connected_app();
+    app.gapless = true;
+    app.queue.repeat = Repeat::One;
+    app.queue.replace(vec![track("lib/a.mp3")]);
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let effects = app.apply_event(Event::Status(PlayerStatus {
+        source: url.clone(),
+        playing: true,
+        ..Default::default()
+    }));
+    assert_eq!(
+        announced_url(&effects).as_deref(),
+        Some(url.as_str()),
+        "the seam announces the track to itself"
+    );
+
+    // With a blend configured instead, the refusal stands: blends never
+    // self-blend.
+    app.crossfade = 6.0;
+    app.announced = None;
+    let effects = app.apply_event(Event::Status(PlayerStatus {
+        source: url,
+        playing: true,
+        ..Default::default()
+    }));
+    assert_eq!(announced_url(&effects), None, "a blend never blends into itself");
+}
+
+#[test]
 fn the_panel_adjusts_the_blend_and_tells_the_engine_in_the_same_keystroke() {
     let mut app = connected_app();
     app.handle_action(Action::OpenDjPanel);

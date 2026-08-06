@@ -285,7 +285,9 @@ const SEEK_DIP_UP: Duration = Duration::from_millis(30);
 
 /// How close to the end the gapless append happens. Late on purpose: an
 /// appended source cannot be taken back out of a sink, so this is the
-/// whole window in which a queue edit can go unheeded.
+/// window in which a queue edit can go unheeded — ordinarily. A seek
+/// backward after the append stretches that window with it: the append
+/// stands, like everything else about it, until the track's real end.
 const APPEND_LEAD: f64 = 1.5;
 
 /// How much blend this track can carry: the configured seconds, capped at
@@ -331,18 +333,24 @@ enum NextTrack {
     Failed,
 }
 
-/// The committed pick for the track after this one, or None when no blend
-/// should happen: nothing is next, loop-one (a track never blends into
-/// itself), or a pick that lands back on the current track (the one-entry
-/// queue under loop-all). Committing at prepare time matters under
-/// shuffle — pick_next rolls dice, and they must be rolled once, here,
-/// not again at handover.
-fn next_candidate(q: &QueueState) -> Option<(QueueEntry, Option<usize>)> {
+/// The committed pick for the track after this one, or None when no
+/// transition should happen. A *blend* never blends a track into itself,
+/// so with `allow_self` false, loop-one and picks landing back on the
+/// current row are refused. A *gapless* append is the opposite case —
+/// looping a track's seam sample-tight is what the feature is for — so
+/// gapless passes `allow_self` true and the loop gets its second reader
+/// of the same source (C4 review: the loop seam always gapped).
+/// Committing at prepare time matters under shuffle — pick_next rolls
+/// dice, and they must be rolled once, here, not again at handover.
+fn next_candidate(q: &QueueState, allow_self: bool) -> Option<(QueueEntry, Option<usize>)> {
     if q.loop_mode == LoopMode::One {
-        return None;
+        if !allow_self {
+            return None;
+        }
+        return q.queue.get(q.index).map(|entry| (entry.clone(), Some(q.index)));
     }
     let index = pick_next(q, false)?;
-    if index == q.index {
+    if index == q.index && !allow_self {
         return None;
     }
     Some((q.queue[index].clone(), Some(index)))
@@ -518,10 +526,15 @@ impl State {
         }
         let entry = self.q.queue[self.q.index].clone();
         let prepared = open_entry(&entry).map_err(EngineError::Unplayable)?;
+        self.install(mixer, prepared);
+        Ok(())
+    }
 
-        // A manual start is a change of plan for whatever was mid-blend,
-        // mid-prepare, or already appended — and the track being left gets
-        // a skip-length breath out instead of a click (C4).
+    /// The sink swap every start shares: whatever was mid-blend,
+    /// mid-prepare, or already appended is a plan that is not happening,
+    /// the track being left gets a skip-length breath instead of a click
+    /// (C4), and `prepared` becomes the current sound.
+    fn install(&mut self, mixer: &Mixer, prepared: Prepared) {
         self.cancel_overlap();
         self.silence_appended();
         self.retire_softly(SKIP_FADE);
@@ -533,7 +546,6 @@ impl State {
         self.duration = prepared.duration;
         self.stopped = false;
         self.advance_failures = 0;
-        Ok(())
     }
 
     /// [`attach`], and the fresh controls become the current ones.
@@ -617,6 +629,8 @@ impl State {
     /// as a blend handover, without the second sink.
     fn promote_appended(&mut self) {
         let Some(next) = self.appended.take() else { return };
+        // Noted before current_file is overwritten: a self-loop's lap.
+        let looped = next.path == self.current_file;
         self.tap_live.store(false, Ordering::Relaxed);
         self.fade = next.fade;
         self.tap_live = next.tap_live;
@@ -637,7 +651,13 @@ impl State {
                 self.q.queue =
                     vec![QueueEntry { path: self.current_file.clone(), duration_hint: hint }];
                 self.q.index = 0;
-                self.pending_next = None;
+                // A self-loop keeps its announcement: the pending that fed
+                // this lap is the same track again, and the app cannot
+                // re-announce what it never sees change — a same-source
+                // boundary emits no event. Kept, the loop sustains itself.
+                if !looped {
+                    self.pending_next = None;
+                }
             }
         }
     }
@@ -770,11 +790,13 @@ impl Engine {
     /// so a repeated announcement never throws away an open in flight.
     pub fn prepare_next(&self, source: String, duration_hint: Option<f64>) {
         let mut s = self.state.lock().unwrap();
-        // A track never blends into itself. The app refuses to announce
+        // A track never BLENDS into itself. The app refuses to announce
         // one, and this is the belt to that suspender: a handover into the
         // playing source would change nothing status can show, and the
-        // watchers upstream would never learn it happened.
-        if s.current_file == source {
+        // watchers upstream would never learn it happened. The gapless
+        // repeat-one seam is the sanctioned exception — its cursor never
+        // needs to move, so nothing upstream needs telling.
+        if s.current_file == source && !(s.gapless && s.crossfade <= 0.0) {
             return;
         }
         if s.pending_next.as_ref().map(|e| e.path.as_str()) == Some(source.as_str()) {
@@ -832,6 +854,15 @@ impl Engine {
         // lock was making it everyone's (audit #48).
         let (sink, fade) = {
             let mut s = self.state.lock().unwrap();
+            // rodio's seek order is sink-wide, and under gapless a sink can
+            // briefly hold two tracks. A boundary that has already crossed
+            // is promoted before the order is placed so the seek aims at
+            // what is actually sounding; the residue — a boundary crossing
+            // in the ~5ms between placing the order and the periodic access
+            // consuming it — is accepted (C4 review).
+            if s.appended.is_some() && s.sink.len() <= 1 {
+                s.promote_appended();
+            }
             // Seeking mid-blend keeps the track being seeked; hearing the
             // old one still draining behind a jump is disorienting.
             s.snap_out_of_blend();
@@ -887,7 +918,13 @@ impl Engine {
     }
 
     pub fn status(&self) -> Status {
-        let s = self.state.lock().unwrap();
+        let mut s = self.state.lock().unwrap();
+        // A crossed gapless boundary is promoted before answering, not a
+        // tick later: without this, /status reported the old file carrying
+        // the new track's position for up to a poll interval (C4 review).
+        if s.appended.is_some() && s.sink.len() <= 1 {
+            s.promote_appended();
+        }
         let is_empty = s.sink.empty();
         let is_paused = s.sink.is_paused();
         // `stopped` is ours and set synchronously; sink.empty() lags a stop()
@@ -1107,6 +1144,23 @@ impl Engine {
             None => s.clear_current(),
             Some(idx) => {
                 s.q.index = idx;
+                // A prepared decoder for exactly this entry — the blend or
+                // append that missed its window (a duration hint running
+                // long is the usual road here) — is installed rather than
+                // thrown away and re-fetched with the lock held, which paid
+                // for every such track twice (C4 review; the deferred
+                // decoder-reuse item, finally done).
+                let ready_for_idx = matches!(&s.next,
+                    NextTrack::Ready { prepared, .. } if prepared.path == s.q.queue[idx].path);
+                if ready_for_idx {
+                    let NextTrack::Ready { prepared, .. } =
+                        std::mem::replace(&mut s.next, NextTrack::Idle)
+                    else {
+                        unreachable!("matched Ready above, under the same lock");
+                    };
+                    s.install(self.device.mixer(), prepared);
+                    return;
+                }
                 if s.start_current(self.device.mixer()).is_ok() {
                     return;
                 }
@@ -1208,7 +1262,7 @@ impl Engine {
                 .pending_next
                 .clone()
                 .map(|entry| (entry, None))
-                .or_else(|| next_candidate(&s.q));
+                .or_else(|| next_candidate(&s.q, !blending));
             if let Some((entry, index)) = candidate {
                 s.next = spawn_prepare(entry, index);
             }
@@ -1687,6 +1741,99 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         let _ = std::fs::remove_file(&tiny);
+    }
+
+    /// Gapless repeat-one: the loop seam crosses sample-tight, lap after
+    /// lap, self-sustained — the case the C4 review found always gapped.
+    ///
+    /// `cargo test the_loop_seam -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn the_loop_seam_crosses_gaplessly_lap_after_lap() {
+        let tiny = std::env::temp_dir().join("mstream-seam.wav");
+        std::fs::write(&tiny, wav_bytes(3)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_gapless(true);
+        engine.cycle_loop(); // None -> One
+        engine.queue_add(tiny.to_string_lossy().into_owned());
+
+        // Two full laps and change: the file must never empty, the index
+        // must never move, and the position must be seen wrapping.
+        let started = std::time::Instant::now();
+        let mut wrapped = 0;
+        let mut last_pos = 0.0;
+        while started.elapsed() < Duration::from_secs(8) {
+            engine.advance_tick();
+            let status = engine.status();
+            assert!(!status.file.is_empty(), "the seam gapped at lap {wrapped}");
+            assert_eq!(status.queue_index, 0, "a loop goes nowhere");
+            if status.position < last_pos - 1.0 {
+                wrapped += 1;
+            }
+            last_pos = status.position;
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(wrapped >= 2, "only {wrapped} laps in 8s of a 3s loop");
+
+        engine.stop();
+        let _ = std::fs::remove_file(&tiny);
+    }
+
+    /// A transient prepare failure heals when the window recedes: seek back
+    /// past it and the retry gets its blend (the Failed latch reset — the
+    /// prior review's one fix that shipped without a test, per the audit).
+    ///
+    /// `cargo test a_healed_failure -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_healed_failure_retries_after_a_seek_back_and_blends() {
+        let dir = std::env::temp_dir();
+        let first = dir.join("mstream-heal-a.wav");
+        let second = dir.join("mstream-heal-b.wav");
+        std::fs::write(&first, wav_bytes(15)).unwrap();
+        // b does not exist yet: the first prepare fails like a network blip.
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(1.0);
+        engine.queue_add_many(vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ]);
+
+        // Into the prepare window (remaining <= 13 of 15s), where the open
+        // of the missing b fails and the latch parks at Failed.
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_millis(2600) {
+            engine.advance_tick();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // The blip heals, and the user seeks back — runway reopens.
+        std::fs::write(&second, wav_bytes(4)).unwrap();
+        engine.seek(0.0).unwrap();
+
+        // The retry must land a real BLEND before a's natural end: an
+        // overlap seen at the switch is the discriminator — without the
+        // reset, the transition falls to the ordinary gap-advance instead.
+        let mut blended = false;
+        while started.elapsed() < Duration::from_secs(22) {
+            engine.advance_tick();
+            let status = engine.status();
+            if status.queue_index == 1 {
+                blended = engine.overlap_active();
+                break;
+            }
+            assert!(!status.file.is_empty(), "playback died before the retry");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(blended, "the healed failure never got its blend");
+
+        engine.stop();
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
     }
 
     /// A stop that lands while a seek is blocked on the network must stay a
@@ -2410,21 +2557,29 @@ mod tests {
     }
 
     #[test]
-    fn nothing_ever_blends_into_itself() {
+    fn nothing_ever_blends_into_itself_but_gapless_loops_its_seam() {
         let mut state = q(3, 1);
         state.loop_mode = LoopMode::One;
-        assert!(next_candidate(&state).is_none(), "loop-one repeats, it does not blend");
+        assert!(next_candidate(&state, false).is_none(), "loop-one repeats, it does not blend");
+        // The gapless side of the same coin: the seam is the point.
+        let (entry, index) = next_candidate(&state, true).expect("gapless loops the seam");
+        assert_eq!((entry.path.as_str(), index), ("t1", Some(1)));
 
         let mut single = q(1, 0);
         single.loop_mode = LoopMode::All;
-        assert!(next_candidate(&single).is_none(), "one track looping is loop-one in effect");
+        assert!(
+            next_candidate(&single, false).is_none(),
+            "one track looping is loop-one in effect"
+        );
+        assert!(next_candidate(&single, true).is_some(), "and gapless loops that too");
 
         let plain = q(3, 0);
-        let (entry, index) = next_candidate(&plain).expect("a plain queue has a next");
+        let (entry, index) = next_candidate(&plain, false).expect("a plain queue has a next");
         assert_eq!((entry.path.as_str(), index), ("t1", Some(1)));
 
         let end = q(3, 2);
-        assert!(next_candidate(&end).is_none(), "nothing follows the last track unlooped");
+        assert!(next_candidate(&end, false).is_none(), "nothing follows the last track unlooped");
+        assert!(next_candidate(&end, true).is_none(), "gapless invents no next either");
     }
 
     #[test]

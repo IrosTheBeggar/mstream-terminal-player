@@ -2088,8 +2088,15 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
             if app.crossfade <= 0.0 {
                 return vec![value("off".into()), Span::styled("   tracks cut over", faint)];
             }
+            // A hand-written 0.5 must not read as "0s" — show the decimal
+            // whenever there is one.
+            let shown = if app.crossfade.fract() == 0.0 {
+                format!("{:.0}s", app.crossfade)
+            } else {
+                format!("{:.1}s", app.crossfade)
+            };
             vec![
-                value(format!("{:.0}s", app.crossfade)),
+                value(shown),
                 Span::styled("   equal-power, when a track ends on its own", faint),
             ]
         }

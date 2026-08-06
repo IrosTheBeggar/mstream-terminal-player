@@ -2057,11 +2057,18 @@ impl App {
         }
         let for_current = self.queue.current?;
         self.now_playing.as_ref()?;
-        if self.queue.repeat == Repeat::One {
+        // The one self-transition that is WANTED: gapless repeat-one loops
+        // its seam sample-tight, and its cursor never has to move — which
+        // is exactly what makes it safe where the duplicate-rows case is
+        // not (C4 review: the loop seam, the case gapless exists for,
+        // always gapped).
+        let self_seam =
+            self.gapless && self.crossfade <= 0.0 && self.queue.repeat == Repeat::One;
+        if self.queue.repeat == Repeat::One && !self_seam {
             return None;
         }
         let index = self.queue.next_index(false)?;
-        if index == for_current {
+        if index == for_current && !self_seam {
             // A one-track queue under repeat-all: repeat-one in effect.
             return None;
         }
@@ -2070,8 +2077,11 @@ impl App {
         // nothing status can show — no HandedOver would ever fire, the
         // cursor would stall, and the missed-blend path would play the copy
         // again (review finding: duplicates played three times). Refuse,
-        // and the ordinary TrackEnded road walks the cursor forward.
-        if self.now_playing.as_ref().is_some_and(|t| t.filepath == track.filepath) {
+        // and the ordinary TrackEnded road walks the cursor forward. The
+        // seam is exempt: its cursor stays where it is.
+        if !self_seam
+            && self.now_playing.as_ref().is_some_and(|t| t.filepath == track.filepath)
+        {
             return None;
         }
         Some(AnnouncedNext {
