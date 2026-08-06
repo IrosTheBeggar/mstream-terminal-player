@@ -932,20 +932,10 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
         .padding(Padding::horizontal(1));
     let facts_inner = divider.inner(facts_area);
     frame.render_widget(divider, facts_area);
-    let mut card = now_playing_card(app, facts_inner.width as usize);
-    // The cover goes under the facts, in whatever rows the ladder leaves
-    // over. `art::lines` drops it entirely when that space would make it a
-    // smudge — the same bargain the connect screen's banner makes — and
-    // when colour is off, where a halfblock mosaic is a grey rectangle.
-    if let Some(art) = app.now_art() {
-        let room = facts_inner.height.saturating_sub(card.len() as u16 + 1);
-        let picture = super::art::lines(art, facts_inner.width, room);
-        if !picture.is_empty() {
-            card.push(Line::raw(""));
-            card.extend(picture);
-        }
-    }
-    frame.render_widget(Paragraph::new(card), facts_inner);
+    frame.render_widget(
+        Paragraph::new(now_playing_card(app, facts_inner.width as usize)),
+        facts_inner,
+    );
     render_now_panel(frame, panel_area, app);
 
     frame.render_widget(
@@ -1139,8 +1129,9 @@ fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
     let sounding = app.status.playing;
     let mut canvas = crate::tui::canvas::Canvas::new(picture);
     if !canvas.is_empty() {
-        // Spelled out rather than through `App::now_art`, so the borrow
-        // checker can see these fields are not the one `draw` mutates.
+        // Spelled out rather than hidden behind an App accessor, so the
+        // borrow checker can see these fields are not the one `draw`
+        // mutates.
         let cover = app
             .now_playing
             .as_ref()

@@ -1989,12 +1989,6 @@ impl App {
         Some(Effect::Api(ApiCmd::AlbumArt { file }))
     }
 
-    /// The cover of what is playing, once it has arrived.
-    pub fn now_art(&self) -> Option<&Art> {
-        let file = self.now_playing.as_ref()?.metadata.album_art.as_ref()?;
-        self.art.get(file)?.as_ref()
-    }
-
     fn play_pause(&mut self) -> Vec<Effect> {
         if self.status.is_idle() {
             // Nothing loaded — start the queue if there is one.
