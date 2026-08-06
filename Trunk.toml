@@ -13,11 +13,16 @@ open = false
 # The page talks to "its own" server and the host forwards to a real
 # mStream — same-origin, so no CORS anywhere. A deployed demo does the same
 # with its static host's redirects. /api is the JSON surface; /media and
-# /transcode are the streams, proxied now so the audio milestone finds them
-# already reachable.
+# /transcode are the streams; /album-art is the covers the visualizer
+# wears. All proxied, or trunk's index-page fallback answers for them with
+# HTML that decodes as nothing.
 [[proxy]]
 rewrite = "/api/"
 backend = "https://demo.mstream.io/api/"
+
+[[proxy]]
+rewrite = "/album-art/"
+backend = "https://demo.mstream.io/album-art/"
 
 [[proxy]]
 rewrite = "/media/"
