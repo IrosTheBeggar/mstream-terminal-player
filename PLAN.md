@@ -544,10 +544,20 @@ falling back to a real Play when the queue was edited under a stale prepare. Con
 at session start — and the round-trip test that uses `crossfade_seconds` as its example
 *unknown* key gets a new example, since the premise expires the moment the key means something.
 
-#### C4 — Polish (todo, each cheap once C1–C3 exist)
-A short fade on manual skip; micro-fades on stop/seek so nothing ever clicks; the setting shown
-in the Auto-DJ panel; `crossfade_seconds = 0` routed through the prepared slot as append-to-sink
-for true gapless — the Phase 7 "append-to-sink redesign", reduced to a small step.
+#### C4 — Polish ✅ DONE 2026-08-06
+Each cheap once C1–C3 existed, as promised. A manual skip breathes out over 150 ms instead of
+clicking (the leaving sink retires softly through the same outgoing slot as a blend); a stop
+gets 80 ms of the same mercy with the bookkeeping clearing instantly; a seek dips — 10 ms down,
+jump, 30 ms up — so neither side of the jump clicks. True gapless landed as `[player] gapless`
+(and serve `--gapless`), not as `crossfade_seconds = 0`: gapless prefetches, and prefetch is a
+behavior the pre-Phase-C engine never showed unasked, so it stays opt-in like the blend. When
+on with no crossfade set, the prepared next is appended to the playing sink at APPEND_LEAD
+(late, because an append cannot be taken back) and rodio crosses the boundary sample-tight;
+the bookkeeping follows at the boundary, and the TUI's HandedOver reconciliation covers both
+transitions unchanged. Crossfade and Gapless close the Auto-DJ panel as live-adjustable rows —
+playback settings rather than picking ones, but that panel is where the adjustable settings
+gather. The round-trip test's future key came true a second time (`gapless`); `replaygain`
+carries the torch.
 
 **Costs accepted**: two decoders and two spool files for a bounded window per transition;
 summed peaks can transiently exceed full scale on loud masters even at equal power (rodio has a
@@ -615,9 +625,8 @@ that declare the ALSA dependency, and darwin binaries that leave signed and nota
   consider replacing `/server-remote` regex page surgery with a template marker.
 
 ### Phase 7 — Backlog (deliberately deferred)
-Next-track prefetch and the crossfade built on it moved forward to Phase C; what stays of that
-thread here is true gapless, the append-to-sink redesign of the advance loop, kept as Phase
-C4's last step since C2's prepared slot does most of its work.
+The gapless/prefetch thread is gone from this list entirely: prefetch and crossfade moved
+forward to Phase C, and true gapless — the append-to-sink redesign — landed as C4.
 A persistent track cache (replay without re-downloading, offline listening) is the step after
 that and a genuinely bigger one: eviction policy, a size budget, an index keyed by server +
 filepath — this is where the SQLite question from A1 returns with an actual job to do. Also:
@@ -654,8 +663,9 @@ when keys are pressed in sequence against real replies. The first live run found
 - Linux binaries link ALSA dynamically (`libasound` required at runtime — already true today).
 - Download-on-enable adds a failure mode → covered by `serverAudioBinaryPath` + CLI fallback.
 - Two-repo version skew → covered by pinning + `apiVersion` check.
-- rodio device-hotplug behavior is deferred, not solved. Gapless moved from "deferred" to
-  "Phase C": crossfade removes the audible gap where it is enabled, and true gapless is C4.
+- rodio device-hotplug behavior is deferred, not solved. Gapless is deferred no longer: Phase C
+  landed crossfade and true gapless, both opt-in — the default remains the compatible hard cut,
+  so finding #8's gap stands only where nobody asked for better.
 - **Iroh tunnel wire compatibility is unproven** (Phase A3): mStream's tunnel runs in-process via
   the `@number0/iroh` NAPI addon, and nothing in that repo tests a Rust `iroh` client against it —
   the only handshake test is Node-to-Node. Both sides are on the iroh 1.x line, which is
@@ -677,7 +687,7 @@ when keys are pressed in sequence against real replies. The first live run found
 | 5 | Shuffle "randomness" is a hash of the system clock; biased and predictable | quality | fixed in port: `fastrand` |
 | 6 | Binds `0.0.0.0` with no auth; any LAN peer gets full transport control + local-path playback (file-existence oracle) | security | fixed in port: default `127.0.0.1`, `--host` opt-out, optional `--auth-token` |
 | 7 | `get_file_duration` re-opens and re-probes the file already opened for decode | perf (matters for Phase 2 HTTP) | deferred to Phase 2: duration-hint parameter |
-| 8 | Between-tracks the 250 ms advance poll reports `playing: false` transiently; inter-track gap is audible (no gapless) | known limitation | Phase C: crossfade closes the gap where enabled; true gapless is C4 |
+| 8 | Between-tracks the 250 ms advance poll reports `playing: false` transiently; inter-track gap is audible (no gapless) | known limitation | closed by Phase C where enabled (`--crossfade` / `--gapless`); the default stays the compatible hard cut |
 | 9 | Shuffle has no history: `previous` can't retrace shuffled order; shuffle never ends under loop=none | semantics quirk | deferred to Phase 4 (queue UX pass) |
 | 10 | mp3 without duration metadata (no Xing header) reports `duration: 0` | known limitation | documented |
 | 11 | Negative or non-finite `/seek` position reaches `Duration::from_secs_f64`, which panics — and a panic while holding the state mutex poisons it, wedging every later request | crash bug (found during port) | fixed in port: positions validated before conversion |

@@ -44,6 +44,8 @@ pub trait PlayerCtl {
     fn set_volume(&self, volume: f32);
     /// Seconds of blend between tracks; 0 is off.
     fn set_crossfade(&self, seconds: f32);
+    /// Sample-tight transitions when no blend is configured.
+    fn set_gapless(&self, on: bool);
     /// Announce what plays after the current source, so a blend can open it
     /// ahead of the fade window. Replaces any earlier announcement.
     fn prepare_next(&self, source: &str, duration_hint: Option<f64>);
@@ -82,6 +84,10 @@ impl PlayerCtl for Engine {
 
     fn set_crossfade(&self, seconds: f32) {
         Engine::set_crossfade(self, seconds);
+    }
+
+    fn set_gapless(&self, on: bool) {
+        Engine::set_gapless(self, on);
     }
 
     fn prepare_next(&self, source: &str, duration_hint: Option<f64>) {

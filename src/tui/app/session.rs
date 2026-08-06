@@ -371,6 +371,7 @@ impl App {
                     Effect::Api(ApiCmd::Browse(self.opening_path())),
                     Effect::Audio(AudioCmd::SetVolume(self.volume)),
                     Effect::Audio(AudioCmd::SetCrossfade(self.crossfade)),
+                    Effect::Audio(AudioCmd::SetGapless(self.gapless)),
                 ];
                 // Worth persisting when we hold a token we logged in for — or
                 // a pairing code, which is the only way back to this server

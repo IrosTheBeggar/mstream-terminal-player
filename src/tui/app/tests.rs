@@ -1649,6 +1649,7 @@ fn remembered_preferences_are_applied_and_handed_back() {
         shuffle: true,
         autodj: "tempo+key".into(),
         crossfade_seconds: 4.5,
+        gapless: true,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -1658,6 +1659,7 @@ fn remembered_preferences_are_applied_and_handed_back() {
     assert!(app.queue.shuffle);
     assert_eq!(app.autodj, AutoDjMode::BpmKey);
     assert_eq!(app.crossfade, 4.5);
+    assert!(app.gapless);
 
     // What goes out matches what came in, so a restart is a no-op.
     assert_eq!(app.prefs(), saved);
@@ -1672,6 +1674,7 @@ fn nonsense_preferences_fall_back_rather_than_refusing_to_start() {
         shuffle: false,
         autodj: "disco".into(),
         crossfade_seconds: f32::NAN,
+        gapless: false,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -2676,7 +2679,7 @@ fn g_and_shift_g_jump_to_the_ends_of_the_panel() {
     app.handle_action(Action::OpenDjPanel);
     app.handle_action(Action::Last);
     let panel = app.dj_panel.as_ref().unwrap();
-    assert_eq!(panel.selected(), DjRow::Genres, "the last row");
+    assert_eq!(panel.selected(), DjRow::Gapless, "the last row (the playback pair closes it)");
     app.handle_action(Action::First);
     assert_eq!(app.dj_panel.as_ref().unwrap().selected(), DjRow::Mode);
 }
@@ -2687,7 +2690,15 @@ fn choosing_a_genre_switches_the_filter_on() {
     // reads as the chooser being broken.
     let mut app = connected_app();
     app.handle_action(Action::OpenDjPanel);
-    app.dj_panel.as_mut().unwrap().row = app.dj_panel.as_ref().unwrap().rows.len() - 1;
+    let genres = app
+        .dj_panel
+        .as_ref()
+        .unwrap()
+        .rows
+        .iter()
+        .position(|r| *r == DjRow::Genres)
+        .unwrap();
+    app.dj_panel.as_mut().unwrap().row = genres;
     assert_eq!(app.dj_panel.as_ref().unwrap().selected(), DjRow::Genres);
 
     let effects = app.handle_action(Action::Activate);
@@ -2810,6 +2821,7 @@ fn a_remembered_similar_mode_is_dropped_on_a_server_without_the_index() {
         shuffle: false,
         autodj: "similar".into(),
         crossfade_seconds: 0.0,
+        gapless: false,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -3321,6 +3333,64 @@ fn toggling_rules_reannounces_through_the_action_funnel() {
         effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::ClearNext))),
         "repeat-one withdraws the announcement in the same keystroke"
     );
+}
+
+#[test]
+fn gapless_announces_the_next_track_without_a_blend() {
+    // The announcement machinery serves both transitions: gapless needs
+    // the engine to hold something appendable, blend or no blend.
+    let mut app = connected_app();
+    app.gapless = true;
+    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let effects = app
+        .apply_event(Event::Status(PlayerStatus { source: url, playing: true, ..Default::default() }));
+    assert!(
+        announced_url(&effects).expect("announced for the append").contains("b.mp3"),
+        "crossfade off, gapless on — the next track is still told ahead"
+    );
+}
+
+#[test]
+fn the_panel_adjusts_the_blend_and_tells_the_engine_in_the_same_keystroke() {
+    let mut app = connected_app();
+    app.handle_action(Action::OpenDjPanel);
+    let place = |app: &App, row: DjRow| {
+        app.dj_panel.as_ref().unwrap().rows.iter().position(|r| *r == row).unwrap()
+    };
+
+    let crossfade = place(&app, DjRow::Crossfade);
+    app.dj_panel.as_mut().unwrap().row = crossfade;
+    let effects = app.handle_action(Action::SeekForward);
+    assert_eq!(app.crossfade, 1.0);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Audio(AudioCmd::SetCrossfade(s)) if *s == 1.0)),
+        "the engine hears the nudge at once"
+    );
+    let effects = app.handle_action(Action::SeekBackward);
+    assert_eq!(app.crossfade, 0.0, "and back down to off, never below");
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Audio(AudioCmd::SetCrossfade(s)) if *s == 0.0))
+    );
+
+    let gapless = place(&app, DjRow::Gapless);
+    app.dj_panel.as_mut().unwrap().row = gapless;
+    let effects = app.handle_action(Action::SeekForward);
+    assert!(app.gapless);
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetGapless(true)))),
+        "gapless toggles through the same funnel"
+    );
+
+    // What the panel set is what the config remembers.
+    let prefs = app.prefs();
+    assert_eq!(prefs.crossfade_seconds, 0.0);
+    assert!(prefs.gapless);
 }
 
 #[test]

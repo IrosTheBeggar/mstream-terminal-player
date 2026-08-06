@@ -103,6 +103,11 @@ struct ServeArgs {
     /// either way.
     #[arg(long, default_value_t = 0.0, value_parser = crossfade_seconds)]
     crossfade: f32,
+
+    /// Cross track boundaries sample-tight when no crossfade is set, by
+    /// feeding the next track into the playing sink ahead of time.
+    #[arg(long)]
+    gapless: bool,
 }
 
 /// A blend length the engine will accept. Bounded like `listening_seconds`
@@ -183,6 +188,7 @@ fn main() {
             auth_token: std::env::var("MSTREAM_AUDIO_TOKEN").ok(),
             exit_with_parent: false,
             crossfade: 0.0,
+            gapless: false,
         }),
         (None, None) => None,
     };
@@ -195,6 +201,7 @@ fn main() {
                 auth_token: args.auth_token,
                 exit_with_parent: args.exit_with_parent,
                 crossfade: args.crossfade,
+                gapless: args.gapless,
             };
             if let Err(e) = serve::run(opts) {
                 eprintln!("mstream-player: {e}");

@@ -622,6 +622,10 @@ pub enum DjRow {
     Rating,
     Cooldown,
     Genres,
+    /// Playback rather than picking, but this panel is where the player's
+    /// few live-adjustable settings gather (Phase C4).
+    Crossfade,
+    Gapless,
 }
 
 impl DjRow {
@@ -635,6 +639,8 @@ impl DjRow {
             DjRow::Rating => "Rating floor",
             DjRow::Cooldown => "Artist cooldown",
             DjRow::Genres => "Genres",
+            DjRow::Crossfade => "Crossfade",
+            DjRow::Gapless => "Gapless",
         }
     }
 }
@@ -667,6 +673,8 @@ impl DjPanel {
             DjRow::Rating,
             DjRow::Cooldown,
             DjRow::Genres,
+            DjRow::Crossfade,
+            DjRow::Gapless,
         ]);
         DjPanel { rows, ..Default::default() }
     }
@@ -815,8 +823,11 @@ pub struct App {
     failures: usize,
     pub volume: f32,
     /// Seconds of blend between tracks, from `crossfade_seconds` in
-    /// config.toml; 0 is off. Config-file only for now (Phase C3).
+    /// config.toml; 0 is off. Also adjustable in the Auto-DJ panel (C4).
     pub crossfade: f32,
+    /// Sample-tight boundaries when no blend is set, from `gapless` in
+    /// config.toml. The announcement machinery serves both.
+    pub gapless: bool,
     /// The next track as told to the engine, so a blend can open it early.
     /// Held to keep the answer stable: recomputing on every refresh would
     /// re-roll a shuffled pick each time, and to know whether the engine's
@@ -921,6 +932,7 @@ impl App {
             failures: 0,
             volume: 1.0,
             crossfade: 0.0,
+            gapless: false,
             announced: None,
             now_playing: None,
             art: HashMap::new(),
@@ -993,6 +1005,7 @@ impl App {
         } else {
             0.0
         };
+        self.gapless = prefs.gapless;
         self.dj = dj::Settings::from_prefs(&prefs.dj);
         self
     }
@@ -1007,6 +1020,7 @@ impl App {
             shuffle: self.queue.shuffle,
             autodj: self.autodj.label().to_string(),
             crossfade_seconds: self.crossfade,
+            gapless: self.gapless,
             dj: self.dj.to_prefs(),
             // Settings from a newer player belong to the file, not to this
             // app's state; `PlayerPrefs::adopt` is what carries them across.
@@ -2023,7 +2037,7 @@ impl App {
     /// — which is the entire reason the announcement is held at all.
     fn announced_still_valid(&self) -> Option<usize> {
         let a = self.announced.as_ref()?;
-        let holds = self.crossfade > 0.0
+        let holds = (self.crossfade > 0.0 || self.gapless)
             && self.queue.current == Some(a.for_current)
             && self.queue.shuffle == a.shuffle
             && self.queue.repeat == a.repeat
@@ -2036,7 +2050,9 @@ impl App {
     /// should follow: crossfade off, nothing playing, repeat-one (a track
     /// never blends into itself), or no next at all.
     fn pick_announcement(&self) -> Option<AnnouncedNext> {
-        if self.crossfade <= 0.0 {
+        // The announcement serves both transitions: a blend needs it early,
+        // gapless needs it to have something to append.
+        if self.crossfade <= 0.0 && !self.gapless {
             return None;
         }
         let for_current = self.queue.current?;

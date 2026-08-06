@@ -48,6 +48,8 @@ pub enum AudioCmd {
     ClearNext,
     /// Seconds of blend between tracks; 0 is off.
     SetCrossfade(f32),
+    /// Sample-tight transitions when no blend is configured.
+    SetGapless(bool),
     Shutdown,
 }
 
@@ -382,10 +384,12 @@ fn collapse(batch: Vec<AudioCmd>) -> Vec<AudioCmd> {
         batch.iter().rposition(|cmd| matches!(cmd, AudioCmd::Play { .. } | AudioCmd::Stop));
     let volume = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetVolume(_)));
     let crossfade = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetCrossfade(_)));
+    let gapless = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetGapless(_)));
 
     let mut kept: Vec<AudioCmd> = Vec::new();
     kept.extend(volume.cloned());
     kept.extend(crossfade.cloned());
+    kept.extend(gapless.cloned());
     if let Some(at) = decider {
         kept.push(batch[at].clone());
     }
@@ -513,6 +517,7 @@ fn apply_audio_cmd(player: &dyn PlayerCtl, cmd: AudioCmd) -> Option<String> {
         AudioCmd::Seek(pos) => return player.seek(pos).err(),
         AudioCmd::SetVolume(v) => player.set_volume(v),
         AudioCmd::SetCrossfade(seconds) => player.set_crossfade(seconds),
+        AudioCmd::SetGapless(on) => player.set_gapless(on),
         AudioCmd::PrepareNext { url, duration_hint } => player.prepare_next(&url, duration_hint),
         AudioCmd::ClearNext => player.clear_next(),
         AudioCmd::Shutdown => {}
@@ -1328,6 +1333,7 @@ mod tests {
         }
         fn set_volume(&self, _volume: f32) {}
         fn set_crossfade(&self, _seconds: f32) {}
+        fn set_gapless(&self, _on: bool) {}
         fn prepare_next(&self, _source: &str, _duration_hint: Option<f64>) {}
         fn clear_next(&self) {}
         fn status(&self) -> crate::player::PlayerStatus {
@@ -1439,6 +1445,11 @@ mod tests {
         assert_eq!(
             collapse(vec![AudioCmd::SetCrossfade(2.0), play("c"), AudioCmd::SetCrossfade(6.0)]),
             vec![AudioCmd::SetCrossfade(6.0), play("c")]
+        );
+        // And gapless the same.
+        assert_eq!(
+            collapse(vec![AudioCmd::SetGapless(true), play("c"), AudioCmd::SetGapless(false)]),
+            vec![AudioCmd::SetGapless(false), play("c")]
         );
     }
 

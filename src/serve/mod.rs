@@ -30,6 +30,9 @@ pub struct ServeOptions {
     /// `--port N` spawn contract, which is deliberate — mStream never sees
     /// a behavior change it didn't ask for.
     pub crossfade: f32,
+    /// Sample-tight transitions when no blend is configured. Same legacy
+    /// stance: unreachable from `--port N`.
+    pub gapless: bool,
 }
 
 // ── Request types (wire-compatible with rust-server-audio) ──────────────────
@@ -309,6 +312,7 @@ fn is_json(content_type: Option<&str>) -> bool {
 pub fn run(opts: ServeOptions) -> Result<(), String> {
     let engine = Engine::new().map_err(|e| format!("could not initialize audio output: {}", e))?;
     engine.set_crossfade(opts.crossfade);
+    engine.set_gapless(opts.gapless);
 
     if opts.exit_with_parent {
         std::thread::spawn(|| {

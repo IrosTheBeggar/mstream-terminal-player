@@ -174,12 +174,23 @@ crossfade_seconds = 6
 
 Each track blends into the next as it ends — equal-power, with the coming track
 opened ahead of time so the blend never waits on the network. Off by default,
-and it only fires when a track ends *on its own*: `n` stays an honest cut, a
-seek keeps the track you're on and drops the one leaving, and pausing mid-blend
-freezes it exactly where it sits. Tracks the server can't state a length for (a
-live transcode on its first play) change over the plain way, since there is no
-known ending to fade toward. The jukebox has the same blend as
-`mstream-player serve --crossfade 6`.
+and it only fires when a track ends *on its own*: `n` stays a cut (a short soft
+one — nothing in this player clicks), a seek keeps the track you're on and drops
+the one leaving, and pausing mid-blend freezes it exactly where it sits. Tracks
+the server can't state a length for (a live transcode on its first play) change
+over the plain way, since there is no known ending to fade toward.
+
+```toml
+[player]
+gapless = true
+```
+
+For album listeners instead of blend listeners: with no crossfade set, `gapless`
+feeds the next track into the playing sink ahead of time and the boundary is
+crossed sample-tight — no gap, no fade, exactly as the album was cut. A
+configured crossfade outranks it. Both settings are also adjustable live from
+the Auto-DJ panel (`D`), and the jukebox has the same pair as
+`mstream-player serve --crossfade 6` / `--gapless`.
 
 ## Mouse
 
@@ -310,6 +321,7 @@ going quiet. `mstream-player info` lists what a given server has enabled.
 | **Key matching** | `compatible` is the Camelot neighbourhood; `strict` never leaves the seed's key. |
 | **Rating floor** · **Artist cooldown** | skip anything below a rating; keep the last N artists out. |
 | **Genres** | whitelist or blacklist. A whitelist also excludes untagged tracks — "only these" is the stricter promise. |
+| **Crossfade** · **Gapless** | how tracks hand over — playback settings rather than picking ones, but this panel is where the live-adjustable settings gather. |
 
 `↑↓` choose · `←→` adjust · `p` samples three picks so you can hear what a
 setting does before committing to it · `Esc` closes. Settings persist.
@@ -445,6 +457,8 @@ legacy alias for the old spawn contract. Changes from the original engine:
   prepared ahead so the blend never waits on the network). 0 — the default — keeps the original
   hard cut, and manual `/next` cuts either way. Needs track durations to find the fade point, so
   sources of unknown length (a live transcode) fall back to the plain cut
+- `--gapless`: with no crossfade set, cross track boundaries sample-tight by feeding the next
+  track into the playing sink ahead of time
 - Bug fixes: volume persists across track changes, manual next is no longer trapped by
   loop-one, no panic when no audio device exists, removing a queue entry while stopped no
   longer starts playback

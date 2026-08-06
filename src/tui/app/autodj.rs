@@ -264,6 +264,17 @@ impl App {
                     step(self.dj.artist_cooldown, delta, dj::ARTIST_COOLDOWN_MAX);
             }
             DjRow::Genres => self.dj.genre_mode = self.dj.genre_mode.next(),
+            // The playback pair (C4): told to the engine in the same
+            // keystroke, and the announcement machinery is refreshed by the
+            // handle_action funnel this returns through.
+            DjRow::Crossfade => {
+                self.crossfade = (self.crossfade + delta as f32).clamp(0.0, 30.0);
+                return vec![Effect::Audio(AudioCmd::SetCrossfade(self.crossfade))];
+            }
+            DjRow::Gapless => {
+                self.gapless = !self.gapless;
+                return vec![Effect::Audio(AudioCmd::SetGapless(self.gapless))];
+            }
         }
         Vec::new()
     }

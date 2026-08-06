@@ -2084,6 +2084,26 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
                 Span::styled("   recently played, skipped", faint),
             ]
         }
+        DjRow::Crossfade => {
+            if app.crossfade <= 0.0 {
+                return vec![value("off".into()), Span::styled("   tracks cut over", faint)];
+            }
+            vec![
+                value(format!("{:.0}s", app.crossfade)),
+                Span::styled("   equal-power, when a track ends on its own", faint),
+            ]
+        }
+        DjRow::Gapless => {
+            let state = if app.gapless { "on" } else { "off" };
+            let what = if app.crossfade > 0.0 {
+                "crossfade wins while it is on"
+            } else if app.gapless {
+                "sample-tight boundaries"
+            } else {
+                "tracks cut over"
+            };
+            vec![value(state.into()), Span::styled(format!("   {what}"), faint)]
+        }
         DjRow::Genres => {
             let mode = app.dj.genre_mode.label().to_string();
             if app.dj.genre_mode == crate::dj::GenreMode::Off {
@@ -3455,8 +3475,11 @@ mod tests {
         let mut app = connected_app();
         app.dj.genres = vec!["Techno".into()];
         app.handle_action(Action::OpenDjPanel);
-        let last = app.dj_panel.as_ref().unwrap().rows.len() - 1;
-        app.dj_panel.as_mut().unwrap().row = last;
+        let genres = {
+            let rows = &app.dj_panel.as_ref().unwrap().rows;
+            rows.iter().position(|r| *r == crate::tui::app::DjRow::Genres).unwrap()
+        };
+        app.dj_panel.as_mut().unwrap().row = genres;
         app.handle_action(Action::Activate);
         app.apply_event(crate::tui::worker::Event::Genres(vec![
             crate::api::types::Genre { name: "Ambient".into(), track_count: None },

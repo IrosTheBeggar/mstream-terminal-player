@@ -270,6 +270,24 @@ const MIN_FADE: f64 = 0.05;
 /// not for scheduling.
 const OUTGOING_SLACK: Duration = Duration::from_secs(2);
 
+/// The breath on a manual track change — long enough to kill the click of
+/// cutting a waveform mid-swing, short enough to feel instant.
+const SKIP_FADE: Duration = Duration::from_millis(150);
+
+/// The breath on a stop. Shorter than a skip: a stop should feel like now.
+const STOP_FADE: Duration = Duration::from_millis(80);
+
+/// The dip around a seek: down before the jump, up after it. A seek lands
+/// mid-waveform on both sides, and forty milliseconds of valley is cheaper
+/// on the ear than two clicks.
+const SEEK_DIP_DOWN: Duration = Duration::from_millis(10);
+const SEEK_DIP_UP: Duration = Duration::from_millis(30);
+
+/// How close to the end the gapless append happens. Late on purpose: an
+/// appended source cannot be taken back out of a sink, so this is the
+/// whole window in which a queue edit can go unheeded.
+const APPEND_LEAD: f64 = 1.5;
+
 /// How much blend this track can carry: the configured seconds, capped at
 /// half the track — past that a short track is all blend and no track.
 /// Zero (no blend) when crossfade is off or the length is unknown.
@@ -336,6 +354,21 @@ fn next_candidate(q: &QueueState) -> Option<(QueueEntry, Option<usize>)> {
 /// screen down under a UI that is still running (audit #32).
 pub(crate) const PREPARE_THREAD: &str = "mstream-prepare";
 
+/// Gapless: hand the prepared source to the playing sink itself. rodio
+/// crosses queued sources sample-tight, which is the entire feature; the
+/// price is that an append cannot be taken back, so it happens as late as
+/// [`APPEND_LEAD`] allows and the bookkeeping waits for the boundary in
+/// [`State::promote_appended`].
+fn append_gapless(s: &mut State) {
+    let NextTrack::Ready { prepared, index } = std::mem::replace(&mut s.next, NextTrack::Idle)
+    else {
+        return;
+    };
+    let (fade, tap_live) = attach(&s.sink, prepared.opened, s.tap.clone(), 1.0);
+    s.appended =
+        Some(Appended { path: prepared.path, duration: prepared.duration, index, fade, tap_live });
+}
+
 /// Open `entry` on a short-lived thread of its own. The open can block for
 /// the network's full patience, and the whole point of preparing is that
 /// nobody holds the state lock — or the audio — waiting on it.
@@ -364,6 +397,32 @@ fn spawn_prepare(entry: QueueEntry, index: Option<usize>) -> NextTrack {
     }
 }
 
+/// Wrap `opened` in the chain every source gets — the tap copy first, so
+/// the ring sees the track at full amplitude rather than the blend (the
+/// same reasoning as listening under volume: draw the track, not the
+/// knob), then the fade — and append it to `sink`. Returns the source's
+/// controls for whoever will own them.
+fn attach(
+    sink: &Player,
+    opened: Opened,
+    tap: Option<Arc<tap::AudioTap>>,
+    initial_gain: f32,
+) -> (Arc<fade::FadeHandle>, Arc<AtomicBool>) {
+    let fade = fade::FadeHandle::new(initial_gain);
+    let live = Arc::new(AtomicBool::new(true));
+    match (opened, tap) {
+        (Opened::Local(d), Some(tap)) => {
+            sink.append(fade::Faded::new(tap::Tapped::new(d, tap, live.clone()), fade.clone()))
+        }
+        (Opened::Local(d), None) => sink.append(fade::Faded::new(d, fade.clone())),
+        (Opened::Http(d), Some(tap)) => {
+            sink.append(fade::Faded::new(tap::Tapped::new(d, tap, live.clone()), fade.clone()))
+        }
+        (Opened::Http(d), None) => sink.append(fade::Faded::new(d, fade.clone())),
+    }
+    (fade, live)
+}
+
 /// A sink on its way out of a blend: still connected to the mixer, ramping
 /// to silence, waiting to be dropped. Its presence is also the latch that
 /// keeps blends strictly one at a time.
@@ -380,6 +439,19 @@ struct Outgoing {
     /// the outgoing at audible gain (review finding: pause/resume pop).
     fade_dur: Duration,
     deadline: Instant,
+}
+
+/// A source appended to the playing sink for a gapless boundary: rodio
+/// crosses queued sources sample-tight, and this is the bookkeeping that
+/// catches up once it has.
+struct Appended {
+    path: String,
+    duration: f64,
+    /// The committed queue slot (serve), or None for a TUI announcement —
+    /// the same split as a blend handover.
+    index: Option<usize>,
+    fade: Arc<fade::FadeHandle>,
+    tap_live: Arc<AtomicBool>,
 }
 
 struct State {
@@ -407,8 +479,14 @@ struct State {
     /// across ticks — [`Engine::advance_tick`] attempts one source per call.
     advance_failures: usize,
     /// Seconds of blend between tracks. 0.0 — the default — is off, and off
-    /// means the pre-crossfade engine, byte for byte.
+    /// (with gapless also off) means the pre-crossfade engine, byte for byte.
     crossfade: f32,
+    /// Sample-tight transitions when no blend is configured: the prepared
+    /// next is appended to the playing sink instead of overlapped on a
+    /// second one. Off by default for the same compatibility reason.
+    gapless: bool,
+    /// The source waiting inside the sink for its gapless boundary.
+    appended: Option<Appended>,
     /// What the TUI said should play after the current track. The TUI keeps
     /// its own queue and feeds this engine one source at a time, so unlike
     /// serve mode the engine cannot pick a next; it has to be told. Consulted
@@ -432,10 +510,12 @@ impl State {
         let entry = self.q.queue[self.q.index].clone();
         let prepared = open_entry(&entry).map_err(EngineError::Unplayable)?;
 
-        // A manual start is a change of plan for whatever was mid-blend or
-        // mid-prepare.
+        // A manual start is a change of plan for whatever was mid-blend,
+        // mid-prepare, or already appended — and the track being left gets
+        // a skip-length breath out instead of a click (C4).
         self.cancel_overlap();
-        self.sink.stop();
+        self.silence_appended();
+        self.retire_softly(SKIP_FADE);
         let sink = Player::connect_new(mixer);
         sink.set_volume(self.volume);
         self.attach_fresh(&sink, prepared.opened, 1.0);
@@ -447,26 +527,90 @@ impl State {
         Ok(())
     }
 
-    /// Wrap `opened` in the chain every sink gets — the tap copy first, so
-    /// the ring sees the track at full amplitude rather than the blend
-    /// (the same reasoning as listening under volume: draw the track, not
-    /// the knob), then the fade — and append it. The fresh fade handle and
-    /// tap switch become the current ones.
+    /// [`attach`], and the fresh controls become the current ones.
     fn attach_fresh(&mut self, sink: &Player, opened: Opened, initial_gain: f32) {
-        let fade = fade::FadeHandle::new(initial_gain);
-        let live = Arc::new(AtomicBool::new(true));
-        match (opened, self.tap.clone()) {
-            (Opened::Local(d), Some(tap)) => {
-                sink.append(fade::Faded::new(tap::Tapped::new(d, tap, live.clone()), fade.clone()))
-            }
-            (Opened::Local(d), None) => sink.append(fade::Faded::new(d, fade.clone())),
-            (Opened::Http(d), Some(tap)) => {
-                sink.append(fade::Faded::new(tap::Tapped::new(d, tap, live.clone()), fade.clone()))
-            }
-            (Opened::Http(d), None) => sink.append(fade::Faded::new(d, fade.clone())),
-        }
+        let (fade, live) = attach(sink, opened, self.tap.clone(), initial_gain);
         self.fade = fade;
         self.tap_live = live;
+    }
+
+    /// Retire the playing sink with a breath instead of a cut: its fade is
+    /// commanded to zero over `window` and the sink parks in `outgoing` to
+    /// drain. A sink with nothing audible left is simply stopped — no
+    /// breath is owed to silence.
+    fn retire_softly(&mut self, window: Duration) {
+        if self.sink.empty() || self.stopped {
+            self.sink.stop();
+            return;
+        }
+        self.fade.ramp_to(0.0, window);
+        self.tap_live.store(false, Ordering::Relaxed);
+        self.outgoing = Some(Outgoing {
+            sink: self.sink.clone(),
+            fade: self.fade.clone(),
+            fade_dur: window,
+            deadline: Instant::now() + window + OUTGOING_SLACK,
+        });
+    }
+
+    /// An appended gapless source cannot be taken back out of its sink, but
+    /// it can be made inaudible: snapped silent, it plays out under the
+    /// retirement machinery without ever being heard.
+    fn silence_appended(&mut self) {
+        if let Some(appended) = self.appended.take() {
+            appended.fade.snap(0.0);
+            appended.tap_live.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Stop what is playing with a breath instead of a click: the audible
+    /// sink ramps out and drains in the outgoing slot while the bookkeeping
+    /// clears now — status says stopped immediately, the ear gets 80ms of
+    /// mercy.
+    fn stop_softly(&mut self) {
+        if let Some(out) = self.outgoing.take() {
+            // Mid-blend already, and near-quiet: two sinks draining for one
+            // stop is not worth a second slot.
+            out.sink.stop();
+        }
+        self.silence_appended();
+        self.retire_softly(STOP_FADE);
+        self.invalidate_next();
+        self.pending_next = None;
+        self.current_file.clear();
+        self.duration = 0.0;
+        self.stopped = true;
+        self.advance_failures = 0;
+    }
+
+    /// The sink crossed a gapless boundary on its own: the appended source
+    /// is what is sounding, so the bookkeeping catches up — the same shape
+    /// as a blend handover, without the second sink.
+    fn promote_appended(&mut self) {
+        let Some(next) = self.appended.take() else { return };
+        self.tap_live.store(false, Ordering::Relaxed);
+        self.fade = next.fade;
+        self.tap_live = next.tap_live;
+        self.current_file = next.path;
+        self.duration = next.duration;
+        self.advance_failures = 0;
+        match next.index {
+            Some(index) => {
+                // Any queue mutation since the append discarded nothing —
+                // an append is irrevocable — but the seatbelt still holds
+                // the index inside the queue that exists now.
+                if index < self.q.queue.len() {
+                    self.q.index = index;
+                }
+            }
+            None => {
+                let hint = (self.duration > 0.0).then_some(self.duration);
+                self.q.queue =
+                    vec![QueueEntry { path: self.current_file.clone(), duration_hint: hint }];
+                self.q.index = 0;
+                self.pending_next = None;
+            }
+        }
     }
 
     /// Forget whatever was decided or prepared about the next track. Any
@@ -548,6 +692,8 @@ impl Engine {
             volume: 1.0,
             advance_failures: 0,
             crossfade: 0.0,
+            gapless: false,
+            appended: None,
             pending_next: None,
             next: NextTrack::Idle,
             outgoing: None,
@@ -641,9 +787,7 @@ impl Engine {
     }
 
     pub fn stop(&self) {
-        let mut s = self.state.lock().unwrap();
-        s.sink.stop();
-        s.clear_current();
+        self.state.lock().unwrap().stop_softly();
     }
 
     pub fn seek(&self, position: f64) -> Result<(), EngineError> {
@@ -654,14 +798,20 @@ impl Engine {
         // on the network — possibly forever, since the download loop never
         // gives a dead server up. The wait is this caller's to make; the
         // lock was making it everyone's (audit #48).
-        let sink = {
+        let (sink, fade) = {
             let mut s = self.state.lock().unwrap();
             // Seeking mid-blend keeps the track being seeked; hearing the
             // old one still draining behind a jump is disorienting.
             s.snap_out_of_blend();
-            s.sink.clone()
+            (s.sink.clone(), s.fade.clone())
         };
-        sink.try_seek(target).map_err(|e| EngineError::Seek(e.to_string()))
+        // The dip (C4): down before the jump, up after it. The down-ramp
+        // has a device callback or two to land while try_seek waits on the
+        // seek being performed; the up-ramp then rises from the new spot.
+        fade.ramp_to(0.0, SEEK_DIP_DOWN);
+        let sought = sink.try_seek(target).map_err(|e| EngineError::Seek(e.to_string()));
+        fade.ramp_to(1.0, SEEK_DIP_UP);
+        sought
     }
 
     pub fn set_volume(&self, volume: f32) {
@@ -683,6 +833,13 @@ impl Engine {
     pub fn set_crossfade(&self, seconds: f32) {
         let mut s = self.state.lock().unwrap();
         s.crossfade = if seconds.is_finite() { seconds.clamp(0.0, 30.0) } else { 0.0 };
+    }
+
+    /// Sample-tight transitions when no blend is configured (C4): the
+    /// prepared next is appended to the playing sink instead of overlapped
+    /// on a second one. A configured crossfade outranks it.
+    pub fn set_gapless(&self, on: bool) {
+        self.state.lock().unwrap().gapless = on;
     }
 
     pub fn status(&self) -> Status {
@@ -740,11 +897,15 @@ impl Engine {
             } else {
                 // The restart is a seek like any other — same discipline as
                 // [`Engine::seek`], even though the start of the track has
-                // almost always downloaded by now. Same blend policy, too.
+                // almost always downloaded by now. Same blend policy and
+                // the same dip, too.
                 s.snap_out_of_blend();
                 let sink = s.sink.clone();
+                let fade = s.fade.clone();
                 drop(s);
+                fade.ramp_to(0.0, SEEK_DIP_DOWN);
                 let _ = sink.try_seek(Duration::ZERO);
+                fade.ramp_to(1.0, SEEK_DIP_UP);
                 Ok(())
             }
         } else {
@@ -822,8 +983,7 @@ impl Engine {
         }
         match apply_remove(&mut s.q, index) {
             RemoveOutcome::EmptiedQueue => {
-                s.sink.stop();
-                s.clear_current();
+                s.stop_softly();
             }
             RemoveOutcome::RemovedCurrent => {
                 s.invalidate_next();
@@ -843,10 +1003,9 @@ impl Engine {
 
     pub fn queue_clear(&self) {
         let mut s = self.state.lock().unwrap();
-        s.sink.stop();
+        s.stop_softly();
         s.q.queue.clear();
         s.q.index = 0;
-        s.clear_current();
     }
 
     pub fn queue_snapshot(&self) -> QueueSnapshot {
@@ -901,7 +1060,8 @@ impl Engine {
     /// their own thread, because this runs with the state lock held and
     /// findings #48–#50 are what happens when that lock meets a network.
     fn crossfade_step(&self, s: &mut State) {
-        if s.crossfade <= 0.0 {
+        let blending = s.crossfade > 0.0;
+        if !blending && !s.gapless {
             // Toggled off with something in flight: forget it. An overlap
             // already sounding is left to retire on its own.
             if !matches!(s.next, NextTrack::Idle) {
@@ -919,30 +1079,42 @@ impl Engine {
                 Ok(Ok(prepared)) => NextTrack::Ready { prepared, index },
                 // open_entry already told stderr what went wrong.
                 Ok(Err(_)) => NextTrack::Failed,
-                Err(mpsc::TryRecvError::Empty) => NextTrack::Opening { index, rx },
                 // The opener panicked — symphonia does, on malformed files
                 // (audit #32) — which reads the same as a failed open.
                 Err(mpsc::TryRecvError::Disconnected) => NextTrack::Failed,
+                Err(mpsc::TryRecvError::Empty) => NextTrack::Opening { index, rx },
             },
             other => other,
         };
+
+        // The gapless boundary: the appended source took over inside the
+        // sink (len fell to one), so the bookkeeping catches up. Checked
+        // before the pause gate only for tidiness — a paused sink pulls no
+        // samples, so a boundary cannot cross during a pause.
+        if s.appended.is_some() && s.sink.len() <= 1 {
+            s.promote_appended();
+        }
 
         // Paused means frozen: the position cannot reach the window, and a
         // handover under a paused track would start sounding on its own.
         if s.sink.is_paused() {
             return;
         }
-        // Blends are strictly one at a time; the retirement of the last is
-        // the gate for the next.
-        if s.outgoing.is_some() {
+        // Transitions are strictly one at a time: a draining blend or an
+        // already-appended next is the gate for anything further.
+        if s.outgoing.is_some() || s.appended.is_some() {
             return;
         }
-        // A duration the engine does not know is a fade point it cannot
-        // find — live transcodes stay on the ordinary advance path. (A
-        // duration *hint* that is wrong misplaces the fade exactly as far
-        // as it misplaces the progress bar; the fade trusts it the same.)
-        let fade = effective_fade(s.crossfade, s.duration);
-        if fade <= 0.0 {
+        // A duration the engine does not know is a fade point — or an
+        // append point — it cannot find; live transcodes stay on the
+        // ordinary advance path. (A duration *hint* that is wrong misplaces
+        // the transition exactly as far as it misplaces the progress bar;
+        // both trust it the same.)
+        if s.duration <= 0.0 {
+            return;
+        }
+        let fade = if blending { effective_fade(s.crossfade, s.duration) } else { 0.0 };
+        if blending && fade <= 0.0 {
             return;
         }
         let remaining = s.duration - s.sink.get_pos().as_secs_f64();
@@ -970,8 +1142,12 @@ impl Engine {
                 s.next = spawn_prepare(entry, index);
             }
         }
-        if matches!(s.next, NextTrack::Ready { .. }) && remaining <= fade {
-            self.handover(s);
+        if matches!(s.next, NextTrack::Ready { .. }) {
+            if blending && remaining <= fade {
+                self.handover(s);
+            } else if !blending && remaining <= APPEND_LEAD {
+                append_gapless(s);
+            }
         }
     }
 
@@ -1344,6 +1520,86 @@ mod tests {
         let _ = std::fs::remove_file(&second);
     }
 
+    /// Gapless (C4): with no blend configured, the transition must come at
+    /// the track's natural end — not early like a blend — with the sink
+    /// never emptying between tracks, and the bookkeeping following the
+    /// boundary within a tick.
+    ///
+    /// `cargo test gapless_crosses -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn gapless_crosses_the_boundary_without_a_gap_or_an_early_switch() {
+        let dir = std::env::temp_dir();
+        let first = dir.join("mstream-gapless-a.wav");
+        let second = dir.join("mstream-gapless-b.wav");
+        std::fs::write(&first, wav_bytes(4)).unwrap();
+        std::fs::write(&second, wav_bytes(4)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_gapless(true);
+        engine.queue_add_many(vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ]);
+
+        let started = std::time::Instant::now();
+        let mut switched_at = None;
+        while started.elapsed() < Duration::from_secs(12) {
+            engine.advance_tick();
+            let status = engine.status();
+            if status.file.is_empty() {
+                assert!(switched_at.is_some(), "went quiet without ever crossing");
+                break;
+            }
+            if switched_at.is_none() && status.queue_index == 1 {
+                switched_at = Some(started.elapsed());
+                assert!(status.playing, "the boundary is seamless, not a gap");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let switched = switched_at.expect("the boundary never crossed");
+        println!(">>> gapless boundary at {switched:?}, done in {:?}", started.elapsed());
+        // The whole point against a blend: the switch comes at the END.
+        assert!(switched > Duration::from_secs_f64(3.7), "at {switched:?} this was a blend");
+        assert!(switched < Duration::from_secs_f64(5.0), "at {switched:?} there was a gap");
+        assert!(started.elapsed() > Duration::from_secs_f64(7.7), "audio went missing");
+
+        engine.stop();
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
+
+    /// A stop breathes (C4): the bookkeeping clears now, the sink drains
+    /// its 80ms in the outgoing slot and is retired by the tick.
+    ///
+    /// `cargo test a_stop_breathes -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_stop_breathes_instead_of_clicking() {
+        let tiny = std::env::temp_dir().join("mstream-softstop.wav");
+        std::fs::write(&tiny, wav_bytes(3)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.play_source(tiny.to_string_lossy().into_owned(), Some(3.0)).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+
+        engine.stop();
+        let status = engine.status();
+        assert!(status.file.is_empty() && !status.playing, "stopped now, to every asker");
+        assert!(engine.overlap_active(), "while the sink breathes out in the slot");
+
+        let waited = std::time::Instant::now();
+        while engine.overlap_active() {
+            engine.advance_tick();
+            assert!(waited.elapsed() < Duration::from_secs(3), "the breath never ended");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_file(&tiny);
+    }
+
     /// A failed play must take the committed pick down with it: play_source
     /// replaces the whole queue before it opens anything, and a pick
     /// committed against the old queue surviving a failed open would blend
@@ -1533,13 +1789,23 @@ mod tests {
             std::thread::sleep(Duration::from_millis(30));
         }
 
-        // A manual skip mid-blend: the outgoing half must cut, not linger
-        // under the track the user asked for.
+        // A manual skip mid-blend: the blend must not outlive the skip —
+        // but since C4 the leaving track breathes out for SKIP_FADE in the
+        // slot instead of clicking, so "cut" means "gone within a breath",
+        // not "gone this instant".
         engine.next_manual().expect("a third track was queued");
-        assert!(!engine.overlap_active(), "the blend outlived the skip");
         let status = engine.status();
         assert_eq!(status.queue_index, 2);
         assert!(status.playing);
+        let waited = std::time::Instant::now();
+        while engine.overlap_active() {
+            engine.advance_tick();
+            assert!(
+                waited.elapsed() < Duration::from_secs(2),
+                "the skip breath never ended — the blend outlived the skip"
+            );
+            std::thread::sleep(Duration::from_millis(30));
+        }
 
         engine.stop();
         for name in &names {
