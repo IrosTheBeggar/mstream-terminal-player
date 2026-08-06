@@ -25,6 +25,11 @@ pub struct ServeOptions {
     pub port: u16,
     pub auth_token: Option<String>,
     pub exit_with_parent: bool,
+    /// Seconds of blend when one track ends and the next begins; 0 keeps
+    /// the original engine's hard cut. Not reachable from the legacy
+    /// `--port N` spawn contract, which is deliberate — mStream never sees
+    /// a behavior change it didn't ask for.
+    pub crossfade: f32,
 }
 
 // ── Request types (wire-compatible with rust-server-audio) ──────────────────
@@ -303,6 +308,7 @@ fn is_json(content_type: Option<&str>) -> bool {
 
 pub fn run(opts: ServeOptions) -> Result<(), String> {
     let engine = Engine::new().map_err(|e| format!("could not initialize audio output: {}", e))?;
+    engine.set_crossfade(opts.crossfade);
 
     if opts.exit_with_parent {
         std::thread::spawn(|| {

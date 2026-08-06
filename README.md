@@ -388,8 +388,9 @@ Both are written by rename, so an interrupted write leaves the previous file int
 While a track plays it is spooled to one scratch file (that's what makes seeking instant), which
 goes in the platform cache directory — `%LOCALAPPDATA%\mstream-player\spool`,
 `~/Library/Caches/mstream-player/spool` or `~/.cache/mstream-player/spool` — rather than `/tmp`,
-which is RAM-backed on many Linux systems. Only the playing track is spooled; the file is deleted
-when it stops, and leftovers from a crash are swept at the next start. To put it elsewhere, set
+which is RAM-backed on many Linux systems. Only the playing track is spooled — plus, briefly, the
+next one while a crossfade is being prepared; each file is deleted when its track stops, and
+leftovers from a crash are swept at the next start. To put it elsewhere, set
 `MSTREAM_PLAYER_CACHE_DIR` or add to config.toml:
 
 ```toml
@@ -423,6 +424,10 @@ legacy alias for the old spawn contract. Changes from the original engine:
   header on every route except `GET /version`)
 - `GET /version` → `{"name", "version", "apiVersion"}`
 - `--exit-with-parent`: exit when stdin closes (pass only when the parent holds stdin open)
+- `--crossfade <seconds>`: blend each track into the next when one ends on its own (equal-power,
+  prepared ahead so the blend never waits on the network). 0 — the default — keeps the original
+  hard cut, and manual `/next` cuts either way. Needs track durations to find the fade point, so
+  sources of unknown length (a live transcode) fall back to the plain cut
 - Bug fixes: volume persists across track changes, manual next is no longer trapped by
   loop-one, no panic when no audio device exists, removing a queue entry while stopped no
   longer starts playback

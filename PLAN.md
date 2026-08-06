@@ -484,7 +484,7 @@ tick loop would staircase at 120 ms steps, so the fade is a source adapter of ou
 
 The pieces, in landing order:
 
-#### C1 — The fade adapter
+#### C1 — The fade adapter ✅ DONE 2026-08-06
 `engine/fade.rs`: a `Faded<S>` source wrapper (same shape as `tap::Tapped`) applying an
 equal-power gain ramp — gain = sin(p·π/2), p stepped linearly per *frame* (per-sample stepping
 would give each channel of a frame a slightly different gain). Commanded through a shared
@@ -496,7 +496,7 @@ or not a fade is configured (gain 1.0 is a multiply and a check per sample); tha
 code path and buys later polish — click-killing micro-fades on stop and seek — for the price
 of a `ramp_to` call. Pure unit tests against a counting source; no audio device.
 
-#### C2 — Engine overlap machinery + serve flag
+#### C2 — Engine overlap machinery + serve flag ✅ DONE 2026-08-06
 The engine gains a prepared-next slot and a retirement queue:
 
 - **Prepare**: at `remaining ≤ fade + margin` (margin generous enough to cover `OPEN_TIMEOUT`

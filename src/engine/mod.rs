@@ -11,14 +11,16 @@
 //! Queue entries carry an optional duration hint so remote tracks don't need
 //! a costly second fetch to probe duration.
 
+pub(crate) mod fade;
 pub(crate) mod http;
 pub(crate) mod tap;
 
 use std::fmt;
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use rodio::mixer::Mixer;
 use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
@@ -180,12 +182,182 @@ enum Opened {
     Http(Decoder<http::HttpReader>),
 }
 
+/// One source opened, probed and spooling: what [`open_entry`] returns,
+/// whether called inline by start_current or from a prepare thread.
+struct Prepared {
+    opened: Opened,
+    path: String,
+    duration: f64,
+}
+
+/// Open and decode one queue entry, blocking for as long as the source
+/// needs — seconds, over a network. Nothing in here touches the state lock:
+/// start_current calls it with the lock held (preserving the original's
+/// open-then-swap ordering), the prepare thread calls it with no lock at
+/// all, which is the whole reason preparing does not freeze the controls
+/// (the lesson of findings #48–#50).
+///
+/// The decoder is always given `byte_len` when we know it (file metadata
+/// or HTTP Content-Length): symphonia's FLAC reader needs the total
+/// length for binary-search seeking on files without a SEEKTABLE block —
+/// rodio 0.20 hardcoded byte_len to None, which made those files
+/// unseekable (audit finding #13).
+fn open_entry(entry: &QueueEntry) -> Result<Prepared, String> {
+    let path = entry.path.clone();
+    // Diagnostics here go through `stderrln!`: these fire mid-session
+    // from audio-side threads, and in the TUI that stderr lands raw on
+    // the alternate screen — where the same news already arrives as
+    // PlaybackFailed. Serve and the CLI keep the lines (audit #43).
+    let (opened, duration) = if http::is_http_url(&path) {
+        let redacted = http::redact_source(&path);
+        let (reader, content_length) = http::open(&path).map_err(|e| {
+            crate::stderrln!("[engine] open failed for {}: {}", redacted, e);
+            e
+        })?;
+        if content_length.is_none() {
+            crate::stderrln!(
+                "[engine] {}: no content length — seek limited to downloaded data",
+                redacted
+            );
+        }
+        let mut builder = Decoder::builder().with_data(reader).with_seekable(true);
+        if let Some(len) = content_length {
+            builder = builder.with_byte_len(len);
+        }
+        let decoder = builder.build().map_err(|e| {
+            crate::stderrln!("[engine] decode failed for {}: {}", redacted, e);
+            e.to_string()
+        })?;
+        let duration = entry
+            .duration_hint
+            .or_else(|| decoder.total_duration().map(|d| d.as_secs_f64()))
+            .unwrap_or(0.0);
+        (Opened::Http(decoder), duration)
+    } else {
+        let file = File::open(&path).map_err(|e| {
+            crate::stderrln!("[engine] open failed for {}: {}", path, e);
+            e.to_string()
+        })?;
+        let byte_len = file.metadata().ok().map(|m| m.len());
+        let mut builder =
+            Decoder::builder().with_data(BufReader::new(file)).with_seekable(true);
+        if let Some(len) = byte_len {
+            builder = builder.with_byte_len(len);
+        }
+        let decoder = builder.build().map_err(|e| {
+            crate::stderrln!("[engine] decode failed for {}: {}", path, e);
+            e.to_string()
+        })?;
+        let duration = entry.duration_hint.unwrap_or_else(|| probe_duration(&path));
+        (Opened::Local(decoder), duration)
+    };
+    Ok(Prepared { opened, path, duration })
+}
+
+// ── Crossfade machinery ─────────────────────────────────────────────────────
+
+/// How long before the fade window the next track's open begins. Covers
+/// http::OPEN_TIMEOUT plus symphonia's probe with room left over; the cost
+/// of being early is only that the next track starts spooling sooner.
+const PREPARE_LEAD: f64 = 12.0;
+
+/// The floor under a blend that arrives with almost nothing left to blend
+/// with — below this it is a cut with extra steps, and cuts click.
+const MIN_FADE: f64 = 0.05;
+
+/// Wall-clock net past the fade window before a lingering outgoing sink is
+/// cut whatever its other signals say. Generous: it exists for pathology,
+/// not for scheduling.
+const OUTGOING_SLACK: Duration = Duration::from_secs(2);
+
+/// How much blend this track can carry: the configured seconds, capped at
+/// half the track — past that a short track is all blend and no track.
+/// Zero (no blend) when crossfade is off or the length is unknown.
+fn effective_fade(crossfade: f32, duration: f64) -> f64 {
+    if !(crossfade > 0.0) || duration <= 0.0 {
+        return 0.0;
+    }
+    f64::from(crossfade).min(duration / 2.0)
+}
+
+/// What plays after the current track, as far as anyone has decided.
+enum NextTrack {
+    /// Nothing decided — the resting state, and all of it when crossfade
+    /// is off.
+    Idle,
+    /// A thread is opening the pick; its answer arrives on `rx`. Dropping
+    /// the receiver is the cancellation: the opener's send fails, the
+    /// decoder drops, and its spool file deletes itself.
+    Opening { index: Option<usize>, rx: mpsc::Receiver<Result<Prepared, String>> },
+    /// Opened, decoded, spooling — waiting for the fade window to arrive.
+    Ready { prepared: Prepared, index: Option<usize> },
+    /// The open failed. Remembered so the tick does not walk into the same
+    /// doomed open every 120 ms; the track's natural end then takes the
+    /// ordinary advance path, which gives the URL its one fresh try.
+    Failed,
+}
+
+/// The committed pick for the track after this one, or None when no blend
+/// should happen: nothing is next, loop-one (a track never blends into
+/// itself), or a pick that lands back on the current track (the one-entry
+/// queue under loop-all). Committing at prepare time matters under
+/// shuffle — pick_next rolls dice, and they must be rolled once, here,
+/// not again at handover.
+fn next_candidate(q: &QueueState) -> Option<(QueueEntry, Option<usize>)> {
+    if q.loop_mode == LoopMode::One {
+        return None;
+    }
+    let index = pick_next(q, false)?;
+    if index == q.index {
+        return None;
+    }
+    Some((q.queue[index].clone(), Some(index)))
+}
+
+/// Open `entry` on a short-lived thread of its own. The open can block for
+/// the network's full patience, and the whole point of preparing is that
+/// nobody holds the state lock — or the audio — waiting on it.
+fn spawn_prepare(entry: QueueEntry, index: Option<usize>) -> NextTrack {
+    let (tx, rx) = mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("mstream-prepare".into())
+        .spawn(move || {
+            let _ = tx.send(open_entry(&entry));
+        });
+    match spawned {
+        Ok(_) => NextTrack::Opening { index, rx },
+        // A box that cannot spawn a thread still has the ordinary advance
+        // path; a blend is not worth an error.
+        Err(_) => NextTrack::Failed,
+    }
+}
+
+/// A sink on its way out of a blend: still connected to the mixer, ramping
+/// to silence, waiting to be dropped. Its presence is also the latch that
+/// keeps blends strictly one at a time.
+struct Outgoing {
+    sink: Arc<Player>,
+    /// Watched, not commanded: position 0.0 means the ramp finished and
+    /// nothing audible remains even if the source has not drained — a
+    /// stalled download can hold a silent sink open indefinitely, and the
+    /// latch it holds would block every later blend.
+    fade: Arc<fade::FadeHandle>,
+    deadline: Instant,
+}
+
 struct State {
     /// Arc'd so a blocking call on the sink — a seek waiting for the device
     /// callback to reach data that has not downloaded — can be made on a
     /// clone with the state lock already released. Held across the wait,
     /// the lock froze every other control with it (audit #48).
     sink: Arc<Player>,
+    /// The playing source's gain ramp, settled at 1.0 outside a blend.
+    /// Every source is wrapped whether or not crossfade is on: one code
+    /// path, and the wrapper at rest is a multiply per sample.
+    fade: Arc<fade::FadeHandle>,
+    /// The playing source's tap switch, flipped off when the source is
+    /// retired into `outgoing` — two sources must never share the ring.
+    tap_live: Arc<AtomicBool>,
     /// Where a copy of the audio goes, when someone is drawing it. Serve mode
     /// attaches none and pays nothing.
     tap: Option<Arc<tap::AudioTap>>,
@@ -197,89 +369,105 @@ struct State {
     /// Failed opens in the current walk for something playable, counted
     /// across ticks — [`Engine::advance_tick`] attempts one source per call.
     advance_failures: usize,
+    /// Seconds of blend between tracks. 0.0 — the default — is off, and off
+    /// means the pre-crossfade engine, byte for byte.
+    crossfade: f32,
+    next: NextTrack,
+    outgoing: Option<Outgoing>,
     q: QueueState,
 }
 
 impl State {
     /// Start playing q.queue[q.index]. Opens and decodes BEFORE touching the
     /// running sink, so a bad source leaves current playback untouched (same
-    /// ordering as the original).
-    ///
-    /// The decoder is always given `byte_len` when we know it (file metadata
-    /// or HTTP Content-Length): symphonia's FLAC reader needs the total
-    /// length for binary-search seeking on files without a SEEKTABLE block —
-    /// rodio 0.20 hardcoded byte_len to None, which made those files
-    /// unseekable (audit finding #13).
+    /// ordering as the original) — a blend in progress included, which is
+    /// cut only once there is something real to replace it with.
     fn start_current(&mut self, mixer: &Mixer) -> Result<(), EngineError> {
         if self.q.index >= self.q.queue.len() {
             return Err(EngineError::OutOfBounds);
         }
         let entry = self.q.queue[self.q.index].clone();
-        let path = entry.path;
+        let prepared = open_entry(&entry).map_err(EngineError::Unplayable)?;
 
-        // Diagnostics here go through `stderrln!`: these fire mid-session
-        // from the audio thread, and in the TUI that stderr lands raw on
-        // the alternate screen — where the same news already arrives as
-        // PlaybackFailed. Serve and the CLI keep the lines (audit #43).
-        let (opened, duration) = if http::is_http_url(&path) {
-            let redacted = http::redact_source(&path);
-            let (reader, content_length) = http::open(&path).map_err(|e| {
-                crate::stderrln!("[engine] open failed for {}: {}", redacted, e);
-                EngineError::Unplayable(e)
-            })?;
-            if content_length.is_none() {
-                crate::stderrln!(
-                    "[engine] {}: no content length — seek limited to downloaded data",
-                    redacted
-                );
-            }
-            let mut builder = Decoder::builder().with_data(reader).with_seekable(true);
-            if let Some(len) = content_length {
-                builder = builder.with_byte_len(len);
-            }
-            let decoder = builder.build().map_err(|e| {
-                crate::stderrln!("[engine] decode failed for {}: {}", redacted, e);
-                EngineError::Unplayable(e.to_string())
-            })?;
-            let duration = entry
-                .duration_hint
-                .or_else(|| decoder.total_duration().map(|d| d.as_secs_f64()))
-                .unwrap_or(0.0);
-            (Opened::Http(decoder), duration)
-        } else {
-            let file = File::open(&path).map_err(|e| {
-                crate::stderrln!("[engine] open failed for {}: {}", path, e);
-                EngineError::Unplayable(e.to_string())
-            })?;
-            let byte_len = file.metadata().ok().map(|m| m.len());
-            let mut builder =
-                Decoder::builder().with_data(BufReader::new(file)).with_seekable(true);
-            if let Some(len) = byte_len {
-                builder = builder.with_byte_len(len);
-            }
-            let decoder = builder.build().map_err(|e| {
-                crate::stderrln!("[engine] decode failed for {}: {}", path, e);
-                EngineError::Unplayable(e.to_string())
-            })?;
-            let duration = entry.duration_hint.unwrap_or_else(|| probe_duration(&path));
-            (Opened::Local(decoder), duration)
-        };
-
+        // A manual start is a change of plan for whatever was mid-blend or
+        // mid-prepare.
+        self.cancel_overlap();
         self.sink.stop();
         let sink = Player::connect_new(mixer);
         sink.set_volume(self.volume);
-        match (opened, self.tap.clone()) {
-            (Opened::Local(d), Some(tap)) => sink.append(tap::Tapped::new(d, tap)),
-            (Opened::Local(d), None) => sink.append(d),
-            (Opened::Http(d), Some(tap)) => sink.append(tap::Tapped::new(d, tap)),
-            (Opened::Http(d), None) => sink.append(d),
-        }
+        self.attach_fresh(&sink, prepared.opened, 1.0);
         self.sink = Arc::new(sink);
-        self.current_file = path;
-        self.duration = duration;
+        self.current_file = prepared.path;
+        self.duration = prepared.duration;
         self.stopped = false;
         self.advance_failures = 0;
         Ok(())
+    }
+
+    /// Wrap `opened` in the chain every sink gets — the tap copy first, so
+    /// the ring sees the track at full amplitude rather than the blend
+    /// (the same reasoning as listening under volume: draw the track, not
+    /// the knob), then the fade — and append it. The fresh fade handle and
+    /// tap switch become the current ones.
+    fn attach_fresh(&mut self, sink: &Player, opened: Opened, initial_gain: f32) {
+        let fade = fade::FadeHandle::new(initial_gain);
+        let live = Arc::new(AtomicBool::new(true));
+        match (opened, self.tap.clone()) {
+            (Opened::Local(d), Some(tap)) => {
+                sink.append(fade::Faded::new(tap::Tapped::new(d, tap, live.clone()), fade.clone()))
+            }
+            (Opened::Local(d), None) => sink.append(fade::Faded::new(d, fade.clone())),
+            (Opened::Http(d), Some(tap)) => {
+                sink.append(fade::Faded::new(tap::Tapped::new(d, tap, live.clone()), fade.clone()))
+            }
+            (Opened::Http(d), None) => sink.append(fade::Faded::new(d, fade.clone())),
+        }
+        self.fade = fade;
+        self.tap_live = live;
+    }
+
+    /// Forget whatever was decided or prepared about the next track. Any
+    /// queue mutation calls this: the committed pick was made against a
+    /// queue that no longer exists, and over-forgetting only costs a
+    /// re-open, where under-forgetting plays the wrong track.
+    fn invalidate_next(&mut self) {
+        self.next = NextTrack::Idle;
+    }
+
+    /// A change of plan mid-blend: cut the outgoing sink now and forget the
+    /// prepared next. What every manual transport action wants — nobody
+    /// pressing next wants the old track audibly lingering under the new.
+    fn cancel_overlap(&mut self) {
+        if let Some(out) = self.outgoing.take() {
+            out.sink.stop();
+        }
+        self.invalidate_next();
+    }
+
+    /// A seek keeps the surviving track and cuts the blend around it: the
+    /// outgoing sink stops, a half-risen fade snaps to full. The prepared
+    /// next, if any, stays — a seek does not change what comes after.
+    fn snap_out_of_blend(&mut self) {
+        if let Some(out) = self.outgoing.take() {
+            out.sink.stop();
+            self.fade.snap(1.0);
+        }
+    }
+
+    /// Drop an outgoing sink once nothing audible remains of it: source
+    /// drained, or ramp at silence with the source still going. The
+    /// wall-clock deadline is the net under both, skipped while paused —
+    /// a paused blend is frozen, not late.
+    fn retire_outgoing(&mut self) {
+        let Some(out) = &self.outgoing else { return };
+        let spent = out.sink.empty()
+            || out.fade.position() <= 0.0
+            || (!out.sink.is_paused() && Instant::now() >= out.deadline);
+        if spent {
+            if let Some(out) = self.outgoing.take() {
+                out.sink.stop();
+            }
+        }
     }
 
     fn clear_current(&mut self) {
@@ -287,6 +475,7 @@ impl State {
         self.duration = 0.0;
         self.stopped = true;
         self.advance_failures = 0;
+        self.cancel_overlap();
     }
 }
 
@@ -306,12 +495,17 @@ impl Engine {
 
         let state = Arc::new(Mutex::new(State {
             sink: Arc::new(sink),
+            fade: fade::FadeHandle::new(1.0),
+            tap_live: Arc::new(AtomicBool::new(true)),
             tap: None,
             current_file: String::new(),
             duration: 0.0,
             stopped: true,
             volume: 1.0,
             advance_failures: 0,
+            crossfade: 0.0,
+            next: NextTrack::Idle,
+            outgoing: None,
             q: QueueState {
                 queue: Vec::new(),
                 index: 0,
@@ -338,12 +532,22 @@ impl Engine {
         s.start_current(self.device.mixer())
     }
 
+    /// Pause everything audible — during a blend that is two sinks, and
+    /// pausing only one would leave the other playing under the silence.
     pub fn pause(&self) {
-        self.state.lock().unwrap().sink.pause();
+        let s = self.state.lock().unwrap();
+        s.sink.pause();
+        if let Some(out) = &s.outgoing {
+            out.sink.pause();
+        }
     }
 
     pub fn resume(&self) {
-        self.state.lock().unwrap().sink.play();
+        let s = self.state.lock().unwrap();
+        s.sink.play();
+        if let Some(out) = &s.outgoing {
+            out.sink.play();
+        }
     }
 
     pub fn stop(&self) {
@@ -360,7 +564,13 @@ impl Engine {
         // on the network — possibly forever, since the download loop never
         // gives a dead server up. The wait is this caller's to make; the
         // lock was making it everyone's (audit #48).
-        let sink = self.state.lock().unwrap().sink.clone();
+        let sink = {
+            let mut s = self.state.lock().unwrap();
+            // Seeking mid-blend keeps the track being seeked; hearing the
+            // old one still draining behind a jump is disorienting.
+            s.snap_out_of_blend();
+            s.sink.clone()
+        };
         sink.try_seek(target).map_err(|e| EngineError::Seek(e.to_string()))
     }
 
@@ -369,6 +579,20 @@ impl Engine {
         let v = if volume.is_finite() { volume.clamp(0.0, 1.0) } else { 1.0 };
         s.volume = v;
         s.sink.set_volume(v);
+        // Both halves of a blend sit at the user's volume; the blend itself
+        // lives in the sources' fade wrappers, so the two never multiply.
+        if let Some(out) = &s.outgoing {
+            out.sink.set_volume(v);
+        }
+    }
+
+    /// Seconds of blend between tracks; 0 turns it off. Serve mode sets
+    /// this once at boot from --crossfade; the TUI will set it from config
+    /// (Phase C3). Turning it off mid-flight abandons any preparation on
+    /// the next tick; a blend already sounding finishes on its own.
+    pub fn set_crossfade(&self, seconds: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.crossfade = if seconds.is_finite() { seconds.clamp(0.0, 30.0) } else { 0.0 };
     }
 
     pub fn status(&self) -> Status {
@@ -412,7 +636,8 @@ impl Engine {
             } else {
                 // The restart is a seek like any other — same discipline as
                 // [`Engine::seek`], even though the start of the track has
-                // almost always downloaded by now.
+                // almost always downloaded by now. Same blend policy, too.
+                s.snap_out_of_blend();
                 let sink = s.sink.clone();
                 drop(s);
                 let _ = sink.try_seek(Duration::ZERO);
@@ -425,12 +650,16 @@ impl Engine {
     }
 
     pub fn set_shuffle(&self, value: bool) {
-        self.state.lock().unwrap().q.shuffle = value;
+        let mut s = self.state.lock().unwrap();
+        s.q.shuffle = value;
+        // The committed next pick was made under the old rules.
+        s.invalidate_next();
     }
 
     pub fn cycle_loop(&self) -> LoopMode {
         let mut s = self.state.lock().unwrap();
         s.q.loop_mode = s.q.loop_mode.next();
+        s.invalidate_next();
         s.q.loop_mode
     }
 
@@ -446,6 +675,8 @@ impl Engine {
         let mut s = self.state.lock().unwrap();
         let was_empty = s.q.queue.is_empty();
         s.q.queue.push(QueueEntry::new(file));
+        // A different queue can mean a different next.
+        s.invalidate_next();
         if was_empty && s.sink.empty() {
             s.q.index = 0;
             let _ = s.start_current(self.device.mixer());
@@ -456,6 +687,7 @@ impl Engine {
         let mut s = self.state.lock().unwrap();
         let was_empty = s.q.queue.is_empty();
         s.q.queue.extend(files.into_iter().map(QueueEntry::new));
+        s.invalidate_next();
         if was_empty && s.sink.empty() && !s.q.queue.is_empty() {
             s.q.index = 0;
             let _ = s.start_current(self.device.mixer());
@@ -482,6 +714,7 @@ impl Engine {
                 s.clear_current();
             }
             RemoveOutcome::RemovedCurrent => {
+                s.invalidate_next();
                 // Audit fix #4: only restart playback if we were actually
                 // playing; the original started audio as a side effect of
                 // removing a track while stopped.
@@ -489,7 +722,9 @@ impl Engine {
                     let _ = s.start_current(self.device.mixer());
                 }
             }
-            RemoveOutcome::RemovedBeforeCurrent | RemoveOutcome::RemovedAfterCurrent => {}
+            RemoveOutcome::RemovedBeforeCurrent | RemoveOutcome::RemovedAfterCurrent => {
+                s.invalidate_next()
+            }
         }
         Ok(())
     }
@@ -517,8 +752,16 @@ impl Engine {
     /// loop — through every doomed open in the queue (audit #49). The count
     /// of failures lives in [`State`], so the walk still gives up after one
     /// lap; it just yields between steps.
+    ///
+    /// Also drives the blend machinery: retiring spent outgoing sinks,
+    /// preparing the next track ahead of the fade window, and handing over
+    /// when it opens. When a blend succeeds the sink never empties between
+    /// tracks, so the ordinary advance below never fires; when preparation
+    /// failed or came too late, it fires exactly as it always has.
     pub fn advance_tick(&self) {
         let mut s = self.state.lock().unwrap();
+        s.retire_outgoing();
+        self.crossfade_step(&mut s);
         if !(s.sink.empty() && !s.stopped && !s.q.queue.is_empty()) {
             return;
         }
@@ -535,6 +778,117 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// One tick of the blend machine: collect a finished open, start the
+    /// next open when the window approaches, hand over when it arrives.
+    /// Each is a step and none of them waits — the opens themselves live on
+    /// their own thread, because this runs with the state lock held and
+    /// findings #48–#50 are what happens when that lock meets a network.
+    fn crossfade_step(&self, s: &mut State) {
+        if s.crossfade <= 0.0 {
+            // Toggled off with something in flight: forget it. An overlap
+            // already sounding is left to retire on its own.
+            if !matches!(s.next, NextTrack::Idle) {
+                s.invalidate_next();
+            }
+            return;
+        }
+        if s.stopped || s.q.queue.is_empty() {
+            return;
+        }
+
+        // Collect the opener's answer if one has arrived.
+        s.next = match std::mem::replace(&mut s.next, NextTrack::Idle) {
+            NextTrack::Opening { index, rx } => match rx.try_recv() {
+                Ok(Ok(prepared)) => NextTrack::Ready { prepared, index },
+                // open_entry already told stderr what went wrong.
+                Ok(Err(_)) => NextTrack::Failed,
+                Err(mpsc::TryRecvError::Empty) => NextTrack::Opening { index, rx },
+                // The opener panicked — symphonia does, on malformed files
+                // (audit #32) — which reads the same as a failed open.
+                Err(mpsc::TryRecvError::Disconnected) => NextTrack::Failed,
+            },
+            other => other,
+        };
+
+        // Paused means frozen: the position cannot reach the window, and a
+        // handover under a paused track would start sounding on its own.
+        if s.sink.is_paused() {
+            return;
+        }
+        // Blends are strictly one at a time; the retirement of the last is
+        // the gate for the next.
+        if s.outgoing.is_some() {
+            return;
+        }
+        // A duration the engine does not know is a fade point it cannot
+        // find — live transcodes stay on the ordinary advance path. (A
+        // duration *hint* that is wrong misplaces the fade exactly as far
+        // as it misplaces the progress bar; the fade trusts it the same.)
+        let fade = effective_fade(s.crossfade, s.duration);
+        if fade <= 0.0 {
+            return;
+        }
+        let remaining = s.duration - s.sink.get_pos().as_secs_f64();
+
+        if matches!(s.next, NextTrack::Idle) && remaining <= fade + PREPARE_LEAD {
+            if let Some((entry, index)) = next_candidate(&s.q) {
+                s.next = spawn_prepare(entry, index);
+            }
+        }
+        if matches!(s.next, NextTrack::Ready { .. }) && remaining <= fade {
+            self.handover(s);
+        }
+    }
+
+    /// The blend itself: retire the current sink into `outgoing` ramping
+    /// down, start the prepared track on a fresh sink ramping up over the
+    /// same window. Status flips to the incoming track here, at fade start
+    /// — the streaming players' convention, and the moment the position
+    /// starts counting from zero.
+    fn handover(&self, s: &mut State) {
+        let NextTrack::Ready { prepared, index } =
+            std::mem::replace(&mut s.next, NextTrack::Idle)
+        else {
+            return;
+        };
+        let remaining = (s.duration - s.sink.get_pos().as_secs_f64()).max(0.0);
+        // The window is whatever is actually left, floored so a handover
+        // that arrived late still blends instead of clicking.
+        let fade_secs = effective_fade(s.crossfade, s.duration).min(remaining).max(MIN_FADE);
+        let fade_dur = Duration::from_secs_f64(fade_secs);
+
+        s.fade.ramp_to(0.0, fade_dur);
+        s.tap_live.store(false, Ordering::Relaxed);
+        s.outgoing = Some(Outgoing {
+            sink: s.sink.clone(),
+            fade: s.fade.clone(),
+            deadline: Instant::now() + fade_dur + OUTGOING_SLACK,
+        });
+
+        let sink = Player::connect_new(self.device.mixer());
+        sink.set_volume(s.volume);
+        s.attach_fresh(&sink, prepared.opened, 0.0);
+        s.fade.ramp_to(1.0, fade_dur);
+        s.sink = Arc::new(sink);
+        s.current_file = prepared.path;
+        s.duration = prepared.duration;
+        s.stopped = false;
+        s.advance_failures = 0;
+        if let Some(index) = index {
+            // Any queue mutation since the prepare discarded it, so the
+            // committed index still holds; the bounds check is a seatbelt.
+            if index < s.q.queue.len() {
+                s.q.index = index;
+            }
+        }
+    }
+
+    /// Whether a blend is running — the outgoing half still draining.
+    #[cfg(test)]
+    fn overlap_active(&self) -> bool {
+        self.state.lock().unwrap().outgoing.is_some()
     }
 }
 
@@ -742,6 +1096,109 @@ mod tests {
         let _ = std::fs::remove_file(&tiny);
     }
 
+    /// Two short tracks blended: the handover must come early, the queue
+    /// index must follow it, and status must never report the silence the
+    /// pre-crossfade engine had between tracks (finding #8's audible gap).
+    ///
+    /// `cargo test a_crossfade_hands_over -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_crossfade_hands_over_early_and_never_goes_quiet() {
+        let dir = std::env::temp_dir();
+        let first = dir.join("mstream-crossfade-a.wav");
+        let second = dir.join("mstream-crossfade-b.wav");
+        std::fs::write(&first, wav_bytes(4)).unwrap();
+        std::fs::write(&second, wav_bytes(4)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(1.5);
+        engine.queue_add_many(vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ]);
+
+        let started = std::time::Instant::now();
+        let mut switched_at = None;
+        let mut quiet_before_switch = false;
+        while started.elapsed() < Duration::from_secs(12) {
+            engine.advance_tick();
+            let status = engine.status();
+            if status.file.is_empty() {
+                // The queue ran out. Before the handover this is the old
+                // inter-track gap — the thing the blend exists to remove.
+                quiet_before_switch = switched_at.is_none();
+                break;
+            }
+            if switched_at.is_none() && status.queue_index == 1 {
+                switched_at = Some(started.elapsed());
+                assert!(engine.overlap_active(), "the old sink should still be draining");
+                assert!(status.playing, "a blend is playing, not a gap");
+                assert!(status.position < 1.0, "the incoming track counts from zero");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(!quiet_before_switch, "went quiet without ever handing over");
+        let switched = switched_at.expect("the handover never happened");
+        println!(">>> handed over at {switched:?}, queue done in {:?}", started.elapsed());
+        // 4s track, 1.5s fade: the switch belongs near t=2.5. Ceilings are
+        // loose for CI-grade timers; the claim is early-at-all, not sharp.
+        assert!(switched > Duration::from_secs_f64(1.0), "at {switched:?} this is a skip");
+        assert!(switched < Duration::from_secs_f64(3.6), "at {switched:?} the blend missed");
+        // Eight seconds of audio, one and a half of them shared: the whole
+        // queue must finish visibly sooner than the tracks played apart.
+        assert!(started.elapsed() < Duration::from_secs_f64(7.6));
+
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
+
+    /// `cargo test a_manual_next_mid_blend -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_manual_next_mid_blend_cuts_the_outgoing_sink() {
+        let dir = std::env::temp_dir();
+        let names: Vec<_> = ["c", "d", "e"]
+            .iter()
+            .map(|n| dir.join(format!("mstream-crossfade-{n}.wav")))
+            .collect();
+        for name in &names {
+            std::fs::write(name, wav_bytes(3)).unwrap();
+        }
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(1.5);
+        engine.queue_add_many(
+            names.iter().map(|n| n.to_string_lossy().into_owned()).collect(),
+        );
+
+        // Ride the ticks until the first blend is audibly under way.
+        let started = std::time::Instant::now();
+        loop {
+            engine.advance_tick();
+            if engine.status().queue_index == 1 && engine.overlap_active() {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(6), "no blend ever started");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+
+        // A manual skip mid-blend: the outgoing half must cut, not linger
+        // under the track the user asked for.
+        engine.next_manual().expect("a third track was queued");
+        assert!(!engine.overlap_active(), "the blend outlived the skip");
+        let status = engine.status();
+        assert_eq!(status.queue_index, 2);
+        assert!(status.playing);
+
+        engine.stop();
+        for name in &names {
+            let _ = std::fs::remove_file(name);
+        }
+    }
+
     /// The tap hears real decoded audio, not silence and not nothing.
     ///
     /// `MSTREAM_TRACK="<library path>" cargo test the_tap_hears -- --ignored --nocapture`
@@ -891,6 +1348,34 @@ mod tests {
         let mut state = q(1, 0);
         state.shuffle = true;
         assert_eq!(pick_next(&state, false), Some(0));
+    }
+
+    #[test]
+    fn a_fade_never_swallows_more_than_half_the_track() {
+        assert_eq!(effective_fade(6.0, 300.0), 6.0);
+        assert_eq!(effective_fade(6.0, 7.0), 3.5, "a short track caps the blend at half");
+        assert_eq!(effective_fade(0.0, 300.0), 0.0, "off is off");
+        assert_eq!(effective_fade(6.0, 0.0), 0.0, "no known length, no fade point");
+        assert_eq!(effective_fade(-3.0, 300.0), 0.0);
+        assert_eq!(effective_fade(f32::NAN, 300.0), 0.0);
+    }
+
+    #[test]
+    fn nothing_ever_blends_into_itself() {
+        let mut state = q(3, 1);
+        state.loop_mode = LoopMode::One;
+        assert!(next_candidate(&state).is_none(), "loop-one repeats, it does not blend");
+
+        let mut single = q(1, 0);
+        single.loop_mode = LoopMode::All;
+        assert!(next_candidate(&single).is_none(), "one track looping is loop-one in effect");
+
+        let plain = q(3, 0);
+        let (entry, index) = next_candidate(&plain).expect("a plain queue has a next");
+        assert_eq!((entry.path.as_str(), index), ("t1", Some(1)));
+
+        let end = q(3, 2);
+        assert!(next_candidate(&end).is_none(), "nothing follows the last track unlooped");
     }
 
     #[test]

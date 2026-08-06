@@ -97,6 +97,27 @@ struct ServeArgs {
     /// would exit immediately.
     #[arg(long)]
     exit_with_parent: bool,
+
+    /// Blend each track into the next for this many seconds when one ends
+    /// on its own. 0 keeps the hard cut; manual /next stays immediate
+    /// either way.
+    #[arg(long, default_value_t = 0.0, value_parser = crossfade_seconds)]
+    crossfade: f32,
+}
+
+/// A blend length the engine will accept. Bounded like `listening_seconds`
+/// and for the same reason — a typo should print a sentence, not misbehave.
+/// Thirty seconds is already past any musical blend; the engine clamps
+/// there too, so the flag and the behavior agree.
+fn crossfade_seconds(raw: &str) -> Result<f32, String> {
+    let seconds: f32 = raw.parse().map_err(|_| format!("'{raw}' is not a number"))?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(format!("'{raw}' is not a length of time"));
+    }
+    if seconds > 30.0 {
+        return Err("that is longer than any blend — try something under 30".to_string());
+    }
+    Ok(seconds)
 }
 
 /// A listening window that `Duration::from_secs_f64` will accept.
@@ -161,6 +182,7 @@ fn main() {
             host: "127.0.0.1".to_string(),
             auth_token: std::env::var("MSTREAM_AUDIO_TOKEN").ok(),
             exit_with_parent: false,
+            crossfade: 0.0,
         }),
         (None, None) => None,
     };
@@ -172,6 +194,7 @@ fn main() {
                 port: args.port,
                 auth_token: args.auth_token,
                 exit_with_parent: args.exit_with_parent,
+                crossfade: args.crossfade,
             };
             if let Err(e) = serve::run(opts) {
                 eprintln!("mstream-player: {e}");
@@ -208,5 +231,16 @@ mod tests {
             let seconds = listening_seconds(good).unwrap();
             let _ = std::time::Duration::from_secs_f64(seconds);
         }
+    }
+
+    #[test]
+    fn a_blend_length_is_vetted_the_same_way() {
+        for bad in ["-1", "nan", "inf", "31", "1e300", "banana"] {
+            let err = crossfade_seconds(bad).unwrap_err();
+            assert!(!err.is_empty(), "{bad:?} was accepted");
+        }
+        assert_eq!(crossfade_seconds("0").unwrap(), 0.0, "off is a legal ask");
+        assert_eq!(crossfade_seconds("4.5").unwrap(), 4.5);
+        assert!(crossfade_seconds("30").is_ok(), "the boundary is inclusive");
     }
 }
