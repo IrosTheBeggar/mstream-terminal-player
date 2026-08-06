@@ -18,7 +18,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use iroh::endpoint::{Connection, presets};
-use iroh::{Endpoint, EndpointAddr};
+use iroh::{Endpoint, EndpointAddr, RelayUrl, TransportAddr};
+use iroh_relay::tls::CaTlsConfig;
 use iroh_tickets::endpoint::EndpointTicket;
 use serde::Deserialize;
 
@@ -159,20 +160,9 @@ pub struct Tunnel {
 impl Tunnel {
     /// Dial the server and complete the secret handshake.
     pub async fn open(code: &PairingCode) -> Result<Self, String> {
-        let endpoint = Endpoint::bind(presets::N0)
-            .await
-            .map_err(|e| format!("could not start the local endpoint: {e}"))?;
-
-        // Best effort: if the relay isn't ready in time, dial anyway rather
-        // than failing outright.
-        let _ = tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online()).await;
-
-        let connection =
-            tokio::time::timeout(DIAL_TIMEOUT, endpoint.connect(code.addr.clone(), TUNNEL_ALPN))
-                .await
-                .map_err(|_| "timed out reaching the server through the tunnel".to_string())?
-                .map_err(|e| format!("could not reach the server: {e}"))?;
-
+        let endpoint = bind_endpoint().await?;
+        let relay_online = wait_for_relay(&endpoint).await;
+        let connection = dial(&endpoint, &code.addr, relay_online).await?;
         handshake(&connection, &code.secret).await?;
         Ok(Tunnel { connection, _endpoint: endpoint })
     }
@@ -185,6 +175,58 @@ impl Tunnel {
             .open_bi()
             .await
             .map_err(|e| format!("tunnel stream failed: {e}"))
+    }
+}
+
+/// Bind the local endpoint the way every tunnel user must: n0 defaults, plus
+/// the two settings the defaults leave off that decide whether a corporate
+/// network works at all. The OS trust store, because TLS inspection (Netskope,
+/// Zscaler) re-signs the relay connection with a CA only the system keychain
+/// knows — iroh's embedded Mozilla roots would reject it. And the
+/// environment's proxy, because a proxy-only network drops direct dials.
+async fn bind_endpoint() -> Result<Endpoint, String> {
+    Endpoint::builder(presets::N0)
+        .ca_tls_config(CaTlsConfig::system())
+        .proxy_from_env()
+        .bind()
+        .await
+        .map_err(|e| format!("could not start the local endpoint: {e}"))
+}
+
+/// Best effort — if the relay isn't ready in time, dial anyway rather than
+/// failing outright. The outcome is returned rather than discarded because a
+/// dial that then times out means opposite things on a machine that reached
+/// the relay network and one that never could.
+async fn wait_for_relay(endpoint: &Endpoint) -> bool {
+    tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online()).await.is_ok()
+}
+
+/// Reach the server by whatever path iroh finds — direct, or relayed for a
+/// network that blocks UDP.
+async fn dial(
+    endpoint: &Endpoint,
+    addr: &EndpointAddr,
+    relay_online: bool,
+) -> Result<Connection, String> {
+    tokio::time::timeout(DIAL_TIMEOUT, endpoint.connect(addr.clone(), TUNNEL_ALPN))
+        .await
+        .map_err(|_| dial_timeout_message(relay_online))?
+        .map_err(|e| format!("could not reach the server: {e}"))
+}
+
+/// The same silent 25 seconds point at opposite culprits depending on whether
+/// this machine ever reached the relay network itself.
+fn dial_timeout_message(relay_online: bool) -> String {
+    if relay_online {
+        "timed out reaching the server through the tunnel — the relay network \
+         is reachable from here, so the server may be offline, or its pairing \
+         code was issued while the server had no relay contact"
+            .to_string()
+    } else {
+        "timed out reaching the server, and the iroh relay network was \
+         unreachable too — this network may block or intercept it (corporate \
+         networks often do); if it requires a proxy, set HTTPS_PROXY and retry"
+            .to_string()
     }
 }
 

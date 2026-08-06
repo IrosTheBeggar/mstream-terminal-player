@@ -29,7 +29,11 @@ ratatui = "0.30.2"
 # actually holds; the default features would compile every codec the crate
 # knows plus rayon, for images this player never meets.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-iroh = "1"
+iroh = { version = "1", features = ["platform-verifier"] }
+# Named directly only for tls::CaTlsConfig on the endpoint builder — iroh
+# doesn't re-export the type. The platform-verifier feature above is what
+# compiles in the OS-trust-store mode it selects; same crate tree either way.
+iroh-relay = "1"
 iroh-tickets = "1"
 # 0.22 rather than 0.23: reqwest, iroh, portmapper and tokio-websockets are
 # all on 0.22.1, and pinning a major of our own put two copies of base64 in
