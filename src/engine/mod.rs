@@ -1220,6 +1220,22 @@ impl Engine {
             other => other,
         };
 
+        // A seam prepared for gapless must never survive into a blend: a
+        // crossfade toggled on mid-lap leaves a self-aimed pending (and
+        // possibly a self-opened Ready) behind, and blends do not
+        // self-blend — whatever an earlier mode left standing. The app
+        // withdraws its side in the same keystroke; this is the engine's
+        // own refusal, for whatever ordering the messages arrive in.
+        if blending {
+            let self_prepared = s.pending_next.as_ref().is_some_and(|e| e.path == s.current_file)
+                || matches!(&s.next,
+                    NextTrack::Ready { prepared, .. } if prepared.path == s.current_file);
+            if self_prepared {
+                s.pending_next = None;
+                s.invalidate_next();
+            }
+        }
+
         // Paused means frozen: the position cannot reach the window, and a
         // handover under a paused track would start sounding on its own.
         if s.sink.is_paused() {
@@ -1776,6 +1792,53 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(wrapped >= 2, "only {wrapped} laps in 8s of a 3s loop");
+
+        engine.stop();
+        let _ = std::fs::remove_file(&tiny);
+    }
+
+    /// Crossfade toggled on mid-lap of a gapless loop: whatever seam the
+    /// old mode prepared — pending or already Ready — must be refused, and
+    /// the loop must fall back to the ordinary repeat restart rather than
+    /// ever blending the track into itself (the pending-seam bug).
+    ///
+    /// `cargo test a_seam_never_survives -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_seam_never_survives_into_a_blend() {
+        let tiny = std::env::temp_dir().join("mstream-seamblend.wav");
+        std::fs::write(&tiny, wav_bytes(3)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_gapless(true);
+        engine.cycle_loop(); // None -> One
+        engine.queue_add(tiny.to_string_lossy().into_owned());
+
+        // Let the seam machinery arm — prepare fires early on a 3s track —
+        // then flip the mode mid-lap.
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_millis(800) {
+            engine.advance_tick();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        engine.set_crossfade(6.0);
+
+        // Two laps of watching: a surviving seam would show up as a blend —
+        // an overlap while the index stays put. The lawful outcome is the
+        // plain loop-one restart, which never overlaps.
+        while started.elapsed() < Duration::from_secs(8) {
+            engine.advance_tick();
+            let status = engine.status();
+            assert!(
+                !engine.overlap_active(),
+                "the seam survived into a blend at t={:?}",
+                started.elapsed()
+            );
+            assert!(!status.file.is_empty(), "the loop died instead");
+            assert_eq!(status.queue_index, 0);
+            std::thread::sleep(Duration::from_millis(50));
+        }
 
         engine.stop();
         let _ = std::fs::remove_file(&tiny);

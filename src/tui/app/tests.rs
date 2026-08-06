@@ -3388,6 +3388,42 @@ fn gapless_repeat_one_announces_its_own_seam() {
 }
 
 #[test]
+fn turning_crossfade_on_withdraws_a_standing_seam_announcement() {
+    // The seam announces the track to itself, which is lawful only while
+    // gapless-without-blend holds. Crossfade coming on must take the seam
+    // with it in the same keystroke — left standing, the engine holds a
+    // self to blend into (the pending-seam bug).
+    let mut app = connected_app();
+    app.gapless = true;
+    app.queue.repeat = Repeat::One;
+    app.queue.replace(vec![track("lib/a.mp3")]);
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let effects = app.apply_event(Event::Status(PlayerStatus {
+        source: url.clone(),
+        playing: true,
+        ..Default::default()
+    }));
+    assert_eq!(announced_url(&effects).as_deref(), Some(url.as_str()), "the seam stands");
+
+    app.handle_action(Action::OpenDjPanel);
+    let crossfade = app
+        .dj_panel
+        .as_ref()
+        .unwrap()
+        .rows
+        .iter()
+        .position(|r| *r == DjRow::Crossfade)
+        .unwrap();
+    app.dj_panel.as_mut().unwrap().row = crossfade;
+    let effects = app.handle_action(Action::SeekForward);
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::ClearNext))),
+        "the keystroke that armed the blend disarmed the seam"
+    );
+}
+
+#[test]
 fn the_panel_adjusts_the_blend_and_tells_the_engine_in_the_same_keystroke() {
     let mut app = connected_app();
     app.handle_action(Action::OpenDjPanel);

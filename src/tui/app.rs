@@ -723,6 +723,12 @@ struct AnnouncedNext {
     /// The rules of the roll; either changing re-rolls it.
     shuffle: bool,
     repeat: Repeat,
+    /// Whether this announced the track to itself — the gapless repeat-one
+    /// seam. Snapshotted because the seam is only lawful under the mode
+    /// that made it: left standing when crossfade comes on, it fed the
+    /// engine a self to blend into, the exact invisible transition the
+    /// duplicate refusal exists to prevent.
+    self_seam: bool,
 }
 
 pub struct App {
@@ -2042,7 +2048,12 @@ impl App {
             && self.queue.shuffle == a.shuffle
             && self.queue.repeat == a.repeat
             && self.queue.items.get(a.index).is_some_and(|t| t.filepath == a.filepath)
-            && (self.queue.shuffle || self.queue.next_index(false) == Some(a.index));
+            && (self.queue.shuffle || self.queue.next_index(false) == Some(a.index))
+            // A seam announcement is only lawful in the mode that made it:
+            // gapless, no blend. The repeat snapshot above cannot catch a
+            // crossfade toggle, and a stale seam under a blend is a track
+            // told to blend into itself.
+            && (!a.self_seam || (self.gapless && self.crossfade <= 0.0));
         holds.then_some(a.index)
     }
 
@@ -2092,6 +2103,7 @@ impl App {
             hint: track.metadata.duration,
             shuffle: self.queue.shuffle,
             repeat: self.queue.repeat,
+            self_seam,
         })
     }
 
