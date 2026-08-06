@@ -219,7 +219,8 @@ persisted preferences landed together; the spool relocation followed the same da
 - ✅ **Schema version** on both files from the start.
 - ✅ **Streaming scratch space** (was "configurable stream cache" — renamed because it is a
   *spool*, not a cache: only the playing track has a file, nothing is prefetched, nothing
-  persists). The problem stands as stated: whole tracks landed in the OS temp dir, and `/tmp` is
+  persists — Phase C loosens the one-file rule by exactly one: while a crossfade prepares and
+  blends, the upcoming track spools alongside the playing one). The problem stands as stated: whole tracks landed in the OS temp dir, and `/tmp` is
   tmpfs on many Linux distros — a 400 MB FLAC silently cost 400 MB of RAM. Spool files now go to
   `<platform cache dir>/mstream-player/spool` (`%LOCALAPPDATA%`, `~/Library/Caches`,
   `$XDG_CACHE_HOME`/`~/.cache`), overridable with `[cache] dir` in config.toml or
@@ -463,9 +464,99 @@ destination creation — all genuinely browser-shaped. Guard with confirmation:
 Note `users/access` is a **full replace, not a patch** — read-modify-write or you'll silently
 clear flags.
 
-### Phase 5 — Release & install
-Tag-driven releases (binaries + `manifest.json` with per-file sha256). README install matrix.
-brew tap / scoop manifest later.
+### Phase C — Crossfade & prefetch (pulls Phase 7's prefetch forward)
+
+Blend the end of each track into the start of the next, the way DJ software and the streaming
+players do it. This is Phase 7's "next-track prefetch" with a fade on top: the prefetch —
+opening the upcoming track's reader before the current one ends — is most of the work either
+way, and it is also what removes the audible inter-track gap (finding #8) for anyone who turns
+the fade on. Off by default everywhere: with `crossfade_seconds = 0` the player is
+byte-identical to today.
+
+**Why rodio suffices** (checked against rodio 0.22.2 source, not docs): every track already
+plays as a `Player` connected to the one shared `Mixer` inside `MixerDeviceSink`, and that
+mixer's whole job is summing simultaneous sources — it resamples each one to the device shape
+through `UniformSourceIterator`, so a 44.1k track fading into a 48k track needs nothing from
+us. Crossfade is "let two Players overlap with opposing gain ramps" rather than today's
+stop-then-start. rodio's own `crossfade()` helper is *not* usable — it returns only the
+overlapped portion and severs seek/pause/position — and `Player::set_volume` ramped from a
+tick loop would staircase at 120 ms steps, so the fade is a source adapter of our own.
+
+The pieces, in landing order:
+
+#### C1 — The fade adapter
+`engine/fade.rs`: a `Faded<S>` source wrapper (same shape as `tap::Tapped`) applying an
+equal-power gain ramp — gain = sin(p·π/2), p stepped linearly per *frame* (per-sample stepping
+would give each channel of a frame a slightly different gain). Commanded through a shared
+`FadeHandle` (atomics, no locks on the audio path): `ramp_to(target, over)`, and it reports its
+current position back so the engine can tell when an outgoing sink has gone silent. The ramp
+advances per sample consumed, not per wall-clock second — so pause freezes a half-finished
+blend exactly where it sits, and resumes it intact, for free. Every source gets wrapped whether
+or not a fade is configured (gain 1.0 is a multiply and a check per sample); that keeps one
+code path and buys later polish — click-killing micro-fades on stop and seek — for the price
+of a `ramp_to` call. Pure unit tests against a counting source; no audio device.
+
+#### C2 — Engine overlap machinery + serve flag
+The engine gains a prepared-next slot and a retirement queue:
+
+- **Prepare**: at `remaining ≤ fade + margin` (margin generous enough to cover `OPEN_TIMEOUT`
+  plus the decode probe), commit the next pick — under shuffle the pick is committed *now*, not
+  re-rolled at handover — and open it on a short-lived thread. Never under the state lock: the
+  open blocks on the network for up to the timeout, and findings #48–#50 are the map of that
+  minefield. The thread hands back the built decoder through a channel; dropping the receiver
+  is how a stale prepare gets cancelled (the thread's send fails, the reader drops, its spool
+  file deletes itself). A failed open is remembered so the tick doesn't re-open a doomed URL
+  every 120 ms; the track's natural end then takes today's advance path, which retries once.
+- **Handover**: at `remaining ≤ fade` with a prepared decoder ready — new `Player` on the same
+  mixer, wrapped source starting at gain 0 ramping up, old sink commanded down over the same
+  window, `self.sink` swapped, the old sink parked in an `outgoing` slot until it empties or
+  its deadline passes. Status flips to the incoming track at fade start (file, duration,
+  position-from-zero) — the same convention as the streaming players, and the serve wire
+  format doesn't change shape.
+- **Policies**, each small, all deliberate: no fade when duration is unknown (live transcode);
+  effective fade clamps to half the track; loop-one never fades into itself; manual
+  next/previous/play/stop/clear cancel the overlap by stopping the outgoing sink at once; seek
+  cancels the blend and snaps the survivor to full gain; pause, resume and volume apply to both
+  sinks (user volume stays `Player` volume on both — the fade gain lives inside the source, so
+  the two never need multiplying together). The visualizer tap follows the handover: the
+  outgoing source's tap goes quiet at fade start (a kill switch on `Tapped`), because two
+  sources pushing one ring interleave garbage.
+- **Serve**: `--crossfade <seconds>` on the serve subcommand, default 0. The legacy `--port N`
+  spawn contract can't pass it, which is the point — mStream never sees a behavior change.
+- The spool contract loosens by one file: during prepare-plus-overlap the upcoming track spools
+  alongside the playing one (A1's "only the playing track has a file" note is amended). The
+  startup sweep never cared how many there were.
+
+Device tests ride the existing `#[ignore]` + `wav_bytes` pattern: a two-track queue whose
+handover must arrive early and whose status must never report an empty file mid-run.
+
+#### C3 — TUI wiring (todo)
+The TUI keeps its own queue and feeds the engine one URL at a time, so it must say what comes
+next: `AudioCmd::PrepareNext`/`ClearNext` (with a `collapse()` rule — a later Play or Stop
+makes a pending prepare moot), re-sent when queue edits change the answer. The delicate part is
+the cursor: an engine-initiated handover means `status.source` changes with no `TrackEnded`,
+and without reconciliation the App still points at the old entry and ignores the *next* end as
+stale. A new worker event (`EndWatch` learns that non-empty → different non-empty is a
+handover) lets the App advance its cursor through the `play_index` path minus the Play itself —
+falling back to a real Play when the queue was edited under a stale prepare. Config:
+`[player] crossfade_seconds` (0 default, clamped sane), through `PlayerPrefs::adopt`, delivered
+at session start — and the round-trip test that uses `crossfade_seconds` as its example
+*unknown* key gets a new example, since the premise expires the moment the key means something.
+
+#### C4 — Polish (todo, each cheap once C1–C3 exist)
+A short fade on manual skip; micro-fades on stop/seek so nothing ever clicks; the setting shown
+in the Auto-DJ panel; `crossfade_seconds = 0` routed through the prepared slot as append-to-sink
+for true gapless — the Phase 7 "append-to-sink redesign", reduced to a small step.
+
+**Costs accepted**: two decoders and two spool files for a bounded window per transition;
+summed peaks can transiently exceed full scale on loud masters even at equal power (rodio has a
+`limit` source if that ever proves audible in practice).
+
+### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
+Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install
+matrix, then the "later" items inside the same three days: one-line installers for sh and
+PowerShell, a Homebrew tap the release workflow bumps itself, a scoop bucket, `.deb`/`.rpm`
+that declare the ALSA dependency, and darwin binaries that leave signed and notarized.
 
 ### Phase 6 — mStream flip (cleanup lands here, in the mStream repo)
 - Binary-manager module: platform/arch → asset name (same `-${platform}-${arch}` scheme),
@@ -485,13 +576,16 @@ brew tap / scoop manifest later.
   consider replacing `/server-remote` regex page surgery with a template marker.
 
 ### Phase 7 — Backlog (deliberately deferred)
-Gapless (append-to-sink redesign of the advance loop) and its natural companion, next-track
-prefetch — open the upcoming track's reader early so a track change doesn't start from zero.
+Next-track prefetch and the crossfade built on it moved forward to Phase C; what stays of that
+thread here is true gapless, the append-to-sink redesign of the advance loop, kept as Phase
+C4's last step since C2's prepared slot does most of its work.
 A persistent track cache (replay without re-downloading, offline listening) is the step after
 that and a genuinely bigger one: eviction policy, a size budget, an index keyed by server +
 filepath — this is where the SQLite question from A1 returns with an actual job to do. Also:
-TUI as remote for server-side audio, album art (ratatui-image), media keys (MPRIS/SMTC),
-scrobbling hooks, brew/scoop/AUR packaging.
+TUI as remote for server-side audio, media keys (MPRIS/SMTC), scrobbling hooks, AUR packaging.
+Two entries left this list by other roads: album art was written down as "ratatui-image" and
+landed instead as the half-block canvas the Cover visualizer draws through (0.1.1), and
+brew/scoop shipped with Phase 5.
 
 ## Smoke testing
 
@@ -521,7 +615,8 @@ when keys are pressed in sequence against real replies. The first live run found
 - Linux binaries link ALSA dynamically (`libasound` required at runtime — already true today).
 - Download-on-enable adds a failure mode → covered by `serverAudioBinaryPath` + CLI fallback.
 - Two-repo version skew → covered by pinning + `apiVersion` check.
-- rodio device-hotplug behavior and gapless are deferred, not solved.
+- rodio device-hotplug behavior is deferred, not solved. Gapless moved from "deferred" to
+  "Phase C": crossfade removes the audible gap where it is enabled, and true gapless is C4.
 - **Iroh tunnel wire compatibility is unproven** (Phase A3): mStream's tunnel runs in-process via
   the `@number0/iroh` NAPI addon, and nothing in that repo tests a Rust `iroh` client against it —
   the only handshake test is Node-to-Node. Both sides are on the iroh 1.x line, which is
@@ -543,7 +638,7 @@ when keys are pressed in sequence against real replies. The first live run found
 | 5 | Shuffle "randomness" is a hash of the system clock; biased and predictable | quality | fixed in port: `fastrand` |
 | 6 | Binds `0.0.0.0` with no auth; any LAN peer gets full transport control + local-path playback (file-existence oracle) | security | fixed in port: default `127.0.0.1`, `--host` opt-out, optional `--auth-token` |
 | 7 | `get_file_duration` re-opens and re-probes the file already opened for decode | perf (matters for Phase 2 HTTP) | deferred to Phase 2: duration-hint parameter |
-| 8 | Between-tracks the 250 ms advance poll reports `playing: false` transiently; inter-track gap is audible (no gapless) | known limitation | deferred (Phase 7 gapless) |
+| 8 | Between-tracks the 250 ms advance poll reports `playing: false` transiently; inter-track gap is audible (no gapless) | known limitation | Phase C: crossfade closes the gap where enabled; true gapless is C4 |
 | 9 | Shuffle has no history: `previous` can't retrace shuffled order; shuffle never ends under loop=none | semantics quirk | deferred to Phase 4 (queue UX pass) |
 | 10 | mp3 without duration metadata (no Xing header) reports `duration: 0` | known limitation | documented |
 | 11 | Negative or non-finite `/seek` position reaches `Duration::from_secs_f64`, which panics — and a panic while holding the state mutex poisons it, wedging every later request | crash bug (found during port) | fixed in port: positions validated before conversion |
