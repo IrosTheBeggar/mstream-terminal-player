@@ -293,6 +293,18 @@ const STOP_FADE: Duration = Duration::from_millis(80);
 const SEEK_DIP_DOWN: Duration = Duration::from_millis(10);
 const SEEK_DIP_UP: Duration = Duration::from_millis(30);
 
+/// What a forward seek must leave on the clock beyond the transition
+/// itself, so the next track's open can finish before the window arrives.
+/// Two seconds covers an ordinary open with the spool warm behind it; a
+/// slower network degrades to a shortened blend rather than a missed one.
+const OPEN_RUNWAY: f64 = 2.0;
+
+/// How long a failed open rests before the tick may try it again. Long
+/// enough that a dead URL costs a handful of opens per track tail rather
+/// than one per tick; short enough that a link merely busy (a seek's spool
+/// catch-up) gets its retry while the window can still be met.
+const FAILED_RETRY: Duration = Duration::from_secs(4);
+
 /// How close to the end the gapless append happens. Late on purpose: an
 /// appended source cannot be taken back out of a sink, so this is the
 /// window in which a queue edit can go unheeded — ordinarily. A seek
@@ -326,6 +338,30 @@ fn blend_window(crossfade: f32, outgoing_dur: f64, remaining: f64, incoming_dur:
     window.max(MIN_FADE)
 }
 
+/// The latest position a *forward* seek may land when a seamless transition
+/// is configured, or None when nothing guards the end. A seek that lands
+/// inside the transition's own runway starves it: the open cannot finish,
+/// the window cannot fit, and the seam the listener configured plays as a
+/// hard cut — which is exactly how the bug report read ("skipped to the
+/// last minute and the crossfade didn't happen"; the landings were nearer
+/// the end than the open could serve). Past the end entirely, the decoder
+/// runs dry on the spot and the track dies mid-keystroke. With crossfade
+/// and gapless both off there is nothing to starve, and seeking past the
+/// end keeping its skip-the-track meaning is the legacy behavior.
+fn seek_ceiling(duration: f64, crossfade: f32, gapless: bool) -> Option<f64> {
+    if duration <= 0.0 {
+        return None;
+    }
+    let reserve = if crossfade > 0.0 {
+        effective_fade(crossfade, duration) + OPEN_RUNWAY
+    } else if gapless {
+        APPEND_LEAD + OPEN_RUNWAY
+    } else {
+        return None;
+    };
+    Some((duration - reserve).max(0.0))
+}
+
 /// What plays after the current track, as far as anyone has decided.
 enum NextTrack {
     /// Nothing decided — the resting state, and all of it when crossfade
@@ -337,10 +373,15 @@ enum NextTrack {
     Opening { index: Option<usize>, rx: mpsc::Receiver<Result<Prepared, String>> },
     /// Opened, decoded, spooling — waiting for the fade window to arrive.
     Ready { prepared: Prepared, index: Option<usize> },
-    /// The open failed. Remembered so the tick does not walk into the same
-    /// doomed open every 120 ms; the track's natural end then takes the
-    /// ordinary advance path, which gives the URL its one fresh try.
-    Failed,
+    /// The open failed, and when. Remembered so the tick does not walk
+    /// into the same doomed open every 120 ms; the timestamp is what turned
+    /// the latch into a rate limit — one failure used to stand for the
+    /// whole rest of the track, which read as "crossfade off" whenever a
+    /// transient starved an open late in the track (a seek's spool
+    /// catch-up over a slow link was the reported case). Retried on a
+    /// clock while enough runway remains; a truly dead URL costs a
+    /// handful of opens per track tail, not one per tick.
+    Failed { at: Instant },
 }
 
 /// The committed pick for the track after this one, or None when no
@@ -411,7 +452,7 @@ fn spawn_prepare(entry: QueueEntry, index: Option<usize>) -> NextTrack {
         Ok(_) => NextTrack::Opening { index, rx },
         // A box that cannot spawn a thread still has the ordinary advance
         // path; a blend is not worth an error.
-        Err(_) => NextTrack::Failed,
+        Err(_) => NextTrack::Failed { at: Instant::now() },
     }
 }
 
@@ -981,7 +1022,7 @@ impl Engine {
     }
 
     pub fn seek(&self, position: f64) -> Result<(), EngineError> {
-        let target = seek_target(position)?;
+        let mut target = seek_target(position)?;
         // Take a handle and let the state go before asking. try_seek blocks
         // on rodio's feedback channel until the device callback performs
         // the seek, and past the downloaded range that callback is waiting
@@ -1000,6 +1041,27 @@ impl Engine {
             // Seeking mid-blend keeps the track being seeked; hearing the
             // old one still draining behind a jump is disorienting.
             s.snap_out_of_blend();
+            // A seek is fresh runway: a next that failed under the old
+            // geometry deserves its retry under the new one. The Failed
+            // latch exists to stop the *tick* re-walking a doomed open
+            // every 120ms inside the window; a user move is a different
+            // occasion, and without this an open that failed once late in
+            // the track stayed failed to the end and the seam went out
+            // as a cut.
+            if matches!(s.next, NextTrack::Failed { .. }) {
+                s.next = NextTrack::Idle;
+            }
+            // Forward seeks stop short of a configured transition's runway
+            // — see [`seek_ceiling`]. Never backward from where playback
+            // already is: a clamp that yanked the cursor back would turn
+            // a keystroke near the end into a rewind.
+            if let Some(ceiling) = seek_ceiling(s.duration, s.crossfade, s.gapless) {
+                let current = s.sink.get_pos().as_secs_f64();
+                let asked = target.as_secs_f64();
+                if asked > current && asked > ceiling {
+                    target = Duration::from_secs_f64(ceiling.max(current));
+                }
+            }
             (s.sink.clone(), s.fade.clone())
         };
         // The dip (C4): down before the jump, up after it. The down-ramp
@@ -1379,10 +1441,10 @@ impl Engine {
             NextTrack::Opening { index, rx } => match rx.try_recv() {
                 Ok(Ok(prepared)) => NextTrack::Ready { prepared, index },
                 // open_entry already told stderr what went wrong.
-                Ok(Err(_)) => NextTrack::Failed,
+                Ok(Err(_)) => NextTrack::Failed { at: Instant::now() },
                 // The opener panicked — symphonia does, on malformed files
                 // (audit #32) — which reads the same as a failed open.
-                Err(mpsc::TryRecvError::Disconnected) => NextTrack::Failed,
+                Err(mpsc::TryRecvError::Disconnected) => NextTrack::Failed { at: Instant::now() },
                 Err(mpsc::TryRecvError::Empty) => NextTrack::Opening { index, rx },
             },
             other => other,
@@ -1439,13 +1501,17 @@ impl Engine {
         }
         let remaining = s.duration - s.sink.get_pos().as_secs_f64();
 
-        // A transient failure earns a fresh try when the window recedes: a
-        // seek back re-opens minutes of runway in which a network blip may
-        // well have healed. Resetting only *outside* the window keeps the
-        // no-retry-every-tick property inside it (review finding: the
-        // Failed latch was one-way).
-        if matches!(s.next, NextTrack::Failed) && remaining > fade + PREPARE_LEAD {
-            s.next = NextTrack::Idle;
+        // A transient failure earns another try on a clock, not never: the
+        // one-way latch inside the window meant a single starved open late
+        // in a track (a seek's spool catch-up hogging a slow link, say)
+        // silenced the seam for good, and the listener heard "crossfade
+        // off". Rate-limiting keeps what the latch was for — a dead URL is
+        // still not walked into every tick — and the runway gate keeps a
+        // retry that cannot possibly finish from being spent at all.
+        if let NextTrack::Failed { at } = s.next {
+            if at.elapsed() >= FAILED_RETRY && remaining > fade + OPEN_RUNWAY {
+                s.next = NextTrack::Idle;
+            }
         }
 
         if matches!(s.next, NextTrack::Idle) && remaining <= fade + PREPARE_LEAD {
@@ -1621,6 +1687,27 @@ mod tests {
         for bad in [1e300, 1e20, f64::NAN, f64::INFINITY, -1.0] {
             assert!(seek_target(bad).is_err(), "{bad} must be refused");
         }
+    }
+
+    #[test]
+    fn the_seek_ceiling_guards_exactly_the_configured_transition() {
+        // Nothing configured: nothing to starve, no ceiling — seeking past
+        // the end keeps its legacy skip-the-track meaning.
+        assert_eq!(seek_ceiling(240.0, 0.0, false), None);
+        // A blend reserves its window plus the open's runway.
+        assert_eq!(seek_ceiling(240.0, 6.0, false), Some(240.0 - 6.0 - OPEN_RUNWAY));
+        // Crossfade outranks gapless, the same precedence as everywhere.
+        assert_eq!(seek_ceiling(240.0, 6.0, true), Some(240.0 - 6.0 - OPEN_RUNWAY));
+        // Gapless alone reserves the append lead plus the runway.
+        assert_eq!(seek_ceiling(240.0, 0.0, true), Some(240.0 - APPEND_LEAD - OPEN_RUNWAY));
+        // The half-track cap flows through: a 10s track under a 30s blend
+        // carries 5s of fade, not 30.
+        assert_eq!(seek_ceiling(10.0, 30.0, false), Some(10.0 - 5.0 - OPEN_RUNWAY));
+        // A track shorter than its own reserve pins the ceiling at zero
+        // rather than going negative.
+        assert_eq!(seek_ceiling(1.0, 30.0, false), Some(0.0));
+        // Unknown duration: no end to guard.
+        assert_eq!(seek_ceiling(0.0, 6.0, true), None);
     }
 
     /// A playable WAV: 44.1k stereo 16-bit of quiet tone, `seconds` long.
@@ -1968,6 +2055,42 @@ mod tests {
         (format!("http://{addr}/counted.wav"), hits)
     }
 
+    /// A server whose first `fail_first` requests are refused with a 500 —
+    /// the shape of an open starved by a busy link — and which serves the
+    /// WAV honestly after that.
+    fn flaky_wav_server(seconds: usize, fail_first: usize) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                let body = wav_bytes(seconds);
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut head = [0u8; 2048];
+                    let _ = stream.read(&mut head);
+                    if n <= fail_first {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    let sent = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(sent.as_bytes());
+                    let _ = stream.write_all(&body);
+                });
+            }
+        });
+        (format!("http://{addr}/flaky.wav"), hits)
+    }
+
     /// A duration hint running long is the usual road to a missed blend:
     /// the sink empties while the fade point is still "seconds away", and
     /// the prepared decoder must then be installed, not thrown away and
@@ -2002,6 +2125,105 @@ mod tests {
             1,
             "the prepared open was repeated instead of reused"
         );
+        engine.stop();
+        let _ = std::fs::remove_file(&local);
+    }
+
+    /// The other half of the listening-session bug: an open that failed
+    /// once late in the track was latched failed to the end, and the seam
+    /// went out as a cut. The latch is now a rate limit — the first open
+    /// fails (a 500 standing in for a starved link), the retry lands, the
+    /// blend fires — and it stays a limit: two hits here, not one per tick.
+    ///
+    /// `cargo test a_failed_open_gets -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_failed_open_gets_its_retry_and_the_blend_still_fires() {
+        let local = std::env::temp_dir().join("mstream-retry-a.wav");
+        std::fs::write(&local, wav_bytes(16)).unwrap();
+        let (url, hits) = flaky_wav_server(3, 1);
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(2.0);
+        engine.play_source(local.to_string_lossy().into_owned(), Some(16.0)).unwrap();
+        engine.queue_add(url.clone());
+
+        // Prepare opens at remaining <= 14 (2s in), eats the 500, and rests
+        // FAILED_RETRY before the fresh try. The blend window arrives at
+        // remaining 2; the retry must have landed Ready well before it.
+        let started = std::time::Instant::now();
+        loop {
+            engine.advance_tick();
+            if engine.overlap_active() {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "no blend fired; the failed open was never retried"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "one failure and one success — a rate limit, not a tick loop"
+        );
+        assert_eq!(engine.status().file, url);
+        engine.stop();
+        let _ = std::fs::remove_file(&local);
+    }
+
+    /// The bug a human listening session found: seeking near the end of a
+    /// track killed the crossfade — the landing left less runway than the
+    /// next track's open needed (and past the end, the decoder died on
+    /// the keystroke). A forward seek now stops at the ceiling, and the
+    /// blend fires from there.
+    ///
+    /// `cargo test a_seek_toward_the_end -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_seek_toward_the_end_stops_short_and_the_blend_still_fires() {
+        let local = std::env::temp_dir().join("mstream-seekclamp-a.wav");
+        std::fs::write(&local, wav_bytes(10)).unwrap();
+        let (url, _hits) = counting_wav_server(3);
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(2.0);
+        engine.play_source(local.to_string_lossy().into_owned(), Some(10.0)).unwrap();
+        engine.queue_add(url.clone());
+        std::thread::sleep(Duration::from_millis(400));
+
+        // Aim far past the end. Unclamped this was the end of the track:
+        // the decoder ran dry mid-keystroke and the seam went out as a
+        // hard advance.
+        engine.seek(999.0).unwrap();
+        let s = engine.status();
+        // Ceiling: 10s − (2s fade + OPEN_RUNWAY) = 6s.
+        assert!(
+            (s.position - 6.0).abs() < 0.8,
+            "expected to land at the ceiling (~6s), got {:.2}",
+            s.position
+        );
+        assert!(s.playing, "the clamped seek must leave the track sounding");
+
+        // From the ceiling the open has its runway; the blend must open
+        // within it (window starts at 2s remaining, i.e. ~2s from now).
+        let started = std::time::Instant::now();
+        loop {
+            engine.advance_tick();
+            if engine.overlap_active() {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(4),
+                "no blend fired after the clamped landing"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let s = engine.status();
+        assert_eq!(s.file, url, "status flips to the incoming track at fade start");
         engine.stop();
         let _ = std::fs::remove_file(&local);
     }

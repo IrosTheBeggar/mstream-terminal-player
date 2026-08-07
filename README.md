@@ -180,6 +180,13 @@ the one leaving, and pausing mid-blend freezes it exactly where it sits. Tracks
 the server can't state a length for (a live transcode on its first play) change
 over the plain way, since there is no known ending to fade toward.
 
+Seeking toward the end plays fair with the blend: a forward seek stops just
+short of the transition's own runway — the fade window plus a couple of
+seconds for the open — so skipping to a track's last stretch still ends in a
+crossfade instead of starving it (with no transition configured, seeking past
+the end keeps its old skip-the-track meaning). Seek keys also chain: quick
+presses of `}` add up a minute each rather than re-reading a stale position.
+
 ```toml
 [player]
 gapless = true

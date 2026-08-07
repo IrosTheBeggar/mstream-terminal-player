@@ -627,6 +627,37 @@ a `Ready` decoder when the blend misses (both are C4-adjacent — the second *is
 attach path); the remaining per-row URL builds in the fallback scan; and the no-headroom
 summation, which stays in Costs above until someone hears it.
 
+#### Phase C listening-session fix ✅ 2026-08-07
+
+The first human listening session found what four adversarial rounds had not: *seeking to a
+track's last stretch killed the crossfade* — the track played out and the seam went as a hard
+cut. Reproduced end-to-end (serve engine on local WAVs, serve on real demo-server MP3s, and
+the actual TUI driven over a pty), all of which **blended correctly** — the failures live at
+the edges of the seek itself, three of them:
+
+- **A seek past the end ended the track mid-keystroke.** rodio accepts the position, the
+  decoder runs dry, hard advance — and `}` (a minute forward) makes overshoot routine.
+  Forward seeks now stop at `seek_ceiling`: duration minus the fade window (or the gapless
+  append lead) minus `OPEN_RUNWAY`, only when a transition is configured — with both off,
+  past-the-end keeps its legacy skip-the-track meaning. Pinned by
+  `a_seek_toward_the_end_stops_short_and_the_blend_still_fires` (device).
+- **`Failed` was a latch, not a limit.** One starved open late in the track (the reported
+  session rides a Quick Connect tunnel, where a seek's spool catch-up hogs the link and the
+  next track's open times out) silenced the seam for the rest of the track. `Failed` now
+  carries its timestamp and retries every `FAILED_RETRY` while `remaining > fade +
+  OPEN_RUNWAY` — the dead-URL property the latch guarded costs a handful of opens per tail,
+  not one per tick. A seek also resets it outright: a user move is fresh runway. Pinned by
+  `a_failed_open_gets_its_retry_and_the_blend_still_fires` (device, flaky server).
+- **Seek keys re-read a stale status.** Position refreshes ~4×/s, so a quick `}}}` computed
+  the same base thrice and moved one minute. The app now chains: each press builds on the
+  in-flight target (`seek_goal`, trusted for 2.5s or until status catches up / the source
+  changes), capped at the bar's end so nothing banks minutes that don't exist. Pinned by
+  `fast_seek_presses_build_on_each_other_not_the_stale_status`.
+
+Considered and kept: `snap_out_of_blend` on seeks (C4's "keep the track being seeked" rule) —
+a seek during a running blend still collapses it, by design; the ceiling makes it much harder
+to land there by accident.
+
 ### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
 Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install
 matrix, then the "later" items inside the same three days: one-line installers for sh and

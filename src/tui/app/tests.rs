@@ -668,6 +668,50 @@ fn seeking_while_idle_does_nothing() {
 }
 
 #[test]
+fn fast_seek_presses_build_on_each_other_not_the_stale_status() {
+    let mut app = connected_app();
+    app.status.source = "http://host/a.mp3".into();
+    app.status.position = 10.0;
+    app.status.duration = 300.0;
+    // Status refreshes a few times a second; three quick presses used to
+    // read the same base and land as one minute instead of three.
+    assert_eq!(
+        app.handle_action(Action::SeekForwardFar),
+        vec![Effect::Audio(AudioCmd::Seek(70.0))]
+    );
+    assert_eq!(
+        app.handle_action(Action::SeekForwardFar),
+        vec![Effect::Audio(AudioCmd::Seek(130.0))]
+    );
+    assert_eq!(
+        app.handle_action(Action::SeekForwardFar),
+        vec![Effect::Audio(AudioCmd::Seek(190.0))]
+    );
+    // Chaining banks nothing past the bar's end — minutes that do not
+    // exist would poison every press that followed.
+    for _ in 0..3 {
+        app.handle_action(Action::SeekForwardFar);
+    }
+    assert_eq!(
+        app.handle_action(Action::SeekForwardFar),
+        vec![Effect::Audio(AudioCmd::Seek(300.0))]
+    );
+    // A status that catches up to the goal hands the base back to
+    // reality — the next press moves from where playback actually is.
+    app.apply_event(Event::Status(PlayerStatus {
+        source: "http://host/a.mp3".into(),
+        position: 299.0,
+        duration: 300.0,
+        playing: true,
+        ..Default::default()
+    }));
+    assert_eq!(
+        app.handle_action(Action::SeekBackward),
+        vec![Effect::Audio(AudioCmd::Seek(294.0))]
+    );
+}
+
+#[test]
 fn every_class_a_search_matched_is_reachable() {
     use crate::api::types::{SearchGroup, SearchTrack};
     let mut app = connected_app();
@@ -2568,8 +2612,10 @@ fn the_shifted_seek_keys_move_by_a_minute() {
 
     let effects = app.handle_action(Action::SeekForwardFar);
     assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(260.0))]);
+    // Each press builds on the last target (seek chaining), so back-far
+    // undoes forward-far exactly rather than re-reading a stale status.
     let effects = app.handle_action(Action::SeekBackwardFar);
-    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(140.0))]);
+    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(200.0))]);
     // And the fine keys still move by five.
     let effects = app.handle_action(Action::SeekForward);
     assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(205.0))]);

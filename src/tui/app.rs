@@ -29,6 +29,12 @@ const SEEK_STEP: f64 = 5.0;
 /// The shifted seek keys. Five seconds is the wrong unit for a long mix or a
 /// set recording, where the interesting distance is minutes.
 const SEEK_STEP_FAR: f64 = 60.0;
+/// How long a just-issued seek outvotes the position status reports when
+/// the next seek computes its base. Covers the round trip through the
+/// worker and a status poll or two; short enough that a target the engine
+/// lawfully landed short of (its end-of-track runway clamp) stops steering
+/// follow-up presses once it has gone stale.
+const SEEK_CHAIN: std::time::Duration = std::time::Duration::from_millis(2500);
 const VOLUME_STEP: f32 = 0.05;
 /// Rows a page key moves. Ctrl+u/d move half of this, as they do in vim.
 const PAGE_STEP: isize = 10;
@@ -861,6 +867,15 @@ pub struct App {
     /// skipping so a queue of nothing but broken files stops rather than
     /// looping.
     failures: usize,
+    /// Where the last seek was told to land, so the next press builds on it.
+    /// Status refreshes a few times a second, and seek keys compute their
+    /// target from the last position heard — so a quick `}}}` all read the
+    /// same stale base and moved one minute, not three. Cleared when a
+    /// status shows the seek arrived (or the source changed under it), and
+    /// trusted only briefly: the engine may lawfully land a forward seek
+    /// short of the ask (its end-of-track runway clamp), and an expired
+    /// goal must not keep outvoting reality.
+    seek_goal: Option<(f64, std::time::Instant)>,
     pub volume: f32,
     /// Seconds of blend between tracks, from `crossfade_seconds` in
     /// config.toml; 0 is off. Also adjustable in the Auto-DJ panel (C4).
@@ -976,6 +991,7 @@ impl App {
             status: PlayerStatus::default(),
             starting: None,
             failures: 0,
+            seek_goal: None,
             volume: 1.0,
             crossfade: 0.0,
             gapless: false,
@@ -2398,6 +2414,9 @@ impl App {
         // engine holding nothing while the app believed otherwise, and the
         // next transition silently lost its blend (review finding).
         self.announced = None;
+        // And a seek aimed at the old track has nothing to say about this
+        // one.
+        self.seek_goal = None;
 
         let mut effects = vec![Effect::Audio(AudioCmd::Play { url, duration_hint: hint })];
         effects.extend(self.fetch_art());
@@ -2472,7 +2491,21 @@ impl App {
         if self.status.is_idle() {
             return Vec::new();
         }
-        let target = (self.status.position + delta).max(0.0);
+        // Build on the seek still in flight, not the position it is about
+        // to replace: status refreshes a few times a second, so a quick
+        // `}}}` all read the same stale base and landed as one press.
+        let base = match self.seek_goal {
+            Some((goal, at)) if at.elapsed() < SEEK_CHAIN => goal,
+            _ => self.status.position,
+        };
+        let mut target = (base + delta).max(0.0);
+        // The bar's end is as far as chaining may bank; where exactly a
+        // near-end landing stops is the engine's call (its transition
+        // runway clamp), not something to duplicate here.
+        if self.status.duration > 0.0 {
+            target = target.min(self.status.duration);
+        }
+        self.seek_goal = Some((target, std::time::Instant::now()));
         vec![Effect::Audio(AudioCmd::Seek(target))]
     }
 
@@ -2511,6 +2544,14 @@ impl App {
                 // before is behind us — the run of failures starts over.
                 if !status.source.is_empty() {
                     self.failures = 0;
+                }
+                // A seek goal has served once status catches up to it — or
+                // once the source changes under it, where the old track's
+                // target would steer presses on the new one.
+                if let Some((goal, _)) = self.seek_goal {
+                    if status.source != self.status.source || status.position >= goal - 1.0 {
+                        self.seek_goal = None;
+                    }
                 }
                 self.status = status;
                 Vec::new()
