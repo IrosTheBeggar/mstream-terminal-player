@@ -668,6 +668,66 @@ fn seeking_while_idle_does_nothing() {
 }
 
 #[test]
+fn a_failed_browse_takes_its_column_back_with_it() {
+    let mut app = connected_app();
+    app.path = String::new();
+    let listing = || {
+        vec![
+            Entry::Dir { label: "Air/".into(), path: "library/Air".into() },
+            Entry::Dir { label: "Boukmanflow/".into(), path: "library/Boukmanflow".into() },
+        ]
+    };
+    // Three rounds of the reported gesture: click a folder, watch the
+    // tunnel eat the request. Before the undo, every round stacked
+    // another copy of this listing on the trail — unclosable at the root.
+    for _ in 0..3 {
+        app.files.set(listing());
+        app.files.state.select(Some(0));
+        let effects = app.handle_action(Action::Activate);
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Browse(p)) if p == "library/Air")),
+            "the click asks the server"
+        );
+        assert_eq!(app.path, "library/Air");
+        assert_eq!(app.files.trail.len(), 1, "one column pushed on the way in");
+
+        app.apply_event(Event::Error("tunnel died".into()));
+        assert_eq!(app.path, "", "the failed browse walks its path back");
+        assert!(app.files.trail.is_empty(), "and takes its column with it");
+    }
+    // A listing that does answer keeps its navigation.
+    app.files.set(listing());
+    app.files.state.select(Some(0));
+    app.handle_action(Action::Activate);
+    app.apply_event(Event::Listing(Box::new(crate::api::types::DirListing {
+        path: "/library/Air/".into(),
+        directories: Vec::new(),
+        files: Vec::new(),
+    })));
+    assert_eq!(app.path, "library/Air");
+    // An unrelated error later must not undo a browse that already landed.
+    app.apply_event(Event::Error("art fetch failed".into()));
+    assert_eq!(app.path, "library/Air");
+}
+
+#[test]
+fn back_at_the_root_drains_an_orphaned_column() {
+    let mut app = connected_app();
+    app.path = String::new();
+    browsing(&mut app, &["a", "b"], 0);
+    // Strand a column the way the pre-undo bug did.
+    let orphan = Trail { entries: app.files.entries.clone(), chosen: 1 };
+    app.files.trail.push(orphan);
+
+    app.handle_action(Action::Back);
+    assert!(app.files.trail.is_empty(), "Back drains the orphan even at the root");
+    assert_eq!(app.files.state.selected(), Some(1), "restored with its remembered cursor");
+    // With nothing stranded, Back at the root stays a no-op.
+    assert!(app.handle_action(Action::Back).is_empty());
+    assert!(app.files.trail.is_empty());
+}
+
+#[test]
 fn fast_seek_presses_build_on_each_other_not_the_stale_status() {
     let mut app = connected_app();
     app.status.source = "http://host/a.mp3".into();

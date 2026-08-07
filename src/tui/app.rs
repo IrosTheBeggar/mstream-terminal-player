@@ -867,6 +867,15 @@ pub struct App {
     /// skipping so a queue of nothing but broken files stops rather than
     /// looping.
     failures: usize,
+    /// How to walk the file browser back if the Browse in flight fails: the
+    /// path the click replaced, and whether it pushed a trail column on the
+    /// way in. A tunnel that flakes mid-browse otherwise left the navigation
+    /// standing — path one level deep, a phantom column beside a listing
+    /// that never changed — and every retry of the click stacked another
+    /// copy. Cleared by the listing that answers; consumed by the error
+    /// that doesn't. A late success for an undone path is dropped by the
+    /// listing handler's own path guard.
+    browse_undo: Option<(String, bool)>,
     /// Where the last seek was told to land, so the next press builds on it.
     /// Status refreshes a few times a second, and seek keys compute their
     /// target from the last position heard — so a quick `}}}` all read the
@@ -991,6 +1000,7 @@ impl App {
             status: PlayerStatus::default(),
             starting: None,
             failures: 0,
+            browse_undo: None,
             seek_goal: None,
             volume: 1.0,
             crossfade: 0.0,
@@ -1715,8 +1725,9 @@ impl App {
         match entry {
             Entry::Parent => self.go_back(),
             Entry::Dir { path, .. } => {
-                self.push_trail();
-                self.path = path.clone();
+                let pushed = self.push_trail();
+                let prev = std::mem::replace(&mut self.path, path.clone());
+                self.browse_undo = Some((prev, pushed));
                 vec![Effect::Api(ApiCmd::Browse(path))]
             }
             Entry::Node { node, label } if self.tab == Tab::Search => {
@@ -1793,10 +1804,10 @@ impl App {
     /// Remember the listing on screen as a column, on the way into the next
     /// one. Called before the request goes out, so the context is there while
     /// the reply is still coming.
-    fn push_trail(&mut self) {
+    fn push_trail(&mut self) -> bool {
         let pane = self.pane_mut();
         if pane.entries.is_empty() {
-            return;
+            return false;
         }
         let chosen = pane.state.selected().unwrap_or(0);
         // The column behind keeps the whole listing, not the narrowed view of
@@ -1813,6 +1824,7 @@ impl App {
             None => (entries, chosen),
         };
         pane.trail.push(Trail { entries, chosen });
+        true
     }
 
     fn go_back(&mut self) -> Vec<Effect> {
@@ -1824,6 +1836,19 @@ impl App {
         // fewer column beside it until the reply landed — which reads as the
         // middle column blinking out and then coming back.
         let Some(effects) = self.step_out() else {
+            // Nowhere further out — but a trail column here is an orphan
+            // (a failed browse from before the undo existed, or any bug
+            // that strands one), Back is the only key anyone would reach
+            // for, and refusing to pop left it on screen for the rest of
+            // the session. Drain it instead.
+            if let Some(step) = self.pane_mut().trail.pop() {
+                let pane = self.pane_mut();
+                pane.filter.clear();
+                pane.unfiltered = None;
+                pane.entries = step.entries;
+                pane.state.select(Some(step.chosen));
+                pane.loading = false;
+            }
             return Vec::new();
         };
         let Some(step) = self.pane_mut().trail.pop() else {
@@ -1859,6 +1884,11 @@ impl App {
                     None => String::new(),
                 };
                 self.path = parent.clone();
+                // Going out is answered from the trail; if this refresh
+                // fails, path and pane still agree on the parent. Nothing
+                // to walk back — and an undo left armed here would fire on
+                // some later unrelated error and yank the path deeper.
+                self.browse_undo = None;
                 vec![Effect::Api(ApiCmd::Browse(parent))]
             }
             Tab::Search => {
@@ -2670,6 +2700,7 @@ impl App {
                     return Vec::new();
                 }
                 self.opening = false;
+                self.browse_undo = None;
                 self.path = path.to_string();
                 let root = self.browser_root().to_string();
                 self.files.set(entries_from_listing(&listing, &root));
@@ -2783,6 +2814,15 @@ impl App {
             Event::Error(e) => {
                 self.connecting = false;
                 self.connect.submitting = false;
+                // The browse this error answers will never repaint the pane,
+                // so its navigation must not stand: put the path back and
+                // take the phantom column with it (see `browse_undo`).
+                if let Some((path, pushed)) = self.browse_undo.take() {
+                    self.path = path;
+                    if pushed {
+                        self.files.trail.pop();
+                    }
+                }
                 self.error(e);
                 Vec::new()
             }

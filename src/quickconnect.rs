@@ -44,6 +44,14 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 /// URL. Deliberately not a real scheme: nothing may hand it to an HTTP client.
 pub const TUNNEL_ID_PREFIX: &str = "mstream+iroh://";
 
+/// Opening a stream on a live connection is near-instant; on a connection
+/// whose network died it hangs until QUIC gives the path up. This is how
+/// long the bridge waits before declaring the tunnel dead and re-dialling —
+/// longer than iroh's 5s heartbeat so a healthy-but-slow moment isn't a
+/// false death, shorter than the 15–30s path idle timeouts so a real death
+/// costs seconds, not half a minute of silence.
+const STREAM_TIMEOUT: Duration = Duration::from_secs(8);
+
 #[derive(Debug, Clone)]
 pub struct PairingCode {
     pub addr: EndpointAddr,
@@ -188,6 +196,59 @@ impl Tunnel {
     }
 }
 
+/// The tunnel a bridge is currently speaking through, re-dialled when it
+/// dies. A QUIC connection is one-shot: fifteen to thirty seconds of dead
+/// network (a lid closed, a VPN re-auth, WiFi wandering) ends it for good,
+/// and before this existed the bridge kept trying to open streams on the
+/// corpse — every API call and every prepare failed from there to the end
+/// of the session (the "tunnel is flakey" report). The pairing code is the
+/// standing capability to dial, so the bridge holds it and uses it.
+struct Redialer {
+    code: PairingCode,
+    /// The lock is held across a re-dial on purpose: the first caller to
+    /// find the tunnel dead dials for everyone, and the rest queue here
+    /// rather than racing their own dials.
+    current: tokio::sync::Mutex<Option<std::sync::Arc<Tunnel>>>,
+}
+
+impl Redialer {
+    fn new(code: PairingCode, first: Tunnel) -> Self {
+        Redialer {
+            code,
+            current: tokio::sync::Mutex::new(Some(std::sync::Arc::new(first))),
+        }
+    }
+
+    /// A stream on the current tunnel — or on a fresh one when the current
+    /// tunnel turns out to be dead. One failure buys one re-dial; a failed
+    /// re-dial fails this caller and the next one starts clean.
+    async fn stream(
+        &self,
+    ) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream), String> {
+        let mut slot = self.current.lock().await;
+        if let Some(tunnel) = slot.as_ref() {
+            match tokio::time::timeout(STREAM_TIMEOUT, tunnel.open_stream()).await {
+                Ok(Ok(pair)) => return Ok(pair),
+                Ok(Err(e)) => {
+                    crate::stderrln!("[quickconnect] tunnel died ({e}); re-dialling");
+                }
+                Err(_) => {
+                    crate::stderrln!("[quickconnect] tunnel unresponsive; re-dialling");
+                }
+            }
+            *slot = None;
+        }
+        // Dial-timeout bounded inside Tunnel::open; the handshake re-proves
+        // the secret the same as the first dial.
+        let tunnel = std::sync::Arc::new(Tunnel::open(&self.code).await?);
+        let pair = tokio::time::timeout(STREAM_TIMEOUT, tunnel.open_stream())
+            .await
+            .map_err(|_| "fresh tunnel would not open a stream".to_string())??;
+        *slot = Some(tunnel);
+        Ok(pair)
+    }
+}
+
 /// The first bi-stream is the gate: write the secret, close our side, read the
 /// verdict.
 async fn handshake(connection: &Connection, secret: &[u8]) -> Result<(), String> {
@@ -234,7 +295,11 @@ pub struct TunnelBridge {
 pub fn open_bridge(code: &PairingCode) -> Result<TunnelBridge, String> {
     let code = code.clone();
     crate::runtime::block_on(async move {
-        let tunnel = std::sync::Arc::new(Tunnel::open(&code).await?);
+        // The first dial happens here, eagerly, so a bad code or an
+        // unreachable server fails the connect attempt rather than the
+        // first request through a bridge that was never going to work.
+        let redialer =
+            std::sync::Arc::new(Redialer::new(code.clone(), Tunnel::open(&code).await?));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| format!("could not open a local port for the tunnel: {e}"))?;
@@ -244,7 +309,7 @@ pub fn open_bridge(code: &PairingCode) -> Result<TunnelBridge, String> {
             .port();
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(accept_loop(listener, tunnel, shutdown_rx));
+        tokio::spawn(accept_loop(listener, redialer, shutdown_rx));
 
         Ok::<_, String>(TunnelBridge {
             local_url: format!("http://127.0.0.1:{port}"),
@@ -255,7 +320,7 @@ pub fn open_bridge(code: &PairingCode) -> Result<TunnelBridge, String> {
 
 async fn accept_loop(
     listener: tokio::net::TcpListener,
-    tunnel: std::sync::Arc<Tunnel>,
+    redialer: std::sync::Arc<Redialer>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
     loop {
@@ -263,12 +328,20 @@ async fn accept_loop(
             _ = &mut shutdown => break,
             accepted = listener.accept() => match accepted {
                 Ok((socket, _)) => socket,
-                Err(_) => break,
+                // Accept errors are transient (file-handle pressure, a
+                // half-open reset). Breaking here killed the whole bridge
+                // for the rest of the session over one of them; breathe
+                // instead, and let the shutdown side stay the only exit.
+                Err(e) => {
+                    crate::stderrln!("[quickconnect] accept failed: {e}");
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
             },
         };
-        let tunnel = tunnel.clone();
+        let redialer = redialer.clone();
         tokio::spawn(async move {
-            if let Err(e) = bridge_one(socket, tunnel).await {
+            if let Err(e) = bridge_one(socket, redialer).await {
                 // Individual connections failing is normal (the client hangs
                 // up on keep-alive idle); only worth a line for diagnosis —
                 // and not worth smearing across a session that is drawing,
@@ -295,9 +368,9 @@ async fn accept_loop(
 /// the server's FIN reaches the client, and the pool buries the body.
 async fn bridge_one(
     socket: tokio::net::TcpStream,
-    tunnel: std::sync::Arc<Tunnel>,
+    redialer: std::sync::Arc<Redialer>,
 ) -> Result<(), String> {
-    let (mut send, mut recv) = tunnel.open_stream().await?;
+    let (mut send, mut recv) = redialer.stream().await?;
     let (mut client_read, mut client_write) = socket.into_split();
 
     let upstream = async {

@@ -694,6 +694,45 @@ Three causes, each now fixed and pinned:
   `a_failed_open_inside_the_window_still_retries` (device, the trace's exact geometry).
 - The recorder itself stays: it is how the next report gets read instead of guessed at.
 
+#### Quick Connect tunnel audit ✅ 2026-08-07
+
+Prompted by "API calls regularly fail" from the same listening sessions. Findings, worst
+first:
+
+- **The tunnel could never re-dial.** One QUIC connection was dialled at connect and held
+  forever; iroh's own transport (5s heartbeats, 15s path idle / 30s relay-path idle) declares
+  a connection dead after any real network interruption — a closed lid, a VPN re-auth, WiFi
+  wandering — and a dead QUIC connection is one-shot. Every later `open_bi` failed, so every
+  API call and every prepare failed for the rest of the session. The bridge now holds the
+  pairing code as the standing capability it is (`Redialer`): the first caller to find the
+  tunnel dead re-dials for everyone (single-flight behind a Mutex held across the dial),
+  the handshake re-proves the secret, and the loopback URL never changes so live sessions
+  ride through.
+- **`open_bi` had no timeout**: on a half-dead connection it hangs until QUIC gives the path
+  up. `STREAM_TIMEOUT` (8s — above the 5s heartbeat, below the 15–30s idle verdicts) now
+  bounds it, and a timeout is treated as death → re-dial.
+- **One accept error killed the whole bridge** (`Err(_) => break` in the accept loop);
+  transient accept failures now log, breathe 250ms, and continue — shutdown stays the only
+  exit.
+- Round two's bridge fix (either-direction-end closes the client conn) is what fixed the
+  API flakiness's steady-state form: the api client's reqwest pool was being handed
+  held-open corpses after the server's keep-alive idle closed streams server-side.
+  Confirmed benign now on both clients; the engine's additionally never pools.
+- Clean bills: pairing-code parsing (four base64 shapes, version gate, secret length),
+  handshake bounds (256-byte read limit, 15s timeout, rejection-vs-transport conflation is
+  deliberate), eager first dial (bad codes fail at connect, not at first use), loopback-only
+  listener, keep-alive defaults (iroh sets them; nothing to add).
+
+And one UI repair from the same weather: **a browse the tunnel ate left its navigation
+standing** — path one level deep, a phantom miller column of the unchanged listing beside
+the pane, another copy stacked per retry click, and unclosable at the root because Back
+refuses to pop with nowhere to step out to. Fixed at both ends: `browse_undo` walks the
+path and the pushed column back when the error arrives (the listing handler's path guard
+already drops any late success for an undone path), and Back at the root now drains
+orphaned trail columns instead of stranding them. Pinned by
+`a_failed_browse_takes_its_column_back_with_it` and
+`back_at_the_root_drains_an_orphaned_column`.
+
 ### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
 Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install
 matrix, then the "later" items inside the same three days: one-line installers for sh and
