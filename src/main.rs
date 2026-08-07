@@ -5,6 +5,7 @@ mod cmd_play;
 mod config;
 mod console;
 mod discovery;
+mod logging;
 mod dj;
 mod engine;
 mod player;
@@ -141,6 +142,15 @@ fn listening_seconds(raw: &str) -> Result<f64, String> {
 
 fn main() {
     let cli = Cli::parse();
+
+    // The debug log first, before anything can dial: a subscriber installed
+    // after the first connection has already missed the interesting part.
+    // The boot line goes to stderr — in the TUI it scrolls away under the
+    // alternate screen and comes back in scrollback after quit, and the
+    // goodbye line at teardown says it again for whoever missed it.
+    if let Some(path) = logging::init() {
+        eprintln!("logging to {}", path.display());
+    }
 
     // Streaming scratch space (PLAN A1): each playing track spools to a temp
     // file. Decide where those belong before anything can open a stream, and

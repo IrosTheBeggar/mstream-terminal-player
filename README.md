@@ -449,6 +449,25 @@ crash are swept at the next start. To put it elsewhere, set
 dir = "/mnt/scratch"   # spool files land in <dir>/spool
 ```
 
+### Diagnostics
+
+Two switches, off by default, each writing to a file and never to the screen — the TUI
+deliberately silences stderr while it draws, so files are how a session explains itself
+afterwards.
+
+- `MSTREAM_LOG=1` captures what the *dependencies* narrate — iroh's relay connects, holepunch
+  attempts and path changes, HTTP retries — into `<cache>/logs/mstream-player.log`, keeping the
+  last few runs beside it as `.1` through `.4`. `MSTREAM_LOG=/path/to/file` writes exactly there
+  instead. `RUST_LOG` chooses how much is said (the usual tracing filter grammar; unset means
+  `info`). The player prints `logging to …` at start and again at quit.
+- `MSTREAM_ENGINE_TRACE=/path/to/file` is the player's own flight recorder: one timestamped line
+  per transition decision — plays, announcements, seeks and their clamps, prepares, open failures
+  with reasons, retries, handovers — plus every diagnostic the TUI kept off the screen. The file
+  is truncated at each start, so it is always exactly one run.
+
+The first is for "what did the network do"; the second for "what did the player decide". A bug
+report with both attached usually answers itself.
+
 ## Playback
 
 ```

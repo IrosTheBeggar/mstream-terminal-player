@@ -34,6 +34,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # TLS-inspecting proxy in front of :443 and re-sign with a CA that only the
 # OS keychain knows (the tunnel research round).
 iroh = { version = "1", features = ["platform-verifier"] }
+# The optional debug log (MSTREAM_LOG): a fmt subscriber writing to a file,
+# never the terminal. env-filter so RUST_LOG chooses what third-party crates
+# (iroh's relay and holepunch narration above all) get to say.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 iroh-tickets = "1"
 # 0.22 rather than 0.23: reqwest, iroh, portmapper and tokio-websockets are
 # all on 0.22.1, and pinning a major of our own put two copies of base64 in
