@@ -192,7 +192,20 @@ pub struct Tunnel {
 impl Tunnel {
     /// Dial the server and complete the secret handshake.
     pub async fn open(code: &PairingCode) -> Result<Self, String> {
-        let endpoint = Endpoint::bind(presets::N0)
+        let endpoint = Endpoint::builder(presets::N0)
+            // The relay is plain HTTPS on 443, which is exactly what a
+            // corporate TLS-inspecting proxy (Netskope, Zscaler) intercepts
+            // and re-signs with a CA only the OS trust store knows. iroh's
+            // default trust is a compiled-in Mozilla bundle, which calls
+            // that CA an UnknownIssuer and fails the relay — the one road
+            // a UDP-blocked network has left. Trust what the operating
+            // system trusts, like every browser on the same machine.
+            .ca_tls_config(iroh::tls::CaTlsConfig::system())
+            // And a network that declares its proxy (HTTP_PROXY and
+            // friends) gets the relay's HTTPS routed through it rather
+            // than around it.
+            .proxy_from_env()
+            .bind()
             .await
             .map_err(|e| format!("could not start the local endpoint: {e}"))?;
 

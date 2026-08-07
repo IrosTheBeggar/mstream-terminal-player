@@ -729,6 +729,26 @@ long as the bridge (Weak-held, 2s cadence, change-only events) reading the selec
 path. Relay and direct sound different; the listener deserves to know which one they are
 hearing.
 
+**Research round (what other iroh users taught us).** Surveyed the ecosystem — dumbpipe,
+sendme, iroh-ssh, pai-sho ("dumbpipe, but it reconnects" — validating the Redialer), Delta
+Chat's peer_channels (the one production user at hostile-network scale; their lesson is
+`endpoint.network_change()`, which macOS handles natively) — and the iroh source itself.
+Two things applied directly to the corporate-network (Netskope) sessions:
+
+- **The relay is plain HTTPS on outbound TCP 443** — precisely what corporate TLS
+  inspection intercepts and re-signs. iroh's default trust is a compiled-in Mozilla bundle
+  (`CaTlsConfig::EmbeddedWebPki`), which calls the corporate CA an UnknownIssuer and fails
+  the relay — the only road a UDP-blocked network has left (iroh #2257 and Dioxus #5564 are
+  the same failure in the wild). Now built with the `platform-verifier` feature and
+  `CaTlsConfig::system()`: the tunnel trusts what the OS keychain trusts, like every
+  browser on the same machine.
+- **`proxy_from_env()`**: a network that declares its proxy (HTTP_PROXY/HTTPS_PROXY) gets
+  the relay's HTTPS routed through it rather than around it. No-op elsewhere.
+
+Noted, not needed: relay-only transport modes (holepunch attempts are harmless),
+`network_change()` nudges (macOS detects natively; the Redialer covers connection death),
+custom relay maps (an mStream-hosted relay is a server-side feature first).
+
 And one UI repair from the same weather: **a browse the tunnel ate left its navigation
 standing** — path one level deep, a phantom miller column of the unchanged listing beside
 the pane, another copy stacked per retry click, and unclosable at the root because Back
