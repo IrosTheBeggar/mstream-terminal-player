@@ -2660,6 +2660,7 @@ dependencies = [
  "tiny_http",
  "tokio",
  "toml",
+ "tracing-subscriber",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",

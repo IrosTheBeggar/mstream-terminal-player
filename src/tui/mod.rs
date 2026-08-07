@@ -214,6 +214,13 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     ratatui::restore();
     crate::console::release_terminal();
 
+    // The boot line scrolled away under the alternate screen; now that the
+    // terminal is a terminal again, say it once more for the person about
+    // to go looking for the file.
+    if let Some(path) = crate::logging::active() {
+        eprintln!("diagnostics were logged to {}", path.display());
+    }
+
     remember(&app);
 
     match result {

@@ -400,6 +400,12 @@ pub fn spool_dir() -> Option<PathBuf> {
     cache_root().map(|root| root.join("spool"))
 }
 
+/// Where the optional debug log goes when `MSTREAM_LOG` asks for the
+/// default location: a `logs` room in the same cache the spool lives in.
+pub fn log_dir() -> Option<PathBuf> {
+    cache_root().map(|root| root.join("logs"))
+}
+
 fn cache_root() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("MSTREAM_PLAYER_CACHE_DIR") {
         return Some(expand_home(PathBuf::from(dir)));

@@ -791,6 +791,28 @@ an unanswered browse can leave path one level shallower than the pane until the 
 navigation (self-heals; both failures' undos fire); the flight-recorder file grows without
 bound across sessions (it is a debug facility you opt into per-run).
 
+#### Logging round ✅ 2026-08-07 (branch `logging`)
+
+The four improvements the post-release overview named, in one coherent shape:
+
+- **`stderrln!` tees into the flight recorder.** The TUI's silence rule stands — the screen is
+  never smeared — but the silenced lines (tunnel re-dials, accept failures, open errors) now
+  land in `MSTREAM_ENGINE_TRACE` when it is on, instead of vanishing with the alternate screen.
+- **`MSTREAM_LOG` installs a `tracing` subscriber** (new `logging.rs`, tracing-subscriber with
+  env-filter): everything iroh, reqwest, hyper and stream-download narrate — relay connects,
+  holepunch attempts, path upgrades, reconnects — written to a file, never the terminal, filtered
+  by `RUST_LOG` (default `info`). The blindness that cost a day of tunnel archaeology, ended.
+- **A standard location with rotation**: `MSTREAM_LOG=1` means `<cache>/logs/mstream-player.log`
+  with the last four runs kept beside it (`.1`–`.4`, logrotate-shift, no date dependency);
+  an explicit path means exactly that file. `logging to …` prints at boot, and the TUI says it
+  again at quit once the terminal is a terminal — both moments a person can actually read.
+- **Recorder hygiene**: the trace file truncates at start and opens with a version header —
+  one run per file, bounded even when the variable lives in a shell profile.
+
+Kept deliberately: two files, two questions. `MSTREAM_LOG` answers "what did the network do",
+the recorder answers "what did the player decide" — merging them would bury the forty decision
+lines under ten thousand of hyper's.
+
 ### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
 Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install
 matrix, then the "later" items inside the same three days: one-line installers for sh and
