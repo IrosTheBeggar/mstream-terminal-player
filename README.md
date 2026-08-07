@@ -211,7 +211,8 @@ Everything lives in the **Settings** tab (`6`): Enter opens Crossfade, `←` `�
 walk the blend length, and Enter toggles the rest — **Gapless**, **Blend
 skips** (a manual skip crosses in a second instead of cutting), and **Pause
 fade** (pause and resume ride a short ramp instead of landing mid-note). What
-you set there is what config.toml remembers. The jukebox has the first pair as
+you set there is what config.toml remembers. The tab's other room is
+**Logs** — see Diagnostics below. The jukebox has the first pair as
 `mstream-player serve --crossfade 6` / `--gapless`; the legacy spawn contract
 keeps all of it off.
 
@@ -451,8 +452,14 @@ dir = "/mnt/scratch"   # spool files land in <dir>/spool
 
 ### Diagnostics
 
-Two switches, off by default, each writing to a file and never to the screen — the TUI
-deliberately silences stderr while it draws, so files are how a session explains itself
+The Settings tab has a **Logs** room: step **Log level** from off up through info, debug and
+trace, and the player starts writing the debug log mid-session — no restart, no environment
+variable; the level you choose is remembered in config.toml. **View log** opens the tail of the
+file right in the player (`j`/`k` scroll, `G` follows the end as new lines arrive, `q` closes),
+which is usually all a "what just happened?" needs.
+
+Underneath sit two switches, off by default, each writing to a file and never to the screen —
+the TUI deliberately silences stderr while it draws, so files are how a session explains itself
 afterwards.
 
 - `MSTREAM_LOG=1` captures what the *dependencies* narrate — iroh's relay connects, holepunch

@@ -813,6 +813,21 @@ Kept deliberately: two files, two questions. `MSTREAM_LOG` answers "what did the
 the recorder answers "what did the player decide" — merging them would bury the forty decision
 lines under ten thousand of hyper's.
 
+#### Logs in Settings ✅ 2026-08-07 (branch `logging`)
+
+The mobile app's debugging room, grown here: **Settings → Logs** holds a **Log level** row
+(off · info · debug · trace, the same ←→ grammar as Blend length) and a **View log** row that
+opens the tail of the file inside the player — modal, `j`/`k` scrolling, `G` following the end
+on a one-second refresh, `q` out. Turning the level up mid-session works because the round
+before this one left the subscriber always installed behind a reloadable filter and a
+late-binding writer: the first step up opens the rotated default file on the spot, and a
+chosen level (only a *chosen* one — environment-forced sessions don't count) persists as
+`[log] level` in config.toml through both save paths. Sessions with no subscriber (unit
+tests, embedding) degrade honestly: the row reports that no file could open and snaps back
+to off. Pinned by the settings-room app test, the config round-trip, and a pty drive of the
+real TUI: level to trace, 26 KB of telemetry inside two seconds, viewer in and out, goodbye
+line, config remembering `trace`.
+
 ### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
 Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install
 matrix, then the "later" items inside the same three days: one-line installers for sh and

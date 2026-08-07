@@ -259,6 +259,7 @@ pub(crate) fn remember(app: &App) {
         }
     };
     config.player.adopt(app.prefs());
+    adopt_log_level(&mut config, &app);
     // Keyed on the identity, never the endpoint: a tunnel session's loopback
     // port is meaningless by the next run.
     if !app.session.server_id.is_empty() {
@@ -413,10 +414,25 @@ fn pop_window_title() {
     let _ = std::io::stdout().flush();
 }
 
+
+/// Carry the session's chosen log level into a config about to be saved —
+/// only a level the user set in Settings, so an environment-forced one
+/// never silently becomes configuration. Off writes as empty, which keeps
+/// the [log] section out of the file entirely.
+fn adopt_log_level(config: &mut config::Config, app: &App) {
+    if let Some(level) = app.chosen_log_level() {
+        config.log.level = match level {
+            crate::logging::Level::Off => String::new(),
+            level => level.label().to_string(),
+        };
+    }
+}
+
 pub(crate) fn save_login(app: &App) -> Result<(), String> {
     let mut config = config::load()?;
     config::touch_server(&mut config, &app.session.server_id, app.session.username.clone());
     config.player.adopt(app.prefs());
+    adopt_log_level(&mut config, app);
     config::save(&config)?;
 
     let mut credentials = config::load_credentials()?;

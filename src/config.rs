@@ -61,6 +61,10 @@ pub struct Config {
     pub player: PlayerPrefs,
     #[serde(default, skip_serializing_if = "CachePrefs::is_unset")]
     pub cache: CachePrefs,
+    /// `[log]` — how loud the debug log is, as the Settings tab left it.
+    /// Absent means off; MSTREAM_LOG and RUST_LOG outrank it.
+    #[serde(default, skip_serializing_if = "LogPrefs::is_unset")]
+    pub log: LogPrefs,
     /// `[theme]` — the three colours the drawing code actually varies. Unset
     /// means palette names, so the terminal's own scheme picks the hues.
     #[serde(default, skip_serializing_if = "ThemePrefs::is_unset")]
@@ -91,6 +95,7 @@ impl Default for Config {
             version: SCHEMA_VERSION,
             player: PlayerPrefs::default(),
             cache: CachePrefs::default(),
+            log: LogPrefs::default(),
             theme: ThemePrefs::default(),
             mouse: MousePrefs::default(),
             keys: std::collections::BTreeMap::new(),
@@ -215,6 +220,22 @@ impl Default for AutoDjPrefs {
 /// `[cache]` — where scratch data lives. Today that is only the streaming
 /// spool (the playing track's buffer, one file at a time); a persistent
 /// track cache would live under the same root if one ever grows.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogPrefs {
+    /// "off", "info", "debug" or "trace"; empty means off and keeps the
+    /// section out of the file entirely.
+    pub level: String,
+    #[serde(flatten)]
+    pub extra: Keep,
+}
+
+impl LogPrefs {
+    pub fn is_unset(&self) -> bool {
+        (self.level.is_empty() || self.level == "off") && self.extra.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CachePrefs {
@@ -793,6 +814,7 @@ mod tests {
         config.player.autodj = "similar".into();
         config.player.crossfade_seconds = 6.0;
         config.player.gapless = true;
+        config.log.level = "debug".into();
         touch_server(&mut config, "http://host:3000", Some("alice".into()));
         set_last_path(&mut config, "http://host:3000", "music/Artist");
         save(&config).unwrap();
@@ -806,6 +828,11 @@ mod tests {
         assert_eq!(loaded.player.repeat, "all");
         assert_eq!(loaded.player.crossfade_seconds, 6.0);
         assert!(loaded.player.gapless);
+        assert_eq!(loaded.log.level, "debug", "the Settings tab's log level persists");
+        // Off is the absence of the section, not a line saying so.
+        let mut quiet = loaded.clone();
+        quiet.log.level = String::new();
+        assert!(!toml::to_string_pretty(&quiet).unwrap().contains("[log]"));
         assert_eq!(loaded.servers[0].username.as_deref(), Some("alice"));
         assert_eq!(loaded.servers[0].last_path.as_deref(), Some("music/Artist"));
 

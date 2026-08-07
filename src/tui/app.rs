@@ -25,6 +25,9 @@ use super::worker::{
     LibraryNode,
 };
 
+/// How much of the log the viewer holds — enough to scroll a real session,
+/// small enough to re-read on a one-second clock without noticing.
+const LOG_VIEW_LINES: usize = 500;
 const SEEK_STEP: f64 = 5.0;
 /// The shifted seek keys. Five seconds is the wrong unit for a long mix or a
 /// set recording, where the interesting distance is minutes.
@@ -104,10 +107,12 @@ fn fmt_blend(seconds: f32) -> String {
 /// A place in the Settings tab's little hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsNode {
-    /// The menu of settings groups — one group so far.
+    /// The menu of settings groups.
     Root,
     /// The crossfade group: how tracks hand over.
     Crossfade,
+    /// The logs group: how loud the debug log is, and reading it.
+    Logs,
 }
 
 /// What a Settings row is, and so what Enter and ←→ do to it.
@@ -123,6 +128,23 @@ pub enum SettingRow {
     BlendSkips,
     /// Pause and resume ride a short ramp instead of landing mid-wave.
     PauseFade,
+    /// The root row that opens the logs group.
+    LogsMenu,
+    /// How loud the debug log is; ← and → walk it, Enter steps it up.
+    LogLevel,
+    /// Opens the in-app viewer on the current log file.
+    ViewLog,
+}
+
+/// The in-app log viewer: a tail of the debug log, refreshed while open.
+pub struct LogView {
+    pub path: std::path::PathBuf,
+    pub lines: Vec<String>,
+    pub scroll: usize,
+    /// Stick to the end as new lines arrive, until the user scrolls away;
+    /// `G` re-attaches.
+    pub follow: bool,
+    refreshed: std::time::Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -867,6 +889,13 @@ pub struct App {
     /// skipping so a queue of nothing but broken files stops rather than
     /// looping.
     failures: usize,
+    /// How loud the debug log is, mirrored from crate::logging for the
+    /// Settings row; `log_touched` is what lets quitting persist only a
+    /// level the user actually chose here, not one the environment forced.
+    pub log_level: crate::logging::Level,
+    log_touched: bool,
+    /// The log viewer, while it is open — it owns the movement keys.
+    pub log_view: Option<LogView>,
     /// How the Quick Connect tunnel is reaching the server, when this
     /// session rides one. Fed by the worker's sampler; the header shows it
     /// beside the session name. None outside tunnel sessions.
@@ -1005,6 +1034,9 @@ impl App {
             starting: None,
             failures: 0,
             browse_undo: None,
+            log_level: crate::logging::level(),
+            log_touched: false,
+            log_view: None,
             tunnel_path: None,
             seek_goal: None,
             volume: 1.0,
@@ -1363,6 +1395,9 @@ impl App {
         }
         // Panels are modal: they own the arrow keys and the letters they use,
         // so playback shortcuts can't fire while one is up.
+        if self.log_view.is_some() {
+            return self.handle_log_view_action(action);
+        }
         if self.dj_panel.is_some() {
             return self.handle_dj_action(action);
         }
@@ -1393,9 +1428,9 @@ impl App {
             }
             Action::Cancel => {
                 self.show_help = false;
-                // The guaranteed way out of the Crossfade rows, where the
-                // left arrow has been given to adjustment.
-                if self.tab == Tab::Settings && *self.settings_node() == SettingsNode::Crossfade {
+                // The guaranteed way out of the settings value rows, where
+                // the left arrow has been given to adjustment.
+                if self.tab == Tab::Settings && *self.settings_node() != SettingsNode::Root {
                     return self.go_back();
                 }
                 Vec::new()
@@ -1787,11 +1822,19 @@ impl App {
                     self.settings.set(self.crossfade_setting_entries());
                     Vec::new()
                 }
+                SettingRow::LogsMenu => {
+                    self.push_trail();
+                    self.settings_stack.enter(SettingsNode::Logs);
+                    self.settings.set(self.logs_setting_entries());
+                    Vec::new()
+                }
+                SettingRow::ViewLog => self.open_log_view(),
                 // Enter walks a value the same way → does; ← walks it back.
                 SettingRow::BlendLength
                 | SettingRow::Gapless
                 | SettingRow::BlendSkips
-                | SettingRow::PauseFade => self.adjust_setting(1),
+                | SettingRow::PauseFade
+                | SettingRow::LogLevel => self.adjust_setting(1),
             },
             Entry::Track { .. } => {
                 // Enqueue everything visible and start at the highlighted row —
@@ -1965,6 +2008,7 @@ impl App {
                     SettingsNode::Crossfade => {
                         self.settings.set(self.crossfade_setting_entries())
                     }
+                    SettingsNode::Logs => self.settings.set(self.logs_setting_entries()),
                 }
                 Vec::new()
             }
@@ -1975,11 +2019,18 @@ impl App {
     // ── Settings ────────────────────────────────────────────────────────────
 
     fn settings_root_entries(&self) -> Vec<Entry> {
-        vec![Entry::Setting {
-            label: "Crossfade".into(),
-            detail: format!("{} · how tracks hand over", self.crossfade_summary()),
-            row: SettingRow::CrossfadeMenu,
-        }]
+        vec![
+            Entry::Setting {
+                label: "Crossfade".into(),
+                detail: format!("{} · how tracks hand over", self.crossfade_summary()),
+                row: SettingRow::CrossfadeMenu,
+            },
+            Entry::Setting {
+                label: "Logs".into(),
+                detail: format!("{} · the player explains itself", self.log_level.label()),
+                row: SettingRow::LogsMenu,
+            },
+        ]
     }
 
     /// The state at a glance, for the root row.
@@ -2043,12 +2094,32 @@ impl App {
         ]
     }
 
+    fn logs_setting_entries(&self) -> Vec<Entry> {
+        let level = match self.log_level {
+            crate::logging::Level::Off => "off · nothing is written · → to speak".to_string(),
+            level => format!(
+                "{} · iroh, http and the spool narrate at this level · ←→ adjust",
+                level.label()
+            ),
+        };
+        let view = match crate::logging::tail(1) {
+            Some((path, _)) => format!("Enter · {}", path.display()),
+            None => "no file yet · set a level first".to_string(),
+        };
+        vec![
+            Entry::Parent,
+            Entry::Setting { label: "Log level".into(), detail: level, row: SettingRow::LogLevel },
+            Entry::Setting { label: "View log".into(), detail: view, row: SettingRow::ViewLog },
+        ]
+    }
+
     /// Rebuild whichever settings view is showing, in place: the values in
     /// the details are live, and [`Pane::set`] would throw the cursor away.
     fn refresh_settings_rows(&mut self) {
         let entries = match self.settings_node() {
             SettingsNode::Root => self.settings_root_entries(),
             SettingsNode::Crossfade => self.crossfade_setting_entries(),
+            SettingsNode::Logs => self.logs_setting_entries(),
         };
         let selected = self.settings.state.selected().unwrap_or(0).min(entries.len() - 1);
         self.settings.entries = entries;
@@ -2058,11 +2129,18 @@ impl App {
     /// The ← route into adjustment: Some only when the cursor stands on a
     /// Settings value row, so Back keeps meaning back everywhere else.
     fn settings_step(&mut self, delta: i32) -> Option<Vec<Effect>> {
-        if self.tab != Tab::Settings || *self.settings_node() != SettingsNode::Crossfade {
+        if self.tab != Tab::Settings || *self.settings_node() == SettingsNode::Root {
             return None;
         }
         match self.pane().selected() {
-            Some(Entry::Setting { row, .. }) if *row != SettingRow::CrossfadeMenu => {
+            // Value rows adjust; menu rows and action rows (View log) keep
+            // Back meaning back.
+            Some(Entry::Setting { row, .. })
+                if !matches!(
+                    row,
+                    SettingRow::CrossfadeMenu | SettingRow::LogsMenu | SettingRow::ViewLog
+                ) =>
+            {
                 Some(self.adjust_setting(delta))
             }
             _ => None,
@@ -2101,10 +2179,102 @@ impl App {
                 self.pause_fade = !self.pause_fade;
                 Effect::Audio(AudioCmd::SetPauseFade(self.pause_fade))
             }
-            SettingRow::CrossfadeMenu => return Vec::new(),
+            SettingRow::LogLevel => {
+                self.log_level = self.log_level.step(delta);
+                self.log_touched = true;
+                match crate::logging::set_level(self.log_level) {
+                    Some(path) => self.info(format!("logging to {}", path.display())),
+                    None if self.log_level != crate::logging::Level::Off => {
+                        // Asked to speak but no file could be opened.
+                        self.log_level = crate::logging::Level::Off;
+                        self.error("no log file could be opened");
+                    }
+                    None => {}
+                }
+                self.refresh_settings_rows();
+                return Vec::new();
+            }
+            SettingRow::CrossfadeMenu | SettingRow::LogsMenu | SettingRow::ViewLog => {
+                return Vec::new();
+            }
         };
         self.refresh_settings_rows();
         vec![effect]
+    }
+
+    /// The log level to remember at quit — Some only when the user chose
+    /// one in this session's Settings, so an environment-forced level never
+    /// silently becomes configuration.
+    pub fn chosen_log_level(&self) -> Option<crate::logging::Level> {
+        self.log_touched.then_some(self.log_level)
+    }
+
+    /// Open the log viewer on the current file, tail-first — or say why not.
+    fn open_log_view(&mut self) -> Vec<Effect> {
+        match crate::logging::tail(LOG_VIEW_LINES) {
+            Some((path, lines)) => {
+                self.log_view = Some(LogView {
+                    path,
+                    lines,
+                    scroll: usize::MAX, // clamped to the end at render
+                    follow: true,
+                    refreshed: std::time::Instant::now(),
+                });
+            }
+            None => self.info("no log yet — set a level first"),
+        }
+        Vec::new()
+    }
+
+    /// The viewer is modal: movement scrolls it, and the ways out are the
+    /// ways out of everything else. All other keys are consumed — a stray
+    /// `n` while reading must not skip the music.
+    fn handle_log_view_action(&mut self, action: Action) -> Vec<Effect> {
+        let Some(view) = &mut self.log_view else { return Vec::new() };
+        match action {
+            Action::Down => {
+                view.scroll = view.scroll.saturating_add(1);
+                view.follow = false;
+            }
+            Action::Up => {
+                view.scroll = view.scroll.saturating_sub(1);
+                view.follow = false;
+            }
+            Action::PageDown => {
+                view.scroll = view.scroll.saturating_add(20);
+                view.follow = false;
+            }
+            Action::PageUp => {
+                view.scroll = view.scroll.saturating_sub(20);
+                view.follow = false;
+            }
+            Action::First => {
+                view.scroll = 0;
+                view.follow = false;
+            }
+            Action::Last => {
+                view.scroll = usize::MAX;
+                view.follow = true;
+            }
+            Action::Quit | Action::Cancel | Action::Back => {
+                self.log_view = None;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// Re-read the tail while the viewer follows the end, on the render
+    /// clock but no more than once a second.
+    pub fn refresh_log_view(&mut self) {
+        let Some(view) = &mut self.log_view else { return };
+        if !view.follow || view.refreshed.elapsed() < std::time::Duration::from_secs(1) {
+            return;
+        }
+        if let Some((_, lines)) = crate::logging::tail(LOG_VIEW_LINES) {
+            view.lines = lines;
+        }
+        view.refreshed = std::time::Instant::now();
     }
 
     // ── Discover ────────────────────────────────────────────────────────────

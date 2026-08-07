@@ -3535,6 +3535,65 @@ fn gapless_repeat_one_announces_its_own_seam() {
 }
 
 #[test]
+fn the_logs_room_switches_levels_and_opens_the_viewer() {
+    let mut app = connected_app();
+    app.handle_action(Action::SelectTab(5));
+    app.handle_action(Action::Down); // Crossfade → Logs
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogsMenu, .. })),
+        "the root has a Logs row"
+    );
+    app.handle_action(Action::Activate);
+    assert_eq!(*app.settings_node(), SettingsNode::Logs);
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogLevel, .. })),
+        "the cursor rests on the level row"
+    );
+
+    // In tests no subscriber is installed, so stepping the level up takes
+    // the degraded road: the file cannot open, the level snaps back to
+    // off, and the row says so — which is also what a read-only disk
+    // would do in a real session.
+    app.handle_action(Action::Activate);
+    assert_eq!(app.log_level, crate::logging::Level::Off);
+    assert!(app.message.as_ref().unwrap().text.contains("no log file"));
+    assert_eq!(app.chosen_log_level(), Some(crate::logging::Level::Off),
+        "touched: the choice would persist");
+
+    // The viewer refuses politely with no file to show.
+    app.handle_action(Action::Down);
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::ViewLog, .. }))
+    );
+    app.handle_action(Action::Activate);
+    assert!(app.log_view.is_none());
+    assert!(app.message.as_ref().unwrap().text.contains("no log yet"));
+
+    // With lines in hand the viewer is modal: j scrolls it and does not
+    // move the settings cursor; q closes the viewer, not the player.
+    app.log_view = Some(LogView {
+        path: std::path::PathBuf::from("/tmp/x.log"),
+        lines: (1..=50).map(|n| format!("line {n}")).collect(),
+        scroll: usize::MAX,
+        follow: true,
+        refreshed: std::time::Instant::now(),
+    });
+    let before = app.pane().state.selected();
+    app.handle_action(Action::Down);
+    assert_eq!(app.pane().state.selected(), before, "the list under it holds still");
+    assert!(!app.log_view.as_ref().unwrap().follow, "scrolling detaches from the end");
+    app.handle_action(Action::Last);
+    assert!(app.log_view.as_ref().unwrap().follow, "G re-attaches");
+    app.handle_action(Action::Quit);
+    assert!(app.log_view.is_none(), "q closes the viewer");
+    assert!(!app.should_quit, "and only the viewer");
+
+    // Untouched sessions remember nothing.
+    let fresh = connected_app();
+    assert_eq!(fresh.chosen_log_level(), None);
+}
+
+#[test]
 fn the_settings_menu_reads_the_state_at_a_glance_and_backs_out_whole() {
     let mut app = connected_app();
     app.crossfade = 6.0;
