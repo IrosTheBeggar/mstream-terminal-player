@@ -12,19 +12,29 @@ pub mod ui;
 pub mod viz;
 pub mod worker;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
+#[cfg(not(target_arch = "wasm32"))]
 use ratatui::DefaultTerminal;
+#[cfg(not(target_arch = "wasm32"))]
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEventKind,
     MouseButton, MouseEventKind,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use ratatui::crossterm::execute;
+#[cfg(not(target_arch = "wasm32"))]
 use ratatui::layout::Rect;
 
 use crate::config;
-use app::{App, Effect};
+use app::App;
+#[cfg(not(target_arch = "wasm32"))]
+use app::Effect;
+#[cfg(not(target_arch = "wasm32"))]
 use worker::{ApiCmd, AudioCmd, Event};
 
 /// How long to wait for a key before redrawing anyway. Also sets how quickly
@@ -38,6 +48,7 @@ const POLL_DRAWING_AUDIO: Duration = Duration::from_millis(33);
 
 /// How often the spinner steps. Off the wall clock rather than the draw count,
 /// so it turns at one speed whether the loop is idle or churning.
+#[cfg(not(target_arch = "wasm32"))]
 const SPIN_EVERY: Duration = Duration::from_millis(90);
 
 /// How long to wait before drawing again. Shared with the replay harness,
@@ -70,6 +81,7 @@ pub(crate) struct Startup {
 /// Resolve the starting point from stored config plus any overrides. Shared
 /// with the replay harness so a scripted run begins exactly where the real
 /// binary would.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup {
     let config = match config::load() {
         Ok(config) => config,
@@ -124,6 +136,7 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
 
 /// The bindings a `[keys]` section produces, with anything wrong reported to
 /// stderr — which the player can't do mid-draw, but a command can.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn keymap_for(
     keys: &std::collections::BTreeMap<String, Vec<String>>,
 ) -> keymap::Keymap {
@@ -136,6 +149,7 @@ pub(crate) fn keymap_for(
 
 /// The palette in force, with anything unreadable reported to stderr — which
 /// the player cannot do mid-draw, but a start-up path can.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn theme_for(prefs: &config::ThemePrefs) -> ui::Theme {
     let (theme, warnings) = ui::Theme::from_prefs(prefs);
     for warning in &warnings {
@@ -162,6 +176,7 @@ pub(crate) fn app_from(start: Startup) -> App {
     app
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     let start = startup(server, token);
 
@@ -216,6 +231,7 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
 /// lists for a while and was taken out again — moving a cursor three rows a
 /// notch is not what a wheel feels like it should do, and the lists are
 /// already well served by the keys.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn on_mouse(app: &mut App, mouse: event::MouseEvent, area: Rect) -> Vec<Effect> {
     let at = ratatui::layout::Position { x: mouse.column, y: mouse.row };
     // Every event, moves included: the bar lights under the pointer, and
@@ -238,6 +254,7 @@ pub(crate) fn on_mouse(app: &mut App, mouse: event::MouseEvent, area: Rect) -> V
 
 /// Write preferences and where we were, on the way out. Saving here rather
 /// than on every keystroke keeps a volume nudge from becoming a disk write.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn remember(app: &App) {
     // Never a default here. Startup runs on defaults when the file won't
     // parse, so falling back a second time would write those defaults over a
@@ -263,6 +280,7 @@ pub(crate) fn remember(app: &App) {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn event_loop(
     terminal: &mut DefaultTerminal,
     app: &mut App,
@@ -339,6 +357,7 @@ fn event_loop(
 /// it passed through between two draws could never have been seen, and each
 /// one kept is a full frame of work. Everything else — clicks, keys, and the
 /// order they came in — is kept exactly.
+#[cfg(not(target_arch = "wasm32"))]
 fn collapse_moves(inputs: Vec<TermEvent>) -> Vec<TermEvent> {
     let mut kept: Vec<TermEvent> = Vec::with_capacity(inputs.len());
     for input in inputs {
@@ -357,6 +376,7 @@ fn collapse_moves(inputs: Vec<TermEvent>) -> Vec<TermEvent> {
 
 /// What the terminal's title bar should read. Paused is worth saying, because
 /// from outside the window silence and a paused track look the same.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn window_title(app: &App) -> String {
     match &app.now_playing {
         Some(track) if app.status.paused => format!("⏸ {}", track.display_name()),
@@ -373,6 +393,7 @@ pub(crate) fn window_title(app: &App) -> String {
 /// The audio thread is the exception — its panics are caught and become
 /// AudioFailed, so the hook stands back rather than tearing the terminal
 /// down under a UI that is still running (audit #32).
+#[cfg(not(target_arch = "wasm32"))]
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -386,6 +407,7 @@ fn install_panic_hook() {
     }));
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn set_window_title(title: &str) {
     use ratatui::crossterm::{execute, terminal::SetTitle};
     let _ = execute!(std::io::stdout(), SetTitle(title));
@@ -394,18 +416,21 @@ fn set_window_title(title: &str) {
 /// Save and restore the title the terminal had before us (XTWINOPS 22/23), so
 /// quitting doesn't leave the last track's name in the tab. Terminals that
 /// don't implement it ignore the sequence, which costs nothing.
+#[cfg(not(target_arch = "wasm32"))]
 fn push_window_title() {
     use std::io::Write;
     let _ = write!(std::io::stdout(), "\x1b[22;2t");
     let _ = std::io::stdout().flush();
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn pop_window_title() {
     use std::io::Write;
     let _ = write!(std::io::stdout(), "\x1b[23;2t");
     let _ = std::io::stdout().flush();
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn save_login(app: &App) -> Result<(), String> {
     let mut config = config::load()?;
     config::touch_server(&mut config, &app.session.server_id, app.session.username.clone());
@@ -423,6 +448,7 @@ pub(crate) fn save_login(app: &App) -> Result<(), String> {
     config::save_credentials(&credentials)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn dispatch(
     app: &App,
     pending: &mut Vec<Effect>,

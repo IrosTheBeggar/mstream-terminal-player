@@ -7,6 +7,7 @@
 //! device hotplug, exotic codecs. Every terminal player surveyed for PLAN.md
 //! skipped this abstraction and wished it hadn't.
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::engine::Engine;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -61,6 +62,7 @@ pub trait PlayerCtl {
     fn tick(&self);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PlayerCtl for Engine {
     fn play(&self, source: &str, duration_hint: Option<f64>) -> Result<(), String> {
         self.play_source(source.to_string(), duration_hint).map_err(|e| e.to_string())

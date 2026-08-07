@@ -1,21 +1,125 @@
+// On wasm the whole native half — config persistence, the HTTP client's
+// response shapes, the Auto-DJ math — is compiled (the types are shared) but
+// never called, and dead-code analysis would name every function of it. The
+// native build keeps the lint; it's the one where dead code means something.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 mod advance;
 mod api;
-mod cmd_library;
-mod cmd_play;
+mod clock;
 mod config;
 mod console;
-mod discovery;
 mod dj;
-mod engine;
+mod input;
 mod player;
-mod quickconnect;
-mod replay;
-mod runtime;
-mod serve;
 mod tui;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod cmd_library;
+#[cfg(not(target_arch = "wasm32"))]
+mod cmd_play;
+#[cfg(not(target_arch = "wasm32"))]
+mod replay;
+#[cfg(not(target_arch = "wasm32"))]
+mod runtime;
+#[cfg(not(target_arch = "wasm32"))]
+mod serve;
+
+/// The browser build (see its module note). Everything below this line that
+/// swaps a module out for a hand-written stand-in exists so the App, the
+/// drawing code and the worker message types compile unchanged there.
+#[cfg(target_arch = "wasm32")]
+mod web;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod discovery;
+/// Stand-in for [discovery.rs]: the browse machinery is mDNS and can never
+/// run in a browser, but the found-server shape appears in the worker Event
+/// enum, so the type itself must exist. Kept field-for-field identical.
+#[cfg(target_arch = "wasm32")]
+mod discovery {
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct DiscoveredServer {
+        pub name: String,
+        pub base_url: String,
+        pub version: Option<String>,
+        pub quick_connect: bool,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod engine;
+/// Only the tap: pure sample buffering the visualizer reads. The rest of the
+/// engine is rodio and the streaming pipeline, which stay native — the wasm
+/// stub feeds the tap a synthesised signal instead.
+#[cfg(target_arch = "wasm32")]
+mod engine {
+    #[path = "tap.rs"]
+    pub(crate) mod tap;
+
+    /// The crossfade prepare thread's name, which the panic-hook check
+    /// (worker::panics_are_caught) compares against. No such thread ever
+    /// runs here — the name just has to exist to be not-matched.
+    pub(crate) const PREPARE_THREAD: &str = "mstream-prepare";
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod quickconnect;
+/// Stand-in for the pure items of [quickconnect.rs] that the app logic
+/// reaches for (tunnel identities appear in saved-server lists, and the
+/// tunnel-path words appear in the header); the tunnel itself is iroh and
+/// stays native. Kept line-for-line identical.
+#[cfg(target_arch = "wasm32")]
+mod quickconnect {
+    /// Marks a remembered server as one reached through a tunnel rather than
+    /// at a URL. Deliberately not a real scheme: nothing may hand it to an
+    /// HTTP client.
+    pub const TUNNEL_ID_PREFIX: &str = "mstream+iroh://";
+
+    /// How the tunnel is reaching the server right now. iroh starts a
+    /// connection on its relay path and holepunches toward a direct one, so
+    /// this can change moments after connecting — and change back when a
+    /// network path dies.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TunnelPath {
+        /// A holepunched peer-to-peer path carries the traffic.
+        Direct,
+        /// Traffic bounces through an iroh relay server.
+        Relay,
+        /// Between tunnels: the last one died and a fresh dial has not won yet.
+        Reconnecting,
+    }
+
+    impl TunnelPath {
+        /// The word the UI shows for this state.
+        pub fn label(self) -> &'static str {
+            match self {
+                TunnelPath::Direct => "direct",
+                TunnelPath::Relay => "relay",
+                TunnelPath::Reconnecting => "reconnecting…",
+            }
+        }
+    }
+
+    pub fn is_tunnel_id(server: &str) -> bool {
+        server.starts_with(TUNNEL_ID_PREFIX)
+    }
+
+    /// A tunnel identity in a form worth showing someone, since the raw
+    /// endpoint id is a 52-character public key. Anything else is returned
+    /// unchanged.
+    pub fn display_server(server: &str) -> String {
+        match server.strip_prefix(TUNNEL_ID_PREFIX) {
+            Some(id) => format!("quick connect · {}", id.chars().take(12).collect::<String>()),
+            None => server.to_string(),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 use clap::{Args, Parser, Subcommand};
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser)]
 #[command(
     name = "mstream-player",
@@ -32,6 +136,7 @@ struct Cli {
     command: Option<Command>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Subcommand)]
 enum Command {
     /// Launch the interactive terminal player (the default)
@@ -74,6 +179,7 @@ enum Command {
     Playlists(cmd_library::PlaylistArgs),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Args)]
 struct ServeArgs {
     /// Port for the JSON control API
@@ -128,6 +234,7 @@ fn crossfade_seconds(raw: &str) -> Result<f32, String> {
 ///
 /// The upper bound is a day rather than the type's limit: past that the flag
 /// is a typo, and a browse that never returns looks exactly like a hang.
+#[cfg(not(target_arch = "wasm32"))]
 fn listening_seconds(raw: &str) -> Result<f64, String> {
     let seconds: f64 = raw.parse().map_err(|_| format!("'{raw}' is not a number"))?;
     if !seconds.is_finite() || seconds < 0.0 {
@@ -139,6 +246,7 @@ fn listening_seconds(raw: &str) -> Result<f64, String> {
     Ok(seconds)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let cli = Cli::parse();
 
@@ -210,6 +318,11 @@ fn main() {
         // Bare `mstream-player` launches the player.
         None => std::process::exit(tui::run(None, None)),
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    web::run();
 }
 
 #[cfg(test)]

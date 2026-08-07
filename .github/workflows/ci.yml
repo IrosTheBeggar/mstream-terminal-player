@@ -29,3 +29,24 @@ jobs:
 
       - name: Build
         run: cargo build --release
+
+  # The browser build has no test runner, but it has a type system: a plain
+  # check catches the native-only import or the unhandled worker command that
+  # main once grew without noticing, and costs a minute. Everything in plain
+  # [dependencies] must build for this target too — see Cargo.toml.
+  wasm:
+    name: Check (wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm32
+
+      - name: Check
+        run: cargo check --target wasm32-unknown-unknown

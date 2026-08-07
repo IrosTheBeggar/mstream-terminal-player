@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>mstream-player · web demo</title>
+    <!-- rustc emits bulk-memory ops by default now; trunk's wasm-opt
+         validates with them off unless told, and fails the release build.
+         (data-wasm-opt-params needs trunk >= 0.21.) -->
+    <link
+      data-trunk
+      rel="rust"
+      data-bin="mstream-player"
+      data-wasm-opt="2"
+      data-wasm-opt-params="--enable-bulk-memory --enable-nontrapping-float-to-int"
+    />
+    <script>
+      // Spike scaffolding: collect boot-time failures somewhere a headless
+      // probe can read them, since a hidden pane surfaces no console.
+      window.__bootErrors = [];
+      window.addEventListener("error", function (e) {
+        window.__bootErrors.push("error: " + (e.message || String(e.error)));
+      });
+      window.addEventListener("unhandledrejection", function (e) {
+        window.__bootErrors.push("rejection: " + String(e.reason));
+      });
+    </script>
+    <script>
+      // The terminal renders on requestAnimationFrame, which browsers stop
+      // delivering to hidden pages — an embedded or backgrounded demo would
+      // sit unpainted until first shown. While hidden, substitute a slow
+      // timer (browsers throttle it to ~1Hz, which is plenty); hand back to
+      // real frames the moment the page is visible.
+      (function () {
+        const native = window.requestAnimationFrame.bind(window);
+        window.requestAnimationFrame = function (cb) {
+          if (document.visibilityState === "hidden") {
+            return setTimeout(function () { cb(performance.now()); }, 250);
+          }
+          return native(cb);
+        };
+      })();
+    </script>
+    <script>
+      // No focus dance here: the shell listens for keys on the document
+      // itself (see src/web/mod.rs), so no element needs focus for the
+      // keyboard to work.
+
+      // The browser has its own ideas about these keys — Space and the
+      // arrows scroll, "/" and "'" open Firefox's quick-find, Tab walks
+      // focus off the terminal and takes the keyboard with it. ratzilla
+      // deliberately doesn't preventDefault, so the page has to. Modified
+      // combinations pass through untouched: Ctrl+R is still reload, Ctrl+C
+      // is still copy.
+      (function () {
+        const claimed = new Set([
+          " ", "Tab", "Backspace", "/", "'",
+          "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+          "PageUp", "PageDown", "Home", "End",
+        ]);
+        document.addEventListener(
+          "keydown",
+          function (e) {
+            if (e.ctrlKey || e.metaKey || e.altKey) return;
+            if (claimed.has(e.key)) e.preventDefault();
+          },
+          { capture: true }
+        );
+      })();
+    </script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: #101014;
+        /* The grid is sized to the window; a one-pixel overhang otherwise
+           grows scrollbars, and Space/arrows would bounce the page. */
+        overflow: hidden;
+        height: 100%;
+      }
+      body {
+        font-family: "Cascadia Mono", "JetBrains Mono", Consolas, "DejaVu Sans Mono", monospace;
+        font-size: 16px;
+        /* It's an application, not a document: no I-beam, no drag-select
+           highlighting, and no focus ring around the whole terminal (the
+           grid holds focus permanently by design). */
+        cursor: default;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      pre {
+        /* The terminal's rows are <pre> elements. The browser default gives
+           each a 1em vertical margin and its own idea of a monospace font —
+           the margins alone once pushed the bottom three rows 559px past
+           the fold. Zero margin, and the same font the cell probe measures,
+           or rows and measurements disagree. */
+        margin: 0;
+        font-family: inherit;
+        font-size: inherit;
+      }
+      [tabindex]:focus {
+        outline: none;
+      }
+    </style>
+  </head>
+  <body></body>
+</html>

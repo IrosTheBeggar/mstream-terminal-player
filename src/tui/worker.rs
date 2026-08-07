@@ -9,9 +9,13 @@
 //!
 //! The UI thread owns only state and rendering, and communicates by message.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 use crate::api::types::{
@@ -21,14 +25,19 @@ use crate::api::types::{
 use crate::api::{ApiError, Client};
 use crate::discovery::DiscoveredServer;
 use crate::dj;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::engine::Engine;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::engine::tap::AudioTap;
-use crate::player::{PlayerCtl, PlayerStatus};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::player::PlayerCtl;
+use crate::player::PlayerStatus;
 use crate::tui::app::Tab;
 use crate::tui::art;
 
 /// How often the audio thread ticks the engine and publishes status. Also the
 /// upper bound on command latency, so keep it small enough to feel instant.
+#[cfg(not(target_arch = "wasm32"))]
 const TICK: Duration = Duration::from_millis(120);
 
 #[derive(Debug, Clone, PartialEq)]
@@ -339,6 +348,7 @@ pub fn panics_are_caught(thread: Option<&str>) -> bool {
 /// Returns the tap alongside the command channel: the engine is built on the
 /// audio thread, so the UI cannot reach in for it afterwards, but the tap
 /// itself is just a buffer and can be made here and handed to both.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn spawn_audio(events: Sender<Event>) -> (Sender<AudioCmd>, Arc<AudioTap>) {
     let (tx, rx) = mpsc::channel();
     let tap = AudioTap::new();
@@ -352,6 +362,7 @@ pub fn spawn_audio(events: Sender<Event>) -> (Sender<AudioCmd>, Arc<AudioTap>) {
 
 /// Keep answering the door so the UI's sends never error; the player stays
 /// usable for browsing with no audio at all.
+#[cfg(not(target_arch = "wasm32"))]
 fn drain_until_shutdown(rx: &Receiver<AudioCmd>) {
     while let Ok(cmd) = rx.recv() {
         if cmd == AudioCmd::Shutdown {
@@ -361,6 +372,7 @@ fn drain_until_shutdown(rx: &Receiver<AudioCmd>) {
 }
 
 /// The words inside a panic payload, if it carried any.
+#[cfg(not(target_arch = "wasm32"))]
 fn panic_note(panic: &(dyn std::any::Any + Send)) -> &str {
     panic
         .downcast_ref::<&str>()
@@ -384,6 +396,7 @@ fn panic_note(panic: &(dyn std::any::Any + Send)) -> &str {
 /// batch has already moved past. Volume and the crossfade length are
 /// sticky, so the last of each is kept wherever it was said. A Shutdown
 /// makes everything else moot.
+#[cfg(not(target_arch = "wasm32"))]
 fn collapse(batch: Vec<AudioCmd>) -> Vec<AudioCmd> {
     if batch.contains(&AudioCmd::Shutdown) {
         return vec![AudioCmd::Shutdown];
@@ -420,6 +433,7 @@ fn collapse(batch: Vec<AudioCmd>) -> Vec<AudioCmd> {
     kept
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>, tap: Arc<AudioTap>) {
     let engine = match Engine::new() {
         Ok(e) => e,
@@ -440,6 +454,7 @@ fn audio_loop(rx: &Receiver<AudioCmd>, events: &Sender<Event>, tap: Arc<AudioTap
 /// #32). Caught, it is just a worse kind of [`Event::AudioFailed`]: the
 /// same event, and the same degraded-but-browsable player the no-device
 /// path has always produced.
+#[cfg(not(target_arch = "wasm32"))]
 fn listen_guarded(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
     // The player is never touched again after a caught panic — whatever it
     // was mid-way through stays where it fell — which is what makes the
@@ -455,6 +470,7 @@ fn listen_guarded(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Send
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
     let mut watch = EndWatch::default();
 
@@ -520,6 +536,7 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
     player.stop();
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn apply_audio_cmd(player: &dyn PlayerCtl, cmd: AudioCmd) -> Option<String> {
     match cmd {
         AudioCmd::Play { url, duration_hint } => return player.play(&url, duration_hint).err(),
@@ -569,6 +586,7 @@ enum Passing {
 /// cleared when the expected source arrives — or when its play fails, so a
 /// doomed open cannot masquerade as a later handover's excuse.
 #[derive(Default)]
+#[cfg(not(target_arch = "wasm32"))]
 struct EndWatch {
     /// The source last seen loaded. Kept rather than a bare "there was one"
     /// because it is the only place the name still exists when the end is
@@ -579,6 +597,7 @@ struct EndWatch {
     expecting: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl EndWatch {
     /// Note what a command asks of playback. Only a stop can account for a
     /// source disappearing, and only a play for one source becoming another;
@@ -624,6 +643,7 @@ impl EndWatch {
 
 /// Browse for servers on its own thread — mDNS listens for a fixed window, and
 /// that shouldn't hold up a pairing attempt queued behind it.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn spawn_discovery(events: Sender<Event>) {
     thread::Builder::new()
         .name("mstream-mdns".into())
@@ -636,10 +656,12 @@ pub fn spawn_discovery(events: Sender<Event>) {
 
 /// How long to listen for adverts. Long enough for a quiet network to answer,
 /// short enough not to feel stuck.
+#[cfg(not(target_arch = "wasm32"))]
 const DISCOVERY_WINDOW: Duration = Duration::from_secs(3);
 
 // ── API thread ──────────────────────────────────────────────────────────────
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn spawn_api(events: Sender<Event>) -> Sender<ApiCmd> {
     let (tx, rx) = mpsc::channel();
     thread::Builder::new()
@@ -649,6 +671,7 @@ pub fn spawn_api(events: Sender<Event>) -> Sender<ApiCmd> {
     tx
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     let mut client: Option<Arc<Client>> = None;
     // Held for as long as this thread lives; dropping it closes the tunnel out
@@ -720,10 +743,12 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 Err(e) => Some(Event::Error(e)),
             },
 
+
             read => {
                 spawn_read(client.clone(), caps, events.clone(), read);
                 None
             }
+
         };
 
         // One place to learn what the server offers, so a new way of
@@ -746,6 +771,7 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
 /// and nothing else. In-flight replies against a client that has since been
 /// replaced still arrive; the app's stale-reply guards are what drop them,
 /// the same as any other answer about somewhere the user no longer is.
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_read(
     client: Option<Arc<Client>>,
     caps: Capabilities,
@@ -764,6 +790,7 @@ fn spawn_read(
 /// One read, answered. Failures map onto events here: only 401 means the
 /// session is no good; 403 is a permission or feature-flag answer that
 /// shouldn't bounce the user to a login form.
+#[cfg(not(target_arch = "wasm32"))]
 fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
     let Some(c) = client else {
         return Event::Error("not connected to a server".into());
@@ -772,20 +799,23 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         ApiCmd::Browse(path) => {
             c.file_explorer(&path).map(|l| Event::Listing(Box::new(l)))
         }
-        ApiCmd::Library { node, dest } => {
-            load_library(c, &node).map(|data| Event::Library { node, dest, data })
-        }
+        ApiCmd::Library { node, dest } => crate::api::wait(load_library(c, &node))
+            .map(|data| Event::Library { node, dest, data }),
         ApiCmd::AutoDj(request) => {
-            autodj_pick(c, caps, &request).map(|picked| Event::AutoDjPick {
+            crate::api::wait(autodj_pick(c, caps, &request)).map(|picked| Event::AutoDjPick {
                 candidates: picked.tracks,
                 ignore_list: picked.ignore_list,
                 note: picked.note,
             })
         }
-        ApiCmd::AutoDjSample { request, count } => autodj_sample(c, caps, &request, count),
+        ApiCmd::AutoDjSample { request, count } => {
+            crate::api::wait(autodj_sample(c, caps, &request, count))
+        }
         ApiCmd::Genres => c.genres().map(Event::Genres),
-        ApiCmd::Journey { start, end, length } => journey(c, &start, &end, length),
-        ApiCmd::Discover { node, seed } => discover(c, &node, &seed),
+        ApiCmd::Journey { start, end, length } => {
+            crate::api::wait(journey(c, &start, &end, length))
+        }
+        ApiCmd::Discover { node, seed } => crate::api::wait(discover(c, &node, &seed)),
         ApiCmd::Playlists => c.playlists().map(Event::Playlists),
         ApiCmd::LoadPlaylist(name) => {
             c.playlist_load(&name).map(|tracks| Event::PlaylistTracks { name, tracks })
@@ -819,6 +849,7 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
 /// shutdown), the next sample fails to upgrade and the thread ends. The
 /// first sample is sent unconditionally so a fresh session shows its state
 /// within a beat of connecting.
+#[cfg(not(target_arch = "wasm32"))]
 fn spawn_path_sampler(
     bridge: std::sync::Weak<crate::quickconnect::TunnelBridge>,
     events: Sender<Event>,
@@ -842,6 +873,7 @@ fn spawn_path_sampler(
 
 /// Parse a pairing code, bring the tunnel up on loopback, and report the
 /// identity the code names alongside it.
+#[cfg(not(target_arch = "wasm32"))]
 fn quick_connect(code: &str) -> Result<(String, crate::quickconnect::TunnelBridge), String> {
     let parsed = crate::quickconnect::parse_code(code)?;
     let id = parsed.server_id();
@@ -852,6 +884,7 @@ fn quick_connect(code: &str) -> Result<(String, crate::quickconnect::TunnelBridg
 /// They differ only for a tunnel, which the UI names either way round: by its
 /// identity when reconnecting, by the loopback URL when the login form is
 /// carrying what the tunnel just published.
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_target(server: &str, tunnel: Option<&(String, String)>) -> (String, String) {
     match tunnel {
         Some((local_url, id)) if server == id || server == local_url => {
@@ -866,6 +899,7 @@ fn resolve_target(server: &str, tunnel: Option<&(String, String)>) -> (String, S
 /// An allowlist rather than "not an error", because this decides whether a
 /// working tunnel gets torn down: an outcome nobody has thought about yet
 /// should keep the session that is already up, not replace it.
+#[cfg(not(target_arch = "wasm32"))]
 fn tunnel_answered(answer: &Option<Event>) -> bool {
     matches!(answer, Some(Event::Connected { .. } | Event::NeedsLogin { .. }))
 }
@@ -875,6 +909,7 @@ fn tunnel_answered(answer: &Option<Event>) -> bool {
 ///
 /// Installing the client before the ping would leave a session pointing at a
 /// server that never replied, so the order here is the point.
+#[cfg(not(target_arch = "wasm32"))]
 fn establish(
     client: &mut Option<Arc<Client>>,
     c: Client,
@@ -888,6 +923,7 @@ fn establish(
     Ok(Event::Connected { server, id: id.to_string(), username, token, ping: Box::new(ping) })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn connect(
     client: &mut Option<Arc<Client>>,
     server: &str,
@@ -910,6 +946,7 @@ fn connect(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn login(
     client: &mut Option<Arc<Client>>,
     server: &str,
@@ -934,27 +971,39 @@ fn login(
     }
 }
 
-fn load_library(client: &Client, node: &LibraryNode) -> Result<LibraryData, ApiError> {
+/// Shared by the native api thread (via `api::wait`) and the web worker
+/// (awaited on the browser's event loop) — as is everything below it that
+/// takes a `&Client`. One brain, two drivers.
+pub(crate) async fn load_library(
+    client: &Client,
+    node: &LibraryNode,
+) -> Result<LibraryData, ApiError> {
     Ok(match node {
         // The mode menu is static; the UI fills it in without asking.
         LibraryNode::Root => LibraryData::Artists(Vec::new()),
-        LibraryNode::Artists => LibraryData::Artists(client.artists()?),
-        LibraryNode::Artist(artist) => LibraryData::Albums(client.artist_albums(artist)?),
-        LibraryNode::Albums => LibraryData::Albums(client.albums()?),
-        LibraryNode::Album { name, artist } => {
-            LibraryData::Tracks(client.album_songs(name, artist.as_deref())?)
+        LibraryNode::Artists => LibraryData::Artists(client.artists_async().await?),
+        LibraryNode::Artist(artist) => {
+            LibraryData::Albums(client.artist_albums_async(artist).await?)
         }
-        LibraryNode::Genres => LibraryData::Genres(client.genres()?),
-        LibraryNode::Genre(genre) => LibraryData::Tracks(client.genre_songs(genre)?),
-        LibraryNode::Recent => LibraryData::Tracks(client.recently_added(RECENT_LIMIT)?),
+        LibraryNode::Albums => LibraryData::Albums(client.albums_async().await?),
+        LibraryNode::Album { name, artist } => {
+            LibraryData::Tracks(client.album_songs_async(name, artist.as_deref()).await?)
+        }
+        LibraryNode::Genres => LibraryData::Genres(client.genres_async().await?),
+        LibraryNode::Genre(genre) => {
+            LibraryData::Tracks(client.genre_songs_async(genre).await?)
+        }
+        LibraryNode::Recent => {
+            LibraryData::Tracks(client.recently_added_async(RECENT_LIMIT).await?)
+        }
     })
 }
 
 /// One answer from the picker.
-struct Picked {
-    tracks: Vec<Track>,
-    ignore_list: Vec<u32>,
-    note: Option<String>,
+pub(crate) struct Picked {
+    pub(crate) tracks: Vec<Track>,
+    pub(crate) ignore_list: Vec<u32>,
+    pub(crate) note: Option<String>,
     pool: Option<crate::api::types::SonicReport>,
 }
 
@@ -965,18 +1014,22 @@ type AutoDjResult = Result<Picked, ApiError>;
 /// Similarity is best-effort: the server may have discovery switched off, or
 /// simply not have embedded this track yet. Rather than stalling, both cases
 /// fall through to tempo/key matching and say why.
-fn autodj_pick(client: &Client, caps: Capabilities, request: &DjRequest) -> AutoDjResult {
+pub(crate) async fn autodj_pick(
+    client: &Client,
+    caps: Capabilities,
+    request: &DjRequest,
+) -> AutoDjResult {
     let ignore_list = request.ignore_list.clone();
     match request.mode {
         AutoDjMode::Off => {
             Ok(Picked { tracks: Vec::new(), ignore_list, note: None, pool: None })
         }
 
-        AutoDjMode::BpmKey => pick_by_tempo_and_key(client, request, None),
+        AutoDjMode::BpmKey => pick_by_tempo_and_key(client, request, None).await,
 
         AutoDjMode::Similar => {
             let Some(seed) = request.seed.as_deref() else {
-                return pick_by_tempo_and_key(client, request, None);
+                return pick_by_tempo_and_key(client, request, None).await;
             };
             // No flag, no probe: ping already said there is no index here, so
             // asking would spend a round trip to be told 403.
@@ -985,26 +1038,36 @@ fn autodj_pick(client: &Client, caps: Capabilities, request: &DjRequest) -> Auto
                     client,
                     request,
                     Some("this server has no similarity index — matching tempo and key"),
-                );
+                )
+                .await;
             }
-            match client.similar_tracks(&seed.filepath, SIMILAR_LIMIT)? {
+            match client.similar_tracks_async(&seed.filepath, SIMILAR_LIMIT).await? {
                 // Backstop for a server reconfigured mid-session; the flag
                 // above is what normally keeps us out of here.
-                None => pick_by_tempo_and_key(
-                    client,
-                    request,
-                    Some("similarity was switched off on this server — matching tempo and key"),
-                ),
-                Some(found) if found.not_analyzed => pick_by_tempo_and_key(
-                    client,
-                    request,
-                    Some("this track hasn't been analysed yet — matching tempo and key"),
-                ),
-                Some(found) if found.results.is_empty() => pick_by_tempo_and_key(
-                    client,
-                    request,
-                    Some("nothing sounded similar — matching tempo and key"),
-                ),
+                None => {
+                    pick_by_tempo_and_key(
+                        client,
+                        request,
+                        Some("similarity was switched off on this server — matching tempo and key"),
+                    )
+                    .await
+                }
+                Some(found) if found.not_analyzed => {
+                    pick_by_tempo_and_key(
+                        client,
+                        request,
+                        Some("this track hasn't been analysed yet — matching tempo and key"),
+                    )
+                    .await
+                }
+                Some(found) if found.results.is_empty() => {
+                    pick_by_tempo_and_key(
+                        client,
+                        request,
+                        Some("nothing sounded similar — matching tempo and key"),
+                    )
+                    .await
+                }
                 Some(found) => Ok(Picked {
                     tracks: found.results.into_iter().map(|r| r.into_track()).collect(),
                     ignore_list,
@@ -1016,7 +1079,7 @@ fn autodj_pick(client: &Client, caps: Capabilities, request: &DjRequest) -> Auto
     }
 }
 
-fn pick_by_tempo_and_key(
+async fn pick_by_tempo_and_key(
     client: &Client,
     request: &DjRequest,
     note: Option<&str>,
@@ -1031,7 +1094,7 @@ fn pick_by_tempo_and_key(
     );
     let sonic_asked = body.min_similarity.is_some();
 
-    let response = match client.random_song(&body) {
+    let response = match client.random_song_async(&body).await {
         Ok(response) => response,
         // A hard sonic pool fails loudly by design — the server would rather
         // say "nothing is that similar" than quietly play something that
@@ -1047,7 +1110,7 @@ fn pick_by_tempo_and_key(
                 &request.recent_artists,
                 false,
             );
-            let response = client.random_song(&relaxed)?;
+            let response = client.random_song_async(&relaxed).await?;
             return Ok(Picked {
                 tracks: response.songs,
                 ignore_list: response.ignore_list,
@@ -1069,7 +1132,7 @@ fn pick_by_tempo_and_key(
 /// Take several picks in a row without committing to any of them, feeding
 /// each back into the next call's cooldown so the sample shows variety rather
 /// than the same track three times.
-fn autodj_sample(
+pub(crate) async fn autodj_sample(
     client: &Client,
     caps: Capabilities,
     request: &DjRequest,
@@ -1084,7 +1147,7 @@ fn autodj_sample(
     let mut pool = None;
     let mut note = None;
     for _ in 0..count {
-        let picked = match autodj_pick(client, caps, &scratch) {
+        let picked = match autodj_pick(client, caps, &scratch).await {
             Ok(picked) => picked,
             // A sample that finds nothing is an answer, not an error: it is
             // exactly what a too-tight setting looks like.
@@ -1120,7 +1183,7 @@ const DISCOVER_LIMIT: u32 = 40;
 /// seed hasn't been embedded yet, or the ranking was walked as far as the
 /// server was willing to go. None is a failure, so each gets a sentence and
 /// an empty list rather than an error.
-fn discover(
+pub(crate) async fn discover(
     client: &Client,
     node: &DiscoverNode,
     seed: &Track,
@@ -1141,7 +1204,9 @@ fn discover(
         }),
 
         DiscoverNode::Tracks => {
-            let Some(found) = client.similar_tracks(&seed.filepath, DISCOVER_LIMIT)? else {
+            let Some(found) =
+                client.similar_tracks_async(&seed.filepath, DISCOVER_LIMIT).await?
+            else {
                 return Ok(disabled(DiscoverData::Tracks(Vec::new())));
             };
             let note = if found.not_analyzed {
@@ -1169,7 +1234,7 @@ fn discover(
                     note: Some("this track has no artist tag to compare against".into()),
                 });
             };
-            let Some(found) = client.similar_artists(artist, DISCOVER_LIMIT)? else {
+            let Some(found) = client.similar_artists_async(artist, DISCOVER_LIMIT).await? else {
                 return Ok(disabled(DiscoverData::Artists(Vec::new())));
             };
             let note = if found.not_analyzed {
@@ -1197,8 +1262,13 @@ fn discover(
 
 /// Fetch a journey and translate the ways it can legitimately come up short
 /// into something worth reading.
-fn journey(client: &Client, start: &str, end: &str, length: u32) -> Result<Event, ApiError> {
-    let Some(response) = client.journey(start, end, length)? else {
+pub(crate) async fn journey(
+    client: &Client,
+    start: &str,
+    end: &str,
+    length: u32,
+) -> Result<Event, ApiError> {
+    let Some(response) = client.journey_async(start, end, length).await? else {
         // Gated on `discoveryPath`, so this only happens if the server was
         // reconfigured since the ping.
         return Ok(Event::Journey {

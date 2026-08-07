@@ -15,7 +15,7 @@
 
 use std::net::IpAddr;
 
-use reqwest::Url;
+use url::Url;
 
 /// Canonicalise a typed server address, filling in whatever was left out.
 ///

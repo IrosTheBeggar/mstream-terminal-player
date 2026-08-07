@@ -15,12 +15,22 @@
 //! into garbage — so at handover the engine flips the outgoing source's
 //! switch off, and the ring belongs to the track you are moving into.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
+#[cfg(not(target_arch = "wasm32"))]
 use rodio::source::SeekError;
+#[cfg(not(target_arch = "wasm32"))]
 use rodio::{ChannelCount, Sample, SampleRate, Source};
+
+/// rodio's sample type, for the build that has no rodio. The tap is plain
+/// data on wasm — and f32 is what rodio 0.22's `Sample` already is, so the
+/// frames are the same shape on both targets.
+#[cfg(target_arch = "wasm32")]
+pub type Sample = f32;
 
 /// How much audio the tap holds, in frames — one sample per channel, so the
 /// stretch of time held does not depend on how many channels the source has.
@@ -32,6 +42,7 @@ pub const TAP_FRAMES: usize = 4096;
 /// How many samples a source gathers before handing them over. Taking the
 /// lock per sample would be ninety thousand times a second for no benefit;
 /// this makes it about twenty.
+#[cfg(not(target_arch = "wasm32"))]
 const BATCH: usize = 2048;
 
 /// The most recent audio, interleaved exactly as it went to the device.
@@ -45,8 +56,9 @@ impl AudioTap {
         Arc::new(AudioTap::default())
     }
 
-    /// From the audio thread. Never waits — see the module note.
-    fn push(&self, batch: &[Sample], rate: u32, channels: u16) {
+    /// From the audio thread — or, on wasm, from the stub that synthesises a
+    /// signal for the visualizer. Never waits — see the module note.
+    pub(crate) fn push(&self, batch: &[Sample], rate: u32, channels: u16) {
         if let Ok(mut ring) = self.ring.try_lock() {
             ring.push(batch, rate, channels);
         }
@@ -176,6 +188,7 @@ impl Ring {
 }
 
 /// A source that keeps a copy of everything passing through it.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Tapped<S> {
     inner: S,
     tap: Arc<AudioTap>,
@@ -185,12 +198,14 @@ pub struct Tapped<S> {
     batch: Vec<Sample>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S> Tapped<S> {
     pub fn new(inner: S, tap: Arc<AudioTap>, live: Arc<AtomicBool>) -> Self {
         Tapped { inner, tap, live, batch: Vec::with_capacity(BATCH) }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S: Source> Iterator for Tapped<S> {
     type Item = Sample;
 
@@ -215,6 +230,7 @@ impl<S: Source> Iterator for Tapped<S> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S: Source> Source for Tapped<S> {
     fn current_span_len(&self) -> Option<usize> {
         self.inner.current_span_len()

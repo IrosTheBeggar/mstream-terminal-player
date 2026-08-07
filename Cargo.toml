@@ -6,11 +6,47 @@ license = "GPL-3.0-only"
 description = "Terminal player and headless server-audio engine for mStream"
 repository = "https://github.com/IrosTheBeggar/mstream-terminal-player"
 
+# Two targets, one crate. The wasm32 build is the browser demo (see src/web):
+# the same App and drawing code rendered by ratzilla, with the OS-bound layers
+# — audio device, threads, sockets, filesystem — either stubbed or compiled
+# out. Everything in plain [dependencies] must build for both.
+
 [dependencies]
-rodio = { version = "0.22", features = ["symphonia-all"] }
-tiny_http = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+fastrand = "2"
+toml = "1.1.4"
+# Shared: on wasm this is the fetch backend (its TLS/socket internals are
+# target-gated inside reqwest itself), which is what makes api::Client's
+# async core one implementation for both builds.
+reqwest = "0.13.4"
+# The Url type api::urls builds with. On native this is the same crate
+# reqwest re-exports (cargo unifies the 2.x line), so the two spellings are
+# one type where they meet.
+url = "2"
+# default-features = false drops the crossterm backend, which has no wasm
+# build; the native block below turns it back on. "std" must be named
+# explicitly here — the default set only implies it through crossterm, and
+# without it ratatui-core goes no-std and expects the app to provide a
+# critical-section implementation, which surfaces as unresolvable `env`
+# imports in the .wasm.
+ratatui = { version = "0.30.2", default-features = false, features = [
+    "std",
+    "all-widgets",
+    "layout-cache",
+    "macros",
+    "underline-color",
+] }
+# Decodes cover art, nothing else. jpeg and png are what mStream's art cache
+# actually holds; the default features would compile every codec the crate
+# knows plus rayon, for images this player never meets. Shared: both decoders
+# are pure Rust, and tui::art is part of the drawing path the wasm build keeps.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ratatui = { version = "0.30.2", features = ["crossterm"] }
+rodio = { version = "0.22", features = ["symphonia-all"] }
+tiny_http = "0.12"
 # Held at 0.5 on purpose: rodio 0.22 decodes through symphonia 0.5.x, and a
 # direct 0.6 dep would compile a second symphonia tree whose format support
 # differs from what playback actually uses. Bump together with rodio.
@@ -18,17 +54,10 @@ serde_json = "1"
 # transcode codec=mp3/aac rule from PLAN.md finding #14 stands either way.)
 symphonia = { version = "0.5", features = ["all"] }
 clap = { version = "4", features = ["derive", "env"] }
-fastrand = "2"
 stream-download = "0.24.2"
 # "time" is for the open() timeout in engine::http — the runtime already ran
 # with enable_all(), the timer just wasn't compiled in (PLAN.md finding #69).
 tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
-reqwest = "0.13.4"
-ratatui = "0.30.2"
-# Decodes cover art, nothing else. jpeg and png are what mStream's art cache
-# actually holds; the default features would compile every codec the crate
-# knows plus rayon, for images this player never meets.
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # platform-verifier: trust what the operating system trusts for the relay's
 # TLS, not just the compiled-in Mozilla bundle — corporate networks put a
 # TLS-inspecting proxy in front of :443 and re-sign with a CA that only the
@@ -40,7 +69,40 @@ iroh-tickets = "1"
 # the tree for one decode call (PLAN.md finding #70).
 base64 = "0.22"
 mdns-sd = "0.20.3"
-toml = "1.1.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ratzilla = "0.3.1"
+# Closure — the shell's own document-level keydown listener (see
+# src/web/mod.rs for why ratzilla's on_key_event can't be trusted with it).
+wasm-bindgen = "0.2"
+# spawn_local — how the web api worker runs the async client without a
+# runtime: the browser's event loop is the executor.
+wasm-bindgen-futures = "0.4"
+# The playback path: an <audio> element for sound, an AudioContext with
+# per-channel analysers for the visualizer tap. See src/web/audio.rs for
+# why this and not cpal or an AudioWorklet.
+web-sys = { version = "0.3", features = [
+    "AnalyserNode",
+    "AudioContext",
+    "AudioContextState",
+    "AudioDestinationNode",
+    "AudioNode",
+    "BaseAudioContext",
+    "ChannelSplitterNode",
+    "HtmlAudioElement",
+    "HtmlMediaElement",
+    "Location",
+    "MediaElementAudioSourceNode",
+    "MediaError",
+    "Window",
+] }
+# std::time::Instant panics on wasm32-unknown-unknown; this is the same API
+# over performance.now(). See src/clock.rs.
+web-time = "1"
+console_error_panic_hook = "0.1"
+# Without "js" the browser build has no entropy source and every shuffle
+# deals the same hand.
+fastrand = { version = "2", features = ["js"] }
 
 [profile.release]
 # One distributed binary, built rarely: spend the compile time on it. Thin

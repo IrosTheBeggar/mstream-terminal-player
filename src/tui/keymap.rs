@@ -8,7 +8,7 @@
 //! reached only through [`Keymap::action`], and it is the part of the
 //! input story most likely to keep growing.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::input::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::app::{Action, InputMode};
 
