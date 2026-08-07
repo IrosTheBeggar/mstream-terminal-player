@@ -421,8 +421,13 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 /// it will settle for, and the header keeps that much back.
 fn server_labels(app: &App) -> Vec<String> {
     // A tunnel session shows its identity, not the loopback port it happens
-    // to be riding on today.
-    let shown = app.server_display();
+    // to be riding on today — and how it is currently reached, because
+    // "direct" and "through a relay on another continent" sound different
+    // and the listener deserves to know which one they are hearing.
+    let shown = match app.tunnel_path {
+        Some(path) => format!("{} · {}", app.server_display(), path.label()),
+        None => app.server_display(),
+    };
     let host = shown
         .trim_start_matches("https://")
         .trim_start_matches("http://")

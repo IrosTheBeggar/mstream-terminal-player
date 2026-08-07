@@ -723,6 +723,12 @@ first:
   deliberate), eager first dial (bad codes fail at connect, not at first use), loopback-only
   listener, keep-alive defaults (iroh sets them; nothing to add).
 
+The header now also says how a tunnel session is reached — `quick connect · ab12cd ·
+direct` / `· relay` / `· reconnecting…` — fed by a sampler thread that lives exactly as
+long as the bridge (Weak-held, 2s cadence, change-only events) reading the selected QUIC
+path. Relay and direct sound different; the listener deserves to know which one they are
+hearing.
+
 And one UI repair from the same weather: **a browse the tunnel ate left its navigation
 standing** — path one level deep, a phantom miller column of the unchanged listing beside
 the pane, another copy stacked per retry click, and unclosable at the root because Back

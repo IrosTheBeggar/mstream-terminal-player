@@ -250,6 +250,10 @@ pub enum Event {
     HandedOver { from: String, to: String },
     /// The audio device could not be opened; playback is unavailable.
     AudioFailed(String),
+    /// How the Quick Connect tunnel is reaching the server right now —
+    /// direct, through a relay, or between tunnels. Sent on change by a
+    /// sampler that lives exactly as long as the bridge does.
+    TunnelPath(crate::quickconnect::TunnelPath),
     /// One source would not play — wrong format, gone from the server, or
     /// something this decoder doesn't speak. The rest of the queue is fine.
     /// Named for the same reason [`Event::TrackEnded`] is, and more urgently:
@@ -648,9 +652,10 @@ pub fn spawn_api(events: Sender<Event>) -> Sender<ApiCmd> {
 fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     let mut client: Option<Arc<Client>> = None;
     // Held for as long as this thread lives; dropping it closes the tunnel out
-    // from under the client, so it is explicitly dropped on the way out.
+    // from under the client, so it is explicitly dropped on the way out. An
+    // Arc so the path sampler can watch it without owning it.
     #[allow(unused_assignments)]
-    let mut bridge: Option<crate::quickconnect::TunnelBridge> = None;
+    let mut bridge: Option<Arc<crate::quickconnect::TunnelBridge>> = None;
     // The tunnel session's two names, once one is open: the loopback address
     // requests go to, and the identity it is remembered by.
     let mut tunnel: Option<(String, String)> = None;
@@ -698,6 +703,8 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                         // on carries on working while they read the error.
                         answer
                     } else {
+                        let opened = Arc::new(opened);
+                        spawn_path_sampler(Arc::downgrade(&opened), events.clone());
                         bridge = Some(opened);
                         tunnel = Some((url.clone(), id.clone()));
                         // A public-mode server answers straight away; anything
@@ -805,6 +812,32 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         Err(ApiError::Unauthorized) => Event::Unauthorized,
         Err(e) => Event::Error(e.to_string()),
     }
+}
+
+/// Watch how the tunnel is reaching the server and tell the UI when it
+/// changes. Holds only a Weak: when the bridge is dropped (a new session,
+/// shutdown), the next sample fails to upgrade and the thread ends. The
+/// first sample is sent unconditionally so a fresh session shows its state
+/// within a beat of connecting.
+fn spawn_path_sampler(
+    bridge: std::sync::Weak<crate::quickconnect::TunnelBridge>,
+    events: Sender<Event>,
+) {
+    let _ = thread::Builder::new().name("mstream-tunnel-path".into()).spawn(move || {
+        let mut last: Option<crate::quickconnect::TunnelPath> = None;
+        loop {
+            let Some(bridge) = bridge.upgrade() else { return };
+            let path = bridge.path();
+            drop(bridge);
+            if last != Some(path) {
+                last = Some(path);
+                if events.send(Event::TunnelPath(path)).is_err() {
+                    return;
+                }
+            }
+            thread::sleep(Duration::from_secs(2));
+        }
+    });
 }
 
 /// Parse a pairing code, bring the tunnel up on loopback, and report the

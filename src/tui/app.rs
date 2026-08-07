@@ -867,6 +867,10 @@ pub struct App {
     /// skipping so a queue of nothing but broken files stops rather than
     /// looping.
     failures: usize,
+    /// How the Quick Connect tunnel is reaching the server, when this
+    /// session rides one. Fed by the worker's sampler; the header shows it
+    /// beside the session name. None outside tunnel sessions.
+    pub tunnel_path: Option<crate::quickconnect::TunnelPath>,
     /// How to walk the file browser back if the Browse in flight fails: the
     /// path the click replaced, and whether it pushed a trail column on the
     /// way in. A tunnel that flakes mid-browse otherwise left the navigation
@@ -1001,6 +1005,7 @@ impl App {
             starting: None,
             failures: 0,
             browse_undo: None,
+            tunnel_path: None,
             seek_goal: None,
             volume: 1.0,
             crossfade: 0.0,
@@ -2809,6 +2814,10 @@ impl App {
                 self.search.trail.clear();
                 self.search.set(self.search_root_entries());
                 self.message = None;
+                Vec::new()
+            }
+            Event::TunnelPath(path) => {
+                self.tunnel_path = Some(path);
                 Vec::new()
             }
             Event::Error(e) => {

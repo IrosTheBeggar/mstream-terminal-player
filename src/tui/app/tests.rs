@@ -668,6 +668,30 @@ fn seeking_while_idle_does_nothing() {
 }
 
 #[test]
+fn the_tunnel_path_reaches_the_header_and_resets_with_the_session() {
+    use crate::quickconnect::TunnelPath;
+    let mut app = connected_app();
+    app.apply_event(Event::TunnelPath(TunnelPath::Relay));
+    assert_eq!(app.tunnel_path, Some(TunnelPath::Relay));
+    app.apply_event(Event::TunnelPath(TunnelPath::Direct));
+    assert_eq!(app.tunnel_path, Some(TunnelPath::Direct));
+    // The words the header will use.
+    assert_eq!(TunnelPath::Direct.label(), "direct");
+    assert_eq!(TunnelPath::Relay.label(), "relay");
+    assert_eq!(TunnelPath::Reconnecting.label(), "reconnecting…");
+    // A fresh session starts with no verdict — a direct server would
+    // otherwise wear the last tunnel's badge.
+    app.apply_event(Event::Connected {
+        server: "http://direct:3000".into(),
+        id: "http://direct:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::new(crate::api::types::Ping::default()),
+    });
+    assert_eq!(app.tunnel_path, None);
+}
+
+#[test]
 fn a_failed_browse_takes_its_column_back_with_it() {
     let mut app = connected_app();
     app.path = String::new();

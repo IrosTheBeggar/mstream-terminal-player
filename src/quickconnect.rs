@@ -52,6 +52,31 @@ pub const TUNNEL_ID_PREFIX: &str = "mstream+iroh://";
 /// costs seconds, not half a minute of silence.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// How the tunnel is reaching the server right now. iroh starts a
+/// connection on its relay path and holepunches toward a direct one, so
+/// this can change moments after connecting — and change back when a
+/// network path dies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelPath {
+    /// A holepunched peer-to-peer path carries the traffic.
+    Direct,
+    /// Traffic bounces through an iroh relay server.
+    Relay,
+    /// Between tunnels: the last one died and a fresh dial has not won yet.
+    Reconnecting,
+}
+
+impl TunnelPath {
+    /// The word the UI shows for this state.
+    pub fn label(self) -> &'static str {
+        match self {
+            TunnelPath::Direct => "direct",
+            TunnelPath::Relay => "relay",
+            TunnelPath::Reconnecting => "reconnecting…",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PairingCode {
     pub addr: EndpointAddr,
@@ -185,6 +210,20 @@ impl Tunnel {
         Ok(Tunnel { connection, _endpoint: endpoint })
     }
 
+    /// Which kind of path is carrying application data right now.
+    fn path(&self) -> TunnelPath {
+        let paths = self.connection.paths();
+        // The selected path is the one QUIC is actually sending on; when
+        // the snapshot catches a moment with none selected, judge by what
+        // exists — a live IP path is what "direct" means either way.
+        match paths.iter().find(|p| p.is_selected()).map(|p| p.is_relay()) {
+            Some(true) => TunnelPath::Relay,
+            Some(false) => TunnelPath::Direct,
+            None if paths.iter().any(|p| p.is_ip()) => TunnelPath::Direct,
+            None => TunnelPath::Relay,
+        }
+    }
+
     /// Open one tunnelled TCP connection to the server's HTTP port.
     pub async fn open_stream(
         &self,
@@ -216,6 +255,19 @@ impl Redialer {
         Redialer {
             code,
             current: tokio::sync::Mutex::new(Some(std::sync::Arc::new(first))),
+        }
+    }
+
+    /// The current tunnel's path, without waiting: a locked slot means a
+    /// re-dial is underway, and an empty one means the last tunnel died —
+    /// both of which the UI honestly calls "reconnecting".
+    fn path(&self) -> TunnelPath {
+        match self.current.try_lock() {
+            Ok(slot) => match slot.as_ref() {
+                Some(tunnel) => tunnel.path(),
+                None => TunnelPath::Reconnecting,
+            },
+            Err(_) => TunnelPath::Reconnecting,
         }
     }
 
@@ -286,8 +338,19 @@ async fn handshake(connection: &Connection, secret: &[u8]) -> Result<(), String>
 /// `local_url` and work exactly as they do against a direct server.
 pub struct TunnelBridge {
     pub local_url: String,
+    /// The dialler the accept loop is using — shared here so the UI can ask
+    /// how the server is currently being reached.
+    redialer: std::sync::Arc<Redialer>,
     /// Dropping this stops the accept loop and closes the tunnel.
     _shutdown: tokio::sync::oneshot::Sender<()>,
+}
+
+impl TunnelBridge {
+    /// How the tunnel is reaching the server right now. Cheap and
+    /// non-blocking; safe to poll from a sampler.
+    pub fn path(&self) -> TunnelPath {
+        self.redialer.path()
+    }
 }
 
 /// Dial a pairing code and publish it on loopback. Blocking; call from a worker
@@ -309,10 +372,11 @@ pub fn open_bridge(code: &PairingCode) -> Result<TunnelBridge, String> {
             .port();
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(accept_loop(listener, redialer, shutdown_rx));
+        tokio::spawn(accept_loop(listener, redialer.clone(), shutdown_rx));
 
         Ok::<_, String>(TunnelBridge {
             local_url: format!("http://127.0.0.1:{port}"),
+            redialer,
             _shutdown: shutdown_tx,
         })
     })?

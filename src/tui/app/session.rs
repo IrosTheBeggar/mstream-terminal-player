@@ -327,6 +327,10 @@ impl App {
     pub(super) fn consume_session(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::Connected { server, id, username, token, ping } => {
+                // A fresh session starts with no verdict on how its tunnel
+                // runs; the sampler speaks within a couple of seconds when
+                // there is one, and a direct server never sets it at all.
+                self.tunnel_path = None;
                 self.connected = true;
                 self.connecting = false;
                 self.connect.submitting = false;
