@@ -131,6 +131,18 @@ fn client() -> Result<&'static Client, String> {
         .get_or_init(|| {
             Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
+                // Never reuse a kept-alive connection. A pooled connection
+                // assumes the far end is still there, and through the Quick
+                // Connect bridge that assumption failed silently: the tunnel
+                // held the client-side TCP open after the server's side was
+                // gone, the pool offered the corpse to the next open, and
+                // the request sat waiting for headers until OPEN_TIMEOUT —
+                // which read as "crossfade didn't happen" whenever a prepare
+                // fired within the pool's idle window of the previous
+                // download finishing (the listening-session trace, fixed
+                // alongside the bridge itself). Streams gain nothing from
+                // reuse — an open per track, a connection per open.
+                .pool_max_idle_per_host(0)
                 .build()
                 .map_err(|e| format!("failed to build http client: {e}"))
         })
@@ -255,6 +267,50 @@ mod tests {
         let missing = std::env::temp_dir().join("mstream-player-test-no-such-dir");
         assert_eq!(clean_spool_dir(&missing), 0, "a missing dir is a no-op");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_open_never_reuses_the_first_connection() {
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // A server that answers exactly one request per connection and then
+        // holds the socket open in silence — the shape the Quick Connect
+        // bridge presented when the server behind it had hung up. A pooled
+        // client offers that connection to its next request and waits out
+        // its whole timeout; a pool-free client opens fresh and succeeds.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let conns = Arc::new(AtomicUsize::new(0));
+        let counter = conns.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut head = [0u8; 2048];
+                    let _ = stream.read(&mut head);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nRIFF",
+                    );
+                    // Hold the socket open, deaf: no FIN for the pool to
+                    // notice, no answer for a reused request.
+                    std::thread::sleep(Duration::from_secs(5));
+                });
+            }
+        });
+
+        let url = format!("http://{addr}/one.wav");
+        let first = open(&url);
+        assert!(first.is_ok(), "{:?}", first.err());
+        drop(first);
+        let second = open(&url);
+        assert!(
+            second.is_ok(),
+            "second open hung on a pooled connection: {:?}",
+            second.err()
+        );
+        assert_eq!(conns.load(Ordering::SeqCst), 2, "each open dials fresh");
     }
 
     #[test]

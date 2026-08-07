@@ -1547,13 +1547,17 @@ impl Engine {
 
         // A transient failure earns another try on a clock, not never: the
         // one-way latch inside the window meant a single starved open late
-        // in a track (a seek's spool catch-up hogging a slow link, say)
-        // silenced the seam for good, and the listener heard "crossfade
-        // off". Rate-limiting keeps what the latch was for — a dead URL is
-        // still not walked into every tick — and the runway gate keeps a
-        // retry that cannot possibly finish from being spent at all.
+        // in a track silenced the seam for good, and the listener heard
+        // "crossfade off". Rate-limiting keeps what the latch was for — a
+        // dead URL is still not walked into every tick. The gate is only
+        // "could a retry still be HEARD": any runway past the open itself,
+        // because blend_window caps at what remains and a shortened blend
+        // beats a cut. It was `fade + OPEN_RUNWAY` at first, which with a
+        // long fade excluded every retry there was — a 30s fade opens its
+        // window at 42s out, the first open fails at 32s out, and 32 is
+        // never greater than 32 (the listening-session trace).
         if let NextTrack::Failed { at } = s.next {
-            if at.elapsed() >= FAILED_RETRY && remaining > fade + OPEN_RUNWAY {
+            if at.elapsed() >= FAILED_RETRY && remaining > OPEN_RUNWAY {
                 etrace!("failed open rests over; retrying ({remaining:.1}s remaining)");
                 s.next = NextTrack::Idle;
             }
@@ -2218,6 +2222,52 @@ mod tests {
             2,
             "one failure and one success — a rate limit, not a tick loop"
         );
+        assert_eq!(engine.status().file, url);
+        engine.stop();
+        let _ = std::fs::remove_file(&local);
+    }
+
+    /// The listening-session trace's exact geometry: a long fade whose
+    /// first open fails INSIDE `fade + OPEN_RUNWAY` of the end. The old
+    /// retry gate demanded more runway than a first failure can ever
+    /// leave under a long fade (a 30s fade's window opens 42s out, the
+    /// open fails 32s out, and 32 is never greater than 32) — so the seam
+    /// went out as a cut. The gate now only asks whether a retry could
+    /// still be heard.
+    ///
+    /// `cargo test a_failed_open_inside -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_failed_open_inside_the_window_still_retries() {
+        let local = std::env::temp_dir().join("mstream-lategate-a.wav");
+        std::fs::write(&local, wav_bytes(20)).unwrap();
+        let (url, hits) = flaky_wav_server(3, 1);
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(9.0);
+        engine.play_source(local.to_string_lossy().into_owned(), Some(20.0)).unwrap();
+        engine.queue_add(url.clone());
+        std::thread::sleep(Duration::from_millis(400));
+
+        // The ceiling (20 − 9 − 2 = 9s) lands the seek at 11s remaining —
+        // inside the old `fade + OPEN_RUNWAY` bar of 11, so the immediate
+        // prepare's 500 left a Failed the old gate would have kept for
+        // the rest of the track.
+        engine.seek(999.0).unwrap();
+        let started = std::time::Instant::now();
+        loop {
+            engine.advance_tick();
+            if engine.overlap_active() {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(9),
+                "no blend fired; the in-window failure was never retried"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "one failure, one landed retry");
         assert_eq!(engine.status().file, url);
         engine.stop();
         let _ = std::fs::remove_file(&local);

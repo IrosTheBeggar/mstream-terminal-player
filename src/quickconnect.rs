@@ -279,7 +279,20 @@ async fn accept_loop(
     }
 }
 
-/// Pump one TCP connection through one tunnel bi-stream, both directions.
+/// Pump one TCP connection through one tunnel bi-stream, both directions —
+/// and pass either side's hang-up through to the other, promptly.
+///
+/// This used to wait for *both* directions to finish, which held the
+/// client-side TCP open after the server's side of the stream had ended.
+/// An HTTP client's connection pool reads that as a healthy idle
+/// connection: reqwest would offer the corpse to its next request, whose
+/// bytes then poured into a stream nothing was answering, and the caller
+/// waited out its whole timeout. The engine's prepare-ahead open was the
+/// caller that paid — every crossfade whose prepare fired within the
+/// pool's idle window of the previous download finishing went out as a
+/// hard cut (the listening-session trace that found this). Ending the
+/// bridge when either side ends is what a direct connection would do:
+/// the server's FIN reaches the client, and the pool buries the body.
 async fn bridge_one(
     socket: tokio::net::TcpStream,
     tunnel: std::sync::Arc<Tunnel>,
@@ -298,9 +311,14 @@ async fn bridge_one(
         Ok::<_, std::io::Error>(())
     };
 
-    tokio::try_join!(upstream, downstream)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    // A client that hung up wants no more responses; a server that hung up
+    // will never send one. Either way the other half is done too — select
+    // drops it, and dropping the socket halves is the FIN that tells the
+    // far side so.
+    tokio::select! {
+        up = upstream => up.map_err(|e| e.to_string()),
+        down = downstream => down.map_err(|e| e.to_string()),
+    }
 }
 
 /// Diagnostic: dial a pairing code and make one real HTTP request through the

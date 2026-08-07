@@ -658,6 +658,42 @@ Considered and kept: `snap_out_of_blend` on seeks (C4's "keep the track being se
 a seek during a running blend still collapses it, by design; the ceiling makes it much harder
 to land there by accident.
 
+#### Phase C listening-session fix, round two ✅ 2026-08-07
+
+The first round's fixes verified clean in every reproduction — including the reporter's exact
+gesture (a pty-driven TUI, a real mouse click on the bar, a throttled tunnel-shaped link in
+both the static and transcode response shapes) — and the bug survived anyway. What settled it
+was evidence, not another theory: the TUI silences stderr, so the engine grew a **flight
+recorder** (`MSTREAM_ENGINE_TRACE=<file>`, `engine/trace.rs`, one line per transition
+decision, off unless named). One reproduced session then read:
+
+```
+preparing 04 Angel Palace (41.9s remaining, fade 30.0s)
+open FAILED: no answer from the server after 10s
+track ran out (next=failed, announced=true)
+```
+
+Three causes, each now fixed and pinned:
+
+- **The Quick Connect bridge kept the client-side TCP open after the server side ended** —
+  `bridge_one` waited for *both* copy directions. reqwest's pool read the held-open socket as
+  a healthy idle connection, offered the corpse to the prepare's open, and the request waited
+  out OPEN_TIMEOUT on a stream nothing was answering. Every transition whose prepare fired
+  within the pool's ~90s idle window of the previous download finishing went out as a cut —
+  which is why long tracks played naturally were fine and *any* seek toward the end was not.
+  The bridge now ends when either direction ends (a server FIN reaches the client, as a
+  direct connection would), and the engine's streaming client no longer pools at all
+  (`pool_max_idle_per_host(0)` — an open per track, a connection per open; pinned by
+  `a_second_open_never_reuses_the_first_connection` against a serve-one-then-hold-silent
+  server).
+- **The round-one retry gate was unsatisfiable under a long fade**: it demanded
+  `remaining > fade + OPEN_RUNWAY`, but a 30s fade opens its window 42s out and the first
+  open can only fail 32s out — 32 is never greater than 32, so no retry ever ran. The gate
+  now asks only whether a retry could still be *heard* (`remaining > OPEN_RUNWAY`);
+  blend_window already caps at what remains, and a shortened blend beats a cut. Pinned by
+  `a_failed_open_inside_the_window_still_retries` (device, the trace's exact geometry).
+- The recorder itself stays: it is how the next report gets read instead of guessed at.
+
 ### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
 Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install
 matrix, then the "later" items inside the same three days: one-line installers for sh and
