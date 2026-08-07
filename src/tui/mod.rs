@@ -445,11 +445,9 @@ fn pop_window_title() {
 /// the browser build has no config file to write.
 #[cfg(not(target_arch = "wasm32"))]
 fn adopt_log_level(config: &mut config::Config, app: &App) {
-    if let Some(level) = app.chosen_log_level() {
-        config.log.level = match level {
-            crate::logging::Level::Off => String::new(),
-            level => level.label().to_string(),
-        };
+    if let Some((write, level)) = app.chosen_log_prefs() {
+        config.log.write = Some(write);
+        config.log.level = level.label().to_string();
     }
 }
 

@@ -452,11 +452,13 @@ dir = "/mnt/scratch"   # spool files land in <dir>/spool
 
 ### Diagnostics
 
-The Settings tab has a **Logs** room: step **Log level** from off up through info, debug and
-trace, and the player starts writing the debug log mid-session — no restart, no environment
-variable; the level you choose is remembered in config.toml. **View log** opens the tail of the
-file right in the player (`j`/`k` scroll, `G` follows the end as new lines arrive, `q` closes),
-which is usually all a "what just happened?" needs.
+The Settings tab has a **Logs** room with two switches. **Write log** (off by default) is the
+master: turn it on and the player starts writing the debug log mid-session — no restart, no
+environment variable. **Log level** (info by default) is how loud: info, debug or trace, deciding
+what gets written while the log is on, adjustable live. Both are remembered in config.toml.
+**View log** opens the tail of the file right in the player (`j`/`k` scroll, `G` follows the end
+as new lines arrive, `q` closes), which is usually all a "what just happened?" needs — it shows
+whatever was captured, so it still works after Write log goes back off.
 
 Underneath sit two switches, off by default, each writing to a file and never to the screen —
 the TUI deliberately silences stderr while it draws, so files are how a session explains itself

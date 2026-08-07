@@ -130,6 +130,8 @@ pub enum SettingRow {
     PauseFade,
     /// The root row that opens the logs group.
     LogsMenu,
+    /// Whether the debug log is written at all; anything toggles it.
+    LogWrite,
     /// How loud the debug log is; ← and → walk it, Enter steps it up.
     LogLevel,
     /// Opens the in-app viewer on the current log file.
@@ -889,9 +891,11 @@ pub struct App {
     /// skipping so a queue of nothing but broken files stops rather than
     /// looping.
     failures: usize,
-    /// How loud the debug log is, mirrored from crate::logging for the
-    /// Settings row; `log_touched` is what lets quitting persist only a
-    /// level the user actually chose here, not one the environment forced.
+    /// The debug log's two switches, mirrored from crate::logging for the
+    /// Settings rows: whether anything is written, and how loud once it is.
+    /// `log_touched` is what lets quitting persist only choices actually
+    /// made here, not ones the environment forced.
+    pub log_write: bool,
     pub log_level: crate::logging::Level,
     log_touched: bool,
     /// The log viewer, while it is open — it owns the movement keys.
@@ -1034,6 +1038,7 @@ impl App {
             starting: None,
             failures: 0,
             browse_undo: None,
+            log_write: crate::logging::writing(),
             log_level: crate::logging::level(),
             log_touched: false,
             log_view: None,
@@ -1834,6 +1839,7 @@ impl App {
                 | SettingRow::Gapless
                 | SettingRow::BlendSkips
                 | SettingRow::PauseFade
+                | SettingRow::LogWrite
                 | SettingRow::LogLevel => self.adjust_setting(1),
             },
             Entry::Track { .. } => {
@@ -2027,7 +2033,10 @@ impl App {
             },
             Entry::Setting {
                 label: "Logs".into(),
-                detail: format!("{} · the player explains itself", self.log_level.label()),
+                detail: format!(
+                    "{} · the player explains itself",
+                    if self.log_write { self.log_level.label() } else { "off" }
+                ),
                 row: SettingRow::LogsMenu,
             },
         ]
@@ -2095,19 +2104,25 @@ impl App {
     }
 
     fn logs_setting_entries(&self) -> Vec<Entry> {
-        let level = match self.log_level {
-            crate::logging::Level::Off => "off · nothing is written · → to speak".to_string(),
-            level => format!(
-                "{} · iroh, http and the spool narrate at this level · ←→ adjust",
-                level.label()
-            ),
+        let write = if self.log_write {
+            match crate::logging::active() {
+                Some(path) => format!("on · writing to {}", path.display()),
+                None => "on".to_string(),
+            }
+        } else {
+            "off · nothing is written · Enter to start".to_string()
         };
+        let level = format!(
+            "{} · what gets written once the log is on · ←→ adjust",
+            self.log_level.label()
+        );
         let view = match crate::logging::tail(1) {
             Some((path, _)) => format!("Enter · {}", path.display()),
-            None => "no file yet · set a level first".to_string(),
+            None => "no file yet · write the log first".to_string(),
         };
         vec![
             Entry::Parent,
+            Entry::Setting { label: "Write log".into(), detail: write, row: SettingRow::LogWrite },
             Entry::Setting { label: "Log level".into(), detail: level, row: SettingRow::LogLevel },
             Entry::Setting { label: "View log".into(), detail: view, row: SettingRow::ViewLog },
         ]
@@ -2179,18 +2194,25 @@ impl App {
                 self.pause_fade = !self.pause_fade;
                 Effect::Audio(AudioCmd::SetPauseFade(self.pause_fade))
             }
-            SettingRow::LogLevel => {
-                self.log_level = self.log_level.step(delta);
+            SettingRow::LogWrite => {
+                self.log_write = !self.log_write;
                 self.log_touched = true;
-                match crate::logging::set_level(self.log_level) {
+                match crate::logging::set_write(self.log_write) {
                     Some(path) => self.info(format!("logging to {}", path.display())),
-                    None if self.log_level != crate::logging::Level::Off => {
-                        // Asked to speak but no file could be opened.
-                        self.log_level = crate::logging::Level::Off;
+                    None if self.log_write => {
+                        // Asked to write but no file could be opened.
+                        self.log_write = false;
                         self.error("no log file could be opened");
                     }
                     None => {}
                 }
+                self.refresh_settings_rows();
+                return Vec::new();
+            }
+            SettingRow::LogLevel => {
+                self.log_level = self.log_level.step(delta);
+                self.log_touched = true;
+                crate::logging::set_level(self.log_level);
                 self.refresh_settings_rows();
                 return Vec::new();
             }
@@ -2202,11 +2224,11 @@ impl App {
         vec![effect]
     }
 
-    /// The log level to remember at quit — Some only when the user chose
-    /// one in this session's Settings, so an environment-forced level never
-    /// silently becomes configuration.
-    pub fn chosen_log_level(&self) -> Option<crate::logging::Level> {
-        self.log_touched.then_some(self.log_level)
+    /// The log switches to remember at quit — Some only when the user chose
+    /// them in this session's Settings, so an environment-forced session
+    /// never silently becomes configuration.
+    pub fn chosen_log_prefs(&self) -> Option<(bool, crate::logging::Level)> {
+        self.log_touched.then_some((self.log_write, self.log_level))
     }
 
     /// Open the log viewer on the current file, tail-first — or say why not.
@@ -2221,7 +2243,7 @@ impl App {
                     refreshed: std::time::Instant::now(),
                 });
             }
-            None => self.info("no log yet — set a level first"),
+            None => self.info("no log yet — write the log first"),
         }
         Vec::new()
     }

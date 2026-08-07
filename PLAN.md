@@ -813,6 +813,18 @@ Kept deliberately: two files, two questions. `MSTREAM_LOG` answers "what did the
 the recorder answers "what did the player decide" — merging them would bury the forty decision
 lines under ten thousand of hyper's.
 
+#### Logs in Settings, split in two ✅ 2026-08-07 (branch `logging`)
+
+Follow-up shaped by use: one row conflated whether logs are written with how loud they are.
+Now **Write log** (bool, default off) owns the file, and **Log level** (info · debug · trace,
+default info) owns the loudness — a write-time threshold, adjustable live while writing and
+waiting patiently while not. Old one-field configs keep their meaning (`level = "trace"`
+alone still means writing at trace; `"off"` means off — `settled_from_config`, unit-pinned),
+both switches persist through both save paths, and the viewer shows whatever was captured
+even after the switch goes back off. The always-installed-subscriber architecture is what
+made the split free. Re-proved live in the pty drive: switch on → toast, level to trace →
+26 KB in two seconds, viewer, quit, `write = true` and `level = "trace"` in config.
+
 #### Logs in Settings ✅ 2026-08-07 (branch `logging`)
 
 The mobile app's debugging room, grown here: **Settings → Logs** holds a **Log level** row
