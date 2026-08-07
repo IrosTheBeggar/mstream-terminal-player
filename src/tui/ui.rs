@@ -311,6 +311,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     // what it does everywhere else.
     if app.fullscreen {
         render_now_playing(frame, area, app);
+        if app.log_view.is_some() {
+            render_log_view(frame, area, app);
+        }
         if app.show_help {
             render_help(frame, area, app);
         }
@@ -338,9 +341,54 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.journey.is_some() {
         render_journey(frame, area, app);
     }
+    if app.log_view.is_some() {
+        render_log_view(frame, area, app);
+    }
     if app.show_help {
         render_help(frame, area, app);
     }
+}
+
+/// The log, nearly full-screen: the tail of the file, following its end
+/// until the reader scrolls away. Movement keys scroll, `G` re-attaches to
+/// the end, and the ways out are the ways out of everything else.
+fn render_log_view(frame: &mut Frame, area: Rect, app: &mut App) {
+    app.refresh_log_view();
+    let Some(view) = &mut app.log_view else { return };
+
+    let width = area.width.saturating_sub(4).max(20).min(area.width);
+    let height = area.height.saturating_sub(2).max(8).min(area.height);
+    let box_area = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, box_area);
+
+    let title = format!(" log · {} ", view.path.display());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(accent()))
+        .title(fit(&title, width.saturating_sub(2) as usize))
+        .title_bottom(" j/k scroll · G follow · q close ");
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+
+    // Clamp the scroll to what fits, and pin it to the end while following.
+    let visible = inner.height as usize;
+    let top_max = view.lines.len().saturating_sub(visible);
+    if view.follow || view.scroll > top_max {
+        view.scroll = top_max;
+    }
+    let lines: Vec<Line> = view
+        .lines
+        .iter()
+        .skip(view.scroll)
+        .take(visible)
+        .map(|l| Line::from(fit(l, inner.width as usize)))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// One labelled key. Brackets mark the one that is on, not just colour — the
@@ -808,6 +856,7 @@ pub(crate) fn browser_title(app: &App) -> String {
         Tab::Settings => match app.settings_node() {
             SettingsNode::Root => " Settings ".to_string(),
             SettingsNode::Crossfade => " Settings · Crossfade ".to_string(),
+            SettingsNode::Logs => " Settings · Logs ".to_string(),
         },
     }
 }
