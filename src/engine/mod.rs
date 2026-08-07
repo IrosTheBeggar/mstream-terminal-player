@@ -14,6 +14,9 @@
 pub(crate) mod fade;
 pub(crate) mod http;
 pub(crate) mod tap;
+pub(crate) mod trace;
+
+use trace::etrace;
 
 use std::fmt;
 use std::fs::File;
@@ -382,6 +385,18 @@ enum NextTrack {
     /// clock while enough runway remains; a truly dead URL costs a
     /// handful of opens per track tail, not one per tick.
     Failed { at: Instant },
+}
+
+impl NextTrack {
+    /// The variant's name, for the flight recorder.
+    fn name(&self) -> &'static str {
+        match self {
+            NextTrack::Idle => "idle",
+            NextTrack::Opening { .. } => "opening",
+            NextTrack::Ready { .. } => "ready",
+            NextTrack::Failed { .. } => "failed",
+        }
+    }
 }
 
 /// The committed pick for the track after this one, or None when no
@@ -906,6 +921,7 @@ impl Engine {
 
     /// Clear the queue, add one source (path or URL), play it.
     pub fn play_source(&self, source: String, duration_hint: Option<f64>) -> Result<(), EngineError> {
+        etrace!("play {} hint={:?}", http::redact_source(&source), duration_hint);
         let mut s = self.state.lock().unwrap();
         // Boundary first, staging second — every mutator's discipline now:
         // promotion writes the index and queue, and must never overwrite
@@ -939,8 +955,10 @@ impl Engine {
         // repeat-one seam is the sanctioned exception — its cursor never
         // needs to move, so nothing upstream needs telling.
         if s.current_file == source && !(s.gapless && s.crossfade <= 0.0) {
+            etrace!("announce refused: names the playing source");
             return;
         }
+        etrace!("announce {} hint={:?}", http::redact_source(&source), duration_hint);
         if s.pending_next.as_ref().map(|e| e.path.as_str()) == Some(source.as_str()) {
             if let Some(entry) = &mut s.pending_next {
                 entry.duration_hint = duration_hint;
@@ -953,6 +971,7 @@ impl Engine {
 
     /// Withdraw the announcement: nothing follows the current track.
     pub fn clear_next(&self) {
+        etrace!("announcement withdrawn");
         let mut s = self.state.lock().unwrap();
         s.pending_next = None;
         s.invalidate_next();
@@ -1049,6 +1068,7 @@ impl Engine {
             // the track stayed failed to the end and the seam went out
             // as a cut.
             if matches!(s.next, NextTrack::Failed { .. }) {
+                etrace!("seek resets a failed open");
                 s.next = NextTrack::Idle;
             }
             // Forward seeks stop short of a configured transition's runway
@@ -1060,6 +1080,8 @@ impl Engine {
                 let asked = target.as_secs_f64();
                 if asked > current && asked > ceiling {
                     target = Duration::from_secs_f64(ceiling.max(current));
+                    etrace!("seek {asked:.1} clamped to {:.1} (transition runway)",
+                        target.as_secs_f64());
                 }
             }
             (s.sink.clone(), s.fade.clone())
@@ -1069,6 +1091,8 @@ impl Engine {
         // seek being performed; the up-ramp then rises from the new spot.
         fade.ramp_to(0.0, SEEK_DIP_DOWN);
         let sought = sink.try_seek(target).map_err(|e| EngineError::Seek(e.to_string()));
+        etrace!("seek to {:.2}: {} (pos {:.2})", target.as_secs_f64(),
+            if sought.is_ok() { "ok" } else { "FAILED" }, sink.get_pos().as_secs_f64());
         // try_seek can block for as long as the network makes it, and a
         // stop or skip can retire this sink in the meantime — its fade then
         // belongs to a drainer ramping to silence, and the up-ramp would
@@ -1372,6 +1396,8 @@ impl Engine {
         if !(s.sink.empty() && !s.stopped && !s.q.queue.is_empty()) {
             return;
         }
+        etrace!("track ran out (next={}, announced={})",
+            s.next.name(), s.pending_next.is_some());
         match pick_next(&s.q, false) {
             None => s.clear_current(),
             Some(idx) => {
@@ -1428,6 +1454,7 @@ impl Engine {
             // committed. An overlap already sounding retires on its own,
             // and an appended source promotes above.
             if !matches!(s.next, NextTrack::Idle) {
+                etrace!("transitions off; forgetting the in-flight next");
                 s.invalidate_next();
             }
             return;
@@ -1439,12 +1466,22 @@ impl Engine {
         // Collect the opener's answer if one has arrived.
         s.next = match std::mem::replace(&mut s.next, NextTrack::Idle) {
             NextTrack::Opening { index, rx } => match rx.try_recv() {
-                Ok(Ok(prepared)) => NextTrack::Ready { prepared, index },
+                Ok(Ok(prepared)) => {
+                    etrace!("prepared {} ({:.1}s)",
+                        http::redact_source(&prepared.path), prepared.duration);
+                    NextTrack::Ready { prepared, index }
+                }
                 // open_entry already told stderr what went wrong.
-                Ok(Err(_)) => NextTrack::Failed { at: Instant::now() },
+                Ok(Err(e)) => {
+                    etrace!("open FAILED: {e}");
+                    NextTrack::Failed { at: Instant::now() }
+                }
                 // The opener panicked — symphonia does, on malformed files
                 // (audit #32) — which reads the same as a failed open.
-                Err(mpsc::TryRecvError::Disconnected) => NextTrack::Failed { at: Instant::now() },
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    etrace!("open FAILED: opener panicked");
+                    NextTrack::Failed { at: Instant::now() }
+                }
                 Err(mpsc::TryRecvError::Empty) => NextTrack::Opening { index, rx },
             },
             other => other,
@@ -1471,6 +1508,7 @@ impl Engine {
                 s.pending_next = None;
             }
             if self_pending || self_ready {
+                etrace!("self-aimed next dropped (a blend never self-blends)");
                 s.invalidate_next();
             }
         }
@@ -1478,6 +1516,9 @@ impl Engine {
         // Paused means frozen: the position cannot reach the window, and a
         // handover under a paused track would start sounding on its own.
         if s.sink.is_paused() {
+            if matches!(s.next, NextTrack::Ready { .. }) {
+                etrace!("blend waiting: paused");
+            }
             return;
         }
         // Transitions are strictly one at a time: a draining blend, an
@@ -1485,6 +1526,9 @@ impl Engine {
         // for anything further — appending behind an orphan would put
         // three sources in one sink and confuse every boundary check.
         if !s.outgoing.is_empty() || s.appended.is_some() || s.orphaned_tail {
+            if matches!(s.next, NextTrack::Ready { .. }) {
+                etrace!("blend waiting: a transition is still draining");
+            }
             return;
         }
         // A duration the engine does not know is a fade point — or an
@@ -1510,6 +1554,7 @@ impl Engine {
         // retry that cannot possibly finish from being spent at all.
         if let NextTrack::Failed { at } = s.next {
             if at.elapsed() >= FAILED_RETRY && remaining > fade + OPEN_RUNWAY {
+                etrace!("failed open rests over; retrying ({remaining:.1}s remaining)");
                 s.next = NextTrack::Idle;
             }
         }
@@ -1525,13 +1570,17 @@ impl Engine {
                 .map(|entry| (entry, None))
                 .or_else(|| next_candidate(&s.q, !blending));
             if let Some((entry, index)) = candidate {
+                etrace!("preparing {} ({remaining:.1}s remaining, fade {fade:.1}s)",
+                    http::redact_source(&entry.path));
                 s.next = spawn_prepare(entry, index);
             }
         }
         if matches!(s.next, NextTrack::Ready { .. }) {
             if blending && remaining <= fade {
+                etrace!("handover at {remaining:.2}s remaining");
                 self.handover(s);
             } else if !blending && remaining <= APPEND_LEAD {
+                etrace!("gapless append at {remaining:.2}s remaining");
                 append_gapless(s);
             }
         }
