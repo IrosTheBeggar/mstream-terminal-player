@@ -57,11 +57,12 @@ pub enum Tab {
     Playlists,
     Search,
     Discover,
+    Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] =
-        [Tab::Files, Tab::Library, Tab::Playlists, Tab::Search, Tab::Discover];
+    pub const ALL: [Tab; 6] =
+        [Tab::Files, Tab::Library, Tab::Playlists, Tab::Search, Tab::Discover, Tab::Settings];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -70,6 +71,7 @@ impl Tab {
             Tab::Playlists => "Playlists",
             Tab::Search => "Search",
             Tab::Discover => "Discover",
+            Tab::Settings => "Settings",
         }
     }
 
@@ -81,6 +83,36 @@ impl Tab {
             _ => true,
         }
     }
+}
+
+/// Seconds of blend as a person reads them: whole when whole, one decimal
+/// when the config was hand-written fractional.
+fn fmt_blend(seconds: f32) -> String {
+    if seconds.fract() == 0.0 {
+        format!("{seconds:.0}s")
+    } else {
+        format!("{seconds:.1}s")
+    }
+}
+
+/// A place in the Settings tab's little hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsNode {
+    /// The menu of settings groups — one group so far.
+    Root,
+    /// The crossfade group: how tracks hand over.
+    Crossfade,
+}
+
+/// What a Settings row is, and so what Enter and ←→ do to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingRow {
+    /// The root row that opens the crossfade group.
+    CrossfadeMenu,
+    /// Seconds of blend; ← and → walk it, Enter steps it up.
+    BlendLength,
+    /// Sample-tight boundaries when no blend is set; anything toggles it.
+    Gapless,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +273,9 @@ pub enum Entry {
     /// A step deeper into Discover. `detail` is the dim right-hand column —
     /// how close, how much the guess rests on, what it sounds like.
     Discover { label: String, detail: String, node: DiscoverNode },
+    /// A row in the Settings tab: a drill into a settings group, or a live
+    /// value. `detail` carries the current value and its meaning.
+    Setting { label: String, detail: String, row: SettingRow },
     Track { label: String, track: Box<Track> },
 }
 
@@ -255,6 +290,7 @@ impl Entry {
             Entry::Playlist { name } => name,
             Entry::Search { label, .. } => label,
             Entry::Discover { label, .. } => label,
+            Entry::Setting { label, .. } => label,
             Entry::Track { label, .. } => label,
         }
     }
@@ -622,10 +658,6 @@ pub enum DjRow {
     Rating,
     Cooldown,
     Genres,
-    /// Playback rather than picking, but this panel is where the player's
-    /// few live-adjustable settings gather (Phase C4).
-    Crossfade,
-    Gapless,
 }
 
 impl DjRow {
@@ -639,8 +671,6 @@ impl DjRow {
             DjRow::Rating => "Rating floor",
             DjRow::Cooldown => "Artist cooldown",
             DjRow::Genres => "Genres",
-            DjRow::Crossfade => "Crossfade",
-            DjRow::Gapless => "Gapless",
         }
     }
 }
@@ -673,8 +703,6 @@ impl DjPanel {
             DjRow::Rating,
             DjRow::Cooldown,
             DjRow::Genres,
-            DjRow::Crossfade,
-            DjRow::Gapless,
         ]);
         DjPanel { rows, ..Default::default() }
     }
@@ -769,8 +797,10 @@ pub struct App {
     pub playlists: Pane,
     pub playlist_open: Option<String>,
     pub discover: Pane,
+    pub settings: Pane,
     /// Breadcrumb through the Discover tab, mirroring `library_stack`.
     pub discover_stack: Drill<DiscoverNode>,
+ settings_stack: Drill<SettingsNode>,
     /// The track every Discover view hangs off. Captured when a view is
     /// opened so the list doesn't quietly re-anchor when the song changes.
     pub discover_seed: Option<Track>,
@@ -914,6 +944,8 @@ impl App {
             playlist_open: None,
             discover: Pane::default(),
             discover_stack: Drill::new(DiscoverNode::Root),
+            settings: Pane::default(),
+            settings_stack: Drill::new(SettingsNode::Root),
             discover_seed: None,
             discover_artists: Vec::new(),
             search: Pane::default(),
@@ -1110,6 +1142,7 @@ impl App {
             Tab::Playlists => &self.playlists,
             Tab::Search => &self.search,
             Tab::Discover => &self.discover,
+            Tab::Settings => &self.settings,
         }
     }
 
@@ -1120,6 +1153,7 @@ impl App {
             Tab::Playlists => &mut self.playlists,
             Tab::Search => &mut self.search,
             Tab::Discover => &mut self.discover,
+            Tab::Settings => &mut self.settings,
         }
     }
 
@@ -1231,6 +1265,10 @@ impl App {
         self.library_stack.here()
     }
 
+    pub fn settings_node(&self) -> &SettingsNode {
+        self.settings_stack.here()
+    }
+
     pub fn discover_node(&self) -> &DiscoverNode {
         self.discover_stack.here()
     }
@@ -1310,6 +1348,11 @@ impl App {
             }
             Action::Cancel => {
                 self.show_help = false;
+                // The guaranteed way out of the Crossfade rows, where the
+                // left arrow has been given to adjustment.
+                if self.tab == Tab::Settings && *self.settings_node() == SettingsNode::Crossfade {
+                    return self.go_back();
+                }
                 Vec::new()
             }
             Action::CycleFocus if !self.fullscreen => {
@@ -1367,7 +1410,16 @@ impl App {
             }
 
             Action::Activate => self.activate(),
-            Action::Back => self.go_back(),
+            Action::Back => {
+                // On a Settings VALUE row, ← means "less", exactly as it
+                // does in the Auto-DJ panel — the way out is Esc, h on the
+                // `..` row, or the row above it.
+                if let Some(effects) = self.settings_step(-1) {
+                    effects
+                } else {
+                    self.go_back()
+                }
+            }
             Action::AddToQueue => self.add_selected_to_queue(),
 
             Action::PlayPause => self.play_pause(),
@@ -1537,6 +1589,17 @@ impl App {
                 }
                 Vec::new()
             }
+            Tab::Settings => {
+                if self.settings_stack.unopened() {
+                    self.settings_stack.enter(SettingsNode::Root);
+                }
+                // Values may have moved since the tab was last looked at
+                // (the config loaded them, this tab edits them), so the
+                // rows are rebuilt on every visit — in place, keeping the
+                // cursor where it was left.
+                self.refresh_settings_rows();
+                Vec::new()
+            }
             Tab::Playlists if self.playlists.entries.is_empty() => {
                 vec![Effect::Api(ApiCmd::Playlists)]
             }
@@ -1671,6 +1734,16 @@ impl App {
                 self.playlist_open = Some(name.clone());
                 vec![Effect::Api(ApiCmd::LoadPlaylist(name))]
             }
+            Entry::Setting { row, .. } => match row {
+                SettingRow::CrossfadeMenu => {
+                    self.push_trail();
+                    self.settings_stack.enter(SettingsNode::Crossfade);
+                    self.settings.set(self.crossfade_setting_entries());
+                    Vec::new()
+                }
+                // Enter walks a value the same way → does; ← walks it back.
+                SettingRow::BlendLength | SettingRow::Gapless => self.adjust_setting(1),
+            },
             Entry::Track { .. } => {
                 // Enqueue everything visible and start at the highlighted row —
                 // what every other player does on Enter.
@@ -1815,8 +1888,129 @@ impl App {
                     node => self.request_discover(node),
                 }
             }
+            Tab::Settings => {
+                let Some(node) = self.settings_stack.back() else {
+                    return None; // already at the settings menu
+                };
+                match node {
+                    SettingsNode::Root => self.settings.set(self.settings_root_entries()),
+                    SettingsNode::Crossfade => {
+                        self.settings.set(self.crossfade_setting_entries())
+                    }
+                }
+                Vec::new()
+            }
             _ => Vec::new(),
         })
+    }
+
+    // ── Settings ────────────────────────────────────────────────────────────
+
+    fn settings_root_entries(&self) -> Vec<Entry> {
+        vec![Entry::Setting {
+            label: "Crossfade".into(),
+            detail: format!("{} · how tracks hand over", self.crossfade_summary()),
+            row: SettingRow::CrossfadeMenu,
+        }]
+    }
+
+    /// The state at a glance, for the root row.
+    fn crossfade_summary(&self) -> String {
+        if self.crossfade > 0.0 {
+            format!("{} blend", fmt_blend(self.crossfade))
+        } else if self.gapless {
+            "gapless".to_string()
+        } else {
+            "off".to_string()
+        }
+    }
+
+    fn crossfade_setting_entries(&self) -> Vec<Entry> {
+        let blend = if self.crossfade <= 0.0 {
+            "off · tracks cut over · → for a blend".to_string()
+        } else {
+            format!(
+                "{} · equal-power, when a track ends on its own · ←→ adjust",
+                fmt_blend(self.crossfade)
+            )
+        };
+        let gapless = if self.crossfade > 0.0 {
+            format!(
+                "{} · crossfade wins while it is on",
+                if self.gapless { "on" } else { "off" }
+            )
+        } else if self.gapless {
+            "on · sample-tight boundaries".to_string()
+        } else {
+            "off · Enter to turn on".to_string()
+        };
+        vec![
+            Entry::Parent,
+            Entry::Setting {
+                label: "Blend length".into(),
+                detail: blend,
+                row: SettingRow::BlendLength,
+            },
+            Entry::Setting { label: "Gapless".into(), detail: gapless, row: SettingRow::Gapless },
+        ]
+    }
+
+    /// Rebuild whichever settings view is showing, in place: the values in
+    /// the details are live, and [`Pane::set`] would throw the cursor away.
+    fn refresh_settings_rows(&mut self) {
+        let entries = match self.settings_node() {
+            SettingsNode::Root => self.settings_root_entries(),
+            SettingsNode::Crossfade => self.crossfade_setting_entries(),
+        };
+        let selected = self.settings.state.selected().unwrap_or(0).min(entries.len() - 1);
+        self.settings.entries = entries;
+        self.settings.state.select(Some(selected));
+    }
+
+    /// The ← route into adjustment: Some only when the cursor stands on a
+    /// Settings value row, so Back keeps meaning back everywhere else.
+    fn settings_step(&mut self, delta: i32) -> Option<Vec<Effect>> {
+        if self.tab != Tab::Settings || *self.settings_node() != SettingsNode::Crossfade {
+            return None;
+        }
+        match self.pane().selected() {
+            Some(Entry::Setting { row, .. })
+                if matches!(row, SettingRow::BlendLength | SettingRow::Gapless) =>
+            {
+                Some(self.adjust_setting(delta))
+            }
+            _ => None,
+        }
+    }
+
+    /// Move the selected value and tell the engine in the same keystroke.
+    /// The announcement machinery is refreshed by the handle_action funnel
+    /// this returns through, so a blend toggled on withdraws a standing
+    /// seam in the same breath (the pending-seam rule).
+    fn adjust_setting(&mut self, delta: i32) -> Vec<Effect> {
+        let Some(Entry::Setting { row, .. }) = self.pane().selected() else {
+            return Vec::new();
+        };
+        let effect = match row {
+            SettingRow::BlendLength => {
+                // Snap toward the pressed direction: a hand-written 4.5
+                // steps to 5 and 4, never 5.5 forever.
+                let snapped = if delta > 0 {
+                    self.crossfade.floor() + 1.0
+                } else {
+                    self.crossfade.ceil() - 1.0
+                };
+                self.crossfade = snapped.clamp(0.0, 30.0);
+                Effect::Audio(AudioCmd::SetCrossfade(self.crossfade))
+            }
+            SettingRow::Gapless => {
+                self.gapless = !self.gapless;
+                Effect::Audio(AudioCmd::SetGapless(self.gapless))
+            }
+            SettingRow::CrossfadeMenu => return Vec::new(),
+        };
+        self.refresh_settings_rows();
+        vec![effect]
     }
 
     // ── Discover ────────────────────────────────────────────────────────────

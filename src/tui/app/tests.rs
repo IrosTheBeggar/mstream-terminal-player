@@ -1749,9 +1749,11 @@ fn the_discover_tab_is_absent_where_the_server_cannot_serve_it() {
     let mut plain = connected_app();
     plain.capabilities = Default::default();
     assert!(!plain.tabs().contains(&Tab::Discover));
-    // And the numbers stay 1..n so no key points at a gap.
-    assert_eq!(plain.tabs().len(), 4);
-    assert!(plain.handle_action(Action::SelectTab(4)).is_empty(), "there is no fifth tab");
+    // And the numbers stay 1..n so no key points at a gap — Settings slides
+    // onto 5, and the strip's positional numbers stay the truth.
+    assert_eq!(plain.tabs().len(), 5);
+    assert_eq!(plain.tabs()[4], Tab::Settings);
+    assert!(plain.handle_action(Action::SelectTab(5)).is_empty(), "there is no sixth tab");
     assert_ne!(plain.tab, Tab::Discover);
 }
 
@@ -2679,7 +2681,7 @@ fn g_and_shift_g_jump_to_the_ends_of_the_panel() {
     app.handle_action(Action::OpenDjPanel);
     app.handle_action(Action::Last);
     let panel = app.dj_panel.as_ref().unwrap();
-    assert_eq!(panel.selected(), DjRow::Gapless, "the last row (the playback pair closes it)");
+    assert_eq!(panel.selected(), DjRow::Genres, "the last row");
     app.handle_action(Action::First);
     assert_eq!(app.dj_panel.as_ref().unwrap().selected(), DjRow::Mode);
 }
@@ -3388,26 +3390,49 @@ fn gapless_repeat_one_announces_its_own_seam() {
 }
 
 #[test]
+fn the_settings_menu_reads_the_state_at_a_glance_and_backs_out_whole() {
+    let mut app = connected_app();
+    app.crossfade = 6.0;
+    app.handle_action(Action::SelectTab(5));
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("6s blend")),
+        "the root row summarises without opening"
+    );
+
+    // In, back out via h on the `..` row, and the menu is whole again.
+    app.handle_action(Action::Activate);
+    assert_eq!(*app.settings_node(), SettingsNode::Crossfade);
+    app.handle_action(Action::Up); // onto `..`
+    app.handle_action(Action::Back);
+    assert_eq!(*app.settings_node(), SettingsNode::Root);
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::CrossfadeMenu, .. })),
+        "back lands on the menu, not an empty pane"
+    );
+
+    // Leaving and returning keeps the live values fresh in the details.
+    app.handle_action(Action::SelectTab(0));
+    app.crossfade = 0.0;
+    app.gapless = true;
+    app.handle_action(Action::SelectTab(5));
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("gapless")),
+        "a revisit reads the values as they are now"
+    );
+}
+
+#[test]
 fn a_fractional_crossfade_snaps_to_whole_steps() {
-    // A hand-written 4.5 must step to 5 and 4 — not 5.5 forever, which is
-    // what the plain +-1 gave it (fix-round review).
+    // A hand-written 4.5 must step to 5 and 4 — not 5.5 forever.
     let mut app = connected_app();
     app.crossfade = 4.5;
-    app.handle_action(Action::OpenDjPanel);
-    let row = app
-        .dj_panel
-        .as_ref()
-        .unwrap()
-        .rows
-        .iter()
-        .position(|r| *r == DjRow::Crossfade)
-        .unwrap();
-    app.dj_panel.as_mut().unwrap().row = row;
+    app.handle_action(Action::SelectTab(5));
+    app.handle_action(Action::Activate); // cursor rests on Blend length
 
-    app.handle_action(Action::SeekForward);
+    app.handle_action(Action::Activate);
     assert_eq!(app.crossfade, 5.0, "up from 4.5 lands on the next whole second");
     app.crossfade = 4.5;
-    app.handle_action(Action::SeekBackward);
+    app.handle_action(Action::Back);
     assert_eq!(app.crossfade, 4.0, "down from 4.5 lands on the previous");
 }
 
@@ -3453,17 +3478,9 @@ fn turning_crossfade_on_withdraws_a_standing_seam_announcement() {
     }));
     assert_eq!(announced_url(&effects).as_deref(), Some(url.as_str()), "the seam stands");
 
-    app.handle_action(Action::OpenDjPanel);
-    let crossfade = app
-        .dj_panel
-        .as_ref()
-        .unwrap()
-        .rows
-        .iter()
-        .position(|r| *r == DjRow::Crossfade)
-        .unwrap();
-    app.dj_panel.as_mut().unwrap().row = crossfade;
-    let effects = app.handle_action(Action::SeekForward);
+    app.handle_action(Action::SelectTab(5));
+    app.handle_action(Action::Activate); // cursor rests on Blend length
+    let effects = app.handle_action(Action::Activate); // crossfade 0 -> 1
     assert!(
         effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::ClearNext))),
         "the keystroke that armed the blend disarmed the seam"
@@ -3471,16 +3488,19 @@ fn turning_crossfade_on_withdraws_a_standing_seam_announcement() {
 }
 
 #[test]
-fn the_panel_adjusts_the_blend_and_tells_the_engine_in_the_same_keystroke() {
+fn the_settings_tab_adjusts_the_blend_and_tells_the_engine_in_the_same_keystroke() {
     let mut app = connected_app();
-    app.handle_action(Action::OpenDjPanel);
-    let place = |app: &App, row: DjRow| {
-        app.dj_panel.as_ref().unwrap().rows.iter().position(|r| *r == row).unwrap()
-    };
+    app.handle_action(Action::SelectTab(5));
+    assert_eq!(app.tab, Tab::Settings, "6 lands on Settings");
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::CrossfadeMenu, .. })),
+        "the root offers Crossfade"
+    );
 
-    let crossfade = place(&app, DjRow::Crossfade);
-    app.dj_panel.as_mut().unwrap().row = crossfade;
-    let effects = app.handle_action(Action::SeekForward);
+    app.handle_action(Action::Activate);
+    // Rows: [.., Blend length, Gapless]; the cursor rests past the `..`,
+    // already on the blend.
+    let effects = app.handle_action(Action::Activate); // Enter steps up
     assert_eq!(app.crossfade, 1.0);
     assert!(
         effects
@@ -3488,27 +3508,36 @@ fn the_panel_adjusts_the_blend_and_tells_the_engine_in_the_same_keystroke() {
             .any(|e| matches!(e, Effect::Audio(AudioCmd::SetCrossfade(s)) if *s == 1.0)),
         "the engine hears the nudge at once"
     );
-    let effects = app.handle_action(Action::SeekBackward);
+    let effects = app.handle_action(Action::Back); // <- steps down on a value row
     assert_eq!(app.crossfade, 0.0, "and back down to off, never below");
     assert!(
         effects
             .iter()
             .any(|e| matches!(e, Effect::Audio(AudioCmd::SetCrossfade(s)) if *s == 0.0))
     );
+    assert_eq!(app.tab, Tab::Settings, "a value row's Back adjusts, it does not leave");
 
-    let gapless = place(&app, DjRow::Gapless);
-    app.dj_panel.as_mut().unwrap().row = gapless;
-    let effects = app.handle_action(Action::SeekForward);
+    app.handle_action(Action::Down); // Gapless
+    let effects = app.handle_action(Action::Activate);
     assert!(app.gapless);
     assert!(
         effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetGapless(true)))),
         "gapless toggles through the same funnel"
     );
+    // The rows show the change without losing the cursor.
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("on")),
+        "the row reads back the live value"
+    );
 
-    // What the panel set is what the config remembers.
+    // What the tab set is what the config remembers.
     let prefs = app.prefs();
     assert_eq!(prefs.crossfade_seconds, 0.0);
     assert!(prefs.gapless);
+
+    // And the ways out: Esc steps back to the settings menu.
+    app.handle_action(Action::Cancel);
+    assert_eq!(*app.settings_node(), SettingsNode::Root);
 }
 
 #[test]

@@ -555,14 +555,23 @@ behavior the pre-Phase-C engine never showed unasked, so it stays opt-in like th
 on with no crossfade set, the prepared next is appended to the playing sink at APPEND_LEAD
 (late, because an append cannot be taken back) and rodio crosses the boundary sample-tight;
 the bookkeeping follows at the boundary, and the TUI's HandedOver reconciliation covers both
-transitions unchanged. Crossfade and Gapless close the Auto-DJ panel as live-adjustable rows —
-playback settings rather than picking ones, but that panel is where the adjustable settings
-gather. The round-trip test's future key came true a second time (`gapless`); `replaygain`
-carries the torch.
+transitions unchanged. Crossfade and Gapless first landed as Auto-DJ panel rows — playback settings
+rather than picking ones, lodging where the adjustable settings then gathered — and moved to
+their real home when C5 built one. The round-trip test's future key came true a second time
+(`gapless`); `replaygain` carries the torch.
 
 **Costs accepted**: two decoders and two spool files for a bounded window per transition;
 summed peaks can transiently exceed full scale on loud masters even at equal power (rodio has a
 `limit` source if that ever proves audible in practice).
+
+#### C5 — The Settings tab ✅ DONE 2026-08-06
+`6` opens Settings, a real home for the player's own knobs: a menu of groups (one group so
+far — Crossfade) drilling into live-value rows. Enter and `→` step a value up, `←` steps it
+down (the Auto-DJ panel's own convention for settings rows; Esc and `..` are the ways out),
+the details read the values back as they change, and the engine hears every nudge in the
+keystroke that made it. The panel's Crossfade/Gapless rows moved here whole, the panel went
+back to being about picking, and on a server without Discover the tab slides onto `5` — the
+strip numbers by position, and the strip is the truth.
 
 #### Phase C review ✅ 2026-08-06
 

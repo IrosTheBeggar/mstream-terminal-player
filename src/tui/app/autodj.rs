@@ -264,25 +264,6 @@ impl App {
                     step(self.dj.artist_cooldown, delta, dj::ARTIST_COOLDOWN_MAX);
             }
             DjRow::Genres => self.dj.genre_mode = self.dj.genre_mode.next(),
-            // The playback pair (C4): told to the engine in the same
-            // keystroke, and the announcement machinery is refreshed by the
-            // handle_action funnel this returns through.
-            DjRow::Crossfade => {
-                // Snap toward the pressed direction: a hand-written 4.5 in
-                // the config steps to 5 and 4, not to 5.5 forever (C4
-                // review: the panel's step was permanently misaligned).
-                let snapped = if delta > 0 {
-                    self.crossfade.floor() + 1.0
-                } else {
-                    self.crossfade.ceil() - 1.0
-                };
-                self.crossfade = snapped.clamp(0.0, 30.0);
-                return vec![Effect::Audio(AudioCmd::SetCrossfade(self.crossfade))];
-            }
-            DjRow::Gapless => {
-                self.gapless = !self.gapless;
-                return vec![Effect::Audio(AudioCmd::SetGapless(self.gapless))];
-            }
         }
         Vec::new()
     }

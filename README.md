@@ -105,7 +105,7 @@ window.
 | `h` | go back |
 | `a` | add the highlighted track to the queue |
 | `Tab` | switch between browser and queue |
-| `1` … `5` | Files / Library / Playlists / Search / Discover · `/` search |
+| `1` … `6` | Files / Library / Playlists / Search / Discover / Settings · `/` search |
 | `0` | full-screen now playing |
 | `Space` | play or pause · `n` / `p` next / previous |
 | `i` | jump to whatever is playing · `0` full-screen now playing |
@@ -188,9 +188,10 @@ gapless = true
 For album listeners instead of blend listeners: with no crossfade set, `gapless`
 feeds the next track into the playing sink ahead of time and the boundary is
 crossed sample-tight — no gap, no fade, exactly as the album was cut. A
-configured crossfade outranks it. Both settings are also adjustable live from
-the Auto-DJ panel (`D`), and the jukebox has the same pair as
-`mstream-player serve --crossfade 6` / `--gapless`.
+configured crossfade outranks it. Both live in the **Settings** tab (`6`):
+Enter opens Crossfade, `←` `→` walk the blend length, Enter toggles gapless,
+and what you set there is what config.toml remembers. The jukebox has the
+same pair as `mstream-player serve --crossfade 6` / `--gapless`.
 
 ## Mouse
 
@@ -321,7 +322,6 @@ going quiet. `mstream-player info` lists what a given server has enabled.
 | **Key matching** | `compatible` is the Camelot neighbourhood; `strict` never leaves the seed's key. |
 | **Rating floor** · **Artist cooldown** | skip anything below a rating; keep the last N artists out. |
 | **Genres** | whitelist or blacklist. A whitelist also excludes untagged tracks — "only these" is the stricter promise. |
-| **Crossfade** · **Gapless** | how tracks hand over — playback settings rather than picking ones, but this panel is where the live-adjustable settings gather. |
 
 `↑↓` choose · `←→` adjust · `p` samples three picks so you can hear what a
 setting does before committing to it · `Esc` closes. Settings persist.
