@@ -420,11 +420,9 @@ fn pop_window_title() {
 /// never silently becomes configuration. Off writes as empty, which keeps
 /// the [log] section out of the file entirely.
 fn adopt_log_level(config: &mut config::Config, app: &App) {
-    if let Some(level) = app.chosen_log_level() {
-        config.log.level = match level {
-            crate::logging::Level::Off => String::new(),
-            level => level.label().to_string(),
-        };
+    if let Some((write, level)) = app.chosen_log_prefs() {
+        config.log.write = Some(write);
+        config.log.level = level.label().to_string();
     }
 }
 

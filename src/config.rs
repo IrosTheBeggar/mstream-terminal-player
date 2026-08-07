@@ -223,8 +223,12 @@ impl Default for AutoDjPrefs {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogPrefs {
-    /// "off", "info", "debug" or "trace"; empty means off and keeps the
-    /// section out of the file entirely.
+    /// Whether the debug log is written at all. Absent in configs from the
+    /// one-field days, where a set `level` meant both switch and loudness —
+    /// logging::init honours that reading when this key is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write: Option<bool>,
+    /// "info", "debug" or "trace" — how loud, once writing at all.
     pub level: String,
     #[serde(flatten)]
     pub extra: Keep,
@@ -232,7 +236,7 @@ pub struct LogPrefs {
 
 impl LogPrefs {
     pub fn is_unset(&self) -> bool {
-        (self.level.is_empty() || self.level == "off") && self.extra.is_empty()
+        self.write.is_none() && self.level.is_empty() && self.extra.is_empty()
     }
 }
 
@@ -814,6 +818,7 @@ mod tests {
         config.player.autodj = "similar".into();
         config.player.crossfade_seconds = 6.0;
         config.player.gapless = true;
+        config.log.write = Some(true);
         config.log.level = "debug".into();
         touch_server(&mut config, "http://host:3000", Some("alice".into()));
         set_last_path(&mut config, "http://host:3000", "music/Artist");
@@ -828,9 +833,11 @@ mod tests {
         assert_eq!(loaded.player.repeat, "all");
         assert_eq!(loaded.player.crossfade_seconds, 6.0);
         assert!(loaded.player.gapless);
-        assert_eq!(loaded.log.level, "debug", "the Settings tab's log level persists");
-        // Off is the absence of the section, not a line saying so.
+        assert_eq!(loaded.log.write, Some(true), "the write switch persists");
+        assert_eq!(loaded.log.level, "debug", "and so does the level");
+        // Untouched is the absence of the section, not lines saying so.
         let mut quiet = loaded.clone();
+        quiet.log.write = None;
         quiet.log.level = String::new();
         assert!(!toml::to_string_pretty(&quiet).unwrap().contains("[log]"));
         assert_eq!(loaded.servers[0].username.as_deref(), Some("alice"));

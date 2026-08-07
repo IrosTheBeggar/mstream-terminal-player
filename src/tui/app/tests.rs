@@ -3546,19 +3546,33 @@ fn the_logs_room_switches_levels_and_opens_the_viewer() {
     app.handle_action(Action::Activate);
     assert_eq!(*app.settings_node(), SettingsNode::Logs);
     assert!(
-        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogLevel, .. })),
-        "the cursor rests on the level row"
+        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogWrite, .. })),
+        "the cursor rests on the write switch"
     );
 
-    // In tests no subscriber is installed, so stepping the level up takes
-    // the degraded road: the file cannot open, the level snaps back to
+    // In tests no subscriber is installed, so flipping the switch on takes
+    // the degraded road: the file cannot open, the switch snaps back to
     // off, and the row says so — which is also what a read-only disk
     // would do in a real session.
     app.handle_action(Action::Activate);
-    assert_eq!(app.log_level, crate::logging::Level::Off);
+    assert!(!app.log_write);
     assert!(app.message.as_ref().unwrap().text.contains("no log file"));
-    assert_eq!(app.chosen_log_level(), Some(crate::logging::Level::Off),
+    assert_eq!(app.chosen_log_prefs(), Some((false, crate::logging::Level::Info)),
         "touched: the choice would persist");
+
+    // The level is its own row, adjustable whether or not anything writes
+    // yet — it is the loudness the switch will use.
+    app.handle_action(Action::Down);
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogLevel, .. }))
+    );
+    app.handle_action(Action::Activate);
+    app.handle_action(Action::Activate);
+    assert_eq!(app.log_level, crate::logging::Level::Trace);
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("trace")),
+        "the row reads the level back"
+    );
 
     // The viewer refuses politely with no file to show.
     app.handle_action(Action::Down);
@@ -3590,7 +3604,7 @@ fn the_logs_room_switches_levels_and_opens_the_viewer() {
 
     // Untouched sessions remember nothing.
     let fresh = connected_app();
-    assert_eq!(fresh.chosen_log_level(), None);
+    assert_eq!(fresh.chosen_log_prefs(), None);
 }
 
 #[test]

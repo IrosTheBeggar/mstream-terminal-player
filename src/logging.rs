@@ -39,22 +39,23 @@ use tracing_subscriber::{EnvFilter, Registry, reload};
 /// How many rotated predecessors the default location keeps.
 const KEEP: usize = 4;
 
-/// How loud the log is. Ordered so a step up says more.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
+/// How loud the log is, once something is being written at all — whether
+/// anything is written belongs to the separate write switch. Ordered so a
+/// step up says more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Default)]
 pub enum Level {
-    Off,
+    #[default]
     Info,
     Debug,
     Trace,
 }
 
 impl Level {
-    pub const ALL: [Level; 4] = [Level::Off, Level::Info, Level::Debug, Level::Trace];
+    pub const ALL: [Level; 3] = [Level::Info, Level::Debug, Level::Trace];
 
     /// The word shown in the Settings row and written to config.toml.
     pub fn label(self) -> &'static str {
         match self {
-            Level::Off => "off",
             Level::Info => "info",
             Level::Debug => "debug",
             Level::Trace => "trace",
@@ -104,10 +105,18 @@ impl Write for LateGuard {
     }
 }
 
-/// The handle that swaps the filter while the player runs, and the state the
-/// Settings row reads back.
+/// The handle that swaps the filter while the player runs, and the state
+/// the Settings rows read back: whether we are writing, how loud, and to
+/// which file (which outlives turning writing off, so the viewer can still
+/// show what was captured).
 static HANDLE: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
-static STATE: Mutex<(Level, Option<PathBuf>)> = Mutex::new((Level::Off, None));
+static STATE: Mutex<State> = Mutex::new(State { write: false, level: Level::Info, path: None });
+
+struct State {
+    write: bool,
+    level: Level,
+    path: Option<PathBuf>,
+}
 
 /// What `MSTREAM_LOG` asked for.
 #[derive(Debug, PartialEq)]
@@ -173,12 +182,24 @@ fn open_sink(path: &Path) -> bool {
     true
 }
 
-/// The filter a level means — unless `RUST_LOG` is set, which knows better.
-fn filter_for(level: Level) -> EnvFilter {
-    if level != Level::Off {
-        if let Ok(custom) = EnvFilter::try_from_default_env() {
-            return custom;
-        }
+/// What a config's `[log]` section means. The write key is young; configs
+/// from the one-field days said everything with `level` alone, where a
+/// parseable level meant writing and "off" meant not — honoured here so an
+/// upgrade never silently changes what a session logs.
+fn settled_from_config(write: Option<bool>, level_text: &str) -> (bool, Level) {
+    let level = Level::parse(level_text).unwrap_or_default();
+    let write = write.unwrap_or_else(|| Level::parse(level_text).is_some());
+    (write, level)
+}
+
+/// The filter the current switches mean. Silence when the write switch is
+/// off; otherwise the level — unless `RUST_LOG` is set, which knows better.
+fn filter_for(write: bool, level: Level) -> EnvFilter {
+    if !write {
+        return EnvFilter::new("off");
+    }
+    if let Ok(custom) = EnvFilter::try_from_default_env() {
+        return custom;
     }
     EnvFilter::new(level.label())
 }
@@ -188,20 +209,20 @@ fn filter_for(level: Level) -> EnvFilter {
 /// speaks into the void. Returns the active path, for the boot line.
 pub fn init() -> Option<PathBuf> {
     let env_target = wants(std::env::var("MSTREAM_LOG").ok().as_deref());
-    let config_level = crate::config::load()
+    let (config_write, level) = crate::config::load()
         .ok()
-        .and_then(|c| Level::parse(&c.log.level))
-        .unwrap_or(Level::Off);
+        .map(|c| settled_from_config(c.log.write, &c.log.level))
+        .unwrap_or((false, Level::Info));
 
-    // Environment outranks config; a bare config level gets the default
+    // Environment outranks config; a bare config switch gets the default
     // location the same as MSTREAM_LOG=1 would.
-    let (level, path) = match env_target {
-        Target::Off if config_level == Level::Off => (Level::Off, None),
-        Target::Off => (config_level, resolve_target(Target::Default)),
-        target => (config_level.max_or_info(), resolve_target(target)),
+    let (write, path) = match env_target {
+        Target::Off if !config_write => (false, None),
+        Target::Off => (true, resolve_target(Target::Default)),
+        target => (true, resolve_target(target)),
     };
 
-    let (filter_layer, handle) = reload::Layer::new(filter_for(level));
+    let (filter_layer, handle) = reload::Layer::new(filter_for(write, level));
     let installed = tracing_subscriber::registry()
         .with(filter_layer)
         .with(
@@ -217,53 +238,63 @@ pub fn init() -> Option<PathBuf> {
     let _ = HANDLE.set(handle);
 
     let path = path.filter(|p| open_sink(p));
-    let active = (level != Level::Off).then(|| path.clone()).flatten();
-    *STATE.lock().unwrap() = (if active.is_some() { level } else { Level::Off }, path);
-    active
+    let write = write && path.is_some();
+    *STATE.lock().unwrap() = State { write, level, path: path.clone() };
+    path.filter(|_| write)
 }
 
-impl Level {
-    /// Env-driven sessions with no stated level mean "say something": info.
-    fn max_or_info(self) -> Level {
-        if self == Level::Off { Level::Info } else { self }
-    }
-}
-
-/// Change how loud the log is, from the Settings tab. Turning it up for the
-/// first time opens the file (the default location, rotated) if the session
-/// started without one. Returns the file now in use, if any.
-pub fn set_level(level: Level) -> Option<PathBuf> {
+/// Flip whether anything is written, from the Settings tab. Turning it on
+/// for the first time opens the file (the default location, rotated) if the
+/// session started without one. Returns the file now in use when on.
+pub fn set_write(on: bool) -> Option<PathBuf> {
     // No subscriber (init never ran — unit tests, embedding) means a file
     // would receive nothing; opening one would be litter.
     if HANDLE.get().is_none() {
         return None;
     }
     let mut state = STATE.lock().unwrap();
-    if level != Level::Off && state.1.is_none() {
-        state.1 = resolve_target(Target::Default).filter(|p| open_sink(p));
+    if on && state.path.is_none() {
+        state.path = resolve_target(Target::Default).filter(|p| open_sink(p));
     }
+    state.write = on && state.path.is_some();
     if let Some(handle) = HANDLE.get() {
-        let _ = handle.reload(filter_for(level));
+        let _ = handle.reload(filter_for(state.write, state.level));
     }
-    state.0 = if state.1.is_some() { level } else { Level::Off };
-    state.1.clone().filter(|_| state.0 != Level::Off)
+    state.path.clone().filter(|_| state.write)
 }
 
-/// How loud the log currently is.
+/// Change how loud the log is. Takes hold at once while writing; otherwise
+/// it simply waits as the level the write switch will use.
+pub fn set_level(level: Level) {
+    let mut state = STATE.lock().unwrap();
+    state.level = level;
+    if state.write
+        && let Some(handle) = HANDLE.get()
+    {
+        let _ = handle.reload(filter_for(true, level));
+    }
+}
+
+/// Whether anything is being written right now.
+pub fn writing() -> bool {
+    STATE.lock().unwrap().write
+}
+
+/// How loud the log is set to be, written or not.
 pub fn level() -> Level {
-    STATE.lock().unwrap().0
+    STATE.lock().unwrap().level
 }
 
 /// Where the log is going, if anywhere — for the boot and goodbye lines.
 pub fn active() -> Option<PathBuf> {
     let state = STATE.lock().unwrap();
-    if state.0 == Level::Off { None } else { state.1.clone() }
+    if state.write { state.path.clone() } else { None }
 }
 
 /// The last `max` lines of the log, for the in-app viewer — read fresh each
 /// call, from at most the final 256 KiB of the file.
 pub fn tail(max: usize) -> Option<(PathBuf, Vec<String>)> {
-    let path = STATE.lock().unwrap().1.clone()?;
+    let path = STATE.lock().unwrap().path.clone()?;
     let text = read_tail(&path)?;
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     if lines.len() > max {
@@ -305,16 +336,32 @@ mod tests {
 
     #[test]
     fn levels_step_between_their_words_and_stop_at_the_ends() {
-        assert_eq!(Level::Off.step(1), Level::Info);
         assert_eq!(Level::Info.step(1), Level::Debug);
+        assert_eq!(Level::Debug.step(1), Level::Trace);
         assert_eq!(Level::Trace.step(1), Level::Trace);
-        assert_eq!(Level::Info.step(-1), Level::Off);
-        assert_eq!(Level::Off.step(-1), Level::Off);
+        assert_eq!(Level::Debug.step(-1), Level::Info);
+        assert_eq!(Level::Info.step(-1), Level::Info);
+        assert_eq!(Level::default(), Level::Info);
         for level in Level::ALL {
             assert_eq!(Level::parse(level.label()), Some(level));
         }
         assert_eq!(Level::parse("TRACE "), Some(Level::Trace));
+        // "off" was a level in the one-field days; it is not one now — the
+        // migration reads it as the write switch being off.
+        assert_eq!(Level::parse("off"), None);
         assert_eq!(Level::parse("loud"), None);
+    }
+
+    #[test]
+    fn old_one_field_configs_keep_their_meaning() {
+        // A set level meant writing at that level…
+        assert_eq!(settled_from_config(None, "trace"), (true, Level::Trace));
+        // …"off" and absence meant silence…
+        assert_eq!(settled_from_config(None, "off"), (false, Level::Info));
+        assert_eq!(settled_from_config(None, ""), (false, Level::Info));
+        // …and the new key speaks for itself, whatever the level says.
+        assert_eq!(settled_from_config(Some(false), "debug"), (false, Level::Debug));
+        assert_eq!(settled_from_config(Some(true), ""), (true, Level::Info));
     }
 
     #[test]
