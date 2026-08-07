@@ -185,13 +185,19 @@ over the plain way, since there is no known ending to fade toward.
 gapless = true
 ```
 
-For album listeners instead of blend listeners: with no crossfade set, `gapless`
-feeds the next track into the playing sink ahead of time and the boundary is
-crossed sample-tight — no gap, no fade, exactly as the album was cut. A
-configured crossfade outranks it. Both live in the **Settings** tab (`6`):
-Enter opens Crossfade, `←` `→` walk the blend length, Enter toggles gapless,
-and what you set there is what config.toml remembers. The jukebox has the
-same pair as `mstream-player serve --crossfade 6` / `--gapless`.
+Gapless is **on by default**: with no crossfade set, the next track is fed
+into the playing sink ahead of time and the boundary is crossed sample-tight —
+no gap, no fade, exactly as the album was cut. The price is one track of
+prefetch near each boundary; on a metered connection, turn it off. A
+configured crossfade outranks it either way.
+
+Everything lives in the **Settings** tab (`6`): Enter opens Crossfade, `←` `→`
+walk the blend length, and Enter toggles the rest — **Gapless**, **Blend
+skips** (a manual skip crosses in a second instead of cutting), and **Pause
+fade** (pause and resume ride a short ramp instead of landing mid-note). What
+you set there is what config.toml remembers. The jukebox has the first pair as
+`mstream-player serve --crossfade 6` / `--gapless`; the legacy spawn contract
+keeps all of it off.
 
 ## Mouse
 

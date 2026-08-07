@@ -110,12 +110,19 @@ pub struct PlayerPrefs {
     /// "off", "similar" or "tempo+key".
     pub autodj: String,
     /// Seconds of blend when one track ends and the next begins; 0 is off.
-    /// Also adjustable live from the Auto-DJ panel (Phase C4).
+    /// Also adjustable live from the Settings tab (Phase C5).
     pub crossfade_seconds: f32,
-    /// Sample-tight track boundaries when no crossfade is set. Off by
-    /// default: it pre-fetches the next track, which is a behavior change
-    /// the pre-Phase-C engine never made unasked.
+    /// Sample-tight track boundaries when no crossfade is set. ON by
+    /// default since C6: nothing of Phase C had shipped when the opt-in
+    /// stance was written, the legacy serve contract keeps its own
+    /// default, and albums playing as they were cut is the better first
+    /// impression — the Settings tab turns it off in two keystrokes. The
+    /// cost is one track of prefetch near each boundary.
     pub gapless: bool,
+    /// Manual skips blend for a second instead of breathing (C6).
+    pub blend_skips: bool,
+    /// Pause and resume ride a short ramp instead of landing mid-wave (C6).
+    pub pause_fade: bool,
     /// How Auto-DJ chooses, beyond the mode.
     pub dj: AutoDjPrefs,
     #[serde(flatten)]
@@ -130,7 +137,9 @@ impl Default for PlayerPrefs {
             shuffle: false,
             autodj: "off".to_string(),
             crossfade_seconds: 0.0,
-            gapless: false,
+            gapless: true,
+            blend_skips: false,
+            pause_fade: false,
             dj: AutoDjPrefs::default(),
             extra: Keep::new(),
         }
@@ -846,6 +855,9 @@ mod tests {
         // 4, not 4.0. Pinned here, on the load, so a stricter future
         // deserializer cannot quietly turn that into a whole-file refusal.
         assert_eq!(config.player.crossfade_seconds, 4.0);
+        // This file predates the gapless key entirely, so it gets the C6
+        // default: on. A file that explicitly said false would keep false.
+        assert!(config.player.gapless, "a keyless config gets gapless by default");
         config.player.adopt(PlayerPrefs { volume: 0.8, ..PlayerPrefs::default() });
         save(&config).unwrap();
 

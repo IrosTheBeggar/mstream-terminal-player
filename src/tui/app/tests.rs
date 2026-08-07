@@ -1650,6 +1650,8 @@ fn remembered_preferences_are_applied_and_handed_back() {
         autodj: "tempo+key".into(),
         crossfade_seconds: 4.5,
         gapless: true,
+        blend_skips: true,
+        pause_fade: true,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -1660,6 +1662,8 @@ fn remembered_preferences_are_applied_and_handed_back() {
     assert_eq!(app.autodj, AutoDjMode::BpmKey);
     assert_eq!(app.crossfade, 4.5);
     assert!(app.gapless);
+    assert!(app.blend_skips);
+    assert!(app.pause_fade);
 
     // What goes out matches what came in, so a restart is a no-op.
     assert_eq!(app.prefs(), saved);
@@ -1675,6 +1679,8 @@ fn nonsense_preferences_fall_back_rather_than_refusing_to_start() {
         autodj: "disco".into(),
         crossfade_seconds: f32::NAN,
         gapless: false,
+        blend_skips: false,
+        pause_fade: false,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -2824,6 +2830,8 @@ fn a_remembered_similar_mode_is_dropped_on_a_server_without_the_index() {
         autodj: "similar".into(),
         crossfade_seconds: 0.0,
         gapless: false,
+        blend_skips: false,
+        pause_fade: false,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -3530,10 +3538,22 @@ fn the_settings_tab_adjusts_the_blend_and_tells_the_engine_in_the_same_keystroke
         "the row reads back the live value"
     );
 
+    // The C6 pair toggle through the same rows.
+    app.handle_action(Action::Down); // Blend skips
+    let effects = app.handle_action(Action::Activate);
+    assert!(app.blend_skips);
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetBlendSkips(true)))));
+    app.handle_action(Action::Down); // Pause fade
+    let effects = app.handle_action(Action::Back); // toggles either way
+    assert!(app.pause_fade);
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetPauseFade(true)))));
+
     // What the tab set is what the config remembers.
     let prefs = app.prefs();
     assert_eq!(prefs.crossfade_seconds, 0.0);
     assert!(prefs.gapless);
+    assert!(prefs.blend_skips);
+    assert!(prefs.pause_fade);
 
     // And the ways out: Esc steps back to the settings menu.
     app.handle_action(Action::Cancel);
@@ -3556,5 +3576,10 @@ fn connecting_tells_the_engine_the_blend_length() {
             .iter()
             .any(|e| matches!(e, Effect::Audio(AudioCmd::SetCrossfade(s)) if *s == 4.0)),
         "the config's blend length reaches the audio thread with the session"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetBlendSkips(_))))
+            && effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetPauseFade(_)))),
+        "the C6 pair travel with it"
     );
 }

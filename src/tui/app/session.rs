@@ -372,6 +372,8 @@ impl App {
                     Effect::Audio(AudioCmd::SetVolume(self.volume)),
                     Effect::Audio(AudioCmd::SetCrossfade(self.crossfade)),
                     Effect::Audio(AudioCmd::SetGapless(self.gapless)),
+                    Effect::Audio(AudioCmd::SetBlendSkips(self.blend_skips)),
+                    Effect::Audio(AudioCmd::SetPauseFade(self.pause_fade)),
                 ];
                 // Worth persisting when we hold a token we logged in for — or
                 // a pairing code, which is the only way back to this server

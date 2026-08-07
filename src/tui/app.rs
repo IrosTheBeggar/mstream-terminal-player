@@ -113,6 +113,10 @@ pub enum SettingRow {
     BlendLength,
     /// Sample-tight boundaries when no blend is set; anything toggles it.
     Gapless,
+    /// Manual skips blend for a second instead of breathing.
+    BlendSkips,
+    /// Pause and resume ride a short ramp instead of landing mid-wave.
+    PauseFade,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -864,6 +868,10 @@ pub struct App {
     /// Sample-tight boundaries when no blend is set, from `gapless` in
     /// config.toml. The announcement machinery serves both.
     pub gapless: bool,
+    /// Manual skips blend for a second instead of breathing (C6).
+    pub blend_skips: bool,
+    /// Pause and resume ride a short ramp (C6).
+    pub pause_fade: bool,
     /// The next track as told to the engine, so a blend can open it early.
     /// Held to keep the answer stable: recomputing on every refresh would
     /// re-roll a shuffled pick each time, and to know whether the engine's
@@ -971,6 +979,8 @@ impl App {
             volume: 1.0,
             crossfade: 0.0,
             gapless: false,
+            blend_skips: false,
+            pause_fade: false,
             announced: None,
             now_playing: None,
             art: HashMap::new(),
@@ -1044,6 +1054,8 @@ impl App {
             0.0
         };
         self.gapless = prefs.gapless;
+        self.blend_skips = prefs.blend_skips;
+        self.pause_fade = prefs.pause_fade;
         self.dj = dj::Settings::from_prefs(&prefs.dj);
         self
     }
@@ -1059,6 +1071,8 @@ impl App {
             autodj: self.autodj.label().to_string(),
             crossfade_seconds: self.crossfade,
             gapless: self.gapless,
+            blend_skips: self.blend_skips,
+            pause_fade: self.pause_fade,
             dj: self.dj.to_prefs(),
             // Settings from a newer player belong to the file, not to this
             // app's state; `PlayerPrefs::adopt` is what carries them across.
@@ -1742,7 +1756,10 @@ impl App {
                     Vec::new()
                 }
                 // Enter walks a value the same way → does; ← walks it back.
-                SettingRow::BlendLength | SettingRow::Gapless => self.adjust_setting(1),
+                SettingRow::BlendLength
+                | SettingRow::Gapless
+                | SettingRow::BlendSkips
+                | SettingRow::PauseFade => self.adjust_setting(1),
             },
             Entry::Track { .. } => {
                 // Enqueue everything visible and start at the highlighted row —
@@ -1944,6 +1961,16 @@ impl App {
         } else {
             "off · Enter to turn on".to_string()
         };
+        let blend_skips = if self.blend_skips {
+            "on · a skip crosses in a second".to_string()
+        } else {
+            "off · a skip is a clean cut".to_string()
+        };
+        let pause_fade = if self.pause_fade {
+            "on · pause and resume ride a short ramp".to_string()
+        } else {
+            "off · pause lands at once".to_string()
+        };
         vec![
             Entry::Parent,
             Entry::Setting {
@@ -1952,6 +1979,16 @@ impl App {
                 row: SettingRow::BlendLength,
             },
             Entry::Setting { label: "Gapless".into(), detail: gapless, row: SettingRow::Gapless },
+            Entry::Setting {
+                label: "Blend skips".into(),
+                detail: blend_skips,
+                row: SettingRow::BlendSkips,
+            },
+            Entry::Setting {
+                label: "Pause fade".into(),
+                detail: pause_fade,
+                row: SettingRow::PauseFade,
+            },
         ]
     }
 
@@ -1974,9 +2011,7 @@ impl App {
             return None;
         }
         match self.pane().selected() {
-            Some(Entry::Setting { row, .. })
-                if matches!(row, SettingRow::BlendLength | SettingRow::Gapless) =>
-            {
+            Some(Entry::Setting { row, .. }) if *row != SettingRow::CrossfadeMenu => {
                 Some(self.adjust_setting(delta))
             }
             _ => None,
@@ -2006,6 +2041,14 @@ impl App {
             SettingRow::Gapless => {
                 self.gapless = !self.gapless;
                 Effect::Audio(AudioCmd::SetGapless(self.gapless))
+            }
+            SettingRow::BlendSkips => {
+                self.blend_skips = !self.blend_skips;
+                Effect::Audio(AudioCmd::SetBlendSkips(self.blend_skips))
+            }
+            SettingRow::PauseFade => {
+                self.pause_fade = !self.pause_fade;
+                Effect::Audio(AudioCmd::SetPauseFade(self.pause_fade))
             }
             SettingRow::CrossfadeMenu => return Vec::new(),
         };

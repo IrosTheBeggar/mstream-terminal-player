@@ -46,6 +46,10 @@ pub trait PlayerCtl {
     fn set_crossfade(&self, seconds: f32);
     /// Sample-tight transitions when no blend is configured.
     fn set_gapless(&self, on: bool);
+    /// Manual skips blend for a second instead of breathing.
+    fn set_blend_skips(&self, on: bool);
+    /// Pause and resume ride a short ramp instead of landing mid-wave.
+    fn set_pause_fade(&self, on: bool);
     /// Announce what plays after the current source, so a blend can open it
     /// ahead of the fade window. Replaces any earlier announcement.
     fn prepare_next(&self, source: &str, duration_hint: Option<f64>);
@@ -88,6 +92,14 @@ impl PlayerCtl for Engine {
 
     fn set_gapless(&self, on: bool) {
         Engine::set_gapless(self, on);
+    }
+
+    fn set_blend_skips(&self, on: bool) {
+        Engine::set_blend_skips(self, on);
+    }
+
+    fn set_pause_fade(&self, on: bool) {
+        Engine::set_pause_fade(self, on);
     }
 
     fn prepare_next(&self, source: &str, duration_hint: Option<f64>) {

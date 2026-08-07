@@ -274,6 +274,16 @@ const OUTGOING_SLACK: Duration = Duration::from_secs(2);
 /// cutting a waveform mid-swing, short enough to feel instant.
 const SKIP_FADE: Duration = Duration::from_millis(150);
 
+/// The window when a manual skip BLENDS instead of breathing (opt-in): a
+/// second is musical without making the transport feel slow, and it stays
+/// fixed rather than borrowing crossfade_seconds — an eight-second blend
+/// is lovely at a track's natural end and treacle on a keystroke.
+const SKIP_BLEND: Duration = Duration::from_secs(1);
+
+/// The ramp either side of an opt-in soft pause: down before the pause
+/// lands, up as the resume begins.
+const PAUSE_FADE: Duration = Duration::from_millis(150);
+
 /// The breath on a stop. Shorter than a skip: a stop should feel like now.
 const STOP_FADE: Duration = Duration::from_millis(80);
 
@@ -497,6 +507,14 @@ struct State {
     gapless: bool,
     /// The source waiting inside the sink for its gapless boundary.
     appended: Option<Appended>,
+    /// Manual skips blend for [`SKIP_BLEND`] instead of breathing (C6).
+    blend_skips: bool,
+    /// Pause rides a [`PAUSE_FADE`] ramp down instead of landing mid-wave
+    /// (C6). The pause itself is applied by the tick once the ramp lands.
+    pause_fade: bool,
+    /// A soft pause in flight: the moment past which the tick may land it,
+    /// whatever the ramp reports. None means no pause is owed.
+    pausing: Option<Instant>,
     /// A silenced remnant still queued in the LIVE sink: the one queue edit
     /// the irrevocable append can heed (deleting the appended row) snaps
     /// the source silent, but rodio would still play its silence to
@@ -544,13 +562,26 @@ impl State {
     fn install(&mut self, mixer: &Mixer, prepared: Prepared) {
         self.cancel_overlap();
         self.adopt_appended_for_retire();
-        self.retire_softly(SKIP_FADE);
+        // A skip can blend (C6, opt-in): when something is audibly playing,
+        // the leaving track gets a one-second window instead of a breath
+        // and the incoming rises through the same second. Nothing audible —
+        // the natural-advance fallback, a stopped or paused sink — keeps
+        // the plain start; the blend is for the keystroke that interrupts.
+        let audible = !self.sink.empty() && !self.stopped && !self.sink.is_paused();
+        let blending_skip = self.blend_skips && audible;
+        self.retire_softly(if blending_skip { SKIP_BLEND } else { SKIP_FADE });
+        // A pause owed but not yet landed is cancelled by choosing a new
+        // track: the user's later intent wins, and the new track plays.
+        self.pausing = None;
         // Any orphaned remnant leaves with the retired sink, where the
         // fleet's reaping bounds it; the flag described the OLD sink.
         self.orphaned_tail = false;
         let sink = Player::connect_new(mixer);
         sink.set_volume(self.volume);
-        self.attach_fresh(&sink, prepared.opened, 1.0);
+        self.attach_fresh(&sink, prepared.opened, if blending_skip { 0.0 } else { 1.0 });
+        if blending_skip {
+            self.fade.ramp_to(1.0, SKIP_BLEND);
+        }
         self.sink = Arc::new(sink);
         self.current_file = prepared.path;
         self.duration = prepared.duration;
@@ -674,6 +705,7 @@ impl State {
         self.hush_drainers();
         self.adopt_appended_for_retire();
         self.retire_softly(STOP_FADE);
+        self.pausing = None;
         self.orphaned_tail = false;
         self.invalidate_next();
         self.pending_next = None;
@@ -807,6 +839,9 @@ impl Engine {
             crossfade: 0.0,
             gapless: false,
             appended: None,
+            blend_skips: false,
+            pause_fade: false,
+            pausing: None,
             orphaned_tail: false,
             pending_next: None,
             next: NextTrack::Idle,
@@ -885,15 +920,50 @@ impl Engine {
     /// Pause everything audible — during a blend that is two sinks, and
     /// pausing only one would leave the other playing under the silence.
     pub fn pause(&self) {
-        let s = self.state.lock().unwrap();
+        let mut s = self.state.lock().unwrap();
+        if s.sink.is_paused() || s.pausing.is_some() {
+            return;
+        }
+        // The soft pause (C6, opt-in): ramp down first, land the pause when
+        // the ramp does — the tick performs the landing, since nothing here
+        // may sleep. Without the option, or with nothing audible to fade,
+        // the pause lands now, exactly as it always has.
+        if s.pause_fade && !s.stopped && !s.sink.empty() {
+            s.fade.ramp_to(0.0, PAUSE_FADE);
+            s.pausing = Some(Instant::now() + PAUSE_FADE + Duration::from_millis(400));
+            return;
+        }
         s.sink.pause();
         for out in &s.outgoing {
             out.sink.pause();
         }
     }
 
+    /// Land a soft pause whose ramp has finished (or whose net came due).
+    /// Runs from the tick; the fade froze at silence, so the pause itself
+    /// is inaudible wherever in the callback cycle it lands.
+    fn land_pause(s: &mut State) {
+        let due = match s.pausing {
+            Some(deadline) => s.fade.position() <= 0.0 || Instant::now() >= deadline,
+            None => return,
+        };
+        if due {
+            s.pausing = None;
+            s.sink.pause();
+            for out in &s.outgoing {
+                out.sink.pause();
+            }
+        }
+    }
+
     pub fn resume(&self) {
         let mut s = self.state.lock().unwrap();
+        // A soft pause still mid-ramp: the resume overtakes it — cancel the
+        // landing and ramp straight back up from wherever the fade stands.
+        let overtaking = s.pausing.take().is_some();
+        if (overtaking || s.sink.is_paused()) && s.pause_fade && !s.stopped {
+            s.fade.ramp_to(1.0, PAUSE_FADE);
+        }
         s.sink.play();
         for out in &mut s.outgoing {
             out.sink.play();
@@ -984,6 +1054,16 @@ impl Engine {
     /// on a second one. A configured crossfade outranks it.
     pub fn set_gapless(&self, on: bool) {
         self.state.lock().unwrap().gapless = on;
+    }
+
+    /// Manual skips blend for a second instead of breathing (C6).
+    pub fn set_blend_skips(&self, on: bool) {
+        self.state.lock().unwrap().blend_skips = on;
+    }
+
+    /// Pause and resume ride a short ramp instead of landing mid-wave (C6).
+    pub fn set_pause_fade(&self, on: bool) {
+        self.state.lock().unwrap().pause_fade = on;
     }
 
     pub fn status(&self) -> Status {
@@ -1224,6 +1304,7 @@ impl Engine {
     /// failed or came too late, it fires exactly as it always has.
     pub fn advance_tick(&self) {
         let mut s = self.state.lock().unwrap();
+        Self::land_pause(&mut s);
         s.retire_outgoing();
         self.crossfade_step(&mut s);
         if !(s.sink.empty() && !s.stopped && !s.q.queue.is_empty()) {
@@ -2244,6 +2325,86 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         panic!("a bare status poll never saw the boundary");
+    }
+
+    /// Blend skips (C6): with the option on, a manual skip retires the old
+    /// track over a full second — at half a second its ramp is still
+    /// audibly mid-descent, where a breath would already be silence.
+    ///
+    /// `cargo test a_blended_skip -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_blended_skip_crosses_in_a_second_not_a_breath() {
+        let dir = std::env::temp_dir();
+        let first = dir.join("mstream-skipblend-a.wav");
+        let second = dir.join("mstream-skipblend-b.wav");
+        std::fs::write(&first, wav_bytes(4)).unwrap();
+        std::fs::write(&second, wav_bytes(4)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_blend_skips(true);
+        engine.queue_add_many(vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ]);
+        std::thread::sleep(Duration::from_millis(400));
+
+        engine.next_manual().unwrap();
+        assert!(engine.status().playing, "the chosen track is on at once");
+        std::thread::sleep(Duration::from_millis(500));
+        let positions = engine.drainer_positions();
+        assert!(
+            positions.iter().any(|&p| p > 0.2 && p < 0.9),
+            "half a second in, a blended skip is mid-ramp, not a finished breath: {positions:?}"
+        );
+
+        // And it still ends: drained within the second plus a tick or two.
+        let waited = std::time::Instant::now();
+        while engine.overlap_active() {
+            engine.advance_tick();
+            assert!(waited.elapsed() < Duration::from_secs(2), "the skip blend never ended");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        engine.stop();
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
+
+    /// The soft pause (C6): the pause itself lands a beat after the key,
+    /// once the ramp has reached silence — and resume ramps back up from
+    /// wherever it stood. With the option off, everything is as it was.
+    ///
+    /// `cargo test a_soft_pause -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_soft_pause_lands_after_its_ramp_and_resumes_whole() {
+        let tiny = std::env::temp_dir().join("mstream-softpause.wav");
+        std::fs::write(&tiny, wav_bytes(4)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_pause_fade(true);
+        engine.play_source(tiny.to_string_lossy().into_owned(), Some(4.0)).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+
+        engine.pause();
+        assert!(!engine.status().paused, "the pause rides the ramp, not the keystroke");
+        let asked = std::time::Instant::now();
+        while !engine.status().paused {
+            engine.advance_tick();
+            assert!(asked.elapsed() < Duration::from_secs(1), "the pause never landed");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+
+        engine.resume();
+        assert!(!engine.status().paused, "resume is immediate");
+        let before = engine.status().position;
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(engine.status().position > before, "and playback truly moves again");
+
+        engine.stop();
+        let _ = std::fs::remove_file(&tiny);
     }
 
     /// Gapless repeat-one: the loop seam crosses sample-tight, lap after

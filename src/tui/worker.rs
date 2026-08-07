@@ -50,6 +50,10 @@ pub enum AudioCmd {
     SetCrossfade(f32),
     /// Sample-tight transitions when no blend is configured.
     SetGapless(bool),
+    /// Manual skips blend for a second instead of breathing.
+    SetBlendSkips(bool),
+    /// Pause and resume ride a short ramp instead of landing mid-wave.
+    SetPauseFade(bool),
     Shutdown,
 }
 
@@ -385,11 +389,15 @@ fn collapse(batch: Vec<AudioCmd>) -> Vec<AudioCmd> {
     let volume = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetVolume(_)));
     let crossfade = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetCrossfade(_)));
     let gapless = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetGapless(_)));
+    let blend_skips = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetBlendSkips(_)));
+    let pause_fade = batch.iter().rev().find(|cmd| matches!(cmd, AudioCmd::SetPauseFade(_)));
 
     let mut kept: Vec<AudioCmd> = Vec::new();
     kept.extend(volume.cloned());
     kept.extend(crossfade.cloned());
     kept.extend(gapless.cloned());
+    kept.extend(blend_skips.cloned());
+    kept.extend(pause_fade.cloned());
     if let Some(at) = decider {
         kept.push(batch[at].clone());
     }
@@ -518,6 +526,8 @@ fn apply_audio_cmd(player: &dyn PlayerCtl, cmd: AudioCmd) -> Option<String> {
         AudioCmd::SetVolume(v) => player.set_volume(v),
         AudioCmd::SetCrossfade(seconds) => player.set_crossfade(seconds),
         AudioCmd::SetGapless(on) => player.set_gapless(on),
+        AudioCmd::SetBlendSkips(on) => player.set_blend_skips(on),
+        AudioCmd::SetPauseFade(on) => player.set_pause_fade(on),
         AudioCmd::PrepareNext { url, duration_hint } => player.prepare_next(&url, duration_hint),
         AudioCmd::ClearNext => player.clear_next(),
         AudioCmd::Shutdown => {}
@@ -1334,6 +1344,8 @@ mod tests {
         fn set_volume(&self, _volume: f32) {}
         fn set_crossfade(&self, _seconds: f32) {}
         fn set_gapless(&self, _on: bool) {}
+        fn set_blend_skips(&self, _on: bool) {}
+        fn set_pause_fade(&self, _on: bool) {}
         fn prepare_next(&self, _source: &str, _duration_hint: Option<f64>) {}
         fn clear_next(&self) {}
         fn status(&self) -> crate::player::PlayerStatus {
@@ -1450,6 +1462,11 @@ mod tests {
         assert_eq!(
             collapse(vec![AudioCmd::SetGapless(true), play("c"), AudioCmd::SetGapless(false)]),
             vec![AudioCmd::SetGapless(false), play("c")]
+        );
+        // The C6 pair ride the same sticky rule.
+        assert_eq!(
+            collapse(vec![AudioCmd::SetBlendSkips(true), play("c"), AudioCmd::SetPauseFade(true)]),
+            vec![AudioCmd::SetBlendSkips(true), AudioCmd::SetPauseFade(true), play("c")]
         );
     }
 

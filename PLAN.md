@@ -573,6 +573,22 @@ keystroke that made it. The panel's Crossfade/Gapless rows moved here whole, the
 back to being about picking, and on a server without Discover the tab slides onto `5` — the
 strip numbers by position, and the strip is the truth.
 
+#### C6 — Blend skips, pause fade, gapless by default ✅ DONE 2026-08-06
+The two settings worth adding, added: **Blend skips** retires a manually skipped track over a
+fixed second (not `crossfade_seconds` — an eight-second blend is lovely at a natural end and
+treacle on a keystroke) with the incoming rising through the same window, reusing the drainer
+fleet whole; **Pause fade** ramps down before the pause lands and back up as the resume begins,
+with the tick performing the landing since nothing in the engine may sleep — the last hard
+edges in the transport, both off by default. And **gapless went on by default**: the opt-in
+stance guarded a shipped behavior that never shipped (v0.1.2 predates all of Phase C), the
+legacy `--port` contract keeps its own defaults, and albums playing as they were cut is the
+better first impression. The cost — one track of prefetch near each boundary — is two
+keystrokes to decline in Settings. Curve selection and prefetch-lead knobs were considered
+and refused: the first is inaudible preference, the second invites the misconfiguration where
+blends silently stop firing. The genuinely valuable next steps are written down instead:
+don't-blend-album-segues (needs trailing-silence detection) and ReplayGain (its own Settings
+group, and the config test's torch key finally come true) — both Phase 7 material.
+
 #### Phase C review ✅ 2026-08-06
 
 A seven-lens adversarial review of C1–C3 (concurrency, audio, state machine, app
@@ -640,7 +656,10 @@ forward to Phase C, and true gapless — the append-to-sink redesign — landed 
 A persistent track cache (replay without re-downloading, offline listening) is the step after
 that and a genuinely bigger one: eviction policy, a size budget, an index keyed by server +
 filepath — this is where the SQLite question from A1 returns with an actual job to do. Also:
-TUI as remote for server-side audio, media keys (MPRIS/SMTC), scrobbling hooks, AUR packaging.
+TUI as remote for server-side audio, media keys (MPRIS/SMTC), scrobbling hooks, AUR packaging,
+don't-blend-album-segues (trailing-silence detection so continuous mixes keep their seams), and
+ReplayGain (the crossfade flaw you can actually hear — lopsided blends between loud and quiet
+masters — and a Settings group of its own).
 Two entries left this list by other roads: album art was written down as "ratatui-image" and
 landed instead as the half-block canvas the Cover visualizer draws through (0.1.1), and
 brew/scoop shipped with Phase 5.
