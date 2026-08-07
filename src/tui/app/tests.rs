@@ -668,6 +668,141 @@ fn seeking_while_idle_does_nothing() {
 }
 
 #[test]
+fn the_tunnel_path_reaches_the_header_and_resets_with_the_session() {
+    use crate::quickconnect::TunnelPath;
+    let mut app = connected_app();
+    // A direct-URL session refuses tunnel verdicts outright: the old
+    // bridge's sampler outlives a server switch, and its reports belong
+    // to nobody here.
+    app.apply_event(Event::TunnelPath(TunnelPath::Relay));
+    assert_eq!(app.tunnel_path, None, "a direct session wears no tunnel badge");
+
+    app.session.server_id = format!("{}abc123", crate::quickconnect::TUNNEL_ID_PREFIX);
+    app.apply_event(Event::TunnelPath(TunnelPath::Relay));
+    assert_eq!(app.tunnel_path, Some(TunnelPath::Relay));
+    app.apply_event(Event::TunnelPath(TunnelPath::Direct));
+    assert_eq!(app.tunnel_path, Some(TunnelPath::Direct));
+    // The words the header will use.
+    assert_eq!(TunnelPath::Direct.label(), "direct");
+    assert_eq!(TunnelPath::Relay.label(), "relay");
+    assert_eq!(TunnelPath::Reconnecting.label(), "reconnecting…");
+    // A fresh session starts with no verdict — a direct server would
+    // otherwise wear the last tunnel's badge.
+    app.apply_event(Event::Connected {
+        server: "http://direct:3000".into(),
+        id: "http://direct:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::new(crate::api::types::Ping::default()),
+    });
+    assert_eq!(app.tunnel_path, None);
+}
+
+#[test]
+fn a_failed_browse_takes_its_column_back_with_it() {
+    let mut app = connected_app();
+    app.path = String::new();
+    let listing = || {
+        vec![
+            Entry::Dir { label: "Air/".into(), path: "library/Air".into() },
+            Entry::Dir { label: "Boukmanflow/".into(), path: "library/Boukmanflow".into() },
+        ]
+    };
+    // Three rounds of the reported gesture: click a folder, watch the
+    // tunnel eat the request. Before the undo, every round stacked
+    // another copy of this listing on the trail — unclosable at the root.
+    for _ in 0..3 {
+        app.files.set(listing());
+        app.files.state.select(Some(0));
+        let effects = app.handle_action(Action::Activate);
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Browse(p)) if p == "library/Air")),
+            "the click asks the server"
+        );
+        assert_eq!(app.path, "library/Air");
+        assert_eq!(app.files.trail.len(), 1, "one column pushed on the way in");
+
+        app.apply_event(Event::Error("tunnel died".into()));
+        assert_eq!(app.path, "", "the failed browse walks its path back");
+        assert!(app.files.trail.is_empty(), "and takes its column with it");
+    }
+    // A listing that does answer keeps its navigation.
+    app.files.set(listing());
+    app.files.state.select(Some(0));
+    app.handle_action(Action::Activate);
+    app.apply_event(Event::Listing(Box::new(crate::api::types::DirListing {
+        path: "/library/Air/".into(),
+        directories: Vec::new(),
+        files: Vec::new(),
+    })));
+    assert_eq!(app.path, "library/Air");
+    // An unrelated error later must not undo a browse that already landed.
+    app.apply_event(Event::Error("art fetch failed".into()));
+    assert_eq!(app.path, "library/Air");
+}
+
+#[test]
+fn back_at_the_root_drains_an_orphaned_column() {
+    let mut app = connected_app();
+    app.path = String::new();
+    browsing(&mut app, &["a", "b"], 0);
+    // Strand a column the way the pre-undo bug did.
+    let orphan = Trail { entries: app.files.entries.clone(), chosen: 1 };
+    app.files.trail.push(orphan);
+
+    app.handle_action(Action::Back);
+    assert!(app.files.trail.is_empty(), "Back drains the orphan even at the root");
+    assert_eq!(app.files.state.selected(), Some(1), "restored with its remembered cursor");
+    // With nothing stranded, Back at the root stays a no-op.
+    assert!(app.handle_action(Action::Back).is_empty());
+    assert!(app.files.trail.is_empty());
+}
+
+#[test]
+fn fast_seek_presses_build_on_each_other_not_the_stale_status() {
+    let mut app = connected_app();
+    app.status.source = "http://host/a.mp3".into();
+    app.status.position = 10.0;
+    app.status.duration = 300.0;
+    // Status refreshes a few times a second; three quick presses used to
+    // read the same base and land as one minute instead of three.
+    assert_eq!(
+        app.handle_action(Action::SeekForwardFar),
+        vec![Effect::Audio(AudioCmd::Seek(70.0))]
+    );
+    assert_eq!(
+        app.handle_action(Action::SeekForwardFar),
+        vec![Effect::Audio(AudioCmd::Seek(130.0))]
+    );
+    assert_eq!(
+        app.handle_action(Action::SeekForwardFar),
+        vec![Effect::Audio(AudioCmd::Seek(190.0))]
+    );
+    // Chaining banks nothing past the bar's end — minutes that do not
+    // exist would poison every press that followed.
+    for _ in 0..3 {
+        app.handle_action(Action::SeekForwardFar);
+    }
+    assert_eq!(
+        app.handle_action(Action::SeekForwardFar),
+        vec![Effect::Audio(AudioCmd::Seek(300.0))]
+    );
+    // A status that catches up to the goal hands the base back to
+    // reality — the next press moves from where playback actually is.
+    app.apply_event(Event::Status(PlayerStatus {
+        source: "http://host/a.mp3".into(),
+        position: 299.0,
+        duration: 300.0,
+        playing: true,
+        ..Default::default()
+    }));
+    assert_eq!(
+        app.handle_action(Action::SeekBackward),
+        vec![Effect::Audio(AudioCmd::Seek(294.0))]
+    );
+}
+
+#[test]
 fn every_class_a_search_matched_is_reachable() {
     use crate::api::types::{SearchGroup, SearchTrack};
     let mut app = connected_app();
@@ -1648,6 +1783,10 @@ fn remembered_preferences_are_applied_and_handed_back() {
         repeat: "all".into(),
         shuffle: true,
         autodj: "tempo+key".into(),
+        crossfade_seconds: 4.5,
+        gapless: true,
+        blend_skips: true,
+        pause_fade: true,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -1656,6 +1795,10 @@ fn remembered_preferences_are_applied_and_handed_back() {
     assert_eq!(app.queue.repeat, Repeat::All);
     assert!(app.queue.shuffle);
     assert_eq!(app.autodj, AutoDjMode::BpmKey);
+    assert_eq!(app.crossfade, 4.5);
+    assert!(app.gapless);
+    assert!(app.blend_skips);
+    assert!(app.pause_fade);
 
     // What goes out matches what came in, so a restart is a no-op.
     assert_eq!(app.prefs(), saved);
@@ -1669,6 +1812,10 @@ fn nonsense_preferences_fall_back_rather_than_refusing_to_start() {
         repeat: "sideways".into(),
         shuffle: false,
         autodj: "disco".into(),
+        crossfade_seconds: f32::NAN,
+        gapless: false,
+        blend_skips: false,
+        pause_fade: false,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -1676,6 +1823,7 @@ fn nonsense_preferences_fall_back_rather_than_refusing_to_start() {
     assert_eq!(app.volume, 1.0, "volume is clamped");
     assert_eq!(app.queue.repeat, Repeat::Off);
     assert_eq!(app.autodj, AutoDjMode::Off);
+    assert_eq!(app.crossfade, 0.0, "a NaN blend is no blend");
 }
 
 #[test]
@@ -1742,9 +1890,11 @@ fn the_discover_tab_is_absent_where_the_server_cannot_serve_it() {
     let mut plain = connected_app();
     plain.capabilities = Default::default();
     assert!(!plain.tabs().contains(&Tab::Discover));
-    // And the numbers stay 1..n so no key points at a gap.
-    assert_eq!(plain.tabs().len(), 4);
-    assert!(plain.handle_action(Action::SelectTab(4)).is_empty(), "there is no fifth tab");
+    // And the numbers stay 1..n so no key points at a gap — Settings slides
+    // onto 5, and the strip's positional numbers stay the truth.
+    assert_eq!(plain.tabs().len(), 5);
+    assert_eq!(plain.tabs()[4], Tab::Settings);
+    assert!(plain.handle_action(Action::SelectTab(5)).is_empty(), "there is no sixth tab");
     assert_ne!(plain.tab, Tab::Discover);
 }
 
@@ -2553,8 +2703,10 @@ fn the_shifted_seek_keys_move_by_a_minute() {
 
     let effects = app.handle_action(Action::SeekForwardFar);
     assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(260.0))]);
+    // Each press builds on the last target (seek chaining), so back-far
+    // undoes forward-far exactly rather than re-reading a stale status.
     let effects = app.handle_action(Action::SeekBackwardFar);
-    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(140.0))]);
+    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(200.0))]);
     // And the fine keys still move by five.
     let effects = app.handle_action(Action::SeekForward);
     assert_eq!(effects, vec![Effect::Audio(AudioCmd::Seek(205.0))]);
@@ -2683,7 +2835,15 @@ fn choosing_a_genre_switches_the_filter_on() {
     // reads as the chooser being broken.
     let mut app = connected_app();
     app.handle_action(Action::OpenDjPanel);
-    app.dj_panel.as_mut().unwrap().row = app.dj_panel.as_ref().unwrap().rows.len() - 1;
+    let genres = app
+        .dj_panel
+        .as_ref()
+        .unwrap()
+        .rows
+        .iter()
+        .position(|r| *r == DjRow::Genres)
+        .unwrap();
+    app.dj_panel.as_mut().unwrap().row = genres;
     assert_eq!(app.dj_panel.as_ref().unwrap().selected(), DjRow::Genres);
 
     let effects = app.handle_action(Action::Activate);
@@ -2805,6 +2965,10 @@ fn a_remembered_similar_mode_is_dropped_on_a_server_without_the_index() {
         repeat: "off".into(),
         shuffle: false,
         autodj: "similar".into(),
+        crossfade_seconds: 0.0,
+        gapless: false,
+        blend_skips: false,
+        pause_fade: false,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -3039,4 +3203,520 @@ fn the_art_cache_is_bounded() {
     app.queue.replace(vec![track_with_cover("lib/a.mp3", "again.jpeg")]);
     app.play_index(0);
     assert_eq!(app.art.len(), 1);
+}
+
+// ── Crossfade announcements and handovers (Phase C3) ────────────────────────
+
+/// The last announcement in a batch of effects — what the engine will hold.
+fn announced_url(effects: &[Effect]) -> Option<String> {
+    effects.iter().rev().find_map(|effect| match effect {
+        Effect::Audio(AudioCmd::PrepareNext { url, .. }) => Some(url.clone()),
+        _ => None,
+    })
+}
+
+/// Play the first of `tracks` with the blend on, and let one status flow so
+/// the announcement hook has had its dispatch. Returns the playing URL and
+/// the announced one.
+fn blending(app: &mut App, tracks: &[&str]) -> (String, String) {
+    app.crossfade = 6.0;
+    app.queue.replace(tracks.iter().map(|t| track(t)).collect());
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let status = PlayerStatus { source: url.clone(), playing: true, ..Default::default() };
+    let effects = app.apply_event(Event::Status(status));
+    let announced = announced_url(&effects).expect("the next track should be announced");
+    (url, announced)
+}
+
+#[test]
+fn a_playing_queue_announces_its_next_track_once() {
+    let mut app = connected_app();
+    let (url, announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+    assert!(announced.contains("b.mp3"), "{announced}");
+
+    // The announcement stands: statuses keep flowing and nothing re-sends
+    // it while the queue it was made against holds.
+    let status = PlayerStatus { source: url, playing: true, ..Default::default() };
+    let again = app.apply_event(Event::Status(status));
+    assert_eq!(announced_url(&again), None, "no re-announcement without a change");
+}
+
+#[test]
+fn no_crossfade_means_no_announcements() {
+    let mut app = connected_app();
+    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let effects = app
+        .apply_event(Event::Status(PlayerStatus { source: url, playing: true, ..Default::default() }));
+    assert_eq!(announced_url(&effects), None);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::ClearNext))),
+        "nothing to withdraw either — the blend was never on"
+    );
+}
+
+#[test]
+fn editing_the_queue_reannounces_what_now_follows() {
+    let mut app = connected_app();
+    let (url, _) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+    let status = PlayerStatus { source: url, playing: true, ..Default::default() };
+
+    // The announced track leaves the queue: what follows is now c, and the
+    // next dispatch — any dispatch — says so.
+    app.queue.remove(1);
+    let effects = app.apply_event(Event::Status(status.clone()));
+    let announced = announced_url(&effects).expect("a replacement announcement");
+    assert!(announced.contains("c.mp3"), "{announced}");
+
+    // And when nothing follows at all, the announcement is withdrawn.
+    app.queue.remove(1);
+    let effects = app.apply_event(Event::Status(status));
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::ClearNext))),
+        "an announcement with no track behind it is taken back"
+    );
+}
+
+#[test]
+fn a_handover_moves_the_cursor_without_starting_anything() {
+    let mut app = connected_app();
+    let (url, announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+
+    let effects =
+        app.apply_event(Event::HandedOver { from: url, to: announced });
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))),
+        "the audio already moved; a Play would start the track over"
+    );
+    assert_eq!(app.queue.current, Some(1), "the cursor followed the blend");
+    assert_eq!(app.now_playing.as_ref().unwrap().filepath, "lib/b.mp3");
+    // The same dispatch announces what follows the adopted track.
+    assert!(announced_url(&effects).expect("the chain continues").contains("c.mp3"));
+}
+
+#[test]
+fn a_handover_the_queue_no_longer_describes_falls_back_to_a_real_play() {
+    let mut app = connected_app();
+    let (url, announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3"]);
+
+    // The engine blended into b, but by the time the event lands the queue
+    // has been rebuilt around different tracks entirely.
+    app.queue.replace(vec![track("lib/x.mp3"), track("lib/y.mp3")]);
+    let effects = app.apply_event(Event::HandedOver { from: url, to: announced });
+    assert!(
+        played_url(&effects).contains("x.mp3"),
+        "a queue that moved on plays its own front, properly"
+    );
+}
+
+#[test]
+fn a_missed_blend_still_plays_the_track_that_was_announced() {
+    // Shuffle rolls dice, and the announcement is the roll. When the blend
+    // misses — the track ran out before the engine could hand over, so a
+    // TrackEnded arrives instead — the same track must play. Re-rolling
+    // here would make the played order diverge from the announced one.
+    let mut app = connected_app();
+    app.queue.shuffle = true;
+    let (url, announced) =
+        blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3", "lib/d.mp3"]);
+
+    let effects = app.apply_event(Event::TrackEnded { source: url });
+    assert_eq!(
+        played_url(&effects),
+        announced,
+        "the roll made at announcement time is the roll that plays"
+    );
+}
+
+#[test]
+fn a_push_behind_the_wrap_reannounces_the_new_tail() {
+    // Playing the last row under repeat-all announces the wrap to row 0.
+    // A pushed track changes the answer without touching anything the
+    // snapshots see — the linear re-check is what catches it (review
+    // finding: the new track was skipped for a whole pass).
+    let mut app = connected_app();
+    app.crossfade = 6.0;
+    app.queue.repeat = Repeat::All;
+    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    let play = app.play_index(1);
+    let url = played_url(&play);
+    let status = PlayerStatus { source: url.clone(), playing: true, ..Default::default() };
+    let effects = app.apply_event(Event::Status(status.clone()));
+    assert!(announced_url(&effects).expect("the wrap").contains("a.mp3"));
+
+    app.queue.push(track("lib/c.mp3"));
+    let effects = app.apply_event(Event::Status(status));
+    let announced = announced_url(&effects).expect("the push changed the answer");
+    assert!(announced.contains("c.mp3"), "{announced}");
+
+    // And the missed-blend path plays the same corrected pick.
+    let effects = app.apply_event(Event::TrackEnded { source: url });
+    assert_eq!(played_url(&effects), announced);
+}
+
+#[test]
+fn restarting_the_playing_track_reannounces_the_next() {
+    // A restart is a Play, and every Play wipes the engine's pending next.
+    // The announcement must not stand on this side while the engine holds
+    // nothing (review finding: restarts silently cost the next blend).
+    let mut app = connected_app();
+    let (url, first) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+
+    app.play_index(0); // Enter on the row already playing
+    let status = PlayerStatus { source: url, playing: true, ..Default::default() };
+    let effects = app.apply_event(Event::Status(status));
+    let again = announced_url(&effects).expect("the announcement was re-sent");
+    assert_eq!(again, first, "same pick, told to the engine afresh");
+}
+
+#[test]
+fn a_duplicate_next_is_never_announced_and_still_advances() {
+    // The same file twice in a row: a blend into it would change nothing
+    // status can show — no HandedOver, a stalled cursor, and the copy
+    // played again on the missed-blend path (review finding). So it is
+    // never announced, and the transition takes the ordinary road.
+    let mut app = connected_app();
+    app.crossfade = 6.0;
+    app.queue.replace(vec![track("lib/x.mp3"), track("lib/x.mp3"), track("lib/y.mp3")]);
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let status = PlayerStatus { source: url.clone(), playing: true, ..Default::default() };
+    let effects = app.apply_event(Event::Status(status));
+    assert_eq!(announced_url(&effects), None, "a track never blends into itself");
+
+    // The ordinary end walks the cursor to the second copy, once — and the
+    // same dispatch already announces y, the different track behind it.
+    let effects = app.apply_event(Event::TrackEnded { source: url.clone() });
+    assert_eq!(played_url(&effects), url, "the copy plays under its own name");
+    assert_eq!(app.queue.current, Some(1), "and the cursor moved to it");
+    assert!(announced_url(&effects).expect("y follows").contains("y.mp3"));
+}
+
+#[test]
+fn the_fallback_adopts_the_copy_ahead_not_behind() {
+    // Duplicate filepaths are legal; an engine handover reconciled through
+    // the fallback scan must land on the copy ahead of the cursor, not
+    // walk backwards into rows already heard (review finding).
+    let mut app = connected_app();
+    app.crossfade = 6.0;
+    app.queue.replace(vec![
+        track("lib/a.mp3"),
+        track("lib/b.mp3"),
+        track("lib/a.mp3"),
+        track("lib/c.mp3"),
+    ]);
+    let play = app.play_index(1);
+    let url = played_url(&play);
+    app.apply_event(Event::Status(PlayerStatus {
+        source: url.clone(),
+        playing: true,
+        ..Default::default()
+    }));
+    let to = app.queue_url(&app.queue.items[2]).unwrap();
+
+    // The announcement is gone (whatever invalidated it); only the scan
+    // remains to say which row the engine meant.
+    app.announced = None;
+    app.apply_event(Event::HandedOver { from: url, to });
+    assert_eq!(app.queue.current, Some(2), "the copy ahead, not row 0");
+}
+
+#[test]
+fn a_handover_racing_a_user_play_is_ignored() {
+    let mut app = connected_app();
+    let (url, announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+
+    // The user picked something else and its Play is still opening: the
+    // engine's handover describes a past that has been overruled.
+    app.starting = Some("http://host:3000/media/elsewhere.mp3".into());
+    app.apply_event(Event::HandedOver { from: url, to: announced });
+    assert_eq!(app.queue.current, Some(0), "the cursor stayed with the user's intent");
+    assert_eq!(app.now_playing.as_ref().unwrap().filepath, "lib/a.mp3");
+}
+
+#[test]
+fn a_handover_from_a_track_already_left_is_ignored() {
+    let mut app = connected_app();
+    let (_url, announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+
+    app.apply_event(Event::HandedOver {
+        from: "http://host:3000/media/somewhere-else.mp3".into(),
+        to: announced,
+    });
+    assert_eq!(app.queue.current, Some(0), "stale news moves nothing");
+}
+
+#[test]
+fn toggling_rules_reannounces_through_the_action_funnel() {
+    // The refresh hook rides handle_action too — a settings keystroke must
+    // carry its announcement change in the same action's effects, not wait
+    // for the next status tick (review finding: only the event funnel was
+    // ever exercised).
+    let mut app = connected_app();
+    let (_url, _announced) = blending(&mut app, &["lib/a.mp3", "lib/b.mp3", "lib/c.mp3"]);
+
+    let effects = app.handle_action(Action::ToggleShuffle);
+    assert!(
+        announced_url(&effects).is_some(),
+        "new rules, new roll, told to the engine in the same keystroke"
+    );
+
+    // A repeat change under SHUFFLE has only the snapshot to catch it —
+    // the linear re-check is skipped there — so it gets its own assert
+    // (the fix-verify pass called this the one uncovered corner).
+    let effects = app.handle_action(Action::ToggleRepeat); // All, shuffle still on
+    assert!(
+        announced_url(&effects).is_some(),
+        "a repeat change re-rolls a shuffled announcement via the snapshot"
+    );
+
+    // Off -> All keeps a next; All -> One withdraws it — repeat-one never
+    // blends, and the withdrawal must not wait for a status tick either.
+    app.handle_action(Action::ToggleShuffle); // shuffle back off
+    let effects = app.handle_action(Action::ToggleRepeat); // One
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::ClearNext))),
+        "repeat-one withdraws the announcement in the same keystroke"
+    );
+}
+
+#[test]
+fn gapless_announces_the_next_track_without_a_blend() {
+    // The announcement machinery serves both transitions: gapless needs
+    // the engine to hold something appendable, blend or no blend.
+    let mut app = connected_app();
+    app.gapless = true;
+    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let effects = app
+        .apply_event(Event::Status(PlayerStatus { source: url, playing: true, ..Default::default() }));
+    assert!(
+        announced_url(&effects).expect("announced for the append").contains("b.mp3"),
+        "crossfade off, gapless on — the next track is still told ahead"
+    );
+}
+
+#[test]
+fn gapless_repeat_one_announces_its_own_seam() {
+    // The engine loops the seam only if it holds something appendable, and
+    // under repeat-one the only appendable thing is the track itself. The
+    // duplicate-refusal must stand aside for exactly this case — the
+    // cursor never moves, which is what makes it safe.
+    let mut app = connected_app();
+    app.gapless = true;
+    app.queue.repeat = Repeat::One;
+    app.queue.replace(vec![track("lib/a.mp3")]);
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let effects = app.apply_event(Event::Status(PlayerStatus {
+        source: url.clone(),
+        playing: true,
+        ..Default::default()
+    }));
+    assert_eq!(
+        announced_url(&effects).as_deref(),
+        Some(url.as_str()),
+        "the seam announces the track to itself"
+    );
+
+    // With a blend configured instead, the refusal stands: blends never
+    // self-blend.
+    app.crossfade = 6.0;
+    app.announced = None;
+    let effects = app.apply_event(Event::Status(PlayerStatus {
+        source: url,
+        playing: true,
+        ..Default::default()
+    }));
+    assert_eq!(announced_url(&effects), None, "a blend never blends into itself");
+}
+
+#[test]
+fn the_settings_menu_reads_the_state_at_a_glance_and_backs_out_whole() {
+    let mut app = connected_app();
+    app.crossfade = 6.0;
+    app.handle_action(Action::SelectTab(5));
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("6s blend")),
+        "the root row summarises without opening"
+    );
+
+    // In, back out via h on the `..` row, and the menu is whole again.
+    app.handle_action(Action::Activate);
+    assert_eq!(*app.settings_node(), SettingsNode::Crossfade);
+    app.handle_action(Action::Up); // onto `..`
+    app.handle_action(Action::Back);
+    assert_eq!(*app.settings_node(), SettingsNode::Root);
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::CrossfadeMenu, .. })),
+        "back lands on the menu, not an empty pane"
+    );
+
+    // Leaving and returning keeps the live values fresh in the details.
+    app.handle_action(Action::SelectTab(0));
+    app.crossfade = 0.0;
+    app.gapless = true;
+    app.handle_action(Action::SelectTab(5));
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("gapless")),
+        "a revisit reads the values as they are now"
+    );
+}
+
+#[test]
+fn a_fractional_crossfade_snaps_to_whole_steps() {
+    // A hand-written 4.5 must step to 5 and 4 — not 5.5 forever.
+    let mut app = connected_app();
+    app.crossfade = 4.5;
+    app.handle_action(Action::SelectTab(5));
+    app.handle_action(Action::Activate); // cursor rests on Blend length
+
+    app.handle_action(Action::Activate);
+    assert_eq!(app.crossfade, 5.0, "up from 4.5 lands on the next whole second");
+    app.crossfade = 4.5;
+    app.handle_action(Action::Back);
+    assert_eq!(app.crossfade, 4.0, "down from 4.5 lands on the previous");
+}
+
+#[test]
+fn a_lone_track_under_repeat_all_gets_its_seam() {
+    // One track on repeat-all loops exactly like repeat-one, and the
+    // engine's candidate logic treats them alike; the app was starving
+    // this disguise of the seam (fix-round review).
+    let mut app = connected_app();
+    app.gapless = true;
+    app.queue.repeat = Repeat::All;
+    app.queue.replace(vec![track("lib/only.mp3")]);
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let effects = app.apply_event(Event::Status(PlayerStatus {
+        source: url.clone(),
+        playing: true,
+        ..Default::default()
+    }));
+    assert_eq!(
+        announced_url(&effects).as_deref(),
+        Some(url.as_str()),
+        "the disguised loop announces its seam too"
+    );
+}
+
+#[test]
+fn turning_crossfade_on_withdraws_a_standing_seam_announcement() {
+    // The seam announces the track to itself, which is lawful only while
+    // gapless-without-blend holds. Crossfade coming on must take the seam
+    // with it in the same keystroke — left standing, the engine holds a
+    // self to blend into (the pending-seam bug).
+    let mut app = connected_app();
+    app.gapless = true;
+    app.queue.repeat = Repeat::One;
+    app.queue.replace(vec![track("lib/a.mp3")]);
+    let play = app.play_index(0);
+    let url = played_url(&play);
+    let effects = app.apply_event(Event::Status(PlayerStatus {
+        source: url.clone(),
+        playing: true,
+        ..Default::default()
+    }));
+    assert_eq!(announced_url(&effects).as_deref(), Some(url.as_str()), "the seam stands");
+
+    app.handle_action(Action::SelectTab(5));
+    app.handle_action(Action::Activate); // cursor rests on Blend length
+    let effects = app.handle_action(Action::Activate); // crossfade 0 -> 1
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::ClearNext))),
+        "the keystroke that armed the blend disarmed the seam"
+    );
+}
+
+#[test]
+fn the_settings_tab_adjusts_the_blend_and_tells_the_engine_in_the_same_keystroke() {
+    let mut app = connected_app();
+    app.handle_action(Action::SelectTab(5));
+    assert_eq!(app.tab, Tab::Settings, "6 lands on Settings");
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::CrossfadeMenu, .. })),
+        "the root offers Crossfade"
+    );
+
+    app.handle_action(Action::Activate);
+    // Rows: [.., Blend length, Gapless]; the cursor rests past the `..`,
+    // already on the blend.
+    let effects = app.handle_action(Action::Activate); // Enter steps up
+    assert_eq!(app.crossfade, 1.0);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Audio(AudioCmd::SetCrossfade(s)) if *s == 1.0)),
+        "the engine hears the nudge at once"
+    );
+    let effects = app.handle_action(Action::Back); // <- steps down on a value row
+    assert_eq!(app.crossfade, 0.0, "and back down to off, never below");
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Audio(AudioCmd::SetCrossfade(s)) if *s == 0.0))
+    );
+    assert_eq!(app.tab, Tab::Settings, "a value row's Back adjusts, it does not leave");
+
+    app.handle_action(Action::Down); // Gapless
+    let effects = app.handle_action(Action::Activate);
+    assert!(app.gapless);
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetGapless(true)))),
+        "gapless toggles through the same funnel"
+    );
+    // The rows show the change without losing the cursor.
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("on")),
+        "the row reads back the live value"
+    );
+
+    // The C6 pair toggle through the same rows.
+    app.handle_action(Action::Down); // Blend skips
+    let effects = app.handle_action(Action::Activate);
+    assert!(app.blend_skips);
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetBlendSkips(true)))));
+    app.handle_action(Action::Down); // Pause fade
+    let effects = app.handle_action(Action::Back); // toggles either way
+    assert!(app.pause_fade);
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetPauseFade(true)))));
+
+    // What the tab set is what the config remembers.
+    let prefs = app.prefs();
+    assert_eq!(prefs.crossfade_seconds, 0.0);
+    assert!(prefs.gapless);
+    assert!(prefs.blend_skips);
+    assert!(prefs.pause_fade);
+
+    // And the ways out: Esc steps back to the settings menu.
+    app.handle_action(Action::Cancel);
+    assert_eq!(*app.settings_node(), SettingsNode::Root);
+}
+
+#[test]
+fn connecting_tells_the_engine_the_blend_length() {
+    let mut app = connected_app();
+    app.crossfade = 4.0;
+    let effects = app.apply_event(Event::Connected {
+        server: "http://host:3000".into(),
+        id: "http://host:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::new(Default::default()),
+    });
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Audio(AudioCmd::SetCrossfade(s)) if *s == 4.0)),
+        "the config's blend length reaches the audio thread with the session"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetBlendSkips(_))))
+            && effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetPauseFade(_)))),
+        "the C6 pair travel with it"
+    );
 }

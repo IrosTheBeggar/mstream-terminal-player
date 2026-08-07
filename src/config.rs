@@ -109,6 +109,20 @@ pub struct PlayerPrefs {
     pub shuffle: bool,
     /// "off", "similar" or "tempo+key".
     pub autodj: String,
+    /// Seconds of blend when one track ends and the next begins; 0 is off.
+    /// Also adjustable live from the Settings tab (Phase C5).
+    pub crossfade_seconds: f32,
+    /// Sample-tight track boundaries when no crossfade is set. ON by
+    /// default since C6: nothing of Phase C had shipped when the opt-in
+    /// stance was written, the legacy serve contract keeps its own
+    /// default, and albums playing as they were cut is the better first
+    /// impression — the Settings tab turns it off in two keystrokes. The
+    /// cost is one track of prefetch near each boundary.
+    pub gapless: bool,
+    /// Manual skips blend for a second instead of breathing (C6).
+    pub blend_skips: bool,
+    /// Pause and resume ride a short ramp instead of landing mid-wave (C6).
+    pub pause_fade: bool,
     /// How Auto-DJ chooses, beyond the mode.
     pub dj: AutoDjPrefs,
     #[serde(flatten)]
@@ -122,6 +136,10 @@ impl Default for PlayerPrefs {
             repeat: "off".to_string(),
             shuffle: false,
             autodj: "off".to_string(),
+            crossfade_seconds: 0.0,
+            gapless: true,
+            blend_skips: false,
+            pause_fade: false,
             dj: AutoDjPrefs::default(),
             extra: Keep::new(),
         }
@@ -767,6 +785,8 @@ mod tests {
         config.player.volume = 0.4;
         config.player.repeat = "all".into();
         config.player.autodj = "similar".into();
+        config.player.crossfade_seconds = 6.0;
+        config.player.gapless = true;
         touch_server(&mut config, "http://host:3000", Some("alice".into()));
         set_last_path(&mut config, "http://host:3000", "music/Artist");
         save(&config).unwrap();
@@ -778,6 +798,8 @@ mod tests {
         let loaded = load().unwrap();
         assert_eq!(loaded.player.volume, 0.4);
         assert_eq!(loaded.player.repeat, "all");
+        assert_eq!(loaded.player.crossfade_seconds, 6.0);
+        assert!(loaded.player.gapless);
         assert_eq!(loaded.servers[0].username.as_deref(), Some("alice"));
         assert_eq!(loaded.servers[0].last_path.as_deref(), Some("music/Artist"));
 
@@ -802,6 +824,9 @@ mod tests {
         // unchanged, because the policy at the top of this file promises that
         // added optional fields don't bump it — which is exactly what puts
         // this file in front of this binary.
+        // This test's example future key keeps coming true: it was
+        // `crossfade_seconds` until Phase C3 shipped it, then `gapless`
+        // until C4 did. `replaygain` now carries the torch.
         fs::write(
             scratch.dir.join(CONFIG_FILE),
             "version = 1\n\
@@ -810,6 +835,7 @@ mod tests {
              [player]\n\
              volume = 0.5\n\
              crossfade_seconds = 4\n\
+             replaygain = \"album\"\n\
              \n\
              [player.dj]\n\
              energy_curve = \"rising\"\n\
@@ -824,6 +850,14 @@ mod tests {
         // its live state, which is where a preserved key gets dropped again
         // if `adopt` isn't in the path.
         let mut config = load().unwrap();
+        // A hand-written integer where the field is an f32: the file's
+        // stated design goal is "fixable in an editor", and a person writes
+        // 4, not 4.0. Pinned here, on the load, so a stricter future
+        // deserializer cannot quietly turn that into a whole-file refusal.
+        assert_eq!(config.player.crossfade_seconds, 4.0);
+        // This file predates the gapless key entirely, so it gets the C6
+        // default: on. A file that explicitly said false would keep false.
+        assert!(config.player.gapless, "a keyless config gets gapless by default");
         config.player.adopt(PlayerPrefs { volume: 0.8, ..PlayerPrefs::default() });
         save(&config).unwrap();
 
@@ -834,7 +868,10 @@ mod tests {
         let int = |t: &Keep, k: &str| t.get(k).and_then(toml::Value::as_integer);
         assert_eq!(int(&again.extra, "lyrics_offset"), Some(250));
         assert!(again.extra.contains_key("visualizer"), "a whole unknown section survived");
-        assert_eq!(int(&again.player.extra, "crossfade_seconds"), Some(4));
+        assert_eq!(
+            again.player.extra.get("replaygain").and_then(toml::Value::as_str),
+            Some("album")
+        );
         assert_eq!(
             again.player.dj.extra.get("energy_curve").and_then(toml::Value::as_str),
             Some("rising")

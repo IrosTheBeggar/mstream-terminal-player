@@ -22,10 +22,15 @@ pub(crate) type HttpReader = StreamDownload<TempStorageProvider>;
 //
 // Each playing track spools to one temp file (that is what makes seeking
 // instant), deleted when the track stops. This is a scratch buffer, not a
-// cache: only the current track has a file, nothing is prefetched, nothing
-// persists. By default the file would land in the OS temp dir — RAM-backed
-// tmpfs on many Linux systems — so main() points us at a real cache
-// directory instead (see config::spool_dir).
+// cache: nothing persists. At most two *live* tracks have files at once —
+// the one playing and, while a crossfade prepares or blends, the one
+// coming up (Phase C) — plus, briefly, the spools of cancelled prepares:
+// cancellation is dropping the opener's receiver, and the opener holds
+// its file until the open completes or OPEN_TIMEOUT expires, so queue
+// churn inside the prepare window can hold three or four for a few
+// seconds. By default the files would land in the OS temp dir —
+// RAM-backed tmpfs on many Linux systems — so main() points us at a real
+// cache directory instead (see config::spool_dir).
 
 /// Filename prefix that makes spool files recognisably ours, so the startup
 /// sweep never touches anything else even in a shared directory.
@@ -126,6 +131,18 @@ fn client() -> Result<&'static Client, String> {
         .get_or_init(|| {
             Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
+                // Never reuse a kept-alive connection. A pooled connection
+                // assumes the far end is still there, and through the Quick
+                // Connect bridge that assumption failed silently: the tunnel
+                // held the client-side TCP open after the server's side was
+                // gone, the pool offered the corpse to the next open, and
+                // the request sat waiting for headers until OPEN_TIMEOUT —
+                // which read as "crossfade didn't happen" whenever a prepare
+                // fired within the pool's idle window of the previous
+                // download finishing (the listening-session trace, fixed
+                // alongside the bridge itself). Streams gain nothing from
+                // reuse — an open per track, a connection per open.
+                .pool_max_idle_per_host(0)
                 .build()
                 .map_err(|e| format!("failed to build http client: {e}"))
         })
@@ -144,12 +161,16 @@ pub(crate) fn open(url_str: &str) -> Result<(HttpReader, Option<u64>), String> {
         let open = async {
             let stream = HttpStream::new(client, url)
                 .await
-                .map_err(|e| format!("request failed: {e}"))?;
+                // Redacted: reqwest embeds the full URL in its error text,
+                // and stream URLs carry the auth token as a query parameter
+                // — which would otherwise walk into the flight recorder and
+                // the UI toast (pre-merge review).
+                .map_err(|e| redact_queries(&format!("request failed: {e}")))?;
             let content_length = stream.content_length();
             let reader =
                 StreamDownload::from_stream(stream, spool_provider(), Settings::default())
                     .await
-                    .map_err(|e| format!("stream init failed: {e}"))?;
+                    .map_err(|e| redact_queries(&format!("stream init failed: {e}")))?;
             Ok((reader, content_length))
         };
         // Timing out abandons the future, which aborts the request in
@@ -164,6 +185,26 @@ pub(crate) fn open(url_str: &str) -> Result<(HttpReader, Option<u64>), String> {
             )),
         }
     })?
+}
+
+/// Strip query strings from URLs embedded in third-party error text. Our
+/// own messages go through [`redact_source`]; this covers the messages we
+/// only relay — reqwest and stream-download print the URL they failed on,
+/// token and all. Anything from a `?` to the next delimiter goes; a `?`
+/// in prose costs a few characters of someone else's sentence, which is
+/// the right price for never writing a token to disk.
+fn redact_queries(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(q) = rest.find('?') {
+        out.push_str(&rest[..q]);
+        out.push_str("?<redacted>");
+        let after = &rest[q + 1..];
+        let end = after.find([' ', ')', '"', '\'']).unwrap_or(after.len());
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 pub(crate) fn is_http_url(source: &str) -> bool {
@@ -253,6 +294,50 @@ mod tests {
     }
 
     #[test]
+    fn a_second_open_never_reuses_the_first_connection() {
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // A server that answers exactly one request per connection and then
+        // holds the socket open in silence — the shape the Quick Connect
+        // bridge presented when the server behind it had hung up. A pooled
+        // client offers that connection to its next request and waits out
+        // its whole timeout; a pool-free client opens fresh and succeeds.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let conns = Arc::new(AtomicUsize::new(0));
+        let counter = conns.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut head = [0u8; 2048];
+                    let _ = stream.read(&mut head);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nRIFF",
+                    );
+                    // Hold the socket open, deaf: no FIN for the pool to
+                    // notice, no answer for a reused request.
+                    std::thread::sleep(Duration::from_secs(5));
+                });
+            }
+        });
+
+        let url = format!("http://{addr}/one.wav");
+        let first = open(&url);
+        assert!(first.is_ok(), "{:?}", first.err());
+        drop(first);
+        let second = open(&url);
+        assert!(
+            second.is_ok(),
+            "second open hung on a pooled connection: {:?}",
+            second.err()
+        );
+        assert_eq!(conns.load(Ordering::SeqCst), 2, "each open dials fresh");
+    }
+
+    #[test]
     fn a_server_that_never_answers_fails_the_open_instead_of_hanging() {
         // Bound but never accepted: on loopback the handshake still
         // completes into the listen backlog, so the connect succeeds and
@@ -272,6 +357,18 @@ mod tests {
         // tested is bounded-at-all, not sharp-at-400.
         assert!(waited < Duration::from_secs(5), "took {waited:?}");
         drop(listener);
+    }
+
+    #[test]
+    fn relayed_error_text_loses_its_query_strings() {
+        assert_eq!(
+            redact_queries("request failed: error sending request for url \
+                            (http://127.0.0.1:9/a.mp3?token=SECRET)"),
+            "request failed: error sending request for url \
+                            (http://127.0.0.1:9/a.mp3?<redacted>)"
+        );
+        assert_eq!(redact_queries("no urls here"), "no urls here");
+        assert_eq!(redact_queries("odd? prose survives"), "odd?<redacted> prose survives");
     }
 
     #[test]

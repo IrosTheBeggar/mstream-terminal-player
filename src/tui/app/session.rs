@@ -327,6 +327,10 @@ impl App {
     pub(super) fn consume_session(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::Connected { server, id, username, token, ping } => {
+                // A fresh session starts with no verdict on how its tunnel
+                // runs; the sampler speaks within a couple of seconds when
+                // there is one, and a direct server never sets it at all.
+                self.tunnel_path = None;
                 self.connected = true;
                 self.connecting = false;
                 self.connect.submitting = false;
@@ -370,6 +374,10 @@ impl App {
                 let mut effects = vec![
                     Effect::Api(ApiCmd::Browse(self.opening_path())),
                     Effect::Audio(AudioCmd::SetVolume(self.volume)),
+                    Effect::Audio(AudioCmd::SetCrossfade(self.crossfade)),
+                    Effect::Audio(AudioCmd::SetGapless(self.gapless)),
+                    Effect::Audio(AudioCmd::SetBlendSkips(self.blend_skips)),
+                    Effect::Audio(AudioCmd::SetPauseFade(self.pause_fade)),
                 ];
                 // Worth persisting when we hold a token we logged in for — or
                 // a pairing code, which is the only way back to this server

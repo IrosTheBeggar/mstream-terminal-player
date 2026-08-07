@@ -153,6 +153,7 @@ impl Action {
             Action::SelectTab(2) => "tab-3",
             Action::SelectTab(3) => "tab-4",
             Action::SelectTab(4) => "tab-5",
+            Action::SelectTab(5) => "tab-6",
             Action::StartSearch => "search",
             Action::StartFilter => "filter",
             Action::CycleViz => "visualiser-mode",
@@ -262,6 +263,10 @@ fn default_normal() -> Vec<Binding> {
         action: Action::SelectTab(4),
         help: Some("Discover, if enabled"),
     },
+    // Settings is always available, so on a server without Discover it
+    // slides onto 5 — the strip numbers by position, and the strip is
+    // the truth.
+    Binding { keys: vec![ch('6')], action: Action::SelectTab(5), help: Some("Settings") },
     Binding { keys: vec![ch('/')], action: Action::StartSearch, help: Some("search") },
     // `/` already asks the server. This one narrows what is already on
     // screen, which is a different enough job to want its own key.

@@ -14,7 +14,7 @@ use crate::api::types::fmt_duration;
 
 use super::app::{
     App, CONNECT_METHODS, ConnectStage, DjRow, Entry, Focus, MessageKind, NowTab, Queue, Repeat,
-    SearchNode, Tab,
+    SearchNode, SettingsNode, Tab,
 };
 use super::worker::{AutoDjMode, DiscoverNode, LibraryNode};
 use crate::api::types::{Track, TrackMetadata};
@@ -421,8 +421,13 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 /// it will settle for, and the header keeps that much back.
 fn server_labels(app: &App) -> Vec<String> {
     // A tunnel session shows its identity, not the loopback port it happens
-    // to be riding on today.
-    let shown = app.server_display();
+    // to be riding on today — and how it is currently reached, because
+    // "direct" and "through a relay on another continent" sound different
+    // and the listener deserves to know which one they are hearing.
+    let shown = match app.tunnel_path {
+        Some(path) => format!("{} · {}", app.server_display(), path.label()),
+        None => app.server_display(),
+    };
     let host = shown
         .trim_start_matches("https://")
         .trim_start_matches("http://")
@@ -726,6 +731,7 @@ fn empty_hint(app: &App) -> String {
         Tab::Playlists => "(no playlists)",
         Tab::Search => "type a query and press Enter",
         Tab::Discover => "(nothing similar)",
+        Tab::Settings => "(no settings here yet)",
     }
     .to_string()
 }
@@ -790,6 +796,10 @@ pub(crate) fn browser_title(app: &App) -> String {
                 DiscoverNode::Artist(artist) => format!(" Ways into {artist} "),
             }
         }
+        Tab::Settings => match app.settings_node() {
+            SettingsNode::Root => " Settings ".to_string(),
+            SettingsNode::Crossfade => " Settings · Crossfade ".to_string(),
+        },
     }
 }
 
@@ -830,6 +840,18 @@ fn entry_line(entry: &Entry, width: usize, playing: Option<&str>) -> Line<'stati
         // column an unclipped detail ends mid-word, and a lone letter against
         // the rule reads as a rendering fault rather than as elision.
         Entry::Discover { label, detail, .. } => {
+            let name = fit(label, width);
+            let room = width.saturating_sub(width_of(&name) + 3);
+            let mut spans = vec![Span::styled(name, Style::new().fg(folder()))];
+            if room > 1 {
+                spans.push(Span::styled(
+                    format!("   {}", fit(detail, room)),
+                    Style::new().fg(dim()),
+                ));
+            }
+            Line::from(spans)
+        }
+        Entry::Setting { label, detail, .. } => {
             let name = fit(label, width);
             let room = width.saturating_sub(width_of(&name) + 3);
             let mut spans = vec![Span::styled(name, Style::new().fg(folder()))];
@@ -3455,8 +3477,11 @@ mod tests {
         let mut app = connected_app();
         app.dj.genres = vec!["Techno".into()];
         app.handle_action(Action::OpenDjPanel);
-        let last = app.dj_panel.as_ref().unwrap().rows.len() - 1;
-        app.dj_panel.as_mut().unwrap().row = last;
+        let genres = {
+            let rows = &app.dj_panel.as_ref().unwrap().rows;
+            rows.iter().position(|r| *r == crate::tui::app::DjRow::Genres).unwrap()
+        };
+        app.dj_panel.as_mut().unwrap().row = genres;
         app.handle_action(Action::Activate);
         app.apply_event(crate::tui::worker::Event::Genres(vec![
             crate::api::types::Genre { name: "Ambient".into(), track_count: None },
@@ -4103,27 +4128,30 @@ mod tests {
 
         // Less room: the scheme is the first thing worth giving up, and it
         // goes to a reminder of a key. The username is not up for trade, so
-        // the extras shorten before it does.
-        let mid = draw_sized(&mut app, 96, 20);
+        // the extras shorten before it does. (Widths sit a Settings tab
+        // wider than they used to — the strip grew a sixth member.)
+        let mid = draw_sized(&mut app, 108, 20);
         assert!(mid.contains("tester@host:3000"), "kept who as well as where");
         assert!(mid.contains("0:Now") && mid.contains("Tab:Queue"));
         assert!(!mid.contains("0:Now Playing"), "the long form is what gave way: {mid}");
 
         // Genuinely tight: the extras go entirely, and every tab is still
-        // whole — including the fifth, which only exists on a server with
-        // discovery and is what made the header longer.
-        let narrow = draw_sized(&mut app, 72, 20);
+        // whole — including Discover, which only exists on a server with
+        // discovery, and Settings behind it.
+        let narrow = draw_sized(&mut app, 84, 20);
         assert!(!narrow.contains("0:Now"), "a hint is not worth a tab: {narrow}");
         assert!(narrow.contains("tester@host:3000"));
         assert!(narrow.contains("5:Discover"));
+        assert!(narrow.contains("6:Settings"));
 
         // A server without discovery has no fifth tab, so the same label
         // survives in a narrower terminal.
         let mut plain = connected_app();
         plain.capabilities = Default::default();
         plain.session.username = Some("tester".into());
-        let text = draw_sized(&mut plain, 72, 20);
+        let text = draw_sized(&mut plain, 84, 20);
         assert!(!text.contains("Discover"), "no tab for a feature this server lacks");
+        assert!(text.contains("5:Settings"), "Settings slides onto the freed number");
         assert!(text.contains("tester@http://host:3000"), "and the freed width shows");
     }
 

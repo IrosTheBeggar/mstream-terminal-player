@@ -9,7 +9,13 @@
 //! the lock is only ever tried, never taken — a batch that arrives while the
 //! UI is reading is dropped, which costs one frame of a visualizer and
 //! nothing else.
+//!
+//! Each [`Tapped`] also carries a switch. During a crossfade two sources play
+//! at once, and two of them pushing one ring would interleave their batches
+//! into garbage — so at handover the engine flips the outgoing source's
+//! switch off, and the ring belongs to the track you are moving into.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -173,12 +179,15 @@ impl Ring {
 pub struct Tapped<S> {
     inner: S,
     tap: Arc<AudioTap>,
+    /// While false the samples still flow, but none are copied — the shape
+    /// of a source that has been retired into the outgoing half of a blend.
+    live: Arc<AtomicBool>,
     batch: Vec<Sample>,
 }
 
 impl<S> Tapped<S> {
-    pub fn new(inner: S, tap: Arc<AudioTap>) -> Self {
-        Tapped { inner, tap, batch: Vec::with_capacity(BATCH) }
+    pub fn new(inner: S, tap: Arc<AudioTap>, live: Arc<AtomicBool>) -> Self {
+        Tapped { inner, tap, live, batch: Vec::with_capacity(BATCH) }
     }
 }
 
@@ -188,12 +197,14 @@ impl<S: Source> Iterator for Tapped<S> {
     #[inline]
     fn next(&mut self) -> Option<Sample> {
         let sample = self.inner.next()?;
-        self.batch.push(sample);
-        if self.batch.len() >= BATCH {
-            let rate = self.inner.sample_rate().get();
-            let channels = self.inner.channels().get();
-            self.tap.push(&self.batch, rate, channels);
-            self.batch.clear();
+        if self.live.load(Ordering::Relaxed) {
+            self.batch.push(sample);
+            if self.batch.len() >= BATCH {
+                let rate = self.inner.sample_rate().get();
+                let channels = self.inner.channels().get();
+                self.tap.push(&self.batch, rate, channels);
+                self.batch.clear();
+            }
         }
         Some(sample)
     }
@@ -288,10 +299,30 @@ mod tests {
         }
     }
 
+    /// A switch in its factory position. Tests that throw it get their own.
+    fn live() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(true))
+    }
+
+    #[test]
+    fn a_retired_source_stops_feeding_the_ring_but_keeps_sounding() {
+        let tap = AudioTap::new();
+        let switch = live();
+        let mut source = Tapped::new(Ramp::new(44100, 2), tap.clone(), switch.clone());
+        drain(&mut source, BATCH);
+        let before = tap.frame().expect("live and pushing");
+
+        // Thrown mid-flight, the way a crossfade handover throws it.
+        switch.store(false, Ordering::Relaxed);
+        assert_eq!(source.next(), Some((BATCH + 1) as Sample), "the audio itself still flows");
+        drain(&mut source, BATCH * 2);
+        assert_eq!(tap.frame().unwrap(), before, "but the ring stopped hearing it");
+    }
+
     #[test]
     fn the_tap_holds_the_most_recent_audio_oldest_first() {
         let tap = AudioTap::new();
-        let mut source = Tapped::new(Ramp::new(44100, 2), tap.clone());
+        let mut source = Tapped::new(Ramp::new(44100, 2), tap.clone(), live());
 
         // Nothing handed over yet: a batch at a time, so the first samples
         // are still in the source.
@@ -318,7 +349,7 @@ mod tests {
     #[test]
     fn a_seek_is_forwarded_and_takes_the_stale_audio_with_it() {
         let tap = AudioTap::new();
-        let mut source = Tapped::new(Ramp::new(44100, 2), tap.clone());
+        let mut source = Tapped::new(Ramp::new(44100, 2), tap.clone(), live());
         drain(&mut source, BATCH * 2);
         assert!(tap.frame().is_some());
 
@@ -338,7 +369,7 @@ mod tests {
         // however long it played.
         let frames_held = |channels: u16| {
             let tap = AudioTap::new();
-            let mut source = Tapped::new(Ramp::new(44100, channels), tap.clone());
+            let mut source = Tapped::new(Ramp::new(44100, channels), tap.clone(), live());
             drain(&mut source, 8 * 8192);
             tap.frame().expect("a full ring").mono().len()
         };
@@ -348,7 +379,7 @@ mod tests {
     #[test]
     fn refilling_a_kept_frame_reuses_its_allocation() {
         let tap = AudioTap::new();
-        let mut source = Tapped::new(Ramp::new(44100, 2), tap.clone());
+        let mut source = Tapped::new(Ramp::new(44100, 2), tap.clone(), live());
         drain(&mut source, TAP_FRAMES * 4);
 
         let mut kept = TapFrame::default();
@@ -364,11 +395,11 @@ mod tests {
     #[test]
     fn a_source_of_a_different_shape_does_not_get_interleaved_with_the_last() {
         let tap = AudioTap::new();
-        let mut stereo = Tapped::new(Ramp::new(44100, 2), tap.clone());
+        let mut stereo = Tapped::new(Ramp::new(44100, 2), tap.clone(), live());
         drain(&mut stereo, BATCH);
         assert_eq!(tap.frame().unwrap().channels, 2);
 
-        let mut mono = Tapped::new(Ramp::new(48000, 1), tap.clone());
+        let mut mono = Tapped::new(Ramp::new(48000, 1), tap.clone(), live());
         drain(&mut mono, BATCH);
         let frame = tap.frame().unwrap();
         assert_eq!((frame.rate, frame.channels), (48000, 1));

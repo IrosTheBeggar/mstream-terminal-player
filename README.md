@@ -114,7 +114,7 @@ window.
 | `h` | go back |
 | `a` | add the highlighted track to the queue |
 | `Tab` | switch between browser and queue |
-| `1` … `5` | Files / Library / Playlists / Search / Discover · `/` search |
+| `1` … `6` | Files / Library / Playlists / Search / Discover / Settings · `/` search |
 | `0` | full-screen now playing |
 | `Space` | play or pause · `n` / `p` next / previous |
 | `i` | jump to whatever is playing · `0` full-screen now playing |
@@ -173,6 +173,47 @@ folder = "33"          # or an index into the 256-colour cube
 A value it can't read costs you that colour and nothing else — it says what was
 wrong on the first screen and keeps the default. Errors stay red and aren't
 configurable; an error that isn't red is a trap.
+
+### Crossfade
+
+```toml
+[player]
+crossfade_seconds = 6
+```
+
+Each track blends into the next as it ends — equal-power, with the coming track
+opened ahead of time so the blend never waits on the network. Off by default,
+and it only fires when a track ends *on its own*: `n` stays a cut (a short soft
+one — nothing in this player clicks), a seek keeps the track you're on and drops
+the one leaving, and pausing mid-blend freezes it exactly where it sits. Tracks
+the server can't state a length for (a live transcode on its first play) change
+over the plain way, since there is no known ending to fade toward.
+
+Seeking toward the end plays fair with the blend: a forward seek stops just
+short of the transition's own runway — the fade window plus a couple of
+seconds for the open — so skipping to a track's last stretch still ends in a
+crossfade instead of starving it (with no transition configured, seeking past
+the end keeps its old skip-the-track meaning). Seek keys also chain: quick
+presses of `}` add up a minute each rather than re-reading a stale position.
+
+```toml
+[player]
+gapless = true
+```
+
+Gapless is **on by default**: with no crossfade set, the next track is fed
+into the playing sink ahead of time and the boundary is crossed sample-tight —
+no gap, no fade, exactly as the album was cut. The price is one track of
+prefetch near each boundary; on a metered connection, turn it off. A
+configured crossfade outranks it either way.
+
+Everything lives in the **Settings** tab (`6`): Enter opens Crossfade, `←` `→`
+walk the blend length, and Enter toggles the rest — **Gapless**, **Blend
+skips** (a manual skip crosses in a second instead of cutting), and **Pause
+fade** (pause and resume ride a short ramp instead of landing mid-note). What
+you set there is what config.toml remembers. The jukebox has the first pair as
+`mstream-player serve --crossfade 6` / `--gapless`; the legacy spawn contract
+keeps all of it off.
 
 ## Mouse
 
@@ -397,8 +438,10 @@ Both are written by rename, so an interrupted write leaves the previous file int
 While a track plays it is spooled to one scratch file (that's what makes seeking instant), which
 goes in the platform cache directory — `%LOCALAPPDATA%\mstream-player\spool`,
 `~/Library/Caches/mstream-player/spool` or `~/.cache/mstream-player/spool` — rather than `/tmp`,
-which is RAM-backed on many Linux systems. Only the playing track is spooled; the file is deleted
-when it stops, and leftovers from a crash are swept at the next start. To put it elsewhere, set
+which is RAM-backed on many Linux systems. Only the playing track is spooled — plus the next one
+while a crossfade is being prepared, and for a few seconds the file of a preparation a queue edit
+abandoned; each is deleted when its track stops or its download lets go, and leftovers from a
+crash are swept at the next start. To put it elsewhere, set
 `MSTREAM_PLAYER_CACHE_DIR` or add to config.toml:
 
 ```toml
@@ -432,6 +475,17 @@ legacy alias for the old spawn contract. Changes from the original engine:
   header on every route except `GET /version`)
 - `GET /version` → `{"name", "version", "apiVersion"}`
 - `--exit-with-parent`: exit when stdin closes (pass only when the parent holds stdin open)
+- `--crossfade <seconds>`: blend each track into the next when one ends on its own (equal-power,
+  prepared ahead so the blend never waits on the network). 0 — the default — keeps the original
+  hard cut, and manual `/next` cuts either way. Needs track durations to find the fade point, so
+  sources of unknown length (a live transcode) fall back to the plain cut
+- `--gapless`: with no crossfade set, cross track boundaries sample-tight by feeding the next
+  track into the playing sink ahead of time
+- Soft cuts everywhere, flags or no flags: manual next fades out over 150 ms, stop over 80 ms,
+  and seeks dip around the jump — where the original engine cut mid-waveform and clicked
+- With a transition configured **and a next track queued**, `POST /seek` lands forward seeks no
+  closer to the end than the transition needs (the fade window plus ~2s for the open); on the
+  queue's last track, seeking past the end still ends the track, as it always did
 - Bug fixes: volume persists across track changes, manual next is no longer trapped by
   loop-one, no panic when no audio device exists, removing a queue entry while stopped no
   longer starts playback

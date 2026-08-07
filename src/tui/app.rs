@@ -29,6 +29,12 @@ const SEEK_STEP: f64 = 5.0;
 /// The shifted seek keys. Five seconds is the wrong unit for a long mix or a
 /// set recording, where the interesting distance is minutes.
 const SEEK_STEP_FAR: f64 = 60.0;
+/// How long a just-issued seek outvotes the position status reports when
+/// the next seek computes its base. Covers the round trip through the
+/// worker and a status poll or two; short enough that a target the engine
+/// lawfully landed short of (its end-of-track runway clamp) stops steering
+/// follow-up presses once it has gone stale.
+const SEEK_CHAIN: std::time::Duration = std::time::Duration::from_millis(2500);
 const VOLUME_STEP: f32 = 0.05;
 /// Rows a page key moves. Ctrl+u/d move half of this, as they do in vim.
 const PAGE_STEP: isize = 10;
@@ -57,11 +63,12 @@ pub enum Tab {
     Playlists,
     Search,
     Discover,
+    Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 5] =
-        [Tab::Files, Tab::Library, Tab::Playlists, Tab::Search, Tab::Discover];
+    pub const ALL: [Tab; 6] =
+        [Tab::Files, Tab::Library, Tab::Playlists, Tab::Search, Tab::Discover, Tab::Settings];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -70,6 +77,7 @@ impl Tab {
             Tab::Playlists => "Playlists",
             Tab::Search => "Search",
             Tab::Discover => "Discover",
+            Tab::Settings => "Settings",
         }
     }
 
@@ -81,6 +89,40 @@ impl Tab {
             _ => true,
         }
     }
+}
+
+/// Seconds of blend as a person reads them: whole when whole, one decimal
+/// when the config was hand-written fractional.
+fn fmt_blend(seconds: f32) -> String {
+    if seconds.fract() == 0.0 {
+        format!("{seconds:.0}s")
+    } else {
+        format!("{seconds:.1}s")
+    }
+}
+
+/// A place in the Settings tab's little hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsNode {
+    /// The menu of settings groups — one group so far.
+    Root,
+    /// The crossfade group: how tracks hand over.
+    Crossfade,
+}
+
+/// What a Settings row is, and so what Enter and ←→ do to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingRow {
+    /// The root row that opens the crossfade group.
+    CrossfadeMenu,
+    /// Seconds of blend; ← and → walk it, Enter steps it up.
+    BlendLength,
+    /// Sample-tight boundaries when no blend is set; anything toggles it.
+    Gapless,
+    /// Manual skips blend for a second instead of breathing.
+    BlendSkips,
+    /// Pause and resume ride a short ramp instead of landing mid-wave.
+    PauseFade,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +283,9 @@ pub enum Entry {
     /// A step deeper into Discover. `detail` is the dim right-hand column —
     /// how close, how much the guess rests on, what it sounds like.
     Discover { label: String, detail: String, node: DiscoverNode },
+    /// A row in the Settings tab: a drill into a settings group, or a live
+    /// value. `detail` carries the current value and its meaning.
+    Setting { label: String, detail: String, row: SettingRow },
     Track { label: String, track: Box<Track> },
 }
 
@@ -255,6 +300,7 @@ impl Entry {
             Entry::Playlist { name } => name,
             Entry::Search { label, .. } => label,
             Entry::Discover { label, .. } => label,
+            Entry::Setting { label, .. } => label,
             Entry::Track { label, .. } => label,
         }
     }
@@ -699,6 +745,30 @@ pub struct GenrePicker {
     pub loading: bool,
 }
 
+/// The next track, as announced to the engine for a crossfade — plus
+/// everything the pick was made against, so its staleness can be seen from
+/// here. The pick is rolled once and then *held*: recomputed each refresh,
+/// a shuffled next would come up different every time, and the engine would
+/// open a track that stops being the answer before it plays.
+struct AnnouncedNext {
+    /// The playing row this pick is "next" relative to.
+    for_current: usize,
+    index: usize,
+    /// The track that was at `index` — how a queue edit shows up.
+    filepath: String,
+    url: String,
+    hint: Option<f64>,
+    /// The rules of the roll; either changing re-rolls it.
+    shuffle: bool,
+    repeat: Repeat,
+    /// Whether this announced the track to itself — the gapless repeat-one
+    /// seam. Snapshotted because the seam is only lawful under the mode
+    /// that made it: left standing when crossfade comes on, it fed the
+    /// engine a self to blend into, the exact invisible transition the
+    /// duplicate refusal exists to prevent.
+    self_seam: bool,
+}
+
 pub struct App {
     /// Which server this is, whose token, as one value — not five parallel
     /// fields that every connect path had to remember together (audit #56).
@@ -737,8 +807,10 @@ pub struct App {
     pub playlists: Pane,
     pub playlist_open: Option<String>,
     pub discover: Pane,
+    pub settings: Pane,
     /// Breadcrumb through the Discover tab, mirroring `library_stack`.
     pub discover_stack: Drill<DiscoverNode>,
+ settings_stack: Drill<SettingsNode>,
     /// The track every Discover view hangs off. Captured when a view is
     /// opened so the list doesn't quietly re-anchor when the song changes.
     pub discover_seed: Option<Track>,
@@ -795,7 +867,44 @@ pub struct App {
     /// skipping so a queue of nothing but broken files stops rather than
     /// looping.
     failures: usize,
+    /// How the Quick Connect tunnel is reaching the server, when this
+    /// session rides one. Fed by the worker's sampler; the header shows it
+    /// beside the session name. None outside tunnel sessions.
+    pub tunnel_path: Option<crate::quickconnect::TunnelPath>,
+    /// How to walk the file browser back if the Browse in flight fails: the
+    /// path the click replaced, and whether it pushed a trail column on the
+    /// way in. A tunnel that flakes mid-browse otherwise left the navigation
+    /// standing — path one level deep, a phantom column beside a listing
+    /// that never changed — and every retry of the click stacked another
+    /// copy. Cleared by the listing that answers; consumed by the error
+    /// that doesn't. A late success for an undone path is dropped by the
+    /// listing handler's own path guard.
+    browse_undo: Option<(String, bool)>,
+    /// Where the last seek was told to land, so the next press builds on it.
+    /// Status refreshes a few times a second, and seek keys compute their
+    /// target from the last position heard — so a quick `}}}` all read the
+    /// same stale base and moved one minute, not three. Cleared when a
+    /// status shows the seek arrived (or the source changed under it), and
+    /// trusted only briefly: the engine may lawfully land a forward seek
+    /// short of the ask (its end-of-track runway clamp), and an expired
+    /// goal must not keep outvoting reality.
+    seek_goal: Option<(f64, std::time::Instant)>,
     pub volume: f32,
+    /// Seconds of blend between tracks, from `crossfade_seconds` in
+    /// config.toml; 0 is off. Also adjustable in the Auto-DJ panel (C4).
+    pub crossfade: f32,
+    /// Sample-tight boundaries when no blend is set, from `gapless` in
+    /// config.toml. The announcement machinery serves both.
+    pub gapless: bool,
+    /// Manual skips blend for a second instead of breathing (C6).
+    pub blend_skips: bool,
+    /// Pause and resume ride a short ramp (C6).
+    pub pause_fade: bool,
+    /// The next track as told to the engine, so a blend can open it early.
+    /// Held to keep the answer stable: recomputing on every refresh would
+    /// re-roll a shuffled pick each time, and to know whether the engine's
+    /// announcement is stale without asking it.
+    announced: Option<AnnouncedNext>,
     pub now_playing: Option<Track>,
     /// Covers fetched this session, keyed by the server's art filename.
     /// `None` records both "asked, nothing there" and "asked, still
@@ -871,6 +980,8 @@ impl App {
             playlist_open: None,
             discover: Pane::default(),
             discover_stack: Drill::new(DiscoverNode::Root),
+            settings: Pane::default(),
+            settings_stack: Drill::new(SettingsNode::Root),
             discover_seed: None,
             discover_artists: Vec::new(),
             search: Pane::default(),
@@ -893,7 +1004,15 @@ impl App {
             status: PlayerStatus::default(),
             starting: None,
             failures: 0,
+            browse_undo: None,
+            tunnel_path: None,
+            seek_goal: None,
             volume: 1.0,
+            crossfade: 0.0,
+            gapless: false,
+            blend_skips: false,
+            pause_fade: false,
+            announced: None,
             now_playing: None,
             art: HashMap::new(),
             audio_available: true,
@@ -958,6 +1077,16 @@ impl App {
         self.queue.repeat = Repeat::from_label(&prefs.repeat);
         self.queue.shuffle = prefs.shuffle;
         self.autodj = AutoDjMode::from_label(&prefs.autodj);
+        // The same clamp as the engine's, so the file and the behavior
+        // agree; anything unreadable costs the blend and nothing else.
+        self.crossfade = if prefs.crossfade_seconds.is_finite() {
+            prefs.crossfade_seconds.clamp(0.0, 30.0)
+        } else {
+            0.0
+        };
+        self.gapless = prefs.gapless;
+        self.blend_skips = prefs.blend_skips;
+        self.pause_fade = prefs.pause_fade;
         self.dj = dj::Settings::from_prefs(&prefs.dj);
         self
     }
@@ -971,6 +1100,10 @@ impl App {
             repeat: self.queue.repeat.label().to_string(),
             shuffle: self.queue.shuffle,
             autodj: self.autodj.label().to_string(),
+            crossfade_seconds: self.crossfade,
+            gapless: self.gapless,
+            blend_skips: self.blend_skips,
+            pause_fade: self.pause_fade,
             dj: self.dj.to_prefs(),
             // Settings from a newer player belong to the file, not to this
             // app's state; `PlayerPrefs::adopt` is what carries them across.
@@ -1054,6 +1187,7 @@ impl App {
             Tab::Playlists => &self.playlists,
             Tab::Search => &self.search,
             Tab::Discover => &self.discover,
+            Tab::Settings => &self.settings,
         }
     }
 
@@ -1064,6 +1198,7 @@ impl App {
             Tab::Playlists => &mut self.playlists,
             Tab::Search => &mut self.search,
             Tab::Discover => &mut self.discover,
+            Tab::Settings => &mut self.settings,
         }
     }
 
@@ -1175,6 +1310,10 @@ impl App {
         self.library_stack.here()
     }
 
+    pub fn settings_node(&self) -> &SettingsNode {
+        self.settings_stack.here()
+    }
+
     pub fn discover_node(&self) -> &DiscoverNode {
         self.discover_stack.here()
     }
@@ -1211,7 +1350,8 @@ impl App {
     // ── Actions ─────────────────────────────────────────────────────────────
 
     pub fn handle_action(&mut self, action: Action) -> Vec<Effect> {
-        let effects = self.act(action);
+        let mut effects = self.act(action);
+        effects.extend(self.refresh_prepared());
         self.note_pending(&effects);
         effects
     }
@@ -1253,6 +1393,11 @@ impl App {
             }
             Action::Cancel => {
                 self.show_help = false;
+                // The guaranteed way out of the Crossfade rows, where the
+                // left arrow has been given to adjustment.
+                if self.tab == Tab::Settings && *self.settings_node() == SettingsNode::Crossfade {
+                    return self.go_back();
+                }
                 Vec::new()
             }
             Action::CycleFocus if !self.fullscreen => {
@@ -1310,7 +1455,16 @@ impl App {
             }
 
             Action::Activate => self.activate(),
-            Action::Back => self.go_back(),
+            Action::Back => {
+                // On a Settings VALUE row, ← means "less", exactly as it
+                // does in the Auto-DJ panel — the way out is Esc, h on the
+                // `..` row, or the row above it.
+                if let Some(effects) = self.settings_step(-1) {
+                    effects
+                } else {
+                    self.go_back()
+                }
+            }
             Action::AddToQueue => self.add_selected_to_queue(),
 
             Action::PlayPause => self.play_pause(),
@@ -1480,6 +1634,17 @@ impl App {
                 }
                 Vec::new()
             }
+            Tab::Settings => {
+                if self.settings_stack.unopened() {
+                    self.settings_stack.enter(SettingsNode::Root);
+                }
+                // Values may have moved since the tab was last looked at
+                // (the config loaded them, this tab edits them), so the
+                // rows are rebuilt on every visit — in place, keeping the
+                // cursor where it was left.
+                self.refresh_settings_rows();
+                Vec::new()
+            }
             Tab::Playlists if self.playlists.entries.is_empty() => {
                 vec![Effect::Api(ApiCmd::Playlists)]
             }
@@ -1565,8 +1730,9 @@ impl App {
         match entry {
             Entry::Parent => self.go_back(),
             Entry::Dir { path, .. } => {
-                self.push_trail();
-                self.path = path.clone();
+                let pushed = self.push_trail();
+                let prev = std::mem::replace(&mut self.path, path.clone());
+                self.browse_undo = Some((prev, pushed));
                 vec![Effect::Api(ApiCmd::Browse(path))]
             }
             Entry::Node { node, label } if self.tab == Tab::Search => {
@@ -1614,6 +1780,19 @@ impl App {
                 self.playlist_open = Some(name.clone());
                 vec![Effect::Api(ApiCmd::LoadPlaylist(name))]
             }
+            Entry::Setting { row, .. } => match row {
+                SettingRow::CrossfadeMenu => {
+                    self.push_trail();
+                    self.settings_stack.enter(SettingsNode::Crossfade);
+                    self.settings.set(self.crossfade_setting_entries());
+                    Vec::new()
+                }
+                // Enter walks a value the same way → does; ← walks it back.
+                SettingRow::BlendLength
+                | SettingRow::Gapless
+                | SettingRow::BlendSkips
+                | SettingRow::PauseFade => self.adjust_setting(1),
+            },
             Entry::Track { .. } => {
                 // Enqueue everything visible and start at the highlighted row —
                 // what every other player does on Enter.
@@ -1630,10 +1809,10 @@ impl App {
     /// Remember the listing on screen as a column, on the way into the next
     /// one. Called before the request goes out, so the context is there while
     /// the reply is still coming.
-    fn push_trail(&mut self) {
+    fn push_trail(&mut self) -> bool {
         let pane = self.pane_mut();
         if pane.entries.is_empty() {
-            return;
+            return false;
         }
         let chosen = pane.state.selected().unwrap_or(0);
         // The column behind keeps the whole listing, not the narrowed view of
@@ -1650,6 +1829,7 @@ impl App {
             None => (entries, chosen),
         };
         pane.trail.push(Trail { entries, chosen });
+        true
     }
 
     fn go_back(&mut self) -> Vec<Effect> {
@@ -1661,6 +1841,19 @@ impl App {
         // fewer column beside it until the reply landed — which reads as the
         // middle column blinking out and then coming back.
         let Some(effects) = self.step_out() else {
+            // Nowhere further out — but a trail column here is an orphan
+            // (a failed browse from before the undo existed, or any bug
+            // that strands one), Back is the only key anyone would reach
+            // for, and refusing to pop left it on screen for the rest of
+            // the session. Drain it instead.
+            if let Some(step) = self.pane_mut().trail.pop() {
+                let pane = self.pane_mut();
+                pane.filter.clear();
+                pane.unfiltered = None;
+                pane.entries = step.entries;
+                pane.state.select(Some(step.chosen));
+                pane.loading = false;
+            }
             return Vec::new();
         };
         let Some(step) = self.pane_mut().trail.pop() else {
@@ -1696,6 +1889,11 @@ impl App {
                     None => String::new(),
                 };
                 self.path = parent.clone();
+                // Going out is answered from the trail; if this refresh
+                // fails, path and pane still agree on the parent. Nothing
+                // to walk back — and an undo left armed here would fire on
+                // some later unrelated error and yank the path deeper.
+                self.browse_undo = None;
                 vec![Effect::Api(ApiCmd::Browse(parent))]
             }
             Tab::Search => {
@@ -1758,8 +1956,155 @@ impl App {
                     node => self.request_discover(node),
                 }
             }
+            Tab::Settings => {
+                let Some(node) = self.settings_stack.back() else {
+                    return None; // already at the settings menu
+                };
+                match node {
+                    SettingsNode::Root => self.settings.set(self.settings_root_entries()),
+                    SettingsNode::Crossfade => {
+                        self.settings.set(self.crossfade_setting_entries())
+                    }
+                }
+                Vec::new()
+            }
             _ => Vec::new(),
         })
+    }
+
+    // ── Settings ────────────────────────────────────────────────────────────
+
+    fn settings_root_entries(&self) -> Vec<Entry> {
+        vec![Entry::Setting {
+            label: "Crossfade".into(),
+            detail: format!("{} · how tracks hand over", self.crossfade_summary()),
+            row: SettingRow::CrossfadeMenu,
+        }]
+    }
+
+    /// The state at a glance, for the root row.
+    fn crossfade_summary(&self) -> String {
+        if self.crossfade > 0.0 {
+            format!("{} blend", fmt_blend(self.crossfade))
+        } else if self.gapless {
+            "gapless".to_string()
+        } else {
+            "off".to_string()
+        }
+    }
+
+    fn crossfade_setting_entries(&self) -> Vec<Entry> {
+        let blend = if self.crossfade <= 0.0 {
+            "off · tracks cut over · → for a blend".to_string()
+        } else {
+            format!(
+                "{} · equal-power, when a track ends on its own · ←→ adjust",
+                fmt_blend(self.crossfade)
+            )
+        };
+        let gapless = if self.crossfade > 0.0 {
+            format!(
+                "{} · crossfade wins while it is on",
+                if self.gapless { "on" } else { "off" }
+            )
+        } else if self.gapless {
+            "on · sample-tight boundaries".to_string()
+        } else {
+            "off · Enter to turn on".to_string()
+        };
+        let blend_skips = if self.blend_skips {
+            "on · a skip crosses in a second".to_string()
+        } else {
+            "off · a skip is a clean cut".to_string()
+        };
+        let pause_fade = if self.pause_fade {
+            "on · pause and resume ride a short ramp".to_string()
+        } else {
+            "off · pause lands at once".to_string()
+        };
+        vec![
+            Entry::Parent,
+            Entry::Setting {
+                label: "Blend length".into(),
+                detail: blend,
+                row: SettingRow::BlendLength,
+            },
+            Entry::Setting { label: "Gapless".into(), detail: gapless, row: SettingRow::Gapless },
+            Entry::Setting {
+                label: "Blend skips".into(),
+                detail: blend_skips,
+                row: SettingRow::BlendSkips,
+            },
+            Entry::Setting {
+                label: "Pause fade".into(),
+                detail: pause_fade,
+                row: SettingRow::PauseFade,
+            },
+        ]
+    }
+
+    /// Rebuild whichever settings view is showing, in place: the values in
+    /// the details are live, and [`Pane::set`] would throw the cursor away.
+    fn refresh_settings_rows(&mut self) {
+        let entries = match self.settings_node() {
+            SettingsNode::Root => self.settings_root_entries(),
+            SettingsNode::Crossfade => self.crossfade_setting_entries(),
+        };
+        let selected = self.settings.state.selected().unwrap_or(0).min(entries.len() - 1);
+        self.settings.entries = entries;
+        self.settings.state.select(Some(selected));
+    }
+
+    /// The ← route into adjustment: Some only when the cursor stands on a
+    /// Settings value row, so Back keeps meaning back everywhere else.
+    fn settings_step(&mut self, delta: i32) -> Option<Vec<Effect>> {
+        if self.tab != Tab::Settings || *self.settings_node() != SettingsNode::Crossfade {
+            return None;
+        }
+        match self.pane().selected() {
+            Some(Entry::Setting { row, .. }) if *row != SettingRow::CrossfadeMenu => {
+                Some(self.adjust_setting(delta))
+            }
+            _ => None,
+        }
+    }
+
+    /// Move the selected value and tell the engine in the same keystroke.
+    /// The announcement machinery is refreshed by the handle_action funnel
+    /// this returns through, so a blend toggled on withdraws a standing
+    /// seam in the same breath (the pending-seam rule).
+    fn adjust_setting(&mut self, delta: i32) -> Vec<Effect> {
+        let Some(Entry::Setting { row, .. }) = self.pane().selected() else {
+            return Vec::new();
+        };
+        let effect = match row {
+            SettingRow::BlendLength => {
+                // Snap toward the pressed direction: a hand-written 4.5
+                // steps to 5 and 4, never 5.5 forever.
+                let snapped = if delta > 0 {
+                    self.crossfade.floor() + 1.0
+                } else {
+                    self.crossfade.ceil() - 1.0
+                };
+                self.crossfade = snapped.clamp(0.0, 30.0);
+                Effect::Audio(AudioCmd::SetCrossfade(self.crossfade))
+            }
+            SettingRow::Gapless => {
+                self.gapless = !self.gapless;
+                Effect::Audio(AudioCmd::SetGapless(self.gapless))
+            }
+            SettingRow::BlendSkips => {
+                self.blend_skips = !self.blend_skips;
+                Effect::Audio(AudioCmd::SetBlendSkips(self.blend_skips))
+            }
+            SettingRow::PauseFade => {
+                self.pause_fade = !self.pause_fade;
+                Effect::Audio(AudioCmd::SetPauseFade(self.pause_fade))
+            }
+            SettingRow::CrossfadeMenu => return Vec::new(),
+        };
+        self.refresh_settings_rows();
+        vec![effect]
     }
 
     // ── Discover ────────────────────────────────────────────────────────────
@@ -1951,6 +2296,135 @@ impl App {
         Vec::new()
     }
 
+    /// One row's media URL, by the same road [`App::play_index`] builds the
+    /// one it plays. None only when the URL cannot be built at all, which
+    /// play_index would have refused too.
+    fn queue_url(&self, track: &Track) -> Option<String> {
+        urls::media_url(&self.session.server, &track.filepath, self.session.token.as_deref()).ok()
+    }
+
+    /// The queue row whose media URL is `url`, if any. A scan, but of an
+    /// in-memory queue, on an event that fires once per blend. Rows after
+    /// the playing one are asked first: duplicate filepaths are legal, and
+    /// adopting an earlier copy would walk the cursor backwards into
+    /// tracks already heard (review finding: the fallback rewound).
+    fn index_of_url(&self, url: &str) -> Option<usize> {
+        let ahead = self.queue.current.map_or(0, |current| current + 1);
+        (ahead..self.queue.items.len())
+            .find(|&i| self.queue_url(&self.queue.items[i]).as_deref() == Some(url))
+            .or_else(|| {
+                self.queue.items[..ahead.min(self.queue.items.len())]
+                    .iter()
+                    .position(|t| self.queue_url(t).as_deref() == Some(url))
+            })
+    }
+
+    /// The standing announcement, if everything it was made against still
+    /// holds: crossfade still on, same playing row, same track at the
+    /// announced index, same shuffle and repeat rules — and, for linear
+    /// play, still the row the rules would pick. Linear picks are
+    /// deterministic, so asking again costs nothing and catches what the
+    /// snapshots cannot: a push that changes the answer without touching
+    /// anything they see, like the repeat-all wrap when a track lands
+    /// behind the last row (review finding: the new track was skipped).
+    /// Shuffle is the one that must NOT be re-asked — that rolls the dice
+    /// — which is the entire reason the announcement is held at all.
+    fn announced_still_valid(&self) -> Option<usize> {
+        let a = self.announced.as_ref()?;
+        let holds = (self.crossfade > 0.0 || self.gapless)
+            && self.queue.current == Some(a.for_current)
+            && self.queue.shuffle == a.shuffle
+            && self.queue.repeat == a.repeat
+            && self.queue.items.get(a.index).is_some_and(|t| t.filepath == a.filepath)
+            && (self.queue.shuffle || self.queue.next_index(false) == Some(a.index))
+            // A seam announcement is only lawful in the mode that made it:
+            // gapless, no blend. The repeat snapshot above cannot catch a
+            // crossfade toggle, and a stale seam under a blend is a track
+            // told to blend into itself.
+            && (!a.self_seam || (self.gapless && self.crossfade <= 0.0));
+        holds.then_some(a.index)
+    }
+
+    /// Roll the pick an announcement would carry, or None when nothing
+    /// should follow: crossfade off, nothing playing, repeat-one (a track
+    /// never blends into itself), or no next at all.
+    fn pick_announcement(&self) -> Option<AnnouncedNext> {
+        // The announcement serves both transitions: a blend needs it early,
+        // gapless needs it to have something to append.
+        if self.crossfade <= 0.0 && !self.gapless {
+            return None;
+        }
+        let for_current = self.queue.current?;
+        self.now_playing.as_ref()?;
+        // The one self-transition that is WANTED: gapless repeat-one loops
+        // its seam sample-tight, and its cursor never has to move — which
+        // is exactly what makes it safe where the duplicate-rows case is
+        // not (C4 review: the loop seam, the case gapless exists for,
+        // always gapped).
+        // Repeat-one, or its disguise: a one-track queue under repeat-all
+        // loops exactly the same seam (the engine's candidate logic already
+        // treats them alike; the fix-round review caught this side starving
+        // the disguised case).
+        let looping_alone = self.queue.repeat == Repeat::One
+            || (self.queue.repeat == Repeat::All && self.queue.items.len() == 1);
+        let self_seam = self.gapless && self.crossfade <= 0.0 && looping_alone;
+        if self.queue.repeat == Repeat::One && !self_seam {
+            return None;
+        }
+        let index = self.queue.next_index(false)?;
+        if index == for_current && !self_seam {
+            // A one-track queue under repeat-all: repeat-one in effect.
+            return None;
+        }
+        let track = self.queue.items.get(index)?;
+        // The same file queued twice in a row: a blend into it would change
+        // nothing status can show — no HandedOver would ever fire, the
+        // cursor would stall, and the missed-blend path would play the copy
+        // again (review finding: duplicates played three times). Refuse,
+        // and the ordinary TrackEnded road walks the cursor forward. The
+        // seam is exempt: its cursor stays where it is.
+        if !self_seam
+            && self.now_playing.as_ref().is_some_and(|t| t.filepath == track.filepath)
+        {
+            return None;
+        }
+        Some(AnnouncedNext {
+            for_current,
+            index,
+            filepath: track.filepath.clone(),
+            url: self.queue_url(track)?,
+            hint: track.metadata.duration,
+            shuffle: self.queue.shuffle,
+            repeat: self.queue.repeat,
+            self_seam,
+        })
+    }
+
+    /// Keep the engine's idea of what comes next in step with this queue.
+    /// Runs after every action and event — dispatch is the one funnel that
+    /// everything able to change the answer passes through — and is cheap
+    /// on the quiet path: a standing announcement that still holds is left
+    /// alone, which is also what keeps a shuffled pick from re-rolling.
+    fn refresh_prepared(&mut self) -> Option<Effect> {
+        if self.announced_still_valid().is_some() {
+            return None;
+        }
+        match (self.announced.take(), self.pick_announcement()) {
+            (None, None) => None,
+            (Some(_), None) => Some(Effect::Audio(AudioCmd::ClearNext)),
+            // Re-announcing an unchanged URL is a no-op engine-side, so a
+            // pick that survived a re-roll costs nothing extra.
+            (_, Some(next)) => {
+                let effect = Effect::Audio(AudioCmd::PrepareNext {
+                    url: next.url.clone(),
+                    duration_hint: next.hint,
+                });
+                self.announced = Some(next);
+                Some(effect)
+            }
+        }
+    }
+
     pub fn play_index(&mut self, index: usize) -> Vec<Effect> {
         let Some(track) = self.queue.items.get(index).cloned() else {
             return Vec::new();
@@ -1967,6 +2441,17 @@ impl App {
         let hint = track.metadata.duration;
         self.remember_played(&track);
         self.now_playing = Some(track);
+        // Every Play wipes the engine's pending next (play_source clears
+        // it), so whatever announcement stood is now this side's belief
+        // alone. Drop it and the trailing refresh re-announces — free when
+        // the pick is unchanged, since the engine treats a repeated URL as
+        // a no-op. Without this, restarting the playing track left the
+        // engine holding nothing while the app believed otherwise, and the
+        // next transition silently lost its blend (review finding).
+        self.announced = None;
+        // And a seek aimed at the old track has nothing to say about this
+        // one.
+        self.seek_goal = None;
 
         let mut effects = vec![Effect::Audio(AudioCmd::Play { url, duration_hint: hint })];
         effects.extend(self.fetch_art());
@@ -2005,6 +2490,16 @@ impl App {
     }
 
     fn skip(&mut self, manual: bool) -> Vec<Effect> {
+        // Auto-advance plays what was announced whenever one stands. The
+        // announcement is a commitment: even when the blend missed (this
+        // path), honoring it keeps one roll of the shuffle dice per
+        // transition instead of one per code path. Manual skips are the
+        // user overruling all of that.
+        if !manual {
+            if let Some(index) = self.announced_still_valid() {
+                return self.play_index(index);
+            }
+        }
         match self.queue.next_index(manual) {
             Some(index) => self.play_index(index),
             None => {
@@ -2031,7 +2526,21 @@ impl App {
         if self.status.is_idle() {
             return Vec::new();
         }
-        let target = (self.status.position + delta).max(0.0);
+        // Build on the seek still in flight, not the position it is about
+        // to replace: status refreshes a few times a second, so a quick
+        // `}}}` all read the same stale base and landed as one press.
+        let base = match self.seek_goal {
+            Some((goal, at)) if at.elapsed() < SEEK_CHAIN => goal,
+            _ => self.status.position,
+        };
+        let mut target = (base + delta).max(0.0);
+        // The bar's end is as far as chaining may bank; where exactly a
+        // near-end landing stops is the engine's call (its transition
+        // runway clamp), not something to duplicate here.
+        if self.status.duration > 0.0 {
+            target = target.min(self.status.duration);
+        }
+        self.seek_goal = Some((target, std::time::Instant::now()));
         vec![Effect::Audio(AudioCmd::Seek(target))]
     }
 
@@ -2046,7 +2555,8 @@ impl App {
         if matches!(event, Event::Error(_) | Event::Unauthorized) {
             self.clear_pending();
         }
-        let effects = self.consume(event);
+        let mut effects = self.consume(event);
+        effects.extend(self.refresh_prepared());
         self.note_pending(&effects);
         effects
     }
@@ -2070,6 +2580,14 @@ impl App {
                 if !status.source.is_empty() {
                     self.failures = 0;
                 }
+                // A seek goal has served once status catches up to it — or
+                // once the source changes under it, where the old track's
+                // target would steer presses on the new one.
+                if let Some((goal, _)) = self.seek_goal {
+                    if status.source != self.status.source || status.position >= goal - 1.0 {
+                        self.seek_goal = None;
+                    }
+                }
                 self.status = status;
                 Vec::new()
             }
@@ -2080,6 +2598,51 @@ impl App {
                     return Vec::new();
                 }
                 self.skip(false)
+            }
+            Event::HandedOver { from, to } => {
+                // A handover out of a track we are no longer on is stale —
+                // the same rule TrackEnded lives by — and one that raced a
+                // play the user just asked for is superseded: `starting`
+                // covers the gap where status still names the old track
+                // while the user's own pick is opening.
+                if !self.is_current_source(&from) || self.starting.is_some() {
+                    return Vec::new();
+                }
+                // The engine crossfaded into the announced track by itself.
+                // Move the cursor the way play_index would — minus the Play,
+                // which the audio has already performed.
+                // The announcement already carries the exact URL it sent
+                // the engine, so the happy path is one string compare —
+                // no rebuilt URL (review note: the rebuild was waste).
+                let adopted = self
+                    .announced_still_valid()
+                    .filter(|_| self.announced.as_ref().is_some_and(|a| a.url == to))
+                    .or_else(|| self.index_of_url(&to));
+                match adopted {
+                    Some(index) => {
+                        let track = self.queue.items[index].clone();
+                        self.queue.start(index);
+                        self.remember_played(&track);
+                        self.now_playing = Some(track);
+                        // Spent; the refresh at the end of this dispatch
+                        // announces whatever follows the new track.
+                        self.announced = None;
+                        self.failures = 0;
+                        let mut effects: Vec<Effect> = Vec::new();
+                        effects.extend(self.fetch_art());
+                        effects.extend(self.maybe_autodj());
+                        effects
+                    }
+                    None => {
+                        // The queue was edited under a blend already in the
+                        // air, and the engine finished a plan this queue no
+                        // longer describes. Put the right track on properly —
+                        // a hard cut, once, in a race that takes deliberate
+                        // timing to hit.
+                        self.announced = None;
+                        self.skip(false)
+                    }
+                }
             }
             Event::AudioFailed(e) => {
                 self.audio_available = false;
@@ -2142,6 +2705,7 @@ impl App {
                     return Vec::new();
                 }
                 self.opening = false;
+                self.browse_undo = None;
                 self.path = path.to_string();
                 let root = self.browser_root().to_string();
                 self.files.set(entries_from_listing(&listing, &root));
@@ -2252,9 +2816,29 @@ impl App {
                 self.message = None;
                 Vec::new()
             }
+            Event::TunnelPath(path) => {
+                // The old bridge outlives a switch to a direct server (its
+                // Drop would cut a session mid-handover), and its sampler
+                // keeps reporting. A verdict about a tunnel this session is
+                // not on belongs to nobody — without this, a direct URL
+                // wore the last tunnel's badge (pre-merge review).
+                if crate::quickconnect::is_tunnel_id(&self.session.server_id) {
+                    self.tunnel_path = Some(path);
+                }
+                Vec::new()
+            }
             Event::Error(e) => {
                 self.connecting = false;
                 self.connect.submitting = false;
+                // The browse this error answers will never repaint the pane,
+                // so its navigation must not stand: put the path back and
+                // take the phantom column with it (see `browse_undo`).
+                if let Some((path, pushed)) = self.browse_undo.take() {
+                    self.path = path;
+                    if pushed {
+                        self.files.trail.pop();
+                    }
+                }
                 self.error(e);
                 Vec::new()
             }

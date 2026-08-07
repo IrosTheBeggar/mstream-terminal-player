@@ -219,7 +219,9 @@ persisted preferences landed together; the spool relocation followed the same da
 - ✅ **Schema version** on both files from the start.
 - ✅ **Streaming scratch space** (was "configurable stream cache" — renamed because it is a
   *spool*, not a cache: only the playing track has a file, nothing is prefetched, nothing
-  persists). The problem stands as stated: whole tracks landed in the OS temp dir, and `/tmp` is
+  persists — Phase C loosens the one-file rule: while a crossfade prepares and blends, the
+  upcoming track spools alongside the playing one, and a prepare cancelled by a queue edit
+  holds its spool until its open completes or times out, so churn can briefly hold more). The problem stands as stated: whole tracks landed in the OS temp dir, and `/tmp` is
   tmpfs on many Linux distros — a 400 MB FLAC silently cost 400 MB of RAM. Spool files now go to
   `<platform cache dir>/mstream-player/spool` (`%LOCALAPPDATA%`, `~/Library/Caches`,
   `$XDG_CACHE_HOME`/`~/.cache`), overridable with `[cache] dir` in config.toml or
@@ -463,9 +465,337 @@ destination creation — all genuinely browser-shaped. Guard with confirmation:
 Note `users/access` is a **full replace, not a patch** — read-modify-write or you'll silently
 clear flags.
 
-### Phase 5 — Release & install
-Tag-driven releases (binaries + `manifest.json` with per-file sha256). README install matrix.
-brew tap / scoop manifest later.
+### Phase C — Crossfade & prefetch (pulls Phase 7's prefetch forward)
+
+Blend the end of each track into the start of the next, the way DJ software and the streaming
+players do it. This is Phase 7's "next-track prefetch" with a fade on top: the prefetch —
+opening the upcoming track's reader before the current one ends — is most of the work either
+way, and it is also what removes the audible inter-track gap (finding #8) for anyone who turns
+the fade on. Off by default everywhere: with `crossfade_seconds = 0` (and `gapless` off) the
+player prefetches nothing and transitions as it always did — C4's soft cuts on manual
+skip/stop/seek are the one deliberate global change, replacing clicks with short breaths.
+
+**Why rodio suffices** (checked against rodio 0.22.2 source, not docs): every track already
+plays as a `Player` connected to the one shared `Mixer` inside `MixerDeviceSink`, and that
+mixer's whole job is summing simultaneous sources — it resamples each one to the device shape
+through `UniformSourceIterator`, so a 44.1k track fading into a 48k track needs nothing from
+us. Crossfade is "let two Players overlap with opposing gain ramps" rather than today's
+stop-then-start. rodio's own `crossfade()` helper is *not* usable — it returns only the
+overlapped portion and severs seek/pause/position — and `Player::set_volume` ramped from a
+tick loop would staircase at 120 ms steps, so the fade is a source adapter of our own.
+
+The pieces, in landing order:
+
+#### C1 — The fade adapter ✅ DONE 2026-08-06
+`engine/fade.rs`: a `Faded<S>` source wrapper (same shape as `tap::Tapped`) applying an
+equal-power gain ramp — gain = sin(p·π/2), p stepped linearly per *frame* (per-sample stepping
+would give each channel of a frame a slightly different gain). Commanded through a shared
+`FadeHandle` (atomics, no locks on the audio path): `ramp_to(target, over)`, and it reports its
+current position back so the engine can tell when an outgoing sink has gone silent. The ramp
+advances per sample consumed, not per wall-clock second — so pause freezes a half-finished
+blend exactly where it sits, and resumes it intact, for free. Every source gets wrapped whether
+or not a fade is configured (gain 1.0 is a multiply and a check per sample); that keeps one
+code path and buys later polish — click-killing micro-fades on stop and seek — for the price
+of a `ramp_to` call. Pure unit tests against a counting source; no audio device.
+
+#### C2 — Engine overlap machinery + serve flag ✅ DONE 2026-08-06
+The engine gains a prepared-next slot and a retirement queue:
+
+- **Prepare**: at `remaining ≤ fade + margin` (margin generous enough to cover `OPEN_TIMEOUT`
+  plus the decode probe), commit the next pick — under shuffle the pick is committed *now*, not
+  re-rolled at handover — and open it on a short-lived thread. Never under the state lock: the
+  open blocks on the network for up to the timeout, and findings #48–#50 are the map of that
+  minefield. The thread hands back the built decoder through a channel; dropping the receiver
+  is how a stale prepare gets cancelled (the thread's send fails, the reader drops, its spool
+  file deletes itself). A failed open is remembered so the tick doesn't re-open a doomed URL
+  every 120 ms; the track's natural end then takes today's advance path, which retries once.
+- **Handover**: at `remaining ≤ fade` with a prepared decoder ready — new `Player` on the same
+  mixer, wrapped source starting at gain 0 ramping up, old sink commanded down over the same
+  window, `self.sink` swapped, the old sink parked in an `outgoing` slot until it empties or
+  its deadline passes. Status flips to the incoming track at fade start (file, duration,
+  position-from-zero) — the same convention as the streaming players, and the serve wire
+  format doesn't change shape.
+- **Policies**, each small, all deliberate: no fade when duration is unknown (live transcode);
+  effective fade clamps to half the track; loop-one never fades into itself; manual
+  next/previous/play/stop/clear cancel the overlap by stopping the outgoing sink at once; seek
+  cancels the blend and snaps the survivor to full gain; pause, resume and volume apply to both
+  sinks (user volume stays `Player` volume on both — the fade gain lives inside the source, so
+  the two never need multiplying together). The visualizer tap follows the handover: the
+  outgoing source's tap goes quiet at fade start (a kill switch on `Tapped`), because two
+  sources pushing one ring interleave garbage.
+- **Serve**: `--crossfade <seconds>` on the serve subcommand, default 0. The legacy `--port N`
+  spawn contract can't pass it, which is the point — mStream never sees a behavior change.
+- The spool contract loosens by one file: during prepare-plus-overlap the upcoming track spools
+  alongside the playing one (A1's "only the playing track has a file" note is amended). The
+  startup sweep never cared how many there were.
+
+Device tests ride the existing `#[ignore]` + `wav_bytes` pattern: a two-track queue whose
+handover must arrive early and whose status must never report an empty file mid-run.
+
+#### C3 — TUI wiring ✅ DONE 2026-08-06
+The TUI keeps its own queue and feeds the engine one URL at a time, so it must say what comes
+next: `AudioCmd::PrepareNext`/`ClearNext` (with a `collapse()` rule — a later Play or Stop
+makes a pending prepare moot), re-sent when queue edits change the answer. The delicate part is
+the cursor: an engine-initiated handover means `status.source` changes with no `TrackEnded`,
+and without reconciliation the App still points at the old entry and ignores the *next* end as
+stale. A new worker event (`EndWatch` learns that non-empty → different non-empty is a
+handover) lets the App advance its cursor through the `play_index` path minus the Play itself —
+falling back to a real Play when the queue was edited under a stale prepare. Config:
+`[player] crossfade_seconds` (0 default, clamped sane), through `PlayerPrefs::adopt`, delivered
+at session start — and the round-trip test that uses `crossfade_seconds` as its example
+*unknown* key gets a new example, since the premise expires the moment the key means something.
+
+#### C4 — Polish ✅ DONE 2026-08-06
+Each cheap once C1–C3 existed, as promised. A manual skip breathes out over 150 ms instead of
+clicking (the leaving sink retires softly through the same outgoing slot as a blend); a stop
+gets 80 ms of the same mercy with the bookkeeping clearing instantly; a seek dips — 10 ms down,
+jump, 30 ms up — so neither side of the jump clicks. True gapless landed as `[player] gapless`
+(and serve `--gapless`), not as `crossfade_seconds = 0`: gapless prefetches, and prefetch is a
+behavior the pre-Phase-C engine never showed unasked, so it stays opt-in like the blend. When
+on with no crossfade set, the prepared next is appended to the playing sink at APPEND_LEAD
+(late, because an append cannot be taken back) and rodio crosses the boundary sample-tight;
+the bookkeeping follows at the boundary, and the TUI's HandedOver reconciliation covers both
+transitions unchanged. Crossfade and Gapless first landed as Auto-DJ panel rows — playback settings
+rather than picking ones, lodging where the adjustable settings then gathered — and moved to
+their real home when C5 built one. The round-trip test's future key came true a second time
+(`gapless`); `replaygain` carries the torch.
+
+**Costs accepted**: two decoders and two spool files for a bounded window per transition;
+summed peaks can transiently exceed full scale on loud masters even at equal power (rodio has a
+`limit` source if that ever proves audible in practice).
+
+#### C5 — The Settings tab ✅ DONE 2026-08-06
+`6` opens Settings, a real home for the player's own knobs: a menu of groups (one group so
+far — Crossfade) drilling into live-value rows. Enter and `→` step a value up, `←` steps it
+down (the Auto-DJ panel's own convention for settings rows; Esc and `..` are the ways out),
+the details read the values back as they change, and the engine hears every nudge in the
+keystroke that made it. The panel's Crossfade/Gapless rows moved here whole, the panel went
+back to being about picking, and on a server without Discover the tab slides onto `5` — the
+strip numbers by position, and the strip is the truth.
+
+#### C6 — Blend skips, pause fade, gapless by default ✅ DONE 2026-08-06
+The two settings worth adding, added: **Blend skips** retires a manually skipped track over a
+fixed second (not `crossfade_seconds` — an eight-second blend is lovely at a natural end and
+treacle on a keystroke) with the incoming rising through the same window, reusing the drainer
+fleet whole; **Pause fade** ramps down before the pause lands and back up as the resume begins,
+with the tick performing the landing since nothing in the engine may sleep — the last hard
+edges in the transport, both off by default. And **gapless went on by default**: the opt-in
+stance guarded a shipped behavior that never shipped (v0.1.2 predates all of Phase C), the
+legacy `--port` contract keeps its own defaults, and albums playing as they were cut is the
+better first impression. The cost — one track of prefetch near each boundary — is two
+keystrokes to decline in Settings. Curve selection and prefetch-lead knobs were considered
+and refused: the first is inaudible preference, the second invites the misconfiguration where
+blends silently stop firing. The genuinely valuable next steps are written down instead:
+don't-blend-album-segues (needs trailing-silence detection) and ReplayGain (its own Settings
+group, and the config test's torch key finally come true) — both Phase 7 material.
+
+#### Phase C review ✅ 2026-08-06
+
+A seven-lens adversarial review of C1–C3 (concurrency, audio, state machine, app
+reconciliation, edge cases, performance, compat/tests; every finding re-verified by
+independent refuters, then a completeness critic over the survivors): 25 raw findings, 19
+confirmed, 2 more from the critic. Fixed the same day, each pinned by a test:
+
+- **Pause/resume popped the blend** — the outgoing's wall-clock deadline ran through a pause;
+  resume now re-arms it. Found independently by five of the seven lenses.
+- **A prepare-thread panic tore the terminal down** under a live TUI (audit #32's failure mode
+  on a new thread). Caught at the spawn *and* the panic hook stands back for the thread by
+  name — the catch alone was not enough, since the hook runs at the panic site.
+- **The fade window ignored the incoming track's length** — a short next track lived its whole
+  life at partial gain and its end hard-cut the outgoing. `blend_window` now applies the
+  half-track rule to both ends.
+- **A push behind the repeat-all wrap was skipped** — linear announcements now re-ask
+  `next_index` (deterministic, no dice); shuffle keeps the held roll, which is the point of it.
+- **Restarting the playing track silently cost the next blend** — every Play now drops the
+  app-side announcement so the refresh re-announces into the engine it just wiped.
+- **Duplicate tracks blended invisibly and played thrice** — a track never blends into itself:
+  refused app-side at announcement, refused engine-side as the belt.
+- **The handover fallback could rewind onto an earlier duplicate** — the scan now prefers rows
+  ahead of the cursor.
+- **A failed manual jump kept a stale committed pick** while `queue_index` moved; the
+  index-moving paths invalidate on error now — including `play_source` and the auto-advance
+  arm, two siblings the *fix-verification* pass (a second adversarial round over the fix diff)
+  caught after the first round missed them. And **`Failed` was a one-way latch** — a seek
+  back past the prepare window resets it, so a healed network blip gets its retry.
+- Seven test gaps closed: the new `collapse()` rules, invalidate-on-mutation (device),
+  `prepare_next` idempotency (re-announce loop in the device test), the `handle_action`
+  refresh funnel, `Faded` under a mid-stream rate change, the `HandedOver` staleness guards,
+  and integer `crossfade_seconds` in hand-written TOML.
+
+Deferred with eyes open: keeping a matching in-flight open across queue mutations and reusing
+a `Ready` decoder when the blend misses (both are C4-adjacent — the second *is* the gapless
+attach path); the remaining per-row URL builds in the fallback scan; and the no-headroom
+summation, which stays in Costs above until someone hears it.
+
+#### Phase C listening-session fix ✅ 2026-08-07
+
+The first human listening session found what four adversarial rounds had not: *seeking to a
+track's last stretch killed the crossfade* — the track played out and the seam went as a hard
+cut. Reproduced end-to-end (serve engine on local WAVs, serve on real demo-server MP3s, and
+the actual TUI driven over a pty), all of which **blended correctly** — the failures live at
+the edges of the seek itself, three of them:
+
+- **A seek past the end ended the track mid-keystroke.** rodio accepts the position, the
+  decoder runs dry, hard advance — and `}` (a minute forward) makes overshoot routine.
+  Forward seeks now stop at `seek_ceiling`: duration minus the fade window (or the gapless
+  append lead) minus `OPEN_RUNWAY`, only when a transition is configured — with both off,
+  past-the-end keeps its legacy skip-the-track meaning. Pinned by
+  `a_seek_toward_the_end_stops_short_and_the_blend_still_fires` (device).
+- **`Failed` was a latch, not a limit.** One starved open late in the track (the reported
+  session rides a Quick Connect tunnel, where a seek's spool catch-up hogs the link and the
+  next track's open times out) silenced the seam for the rest of the track. `Failed` now
+  carries its timestamp and retries every `FAILED_RETRY` while `remaining > fade +
+  OPEN_RUNWAY` — the dead-URL property the latch guarded costs a handful of opens per tail,
+  not one per tick. A seek also resets it outright: a user move is fresh runway. Pinned by
+  `a_failed_open_gets_its_retry_and_the_blend_still_fires` (device, flaky server).
+- **Seek keys re-read a stale status.** Position refreshes ~4×/s, so a quick `}}}` computed
+  the same base thrice and moved one minute. The app now chains: each press builds on the
+  in-flight target (`seek_goal`, trusted for 2.5s or until status catches up / the source
+  changes), capped at the bar's end so nothing banks minutes that don't exist. Pinned by
+  `fast_seek_presses_build_on_each_other_not_the_stale_status`.
+
+Considered and kept: `snap_out_of_blend` on seeks (C4's "keep the track being seeked" rule) —
+a seek during a running blend still collapses it, by design; the ceiling makes it much harder
+to land there by accident.
+
+#### Phase C listening-session fix, round two ✅ 2026-08-07
+
+The first round's fixes verified clean in every reproduction — including the reporter's exact
+gesture (a pty-driven TUI, a real mouse click on the bar, a throttled tunnel-shaped link in
+both the static and transcode response shapes) — and the bug survived anyway. What settled it
+was evidence, not another theory: the TUI silences stderr, so the engine grew a **flight
+recorder** (`MSTREAM_ENGINE_TRACE=<file>`, `engine/trace.rs`, one line per transition
+decision, off unless named). One reproduced session then read:
+
+```
+preparing 04 Angel Palace (41.9s remaining, fade 30.0s)
+open FAILED: no answer from the server after 10s
+track ran out (next=failed, announced=true)
+```
+
+Three causes, each now fixed and pinned:
+
+- **The Quick Connect bridge kept the client-side TCP open after the server side ended** —
+  `bridge_one` waited for *both* copy directions. reqwest's pool read the held-open socket as
+  a healthy idle connection, offered the corpse to the prepare's open, and the request waited
+  out OPEN_TIMEOUT on a stream nothing was answering. Every transition whose prepare fired
+  within the pool's ~90s idle window of the previous download finishing went out as a cut —
+  which is why long tracks played naturally were fine and *any* seek toward the end was not.
+  The bridge now ends when either direction ends (a server FIN reaches the client, as a
+  direct connection would), and the engine's streaming client no longer pools at all
+  (`pool_max_idle_per_host(0)` — an open per track, a connection per open; pinned by
+  `a_second_open_never_reuses_the_first_connection` against a serve-one-then-hold-silent
+  server).
+- **The round-one retry gate was unsatisfiable under a long fade**: it demanded
+  `remaining > fade + OPEN_RUNWAY`, but a 30s fade opens its window 42s out and the first
+  open can only fail 32s out — 32 is never greater than 32, so no retry ever ran. The gate
+  now asks only whether a retry could still be *heard* (`remaining > OPEN_RUNWAY`);
+  blend_window already caps at what remains, and a shortened blend beats a cut. Pinned by
+  `a_failed_open_inside_the_window_still_retries` (device, the trace's exact geometry).
+- The recorder itself stays: it is how the next report gets read instead of guessed at.
+
+#### Quick Connect tunnel audit ✅ 2026-08-07
+
+Prompted by "API calls regularly fail" from the same listening sessions. Findings, worst
+first:
+
+- **The tunnel could never re-dial.** One QUIC connection was dialled at connect and held
+  forever; iroh's own transport (5s heartbeats, 15s path idle / 30s relay-path idle) declares
+  a connection dead after any real network interruption — a closed lid, a VPN re-auth, WiFi
+  wandering — and a dead QUIC connection is one-shot. Every later `open_bi` failed, so every
+  API call and every prepare failed for the rest of the session. The bridge now holds the
+  pairing code as the standing capability it is (`Redialer`): the first caller to find the
+  tunnel dead re-dials for everyone (single-flight behind a Mutex held across the dial),
+  the handshake re-proves the secret, and the loopback URL never changes so live sessions
+  ride through.
+- **`open_bi` had no timeout**: on a half-dead connection it hangs until QUIC gives the path
+  up. `STREAM_TIMEOUT` (8s — above the 5s heartbeat, below the 15–30s idle verdicts) now
+  bounds it, and a timeout is treated as death → re-dial.
+- **One accept error killed the whole bridge** (`Err(_) => break` in the accept loop);
+  transient accept failures now log, breathe 250ms, and continue — shutdown stays the only
+  exit.
+- Round two's bridge fix (either-direction-end closes the client conn) is what fixed the
+  API flakiness's steady-state form: the api client's reqwest pool was being handed
+  held-open corpses after the server's keep-alive idle closed streams server-side.
+  Confirmed benign now on both clients; the engine's additionally never pools.
+- Clean bills: pairing-code parsing (four base64 shapes, version gate, secret length),
+  handshake bounds (256-byte read limit, 15s timeout, rejection-vs-transport conflation is
+  deliberate), eager first dial (bad codes fail at connect, not at first use), loopback-only
+  listener, keep-alive defaults (iroh sets them; nothing to add).
+
+The header now also says how a tunnel session is reached — `quick connect · ab12cd ·
+direct` / `· relay` / `· reconnecting…` — fed by a sampler thread that lives exactly as
+long as the bridge (Weak-held, 2s cadence, change-only events) reading the selected QUIC
+path. Relay and direct sound different; the listener deserves to know which one they are
+hearing.
+
+**Research round (what other iroh users taught us).** Surveyed the ecosystem — dumbpipe,
+sendme, iroh-ssh, pai-sho ("dumbpipe, but it reconnects" — validating the Redialer), Delta
+Chat's peer_channels (the one production user at hostile-network scale; their lesson is
+`endpoint.network_change()`, which macOS handles natively) — and the iroh source itself.
+Two things applied directly to the corporate-network (Netskope) sessions:
+
+- **The relay is plain HTTPS on outbound TCP 443** — precisely what corporate TLS
+  inspection intercepts and re-signs. iroh's default trust is a compiled-in Mozilla bundle
+  (`CaTlsConfig::EmbeddedWebPki`), which calls the corporate CA an UnknownIssuer and fails
+  the relay — the only road a UDP-blocked network has left (iroh #2257 and Dioxus #5564 are
+  the same failure in the wild). Now built with the `platform-verifier` feature and
+  `CaTlsConfig::system()`: the tunnel trusts what the OS keychain trusts, like every
+  browser on the same machine.
+- **`proxy_from_env()`**: a network that declares its proxy (HTTP_PROXY/HTTPS_PROXY) gets
+  the relay's HTTPS routed through it rather than around it. No-op elsewhere.
+
+Noted, not needed: relay-only transport modes (holepunch attempts are harmless),
+`network_change()` nudges (macOS detects natively; the Redialer covers connection death),
+custom relay maps (an mStream-hosted relay is a server-side feature first).
+
+And one UI repair from the same weather: **a browse the tunnel ate left its navigation
+standing** — path one level deep, a phantom miller column of the unchanged listing beside
+the pane, another copy stacked per retry click, and unclosable at the root because Back
+refuses to pop with nowhere to step out to. Fixed at both ends: `browse_undo` walks the
+path and the pushed column back when the error arrives (the listing handler's path guard
+already drops any late success for an undone path), and Back at the root now drains
+orphaned trail columns instead of stranding them. Pinned by
+`a_failed_browse_takes_its_column_back_with_it` and
+`back_at_the_root_drains_an_orphaned_column`.
+
+#### Pre-merge once-over ✅ 2026-08-07
+
+A fresh-eyes pass over everything since the last adversarial round — the seek fixes, the
+flight recorder, the tunnel rounds, the marker — before merging `crossfade`. Four findings,
+all fixed same-day:
+
+- **The seek ceiling outlived its reason on the last track**: it clamped whenever crossfade
+  was configured, even with nothing lined up to follow — on the queue's final track under a
+  30s fade, the last 32 seconds were unreachable by seeking, protecting a transition that
+  didn't exist. The clamp now also asks whether anything follows (`pending_next` or a queue
+  candidate; pick_next is pure, so asking commits nothing). Pinned by
+  `the_last_track_seeks_free_of_the_ceiling` (device).
+- **Relayed error text could carry `?token=` into the flight recorder**: our own messages
+  redact URLs, but "request failed: {e}" interpolates reqwest's text, which prints the full
+  URL it failed on. `redact_queries` now scrubs query strings from relayed third-party error
+  text (unit-pinned); the price is a few characters of anyone's prose that contains a `?`.
+- **Dead-network dial pile-up**: a failed re-dial left the slot empty, and every caller
+  queued behind it took its own 25-second turn at a network that just said no.
+  `DIAL_COOLDOWN` (4s) makes callers arriving during a dead spell fail fast; the tunnel
+  still re-dials on the next request after the cooldown.
+- **The tunnel badge could dress a direct session**: the old bridge deliberately outlives a
+  server switch (dropping it would cut a session mid-handover), so its sampler kept
+  reporting — and a direct-URL session would wear the stale tunnel's `· relay`. TunnelPath
+  events are now refused unless the current session is a tunnel (test updated to pin both
+  directions).
+
+Noted without code: a seek within the 150ms soft-pause ramp briefly restores volume before
+the pause lands (cosmetic, needs a deliberate ~100ms gesture); a second folder click during
+an unanswered browse can leave path one level shallower than the pane until the next
+navigation (self-heals; both failures' undos fire); the flight-recorder file grows without
+bound across sessions (it is a debug facility you opt into per-run).
+
+### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
+Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install
+matrix, then the "later" items inside the same three days: one-line installers for sh and
+PowerShell, a Homebrew tap the release workflow bumps itself, a scoop bucket, `.deb`/`.rpm`
+that declare the ALSA dependency, and darwin binaries that leave signed and notarized.
 
 ### Phase 6 — mStream flip (cleanup lands here, in the mStream repo)
 - Binary-manager module: platform/arch → asset name (same `-${platform}-${arch}` scheme),
@@ -485,13 +815,18 @@ brew tap / scoop manifest later.
   consider replacing `/server-remote` regex page surgery with a template marker.
 
 ### Phase 7 — Backlog (deliberately deferred)
-Gapless (append-to-sink redesign of the advance loop) and its natural companion, next-track
-prefetch — open the upcoming track's reader early so a track change doesn't start from zero.
+The gapless/prefetch thread is gone from this list entirely: prefetch and crossfade moved
+forward to Phase C, and true gapless — the append-to-sink redesign — landed as C4.
 A persistent track cache (replay without re-downloading, offline listening) is the step after
 that and a genuinely bigger one: eviction policy, a size budget, an index keyed by server +
 filepath — this is where the SQLite question from A1 returns with an actual job to do. Also:
-TUI as remote for server-side audio, album art (ratatui-image), media keys (MPRIS/SMTC),
-scrobbling hooks, brew/scoop/AUR packaging.
+TUI as remote for server-side audio, media keys (MPRIS/SMTC), scrobbling hooks, AUR packaging,
+don't-blend-album-segues (trailing-silence detection so continuous mixes keep their seams), and
+ReplayGain (the crossfade flaw you can actually hear — lopsided blends between loud and quiet
+masters — and a Settings group of its own).
+Two entries left this list by other roads: album art was written down as "ratatui-image" and
+landed instead as the half-block canvas the Cover visualizer draws through (0.1.1), and
+brew/scoop shipped with Phase 5.
 
 ## Smoke testing
 
@@ -521,7 +856,9 @@ when keys are pressed in sequence against real replies. The first live run found
 - Linux binaries link ALSA dynamically (`libasound` required at runtime — already true today).
 - Download-on-enable adds a failure mode → covered by `serverAudioBinaryPath` + CLI fallback.
 - Two-repo version skew → covered by pinning + `apiVersion` check.
-- rodio device-hotplug behavior and gapless are deferred, not solved.
+- rodio device-hotplug behavior is deferred, not solved. Gapless is deferred no longer: Phase C
+  landed crossfade and true gapless, both opt-in — the default remains the compatible hard cut,
+  so finding #8's gap stands only where nobody asked for better.
 - **Iroh tunnel wire compatibility is unproven** (Phase A3): mStream's tunnel runs in-process via
   the `@number0/iroh` NAPI addon, and nothing in that repo tests a Rust `iroh` client against it —
   the only handshake test is Node-to-Node. Both sides are on the iroh 1.x line, which is
@@ -543,7 +880,7 @@ when keys are pressed in sequence against real replies. The first live run found
 | 5 | Shuffle "randomness" is a hash of the system clock; biased and predictable | quality | fixed in port: `fastrand` |
 | 6 | Binds `0.0.0.0` with no auth; any LAN peer gets full transport control + local-path playback (file-existence oracle) | security | fixed in port: default `127.0.0.1`, `--host` opt-out, optional `--auth-token` |
 | 7 | `get_file_duration` re-opens and re-probes the file already opened for decode | perf (matters for Phase 2 HTTP) | deferred to Phase 2: duration-hint parameter |
-| 8 | Between-tracks the 250 ms advance poll reports `playing: false` transiently; inter-track gap is audible (no gapless) | known limitation | deferred (Phase 7 gapless) |
+| 8 | Between-tracks the 250 ms advance poll reports `playing: false` transiently; inter-track gap is audible (no gapless) | known limitation | closed by Phase C where enabled (`--crossfade` / `--gapless`); the default stays the compatible hard cut |
 | 9 | Shuffle has no history: `previous` can't retrace shuffled order; shuffle never ends under loop=none | semantics quirk | deferred to Phase 4 (queue UX pass) |
 | 10 | mp3 without duration metadata (no Xing header) reports `duration: 0` | known limitation | documented |
 | 11 | Negative or non-finite `/seek` position reaches `Duration::from_secs_f64`, which panics — and a panic while holding the state mutex poisons it, wedging every later request | crash bug (found during port) | fixed in port: positions validated before conversion |

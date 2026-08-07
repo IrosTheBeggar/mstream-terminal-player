@@ -42,6 +42,19 @@ pub trait PlayerCtl {
     fn stop(&self);
     fn seek(&self, position: f64) -> Result<(), String>;
     fn set_volume(&self, volume: f32);
+    /// Seconds of blend between tracks; 0 is off.
+    fn set_crossfade(&self, seconds: f32);
+    /// Sample-tight transitions when no blend is configured.
+    fn set_gapless(&self, on: bool);
+    /// Manual skips blend for a second instead of breathing.
+    fn set_blend_skips(&self, on: bool);
+    /// Pause and resume ride a short ramp instead of landing mid-wave.
+    fn set_pause_fade(&self, on: bool);
+    /// Announce what plays after the current source, so a blend can open it
+    /// ahead of the fade window. Replaces any earlier announcement.
+    fn prepare_next(&self, source: &str, duration_hint: Option<f64>);
+    /// Withdraw the announcement: nothing follows the current source.
+    fn clear_next(&self);
     fn status(&self) -> PlayerStatus;
     /// Drive any background bookkeeping (end-of-track handling). Called on a
     /// timer by the audio thread.
@@ -71,6 +84,30 @@ impl PlayerCtl for Engine {
 
     fn set_volume(&self, volume: f32) {
         Engine::set_volume(self, volume);
+    }
+
+    fn set_crossfade(&self, seconds: f32) {
+        Engine::set_crossfade(self, seconds);
+    }
+
+    fn set_gapless(&self, on: bool) {
+        Engine::set_gapless(self, on);
+    }
+
+    fn set_blend_skips(&self, on: bool) {
+        Engine::set_blend_skips(self, on);
+    }
+
+    fn set_pause_fade(&self, on: bool) {
+        Engine::set_pause_fade(self, on);
+    }
+
+    fn prepare_next(&self, source: &str, duration_hint: Option<f64>) {
+        Engine::prepare_next(self, source.to_string(), duration_hint);
+    }
+
+    fn clear_next(&self) {
+        Engine::clear_next(self);
     }
 
     fn status(&self) -> PlayerStatus {
