@@ -52,6 +52,12 @@ pub const TUNNEL_ID_PREFIX: &str = "mstream+iroh://";
 /// costs seconds, not half a minute of silence.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// How long a failed dial holds further dials off. Without it, every
+/// caller queued behind a failed re-dial took its own 25-second turn at a
+/// network that just said no — on a dead link, requests stacked up half a
+/// minute apiece instead of failing fast (pre-merge review).
+const DIAL_COOLDOWN: Duration = Duration::from_secs(4);
+
 /// How the tunnel is reaching the server right now. iroh starts a
 /// connection on its relay path and holepunches toward a direct one, so
 /// this can change moments after connecting — and change back when a
@@ -260,14 +266,25 @@ struct Redialer {
     /// The lock is held across a re-dial on purpose: the first caller to
     /// find the tunnel dead dials for everyone, and the rest queue here
     /// rather than racing their own dials.
-    current: tokio::sync::Mutex<Option<std::sync::Arc<Tunnel>>>,
+    current: tokio::sync::Mutex<Standing>,
+}
+
+/// What the redialer currently holds: a tunnel if one is live, and when
+/// the last dial failed, so callers arriving during a dead spell fail
+/// fast instead of each serving a full dial timeout in turn.
+struct Standing {
+    tunnel: Option<std::sync::Arc<Tunnel>>,
+    last_failed_dial: Option<std::time::Instant>,
 }
 
 impl Redialer {
     fn new(code: PairingCode, first: Tunnel) -> Self {
         Redialer {
             code,
-            current: tokio::sync::Mutex::new(Some(std::sync::Arc::new(first))),
+            current: tokio::sync::Mutex::new(Standing {
+                tunnel: Some(std::sync::Arc::new(first)),
+                last_failed_dial: None,
+            }),
         }
     }
 
@@ -276,7 +293,7 @@ impl Redialer {
     /// both of which the UI honestly calls "reconnecting".
     fn path(&self) -> TunnelPath {
         match self.current.try_lock() {
-            Ok(slot) => match slot.as_ref() {
+            Ok(slot) => match slot.tunnel.as_ref() {
                 Some(tunnel) => tunnel.path(),
                 None => TunnelPath::Reconnecting,
             },
@@ -291,7 +308,7 @@ impl Redialer {
         &self,
     ) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream), String> {
         let mut slot = self.current.lock().await;
-        if let Some(tunnel) = slot.as_ref() {
+        if let Some(tunnel) = slot.tunnel.as_ref() {
             match tokio::time::timeout(STREAM_TIMEOUT, tunnel.open_stream()).await {
                 Ok(Ok(pair)) => return Ok(pair),
                 Ok(Err(e)) => {
@@ -301,15 +318,37 @@ impl Redialer {
                     crate::stderrln!("[quickconnect] tunnel unresponsive; re-dialling");
                 }
             }
-            *slot = None;
+            slot.tunnel = None;
+        }
+        // A dial that just failed answers for everyone who arrives during
+        // the cooldown: fail fast rather than serve a full timeout each.
+        if let Some(at) = slot.last_failed_dial {
+            if at.elapsed() < DIAL_COOLDOWN {
+                return Err("the tunnel is down; the next dial is moments away".to_string());
+            }
         }
         // Dial-timeout bounded inside Tunnel::open; the handshake re-proves
         // the secret the same as the first dial.
-        let tunnel = std::sync::Arc::new(Tunnel::open(&self.code).await?);
-        let pair = tokio::time::timeout(STREAM_TIMEOUT, tunnel.open_stream())
-            .await
-            .map_err(|_| "fresh tunnel would not open a stream".to_string())??;
-        *slot = Some(tunnel);
+        let tunnel = match Tunnel::open(&self.code).await {
+            Ok(tunnel) => std::sync::Arc::new(tunnel),
+            Err(e) => {
+                slot.last_failed_dial = Some(std::time::Instant::now());
+                return Err(e);
+            }
+        };
+        let pair = match tokio::time::timeout(STREAM_TIMEOUT, tunnel.open_stream()).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
+                slot.last_failed_dial = Some(std::time::Instant::now());
+                return Err(e);
+            }
+            Err(_) => {
+                slot.last_failed_dial = Some(std::time::Instant::now());
+                return Err("fresh tunnel would not open a stream".to_string());
+            }
+        };
+        slot.tunnel = Some(tunnel);
+        slot.last_failed_dial = None;
         Ok(pair)
     }
 }

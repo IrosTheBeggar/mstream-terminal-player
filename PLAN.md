@@ -759,6 +759,38 @@ orphaned trail columns instead of stranding them. Pinned by
 `a_failed_browse_takes_its_column_back_with_it` and
 `back_at_the_root_drains_an_orphaned_column`.
 
+#### Pre-merge once-over ✅ 2026-08-07
+
+A fresh-eyes pass over everything since the last adversarial round — the seek fixes, the
+flight recorder, the tunnel rounds, the marker — before merging `crossfade`. Four findings,
+all fixed same-day:
+
+- **The seek ceiling outlived its reason on the last track**: it clamped whenever crossfade
+  was configured, even with nothing lined up to follow — on the queue's final track under a
+  30s fade, the last 32 seconds were unreachable by seeking, protecting a transition that
+  didn't exist. The clamp now also asks whether anything follows (`pending_next` or a queue
+  candidate; pick_next is pure, so asking commits nothing). Pinned by
+  `the_last_track_seeks_free_of_the_ceiling` (device).
+- **Relayed error text could carry `?token=` into the flight recorder**: our own messages
+  redact URLs, but "request failed: {e}" interpolates reqwest's text, which prints the full
+  URL it failed on. `redact_queries` now scrubs query strings from relayed third-party error
+  text (unit-pinned); the price is a few characters of anyone's prose that contains a `?`.
+- **Dead-network dial pile-up**: a failed re-dial left the slot empty, and every caller
+  queued behind it took its own 25-second turn at a network that just said no.
+  `DIAL_COOLDOWN` (4s) makes callers arriving during a dead spell fail fast; the tunnel
+  still re-dials on the next request after the cooldown.
+- **The tunnel badge could dress a direct session**: the old bridge deliberately outlives a
+  server switch (dropping it would cut a session mid-handover), so its sampler kept
+  reporting — and a direct-URL session would wear the stale tunnel's `· relay`. TunnelPath
+  events are now refused unless the current session is a tunnel (test updated to pin both
+  directions).
+
+Noted without code: a seek within the 150ms soft-pause ramp briefly restores volume before
+the pause lands (cosmetic, needs a deliberate ~100ms gesture); a second folder click during
+an unanswered browse can leave path one level shallower than the pane until the next
+navigation (self-heals; both failures' undos fire); the flight-recorder file grows without
+bound across sessions (it is a debug facility you opt into per-run).
+
 ### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
 Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install
 matrix, then the "later" items inside the same three days: one-line installers for sh and

@@ -161,12 +161,16 @@ pub(crate) fn open(url_str: &str) -> Result<(HttpReader, Option<u64>), String> {
         let open = async {
             let stream = HttpStream::new(client, url)
                 .await
-                .map_err(|e| format!("request failed: {e}"))?;
+                // Redacted: reqwest embeds the full URL in its error text,
+                // and stream URLs carry the auth token as a query parameter
+                // — which would otherwise walk into the flight recorder and
+                // the UI toast (pre-merge review).
+                .map_err(|e| redact_queries(&format!("request failed: {e}")))?;
             let content_length = stream.content_length();
             let reader =
                 StreamDownload::from_stream(stream, spool_provider(), Settings::default())
                     .await
-                    .map_err(|e| format!("stream init failed: {e}"))?;
+                    .map_err(|e| redact_queries(&format!("stream init failed: {e}")))?;
             Ok((reader, content_length))
         };
         // Timing out abandons the future, which aborts the request in
@@ -181,6 +185,26 @@ pub(crate) fn open(url_str: &str) -> Result<(HttpReader, Option<u64>), String> {
             )),
         }
     })?
+}
+
+/// Strip query strings from URLs embedded in third-party error text. Our
+/// own messages go through [`redact_source`]; this covers the messages we
+/// only relay — reqwest and stream-download print the URL they failed on,
+/// token and all. Anything from a `?` to the next delimiter goes; a `?`
+/// in prose costs a few characters of someone else's sentence, which is
+/// the right price for never writing a token to disk.
+fn redact_queries(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(q) = rest.find('?') {
+        out.push_str(&rest[..q]);
+        out.push_str("?<redacted>");
+        let after = &rest[q + 1..];
+        let end = after.find([' ', ')', '"', '\'']).unwrap_or(after.len());
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 pub(crate) fn is_http_url(source: &str) -> bool {
@@ -333,6 +357,18 @@ mod tests {
         // tested is bounded-at-all, not sharp-at-400.
         assert!(waited < Duration::from_secs(5), "took {waited:?}");
         drop(listener);
+    }
+
+    #[test]
+    fn relayed_error_text_loses_its_query_strings() {
+        assert_eq!(
+            redact_queries("request failed: error sending request for url \
+                            (http://127.0.0.1:9/a.mp3?token=SECRET)"),
+            "request failed: error sending request for url \
+                            (http://127.0.0.1:9/a.mp3?<redacted>)"
+        );
+        assert_eq!(redact_queries("no urls here"), "no urls here");
+        assert_eq!(redact_queries("odd? prose survives"), "odd?<redacted> prose survives");
     }
 
     #[test]

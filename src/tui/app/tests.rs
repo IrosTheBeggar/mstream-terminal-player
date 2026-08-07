@@ -671,6 +671,13 @@ fn seeking_while_idle_does_nothing() {
 fn the_tunnel_path_reaches_the_header_and_resets_with_the_session() {
     use crate::quickconnect::TunnelPath;
     let mut app = connected_app();
+    // A direct-URL session refuses tunnel verdicts outright: the old
+    // bridge's sampler outlives a server switch, and its reports belong
+    // to nobody here.
+    app.apply_event(Event::TunnelPath(TunnelPath::Relay));
+    assert_eq!(app.tunnel_path, None, "a direct session wears no tunnel badge");
+
+    app.session.server_id = format!("{}abc123", crate::quickconnect::TUNNEL_ID_PREFIX);
     app.apply_event(Event::TunnelPath(TunnelPath::Relay));
     assert_eq!(app.tunnel_path, Some(TunnelPath::Relay));
     app.apply_event(Event::TunnelPath(TunnelPath::Direct));

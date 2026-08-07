@@ -474,6 +474,9 @@ legacy alias for the old spawn contract. Changes from the original engine:
   track into the playing sink ahead of time
 - Soft cuts everywhere, flags or no flags: manual next fades out over 150 ms, stop over 80 ms,
   and seeks dip around the jump — where the original engine cut mid-waveform and clicked
+- With a transition configured **and a next track queued**, `POST /seek` lands forward seeks no
+  closer to the end than the transition needs (the fade window plus ~2s for the open); on the
+  queue's last track, seeking past the end still ends the track, as it always did
 - Bug fixes: volume persists across track changes, manual next is no longer trapped by
   loop-one, no panic when no audio device exists, removing a queue entry while stopped no
   longer starts playback

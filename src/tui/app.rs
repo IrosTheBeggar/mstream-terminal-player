@@ -2817,7 +2817,14 @@ impl App {
                 Vec::new()
             }
             Event::TunnelPath(path) => {
-                self.tunnel_path = Some(path);
+                // The old bridge outlives a switch to a direct server (its
+                // Drop would cut a session mid-handover), and its sampler
+                // keeps reporting. A verdict about a tunnel this session is
+                // not on belongs to nobody — without this, a direct URL
+                // wore the last tunnel's badge (pre-merge review).
+                if crate::quickconnect::is_tunnel_id(&self.session.server_id) {
+                    self.tunnel_path = Some(path);
+                }
                 Vec::new()
             }
             Event::Error(e) => {

@@ -1074,11 +1074,19 @@ impl Engine {
             // Forward seeks stop short of a configured transition's runway
             // — see [`seek_ceiling`]. Never backward from where playback
             // already is: a clamp that yanked the cursor back would turn
-            // a keystroke near the end into a rewind.
+            // a keystroke near the end into a rewind. And only when
+            // something is actually lined up to follow — on the queue's
+            // last track with nothing announced there is no transition to
+            // starve, and holding the listener away from the end of the
+            // final track would be the ceiling outliving its reason
+            // (pre-merge review). pick_next is pure, so asking it here
+            // commits nothing.
             if let Some(ceiling) = seek_ceiling(s.duration, s.crossfade, s.gapless) {
+                let follows = s.pending_next.is_some()
+                    || next_candidate(&s.q, !(s.crossfade > 0.0)).is_some();
                 let current = s.sink.get_pos().as_secs_f64();
                 let asked = target.as_secs_f64();
-                if asked > current && asked > ceiling {
+                if follows && asked > current && asked > ceiling {
                     target = Duration::from_secs_f64(ceiling.max(current));
                     etrace!("seek {asked:.1} clamped to {:.1} (transition runway)",
                         target.as_secs_f64());
@@ -2223,6 +2231,47 @@ mod tests {
             "one failure and one success — a rate limit, not a tick loop"
         );
         assert_eq!(engine.status().file, url);
+        engine.stop();
+        let _ = std::fs::remove_file(&local);
+    }
+
+    /// The ceiling protects a transition; with nothing lined up to follow
+    /// — the queue's last track, nothing announced — there is no
+    /// transition, and a forward seek keeps its legacy skip-the-track
+    /// meaning even with crossfade configured (pre-merge review: the
+    /// clamp held listeners away from the end of the final track for no
+    /// one's benefit).
+    ///
+    /// `cargo test the_last_track -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn the_last_track_seeks_free_of_the_ceiling() {
+        let local = std::env::temp_dir().join("mstream-lasttrack-a.wav");
+        std::fs::write(&local, wav_bytes(10)).unwrap();
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_crossfade(2.0);
+        engine.play_source(local.to_string_lossy().into_owned(), Some(10.0)).unwrap();
+        std::thread::sleep(Duration::from_millis(400));
+
+        // Past the end on the queue's only track: no ceiling, the track
+        // ends — the pre-crossfade meaning of seeking past the end.
+        engine.seek(999.0).unwrap();
+        let started = std::time::Instant::now();
+        loop {
+            engine.advance_tick();
+            let s = engine.status();
+            if !s.playing {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "the seek was clamped ({:.2}s) though nothing follows",
+                s.position
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
         engine.stop();
         let _ = std::fs::remove_file(&local);
     }
