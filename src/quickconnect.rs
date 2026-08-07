@@ -18,7 +18,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use iroh::endpoint::{Connection, presets};
-use iroh::{Endpoint, EndpointAddr};
+use iroh::{Endpoint, EndpointAddr, RelayUrl, TransportAddr};
 use iroh_tickets::endpoint::EndpointTicket;
 use serde::Deserialize;
 
@@ -198,33 +198,9 @@ pub struct Tunnel {
 impl Tunnel {
     /// Dial the server and complete the secret handshake.
     pub async fn open(code: &PairingCode) -> Result<Self, String> {
-        let endpoint = Endpoint::builder(presets::N0)
-            // The relay is plain HTTPS on 443, which is exactly what a
-            // corporate TLS-inspecting proxy (Netskope, Zscaler) intercepts
-            // and re-signs with a CA only the OS trust store knows. iroh's
-            // default trust is a compiled-in Mozilla bundle, which calls
-            // that CA an UnknownIssuer and fails the relay — the one road
-            // a UDP-blocked network has left. Trust what the operating
-            // system trusts, like every browser on the same machine.
-            .ca_tls_config(iroh::tls::CaTlsConfig::system())
-            // And a network that declares its proxy (HTTP_PROXY and
-            // friends) gets the relay's HTTPS routed through it rather
-            // than around it.
-            .proxy_from_env()
-            .bind()
-            .await
-            .map_err(|e| format!("could not start the local endpoint: {e}"))?;
-
-        // Best effort: if the relay isn't ready in time, dial anyway rather
-        // than failing outright.
-        let _ = tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online()).await;
-
-        let connection =
-            tokio::time::timeout(DIAL_TIMEOUT, endpoint.connect(code.addr.clone(), TUNNEL_ALPN))
-                .await
-                .map_err(|_| "timed out reaching the server through the tunnel".to_string())?
-                .map_err(|e| format!("could not reach the server: {e}"))?;
-
+        let endpoint = bind_endpoint().await?;
+        let relay_online = wait_for_relay(&endpoint).await;
+        let connection = dial(&endpoint, &code.addr, relay_online).await?;
         handshake(&connection, &code.secret).await?;
         Ok(Tunnel { connection, _endpoint: endpoint })
     }
@@ -353,6 +329,60 @@ impl Redialer {
     }
 }
 
+/// Bind the local endpoint the way every tunnel user must: n0 defaults, plus
+/// the two settings the defaults leave off that decide whether a corporate
+/// network works at all. The OS trust store, because the relay is plain HTTPS
+/// on 443 and TLS inspection (Netskope, Zscaler) re-signs it with a CA only
+/// the system keychain knows — iroh's embedded Mozilla roots would call that
+/// an UnknownIssuer and fail the one road a UDP-blocked network has left.
+/// And the environment's proxy, because a proxy-only network drops direct
+/// dials on the floor.
+async fn bind_endpoint() -> Result<Endpoint, String> {
+    Endpoint::builder(presets::N0)
+        .ca_tls_config(iroh::tls::CaTlsConfig::system())
+        .proxy_from_env()
+        .bind()
+        .await
+        .map_err(|e| format!("could not start the local endpoint: {e}"))
+}
+
+/// Best effort — if the relay isn't ready in time, dial anyway rather than
+/// failing outright. The outcome is returned rather than discarded because a
+/// dial that then times out means opposite things on a machine that reached
+/// the relay network and one that never could.
+async fn wait_for_relay(endpoint: &Endpoint) -> bool {
+    tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online()).await.is_ok()
+}
+
+/// Reach the server by whatever path iroh finds — direct, or relayed for a
+/// network that blocks UDP.
+async fn dial(
+    endpoint: &Endpoint,
+    addr: &EndpointAddr,
+    relay_online: bool,
+) -> Result<Connection, String> {
+    tokio::time::timeout(DIAL_TIMEOUT, endpoint.connect(addr.clone(), TUNNEL_ALPN))
+        .await
+        .map_err(|_| dial_timeout_message(relay_online))?
+        .map_err(|e| format!("could not reach the server: {e}"))
+}
+
+/// The same silent 25 seconds point at opposite culprits depending on whether
+/// this machine ever reached the relay network itself.
+fn dial_timeout_message(relay_online: bool) -> String {
+    if relay_online {
+        "timed out reaching the server through the tunnel — the relay network \
+         is reachable from here, so the server may be offline, or its pairing \
+         code was issued while the server had no relay contact"
+            .to_string()
+    } else {
+        "timed out reaching the server, and the iroh relay network was \
+         unreachable too — this network may block or intercept it (corporate \
+         networks often do); if it requires a proxy, set HTTPS_PROXY and retry"
+            .to_string()
+    }
+}
+
 /// The first bi-stream is the gate: write the secret, close our side, read the
 /// verdict.
 async fn handshake(connection: &Connection, secret: &[u8]) -> Result<(), String> {
@@ -415,23 +445,32 @@ pub fn open_bridge(code: &PairingCode) -> Result<TunnelBridge, String> {
         // first request through a bridge that was never going to work.
         let redialer =
             std::sync::Arc::new(Redialer::new(code.clone(), Tunnel::open(&code).await?));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|e| format!("could not open a local port for the tunnel: {e}"))?;
-        let port = listener
-            .local_addr()
-            .map_err(|e| format!("could not read the local tunnel port: {e}"))?
-            .port();
-
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(accept_loop(listener, redialer.clone(), shutdown_rx));
-
-        Ok::<_, String>(TunnelBridge {
-            local_url: format!("http://127.0.0.1:{port}"),
-            redialer,
-            _shutdown: shutdown_tx,
-        })
+        publish_on_loopback(redialer).await
     })?
+}
+
+/// The loopback half of a bridge: bind a local port, pump every inbound TCP
+/// connection through the dialler. Split from [`open_bridge`] so the probe
+/// can publish a tunnel it has already dialled stage by stage.
+async fn publish_on_loopback(
+    redialer: std::sync::Arc<Redialer>,
+) -> Result<TunnelBridge, String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("could not open a local port for the tunnel: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("could not read the local tunnel port: {e}"))?
+        .port();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(accept_loop(listener, redialer.clone(), shutdown_rx));
+
+    Ok(TunnelBridge {
+        local_url: format!("http://127.0.0.1:{port}"),
+        redialer,
+        _shutdown: shutdown_tx,
+    })
 }
 
 async fn accept_loop(
@@ -500,18 +539,45 @@ async fn bridge_one(
         Ok::<_, std::io::Error>(())
     };
 
-    // A client that hung up wants no more responses; a server that hung up
-    // will never send one. Either way the other half is done too — select
-    // drops it, and dropping the socket halves is the FIN that tells the
-    // far side so.
+    // Asymmetric on purpose. A client done SENDING may still be owed a
+    // response — an HTTP client that half-closes after its request is
+    // within its rights (the end-to-end test does exactly this) — so
+    // upstream ending only stops the upstream copy. A server that ended
+    // its side will never send another byte: that is the moment to close
+    // the client's connection too, so no connection pool is left holding
+    // a corpse (the listening-session finding).
+    tokio::pin!(upstream, downstream);
     tokio::select! {
-        up = upstream => up.map_err(|e| e.to_string()),
-        down = downstream => down.map_err(|e| e.to_string()),
+        up = &mut upstream => {
+            up.map_err(|e| e.to_string())?;
+            (&mut downstream).await.map_err(|e| e.to_string())
+        }
+        down = &mut downstream => down.map_err(|e| e.to_string()),
     }
 }
 
+/// Which proxy variable is set, if any — named but never printed whole,
+/// since proxy URLs routinely carry credentials. Mirrors iroh's read order.
+fn proxy_env_var() -> Option<&'static str> {
+    ["http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"]
+        .into_iter()
+        .find(|name| std::env::var(name).is_ok_and(|v| !v.is_empty()))
+}
+
+/// The relay the endpoint settled on, if any. The probe names it so a
+/// corporate allowlist request can name it too.
+fn home_relay(endpoint: &Endpoint) -> Option<RelayUrl> {
+    endpoint.addr().addrs.into_iter().find_map(|addr| match addr {
+        TransportAddr::Relay(url) => Some(url),
+        _ => None,
+    })
+}
+
 /// Diagnostic: dial a pairing code and make one real HTTP request through the
-/// tunnel, proving the whole path rather than just the handshake.
+/// tunnel, proving the whole path rather than just the handshake. Each stage
+/// is narrated as it completes, so on a hostile network the output names the
+/// stage that died — the difference between an IT ticket about blocked relays
+/// and a look at the server.
 pub fn probe(code: &str) -> i32 {
     let parsed = match parse_code(code) {
         Ok(parsed) => parsed,
@@ -521,11 +587,38 @@ pub fn probe(code: &str) -> i32 {
         }
     };
     println!("endpoint: {}…", parsed.endpoint_label());
+    if let Some(name) = proxy_env_var() {
+        println!("proxy: ${name} is set and will be used for relay dials");
+    }
 
-    // Exercise the same path the player uses: bring the tunnel up on loopback,
-    // then talk to it with the ordinary API client.
+    // The same steps `Tunnel::open` composes, exercised the same way the
+    // player uses them — then the loopback bridge and the ordinary API client.
     let started = std::time::Instant::now();
-    let bridge = match open_bridge(&parsed) {
+    let stage = move |what: &str| {
+        println!("  {what} after {:.2}s", started.elapsed().as_secs_f64());
+    };
+    let opened = crate::runtime::block_on(async move {
+        let endpoint = bind_endpoint().await?;
+        stage("local endpoint up");
+        let relay_online = wait_for_relay(&endpoint).await;
+        match (relay_online, home_relay(&endpoint)) {
+            (true, Some(url)) => stage(&format!("relay reached ({url})")),
+            (true, None) => stage("relay reported online"),
+            (false, _) => stage(
+                "NO RELAY — dialling direct anyway; if that fails too, this \
+                 network likely blocks or intercepts the iroh relay servers",
+            ),
+        }
+        let connection = dial(&endpoint, &parsed.addr, relay_online).await?;
+        stage("server accepted the connection");
+        handshake(&connection, &parsed.secret).await?;
+        stage("pairing handshake accepted");
+        let tunnel = Tunnel { connection, _endpoint: endpoint };
+        publish_on_loopback(std::sync::Arc::new(Redialer::new(parsed.clone(), tunnel))).await
+    })
+    .and_then(|opened| opened);
+
+    let bridge = match opened {
         Ok(bridge) => bridge,
         Err(e) => {
             eprintln!("FAIL: {e}");
@@ -666,5 +759,131 @@ mod tests {
     fn trims_surrounding_whitespace_from_a_pasted_code() {
         let code = format!("  {}\n", encode(Some(1), TICKET, &[9u8; 32]));
         assert!(parse_code(&code).is_ok());
+    }
+
+    /// Stand up an endpoint speaking the server half of the tunnel protocol,
+    /// as mStream implements it — the first bi-stream carries the secret and
+    /// is answered OK, every later one is one TCP connection's worth of bytes
+    /// to a local HTTP port that always answers `http_response` — and hand
+    /// back its ticket. Relay-free, dialled by direct addresses: tests need
+    /// no network beyond this machine.
+    fn fake_mstream_endpoint(secret: [u8; 32], http_response: &'static [u8]) -> String {
+        let http = std::net::TcpListener::bind("127.0.0.1:0").expect("bind http");
+        let http_port = http.local_addr().expect("http addr").port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            while let Ok((mut sock, _)) = http.accept() {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 256];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut byte) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&byte[..n]),
+                    }
+                }
+                let _ = sock.write_all(http_response);
+            }
+        });
+
+        let addr = crate::runtime::block_on(async move {
+            let endpoint = Endpoint::builder(presets::Minimal)
+                .alpns(vec![TUNNEL_ALPN.to_vec()])
+                .bind()
+                .await
+                .expect("bind server endpoint");
+            let addr = endpoint.addr();
+            tokio::spawn(async move {
+                while let Some(incoming) = endpoint.accept().await {
+                    let Ok(connection) = incoming.await else { continue };
+                    tokio::spawn(async move {
+                        let Ok((mut send, mut recv)) = connection.accept_bi().await else {
+                            return;
+                        };
+                        let got = recv.read_to_end(256).await.unwrap_or_default();
+                        if got != secret {
+                            let _ = send.write_all(b"NO").await;
+                            return;
+                        }
+                        let _ = send.write_all(b"OK").await;
+                        let _ = send.finish();
+                        while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+                            tokio::spawn(async move {
+                                let Ok(tcp) =
+                                    tokio::net::TcpStream::connect(("127.0.0.1", http_port)).await
+                                else {
+                                    return;
+                                };
+                                let (mut tcp_read, mut tcp_write) = tcp.into_split();
+                                let up = async {
+                                    let _ = tokio::io::copy(&mut recv, &mut tcp_write).await;
+                                };
+                                let down = async {
+                                    let _ = tokio::io::copy(&mut tcp_read, &mut send).await;
+                                    let _ = send.finish();
+                                };
+                                tokio::join!(up, down);
+                            });
+                        }
+                    });
+                }
+            });
+            addr
+        })
+        .expect("runtime");
+
+        EndpointTicket::from(addr).to_string()
+    }
+
+    /// The whole client path against a live endpoint speaking the server's
+    /// protocol — parse, dial, handshake, bridge, one HTTP round trip. The
+    /// peer is relay-free and dialled by its direct addresses, so a pass
+    /// means the client machinery is sound without any network beyond this
+    /// machine — which is exactly the half a corporate firewall can't touch.
+    #[test]
+    fn dials_handshakes_and_bridges_http_end_to_end() {
+        const SECRET: [u8; 32] = [42u8; 32];
+        let ticket = fake_mstream_endpoint(
+            SECRET,
+            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nhi",
+        );
+        let code = encode(Some(1), &ticket, &SECRET);
+        let bridge = open_bridge(&parse_code(&code).expect("parse")).expect("open bridge");
+
+        use std::io::{Read, Write};
+        let target = bridge.local_url.strip_prefix("http://").expect("local url");
+        let mut sock = std::net::TcpStream::connect(target).expect("connect bridge");
+        sock.write_all(b"GET /api/v1/ping HTTP/1.1\r\nhost: tunnel\r\nconnection: close\r\n\r\n")
+            .expect("send request");
+        // Mirror what a real HTTP client does at end of request, and what the
+        // bridge needs to forward end-of-stream: half-close the write side.
+        sock.shutdown(std::net::Shutdown::Write).expect("half-close");
+        let mut reply = String::new();
+        let _ = sock.read_to_string(&mut reply);
+        assert!(reply.starts_with("HTTP/1.1 200 OK"), "got: {reply}");
+        assert!(reply.ends_with("hi"), "got: {reply}");
+    }
+
+    /// The probe walks the same stages and comes back green against a healthy
+    /// endpoint — including the final ping through the real API client, which
+    /// needs the canned answer to be a ping-shaped JSON body.
+    #[test]
+    fn the_probe_passes_against_a_live_endpoint() {
+        const SECRET: [u8; 32] = [7u8; 32];
+        let ticket = fake_mstream_endpoint(
+            SECRET,
+            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+              content-length: 13\r\nconnection: close\r\n\r\n{\"vpaths\":[]}",
+        );
+        let code = encode(Some(1), &ticket, &SECRET);
+        assert_eq!(probe(&code), 0);
+    }
+
+    #[test]
+    fn a_dial_timeout_names_the_right_culprit() {
+        let reached = dial_timeout_message(true);
+        assert!(reached.contains("server may be offline"), "got: {reached}");
+        let unreached = dial_timeout_message(false);
+        assert!(unreached.contains("relay network was unreachable"), "got: {unreached}");
+        assert!(unreached.contains("HTTPS_PROXY"), "got: {unreached}");
     }
 }

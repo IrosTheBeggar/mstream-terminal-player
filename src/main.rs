@@ -55,7 +55,6 @@ enum Command {
     /// Show what Auto-DJ would play next, and why
     Dj(cmd_library::DjArgs),
     /// Dial a Quick Connect pairing code and probe the tunnel (diagnostic)
-    #[command(hide = true)]
     QuickconnectProbe { code: String },
     /// Drive the interactive player from a script (smoke testing)
     Replay(replay::ReplayArgs),

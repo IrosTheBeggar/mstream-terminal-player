@@ -81,6 +81,15 @@ that can only be on your network (loopback, private ranges, `.local`, plain host
 `http`, anything reachable from the internet gets `https`. The completed address is written back
 into the field, so you can see what was assumed.
 
+A pasted Quick Connect pairing code (`mstr1:…`) dials the server over its Iroh tunnel instead of
+an address — the way in from networks that can't reach the server directly. It holds up on
+corporate networks: the relay connection trusts the operating system's certificate store, so a
+TLS-inspecting proxy (Netskope, Zscaler) passes once its CA is installed where everything else on
+the machine already trusts it, and `HTTPS_PROXY` is honoured when the network insists on one. If
+a dial still times out, `mstream-player quickconnect-probe '<code>'` narrates each stage and
+names the relay it reached — and when the network is the problem, the concrete thing to ask IT
+to allow is `*.relay.n0.iroh.link` on TCP 443.
+
 **Files** browses folders as they sit on disk, opening wherever the server says
 is most useful — straight inside your library when there is only one, or the
 list to choose from when there are several. `h` from there goes up to the list
