@@ -497,6 +497,13 @@ struct State {
     gapless: bool,
     /// The source waiting inside the sink for its gapless boundary.
     appended: Option<Appended>,
+    /// A silenced remnant still queued in the LIVE sink: the one queue edit
+    /// the irrevocable append can heed (deleting the appended row) snaps
+    /// the source silent, but rodio would still play its silence to
+    /// completion at the boundary — dead air for the removed track's whole
+    /// length (verify round, critic). This flag is the record; the tick
+    /// skips the remnant the moment it becomes current.
+    orphaned_tail: bool,
     /// What the TUI said should play after the current track. The TUI keeps
     /// its own queue and feeds this engine one source at a time, so unlike
     /// serve mode the engine cannot pick a next; it has to be told. Consulted
@@ -538,6 +545,9 @@ impl State {
         self.cancel_overlap();
         self.adopt_appended_for_retire();
         self.retire_softly(SKIP_FADE);
+        // Any orphaned remnant leaves with the retired sink, where the
+        // fleet's reaping bounds it; the flag described the OLD sink.
+        self.orphaned_tail = false;
         let sink = Player::connect_new(mixer);
         sink.set_volume(self.volume);
         self.attach_fresh(&sink, prepared.opened, 1.0);
@@ -564,9 +574,18 @@ impl State {
         // it would be a zombie: its sample-clocked ramp can never advance,
         // its drain never comes, and the deadline is deliberately skipped
         // while paused. It held the drainer gate forever and came BACK on
-        // the next resume (C4 review). Stopped is stopped.
+        // the next resume (C4 review). Stopped is stopped — EXCEPT that
+        // after a soft stop, self.sink still aliases the parked drainer
+        // until the next start replaces it, and stopping "the old current"
+        // here would hard-cut that breath at speaking gain (verify round,
+        // critic: the /stop-then-/play click). A parked sink belongs to
+        // the fleet's retirement, not to this exit.
         if self.sink.empty() || self.stopped || self.sink.is_paused() {
-            self.sink.stop();
+            let parked =
+                self.outgoing.iter().any(|out| Arc::ptr_eq(&out.sink, &self.sink));
+            if !parked {
+                self.sink.stop();
+            }
             return;
         }
         self.fade.ramp_to(0.0, window);
@@ -593,6 +612,13 @@ impl State {
     fn promote_if_crossed(&mut self) {
         if self.appended.is_some() && self.sink.len() <= 1 {
             self.promote_appended();
+        } else if self.orphaned_tail && self.sink.len() <= 1 {
+            // The silenced remnant of a deleted row became the sink's
+            // current: skip it now, so its silence never stalls the
+            // advance. The skip lands at the next periodic access and the
+            // ordinary end-of-track machinery takes over from there.
+            self.sink.skip_one();
+            self.orphaned_tail = false;
         }
     }
 
@@ -637,6 +663,10 @@ impl State {
     /// clears now — status says stopped immediately, the ear gets 80ms of
     /// mercy.
     fn stop_softly(&mut self) {
+        // The boundary first: a stop landing on a crossed seam should stop
+        // the track that is SOUNDING — promotion advances the index so a
+        // later resume restarts the right row (verify round, sweep).
+        self.promote_if_crossed();
         // A stop means everything winds down NOW: the blend's long tail is
         // hushed to a stop-length ramp (left alone it played on for the
         // whole blend window — fix-round review, critic), the breaths
@@ -644,6 +674,7 @@ impl State {
         self.hush_drainers();
         self.adopt_appended_for_retire();
         self.retire_softly(STOP_FADE);
+        self.orphaned_tail = false;
         self.invalidate_next();
         self.pending_next = None;
         self.current_file.clear();
@@ -708,9 +739,10 @@ impl State {
         self.invalidate_next();
     }
 
-    /// A seek keeps the surviving track and cuts the blend around it: the
-    /// outgoing sink stops, a half-risen fade snaps to full. The prepared
-    /// next, if any, stays — a seek does not change what comes after.
+    /// A seek keeps the surviving track and takes the blend out from
+    /// around it: the outgoing half is hushed down a stop-length ramp, a
+    /// half-risen fade snaps to full. The prepared next, if any, stays —
+    /// a seek does not change what comes after.
     fn snap_out_of_blend(&mut self) {
         if self.outgoing.is_empty() {
             return;
@@ -775,6 +807,7 @@ impl Engine {
             crossfade: 0.0,
             gapless: false,
             appended: None,
+            orphaned_tail: false,
             pending_next: None,
             next: NextTrack::Idle,
             outgoing: Vec::new(),
@@ -1123,6 +1156,10 @@ impl Engine {
             if let Some(appended) = s.appended.take() {
                 appended.fade.snap(0.0);
                 appended.tap_live.store(false, Ordering::Relaxed);
+                // The silent remnant is still queued in the live sink, and
+                // must be skipped at its boundary rather than played to
+                // its silent completion (verify round, critic).
+                s.orphaned_tail = true;
             }
         }
         let outcome = apply_remove(&mut s.q, index);
@@ -1300,9 +1337,11 @@ impl Engine {
         if s.sink.is_paused() {
             return;
         }
-        // Transitions are strictly one at a time: a draining blend or an
-        // already-appended next is the gate for anything further.
-        if !s.outgoing.is_empty() || s.appended.is_some() {
+        // Transitions are strictly one at a time: a draining blend, an
+        // already-appended next, or a not-yet-skipped orphan is the gate
+        // for anything further — appending behind an orphan would put
+        // three sources in one sink and confuse every boundary check.
+        if !s.outgoing.is_empty() || s.appended.is_some() || s.orphaned_tail {
             return;
         }
         // A duration the engine does not know is a fade point — or an
@@ -1380,6 +1419,7 @@ impl Engine {
         s.attach_fresh(&sink, prepared.opened, 0.0);
         s.fade.ramp_to(1.0, fade_dur);
         s.sink = Arc::new(sink);
+        s.orphaned_tail = false;
         s.current_file = prepared.path;
         s.duration = prepared.duration;
         s.stopped = false;
@@ -2113,18 +2153,20 @@ mod tests {
     #[ignore = "needs an audio device"]
     fn a_removed_appended_row_is_never_heard() {
         let dir = std::env::temp_dir();
-        let first = dir.join("mstream-heed-a.wav");
-        let second = dir.join("mstream-heed-b.wav");
-        std::fs::write(&first, wav_bytes(3)).unwrap();
-        std::fs::write(&second, wav_bytes(3)).unwrap();
+        let names: Vec<_> = ["a", "b", "c"]
+            .iter()
+            .map(|n| dir.join(format!("mstream-heed-{n}.wav")))
+            .collect();
+        for name in &names {
+            std::fs::write(name, wav_bytes(3)).unwrap();
+        }
 
         let engine = Engine::new().unwrap();
         engine.set_volume(0.0);
         engine.set_gapless(true);
-        engine.queue_add_many(vec![
-            first.to_string_lossy().into_owned(),
-            second.to_string_lossy().into_owned(),
-        ]);
+        engine.queue_add_many(
+            names.iter().map(|n| n.to_string_lossy().into_owned()).collect(),
+        );
 
         let started = std::time::Instant::now();
         while !engine.appended_waiting() {
@@ -2134,22 +2176,31 @@ mod tests {
         }
         engine.queue_remove(1).unwrap();
 
-        // Ride out the rest: the deleted track's name must never surface.
-        while started.elapsed() < Duration::from_secs(6) {
+        // The deleted track's name must never surface — and its SILENCE
+        // must not stall the queue either: the snapped remnant used to
+        // play its whole length at gain zero before the successor came
+        // (verify round, critic). c is due by ~3s; the stall pushed it
+        // past 6.
+        let mut heard_c = false;
+        while started.elapsed() < Duration::from_secs(5) {
             engine.advance_tick();
             let status = engine.status();
             assert!(
-                status.file != second.to_string_lossy(),
+                status.file != names[1].to_string_lossy(),
                 "the deleted track played anyway"
             );
-            if status.file.is_empty() {
+            if status.file == names[2].to_string_lossy() {
+                heard_c = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+        assert!(heard_c, "the successor never came — the orphan's silence stalled the queue");
+
         engine.stop();
-        let _ = std::fs::remove_file(&first);
-        let _ = std::fs::remove_file(&second);
+        for name in &names {
+            let _ = std::fs::remove_file(name);
+        }
     }
 
     /// The boundary is visible through a bare status() with no ticks at
@@ -2435,8 +2486,9 @@ mod tests {
     /// A stop landing in the window between a gapless boundary crossing
     /// (audio thread) and its promotion (next tick) must treat the sounding
     /// source as current — promoted and breathed out, not snapped at full
-    /// scale (C4 review). Without ticks, the promotion can ONLY come from
-    /// silence_appended's own boundary check.
+    /// scale (C4 review). Without ticks, the boundary can only be caught
+    /// inside the stop itself (promote_if_crossed at its top, and
+    /// adopt_appended_for_retire's own crossed check behind it).
     ///
     /// `cargo test a_stop_at_the_boundary -- --ignored --nocapture`
     #[test]
@@ -2577,6 +2629,15 @@ mod tests {
         // breath this gate was fixed to respect was the fleet-defeating
         // click (hush round).
         assert!(engine.drainers() >= 1, "the stop's breath was cut, not kept");
+        // Surviving in the LIST is not surviving: retire_softly's early
+        // exit used to stop() the parked sink through its self.sink alias,
+        // leaving the entry in the fleet with its ramp frozen at speaking
+        // gain (verify round, critic). A live breath ramps to silence
+        // within a couple hundred ms; a stopped one stays stuck high.
+        std::thread::sleep(Duration::from_millis(400));
+        for position in engine.drainer_positions() {
+            assert!(position <= 0.05, "the breath was silently hard-stopped at {position}");
+        }
 
         engine.stop();
         for name in &names {
