@@ -27,17 +27,28 @@
 //! also collects the `stderrln!` diagnostics the TUI would otherwise
 //! silence — the two files answer different questions and stay separate.
 //!
+//! Two destinations, one capture. Every event the level admits is kept in a
+//! bounded in-memory ring — which is what **View log** reads, so a session
+//! can be inspected without writing a byte to disk — and, when **Write log**
+//! is on, the same formatted line also goes to the file. The level therefore
+//! governs both: it is what gets captured at all, not merely what gets
+//! persisted. The ring dies with the process; the file is what survives to
+//! be sent to someone.
+//!
 //! The browser build keeps the level type and the switches — the Settings
 //! tab that drives them is drawing code wasm compiles unchanged — and drops
 //! the half that needs a filesystem. Nothing installs a subscriber there,
 //! so Write log honestly answers "no file could be opened", and a browser's
 //! own devtools console stays where its diagnostics live.
 
-use std::fs::{self, File};
+use std::collections::VecDeque;
+use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs::File;
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::OnceLock;
 
@@ -86,6 +97,65 @@ impl Level {
     }
 }
 
+/// How many formatted lines the ring holds. Deep enough to scroll a real
+/// session in the viewer, shallow enough that holding it costs a few
+/// hundred kilobytes at worst.
+const RING_LINES: usize = 2_000;
+
+/// A guard on the one pathological input: an event whose formatted line
+/// never ends. Past this the pending line is flushed as-is rather than
+/// growing until memory complains.
+const RING_LINE_CAP: usize = 64 * 1024;
+
+/// Everything the level admitted this session, most recent last — the
+/// viewer's source, and the reason a log can be read without being written.
+static RING: LazyLock<Mutex<Ring>> = LazyLock::new(|| Mutex::new(Ring::default()));
+
+#[derive(Default)]
+struct Ring {
+    lines: VecDeque<String>,
+    /// The tail of a line the writer has not finished handing over: the fmt
+    /// layer may deliver one event in several writes, and half a line in
+    /// the viewer would be a lie about what was logged.
+    pending: String,
+}
+
+impl Ring {
+    fn push_bytes(&mut self, text: &str) {
+        for ch in text.chars() {
+            if ch == '\n' {
+                let line = std::mem::take(&mut self.pending);
+                self.push_line(line);
+            } else {
+                self.pending.push(ch);
+                if self.pending.len() >= RING_LINE_CAP {
+                    let line = std::mem::take(&mut self.pending);
+                    self.push_line(line);
+                }
+            }
+        }
+    }
+
+    fn push_line(&mut self, line: String) {
+        if self.lines.len() == RING_LINES {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(line);
+    }
+}
+
+/// The last `max` lines the ring holds, oldest first.
+pub fn tail(max: usize) -> Vec<String> {
+    let ring = RING.lock().unwrap();
+    let skip = ring.lines.len().saturating_sub(max);
+    ring.lines.iter().skip(skip).cloned().collect()
+}
+
+/// How many lines have been captured this session.
+pub fn captured() -> usize {
+    RING.lock().unwrap().lines.len()
+}
+
 /// The file events land in, arriving whenever logging is first turned on.
 /// The subscriber is installed before any file may exist, so its writer
 /// looks here on every event; empty means the words go nowhere.
@@ -109,8 +179,12 @@ struct LateGuard;
 #[cfg(not(target_arch = "wasm32"))]
 impl Write for LateGuard {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // The ring first and always: it is what the viewer reads, and it
+        // must hold a session whether or not a file is being written.
+        RING.lock().unwrap().push_bytes(&String::from_utf8_lossy(buf));
         match &mut *SINK.lock().unwrap() {
             Some(file) => file.write(buf),
+            // Nothing on disk to take it, and nothing wrong with that.
             None => Ok(buf.len()),
         }
     }
@@ -189,14 +263,25 @@ fn resolve_target(target: Target) -> Option<PathBuf> {
 }
 
 /// Truncate `path` into a fresh signed file and point the writer at it.
+///
+/// `backlog` is what the ring already holds — poured in first, because the
+/// reason someone turns writing on is usually the thing they just watched
+/// happen. Without it the file would begin at the keystroke and miss
+/// exactly that.
 #[cfg(not(target_arch = "wasm32"))]
-fn open_sink(path: &Path) -> bool {
+fn open_sink(path: &Path, backlog: &[String]) -> bool {
     let Ok(mut file) = File::create(path) else { return false };
     let _ = writeln!(
         file,
         "── mstream-player v{} — RUST_LOG overrides the level when set ──",
         env!("CARGO_PKG_VERSION")
     );
+    if !backlog.is_empty() {
+        let _ = writeln!(file, "── {} lines captured before writing began ──", backlog.len());
+        for line in backlog {
+            let _ = writeln!(file, "{line}");
+        }
+    }
     *SINK.lock().unwrap() = Some(file);
     true
 }
@@ -211,13 +296,11 @@ fn settled_from_config(write: Option<bool>, level_text: &str) -> (bool, Level) {
     (write, level)
 }
 
-/// The filter the current switches mean. Silence when the write switch is
-/// off; otherwise the level — unless `RUST_LOG` is set, which knows better.
+/// What the level admits — unless `RUST_LOG` is set, which knows better.
+/// Note this does not consult the write switch: capture feeds the ring, and
+/// the ring is readable whether or not anything reaches a file.
 #[cfg(not(target_arch = "wasm32"))]
-fn filter_for(write: bool, level: Level) -> EnvFilter {
-    if !write {
-        return EnvFilter::new("off");
-    }
+fn filter_for(level: Level) -> EnvFilter {
     if let Ok(custom) = EnvFilter::try_from_default_env() {
         return custom;
     }
@@ -243,7 +326,10 @@ pub fn init() -> Option<PathBuf> {
         target => (true, resolve_target(target)),
     };
 
-    let (filter_layer, handle) = reload::Layer::new(filter_for(write, level));
+    // Installed at the level, not at the write switch: the ring starts
+    // filling from boot, so a session that goes wrong before anyone thought
+    // to turn writing on can still be read.
+    let (filter_layer, handle) = reload::Layer::new(filter_for(level));
     let installed = tracing_subscriber::registry()
         .with(filter_layer)
         .with(
@@ -258,7 +344,8 @@ pub fn init() -> Option<PathBuf> {
     }
     let _ = HANDLE.set(handle);
 
-    let path = path.filter(|p| open_sink(p));
+    // Nothing has been captured yet at boot, so the file opens empty.
+    let path = path.filter(|p| open_sink(p, &[]));
     let write = write && path.is_some();
     *STATE.lock().unwrap() = State { write, level, path: path.clone() };
     path.filter(|_| write)
@@ -278,49 +365,74 @@ fn subscriber_ready() -> bool {
     false
 }
 
-/// Point the live subscriber at what the switches now say.
+/// Let go of the file, leaving the ring capturing.
 #[cfg(not(target_arch = "wasm32"))]
-fn apply_filter(write: bool, level: Level) {
+fn close_sink() {
+    *SINK.lock().unwrap() = None;
+}
+
+#[cfg(target_arch = "wasm32")]
+fn close_sink() {}
+
+/// Point the live subscriber at the level now chosen.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_filter(level: Level) {
     if let Some(handle) = HANDLE.get() {
-        let _ = handle.reload(filter_for(write, level));
+        let _ = handle.reload(filter_for(level));
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-fn apply_filter(_write: bool, _level: Level) {}
+fn apply_filter(_level: Level) {}
 
 /// Unreachable in the browser build — `set_write` turns back at
 /// [`subscriber_ready`] before any path is resolved — but the shared code
 /// path names it, so it exists and refuses.
 #[cfg(target_arch = "wasm32")]
-fn open_sink(_path: &Path) -> bool {
+fn open_sink(_path: &Path, _backlog: &[String]) -> bool {
     false
 }
 
-/// Flip whether anything is written, from the Settings tab. Turning it on
-/// for the first time opens the file (the default location, rotated) if the
-/// session started without one. Returns the file now in use when on.
+/// Flip whether the captured log is also *written*, from the Settings tab.
+/// Turning it on for the first time opens the file (the default location,
+/// rotated) if the session started without one; turning it off lets go of
+/// the file and leaves the ring filling. Returns the file now in use when
+/// on.
 pub fn set_write(on: bool) -> Option<PathBuf> {
     if !subscriber_ready() {
         return None;
     }
+    // The ring's lock is taken and released before the sink's: the writer
+    // takes them in that order too, and one order is what makes it safe.
+    let backlog = if on { tail(usize::MAX) } else { Vec::new() };
     let mut state = STATE.lock().unwrap();
     if on && state.path.is_none() {
-        state.path = resolve_target(Target::Default).filter(|p| open_sink(p));
+        state.path = resolve_target(Target::Default).filter(|p| open_sink(p, &backlog));
+    } else if on {
+        // A file this session already opened and let go of: re-point the
+        // writer at it, carrying over what has been captured since.
+        if let Some(path) = state.path.clone() {
+            state.path = Some(path.clone()).filter(|p| open_sink(p, &backlog));
+        }
     }
     state.write = on && state.path.is_some();
-    apply_filter(state.write, state.level);
+    // Turning writing off leaves the filter alone: the ring goes on
+    // holding the session, which is the whole point of being able to read
+    // a log without keeping one.
+    if !state.write {
+        close_sink();
+    }
     state.path.clone().filter(|_| state.write)
 }
 
-/// Change how loud the log is. Takes hold at once while writing; otherwise
-/// it simply waits as the level the write switch will use.
+/// Change how loud the log is. Takes hold at once, written or not — the
+/// level is what the ring captures as much as what the file receives.
 pub fn set_level(level: Level) {
     let mut state = STATE.lock().unwrap();
     state.level = level;
-    if state.write {
-        apply_filter(true, level);
-    }
+    // Always: the level is what the ring captures as much as what the file
+    // receives.
+    apply_filter(level);
 }
 
 /// Whether anything is being written right now.
@@ -337,31 +449,6 @@ pub fn level() -> Level {
 pub fn active() -> Option<PathBuf> {
     let state = STATE.lock().unwrap();
     if state.write { state.path.clone() } else { None }
-}
-
-/// The last `max` lines of the log, for the in-app viewer — read fresh each
-/// call, from at most the final 256 KiB of the file.
-pub fn tail(max: usize) -> Option<(PathBuf, Vec<String>)> {
-    let path = STATE.lock().unwrap().path.clone()?;
-    let text = read_tail(&path)?;
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    if lines.len() > max {
-        lines.drain(..lines.len() - max);
-    }
-    Some((path, lines))
-}
-
-fn read_tail(path: &Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    const WINDOW: u64 = 256 * 1024;
-    let mut file = File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    if len > WINDOW {
-        file.seek(SeekFrom::Start(len - WINDOW)).ok()?;
-    }
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 #[cfg(test)]
@@ -435,17 +522,54 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The ring is what the viewer reads, so it has to hold whole lines,
+    /// hold the *recent* ones, and never grow without bound.
     #[test]
-    fn the_tail_is_the_end_of_the_file_and_no_more_than_asked() {
-        let path = std::env::temp_dir().join("mstream-player-test-tail.log");
-        let body: String = (1..=40).map(|n| format!("line {n}\n")).collect();
-        fs::write(&path, body).unwrap();
+    fn the_ring_keeps_whole_recent_lines_and_forgets_the_rest() {
+        let mut ring = Ring::default();
 
-        let text = read_tail(&path).unwrap();
-        let mut lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 40);
-        lines.drain(..lines.len() - 5);
-        assert_eq!(lines, ["line 36", "line 37", "line 38", "line 39", "line 40"]);
-        let _ = fs::remove_file(&path);
+        // The fmt layer may hand one event over in several writes; a line
+        // is only a line once its newline arrives.
+        ring.push_bytes("first half");
+        assert!(ring.lines.is_empty(), "half a line is not a line yet");
+        ring.push_bytes(" and second half\n");
+        assert_eq!(ring.lines, ["first half and second half"]);
+
+        // Several lines in one write land as several lines.
+        ring.push_bytes("two\nthree\n");
+        assert_eq!(ring.lines.len(), 3);
+
+        // Past its depth the ring drops the oldest and keeps the newest.
+        for n in 0..RING_LINES {
+            ring.push_bytes(&format!("line {n}\n"));
+        }
+        assert_eq!(ring.lines.len(), RING_LINES);
+        assert_eq!(ring.lines.back().unwrap(), &format!("line {}", RING_LINES - 1));
+        assert!(!ring.lines.contains(&"first half and second half".to_string()));
+
+        // A line that never ends is flushed rather than eating memory.
+        let mut ring = Ring::default();
+        ring.push_bytes(&"x".repeat(RING_LINE_CAP + 10));
+        assert_eq!(ring.lines.len(), 1);
+        assert!(ring.pending.len() < RING_LINE_CAP);
+    }
+
+    #[test]
+    fn the_tail_reads_the_end_of_the_ring_and_no_more_than_asked() {
+        let mut ring = RING.lock().unwrap();
+        ring.lines.clear();
+        ring.pending.clear();
+        for n in 1..=40 {
+            ring.push_bytes(&format!("line {n}\n"));
+        }
+        drop(ring);
+
+        assert_eq!(tail(5), ["line 36", "line 37", "line 38", "line 39", "line 40"]);
+        assert_eq!(captured(), 40);
+        // Asking for more than exists is not an error, just everything.
+        assert_eq!(tail(500).len(), 40);
+
+        let mut ring = RING.lock().unwrap();
+        ring.lines.clear();
     }
 }

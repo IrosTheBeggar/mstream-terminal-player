@@ -813,6 +813,29 @@ Kept deliberately: two files, two questions. `MSTREAM_LOG` answers "what did the
 the recorder answers "what did the player decide" — merging them would bury the forty decision
 lines under ten thousand of hyper's.
 
+#### The ring: a log you can read without keeping ✅ 2026-08-07 (branch `logs`)
+
+"Is there any way to view logs without writing them?" — there is now. Every event the level
+admits goes into a bounded in-memory ring (2 000 lines, whole-line assembly since the fmt layer
+hands an event over in pieces, oldest dropped, a 64 KiB guard on a line that never ends), and
+**View log** reads the ring rather than the file. So a session can be inspected at any moment
+with nothing on disk, and the viewer's title says which it is — a path, or "in memory · not
+written to disk".
+
+Two consequences worth naming. The filter no longer consults the write switch: the level is what
+gets *captured*, not merely what gets persisted, which is what makes viewing-without-writing
+possible at all. And turning Write log on now pours the ring into the file first (`── N lines
+captured before writing began ──`), because the reason anyone turns writing on is the thing they
+just watched happen; without it the file would begin at the keystroke and miss exactly that.
+
+The ring also exposed a product gap: at the default `info` level the dependencies are nearly
+silent (iroh and reqwest keep their detail at debug and trace), so a default session had nothing
+to show. The engine's flight-recorder lines are now emitted as `tracing` events too
+(`target: "mstream"`), which puts the player's own voice — plays, announcements, seeks and their
+clamps, prepares, open failures, handovers, tunnel re-dials — in the ring at info. The default
+log is now the story of what the player decided, and raising the level adds what the network was
+doing underneath.
+
 #### Logs in Settings, split in two ✅ 2026-08-07 (branch `logging`)
 
 Follow-up shaped by use: one row conflated whether logs are written with how loud they are.

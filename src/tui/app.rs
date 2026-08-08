@@ -138,9 +138,12 @@ pub enum SettingRow {
     ViewLog,
 }
 
-/// The in-app log viewer: a tail of the debug log, refreshed while open.
+/// The in-app log viewer: a tail of what has been captured, refreshed
+/// while open. Its source is the in-memory ring, so it reads the same
+/// whether or not a file is being written — the label just says which of
+/// those is true.
 pub struct LogView {
-    pub path: std::path::PathBuf,
+    pub source: String,
     pub lines: Vec<String>,
     pub scroll: usize,
     /// Stick to the end as new lines arrive, until the user scrolls away;
@@ -2110,15 +2113,19 @@ impl App {
                 None => "on".to_string(),
             }
         } else {
-            "off · nothing is written · Enter to start".to_string()
+            "off · kept in memory only, nothing on disk · Enter to write".to_string()
         };
         let level = format!(
-            "{} · what gets written once the log is on · ←→ adjust",
+            "{} · what gets captured, viewed and written · ←→ adjust",
             self.log_level.label()
         );
-        let view = match crate::logging::tail(1) {
-            Some((path, _)) => format!("Enter · {}", path.display()),
-            None => "no file yet · write the log first".to_string(),
+        let held = crate::logging::captured();
+        let view = if held == 0 {
+            "nothing captured yet".to_string()
+        } else if crate::logging::active().is_some() {
+            format!("Enter · {held} lines held, and going to disk")
+        } else {
+            format!("Enter · {held} lines held in memory")
         };
         vec![
             Entry::Parent,
@@ -2233,19 +2240,29 @@ impl App {
 
     /// Open the log viewer on the current file, tail-first — or say why not.
     fn open_log_view(&mut self) -> Vec<Effect> {
-        match crate::logging::tail(LOG_VIEW_LINES) {
-            Some((path, lines)) => {
-                self.log_view = Some(LogView {
-                    path,
-                    lines,
-                    scroll: usize::MAX, // clamped to the end at render
-                    follow: true,
-                    refreshed: std::time::Instant::now(),
-                });
-            }
-            None => self.info("no log yet — write the log first"),
+        let lines = crate::logging::tail(LOG_VIEW_LINES);
+        if lines.is_empty() {
+            self.info("nothing captured yet");
+            return Vec::new();
         }
+        self.log_view = Some(LogView {
+            source: self.log_source_label(),
+            lines,
+            scroll: usize::MAX, // clamped to the end at render
+            follow: true,
+            refreshed: std::time::Instant::now(),
+        });
         Vec::new()
+    }
+
+    /// What the viewer's title says it is showing: the file when one is
+    /// being written, and otherwise the honest truth that this session is
+    /// only in memory.
+    fn log_source_label(&self) -> String {
+        match crate::logging::active() {
+            Some(path) => path.display().to_string(),
+            None => "in memory · not written to disk".to_string(),
+        }
     }
 
     /// The viewer is modal: movement scrolls it, and the ways out are the
@@ -2293,9 +2310,7 @@ impl App {
         if !view.follow || view.refreshed.elapsed() < std::time::Duration::from_secs(1) {
             return;
         }
-        if let Some((_, lines)) = crate::logging::tail(LOG_VIEW_LINES) {
-            view.lines = lines;
-        }
+        view.lines = crate::logging::tail(LOG_VIEW_LINES);
         view.refreshed = std::time::Instant::now();
     }
 

@@ -3574,19 +3574,21 @@ fn the_logs_room_switches_levels_and_opens_the_viewer() {
         "the row reads the level back"
     );
 
-    // The viewer refuses politely with no file to show.
+    // No subscriber in a unit test means nothing was ever captured, so the
+    // viewer refuses politely — the same words a fresh session would give
+    // before anything had been logged.
     app.handle_action(Action::Down);
     assert!(
         matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::ViewLog, .. }))
     );
     app.handle_action(Action::Activate);
     assert!(app.log_view.is_none());
-    assert!(app.message.as_ref().unwrap().text.contains("no log yet"));
+    assert!(app.message.as_ref().unwrap().text.contains("nothing captured"));
 
     // With lines in hand the viewer is modal: j scrolls it and does not
     // move the settings cursor; q closes the viewer, not the player.
     app.log_view = Some(LogView {
-        path: std::path::PathBuf::from("/tmp/x.log"),
+        source: "in memory · not written to disk".into(),
         lines: (1..=50).map(|n| format!("line {n}")).collect(),
         scroll: usize::MAX,
         follow: true,

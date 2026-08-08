@@ -366,7 +366,7 @@ fn render_log_view(frame: &mut Frame, area: Rect, app: &mut App) {
     };
     frame.render_widget(Clear, box_area);
 
-    let title = format!(" log · {} ", view.path.display());
+    let title = format!(" log · {} ", view.source);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(accent()))

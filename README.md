@@ -452,13 +452,18 @@ dir = "/mnt/scratch"   # spool files land in <dir>/spool
 
 ### Diagnostics
 
-The Settings tab has a **Logs** room with two switches. **Write log** (off by default) is the
-master: turn it on and the player starts writing the debug log mid-session — no restart, no
-environment variable. **Log level** (info by default) is how loud: info, debug or trace, deciding
-what gets written while the log is on, adjustable live. Both are remembered in config.toml.
-**View log** opens the tail of the file right in the player (`j`/`k` scroll, `G` follows the end
-as new lines arrive, `q` closes), which is usually all a "what just happened?" needs — it shows
-whatever was captured, so it still works after Write log goes back off.
+The Settings tab has a **Logs** room. The player is always capturing a session into a bounded
+in-memory ring — the last couple of thousand lines, held for as long as it runs and gone when it
+quits — so **View log** opens a real session at any time, written or not (`j`/`k` scroll, `G`
+follows the end as new lines arrive, `q` closes). That is usually all a "what just happened?"
+needs, and it leaves nothing behind on disk.
+
+**Write log** (off by default) decides whether the same lines are also kept in a file. Turn it on
+and the file opens *carrying what has already been captured*, so the thing you just watched
+happen is in it — no restart, no environment variable. **Log level** (info by default) is how
+much is captured at all: info is the player narrating its own decisions (what it played, seeked,
+prepared, handed over, and what failed), while debug and trace add what iroh, the HTTP stack and
+the spool have to say. Both switches are remembered in config.toml.
 
 Underneath sit two switches, off by default, each writing to a file and never to the screen —
 the TUI deliberately silences stderr while it draws, so files are how a session explains itself

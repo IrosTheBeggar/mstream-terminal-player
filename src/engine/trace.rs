@@ -33,6 +33,14 @@ fn start_file(path: &OsStr) -> Option<File> {
 }
 
 pub(crate) fn line(args: std::fmt::Arguments) {
+    // Every decision also goes out as a tracing event, which is what puts
+    // the player's own voice in the debug log beside its dependencies'.
+    // Cheap when nothing is listening, and the reason the in-memory ring
+    // holds a readable session at the default level: iroh and reqwest keep
+    // their interesting detail at debug and trace, but a listener wants to
+    // know what the *player* decided.
+    tracing::info!(target: "mstream", "{args}");
+
     let Some((file, t0)) = SINK
         .get_or_init(|| {
             let path = std::env::var_os("MSTREAM_ENGINE_TRACE")?;
