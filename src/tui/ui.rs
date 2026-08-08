@@ -958,11 +958,13 @@ pub(crate) fn empty_hint(app: &App) -> String {
     }
     match app.tab {
         Tab::Files => "(empty directory)",
-        Tab::Library => "(nothing here)",
         // Inside an opened playlist the pane is that playlist's tracks;
         // "(no playlists)" there would deny the ones sitting in the list.
-        Tab::Playlists if app.playlist_open.is_some() => "(empty playlist)",
-        Tab::Playlists => "(no playlists)",
+        Tab::Library => match app.library_node() {
+            LibraryNode::Playlists => "(no playlists)",
+            LibraryNode::Playlist(_) => "(empty playlist)",
+            _ => "(nothing here)",
+        },
         Tab::Search => "type a query and press Enter",
         Tab::Discover => "(nothing similar)",
         Tab::SonicPath => "(nothing to set here)",
@@ -989,10 +991,8 @@ pub(crate) fn browser_title(app: &App) -> String {
             LibraryNode::Genres => " Genres ".to_string(),
             LibraryNode::Genre(genre) => format!(" Genre: {genre} "),
             LibraryNode::Recent => " Recently Added ".to_string(),
-        },
-        Tab::Playlists => match &app.playlist_open {
-            Some(name) => format!(" Playlist: {name} "),
-            None => " Playlists ".to_string(),
+            LibraryNode::Playlists => " Playlists ".to_string(),
+            LibraryNode::Playlist(name) => format!(" Playlist: {name} "),
         },
         Tab::Search => {
             let query = if app.query.is_empty() { "…" } else { &app.query };
@@ -1075,7 +1075,6 @@ fn entry_line(entry: &Entry, width: usize, playing: Option<&str>) -> Line<'stati
         Entry::Node { label, .. } => {
             Line::from(Span::styled(label.clone(), Style::new().fg(folder())))
         }
-        Entry::Playlist { name } => Line::from(format!("♪ {name}")),
         // The count is flushed right, the same column the durations make, so
         // the menu reads down the numbers.
         Entry::Search { label, detail, .. } => {
@@ -4014,7 +4013,7 @@ mod tests {
         let discover = app.tabs().iter().position(|t| *t == Tab::Discover).unwrap();
         app.handle_action(Action::SelectTab(discover));
         let text = draw(&mut app);
-        assert!(text.contains("5:Discover"));
+        assert!(text.contains("4:Discover"));
         assert!(text.contains("Seed Artist - Seed Song"), "the title names the seed:\n{text}");
         assert!(text.contains("Similar tracks"));
         assert!(text.contains("like Seed Artist"), "and the artist row names the artist");
@@ -4848,17 +4847,30 @@ mod tests {
         assert!(app.library.trail.is_empty());
     }
 
+    /// Put the cursor inside the Library tab's Playlists node.
+    fn on_the_playlists_node(app: &mut App) {
+        app.handle_action(Action::SelectTab(1));
+        let at =
+            app.library.entries.iter().position(|e| e.label() == "Playlists").unwrap();
+        app.library.state.select(Some(at));
+        app.handle_action(Action::Activate);
+    }
+
     #[test]
     fn a_pane_waiting_on_the_server_says_so_instead_of_saying_it_is_empty() {
         let mut app = connected_app();
         // The bug this exists for: opening Playlists showed "(no playlists)"
         // for as long as the round trip took, which is a different claim.
-        app.handle_action(Action::SelectTab(2));
+        on_the_playlists_node(&mut app);
         let waiting = draw(&mut app);
         assert!(waiting.contains("loading…"), "{waiting}");
         assert!(!waiting.contains("(no playlists)"), "{waiting}");
 
-        app.apply_event(Event::Playlists(Vec::new()));
+        app.apply_event(Event::Library {
+            node: LibraryNode::Playlists,
+            dest: Tab::Library,
+            data: crate::tui::worker::LibraryData::Playlists(Vec::new()),
+        });
         let answered = draw(&mut app);
         assert!(answered.contains("(no playlists)"), "{answered}");
         assert!(!answered.contains("loading…"), "{answered}");
@@ -4867,13 +4879,23 @@ mod tests {
     #[test]
     fn an_empty_playlist_is_not_a_claim_about_the_list() {
         use crate::api::types::PlaylistSummary;
+        use crate::tui::worker::LibraryData;
         let mut app = connected_app();
-        app.handle_action(Action::SelectTab(2));
-        app.apply_event(Event::Playlists(vec![PlaylistSummary { name: "phone".into() }]));
+        on_the_playlists_node(&mut app);
+        app.apply_event(Event::Library {
+            node: LibraryNode::Playlists,
+            dest: Tab::Library,
+            data: LibraryData::Playlists(vec![PlaylistSummary { name: "phone".into() }]),
+        });
         // Open the (empty) playlist: the pane now shows its tracks, and the
         // message must be about them — the list plainly has an entry.
+        app.library.state.select(Some(1));
         app.handle_action(Action::Activate);
-        app.apply_event(Event::PlaylistTracks { name: "phone".into(), tracks: Vec::new() });
+        app.apply_event(Event::Library {
+            node: LibraryNode::Playlist("phone".into()),
+            dest: Tab::Library,
+            data: LibraryData::Tracks(Vec::new()),
+        });
         let text = draw(&mut app);
         assert!(text.contains("(empty playlist)"), "{text}");
         assert!(!text.contains("(no playlists)"), "{text}");
@@ -4894,7 +4916,7 @@ mod tests {
     #[test]
     fn a_failed_request_stops_the_spinner_rather_than_turning_forever() {
         let mut app = connected_app();
-        app.handle_action(Action::SelectTab(2));
+        on_the_playlists_node(&mut app);
         app.apply_event(Event::Error("server said no".into()));
         let text = draw(&mut app);
         assert!(!text.contains("loading…"), "{text}");
@@ -4904,7 +4926,7 @@ mod tests {
     #[test]
     fn the_spinner_turns() {
         let mut app = connected_app();
-        app.handle_action(Action::SelectTab(2));
+        on_the_playlists_node(&mut app);
         let first = draw(&mut app);
         app.spinner += 1;
         let second = draw(&mut app);
@@ -4914,7 +4936,7 @@ mod tests {
     #[test]
     fn search_tab_shows_the_query_and_result_summary() {
         let mut app = connected_app();
-        app.handle_action(Action::SelectTab(3));
+        app.handle_action(Action::SelectTab(2));
         for c in "moon".chars() {
             app.handle_action(Action::Input(c));
         }
@@ -4932,7 +4954,7 @@ mod tests {
     fn the_search_menu_says_what_matched_and_how_many() {
         use crate::api::types::{SearchGroup, SearchResults, SearchTrack};
         let mut app = connected_app();
-        app.handle_action(Action::SelectTab(3));
+        app.handle_action(Action::SelectTab(2));
         for c in "moon".chars() {
             app.handle_action(Action::Input(c));
         }
@@ -4981,7 +5003,7 @@ mod tests {
         app.session.username = Some("tester".into());
         for width in [76, 80, 100, 140] {
             let text = draw_sized(&mut app, width, 20);
-            for tab in ["1:Files", "2:Library", "3:Playlists", "4:Search"] {
+            for tab in ["1:Files", "2:Library", "3:Search", "4:Discover"] {
                 assert!(text.contains(tab), "{tab} missing at {width} columns");
             }
         }
@@ -5012,9 +5034,9 @@ mod tests {
 
         // Less room: the scheme is the first thing worth giving up, and it
         // goes to a reminder of a key. The username is not up for trade, so
-        // the extras shorten before it does. (Widths sit a Sonic Path tab
-        // wider than they used to — the strip grew a seventh member.)
-        let mid = draw_sized(&mut app, 122, 20);
+        // the extras shorten before it does. (Widths came back in when
+        // Playlists left the strip for the Library tab.)
+        let mid = draw_sized(&mut app, 110, 20);
         assert!(mid.contains("tester@host:3000"), "kept who as well as where");
         assert!(mid.contains("0:Now") && mid.contains("Tab:Queue"));
         assert!(!mid.contains("0:Now Playing"), "the long form is what gave way: {mid}");
@@ -5022,22 +5044,22 @@ mod tests {
         // Genuinely tight: the extras go entirely, and every tab is still
         // whole — including the two that only exist on a server with a
         // discovery index, and Settings behind them.
-        let narrow = draw_sized(&mut app, 98, 20);
+        let narrow = draw_sized(&mut app, 86, 20);
         assert!(!narrow.contains("0:Now"), "a hint is not worth a tab: {narrow}");
         assert!(narrow.contains("tester@host:3000"));
-        assert!(narrow.contains("5:Discover"));
-        assert!(narrow.contains("6:Sonic Path"));
-        assert!(narrow.contains("7:Settings"));
+        assert!(narrow.contains("4:Discover"));
+        assert!(narrow.contains("5:Sonic Path"));
+        assert!(narrow.contains("6:Settings"));
 
         // A server without a discovery index has neither, so the same label
         // survives in a much narrower terminal.
         let mut plain = connected_app();
         plain.capabilities = Default::default();
         plain.session.username = Some("tester".into());
-        let text = draw_sized(&mut plain, 84, 20);
+        let text = draw_sized(&mut plain, 72, 20);
         assert!(!text.contains("Discover"), "no tab for a feature this server lacks");
         assert!(!text.contains("Sonic Path"), "nor for the path it cannot plot");
-        assert!(text.contains("5:Settings"), "Settings slides onto the freed number");
+        assert!(text.contains("4:Settings"), "Settings slides onto the freed number");
         assert!(text.contains("tester@http://host:3000"), "and the freed width shows");
     }
 

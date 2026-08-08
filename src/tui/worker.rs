@@ -92,8 +92,6 @@ pub enum ApiCmd {
     Journey { start: String, end: String, length: u32 },
     /// Fill a Discover view. `seed` is the track it all hangs off.
     Discover { node: DiscoverNode, seed: Box<Track> },
-    Playlists,
-    LoadPlaylist(String),
     /// Write a whole track list to a playlist, creating it or replacing what
     /// was there. Sonic Path's "save as playlist" is the only caller.
     SavePlaylist { name: String, files: Vec<String> },
@@ -160,6 +158,11 @@ pub enum LibraryNode {
     Genres,
     Genre(String),
     Recent,
+    /// Your own lists, which are a way of browsing the library like any
+    /// other — they were a tab of their own until they turned out to need
+    /// every machine the Library tab already had.
+    Playlists,
+    Playlist(String),
 }
 
 #[derive(Debug)]
@@ -167,6 +170,7 @@ pub enum LibraryData {
     Artists(Vec<String>),
     Albums(Vec<Album>),
     Genres(Vec<Genre>),
+    Playlists(Vec<PlaylistSummary>),
     Tracks(Vec<Track>),
 }
 
@@ -320,8 +324,6 @@ pub enum Event {
     Journey { stops: Vec<JourneyStop>, note: Option<String>, length: u32 },
     /// A Discover view's contents, tagged with the node they belong to.
     Discover { node: DiscoverNode, data: DiscoverData, note: Option<String> },
-    Playlists(Vec<PlaylistSummary>),
-    PlaylistTracks { name: String, tracks: Vec<Track> },
     /// A playlist was written. Carries the name so the confirmation can say
     /// which one, and how many tracks went into it.
     PlaylistSaved { name: String, count: usize },
@@ -830,10 +832,6 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
             crate::api::wait(journey(c, &start, &end, length))
         }
         ApiCmd::Discover { node, seed } => crate::api::wait(discover(c, &node, &seed)),
-        ApiCmd::Playlists => c.playlists().map(Event::Playlists),
-        ApiCmd::LoadPlaylist(name) => {
-            c.playlist_load(&name).map(|tracks| Event::PlaylistTracks { name, tracks })
-        }
         ApiCmd::SavePlaylist { name, files } => {
             let count = files.len();
             c.playlist_save(&name, &files).map(|()| Event::PlaylistSaved { name, count })
@@ -1021,6 +1019,10 @@ pub(crate) async fn load_library(
         }
         LibraryNode::Recent => {
             LibraryData::Tracks(client.recently_added_async(RECENT_LIMIT).await?)
+        }
+        LibraryNode::Playlists => LibraryData::Playlists(client.playlists_async().await?),
+        LibraryNode::Playlist(name) => {
+            LibraryData::Tracks(client.playlist_load_async(name).await?)
         }
     })
 }

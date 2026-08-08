@@ -581,13 +581,16 @@ impl App {
         Some(Vec::new())
     }
 
-    /// The save landed. The playlist list on the Playlists tab is now one
-    /// short of the truth, so it is dropped rather than refreshed — the tab
-    /// asks again the next time it is opened.
+    /// The save landed. Anyone standing on the list of playlists is looking
+    /// at one that no longer has everything in it, so that view — and only
+    /// that view — is asked for again.
     pub(super) fn consume_playlist_saved(&mut self, name: String, count: usize) -> Vec<Effect> {
         self.info(format!("saved {name} — {count} tracks"));
-        if self.playlist_open.is_none() {
-            self.playlists.entries.clear();
+        if *self.library_node() == LibraryNode::Playlists {
+            return vec![Effect::Api(ApiCmd::Library {
+                node: LibraryNode::Playlists,
+                dest: Tab::Library,
+            })];
         }
         Vec::new()
     }

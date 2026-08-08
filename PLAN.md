@@ -1004,6 +1004,32 @@ Two things came out of looking at the result rather than the diff:
   it after the draw to answer a click — so "resolved once at startup" is
   load-bearing rather than tidiness.
 
+#### D6 — Playlists move into the Library ✅ 2026-08-08
+
+A tab of its own, for something that is a way of cutting the library like
+artists or genres are. It came with a parallel copy of machinery the Library
+tab already had: its own `Pane`, its own `playlist_open` cursor doing by hand
+what `Drill::wants` does for every other tab, two `ApiCmd`s, two `Event`s and
+an `Entry::Playlist` variant.
+
+They are now two `LibraryNode`s — `Playlists` and `Playlist(name)` — and the
+rows are ordinary `Entry::Node`s, so the drill, the trail columns, the
+stale-reply guard, the spinner and the Miller columns all apply without a
+line of their own. Net: **six tabs instead of seven**, and a `Pane`, a
+cursor, two commands, two events and an `Entry` variant deleted.
+
+Two things fell out of the move rather than being designed in:
+
+- **The list refreshes now.** The tab cached its playlists and only fetched
+  on first visit, so one made anywhere else never appeared. A library node is
+  asked for on the way in like every other.
+- **`step_out`'s catch-all became unreachable.** Playlists was the last tab
+  not handled explicitly, so the match is exhaustive and the compiler now
+  checks it — the audit-#59 property, arrived at by subtraction.
+
+`Tab::ALL` is `[Files, Library, Search, Discover, SonicPath, Settings]`, and
+the digits move with it: Search is 3, Discover 4, Sonic Path 5, Settings 6.
+
 ### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
 Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install
 matrix, then the "later" items inside the same three days: one-line installers for sh and

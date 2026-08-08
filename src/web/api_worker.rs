@@ -122,23 +122,6 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
                 .await
         }
 
-        ApiCmd::Playlists => {
-            with_session(session, async |s| {
-                s.client.playlists_async().await.map(Event::Playlists)
-            })
-            .await
-        }
-
-        ApiCmd::LoadPlaylist(name) => {
-            with_session(session, async |s| {
-                s.client
-                    .playlist_load_async(&name)
-                    .await
-                    .map(|tracks| Event::PlaylistTracks { name: name.clone(), tracks })
-            })
-            .await
-        }
-
         ApiCmd::SavePlaylist { name, files } => {
             with_session(session, async |s| {
                 let count = files.len();

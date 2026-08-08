@@ -60,7 +60,6 @@ pub enum Effect {
 pub enum Tab {
     Files,
     Library,
-    Playlists,
     Search,
     Discover,
     SonicPath,
@@ -68,10 +67,9 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [
+    pub const ALL: [Tab; 6] = [
         Tab::Files,
         Tab::Library,
-        Tab::Playlists,
         Tab::Search,
         Tab::Discover,
         Tab::SonicPath,
@@ -82,7 +80,6 @@ impl Tab {
         match self {
             Tab::Files => "Files",
             Tab::Library => "Library",
-            Tab::Playlists => "Playlists",
             Tab::Search => "Search",
             Tab::Discover => "Discover",
             Tab::SonicPath => "Sonic Path",
@@ -302,7 +299,6 @@ pub enum Entry {
     Dir { label: String, path: String },
     /// A step deeper into the tag-based library (an artist, album, genre…).
     Node { label: String, node: LibraryNode },
-    Playlist { name: String },
     /// A row in the search-class menu: what it matched on, and how many.
     Search { label: String, detail: String, node: SearchNode },
     /// A step deeper into Discover. `detail` is the dim right-hand column —
@@ -326,7 +322,6 @@ impl Entry {
             Entry::Parent => "..",
             Entry::Dir { label, .. } => label,
             Entry::Node { label, .. } => label,
-            Entry::Playlist { name } => name,
             Entry::Search { label, .. } => label,
             Entry::Discover { label, .. } => label,
             Entry::Setting { label, .. } => label,
@@ -992,8 +987,6 @@ pub struct App {
     /// same chain -- artist, album, track, queued -- so it reads better as one
     /// more column than as a separate pane that is always there.
     pub queue_column: bool,
-    pub playlists: Pane,
-    pub playlist_open: Option<String>,
     pub discover: Pane,
     pub settings: Pane,
     /// Breadcrumb through the Discover tab, mirroring `library_stack`.
@@ -1182,8 +1175,6 @@ impl App {
             search_hits: None,
             search_stack: Drill::new(SearchNode::Root),
             queue_column: false,
-            playlists: Pane::default(),
-            playlist_open: None,
             discover: Pane::default(),
             discover_stack: Drill::new(DiscoverNode::Root),
             settings: Pane::default(),
@@ -1399,7 +1390,6 @@ impl App {
         match tab {
             Tab::Files => &self.files,
             Tab::Library => &self.library,
-            Tab::Playlists => &self.playlists,
             Tab::Search => &self.search,
             Tab::Discover => &self.discover,
             Tab::SonicPath => &self.sonic_pane,
@@ -1411,7 +1401,6 @@ impl App {
         match tab {
             Tab::Files => &mut self.files,
             Tab::Library => &mut self.library,
-            Tab::Playlists => &mut self.playlists,
             Tab::Search => &mut self.search,
             Tab::Discover => &mut self.discover,
             Tab::SonicPath => &mut self.sonic_pane,
@@ -1449,7 +1438,6 @@ impl App {
             let tab = match effect {
                 Effect::Api(ApiCmd::Browse(_)) => Tab::Files,
                 Effect::Api(ApiCmd::Library { dest, .. }) => *dest,
-                Effect::Api(ApiCmd::Playlists | ApiCmd::LoadPlaylist(_)) => Tab::Playlists,
                 Effect::Api(ApiCmd::Search(_)) => Tab::Search,
                 Effect::Api(ApiCmd::Discover { .. }) => Tab::Discover,
                 _ => continue,
@@ -1924,9 +1912,6 @@ impl App {
                 self.refresh_settings_rows();
                 Vec::new()
             }
-            Tab::Playlists if self.playlists.entries.is_empty() => {
-                vec![Effect::Api(ApiCmd::Playlists)]
-            }
             // Pressing the Search tab while already on it means "another
             // one" — there is nowhere else that keystroke could sensibly go,
             // and looking at results with no way back to the box was the
@@ -2076,21 +2061,6 @@ impl App {
             Entry::Discover { node, label, .. } => {
                 self.push_trail();
                 self.open_discover(node, &label)
-            }
-            Entry::Playlist { name } => {
-                self.push_trail();
-                // Same rule as every other drill-in: the list of playlists is
-                // not this playlist's tracks, and showing it until they land
-                // is a wrong answer rather than a slow one.
-                self.playlists.set(Vec::new());
-                self.info(format!("loading playlist {name}…"));
-                // Open now rather than when the tracks land, so this is a
-                // record of where the user went instead of a record of what
-                // last answered — which is what lets a late reply be told
-                // apart from a wanted one, and lets Back close a playlist
-                // that has not answered yet.
-                self.playlist_open = Some(name.clone());
-                vec![Effect::Api(ApiCmd::LoadPlaylist(name))]
             }
             Entry::Setting { row, .. } => match row {
                 SettingRow::CrossfadeMenu => {
@@ -2243,10 +2213,6 @@ impl App {
                     }
                 }
             }
-            Tab::Playlists if self.playlist_open.is_some() => {
-                self.playlist_open = None;
-                vec![Effect::Api(ApiCmd::Playlists)]
-            }
             Tab::Discover => {
                 let Some(node) = self.discover_stack.back() else {
                     return None; // already at the mode menu
@@ -2288,7 +2254,6 @@ impl App {
                 }
                 Vec::new()
             }
-            _ => Vec::new(),
         })
     }
 
@@ -3147,32 +3112,6 @@ impl App {
             // playing, and is filed for when it starts.
             Event::Waveform { filepath, bars } => {
                 self.waveforms.insert(filepath, bars);
-                Vec::new()
-            }
-            Event::Playlists(playlists) => {
-                self.playlist_open = None;
-                self.playlists.set(
-                    playlists
-                        .into_iter()
-                        .map(|p| Entry::Playlist { name: p.name })
-                        .collect(),
-                );
-                Vec::new()
-            }
-            Event::PlaylistTracks { name, tracks } => {
-                // A playlist the user has closed, or moved off to another —
-                // its tracks would otherwise open over the top of whatever
-                // they went to instead, under that one's name.
-                if self.playlist_open.as_deref() != Some(name.as_str()) {
-                    return Vec::new();
-                }
-                let mut entries = vec![Entry::Parent];
-                entries.extend(tracks.into_iter().map(|t| Entry::Track {
-                    label: t.display_name(),
-                    track: Box::new(t),
-                }));
-                self.playlists.set(entries);
-                self.message = None;
                 Vec::new()
             }
             Event::PlaylistSaved { name, count } => self.consume_playlist_saved(name, count),

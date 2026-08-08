@@ -93,9 +93,11 @@ to allow is `*.relay.n0.iroh.link` on TCP 443.
 **Files** browses folders as they sit on disk, opening wherever the server says
 is most useful — straight inside your library when there is only one, or the
 list to choose from when there are several. `h` from there goes up to the list
-either way. **Library** browses by tags — artists, albums,
-genres, and recently added — and **Search** and **Playlists** do what they say. `Enter` on a
-track queues everything visible and starts there; `a` queues just that one.
+either way. **Library** browses by tags — artists, albums, genres, recently
+added — and by **playlists**, which are a way of cutting the library like any
+other and live in there rather than on a tab of their own. **Search** does
+what it says. `Enter` on a track queues everything visible and starts there;
+`a` queues just that one.
 
 The browser draws as **Miller columns** — the listings you came through, then
 the one you are in, then the queue when it is open. How many of the context
@@ -126,7 +128,7 @@ window.
 | `h` | go back |
 | `a` | add the highlighted track to the queue |
 | `Tab` | switch between browser and queue |
-| `1` … `7` | Files / Library / Playlists / Search / Discover / Sonic Path / Settings · `/` search |
+| `1` … `6` | Files / Library / Search / Discover / Sonic Path / Settings · `/` search |
 | `0` | full-screen now playing |
 | `Space` | play or pause · `n` / `p` next / previous |
 | `i` | jump to whatever is playing · `0` full-screen now playing |
@@ -136,7 +138,7 @@ window.
 | `J` | sonic path to the highlighted track |
 | `?` | help · `q` quit |
 
-Every screen the player has is behind a number: `1`–`7` are the tabs, in the
+Every screen the player has is behind a number: `1`–`6` are the tabs, in the
 order the strip draws them, and `0` is the full-screen player with Auto-DJ,
 the visualiser and the queue on its own tabs. Nothing worth finding is hidden
 behind a letter you would have to already know.

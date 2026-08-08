@@ -162,6 +162,32 @@ fn labels(app: &App) -> Vec<&str> {
     app.pane().entries.iter().map(Entry::label).collect()
 }
 
+/// Open the Library tab's Playlists node and answer it with these names.
+///
+/// Playlists are a library node like any other now, so getting to them is
+/// the same drill as getting to artists — which is the point of the move.
+fn browsing_playlists(app: &mut App, names: &[&str]) {
+    app.handle_action(Action::SelectTab(1));
+    let at = app
+        .library
+        .entries
+        .iter()
+        .position(|e| e.label() == "Playlists")
+        .expect("the library menu offers playlists");
+    app.library.state.select(Some(at));
+    app.handle_action(Action::Activate);
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlists,
+        dest: Tab::Library,
+        data: LibraryData::Playlists(
+            names
+                .iter()
+                .map(|name| crate::api::types::PlaylistSummary { name: (*name).to_string() })
+                .collect(),
+        ),
+    });
+}
+
 #[test]
 fn a_filter_narrows_the_list_without_losing_the_way_out() {
     let mut app = connected_app();
@@ -877,19 +903,20 @@ fn opening_a_folder_spins_instead_of_showing_the_one_you_left() {
 #[test]
 fn opening_a_playlist_spins_instead_of_showing_the_list_of_playlists() {
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(2));
-    app.apply_event(Event::Playlists(vec![
-        crate::api::types::PlaylistSummary { name: "phone".into() },
-        crate::api::types::PlaylistSummary { name: "car".into() },
-    ]));
+    browsing_playlists(&mut app, &["phone", "car"]);
 
+    app.library.state.select(Some(1)); // past the ".."
     app.handle_action(Action::Activate);
-    assert!(app.playlists.entries.is_empty(), "the list of playlists is not this playlist");
-    assert!(app.playlists.loading);
+    assert!(app.library.entries.is_empty(), "the list of playlists is not this playlist");
+    assert!(app.library.loading);
 
-    app.apply_event(Event::PlaylistTracks { name: "phone".into(), tracks: vec![track("a")] });
-    assert!(!app.playlists.loading);
-    assert_eq!(app.playlists.entries.len(), 2, "'..' and the track");
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlist("phone".into()),
+        dest: Tab::Library,
+        data: LibraryData::Tracks(vec![track("a")]),
+    });
+    assert!(!app.library.loading);
+    assert_eq!(app.library.entries.len(), 2, "'..' and the track");
 }
 
 #[test]
@@ -957,7 +984,7 @@ fn fast_seek_presses_build_on_each_other_not_the_stale_status() {
 fn every_class_a_search_matched_is_reachable() {
     use crate::api::types::{SearchGroup, SearchTrack};
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(3));
+    app.handle_action(Action::SelectTab(2));
     let hit = |p: &str| SearchTrack {
         name: p.to_string(),
         filepath: p.to_string(),
@@ -1616,116 +1643,134 @@ fn searching_from_the_query_box_emits_one_search() {
 }
 
 #[test]
-fn opening_the_playlists_tab_loads_them_once() {
+fn opening_the_playlists_node_asks_every_time() {
+    // The old tab cached its list and only fetched on first visit, so a
+    // playlist made anywhere else never appeared. A library node is asked
+    // for on the way in like every other, which is the behaviour worth
+    // having and came free with the move.
     let mut app = connected_app();
-    let effects = app.handle_action(Action::SelectTab(2));
-    assert_eq!(effects, vec![Effect::Api(ApiCmd::Playlists)]);
+    app.handle_action(Action::SelectTab(1));
+    let at = app.library.entries.iter().position(|e| e.label() == "Playlists").unwrap();
+    app.library.state.select(Some(at));
 
-    app.apply_event(Event::Playlists(vec![crate::api::types::PlaylistSummary {
-        name: "Roadtrip".into(),
-    }]));
-    // Already loaded: switching back doesn't refetch.
-    app.handle_action(Action::SelectTab(0));
-    assert!(app.handle_action(Action::SelectTab(2)).is_empty());
+    let asked = |effects: &[Effect]| {
+        effects.iter().any(|e| {
+            matches!(e, Effect::Api(ApiCmd::Library { node: LibraryNode::Playlists, .. }))
+        })
+    };
+    assert!(asked(&app.handle_action(Action::Activate)));
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlists,
+        dest: Tab::Library,
+        data: LibraryData::Playlists(vec![crate::api::types::PlaylistSummary {
+            name: "Roadtrip".into(),
+        }]),
+    });
+    assert_eq!(labels(&app), vec!["..", "Roadtrip"]);
+
+    // Out and back in asks again.
+    app.handle_action(Action::Back);
+    assert!(asked(&app.handle_action(Action::Activate)));
 }
 
 #[test]
 fn a_pane_knows_when_its_contents_are_still_on_the_wire() {
     let mut app = connected_app();
-    assert!(!app.playlists.loading);
+    assert!(!app.library.loading);
 
-    app.handle_action(Action::SelectTab(2));
-    assert!(app.playlists.loading, "asking marks the pane, not the call site");
+    app.handle_action(Action::SelectTab(1));
+    app.handle_action(Action::Activate); // into Artists
+    assert!(app.library.loading, "asking marks the pane, not the call site");
     // Only the pane that was asked for — leaving the tab mid-flight must
     // not leave a spinner turning somewhere it was never requested.
     assert!(!app.files.loading && !app.search.loading);
 
-    app.apply_event(Event::Playlists(Vec::new()));
-    assert!(!app.playlists.loading, "the reply lands through Pane::set");
+    app.apply_event(Event::Library {
+        node: LibraryNode::Artists,
+        dest: Tab::Library,
+        data: LibraryData::Artists(Vec::new()),
+    });
+    assert!(!app.library.loading, "the reply lands through Pane::set");
 }
 
 #[test]
 fn a_request_that_fails_is_no_longer_pending() {
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(2));
+    app.handle_action(Action::SelectTab(1));
+    app.handle_action(Action::Activate);
     // Nothing calls `Pane::set` on the way out of an error, so this is the
     // one path that would otherwise spin forever.
     app.apply_event(Event::Error("nope".into()));
-    assert!(!app.playlists.loading);
+    assert!(!app.library.loading);
 }
 
 #[test]
 fn playlist_tracks_open_and_close() {
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(2));
-    app.apply_event(Event::Playlists(vec![crate::api::types::PlaylistSummary {
-        name: "Roadtrip".into(),
-    }]));
+    browsing_playlists(&mut app, &["Roadtrip"]);
 
+    app.library.state.select(Some(1));
     let effects = app.handle_action(Action::Activate);
-    assert_eq!(effects, vec![Effect::Api(ApiCmd::LoadPlaylist("Roadtrip".into()))]);
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::Library {
+            node: LibraryNode::Playlist("Roadtrip".into()),
+            dest: Tab::Library,
+        })]
+    );
 
-    app.apply_event(Event::PlaylistTracks {
-        name: "Roadtrip".into(),
-        tracks: vec![track("lib/a.mp3")],
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlist("Roadtrip".into()),
+        dest: Tab::Library,
+        data: LibraryData::Tracks(vec![track("lib/a.mp3")]),
     });
-    assert_eq!(app.playlists.entries.len(), 2); // ".." + one track
-    assert_eq!(app.playlist_open.as_deref(), Some("Roadtrip"));
+    assert_eq!(labels(&app), vec!["..", "a.mp3"]);
 
     let effects = app.handle_action(Action::Back);
     assert!(effects.is_empty(), "the playlist list came back off the trail");
-    assert!(app.playlist_open.is_none());
-    assert_eq!(app.playlists.entries.len(), 1, "the one playlist, restored");
+    assert_eq!(labels(&app), vec!["..", "Roadtrip"], "the one playlist, restored");
+    assert_eq!(app.library_node(), &LibraryNode::Playlists);
 }
 
 #[test]
 fn a_playlist_answering_after_it_was_left_does_not_open_over_the_top() {
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(2));
-    app.apply_event(Event::Playlists(
-        ["Roadtrip", "Dinner"]
-            .iter()
-            .map(|name| crate::api::types::PlaylistSummary { name: (*name).to_string() })
-            .collect(),
-    ));
+    browsing_playlists(&mut app, &["Roadtrip", "Dinner"]);
 
-    // Open one and change your mind before it answers. Which playlist is
-    // open is now decided on the way in rather than by whatever replied
-    // last, so the way out has something to close.
+    // Open one and change your mind before it answers. Which node is open
+    // is decided on the way in rather than by whatever replied last, so a
+    // late reply can be told apart from a wanted one — the drill's own
+    // stale-reply rule, which playlists now get for nothing.
+    app.library.state.select(Some(1));
     app.handle_action(Action::Activate);
-    assert_eq!(app.playlist_open.as_deref(), Some("Roadtrip"));
-    assert!(app.message.as_ref().unwrap().text.contains("loading playlist"));
+    assert_eq!(app.library_node(), &LibraryNode::Playlist("Roadtrip".into()));
     app.handle_action(Action::Back);
-    assert!(app.playlist_open.is_none());
-    assert!(app.message.is_none(), "and the note about loading it goes too");
+    assert_eq!(app.library_node(), &LibraryNode::Playlists);
 
-    app.apply_event(Event::PlaylistTracks {
-        name: "Roadtrip".into(),
-        tracks: vec![track("lib/a.mp3")],
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlist("Roadtrip".into()),
+        dest: Tab::Library,
+        data: LibraryData::Tracks(vec![track("lib/a.mp3")]),
     });
-    assert!(app.playlist_open.is_none(), "closed stays closed");
-    assert_eq!(labels(&app), vec!["Roadtrip", "Dinner"], "and the list is still the list");
+    assert_eq!(labels(&app), vec!["..", "Roadtrip", "Dinner"], "the list is still the list");
 
     // The same rule when the change of mind is another playlist: the one
     // on screen must be the one named at the top of it.
-    app.handle_action(Action::Down);
+    app.library.state.select(Some(2));
     app.handle_action(Action::Activate);
-    assert_eq!(app.playlist_open.as_deref(), Some("Dinner"));
-    app.apply_event(Event::PlaylistTracks {
-        name: "Roadtrip".into(),
-        tracks: vec![track("lib/a.mp3")],
+    assert_eq!(app.library_node(), &LibraryNode::Playlist("Dinner".into()));
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlist("Roadtrip".into()),
+        dest: Tab::Library,
+        data: LibraryData::Tracks(vec![track("lib/a.mp3")]),
     });
-    assert_eq!(app.playlist_open.as_deref(), Some("Dinner"));
-    // Still waiting on Dinner rather than wearing Roadtrip's tracks. The
-    // way in empties the pane so the wait can spin, so "the list is still
-    // the list" is no longer what a dropped reply looks like — an unmoved
-    // spinner is.
-    assert!(app.playlists.entries.is_empty(), "Roadtrip's tracks are not it");
-    assert!(app.playlists.loading, "and Dinner is still coming");
+    assert!(app.library.entries.is_empty(), "Roadtrip's tracks are not it");
+    assert!(app.library.loading, "and Dinner is still coming");
 
-    app.apply_event(Event::PlaylistTracks {
-        name: "Dinner".into(),
-        tracks: vec![track("lib/b.mp3")],
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlist("Dinner".into()),
+        dest: Tab::Library,
+        data: LibraryData::Tracks(vec![track("lib/b.mp3")]),
     });
     assert_eq!(labels(&app), vec!["..", "b.mp3"], "the one asked for lands");
 }
@@ -1735,7 +1780,7 @@ fn library_tab_opens_on_a_static_menu_without_a_request() {
     let mut app = connected_app();
     let effects = app.handle_action(Action::SelectTab(1));
     assert!(effects.is_empty(), "the mode menu costs no round-trip");
-    assert_eq!(app.library.entries.len(), 4);
+    assert_eq!(app.library.entries.len(), 5);
     assert_eq!(app.library_node(), &LibraryNode::Root);
 
     let labels: Vec<&str> = app
@@ -1747,7 +1792,7 @@ fn library_tab_opens_on_a_static_menu_without_a_request() {
             _ => "?",
         })
         .collect();
-    assert_eq!(labels, ["Artists", "Albums", "Genres", "Recently Added"]);
+    assert_eq!(labels, ["Artists", "Albums", "Genres", "Recently Added", "Playlists"]);
 }
 
 #[test]
@@ -1834,7 +1879,7 @@ fn back_walks_the_library_stack_to_the_menu() {
     let effects = app.handle_action(Action::Back);
     assert!(effects.is_empty(), "returning to the static menu needs no request");
     assert_eq!(app.library_node(), &LibraryNode::Root);
-    assert_eq!(app.library.entries.len(), 4);
+    assert_eq!(app.library.entries.len(), 5);
 
     // Already at the top.
     assert!(app.handle_action(Action::Back).is_empty());
@@ -1853,7 +1898,7 @@ fn a_reply_for_an_abandoned_view_is_discarded() {
         data: LibraryData::Artists(vec!["Ghost".into()]),
     });
     assert_eq!(app.library_node(), &LibraryNode::Root);
-    assert_eq!(app.library.entries.len(), 4, "the menu is untouched by the late reply");
+    assert_eq!(app.library.entries.len(), 5, "the menu is untouched by the late reply");
 }
 
 #[test]
@@ -2052,11 +2097,11 @@ fn the_discover_tab_is_absent_where_the_server_cannot_serve_it() {
     let mut plain = connected_app();
     plain.capabilities = Default::default();
     assert!(!plain.tabs().contains(&Tab::Discover));
-    // And the numbers stay 1..n so no key points at a gap — Settings slides
-    // onto 5, and the strip's positional numbers stay the truth.
-    assert_eq!(plain.tabs().len(), 5);
-    assert_eq!(plain.tabs()[4], Tab::Settings);
-    assert!(plain.handle_action(Action::SelectTab(5)).is_empty(), "there is no sixth tab");
+    // And the numbers stay 1..n so no key points at a gap — Files, Library,
+    // Search, Settings, with the strip's positional numbers the truth.
+    assert_eq!(plain.tabs().len(), 4);
+    assert_eq!(plain.tabs()[3], Tab::Settings);
+    assert!(plain.handle_action(Action::SelectTab(4)).is_empty(), "there is no fifth tab");
     assert_ne!(plain.tab, Tab::Discover);
 }
 
@@ -2809,7 +2854,7 @@ fn search_replies_that_pass_each_other_cannot_swap_the_results() {
     // search can land after the reply for the current one. Only the
     // query last submitted is still wanted.
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(3));
+    app.handle_action(Action::SelectTab(2));
     for c in "one".chars() {
         app.handle_action(Action::Input(c));
     }
@@ -2876,7 +2921,7 @@ fn drilling_out_of_search_lights_the_search_tab_spinner() {
     // forget a case: the old SearchDrill command wasn't in its table at
     // all, and this spinner never lit.
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(3));
+    app.handle_action(Action::SelectTab(2));
     app.search_submitted = Some("moon".into());
     app.apply_event(Event::SearchResults {
         query: "moon".into(),
@@ -3558,7 +3603,7 @@ fn a_fallback_note_is_surfaced_instead_of_the_track_name() {
 #[test]
 fn selection_stays_in_bounds() {
     let mut pane = Pane::default();
-    pane.set(vec![Entry::Parent, Entry::Playlist { name: "x".into() }]);
+    pane.set(vec![Entry::Parent, Entry::Node { label: "x".into(), node: LibraryNode::Artists }]);
     pane.move_by(-5);
     assert_eq!(pane.state.selected(), Some(0));
     pane.move_by(50);

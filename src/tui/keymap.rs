@@ -154,7 +154,6 @@ impl Action {
             Action::SelectTab(3) => "tab-4",
             Action::SelectTab(4) => "tab-5",
             Action::SelectTab(5) => "tab-6",
-            Action::SelectTab(6) => "tab-7",
             Action::StartSearch => "search",
             Action::StartFilter => "filter",
             Action::CycleViz => "visualiser-mode",
@@ -255,26 +254,25 @@ fn default_normal() -> Vec<Binding> {
         help: Some("show / hide the queue"),
     },
     // One digit per visible tab; `select_tab` ignores a number past the end,
-    // so a server without Discover simply has nothing on 5. Listed one per
+    // so a server without Discover simply has nothing on 4. Listed one per
     // row because "which tab is 3" is the thing a reader actually wants.
     Binding { keys: vec![ch('1')], action: Action::SelectTab(0), help: Some("Files") },
     Binding { keys: vec![ch('2')], action: Action::SelectTab(1), help: Some("Library") },
-    Binding { keys: vec![ch('3')], action: Action::SelectTab(2), help: Some("Playlists") },
-    Binding { keys: vec![ch('4')], action: Action::SelectTab(3), help: Some("Search") },
+    Binding { keys: vec![ch('3')], action: Action::SelectTab(2), help: Some("Search") },
     Binding {
-        keys: vec![ch('5')],
-        action: Action::SelectTab(4),
+        keys: vec![ch('4')],
+        action: Action::SelectTab(3),
         help: Some("Discover, if enabled"),
     },
     Binding {
-        keys: vec![ch('6')],
-        action: Action::SelectTab(5),
+        keys: vec![ch('5')],
+        action: Action::SelectTab(4),
         help: Some("Sonic Path, if enabled"),
     },
     // Settings is always available, so on a server with neither discovery
-    // tab it slides onto 5 — the strip numbers by position, and the strip
+    // tab it slides onto 4 — the strip numbers by position, and the strip
     // is the truth.
-    Binding { keys: vec![ch('7')], action: Action::SelectTab(6), help: Some("Settings") },
+    Binding { keys: vec![ch('6')], action: Action::SelectTab(5), help: Some("Settings") },
     Binding { keys: vec![ch('/')], action: Action::StartSearch, help: Some("search") },
     // `/` already asks the server. This one narrows what is already on
     // screen, which is a different enough job to want its own key.
