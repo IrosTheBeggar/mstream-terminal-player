@@ -140,7 +140,10 @@ pub enum DiscoverNode {
 
 #[derive(Debug)]
 pub enum DiscoverData {
-    Tracks(Vec<Track>),
+    /// Neighbours with how close each one is. The browser tab drops the
+    /// number and draws playable rows; the full-screen panel shows it,
+    /// which is the difference between a list and a ranking.
+    Tracks(Vec<crate::api::types::SimilarTrack>),
     Artists(Vec<SimilarArtist>),
 }
 
@@ -1277,9 +1280,7 @@ pub(crate) async fn discover(
             };
             Ok(Event::Discover {
                 node: node.clone(),
-                data: DiscoverData::Tracks(
-                    found.results.into_iter().map(|r| r.into_track()).collect(),
-                ),
+                data: DiscoverData::Tracks(found.results),
                 note,
                 dest,
                 seed: seed.filepath.clone(),

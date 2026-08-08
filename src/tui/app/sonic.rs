@@ -13,7 +13,7 @@
 //! * **The armed picker is answered by `Enter`**, not by a click. Arming
 //!   drops the user in the file browser with a banner along the foot; the
 //!   next track they open lands in the field instead of on the speakers.
-//!   [`App::sonic_capture`] holds the arming, which is why it lives on the
+//!   [`App::capture`] holds the arming, which is why it lives on the
 //!   App and not on [`SonicPath`]: it is answered from whichever tab they
 //!   wander into looking for the song.
 
@@ -75,7 +75,7 @@ impl App {
     /// and what "Start over" does.
     pub(super) fn reset_sonic_path(&mut self) {
         self.sonic = SonicPath::default();
-        self.sonic_capture = None;
+        self.capture = None;
         self.sonic_playlist_name = None;
         self.sonic_stack.restart();
         self.refresh_sonic_rows();
@@ -344,7 +344,7 @@ impl App {
             }
             SonicRow::PickFromLibrary => {
                 let side = self.open_side();
-                self.arm_sonic_pick(side)
+                self.arm_capture(Capture::Sonic(side))
             }
             SonicRow::Clear => {
                 let side = self.open_side();
@@ -450,19 +450,45 @@ impl App {
 
     // ── Choosing the ends ───────────────────────────────────────────────────
 
-    /// Arm the picker and put the user somewhere with songs in it. The
-    /// capture is answered from anywhere — search, albums, a playlist — so
-    /// the file browser is a starting point, not a requirement.
-    fn arm_sonic_pick(&mut self, side: SonicSide) -> Vec<Effect> {
-        self.sonic_capture = Some(side);
-        self.sonic_stack.restart();
-        self.refresh_sonic_rows();
+    /// Arm the picker and put the user somewhere with songs in it.
+    ///
+    /// Shared by both panels that ask for a song: the capture is answered
+    /// from anywhere — search, albums, a playlist — so the file browser is a
+    /// starting point rather than a requirement, and the arming carries who
+    /// is waiting rather than each caller keeping its own flag.
+    pub(super) fn arm_capture(&mut self, who: Capture) -> Vec<Effect> {
+        self.capture = Some(who);
         self.message = None;
-        // The file browser is where the songs are; the capture itself is
-        // answered from any tab the user wanders into looking for one.
+        // The picking happens in the browser, so the browser has to be on
+        // screen — arming from the full-screen view otherwise left the user
+        // choosing from a listing they could not see.
+        self.fullscreen = false;
+        if let Capture::Sonic(_) = who {
+            self.sonic_stack.restart();
+            self.refresh_sonic_rows();
+        }
         match self.tabs().iter().position(|tab| *tab == Tab::Files) {
             Some(index) => self.select_tab(index),
             None => Vec::new(),
+        }
+    }
+
+    /// The next track chosen anywhere, handed to whoever armed the picker.
+    pub(super) fn answer_capture(&mut self, who: Capture, track: Track) -> Vec<Effect> {
+        self.capture = None;
+        match who {
+            Capture::Sonic(side) => self.capture_sonic_side(side, track),
+            // Back to the panel that asked, with the two ways of looking.
+            Capture::Discover => {
+                let label = track.display_name();
+                if !self.fullscreen {
+                    self.fullscreen = true;
+                }
+                self.now_tab = NowTab::Discover;
+                let effects = self.seed_now_discover(track);
+                self.info(format!("looking around {label}"));
+                effects
+            }
         }
     }
 
@@ -470,7 +496,7 @@ impl App {
     pub(super) fn capture_sonic_side(&mut self, side: SonicSide, track: Track) -> Vec<Effect> {
         let label = track.display_name();
         self.sonic.set_side(side, Some(track));
-        self.sonic_capture = None;
+        self.capture = None;
         // A path drawn between the old ends is not a path between these.
         if self.sonic.view == SonicView::Results {
             self.sonic.view = SonicView::Setup;

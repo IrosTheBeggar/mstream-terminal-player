@@ -146,7 +146,7 @@ pub(super) fn entries_from_library(data: LibraryData) -> Vec<Entry> {
 /// artists similar to each other the prefix is the same on every row, so only
 /// the leaf carries information; it is also the difference between two tags
 /// fitting on a line and none of them fitting.
-pub(super) fn tidy_tag(tag: &str) -> &str {
+pub(crate) fn tidy_tag(tag: &str) -> &str {
     tag.rsplit("---").next().unwrap_or(tag).trim()
 }
 

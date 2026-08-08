@@ -1059,6 +1059,39 @@ re-asks when the track changes.
 
 Lyrics is now the last placeholder on that strip.
 
+#### D8 — The Discover panel gets a seed of its own ✅ 2026-08-08
+
+D7 made the panel follow the speakers, which answers one question well and
+another not at all: **what does *this* track sound like, without playing
+it?** The browser's Discover tab cannot answer it either — it anchors on
+whatever was highlighted when you opened it, and getting there loses your
+place. So the panel became a small drill:
+
+```
+Look around from…          →  Songs / Artists  →  the list
+  What's playing                                    83%  ALM - Manor
+  Choose a song…                                    81%  ALM - Hip Hop Factory
+```
+
+- **The seed is resolved when it is picked, not read live.** "What's
+  playing" means the track that *was* playing when you said so. A list that
+  re-aimed itself every time a song ended is exactly what D7 built, and it
+  is unusable for looking something up.
+- **`Choose a song…` reuses the Sonic Path capture**, which is what turned
+  two armed-picker fields into one `Capture` enum carrying who is waiting.
+  Arming now also drops out of the full-screen view — the picking happens in
+  the browser, and arming from fullscreen left the user choosing from a
+  listing they could not see.
+- **Percentages instead of ranks.** The rows arrive in order, so a number
+  counting them says nothing their position doesn't. The cosine says how
+  much of a neighbour each one actually is — and it was being thrown away:
+  `DiscoverData::Tracks` carried `Vec<Track>`, built by `SimilarTrack::
+  into_track()`, which drops the similarity. It carries `Vec<SimilarTrack>`
+  now, and the browser tab drops the number itself.
+- **The stale guard needed both halves.** Seed *and* node: the two lists are
+  asked for separately about the same seed, so an artists reply arriving
+  after the user asked for songs is as wrong as a reply about another track.
+
 ### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
 Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install
 matrix, then the "later" items inside the same three days: one-line installers for sh and

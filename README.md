@@ -409,17 +409,41 @@ everywhere.
 
 **Queue** shares the browser screen's selection, so `Enter` plays and `d`
 removes the row under the cursor either way. **Auto-DJ** is where Auto-DJ is
-*set*, not just reported. **Discover** is what the track on the speakers
-sounds like — the server's nearest neighbours in order, re-asked whenever
-the track changes. `Enter` queues one and starts it, `a` just queues it;
-neither throws away the queue you are in the middle of, which is the one
-thing the browser's Discover tab does differently. **Lyrics** appears only
+*set*, not just reported. **Lyrics** appears only
 for a track the server has words for, so the strip
 changes shape as the queue moves. **Discover** needs the server's index. Where
 the strip won't fit, it shows the tab you're on between arrows rather than
 truncating the last name.
 
 Lyrics is the last stub; everything else on the strip does what it says.
+
+### The Discover panel
+
+The full-screen view's Discover tab asks two questions before it shows you
+anything, and the first is the useful one: **what to look around from**.
+
+```
+ Songs similar to what's playing
+
+  83%  ALM - Manor                            4:11
+  81%  ALM - Hip Hop Factory                  5:02
+  80%  Color Out - Ghosts (Abludo Remix)      4:09
+```
+
+*What's playing* is the common case. *Choose a song…* arms the browser the
+way Sonic Path does — pick anything, anywhere, and the panel opens back up
+on it. That is the whole point of the step: **you can ask what a track
+sounds like without playing it**, which the browser's Discover tab cannot
+do, since it anchors on what you had highlighted when you opened it.
+
+Then **similar songs** or **similar artists**, and the list. The number is
+how close the server thinks it is — these arrive in order, so a rank would
+say nothing a position doesn't, where the percentage says how much of a
+neighbour it actually is.
+
+`Enter` queues one and starts it, `a` just queues it — neither throws away
+the queue you are in the middle of, which is the one thing the browser's
+Discover tab does differently. `←` walks back out a level at a time.
 
 ## Auto-DJ
 

@@ -900,6 +900,15 @@ fn opening_a_folder_spins_instead_of_showing_the_one_you_left() {
     assert_eq!(app.files.entries.len(), 2, "'..' and the track");
 }
 
+/// A neighbour as the server sends one: a path and how close it is.
+fn near(path: &str, similarity: f64) -> crate::api::types::SimilarTrack {
+    crate::api::types::SimilarTrack {
+        filepath: path.to_string(),
+        similarity,
+        metadata: TrackMetadata::default(),
+    }
+}
+
 /// Put the cursor on the full-screen view's Discover tab.
 fn on_the_now_discover_tab(app: &mut App) {
     app.handle_action(Action::ToggleNowPlaying);
@@ -909,114 +918,133 @@ fn on_the_now_discover_tab(app: &mut App) {
 }
 
 #[test]
-fn the_now_playing_discover_panel_follows_what_is_on_the_speakers() {
+fn the_discover_panel_asks_what_to_look_around_from_before_anything_else() {
+    // The point of the first step: you can ask about a track without
+    // playing it, so the panel cannot simply follow the speakers.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("playing")]);
+    app.play_index(0);
+    on_the_now_discover_tab(&mut app);
+
+    // Nothing is asked of the server until there is a seed and a question.
+    assert!(app.now_discover.as_ref().is_none_or(|shown| shown.seed.is_none()));
+
+    // Row 0 is what's playing; taking it moves on to *what* to look at
+    // rather than straight to a list.
+    let effects = app.handle_action(Action::Activate);
+    assert!(effects.is_empty(), "choosing a seed asks the server nothing: {effects:?}");
+    let shown = app.now_discover.as_ref().unwrap();
+    assert_eq!(shown.node, NowDiscoverNode::Mode);
+    assert_eq!(shown.seed.as_ref().unwrap().filepath, "playing");
+
+    // Songs on row 0, artists on row 1 — each its own request.
+    let effects = app.handle_action(Action::Activate);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Api(ApiCmd::Discover { node: DiscoverNode::Tracks, dest: DiscoverDest::NowPlaying, seed })]
+            if seed.filepath == "playing"
+    ));
+    assert_eq!(app.now_discover.as_ref().unwrap().node, NowDiscoverNode::Tracks);
+
+    // ← walks back out, a level at a time, to the seed question.
+    app.handle_action(Action::NowLeft);
+    assert_eq!(app.now_discover.as_ref().unwrap().node, NowDiscoverNode::Mode);
+    app.handle_action(Action::NowLeft);
+    assert_eq!(app.now_discover.as_ref().unwrap().node, NowDiscoverNode::Seed);
+    app.handle_action(Action::NowLeft);
+    assert_eq!(app.now_discover.as_ref().unwrap().node, NowDiscoverNode::Seed, "and stops");
+}
+
+#[test]
+fn a_seed_can_be_pointed_at_rather_than_played() {
+    // The whole reason for the first step: look up what a track sounds like
+    // without putting it on.
+    let mut app = connected_app();
+    browsing(&mut app, &["curious"], 0);
+    on_the_now_discover_tab(&mut app);
+
+    app.handle_action(Action::Down); // "Choose a song…"
+    app.handle_action(Action::Activate);
+    assert_eq!(app.capture, Some(Capture::Discover));
+    assert_eq!(app.tab, Tab::Files, "and it puts you where the songs are");
+    assert!(!app.fullscreen, "the browser is where you pick");
+
+    let effects = app.handle_action(Action::Activate);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))),
+        "pointing at a track is not playing it"
+    );
+    assert!(app.queue.items.is_empty(), "nor queueing it");
+
+    // Back in the panel, on the seed just chosen, asking which way to look.
+    assert!(app.fullscreen && app.now_tab() == NowTab::Discover);
+    let shown = app.now_discover.as_ref().unwrap();
+    assert_eq!(shown.node, NowDiscoverNode::Mode);
+    assert_eq!(shown.seed.as_ref().unwrap().filepath, "curious");
+    assert_eq!(app.capture, None, "one track, then it disarms");
+}
+
+#[test]
+fn the_two_lists_are_kept_apart_by_the_seed_and_the_question() {
     let mut app = connected_app();
     app.queue.replace(vec![track("first"), track("second")]);
     app.play_index(0);
-
-    // Nothing is asked until the panel is the one being looked at — the
-    // whole view is otherwise costing a request per track change.
-    assert!(app.now_discover.is_none());
-
     on_the_now_discover_tab(&mut app);
-    let asked = |effects: &[Effect]| {
-        effects.iter().find_map(|e| match e {
-            Effect::Api(ApiCmd::Discover { seed, dest: DiscoverDest::NowPlaying, .. }) => {
-                Some(seed.filepath.clone())
-            }
-            _ => None,
-        })
-    };
-    // Opening the tab is itself a dispatch, so the ask rides out with it.
-    let effects = app.handle_action(Action::NowTabNext);
-    app.handle_action(Action::NowTabPrev);
-    assert!(app.now_discover.as_ref().unwrap().pending || asked(&effects).is_some());
-    assert_eq!(app.now_discover.as_ref().unwrap().seed, "first");
+    app.handle_action(Action::Activate); // seed: what's playing
+    app.handle_action(Action::Activate); // and: similar songs
 
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![track("near-one"), track("near-two")]),
-        note: None,
-        dest: DiscoverDest::NowPlaying,
-        seed: "first".into(),
-    });
+    let reply = |app: &mut App, seed: &str, data: DiscoverData| {
+        let node = match data {
+            DiscoverData::Artists(_) => DiscoverNode::Artists,
+            DiscoverData::Tracks(_) => DiscoverNode::Tracks,
+        };
+        app.apply_event(Event::Discover {
+            node,
+            data,
+            note: None,
+            dest: DiscoverDest::NowPlaying,
+            seed: seed.to_string(),
+        });
+    };
+
+    // An answer about another seed is about a question already withdrawn.
+    reply(&mut app, "second", DiscoverData::Tracks(vec![near("wrong", 0.9)]));
+    assert!(app.now_discover.as_ref().unwrap().tracks.is_empty());
+    assert!(app.now_discover.as_ref().unwrap().pending);
+
+    // And an answer to the other question — the user asked for songs.
+    reply(&mut app, "first", DiscoverData::Artists(Vec::new()));
+    assert!(app.now_discover.as_ref().unwrap().pending, "still waiting on songs");
+
+    reply(&mut app, "first", DiscoverData::Tracks(vec![near("near-one", 0.94), near("near-two", 0.9)]));
     let shown = app.now_discover.as_ref().unwrap();
     assert!(!shown.pending);
     assert_eq!(shown.tracks.len(), 2);
+    assert_eq!(shown.tracks[0].similarity, 0.94, "how close is what the rows are for");
+
+    // The browser tab's reply never lands here, whatever it names.
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![near("browser", 0.5)]),
+        note: None,
+        dest: DiscoverDest::Browser,
+        seed: "first".into(),
+    });
+    assert_eq!(app.now_discover.as_ref().unwrap().tracks.len(), 2);
 
     // `a` queues the row under the cursor rather than reaching past the
-    // panel to whatever the hidden browser had selected.
+    // panel to whatever the hidden browser had selected; Enter plays it,
+    // and neither throws away the queue.
     app.handle_action(Action::Down);
     app.handle_action(Action::AddToQueue);
     assert_eq!(app.queue.items.last().unwrap().filepath, "near-two");
 
-    // Enter queues it and starts it — without throwing away the queue you
-    // are in the middle of, which is what the browser's Enter would do.
     let before = app.queue.items.len();
     let effects = app.handle_action(Action::Activate);
     assert_eq!(app.queue.items.len(), before + 1);
     assert_eq!(app.queue.items[app.queue.current.unwrap()].filepath, "near-two");
     assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
 }
-
-#[test]
-fn a_neighbour_list_for_the_track_before_this_one_is_dropped() {
-    // The node never changes here — it is always "tracks like the seed" —
-    // so the seed is the only thing that can tell a stale reply apart.
-    let mut app = connected_app();
-    app.queue.replace(vec![track("first"), track("second")]);
-    app.play_index(0);
-    on_the_now_discover_tab(&mut app);
-    assert_eq!(app.now_discover.as_ref().unwrap().seed, "first");
-
-    app.handle_action(Action::NextTrack);
-    assert_eq!(app.now_discover.as_ref().unwrap().seed, "second", "it re-aims itself");
-
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![track("stale")]),
-        note: None,
-        dest: DiscoverDest::NowPlaying,
-        seed: "first".into(),
-    });
-    let shown = app.now_discover.as_ref().unwrap();
-    assert!(shown.tracks.is_empty(), "the last song's neighbours are not this one's");
-    assert!(shown.pending, "still waiting on the one asked for");
-
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![track("fresh")]),
-        note: None,
-        dest: DiscoverDest::NowPlaying,
-        seed: "second".into(),
-    });
-    assert_eq!(app.now_discover.as_ref().unwrap().tracks[0].filepath, "fresh");
-}
-
-#[test]
-fn the_two_discover_surfaces_do_not_answer_each_other() {
-    // The browser tab drills from a seed it captured on the way in; the
-    // panel follows the speakers. Both ask for `DiscoverNode::Tracks`, so
-    // only the destination keeps their replies apart.
-    let mut app = connected_app();
-    app.queue.replace(vec![track("playing")]);
-    app.play_index(0);
-    on_the_now_discover_tab(&mut app);
-
-    app.apply_event(Event::Discover {
-        node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![track("browser-answer")]),
-        note: None,
-        dest: DiscoverDest::Browser,
-        seed: "playing".into(),
-    });
-    assert!(
-        app.now_discover.as_ref().unwrap().tracks.is_empty(),
-        "the browser tab's reply is not the panel's"
-    );
-    assert!(app.now_discover.as_ref().unwrap().pending);
-}
-
 #[test]
 fn opening_a_playlist_spins_instead_of_showing_the_list_of_playlists() {
     let mut app = connected_app();
@@ -2261,7 +2289,7 @@ fn similar_tracks_are_ordinary_playable_rows() {
 
     app.apply_event(Event::Discover {
         node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![track("near-one"), track("near-two")]),
+        data: DiscoverData::Tracks(vec![near("near-one", 0.94), near("near-two", 0.9)]),
         note: None,
         dest: DiscoverDest::Browser,
         seed: String::new(),
@@ -2320,7 +2348,7 @@ fn a_discover_reply_for_a_view_already_left_is_dropped() {
 
     app.apply_event(Event::Discover {
         node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![track("late")]),
+        data: DiscoverData::Tracks(vec![near("late", 0.8)]),
         note: None,
         dest: DiscoverDest::Browser,
         seed: String::new(),
@@ -2790,7 +2818,7 @@ fn picking_a_song_from_the_library_fills_the_end_that_asked() {
     on_sonic_row(&mut app, SonicRow::PickFromLibrary);
     app.handle_action(Action::Activate);
 
-    assert_eq!(app.sonic_capture, Some(SonicSide::End));
+    assert_eq!(app.capture, Some(Capture::Sonic(SonicSide::End)));
     assert_eq!(app.tab, Tab::Files, "and it puts you where the songs are");
 
     // Enter on a track now fills the field rather than playing it.
@@ -2801,7 +2829,7 @@ fn picking_a_song_from_the_library_fills_the_end_that_asked() {
     );
     assert!(app.queue.items.is_empty(), "nor queue anything");
     assert_eq!(app.sonic.end.as_ref().unwrap().filepath, "chosen");
-    assert_eq!(app.sonic_capture, None, "one row, then it disarms");
+    assert_eq!(app.capture, None, "one row, then it disarms");
     assert_eq!(app.tab, Tab::SonicPath, "and hands you back to the panel");
 }
 
@@ -2814,10 +2842,10 @@ fn an_armed_pick_is_called_off_by_escape() {
     app.handle_action(Action::Activate);
     on_sonic_row(&mut app, SonicRow::PickFromLibrary);
     app.handle_action(Action::Activate);
-    assert_eq!(app.sonic_capture, Some(SonicSide::Start));
+    assert_eq!(app.capture, Some(Capture::Sonic(SonicSide::Start)));
 
     app.handle_action(Action::Cancel);
-    assert_eq!(app.sonic_capture, None);
+    assert_eq!(app.capture, None);
     assert_eq!(app.tab, Tab::SonicPath, "back where the arming was asked for");
 
     // And Enter means play again.
@@ -2841,7 +2869,7 @@ fn use_playing_song_takes_what_is_on_the_speakers() {
     on_sonic_row(&mut app, SonicRow::UsePlaying);
     app.handle_action(Action::Activate);
     assert_eq!(app.sonic.end.as_ref().unwrap().filepath, "sounding");
-    assert_eq!(app.sonic_capture, None, "nothing was armed — it was already in hand");
+    assert_eq!(app.capture, None, "nothing was armed — it was already in hand");
 }
 
 #[test]
