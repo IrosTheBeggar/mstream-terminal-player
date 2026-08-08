@@ -1018,8 +1018,9 @@ pub(crate) fn browser_title(app: &App) -> String {
                 .as_ref()
                 .map_or_else(|| "nothing yet".to_string(), Track::display_name);
             match app.discover_node() {
-                DiscoverNode::Root => format!(" Discover · from {seed} "),
-                DiscoverNode::Tracks => format!(" Sounds like {seed} "),
+                DiscoverNode::Root => " Discover · look around from… ".to_string(),
+                DiscoverNode::Mode => format!(" Discover · from {seed} "),
+                DiscoverNode::Tracks => format!(" Songs similar to {seed} "),
                 DiscoverNode::Artists => {
                     let artist = app
                         .discover_seed
@@ -1369,12 +1370,7 @@ fn now_keys_hint(app: &App) -> &'static str {
     match app.now_tab() {
         NowTab::Queue => "1-5 tab   ↑↓ list   Enter play   d remove   0 back",
         NowTab::AutoDj => "1-5 tab   ↑↓ choose   ←→ adjust   Enter set   0 back",
-        // A drill, so it needs the way back out — and what Enter does
-        // depends on which of its four faces is up.
-        NowTab::Discover if app.now_discover.as_ref().is_some_and(|s| s.is_list()) => {
-            "1-5 tab   ↑↓ list   Enter play   a queue   ← back"
-        }
-        NowTab::Discover => "1-5 tab   ↑↓ choose   Enter open   ← back   0 out",
+        NowTab::Discover => "1-5 tab   ↑↓ list   Enter play   a queue   0 back",
         NowTab::Visualizer if app.viz.mode.plots_samples() => {
             "1-5 tab   v mode   . dots   0 back"
         }
@@ -1473,139 +1469,58 @@ fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
 /// What the track on the speakers sounds like, as neighbours you can play.
 ///
 /// A list rather than the browser tab's drill: this panel follows what is
-/// playing and has one question to ask about it. The rows are the server's
-/// nearest matches in order, so the number beside each one is its rank, not
-/// a position in a queue.
+/// playing and has one question to ask about it. Picking a different seed,
+/// or asking about artists instead, is the Discover *tab*'s job — you go
+/// there to look something up; you glance at this while the music plays.
 fn render_now_discover(frame: &mut Frame, area: Rect, app: &mut App) {
-    use crate::tui::app::NowDiscoverNode;
-
-    let shown = app.now_discover.as_ref();
-    let node = shown.map_or(NowDiscoverNode::Seed, |s| s.node);
-    let seed = shown.and_then(|s| s.seed.clone());
-
-    // The line that says what the rows are about. Every face has one: a
-    // list of neighbours with no name on it is a list of strangers.
-    let heading = match node {
-        NowDiscoverNode::Seed => "Look around from…".to_string(),
-        _ => {
-            let what = if node == NowDiscoverNode::Artists { "Artists" } else { "Songs" };
-            match &seed {
-                // The phrase people actually use for the common case.
-                Some(track) if Some(&track.filepath) == app.now_playing.as_ref().map(|t| &t.filepath) => {
-                    format!("{what} similar to what's playing")
-                }
-                Some(track) => format!("{what} similar to {}", track.display_name()),
-                None => format!("{what} similar to…"),
-            }
-        }
-    };
     let [head, rest] =
         Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    // A list of neighbours with no name on it is a list of strangers.
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(Span::styled(fit(&heading, area.width as usize), Style::new().fg(dim()))),
+            Line::from(Span::styled(
+                fit("Songs similar to what's playing", area.width as usize),
+                Style::new().fg(dim()),
+            )),
             Line::raw(""),
         ]),
         head,
     );
 
-    let width = rest.width as usize;
-    let rows: Vec<Line<'static>> = match node {
-        // The two menus. Rows rather than a prompt, so ↑↓ and Enter mean
-        // here what they mean on every list in the player.
-        NowDiscoverNode::Seed => {
-            let playing = app
-                .now_playing
-                .as_ref()
-                .map_or_else(|| "nothing playing".to_string(), Track::display_name);
-            vec![
-                menu_row("What's playing", &playing, width),
-                menu_row("Choose a song…", "the next track you open lands here", width),
-            ]
-        }
-        NowDiscoverNode::Mode => vec![
-            menu_row("Similar songs", "in your library", width),
-            menu_row(
-                "Similar artists",
-                &seed
-                    .as_ref()
-                    .and_then(|t| t.metadata.artist.clone())
-                    .map_or_else(|| "this track has no artist tag".into(), |a| format!("like {a}")),
-                width,
-            ),
-        ],
-        NowDiscoverNode::Tracks | NowDiscoverNode::Artists => Vec::new(),
+    let Some(shown) = app.now_discover.as_ref() else {
+        return render_now_placeholder(frame, rest, "", "nothing playing to compare against");
     };
-
-    if !rows.is_empty() {
-        let mut state = ListState::default().with_selected(Some(app.now_scroll));
-        let (window, mut visible) = visible_rows(&mut state, rows.len(), rest.height);
-        let items: Vec<ListItem> =
-            rows[window].iter().cloned().map(ListItem::new).collect();
-        frame.render_stateful_widget(
-            List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
-            rest,
-            &mut visible,
-        );
-        return;
-    }
-
-    let Some(shown) = app.now_discover.as_ref() else { return };
     if shown.pending {
         return render_now_placeholder(frame, rest, "", &format!("{} looking…", spinner_frame(app)));
     }
-    let count = shown.rows();
-    if count == 0 {
+    if shown.tracks.is_empty() {
         // The server's own words when it has them — an unanalysed track and
         // a library with nothing close are different answers.
         let why = shown.note.clone().unwrap_or_else(|| "nothing close in your library".into());
         return render_now_placeholder(frame, rest, "", &why);
     }
 
+    let width = rest.width as usize;
     let mut state = ListState::default().with_selected(Some(app.now_scroll));
-    let (window, mut visible) = visible_rows(&mut state, count, rest.height);
+    let (window, mut visible) = visible_rows(&mut state, shown.tracks.len(), rest.height);
     let playing = app.now_playing.as_ref().map(|t| t.filepath.as_str());
 
-    let items: Vec<ListItem> = match node {
-        NowDiscoverNode::Artists => shown.artists[window]
-            .iter()
-            .map(|artist| {
-                // How close, then what the model thinks they sound like —
-                // the two things that decide whether to open one.
-                let tags: Vec<&str> =
-                    artist.genre_tags.iter().take(2).map(|t| crate::tui::app::entries::tidy_tag(t)).collect();
-                near_row(&artist.artist, artist.similarity, &tags.join(", "), width, false)
-            })
-            .collect(),
-        _ => shown.tracks[window]
-            .iter()
-            .map(|near| {
-                // The seed's nearest neighbour is sometimes the seed.
-                let is_playing = playing == Some(near.filepath.as_str());
-                let name = near.clone().into_track().display_name();
-                let detail = near.metadata.duration.map(fmt_duration).unwrap_or_default();
-                near_row(&name, near.similarity, &detail, width, is_playing)
-            })
-            .collect(),
-    };
+    let items: Vec<ListItem> = shown.tracks[window]
+        .iter()
+        .map(|near| {
+            // The seed's nearest neighbour is sometimes the seed.
+            let is_playing = playing == Some(near.filepath.as_str());
+            let name = near.clone().into_track().display_name();
+            let detail = near.metadata.duration.map(fmt_duration).unwrap_or_default();
+            near_row(&name, near.similarity, &detail, width, is_playing)
+        })
+        .collect();
 
     frame.render_stateful_widget(
         List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
         rest,
         &mut visible,
     );
-}
-
-/// A menu row in the Discover panel: what it does, and what it would do it
-/// with. Same two-column shape the Sonic Path rows use.
-fn menu_row(label: &str, detail: &str, width: usize) -> Line<'static> {
-    let name = fit(label, width);
-    let room = width.saturating_sub(width_of(&name) + 3);
-    let mut spans = vec![Span::styled(name, Style::new().fg(accent()))];
-    if room > 1 {
-        spans.push(Span::styled(format!("   {}", fit(detail, room)), Style::new().fg(dim())));
-    }
-    Line::from(spans)
 }
 
 /// One neighbour: how close it is, what it is, and one dim fact on the
@@ -4174,30 +4089,34 @@ mod tests {
         // A list of neighbours means nothing without saying neighbours of
         // what, so every view in the tab carries the seed in its title.
         let mut app = connected_app();
-        app.files.set(vec![crate::tui::app::Entry::Track {
-            label: "seed".into(),
-            track: Box::new(Track {
-                filepath: "lib/seed.mp3".into(),
-                metadata: TrackMetadata {
-                    artist: Some("Seed Artist".into()),
-                    title: Some("Seed Song".into()),
-                    ..Default::default()
-                },
-            }),
+        app.queue.replace(vec![Track {
+            filepath: "lib/seed.mp3".into(),
+            metadata: TrackMetadata {
+                artist: Some("Seed Artist".into()),
+                title: Some("Seed Song".into()),
+                ..Default::default()
+            },
         }]);
-        app.files.state.select(Some(0));
+        app.play_index(0);
 
         let discover = app.tabs().iter().position(|t| *t == Tab::Discover).unwrap();
         app.handle_action(Action::SelectTab(discover));
         let text = draw(&mut app);
         assert!(text.contains("4:Discover"));
+        // The tab opens on the question, not on a guess about the answer.
+        assert!(text.contains("look around from"), "got:\n{text}");
+        assert!(text.contains("What's playing") && text.contains("Choose a song"));
+
+        // Take what's playing, and the title names it from then on.
+        app.handle_action(Action::Activate);
+        let text = draw(&mut app);
         assert!(text.contains("Seed Artist - Seed Song"), "the title names the seed:\n{text}");
         assert!(text.contains("Similar tracks"));
         assert!(text.contains("like Seed Artist"), "and the artist row names the artist");
 
         // Artist rows carry how close, how many ways in, and what it sounds
         // like — the three things that decide whether to open one.
-        app.discover.state.select(Some(1));
+        app.discover.state.select(Some(2));
         app.handle_action(Action::Activate);
         app.apply_event(crate::tui::worker::Event::Discover {
             node: crate::tui::worker::DiscoverNode::Artists,

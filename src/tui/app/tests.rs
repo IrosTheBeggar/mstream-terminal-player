@@ -918,56 +918,51 @@ fn on_the_now_discover_tab(app: &mut App) {
 }
 
 #[test]
-fn the_discover_panel_asks_what_to_look_around_from_before_anything_else() {
-    // The point of the first step: you can ask about a track without
-    // playing it, so the panel cannot simply follow the speakers.
+fn the_discover_tab_asks_what_to_look_around_from_before_anything_else() {
+    // The step that lets you ask about a track without playing it — which
+    // the full-screen panel cannot do, since it follows the speakers.
     let mut app = connected_app();
     app.queue.replace(vec![track("playing")]);
     app.play_index(0);
-    on_the_now_discover_tab(&mut app);
+    app.handle_action(Action::SelectTab(discover_tab(&app)));
+    assert_eq!(*app.discover_node(), DiscoverNode::Root);
+    assert_eq!(labels(&app), vec!["What's playing", "Choose a song…"]);
 
-    // Nothing is asked of the server until there is a seed and a question.
-    assert!(app.now_discover.as_ref().is_none_or(|shown| shown.seed.is_none()));
-
-    // Row 0 is what's playing; taking it moves on to *what* to look at
-    // rather than straight to a list.
+    // Taking what's playing settles the seed and offers the two ways of
+    // looking — no request yet, both menus are static.
     let effects = app.handle_action(Action::Activate);
     assert!(effects.is_empty(), "choosing a seed asks the server nothing: {effects:?}");
-    let shown = app.now_discover.as_ref().unwrap();
-    assert_eq!(shown.node, NowDiscoverNode::Mode);
-    assert_eq!(shown.seed.as_ref().unwrap().filepath, "playing");
+    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
+    assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "playing");
+    assert_eq!(labels(&app), vec!["..", "Similar tracks", "Similar artists"]);
 
-    // Songs on row 0, artists on row 1 — each its own request.
+    // And then a list, which does cost one.
+    app.discover.state.select(Some(1));
     let effects = app.handle_action(Action::Activate);
     assert!(matches!(
         effects.as_slice(),
-        [Effect::Api(ApiCmd::Discover { node: DiscoverNode::Tracks, dest: DiscoverDest::NowPlaying, seed })]
+        [Effect::Api(ApiCmd::Discover { node: DiscoverNode::Tracks, dest: DiscoverDest::Browser, seed })]
             if seed.filepath == "playing"
     ));
-    assert_eq!(app.now_discover.as_ref().unwrap().node, NowDiscoverNode::Tracks);
 
-    // ← walks back out, a level at a time, to the seed question.
-    app.handle_action(Action::NowLeft);
-    assert_eq!(app.now_discover.as_ref().unwrap().node, NowDiscoverNode::Mode);
-    app.handle_action(Action::NowLeft);
-    assert_eq!(app.now_discover.as_ref().unwrap().node, NowDiscoverNode::Seed);
-    app.handle_action(Action::NowLeft);
-    assert_eq!(app.now_discover.as_ref().unwrap().node, NowDiscoverNode::Seed, "and stops");
+    // Back walks out a level at a time, and both menus come back without
+    // asking again.
+    app.handle_action(Action::Back);
+    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
+    assert!(app.handle_action(Action::Back).is_empty());
+    assert_eq!(*app.discover_node(), DiscoverNode::Root);
 }
 
 #[test]
-fn a_seed_can_be_pointed_at_rather_than_played() {
-    // The whole reason for the first step: look up what a track sounds like
-    // without putting it on.
+fn a_discover_seed_can_be_pointed_at_rather_than_played() {
     let mut app = connected_app();
     browsing(&mut app, &["curious"], 0);
-    on_the_now_discover_tab(&mut app);
+    app.handle_action(Action::SelectTab(discover_tab(&app)));
 
     app.handle_action(Action::Down); // "Choose a song…"
     app.handle_action(Action::Activate);
     assert_eq!(app.capture, Some(Capture::Discover));
     assert_eq!(app.tab, Tab::Files, "and it puts you where the songs are");
-    assert!(!app.fullscreen, "the browser is where you pick");
 
     let effects = app.handle_action(Action::Activate);
     assert!(
@@ -976,75 +971,85 @@ fn a_seed_can_be_pointed_at_rather_than_played() {
     );
     assert!(app.queue.items.is_empty(), "nor queueing it");
 
-    // Back in the panel, on the seed just chosen, asking which way to look.
-    assert!(app.fullscreen && app.now_tab() == NowTab::Discover);
-    let shown = app.now_discover.as_ref().unwrap();
-    assert_eq!(shown.node, NowDiscoverNode::Mode);
-    assert_eq!(shown.seed.as_ref().unwrap().filepath, "curious");
+    // Back on the tab, on the seed just chosen, asking which way to look.
+    assert_eq!(app.tab, Tab::Discover);
+    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
+    assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "curious");
     assert_eq!(app.capture, None, "one track, then it disarms");
 }
 
 #[test]
-fn the_two_lists_are_kept_apart_by_the_seed_and_the_question() {
+fn how_close_leads_the_row_rather_than_where_it_sits() {
+    // The rows arrive in order, so a rank says nothing a position does not.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("playing")]);
+    app.play_index(0);
+    app.handle_action(Action::SelectTab(discover_tab(&app)));
+    app.handle_action(Action::Activate); // seed: what's playing
+    app.discover.state.select(Some(1));
+    app.handle_action(Action::Activate); // similar tracks
+
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![near("near-one", 0.9412), near("near-two", 0.836)]),
+        note: None,
+        dest: DiscoverDest::Browser,
+        seed: "playing".into(),
+    });
+    assert_eq!(labels(&app), vec!["..", " 94%  near-one", " 84%  near-two"]);
+}
+
+#[test]
+fn the_full_screen_panel_still_just_follows_the_speakers() {
+    // It is glanced at while a track plays, so it steers itself: no seed to
+    // choose, no menu, one question re-asked when the answer would change.
     let mut app = connected_app();
     app.queue.replace(vec![track("first"), track("second")]);
     app.play_index(0);
+    assert!(app.now_discover.is_none(), "nothing until the tab is looked at");
+
     on_the_now_discover_tab(&mut app);
-    app.handle_action(Action::Activate); // seed: what's playing
-    app.handle_action(Action::Activate); // and: similar songs
+    assert_eq!(app.now_discover.as_ref().unwrap().seed, "first");
 
-    let reply = |app: &mut App, seed: &str, data: DiscoverData| {
-        let node = match data {
-            DiscoverData::Artists(_) => DiscoverNode::Artists,
-            DiscoverData::Tracks(_) => DiscoverNode::Tracks,
-        };
-        app.apply_event(Event::Discover {
-            node,
-            data,
-            note: None,
-            dest: DiscoverDest::NowPlaying,
-            seed: seed.to_string(),
-        });
-    };
-
-    // An answer about another seed is about a question already withdrawn.
-    reply(&mut app, "second", DiscoverData::Tracks(vec![near("wrong", 0.9)]));
-    assert!(app.now_discover.as_ref().unwrap().tracks.is_empty());
-    assert!(app.now_discover.as_ref().unwrap().pending);
-
-    // And an answer to the other question — the user asked for songs.
-    reply(&mut app, "first", DiscoverData::Artists(Vec::new()));
-    assert!(app.now_discover.as_ref().unwrap().pending, "still waiting on songs");
-
-    reply(&mut app, "first", DiscoverData::Tracks(vec![near("near-one", 0.94), near("near-two", 0.9)]));
-    let shown = app.now_discover.as_ref().unwrap();
-    assert!(!shown.pending);
-    assert_eq!(shown.tracks.len(), 2);
-    assert_eq!(shown.tracks[0].similarity, 0.94, "how close is what the rows are for");
-
-    // The browser tab's reply never lands here, whatever it names.
     app.apply_event(Event::Discover {
         node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![near("browser", 0.5)]),
+        data: DiscoverData::Tracks(vec![near("near-one", 0.94), near("near-two", 0.9)]),
         note: None,
-        dest: DiscoverDest::Browser,
+        dest: DiscoverDest::NowPlaying,
         seed: "first".into(),
     });
     assert_eq!(app.now_discover.as_ref().unwrap().tracks.len(), 2);
 
     // `a` queues the row under the cursor rather than reaching past the
-    // panel to whatever the hidden browser had selected; Enter plays it,
-    // and neither throws away the queue.
+    // panel to whatever the hidden browser had selected; Enter plays it.
     app.handle_action(Action::Down);
     app.handle_action(Action::AddToQueue);
     assert_eq!(app.queue.items.last().unwrap().filepath, "near-two");
 
-    let before = app.queue.items.len();
-    let effects = app.handle_action(Action::Activate);
-    assert_eq!(app.queue.items.len(), before + 1);
-    assert_eq!(app.queue.items[app.queue.current.unwrap()].filepath, "near-two");
-    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+    // The track changing re-aims it, and the old answer is dropped.
+    app.handle_action(Action::NextTrack);
+    assert_eq!(app.now_discover.as_ref().unwrap().seed, "second");
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![near("stale", 0.5)]),
+        note: None,
+        dest: DiscoverDest::NowPlaying,
+        seed: "first".into(),
+    });
+    assert!(app.now_discover.as_ref().unwrap().tracks.is_empty());
+    assert!(app.now_discover.as_ref().unwrap().pending);
+
+    // And the browser tab's reply never lands here.
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![near("browser", 0.8)]),
+        note: None,
+        dest: DiscoverDest::Browser,
+        seed: "second".into(),
+    });
+    assert!(app.now_discover.as_ref().unwrap().pending);
 }
+
 #[test]
 fn opening_a_playlist_spins_instead_of_showing_the_list_of_playlists() {
     let mut app = connected_app();
@@ -2251,35 +2256,53 @@ fn the_discover_tab_is_absent_where_the_server_cannot_serve_it() {
 }
 
 #[test]
-fn opening_discover_anchors_on_what_is_highlighted() {
-    // The cursor was on a track in another tab, and that is the obvious
-    // thing to mean by "more like this".
+fn opening_discover_asks_rather_than_guessing_what_you_meant() {
+    // The tab used to take whatever the cursor happened to be on, which
+    // made "more like this" mean something you never said out loud — and
+    // gave you no way to say anything else. Now it asks.
     let mut app = connected_app();
     browsing(&mut app, &["a", "b"], 1);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
 
     assert_eq!(app.tab, Tab::Discover);
-    assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "b");
-    // The mode menu costs no request.
+    assert!(app.discover_seed.is_none(), "a highlighted row is not an answer");
+    // Two ways of answering, and the menu costs no request.
     assert_eq!(app.discover.entries.len(), 2);
 }
 
 #[test]
-fn what_is_playing_wins_over_what_is_merely_highlighted() {
+fn the_seed_row_names_the_track_it_would_take() {
+    // "What's playing" is only a useful thing to choose if you can see what
+    // it would choose without choosing it.
     let mut app = connected_app();
+    let Entry::Discover { detail, .. } = &connected_app().discover_root_entries()[0] else {
+        panic!("the first row is the seed row");
+    };
+    assert_eq!(detail, "nothing playing");
+
     app.queue.replace(vec![track("playing")]);
     app.play_index(0);
-    browsing(&mut app, &["highlighted"], 0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
+    let Entry::Discover { detail, .. } = &app.discover.entries[0] else {
+        panic!("the first row is the seed row");
+    };
+    assert_eq!(detail, &track("playing").display_name());
+
+    // And taking it puts that track — not the cursor's — under the tab.
+    app.handle_action(Action::Activate);
     assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "playing");
+    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
 }
 
 #[test]
 fn similar_tracks_are_ordinary_playable_rows() {
     let mut app = connected_app();
-    browsing(&mut app, &["seed"], 0);
+    app.queue.replace(vec![track("seed")]);
+    app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
+    app.handle_action(Action::Activate); // seed: what's playing
 
+    app.discover.state.select(Some(1)); // "Similar tracks"
     let effects = app.handle_action(Action::Activate);
     assert!(matches!(
         effects.as_slice(),
@@ -2309,9 +2332,11 @@ fn an_artist_drills_into_its_ways_in_without_asking_again() {
     // The entry points arrived with the artist list, so going in costs
     // nothing — the whole reason the server sends them inline.
     let mut app = connected_app();
-    browsing(&mut app, &["seed"], 0);
+    app.queue.replace(vec![track("seed")]);
+    app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
-    app.discover.state.select(Some(1)); // "Similar artists"
+    app.handle_action(Action::Activate); // seed: what's playing
+    app.discover.state.select(Some(2)); // "Similar artists"
     app.handle_action(Action::Activate);
 
     app.apply_event(Event::Discover {
@@ -2361,10 +2386,10 @@ fn a_discover_reply_for_a_view_already_left_is_dropped() {
 fn discovery_with_nothing_to_go_on_says_so() {
     let mut app = connected_app();
     app.handle_action(Action::SelectTab(discover_tab(&app)));
-    assert!(app.discover_seed.is_none(), "nothing playing, nothing highlighted");
+    assert!(app.discover_seed.is_none(), "nothing playing, nothing chosen");
 
     assert!(app.handle_action(Action::Activate).is_empty());
-    assert!(app.message.as_ref().unwrap().text.contains("play or highlight a track"));
+    assert!(app.message.as_ref().unwrap().text.contains("nothing is playing"));
 }
 
 #[test]

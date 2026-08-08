@@ -127,8 +127,12 @@ pub struct DjRequest {
 /// and the identity of what comes back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscoverNode {
-    /// The mode menu — static, needs no request.
+    /// What to look around *from*: what is playing, or anything you care to
+    /// point at. Static, needs no request — and being able to ask about a
+    /// track without playing it is why the tab starts here.
     Root,
+    /// What to look *at*: songs, or artists. Also static.
+    Mode,
     /// Tracks that sound like the seed.
     Tracks,
     /// Artists that sound like the seed's artist.
@@ -1255,9 +1259,9 @@ pub(crate) async fn discover(
     };
 
     match node {
-        // Both are answered without asking the server: the mode menu is
-        // static, and an artist's ways in arrived with the artist list.
-        DiscoverNode::Root | DiscoverNode::Artist(_) => Ok(Event::Discover {
+        // All three are answered without asking the server: the two menus
+        // are static, and an artist's ways in arrived with the artist list.
+        DiscoverNode::Root | DiscoverNode::Mode | DiscoverNode::Artist(_) => Ok(Event::Discover {
             node: node.clone(),
             data: DiscoverData::Tracks(Vec::new()),
             note: None,

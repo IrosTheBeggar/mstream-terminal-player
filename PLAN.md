@@ -1059,35 +1059,47 @@ re-asks when the track changes.
 
 Lyrics is now the last placeholder on that strip.
 
-#### D8 — The Discover panel gets a seed of its own ✅ 2026-08-08
+#### D8 — Discover asks what to look around from ✅ 2026-08-08
 
-D7 made the panel follow the speakers, which answers one question well and
-another not at all: **what does *this* track sound like, without playing
-it?** The browser's Discover tab cannot answer it either — it anchors on
-whatever was highlighted when you opened it, and getting there loses your
-place. So the panel became a small drill:
+D7 made the full-screen panel follow the speakers, which answers one
+question well and another not at all: **what does *this* track sound like,
+without playing it?** The browser's Discover tab could not answer it either
+— it anchored on whatever was highlighted when you opened it, which meant
+the seed was something you never said out loud and could not change. So the
+tab grew the step in front:
 
 ```
-Look around from…          →  Songs / Artists  →  the list
-  What's playing                                    83%  ALM - Manor
-  Choose a song…                                    81%  ALM - Hip Hop Factory
+Discover · look around from…   →  Songs / Artists  →  the list
+  What's playing                                       83%  ALM - Manor
+  Choose a song…                                       81%  ALM - Hip Hop Factory
 ```
+
+**The two Discover views are different things, and the split is the point.**
+The panel is glanced at while music plays: one question, re-asked when the
+answer would change, no steering. The tab is somewhere you *go* to look
+something up, so it asks. Putting the drill on the panel — which is where it
+was first built — made the glance into a menu and still left the tab
+guessing.
 
 - **The seed is resolved when it is picked, not read live.** "What's
   playing" means the track that *was* playing when you said so. A list that
-  re-aimed itself every time a song ended is exactly what D7 built, and it
-  is unusable for looking something up.
+  re-aimed itself every time a song ended is exactly what the panel is, and
+  that is unusable for looking something up.
 - **`Choose a song…` reuses the Sonic Path capture**, which is what turned
   two armed-picker fields into one `Capture` enum carrying who is waiting.
-  Arming now also drops out of the full-screen view — the picking happens in
-  the browser, and arming from fullscreen left the user choosing from a
-  listing they could not see.
+  Arming also drops out of the full-screen view — the picking happens in the
+  browser, and arming from fullscreen left the user choosing from a listing
+  they could not see.
+- **Nothing seeds the tab implicitly any more.** `set_discover_seed` took
+  the cursor's track on every tab switch and on every step back to the root;
+  both are gone. `discover_seed` now only ever holds what a row named, so
+  the title can be trusted.
 - **Percentages instead of ranks.** The rows arrive in order, so a number
   counting them says nothing their position doesn't. The cosine says how
   much of a neighbour each one actually is — and it was being thrown away:
   `DiscoverData::Tracks` carried `Vec<Track>`, built by `SimilarTrack::
   into_track()`, which drops the similarity. It carries `Vec<SimilarTrack>`
-  now, and the browser tab drops the number itself.
+  now, and both views show the number.
 - **The stale guard needed both halves.** Seed *and* node: the two lists are
   asked for separately about the same seed, so an artists reply arriving
   after the user asked for songs is as wrong as a reply about another track.

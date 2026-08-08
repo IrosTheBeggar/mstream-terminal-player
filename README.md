@@ -380,7 +380,7 @@ the right.
 
 ```
 ┌ Now Playing ────────────────────────────────────────────────────────────┐
-│                              │ Queue  Lyrics  Discover  Auto-DJ  Visual… │
+│                              │ 1:Queue  2:Lyrics  3:Discover  4:Auto-DJ… │
 │ Rewind The Track             │ ──────────────────────────────────────────│
 │ Bassnectar                   │ ▶ Bassnectar - Rewind The Track      3:29 │
 │                              │   Bassnectar - Mic Check             4:02 │
@@ -389,8 +389,8 @@ the right.
 │ Tempo   174 BPM              │                                           │
 │ Key     8A  A minor          │                                           │
 │──────────────────────────────┴───────────────────────────────────────────│
-│████████████████████▍               1:11 / 3:29                           │
-│←→ tab   ↑↓ list   Enter play   d remove   0 back        vol 100%  dj sim… │
+│▃▅▂▆▃▇▄▁▅▃▆▂▄▇▃▅▁▄▆▂▅▃▇▄▂▆▁▅▃▄▆▂▇▃▅▁▄▂▆▃▅▇▂▄▁▃▆▅▂▇▄▃▁▅▆   1:11 / 3:29    │
+│1-5 tab   ↑↓ list   Enter play   d remove   0 back       vol 100%  dj sim… │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -419,8 +419,8 @@ Lyrics is the last stub; everything else on the strip does what it says.
 
 ### The Discover panel
 
-The full-screen view's Discover tab asks two questions before it shows you
-anything, and the first is the useful one: **what to look around from**.
+The full-screen view's Discover tab follows the speakers. No seed to pick,
+no menu — one question, asked again whenever the answer would change.
 
 ```
  Songs similar to what's playing
@@ -430,20 +430,17 @@ anything, and the first is the useful one: **what to look around from**.
   80%  Color Out - Ghosts (Abludo Remix)      4:09
 ```
 
-*What's playing* is the common case. *Choose a song…* arms the browser the
-way Sonic Path does — pick anything, anywhere, and the panel opens back up
-on it. That is the whole point of the step: **you can ask what a track
-sounds like without playing it**, which the browser's Discover tab cannot
-do, since it anchors on what you had highlighted when you opened it.
-
-Then **similar songs** or **similar artists**, and the list. The number is
-how close the server thinks it is — these arrive in order, so a rank would
-say nothing a position doesn't, where the percentage says how much of a
-neighbour it actually is.
+The number is how close the server thinks it is — these arrive in order, so
+a rank would say nothing a position doesn't, where the percentage says how
+much of a neighbour it actually is.
 
 `Enter` queues one and starts it, `a` just queues it — neither throws away
 the queue you are in the middle of, which is the one thing the browser's
-Discover tab does differently. `←` walks back out a level at a time.
+Discover tab does differently.
+
+To look around from something *other* than what is playing, that is the
+[Discover tab](#discover)'s job — this is a panel you glance at, not one you
+steer.
 
 ## Auto-DJ
 
@@ -486,19 +483,33 @@ Rows that need the server's embedding index only appear where it exists.
 
 ## Discover
 
-Press `5` with a track playing or highlighted, and the Discover tab opens
-anchored on it:
+Press `4`, and the tab asks what to look around from before it looks:
+
+```
+┌ Discover · look around from… ────────────────────────────┐
+│> What's playing   Bassnectar - Rewind The Track          │
+│  Choose a song…   the next track you open lands here     │
+└──────────────────────────────────────────────────────────┘
+```
+
+*Choose a song…* arms the browser the way Sonic Path does — pick anything,
+anywhere, and the tab opens back up on it. That is what the step is for:
+**you can ask what a track sounds like without playing it.**
+
+Either way you land on the two ways of looking:
 
 ```
 ┌ Discover · from Bassnectar - Rewind The Track ───────────┐
+│  ..                                                      │
 │> Similar tracks    in your library                       │
 │  Similar artists   like Bassnectar                       │
 └──────────────────────────────────────────────────────────┘
 ```
 
-**Similar tracks** are ordinary rows — `Enter` plays from there, `a` queues
-one, exactly as everywhere else. **Similar artists** shows how close each one
-is, how many ways in it has, and what the model thinks it sounds like:
+**Similar tracks** are ordinary rows, each led by how close the server
+thinks it is — `Enter` plays from there, `a` queues one, exactly as
+everywhere else. **Similar artists** shows how close each one is, how many
+ways in it has, and what the model thinks it sounds like:
 
 ```
 ┌ Artists like Bassnectar ─────────────────────────────────┐
@@ -514,7 +525,7 @@ The tab only appears on servers that have the discovery index.
 
 ## Sonic Path
 
-`6` opens the Sonic Path tab — the webapp's panel, in a terminal. Pick a song
+`5` opens the Sonic Path tab — the webapp's panel, in a terminal. Pick a song
 to start from and one to end on, choose a length, and the server fills the
 road between them with tracks that sit along the arc joining the two in its
 embedding space.

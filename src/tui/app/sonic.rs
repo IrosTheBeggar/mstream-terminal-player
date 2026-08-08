@@ -478,17 +478,8 @@ impl App {
         self.capture = None;
         match who {
             Capture::Sonic(side) => self.capture_sonic_side(side, track),
-            // Back to the panel that asked, with the two ways of looking.
-            Capture::Discover => {
-                let label = track.display_name();
-                if !self.fullscreen {
-                    self.fullscreen = true;
-                }
-                self.now_tab = NowTab::Discover;
-                let effects = self.seed_now_discover(track);
-                self.info(format!("looking around {label}"));
-                effects
-            }
+            // Back to the tab that asked, on the two ways of looking.
+            Capture::Discover => self.seed_discover(track),
         }
     }
 
