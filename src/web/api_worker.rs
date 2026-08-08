@@ -139,6 +139,17 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
+        ApiCmd::SavePlaylist { name, files } => {
+            with_session(session, async |s| {
+                let count = files.len();
+                s.client
+                    .playlist_save_async(&name, &files)
+                    .await
+                    .map(|()| Event::PlaylistSaved { name: name.clone(), count })
+            })
+            .await
+        }
+
         ApiCmd::Search(query) => {
             with_session(session, async |s| {
                 s.client.search_async(&query).await.map(|r| Event::SearchResults {
@@ -162,6 +173,17 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
                 None => None,
             };
             Some(Event::AlbumArt { file, art })
+        }
+
+        ApiCmd::Waveform { filepath } => {
+            // Art's rule, for the same reason: a shape nobody could draw is
+            // not worth the "not connected" toast `with_session` would raise.
+            let client = session.borrow().as_ref().map(|s| s.client.clone());
+            let bars = match client {
+                Some(c) => c.waveform_async(&filepath).await.ok().flatten(),
+                None => None,
+            };
+            Some(Event::Waveform { filepath, bars })
         }
     }
 }

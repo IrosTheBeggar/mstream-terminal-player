@@ -24,6 +24,10 @@ mod wasm {
         Enter,
         Esc,
         Tab,
+        /// Shift+Tab, which crossterm reports as its own code rather than as
+        /// Tab with a modifier. The full-screen view's Auto-DJ tab has ←→ for
+        /// its own rows, so this is how that tab is left.
+        BackTab,
         Backspace,
         Delete,
         Up,

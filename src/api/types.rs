@@ -564,6 +564,23 @@ pub const JOURNEY_MIN_LENGTH: u32 = 4;
 pub const JOURNEY_MAX_LENGTH: u32 = 32;
 pub const JOURNEY_DEFAULT_LENGTH: u32 = 14;
 
+// ── Waveform ────────────────────────────────────────────────────────────────
+
+/// `GET /api/v1/db/waveform` — the shape of a track, for drawing under the
+/// progress bar.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct WaveformResponse {
+    /// Peak magnitude per bar, 0–255. One value, not a min/max pair: the
+    /// server measures |sample| and bins by peak-of-peaks, so the shape is
+    /// symmetric and a drawing only ever needs half of it.
+    ///
+    /// 800 of them, whatever the track's length — but nothing here depends
+    /// on that. Every consumer resamples to however many columns it has, so
+    /// a server that changes its mind costs nobody anything.
+    pub waveform: Vec<u8>,
+}
+
 // ── Playlists ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Deserialize)]

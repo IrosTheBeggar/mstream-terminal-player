@@ -66,6 +66,11 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "ThemePrefs::is_unset")]
     pub theme: ThemePrefs,
 
+    /// `[display]` — how much of Unicode the terminal's font can be trusted
+    /// with.
+    #[serde(default, skip_serializing_if = "DisplayPrefs::is_default")]
+    pub display: DisplayPrefs,
+
     /// `[mouse]` — the wheel and clicking the progress bar.
     #[serde(default, skip_serializing_if = "MousePrefs::is_default")]
     pub mouse: MousePrefs,
@@ -92,6 +97,7 @@ impl Default for Config {
             player: PlayerPrefs::default(),
             cache: CachePrefs::default(),
             theme: ThemePrefs::default(),
+            display: DisplayPrefs::default(),
             mouse: MousePrefs::default(),
             keys: std::collections::BTreeMap::new(),
             servers: Vec::new(),
@@ -265,6 +271,75 @@ impl ThemePrefs {
             && self.dim.is_none()
             && self.folder.is_none()
             && self.extra.is_empty()
+    }
+}
+
+/// `[display]`. Which glyphs the terminal's font can actually draw.
+///
+/// Not a taste setting — a font either has a character or it prints a box.
+/// The Windows 10 default console is conhost with Consolas, which covers the
+/// old CP437 shapes (`█ ░ ▓ ▄ ─ │`) and nothing later: no eighth-height
+/// blocks, no braille, no `▶`, no `★`. Windows Terminal ships Cascadia Mono,
+/// which has all of them, and every ordinary Linux and macOS terminal font
+/// does too.
+///
+/// `auto` reads `WT_SESSION` — Windows Terminal sets it, conhost does not —
+/// and assumes anything not Windows is fine. `full` and `legacy` pin it,
+/// for a Windows console someone has pointed at a better font, or a Linux
+/// one stuck on a bitmap font.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DisplayPrefs {
+    /// `auto`, `full` or `legacy`.
+    pub glyphs: String,
+    /// Rows the terminal needs before the browser screen's progress bar
+    /// spends a second one mirroring the waveform.
+    ///
+    /// The compact transport is two rows — what is playing, then the bar —
+    /// and on an 80x24 terminal that is already an eighth of the list. A
+    /// third row is worth it when there are rows to spare and not when there
+    /// aren't, which is a question only the terminal can answer. `0` always,
+    /// something enormous never. The full-screen view mirrors regardless:
+    /// its body is a facts column and a panel rather than a list to scroll.
+    pub mirror_min_height: u16,
+    /// How many listing columns the browser will show at once, the one you
+    /// are in included — the Miller columns.
+    ///
+    /// A ceiling, not a promise: the columns you came through are only drawn
+    /// where there is width for them, innermost first, so a narrow terminal
+    /// quietly shows fewer. The queue column is not one of these; it is the
+    /// end of the chain rather than a step along it.
+    pub miller_columns: usize,
+    #[serde(flatten)]
+    pub extra: Keep,
+}
+
+/// Rows below which the browser screen keeps its single-row bar.
+///
+/// Twenty-four rows leaves nineteen for the list; thirty leaves twenty-five,
+/// and giving one of those up costs nothing anyone notices.
+pub const DEFAULT_MIRROR_MIN_HEIGHT: u16 = 30;
+
+/// Listing columns the browser will show at once, the current one included.
+///
+/// Four fits an 88-column terminal and is about as far back as the context
+/// is still worth reading: artist, album, and the two you came through.
+pub const DEFAULT_MILLER_COLUMNS: usize = 4;
+
+impl Default for DisplayPrefs {
+    fn default() -> Self {
+        DisplayPrefs {
+            glyphs: "auto".to_string(),
+            mirror_min_height: DEFAULT_MIRROR_MIN_HEIGHT,
+            miller_columns: DEFAULT_MILLER_COLUMNS,
+            extra: Keep::new(),
+        }
+    }
+}
+
+impl DisplayPrefs {
+    fn is_default(&self) -> bool {
+        *self == DisplayPrefs::default()
     }
 }
 

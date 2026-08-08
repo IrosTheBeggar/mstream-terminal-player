@@ -1,9 +1,15 @@
-//! Auto-DJ and the Sonic Journey: the picks, the panel, and the trip.
+//! Auto-DJ: the picks, and the tab that shapes them.
 //!
-//! Eight of App's fields are serviced from here and nowhere else
+//! Most of App's DJ fields are serviced from here and nowhere else
 //! (audit #57). The rule that matters lives in [`App::consume_dj`]:
 //! a DJ reply in hand means its request is no longer in flight,
 //! decided in one place rather than by every arm on its own clock.
+//!
+//! The settings used to be a modal behind `D`, reachable from the browser
+//! screen and invisible over the full-screen one. They are now the Auto-DJ
+//! tab itself, which is the only screen that ever described them — and the
+//! Sonic Path, which shared this file when it was an overlay, has moved to
+//! its own tab in [`super::sonic`].
 
 use super::*;
 
@@ -47,186 +53,31 @@ impl App {
         })
     }
 
-    // ── Sonic Journey ───────────────────────────────────────────────────────
+    // ── The Auto-DJ tab ─────────────────────────────────────────────────────
 
-    /// `J` on a track. What's playing is the natural place to set off from,
-    /// so one press is usually enough; with nothing playing it takes two —
-    /// one to mark where to start, one to say where to end up.
-    pub(super) fn start_journey(&mut self) -> Vec<Effect> {
-        if !self.capabilities.discovery_path {
-            self.error("this server can't plot journeys — it has no discovery index");
-            return Vec::new();
-        }
-        let Some(picked) = self.selected_track() else {
-            self.error("highlight a track to travel to");
-            return Vec::new();
-        };
-
-        let from = self.now_playing.clone().or_else(|| self.journey_from.take());
-        let Some(from) = from else {
-            self.journey_from = Some(picked.clone());
-            self.info(format!(
-                "journey starts at {} — now highlight where it should end and press J",
-                picked.display_name()
-            ));
-            return Vec::new();
-        };
-
-        self.journey_from = None;
-        self.open_journey(from, picked)
+    /// Whether the Auto-DJ tab is the one in front of you — and so whether
+    /// it gets the arrows and Enter. Its rows are values, so ←→ adjust them
+    /// there and Tab / Shift+Tab do the tab switching instead.
+    pub(super) fn on_dj_tab(&self) -> bool {
+        self.fullscreen && self.now_tab() == NowTab::AutoDj
     }
 
-    fn open_journey(&mut self, from: Track, to: Track) -> Vec<Effect> {
-        let length = self
-            .journey
-            .as_ref()
-            .map_or(crate::api::types::JOURNEY_DEFAULT_LENGTH, |j| j.length);
-        self.journey = Some(Journey {
-            from,
-            to,
-            length,
-            stops: Vec::new(),
-            pending: true,
-            offset: 0,
-        });
-        self.message = None;
-        self.fetch_journey()
-    }
-
-    fn fetch_journey(&mut self) -> Vec<Effect> {
-        let Some(journey) = self.journey.as_mut() else { return Vec::new() };
-        journey.pending = true;
-        journey.offset = 0;
-        vec![Effect::Api(ApiCmd::Journey {
-            start: journey.from.filepath.clone(),
-            end: journey.to.filepath.clone(),
-            length: journey.length,
-        })]
-    }
-
-    pub(super) fn handle_journey_action(&mut self, action: Action) -> Vec<Effect> {
-        if action == Action::Quit {
-            self.should_quit = true;
-            return vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)];
-        }
-        let Some(journey) = self.journey.as_mut() else { return Vec::new() };
-        match action {
-            Action::Cancel | Action::Input('J') => {
-                self.journey = None;
-                Vec::new()
-            }
-            // Changing the length is a different arc, so it has to be asked
-            // for again rather than trimmed locally.
-            Action::SeekForward | Action::Back | Action::SeekBackward => {
-                let delta: i32 = if action == Action::SeekForward { 2 } else { -2 };
-                let length = (journey.length as i32 + delta).clamp(
-                    crate::api::types::JOURNEY_MIN_LENGTH as i32,
-                    crate::api::types::JOURNEY_MAX_LENGTH as i32,
-                ) as u32;
-                if length == journey.length {
-                    return Vec::new();
-                }
-                journey.length = length;
-                self.fetch_journey()
-            }
-            Action::Down => {
-                journey.offset = (journey.offset + 1).min(journey.stops.len().saturating_sub(1));
-                Vec::new()
-            }
-            Action::Up => {
-                journey.offset = journey.offset.saturating_sub(1);
-                Vec::new()
-            }
-            Action::First => {
-                journey.offset = 0;
-                Vec::new()
-            }
-            Action::Activate | Action::Submit => self.queue_journey(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// Take the arc as the queue and start at its first stop.
-    fn queue_journey(&mut self) -> Vec<Effect> {
-        let Some(journey) = self.journey.take() else { return Vec::new() };
-        if journey.stops.is_empty() {
-            return Vec::new();
-        }
-        let count = journey.stops.len();
-        let tracks: Vec<Track> = journey.stops.iter().map(|s| s.to_track()).collect();
-        self.queue.replace(tracks);
-        self.info(format!(
-            "{count} stops from {} to {}",
-            journey.from.display_name(),
-            journey.to.display_name()
-        ));
-        self.play_index(0)
-    }
-
-    // ── Auto-DJ panel ───────────────────────────────────────────────────────
-
-    /// Open the panel, built for what this server can do.
-    pub(super) fn open_dj_panel(&mut self) -> Vec<Effect> {
-        self.dj_panel = Some(DjPanel::new(self.capabilities));
-        self.message = None;
-        Vec::new()
-    }
-
-    /// Keys while the panel is open. Left/right adjust the highlighted row;
-    /// everything else is navigation or one of the panel's own commands.
-    pub(super) fn handle_dj_action(&mut self, action: Action) -> Vec<Effect> {
-        if action == Action::Quit {
-            self.should_quit = true;
-            return vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)];
-        }
-        // The genre chooser sits over the panel and takes keys first.
-        if self.dj_panel.as_ref().is_some_and(|p| p.genres.is_some()) {
-            return self.handle_genre_action(action);
-        }
-
-        let Some(panel) = self.dj_panel.as_mut() else { return Vec::new() };
-        match action {
-            Action::Cancel | Action::ToggleAutoDj => {
-                self.dj_panel = None;
-                Vec::new()
-            }
-            Action::Up => {
-                panel.row = panel.row.saturating_sub(1);
-                Vec::new()
-            }
-            Action::Down => {
-                panel.row = (panel.row + 1).min(panel.rows.len().saturating_sub(1));
-                Vec::new()
-            }
-            Action::First => {
-                panel.row = 0;
-                Vec::new()
-            }
-            Action::Last => {
-                panel.row = panel.rows.len().saturating_sub(1);
-                Vec::new()
-            }
-            // `h`/`l` and the arrows both land here — `[`/`]` too, which is
-            // the same left/right shape.
-            Action::Back | Action::SeekBackward => self.adjust_dj_row(-1),
-            Action::SeekForward => self.adjust_dj_row(1),
-            Action::Activate | Action::Submit => match panel.selected() {
-                // Enter on the genre row opens the chooser; elsewhere it
-                // nudges the setting, matching what right-arrow does.
-                DjRow::Genres => self.open_genre_picker(),
-                _ => self.adjust_dj_row(1),
-            },
-            // `p` samples what these settings produce.
-            Action::Input('p') => self.sample_dj(),
-            _ => Vec::new(),
+    /// Enter on the highlighted row. The genre row opens the chooser and the
+    /// sample row asks for one; everything else nudges its value, matching
+    /// what the right arrow does.
+    pub(super) fn activate_dj_row(&mut self) -> Vec<Effect> {
+        match self.dj_panel.selected() {
+            DjRow::Genres => self.open_genre_picker(),
+            DjRow::Sample => self.sample_dj(),
+            _ => self.adjust_dj_row(1),
         }
     }
 
     /// Move the highlighted setting by one step. Numbers move in useful
     /// increments rather than by one, so a slider crosses its range in a
     /// handful of presses.
-    fn adjust_dj_row(&mut self, delta: i32) -> Vec<Effect> {
-        let Some(panel) = self.dj_panel.as_ref() else { return Vec::new() };
+    pub(super) fn adjust_dj_row(&mut self, delta: i32) -> Vec<Effect> {
+        let panel = &self.dj_panel;
         let step = |value: u32, by: i32, max: u32| -> u32 {
             (value as i32 + by).clamp(0, max as i32) as u32
         };
@@ -264,18 +115,24 @@ impl App {
                     step(self.dj.artist_cooldown, delta, dj::ARTIST_COOLDOWN_MAX);
             }
             DjRow::Genres => self.dj.genre_mode = self.dj.genre_mode.next(),
+            // Not a value: ←→ have nothing to move here, and Enter is what
+            // asks. Left alone rather than made to do something arbitrary.
+            DjRow::Sample => {}
         }
         Vec::new()
     }
 
     fn open_genre_picker(&mut self) -> Vec<Effect> {
-        let Some(panel) = self.dj_panel.as_mut() else { return Vec::new() };
-        panel.genres = Some(GenrePicker { loading: true, ..Default::default() });
+        self.dj_panel.genres = Some(GenrePicker { loading: true, ..Default::default() });
         vec![Effect::Api(ApiCmd::Genres)]
     }
 
-    fn handle_genre_action(&mut self, action: Action) -> Vec<Effect> {
-        let Some(panel) = self.dj_panel.as_mut() else { return Vec::new() };
+    pub(super) fn handle_genre_action(&mut self, action: Action) -> Vec<Effect> {
+        if action == Action::Quit {
+            self.should_quit = true;
+            return vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)];
+        }
+        let panel = &mut self.dj_panel;
         let Some(picker) = panel.genres.as_mut() else { return Vec::new() };
         match action {
             Action::Cancel | Action::Activate | Action::Submit => {
@@ -310,12 +167,11 @@ impl App {
     }
 
     fn sample_dj(&mut self) -> Vec<Effect> {
-        let Some(panel) = self.dj_panel.as_mut() else { return Vec::new() };
-        if panel.sample_pending {
+        if self.dj_panel.sample_pending {
             return Vec::new();
         }
-        panel.sample_pending = true;
-        panel.sample.clear();
+        self.dj_panel.sample_pending = true;
+        self.dj_panel.sample.clear();
         vec![Effect::Api(ApiCmd::AutoDjSample {
             request: self.dj_request(),
             count: DJ_SAMPLE_COUNT,
@@ -343,7 +199,7 @@ impl App {
     }
 
     /// `A` cycles the mode, which is the whole interaction most of the time;
-    /// the panel behind `D` is for the rest of it.
+    /// the Auto-DJ tab of the full-screen view is for the rest of it.
     pub(super) fn cycle_autodj(&mut self) -> Vec<Effect> {
         self.autodj = self.autodj.next_available(self.capabilities);
         self.info(format!("auto-dj: {}", self.autodj.label()));
@@ -364,25 +220,9 @@ impl App {
     pub(super) fn consume_dj(&mut self, event: Event) -> Vec<Effect> {
         match &event {
             Event::AutoDjPick { .. } => self.autodj_pending = false,
-            Event::AutoDjSample { .. } => {
-                if let Some(panel) = self.dj_panel.as_mut() {
-                    panel.sample_pending = false;
-                }
-            }
-            Event::Journey { length, .. } => {
-                // Only the arc still being asked for settles the wait: the
-                // reply to a length the user has since changed answers a
-                // request nobody is tracking any more.
-                if let Some(journey) = self.journey.as_mut()
-                    && journey.length == *length
-                {
-                    journey.pending = false;
-                }
-            }
+            Event::AutoDjSample { .. } => self.dj_panel.sample_pending = false,
             Event::Genres(_) => {
-                if let Some(picker) =
-                    self.dj_panel.as_mut().and_then(|panel| panel.genres.as_mut())
-                {
+                if let Some(picker) = self.dj_panel.genres.as_mut() {
                     picker.loading = false;
                 }
             }
@@ -391,36 +231,20 @@ impl App {
 
         match event {
             Event::AutoDjSample { tracks, pool, note } => {
-                if let Some(panel) = self.dj_panel.as_mut() {
-                    panel.sample = tracks;
-                    // Keep the last pool size when this pick didn't report
-                    // one: it still describes the settings on screen.
-                    panel.pool = pool.or(panel.pool.take());
-                }
+                self.dj_panel.sample = tracks;
+                // Keep the last pool size when this pick didn't report one:
+                // it still describes the settings on screen.
+                self.dj_panel.pool = pool.or(self.dj_panel.pool.take());
                 if let Some(note) = note {
                     self.info(note);
                 }
                 Vec::new()
             }
-            Event::Journey { stops, note, length } => {
-                // A journey the user closed while it was in flight stays
-                // closed, and one whose length has since been changed keeps
-                // waiting for the arc it actually asked for.
-                if let Some(journey) =
-                    self.journey.as_mut().filter(|journey| journey.length == length)
-                {
-                    journey.stops = stops;
-                    journey.offset = 0;
-                    if let Some(note) = note {
-                        self.info(note);
-                    }
-                }
-                Vec::new()
-            }
+            // The Sonic Path tab owns this one; it lands here only because
+            // the four discovery replies come through one door.
+            Event::Journey { stops, note, length } => self.consume_journey(stops, note, length),
             Event::Genres(genres) => {
-                if let Some(picker) =
-                    self.dj_panel.as_mut().and_then(|panel| panel.genres.as_mut())
-                {
+                if let Some(picker) = self.dj_panel.genres.as_mut() {
                     picker.all = genres.into_iter().map(|g| g.name).collect();
                     picker.row = picker.row.min(picker.all.len().saturating_sub(1));
                 }

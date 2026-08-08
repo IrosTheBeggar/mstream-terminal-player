@@ -102,6 +102,11 @@ pub struct Client {
     /// metadata, so the fallback costs one wasted request per session rather
     /// than one per folder.
     plain_listings: AtomicBool,
+    /// Set once this server has said it has no ffmpeg. Waveforms are the one
+    /// optional feature the ping does *not* advertise, so the house rule —
+    /// no flag, no probe — has nothing to read. This is the next best thing:
+    /// probe once, believe the answer, and stop asking for the session.
+    no_waveforms: AtomicBool,
 }
 
 impl Client {
@@ -130,7 +135,13 @@ impl Client {
         #[cfg(target_arch = "wasm32")]
         let http = reqwest::Client::new();
 
-        Ok(Client { http, base, token: None, plain_listings: AtomicBool::new(false) })
+        Ok(Client {
+            http,
+            base,
+            token: None,
+            plain_listings: AtomicBool::new(false),
+            no_waveforms: AtomicBool::new(false),
+        })
     }
 
     pub fn with_token(mut self, token: Option<String>) -> Self {
@@ -561,6 +572,79 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn playlist_load(&self, name: &str) -> Result<Vec<Track>, ApiError> {
         wait(self.playlist_load_async(name))
+    }
+
+    /// Write `files` to the playlist called `title`, creating it or replacing
+    /// its contents outright — the server's save is an overwrite, not an
+    /// append, and it says so by taking the whole list every time.
+    ///
+    /// The reply is `{}`, so there is nothing to read back; the unit type is
+    /// what says the call is only worth its success.
+    pub async fn playlist_save_async(
+        &self,
+        title: &str,
+        files: &[String],
+    ) -> Result<(), ApiError> {
+        let _: serde_json::Value = self
+            .post(
+                "api/v1/playlist/save",
+                serde_json::json!({ "title": title, "songs": files }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn playlist_save(&self, title: &str, files: &[String]) -> Result<(), ApiError> {
+        wait(self.playlist_save_async(title, files))
+    }
+
+    /// The shape of a track, for drawing under the progress bar.
+    ///
+    /// `None` is every flavour of "there isn't one", and none of them is an
+    /// error the user can do anything about:
+    ///
+    /// * **503** — the server has no ffmpeg. That is a property of the
+    ///   server, not the track, so it latches: every later call short-
+    ///   circuits and the session costs one wasted request rather than one
+    ///   per track.
+    /// * **500** — ffmpeg's own verdict on this content. The server writes a
+    ///   failure marker and will answer the same way forever, so this is a
+    ///   settled answer rather than something to retry.
+    /// * **404** — not in the database, or a federated track: mStream's
+    ///   federation stream puts waveforms out of scope deliberately, so a
+    ///   peer's track simply has no shape to fetch.
+    ///
+    /// The first call for a track the server hasn't seen can take as long as
+    /// ffmpeg takes to decode it — up to 30 seconds. Callers must treat this
+    /// as an enhancement that may arrive late, or never.
+    pub async fn waveform_async(&self, filepath: &str) -> Result<Option<Vec<u8>>, ApiError> {
+        if self.no_waveforms.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        // A vpath contains slashes, spaces and anything else a filename can,
+        // and this is the one endpoint here that takes one as a query
+        // parameter rather than in a JSON body.
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("filepath", filepath)
+            .finish();
+        match self.get::<WaveformResponse>(&format!("api/v1/db/waveform?{query}")).await {
+            // An empty array is "nothing to draw", not a flat line.
+            Ok(response) => Ok((!response.waveform.is_empty()).then_some(response.waveform)),
+            Err(ApiError::Server { status: 503, .. }) => {
+                self.no_waveforms.store(true, Ordering::Relaxed);
+                Ok(None)
+            }
+            Err(ApiError::Server { status: 500, .. })
+            | Err(ApiError::NotFound(_))
+            | Err(ApiError::Forbidden(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn waveform(&self, filepath: &str) -> Result<Option<Vec<u8>>, ApiError> {
+        wait(self.waveform_async(filepath))
     }
 
     /// The cover image a track's `album-art` metadata names — raw bytes,

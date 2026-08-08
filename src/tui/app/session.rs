@@ -8,7 +8,7 @@
 
 use crate::discovery::DiscoveredServer;
 
-use super::{Action, App, Effect};
+use super::{Action, App, Effect, Tab};
 use crate::tui::worker::{ApiCmd, AudioCmd, Event};
 
 /// Which server this session is talking to, as one value.
@@ -343,6 +343,15 @@ impl App {
                     self.session.username = username;
                 }
                 self.capabilities = crate::api::types::Capabilities::from(ping.as_ref());
+                // The Auto-DJ rows and the Sonic Path tab both turn on what
+                // the ping just said; a reconnect can be a different server.
+                self.dj_panel.rebuild(self.capabilities);
+                self.reset_sonic_path();
+                // A tab this server cannot serve is off the strip, so being
+                // left standing on one is being on a tab with no number.
+                if !self.tab.available(self.capabilities) {
+                    self.tab = Tab::Files;
+                }
                 self.libraries = ping.vpaths.clone();
                 // Cover filenames only mean anything to the server that
                 // minted them; a reconnect may be a different server.

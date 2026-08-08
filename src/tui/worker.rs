@@ -94,10 +94,17 @@ pub enum ApiCmd {
     Discover { node: DiscoverNode, seed: Box<Track> },
     Playlists,
     LoadPlaylist(String),
+    /// Write a whole track list to a playlist, creating it or replacing what
+    /// was there. Sonic Path's "save as playlist" is the only caller.
+    SavePlaylist { name: String, files: Vec<String> },
     Search(String),
     /// Fetch and decode one cover, named by the art file a track's metadata
     /// carries. The app caches the answer under that name.
     AlbumArt { file: String },
+    /// Fetch a track's shape for the progress bar. Keyed by filepath rather
+    /// than by an art file: a waveform belongs to one recording, not to an
+    /// album.
+    Waveform { filepath: String },
     Shutdown,
 }
 
@@ -315,6 +322,9 @@ pub enum Event {
     Discover { node: DiscoverNode, data: DiscoverData, note: Option<String> },
     Playlists(Vec<PlaylistSummary>),
     PlaylistTracks { name: String, tracks: Vec<Track> },
+    /// A playlist was written. Carries the name so the confirmation can say
+    /// which one, and how many tracks went into it.
+    PlaylistSaved { name: String, count: usize },
     /// `query` is the search these results answer — replies can pass each
     /// other now, and the box's contents name the one still wanted.
     SearchResults { query: String, results: Box<SearchResults> },
@@ -322,6 +332,10 @@ pub enum Event {
     /// kind of failure. Art is a nicety: nothing about it is ever worth a
     /// message the user has to read.
     AlbumArt { file: String, art: Option<art::Art> },
+    /// A track's shape, or `None` for every flavour of "there isn't one".
+    /// Like art, never worth a message: the bar it decorates draws perfectly
+    /// well without it.
+    Waveform { filepath: String, bars: Option<Vec<u8>> },
     /// Credentials are missing or expired — the UI drops back to the
     /// connect screen.
     Unauthorized,
@@ -820,6 +834,10 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         ApiCmd::LoadPlaylist(name) => {
             c.playlist_load(&name).map(|tracks| Event::PlaylistTracks { name, tracks })
         }
+        ApiCmd::SavePlaylist { name, files } => {
+            let count = files.len();
+            c.playlist_save(&name, &files).map(|()| Event::PlaylistSaved { name, count })
+        }
         ApiCmd::Search(query) => {
             c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r) })
         }
@@ -830,6 +848,14 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
             // render loop only ever meets covers already at terminal scale.
             let art = c.album_art(&file).ok().and_then(|bytes| art::decode(&bytes));
             Ok(Event::AlbumArt { file, art })
+        }
+        ApiCmd::Waveform { filepath } => {
+            // Same rule as art: a shape nobody could draw is not news. The
+            // client already folds the server's four ways of saying "no
+            // waveform" into `None`; anything left is a real transport
+            // failure, and even that is worth less than a message here.
+            let bars = c.waveform(&filepath).ok().flatten();
+            Ok(Event::Waveform { filepath, bars })
         }
         // The connection commands never reach here; api_loop keeps them.
         ApiCmd::Connect { .. }
