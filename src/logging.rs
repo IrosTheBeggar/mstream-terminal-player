@@ -26,14 +26,26 @@
 //! have their own recorder (`MSTREAM_ENGINE_TRACE`, engine::trace), which
 //! also collects the `stderrln!` diagnostics the TUI would otherwise
 //! silence — the two files answer different questions and stay separate.
+//!
+//! The browser build keeps the level type and the switches — the Settings
+//! tab that drives them is drawing code wasm compiles unchanged — and drops
+//! the half that needs a filesystem. Nothing installs a subscriber there,
+//! so Write log honestly answers "no file could be opened", and a browser's
+//! own devtools console stays where its diagnostics live.
 
 use std::fs::{self, File};
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::OnceLock;
 
+#[cfg(not(target_arch = "wasm32"))]
 use tracing_subscriber::layer::SubscriberExt;
+#[cfg(not(target_arch = "wasm32"))]
 use tracing_subscriber::util::SubscriberInitExt;
+#[cfg(not(target_arch = "wasm32"))]
 use tracing_subscriber::{EnvFilter, Registry, reload};
 
 /// How many rotated predecessors the default location keeps.
@@ -77,10 +89,13 @@ impl Level {
 /// The file events land in, arriving whenever logging is first turned on.
 /// The subscriber is installed before any file may exist, so its writer
 /// looks here on every event; empty means the words go nowhere.
+#[cfg(not(target_arch = "wasm32"))]
 static SINK: Mutex<Option<File>> = Mutex::new(None);
 
+#[cfg(not(target_arch = "wasm32"))]
 struct LateWriter;
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LateWriter {
     type Writer = LateGuard;
     fn make_writer(&'a self) -> LateGuard {
@@ -88,8 +103,10 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LateWriter {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct LateGuard;
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Write for LateGuard {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match &mut *SINK.lock().unwrap() {
@@ -109,6 +126,7 @@ impl Write for LateGuard {
 /// the Settings rows read back: whether we are writing, how loud, and to
 /// which file (which outlives turning writing off, so the viewer can still
 /// show what was captured).
+#[cfg(not(target_arch = "wasm32"))]
 static HANDLE: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
 static STATE: Mutex<State> = Mutex::new(State { write: false, level: Level::Info, path: None });
 
@@ -171,6 +189,7 @@ fn resolve_target(target: Target) -> Option<PathBuf> {
 }
 
 /// Truncate `path` into a fresh signed file and point the writer at it.
+#[cfg(not(target_arch = "wasm32"))]
 fn open_sink(path: &Path) -> bool {
     let Ok(mut file) = File::create(path) else { return false };
     let _ = writeln!(
@@ -194,6 +213,7 @@ fn settled_from_config(write: Option<bool>, level_text: &str) -> (bool, Level) {
 
 /// The filter the current switches mean. Silence when the write switch is
 /// off; otherwise the level — unless `RUST_LOG` is set, which knows better.
+#[cfg(not(target_arch = "wasm32"))]
 fn filter_for(write: bool, level: Level) -> EnvFilter {
     if !write {
         return EnvFilter::new("off");
@@ -207,6 +227,7 @@ fn filter_for(write: bool, level: Level) -> EnvFilter {
 /// Install the subscriber and apply whatever the environment and config ask
 /// for. Call once, first thing in main — anything that dials before this
 /// speaks into the void. Returns the active path, for the boot line.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn init() -> Option<PathBuf> {
     let env_target = wants(std::env::var("MSTREAM_LOG").ok().as_deref());
     let (config_write, level) = crate::config::load()
@@ -243,13 +264,44 @@ pub fn init() -> Option<PathBuf> {
     path.filter(|_| write)
 }
 
+/// Whether a subscriber exists to hear anything at all. False in the
+/// browser build (no filesystem to write to), and in unit tests and
+/// embeddings where `init` never ran — a file opened for either would
+/// receive nothing, so the switch honestly refuses rather than littering.
+#[cfg(not(target_arch = "wasm32"))]
+fn subscriber_ready() -> bool {
+    HANDLE.get().is_some()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn subscriber_ready() -> bool {
+    false
+}
+
+/// Point the live subscriber at what the switches now say.
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_filter(write: bool, level: Level) {
+    if let Some(handle) = HANDLE.get() {
+        let _ = handle.reload(filter_for(write, level));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn apply_filter(_write: bool, _level: Level) {}
+
+/// Unreachable in the browser build — `set_write` turns back at
+/// [`subscriber_ready`] before any path is resolved — but the shared code
+/// path names it, so it exists and refuses.
+#[cfg(target_arch = "wasm32")]
+fn open_sink(_path: &Path) -> bool {
+    false
+}
+
 /// Flip whether anything is written, from the Settings tab. Turning it on
 /// for the first time opens the file (the default location, rotated) if the
 /// session started without one. Returns the file now in use when on.
 pub fn set_write(on: bool) -> Option<PathBuf> {
-    // No subscriber (init never ran — unit tests, embedding) means a file
-    // would receive nothing; opening one would be litter.
-    if HANDLE.get().is_none() {
+    if !subscriber_ready() {
         return None;
     }
     let mut state = STATE.lock().unwrap();
@@ -257,9 +309,7 @@ pub fn set_write(on: bool) -> Option<PathBuf> {
         state.path = resolve_target(Target::Default).filter(|p| open_sink(p));
     }
     state.write = on && state.path.is_some();
-    if let Some(handle) = HANDLE.get() {
-        let _ = handle.reload(filter_for(state.write, state.level));
-    }
+    apply_filter(state.write, state.level);
     state.path.clone().filter(|_| state.write)
 }
 
@@ -268,10 +318,8 @@ pub fn set_write(on: bool) -> Option<PathBuf> {
 pub fn set_level(level: Level) {
     let mut state = STATE.lock().unwrap();
     state.level = level;
-    if state.write
-        && let Some(handle) = HANDLE.get()
-    {
-        let _ = handle.reload(filter_for(true, level));
+    if state.write {
+        apply_filter(true, level);
     }
 }
 
