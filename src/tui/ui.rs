@@ -1369,6 +1369,7 @@ fn now_keys_hint(app: &App) -> &'static str {
     match app.now_tab() {
         NowTab::Queue => "1-5 tab   ↑↓ list   Enter play   d remove   0 back",
         NowTab::AutoDj => "1-5 tab   ↑↓ choose   ←→ adjust   Enter set   0 back",
+        NowTab::Discover => "1-5 tab   ↑↓ list   Enter play   a queue   0 back",
         NowTab::Visualizer if app.viz.mode.plots_samples() => {
             "1-5 tab   v mode   . dots   0 back"
         }
@@ -1399,9 +1400,7 @@ fn render_now_panel(frame: &mut Frame, area: Rect, app: &mut App) {
         NowTab::Lyrics => {
             render_now_placeholder(frame, content, "words go here", "not wired up yet")
         }
-        NowTab::Discover => {
-            render_now_placeholder(frame, content, "what this sounds like", "not wired up yet")
-        }
+        NowTab::Discover => render_now_discover(frame, content, app),
         NowTab::Visualizer => render_now_visualizer(frame, content, app),
     }
 }
@@ -1464,6 +1463,76 @@ fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
         app.viz.draw(&mut canvas, &app.heard, sounding, cover);
         frame.render_widget(Paragraph::new(canvas.into_lines()), picture);
     }
+}
+
+/// What the track on the speakers sounds like, as neighbours you can play.
+///
+/// A list rather than the browser tab's drill: this panel follows what is
+/// playing and has one question to ask about it. The rows are the server's
+/// nearest matches in order, so the number beside each one is its rank, not
+/// a position in a queue.
+fn render_now_discover(frame: &mut Frame, area: Rect, app: &mut App) {
+    let Some(shown) = &app.now_discover else {
+        return render_now_placeholder(
+            frame,
+            area,
+            "what this sounds like",
+            "nothing playing to compare against",
+        );
+    };
+    if shown.pending {
+        return render_now_placeholder(
+            frame,
+            area,
+            "what this sounds like",
+            &format!("{} looking…", spinner_frame(app)),
+        );
+    }
+    if shown.tracks.is_empty() {
+        // The server's own words when it has them — an unanalysed track and
+        // a library with nothing close are different answers.
+        let why = shown.note.clone().unwrap_or_else(|| "nothing close in your library".into());
+        return render_now_placeholder(frame, area, "what this sounds like", &why);
+    }
+
+    let width = area.width as usize;
+    let mut state = ListState::default().with_selected(Some(app.now_scroll));
+    let (window, mut visible) = visible_rows(&mut state, shown.tracks.len(), area.height);
+    let playing = app.now_playing.as_ref().map(|t| t.filepath.as_str());
+
+    let items: Vec<ListItem> = shown.tracks[window.clone()]
+        .iter()
+        .enumerate()
+        .map(|(row, track)| {
+            let rank = window.start + row + 1;
+            // Already on the speakers — the seed's nearest neighbour is
+            // sometimes another copy of the seed.
+            let style = if playing == Some(track.filepath.as_str()) {
+                Style::new().fg(accent()).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new()
+            };
+            let name = format!("{rank:>2}. {}", track.display_name());
+            let Some(duration) = track.metadata.duration else {
+                return ListItem::new(Line::from(Span::styled(fit(&name, width), style)));
+            };
+            let time = fmt_duration(duration);
+            let time_width = width_of(&time);
+            let name = fit(&name, width.saturating_sub(time_width + 1));
+            let gap = width.saturating_sub(width_of(&name) + time_width).max(1);
+            ListItem::new(Line::from(vec![
+                Span::styled(name, style),
+                Span::raw(" ".repeat(gap)),
+                Span::styled(time, Style::new().fg(dim())),
+            ]))
+        })
+        .collect();
+
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+        area,
+        &mut visible,
+    );
 }
 
 fn render_now_placeholder(frame: &mut Frame, area: Rect, what: &str, why: &str) {
@@ -4037,6 +4106,8 @@ mod tests {
                 },
             ]),
             note: None,
+            dest: crate::tui::worker::DiscoverDest::Browser,
+            seed: String::new(),
         });
         let text = draw(&mut app);
         assert!(text.contains("Artists like Seed Artist"), "got:\n{text}");

@@ -91,7 +91,7 @@ pub enum ApiCmd {
     /// Walk from one track to another through the embedding space.
     Journey { start: String, end: String, length: u32 },
     /// Fill a Discover view. `seed` is the track it all hangs off.
-    Discover { node: DiscoverNode, seed: Box<Track> },
+    Discover { node: DiscoverNode, seed: Box<Track>, dest: DiscoverDest },
     /// Write a whole track list to a playlist, creating it or replacing what
     /// was there. Sonic Path's "save as playlist" is the only caller.
     SavePlaylist { name: String, files: Vec<String> },
@@ -142,6 +142,21 @@ pub enum DiscoverNode {
 pub enum DiscoverData {
     Tracks(Vec<Track>),
     Artists(Vec<SimilarArtist>),
+}
+
+/// Which Discover surface asked, echoed back on the reply.
+///
+/// Two of them want the same data about different seeds: the browser tab
+/// drills from a seed it captured when you opened it, and the now-playing
+/// panel follows whatever is on the speakers. Carrying the destination is
+/// what audit #64 asks for — the alternative is a second command whose only
+/// job is to be a different variant name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoverDest {
+    /// The Discover tab in the browser.
+    Browser,
+    /// The Discover tab of the full-screen view.
+    NowPlaying,
 }
 
 /// A position in the tag-based library hierarchy. Doubles as the request (what
@@ -323,7 +338,16 @@ pub enum Event {
     /// arc while one is still in flight is a race the UI can lose.
     Journey { stops: Vec<JourneyStop>, note: Option<String>, length: u32 },
     /// A Discover view's contents, tagged with the node they belong to.
-    Discover { node: DiscoverNode, data: DiscoverData, note: Option<String> },
+    /// `seed` is the filepath it was asked about. The browser tab tells a
+    /// stale reply by its node; the now-playing panel follows the speakers,
+    /// where the node never changes and the seed is the only thing that does.
+    Discover {
+        node: DiscoverNode,
+        data: DiscoverData,
+        note: Option<String>,
+        dest: DiscoverDest,
+        seed: String,
+    },
     /// A playlist was written. Carries the name so the confirmation can say
     /// which one, and how many tracks went into it.
     PlaylistSaved { name: String, count: usize },
@@ -831,7 +855,9 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         ApiCmd::Journey { start, end, length } => {
             crate::api::wait(journey(c, &start, &end, length))
         }
-        ApiCmd::Discover { node, seed } => crate::api::wait(discover(c, &node, &seed)),
+        ApiCmd::Discover { node, seed, dest } => {
+            crate::api::wait(discover(c, &node, &seed, dest))
+        }
         ApiCmd::SavePlaylist { name, files } => {
             let count = files.len();
             c.playlist_save(&name, &files).map(|()| Event::PlaylistSaved { name, count })
@@ -1215,11 +1241,14 @@ pub(crate) async fn discover(
     client: &Client,
     node: &DiscoverNode,
     seed: &Track,
+    dest: DiscoverDest,
 ) -> Result<Event, ApiError> {
     let disabled = |data| Event::Discover {
         node: node.clone(),
         data,
         note: Some("discovery is switched off on this server".into()),
+        dest,
+        seed: seed.filepath.clone(),
     };
 
     match node {
@@ -1229,6 +1258,8 @@ pub(crate) async fn discover(
             node: node.clone(),
             data: DiscoverData::Tracks(Vec::new()),
             note: None,
+            dest,
+            seed: seed.filepath.clone(),
         }),
 
         DiscoverNode::Tracks => {
@@ -1250,6 +1281,8 @@ pub(crate) async fn discover(
                     found.results.into_iter().map(|r| r.into_track()).collect(),
                 ),
                 note,
+                dest,
+                seed: seed.filepath.clone(),
             })
         }
 
@@ -1260,6 +1293,8 @@ pub(crate) async fn discover(
                     node: node.clone(),
                     data: DiscoverData::Artists(Vec::new()),
                     note: Some("this track has no artist tag to compare against".into()),
+                    dest,
+                    seed: seed.filepath.clone(),
                 });
             };
             let Some(found) = client.similar_artists_async(artist, DISCOVER_LIMIT).await? else {
@@ -1283,6 +1318,8 @@ pub(crate) async fn discover(
                 node: node.clone(),
                 data: DiscoverData::Artists(found.results),
                 note,
+                dest,
+                seed: seed.filepath.clone(),
             })
         }
     }

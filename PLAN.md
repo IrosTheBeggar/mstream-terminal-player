@@ -1030,6 +1030,35 @@ Two things fell out of the move rather than being designed in:
 `Tab::ALL` is `[Files, Library, Search, Discover, SonicPath, Settings]`, and
 the digits move with it: Search is 3, Discover 4, Sonic Path 5, Settings 6.
 
+#### D7 — The now-playing Discover panel ✅ 2026-08-08
+
+The second of the two `"not wired up yet"` placeholders. It shows the
+server's nearest neighbours to whatever is on the speakers, in order, and
+re-asks when the track changes.
+
+- **A destination on the command, not a second command.** Both surfaces ask
+  for `DiscoverNode::Tracks` about different seeds, so their replies had to
+  be told apart. `ApiCmd::Discover` and `Event::Discover` carry a
+  `DiscoverDest` — exactly what audit #64 asks for, against the alternative
+  of a variant whose only job is to be a different name.
+- **And a seed on the reply.** The browser tab tells a stale answer by its
+  node, because walking around changes the node. This panel's node never
+  changes — it is always "tracks like the seed" — so the seed is the only
+  thing that can say which track an answer is about. Without it, a reply for
+  the track that just ended would land under the name of the one now
+  playing.
+- **The refresh rides the dispatch funnel**, like the waveform prefetch:
+  "the track changed" and "the tab opened" are two events with one answer,
+  and a panel that asks whenever what it holds disagrees with what is
+  sounding cannot be left describing the wrong song. It asks nothing while
+  the tab is not the one being looked at.
+- **`Enter` queues and plays; `a` queues.** Neither replaces the queue,
+  which is what the browser's `Enter` on a track row does — reasonable while
+  browsing, wrong in the middle of listening to the thing you are getting
+  recommendations from.
+
+Lyrics is now the last placeholder on that strip.
+
 ### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
 Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install
 matrix, then the "later" items inside the same three days: one-line installers for sh and

@@ -117,9 +117,11 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
-        ApiCmd::Discover { node, seed } => {
-            with_session(session, async |s| worker::discover(&s.client, &node, &seed).await)
-                .await
+        ApiCmd::Discover { node, seed, dest } => {
+            with_session(session, async |s| {
+                worker::discover(&s.client, &node, &seed, dest).await
+            })
+            .await
         }
 
         ApiCmd::SavePlaylist { name, files } => {

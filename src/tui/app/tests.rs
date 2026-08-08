@@ -900,6 +900,123 @@ fn opening_a_folder_spins_instead_of_showing_the_one_you_left() {
     assert_eq!(app.files.entries.len(), 2, "'..' and the track");
 }
 
+/// Put the cursor on the full-screen view's Discover tab.
+fn on_the_now_discover_tab(app: &mut App) {
+    app.handle_action(Action::ToggleNowPlaying);
+    while app.now_tab() != NowTab::Discover {
+        app.handle_action(Action::NowTabNext);
+    }
+}
+
+#[test]
+fn the_now_playing_discover_panel_follows_what_is_on_the_speakers() {
+    let mut app = connected_app();
+    app.queue.replace(vec![track("first"), track("second")]);
+    app.play_index(0);
+
+    // Nothing is asked until the panel is the one being looked at — the
+    // whole view is otherwise costing a request per track change.
+    assert!(app.now_discover.is_none());
+
+    on_the_now_discover_tab(&mut app);
+    let asked = |effects: &[Effect]| {
+        effects.iter().find_map(|e| match e {
+            Effect::Api(ApiCmd::Discover { seed, dest: DiscoverDest::NowPlaying, .. }) => {
+                Some(seed.filepath.clone())
+            }
+            _ => None,
+        })
+    };
+    // Opening the tab is itself a dispatch, so the ask rides out with it.
+    let effects = app.handle_action(Action::NowTabNext);
+    app.handle_action(Action::NowTabPrev);
+    assert!(app.now_discover.as_ref().unwrap().pending || asked(&effects).is_some());
+    assert_eq!(app.now_discover.as_ref().unwrap().seed, "first");
+
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![track("near-one"), track("near-two")]),
+        note: None,
+        dest: DiscoverDest::NowPlaying,
+        seed: "first".into(),
+    });
+    let shown = app.now_discover.as_ref().unwrap();
+    assert!(!shown.pending);
+    assert_eq!(shown.tracks.len(), 2);
+
+    // `a` queues the row under the cursor rather than reaching past the
+    // panel to whatever the hidden browser had selected.
+    app.handle_action(Action::Down);
+    app.handle_action(Action::AddToQueue);
+    assert_eq!(app.queue.items.last().unwrap().filepath, "near-two");
+
+    // Enter queues it and starts it — without throwing away the queue you
+    // are in the middle of, which is what the browser's Enter would do.
+    let before = app.queue.items.len();
+    let effects = app.handle_action(Action::Activate);
+    assert_eq!(app.queue.items.len(), before + 1);
+    assert_eq!(app.queue.items[app.queue.current.unwrap()].filepath, "near-two");
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+}
+
+#[test]
+fn a_neighbour_list_for_the_track_before_this_one_is_dropped() {
+    // The node never changes here — it is always "tracks like the seed" —
+    // so the seed is the only thing that can tell a stale reply apart.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("first"), track("second")]);
+    app.play_index(0);
+    on_the_now_discover_tab(&mut app);
+    assert_eq!(app.now_discover.as_ref().unwrap().seed, "first");
+
+    app.handle_action(Action::NextTrack);
+    assert_eq!(app.now_discover.as_ref().unwrap().seed, "second", "it re-aims itself");
+
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![track("stale")]),
+        note: None,
+        dest: DiscoverDest::NowPlaying,
+        seed: "first".into(),
+    });
+    let shown = app.now_discover.as_ref().unwrap();
+    assert!(shown.tracks.is_empty(), "the last song's neighbours are not this one's");
+    assert!(shown.pending, "still waiting on the one asked for");
+
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![track("fresh")]),
+        note: None,
+        dest: DiscoverDest::NowPlaying,
+        seed: "second".into(),
+    });
+    assert_eq!(app.now_discover.as_ref().unwrap().tracks[0].filepath, "fresh");
+}
+
+#[test]
+fn the_two_discover_surfaces_do_not_answer_each_other() {
+    // The browser tab drills from a seed it captured on the way in; the
+    // panel follows the speakers. Both ask for `DiscoverNode::Tracks`, so
+    // only the destination keeps their replies apart.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("playing")]);
+    app.play_index(0);
+    on_the_now_discover_tab(&mut app);
+
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![track("browser-answer")]),
+        note: None,
+        dest: DiscoverDest::Browser,
+        seed: "playing".into(),
+    });
+    assert!(
+        app.now_discover.as_ref().unwrap().tracks.is_empty(),
+        "the browser tab's reply is not the panel's"
+    );
+    assert!(app.now_discover.as_ref().unwrap().pending);
+}
+
 #[test]
 fn opening_a_playlist_spins_instead_of_showing_the_list_of_playlists() {
     let mut app = connected_app();
@@ -2138,7 +2255,7 @@ fn similar_tracks_are_ordinary_playable_rows() {
     let effects = app.handle_action(Action::Activate);
     assert!(matches!(
         effects.as_slice(),
-        [Effect::Api(ApiCmd::Discover { node: DiscoverNode::Tracks, seed })]
+        [Effect::Api(ApiCmd::Discover { node: DiscoverNode::Tracks, seed, dest: DiscoverDest::Browser })]
             if seed.filepath == "seed"
     ));
 
@@ -2146,6 +2263,8 @@ fn similar_tracks_are_ordinary_playable_rows() {
         node: DiscoverNode::Tracks,
         data: DiscoverData::Tracks(vec![track("near-one"), track("near-two")]),
         note: None,
+        dest: DiscoverDest::Browser,
+        seed: String::new(),
     });
     // Parent row plus the two neighbours, and Enter plays them like any
     // other list — no new concept to learn.
@@ -2174,6 +2293,8 @@ fn an_artist_drills_into_its_ways_in_without_asking_again() {
             similar_artist("Other", 0.80, &[]),
         ]),
         note: None,
+        dest: DiscoverDest::Browser,
+        seed: String::new(),
     });
     assert_eq!(app.discover.entries.len(), 3, "parent plus two artists");
 
@@ -2201,6 +2322,8 @@ fn a_discover_reply_for_a_view_already_left_is_dropped() {
         node: DiscoverNode::Tracks,
         data: DiscoverData::Tracks(vec![track("late")]),
         note: None,
+        dest: DiscoverDest::Browser,
+        seed: String::new(),
     });
     assert_eq!(*app.discover_node(), DiscoverNode::Root);
     assert_eq!(app.discover.entries.len(), 2, "still the mode menu");

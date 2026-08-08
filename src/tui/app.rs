@@ -21,7 +21,8 @@ use crate::player::PlayerStatus;
 use crate::tui::art::Art;
 
 use super::worker::{
-    ApiCmd, AudioCmd, AutoDjMode, DiscoverData, DiscoverNode, DjRequest, Event, LibraryData,
+    ApiCmd, AudioCmd, AutoDjMode, DiscoverData, DiscoverDest, DiscoverNode, DjRequest, Event,
+    LibraryData,
     LibraryNode,
 };
 
@@ -919,6 +920,29 @@ impl SonicPath {
     }
 }
 
+/// What the full-screen view's Discover tab is showing.
+///
+/// Deliberately not the browser tab's state. That one is a drill anchored on
+/// a seed captured when you opened it, and it stays put while you walk
+/// around inside it; this one follows whatever is on the speakers and has
+/// one view. Sharing them would mean drilling into an artist in the browser
+/// silently changing what "what this sounds like" says about the track you
+/// are listening to.
+#[derive(Debug)]
+pub struct NowDiscover {
+    /// The filepath it was asked for. A reply naming anything else is about
+    /// a track that has since finished, and the panel is already showing the
+    /// next one's wait.
+    pub seed: String,
+    pub tracks: Vec<Track>,
+    pub pending: bool,
+    /// Why the list is short or empty, in the server's own words — an
+    /// unanalysed track, a library with nothing close, discovery switched
+    /// off. Kept here rather than flashed in the footer: it describes what
+    /// is on screen.
+    pub note: Option<String>,
+}
+
 /// Choosing which genres the filter applies to.
 #[derive(Debug, Default)]
 pub struct GenrePicker {
@@ -997,6 +1021,8 @@ pub struct App {
     pub discover_seed: Option<Track>,
     /// The last artist list, kept so drilling into one of them costs nothing.
     pub discover_artists: Vec<crate::api::types::SimilarArtist>,
+    /// The full-screen view's own Discover panel, once it has asked.
+    pub now_discover: Option<NowDiscover>,
     pub search: Pane,
     pub query: String,
     pub editing_query: bool,
@@ -1181,6 +1207,7 @@ impl App {
             settings_stack: Drill::new(SettingsNode::Root),
             discover_seed: None,
             discover_artists: Vec::new(),
+            now_discover: None,
             search: Pane::default(),
             query: String::new(),
             editing_query: false,
@@ -1573,6 +1600,7 @@ impl App {
         // edit that changes what comes next also changes which shape is
         // being fetched ahead of it.
         effects.extend(self.prefetch_waveform());
+        effects.extend(self.refresh_now_discover());
         self.note_pending(&effects);
         effects
     }
@@ -1958,6 +1986,14 @@ impl App {
                 return Vec::new();
             }
             self.now_scroll = self.now_scroll.saturating_add_signed(delta);
+            // Discover is a list to pick from rather than text to scroll, so
+            // its cursor stops at the last neighbour instead of walking off
+            // the end into nothing.
+            if self.now_tab() == NowTab::Discover
+                && let Some(shown) = &self.now_discover
+            {
+                self.now_scroll = self.now_scroll.min(shown.tracks.len().saturating_sub(1));
+            }
             return Vec::new();
         }
         match self.focus {
@@ -1982,6 +2018,16 @@ impl App {
         if self.fullscreen {
             if self.on_dj_tab() {
                 return self.activate_dj_row();
+            }
+            // Enter on a neighbour queues it and starts it — the two things
+            // you want from "this sounds like it" while something plays.
+            // Deliberately not the browser's replace-the-queue-with-this-
+            // listing: you are in the middle of listening to the queue.
+            if let Some(track) = self.now_discover_selected() {
+                let label = track.display_name();
+                self.queue.push(track);
+                self.info(format!("playing {label}"));
+                return self.play_index(self.queue.items.len() - 1);
             }
             if self.now_tab() != NowTab::Queue {
                 return Vec::new();
@@ -2483,7 +2529,49 @@ impl App {
             self.error("play or highlight a track first — discovery needs somewhere to start");
             return Vec::new();
         };
-        vec![Effect::Api(ApiCmd::Discover { node, seed: Box::new(seed) })]
+        vec![Effect::Api(ApiCmd::Discover {
+            node,
+            seed: Box::new(seed),
+            dest: DiscoverDest::Browser,
+        })]
+    }
+
+    /// Keep the full-screen Discover panel pointed at what is playing.
+    ///
+    /// Rides the dispatch funnel rather than hanging off "the track changed"
+    /// and "the tab opened" separately: those are two events with one answer,
+    /// and a panel that asks whenever what it holds does not match what is
+    /// sounding cannot be left describing the track before this one. The
+    /// cache is the guard against asking twice — an entry exists from the
+    /// moment the request goes out.
+    fn refresh_now_discover(&mut self) -> Option<Effect> {
+        if !self.fullscreen || self.now_tab() != NowTab::Discover {
+            return None;
+        }
+        let seed = self.now_playing.clone()?;
+        if self.now_discover.as_ref().is_some_and(|shown| shown.seed == seed.filepath) {
+            return None;
+        }
+        self.now_discover = Some(NowDiscover {
+            seed: seed.filepath.clone(),
+            tracks: Vec::new(),
+            pending: true,
+            note: None,
+        });
+        self.now_scroll = 0;
+        Some(Effect::Api(ApiCmd::Discover {
+            node: DiscoverNode::Tracks,
+            seed: Box::new(seed),
+            dest: DiscoverDest::NowPlaying,
+        }))
+    }
+
+    /// The similar track under the cursor, when that panel is what is up.
+    fn now_discover_selected(&self) -> Option<Track> {
+        if !self.fullscreen || self.now_tab() != NowTab::Discover {
+            return None;
+        }
+        self.now_discover.as_ref()?.tracks.get(self.now_scroll).cloned()
     }
 
     /// Put the cursor back on the playing track.
@@ -2543,6 +2631,20 @@ impl App {
     }
 
     fn add_selected_to_queue(&mut self) -> Vec<Effect> {
+        // The full-screen Discover panel has a highlighted row of its own,
+        // and `a` means there what it means everywhere else. Without this it
+        // would reach past the panel to whatever the hidden browser had
+        // under its cursor.
+        if let Some(track) = self.now_discover_selected() {
+            let label = track.display_name();
+            let was_empty = self.queue.items.is_empty();
+            self.queue.push(track);
+            self.info(format!("queued {label}"));
+            if was_empty && self.status.is_idle() {
+                return self.play_index(0);
+            }
+            return Vec::new();
+        }
         if self.focus != Focus::Browser {
             return Vec::new();
         }
@@ -2897,6 +2999,7 @@ impl App {
         let mut effects = self.consume(event);
         effects.extend(self.refresh_prepared());
         effects.extend(self.prefetch_waveform());
+        effects.extend(self.refresh_now_discover());
         self.note_pending(&effects);
         effects
     }
@@ -3067,7 +3170,28 @@ impl App {
                 self.message = None;
                 Vec::new()
             }
-            Event::Discover { node, data, note } => {
+            // The full-screen panel's own answer, told apart from the
+            // browser tab's by the destination it carried out with it.
+            Event::Discover { data, note, seed, dest: DiscoverDest::NowPlaying, .. } => {
+                let tracks = match data {
+                    DiscoverData::Tracks(tracks) => tracks,
+                    // It only ever asks for tracks; anything else is a reply
+                    // to a question this panel did not put.
+                    DiscoverData::Artists(_) => return Vec::new(),
+                };
+                // A reply about the track before this one describes a wait
+                // that is already over. Taking it would put the last song's
+                // neighbours under the name of this one.
+                let Some(shown) = self.now_discover.as_mut().filter(|s| s.seed == seed) else {
+                    return Vec::new();
+                };
+                shown.pending = false;
+                shown.tracks = tracks;
+                shown.note = note;
+                self.now_scroll = 0;
+                Vec::new()
+            }
+            Event::Discover { node, data, note, dest: DiscoverDest::Browser, .. } => {
                 // Drop a reply for a view the user has already left, the same
                 // rule the Library tab follows.
                 if !self.discover_stack.wants(&node) {

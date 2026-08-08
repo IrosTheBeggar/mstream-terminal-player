@@ -409,14 +409,17 @@ everywhere.
 
 **Queue** shares the browser screen's selection, so `Enter` plays and `d`
 removes the row under the cursor either way. **Auto-DJ** is where Auto-DJ is
-*set*, not just reported. **Lyrics** appears only for a track the server has
-words for, so the strip
+*set*, not just reported. **Discover** is what the track on the speakers
+sounds like — the server's nearest neighbours in order, re-asked whenever
+the track changes. `Enter` queues one and starts it, `a` just queues it;
+neither throws away the queue you are in the middle of, which is the one
+thing the browser's Discover tab does differently. **Lyrics** appears only
+for a track the server has words for, so the strip
 changes shape as the queue moves. **Discover** needs the server's index. Where
 the strip won't fit, it shows the tab you're on between arrows rather than
 truncating the last name.
 
-Lyrics, Discover and the visualizer are stubs for now; the layout is what's
-real.
+Lyrics is the last stub; everything else on the strip does what it says.
 
 ## Auto-DJ
 
