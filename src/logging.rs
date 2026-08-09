@@ -98,9 +98,14 @@ impl Level {
 }
 
 /// How many formatted lines the ring holds. Deep enough to scroll a real
-/// session in the viewer, shallow enough that holding it costs a few
-/// hundred kilobytes at worst.
+/// session in the viewer.
 const RING_LINES: usize = 2_000;
+
+/// And how much memory those lines may occupy. The line count alone was not
+/// a ceiling: 2 000 lines at the [`RING_LINE_CAP`] limit is 128 MiB, which
+/// is not the "few hundred kilobytes" the count implies (PR #5 review).
+/// Whichever bound is reached first evicts the oldest.
+const RING_BYTES: usize = 2 * 1024 * 1024;
 
 /// A guard on the one pathological input: an event whose formatted line
 /// never ends. Past this the pending line is flushed as-is rather than
@@ -117,6 +122,9 @@ struct Ring {
     /// what lets writing resume without either losing the stretch captured
     /// while it was off or repeating the stretch already in the file.
     total: u64,
+    /// What the held lines weigh, kept as they come and go so the ceiling
+    /// costs no walk.
+    bytes: usize,
     lines: VecDeque<String>,
     /// The tail of a line the writer has not finished handing over: the fmt
     /// layer may deliver one event in several writes, and half a line in
@@ -141,11 +149,24 @@ impl Ring {
     }
 
     fn push_line(&mut self, line: String) {
-        if self.lines.len() == RING_LINES {
-            self.lines.pop_front();
-        }
+        self.bytes += line.len();
         self.lines.push_back(line);
         self.total += 1;
+        // Never below one line: a single event longer than the whole budget
+        // should cost the ring its history, not its last word.
+        while self.lines.len() > 1 && (self.lines.len() > RING_LINES || self.bytes > RING_BYTES)
+        {
+            match self.lines.pop_front() {
+                Some(gone) => self.bytes -= gone.len(),
+                None => break,
+            }
+        }
+    }
+
+    /// The last `max` lines, oldest first — the shape the viewer reads.
+    fn tail(&self, max: usize) -> Vec<String> {
+        let skip = self.lines.len().saturating_sub(max);
+        self.lines.iter().skip(skip).cloned().collect()
     }
 
     /// The lines pushed at or after `mark` that the ring still holds. A
@@ -208,9 +229,7 @@ fn scrub(text: &str) -> String {
 
 /// The last `max` lines the ring holds, oldest first.
 pub fn tail(max: usize) -> Vec<String> {
-    let ring = RING.lock().unwrap();
-    let skip = ring.lines.len().saturating_sub(max);
-    ring.lines.iter().skip(skip).cloned().collect()
+    RING.lock().unwrap().tail(max)
 }
 
 /// How many lines have been captured this session.
@@ -232,7 +251,57 @@ fn ring_since(mark: u64) -> Vec<String> {
 /// The subscriber is installed before any file may exist, so its writer
 /// looks here on every event; empty means the words go nowhere.
 #[cfg(not(target_arch = "wasm32"))]
-static SINK: Mutex<Option<File>> = Mutex::new(None);
+static SINK: Mutex<Option<Sink>> = Mutex::new(None);
+
+/// How large one run's file may grow before it is rolled aside. Rotation
+/// used to happen only at open, which bounded the number of runs kept and
+/// never the size of one: a serve instance left writing for a week grew a
+/// single file without limit (PR #5 review).
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The open log file, and enough about it to roll it without reaching for
+/// another lock. Keeping the path here rather than in [`STATE`] is what
+/// keeps the writer's lock order (RING, then SINK) free of a third.
+#[cfg(not(target_arch = "wasm32"))]
+struct Sink {
+    file: File,
+    path: PathBuf,
+    written: u64,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Sink {
+    /// Write a line's worth of bytes, rolling the file aside first if it
+    /// has grown past its bound. The roll keeps one predecessor — this
+    /// process's own `.1`, never another's — so a long session costs at
+    /// most twice the bound and loses only its distant past.
+    fn write_rolling(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if self.written + bytes.len() as u64 > MAX_FILE_BYTES {
+            let previous = self.path.with_extension("log.1");
+            let _ = fs::rename(&self.path, &previous);
+            match create_private(&self.path) {
+                Ok(fresh) => {
+                    self.file = fresh;
+                    self.written = 0;
+                    let _ = writeln!(
+                        self.file,
+                        "── rolled at {} MiB; the stretch before this is in {} ──",
+                        MAX_FILE_BYTES / (1024 * 1024),
+                        previous.display()
+                    );
+                }
+                // Could not open a fresh one: keep writing to the file we
+                // have (now named .1) rather than losing the session.
+                Err(_) => {
+                    let _ = fs::rename(&previous, &self.path);
+                }
+            }
+        }
+        self.written += bytes.len() as u64;
+        self.file.write_all(bytes)
+    }
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 struct LateWriter;
@@ -259,10 +328,10 @@ impl Write for LateGuard {
         // The ring first and always: it is what the viewer reads, and it
         // must hold a session whether or not a file is being written.
         RING.lock().unwrap().push_bytes(&text);
-        if let Some(file) = &mut *SINK.lock().unwrap() {
+        if let Some(sink) = &mut *SINK.lock().unwrap() {
             // write_all, not write: a short write would otherwise leave the
             // caller to retry a remainder the ring has already taken.
-            file.write_all(text.as_bytes())?;
+            sink.write_rolling(text.as_bytes())?;
         }
         // Every byte of `buf` was accounted for, whatever the scrubbed
         // length turned out to be.
@@ -270,7 +339,7 @@ impl Write for LateGuard {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match &mut *SINK.lock().unwrap() {
-            Some(file) => file.flush(),
+            Some(sink) => sink.file.flush(),
             None => Ok(()),
         }
     }
@@ -318,25 +387,64 @@ fn wants(value: Option<&str>) -> Target {
     }
 }
 
-/// Shift `base` → `base.1` → … in `dir`, dropping the oldest, so the file
-/// about to be created is the newest of at most KEEP+1.
-fn rotate(dir: &Path, base: &str) {
-    let _ = fs::remove_file(dir.join(format!("{base}.{KEEP}")));
-    for n in (1..KEEP).rev() {
-        let _ = fs::rename(dir.join(format!("{base}.{n}")), dir.join(format!("{base}.{}", n + 1)));
-    }
-    let _ = fs::rename(dir.join(base), dir.join(format!("{base}.1")));
+/// The prefix every default-location log wears, so the sweep can tell ours
+/// from anything else that lands in the directory.
+const LOG_PREFIX: &str = "mstream-player-";
+
+/// A file another process may still be writing to. Nothing this recently
+/// touched is swept, however far down the list it sits: an idle player's
+/// log is not litter.
+const SWEEP_GRACE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// This run's own file name. Every process writes to its own, which is what
+/// makes the default location safe to share.
+///
+/// The rename chain that used to live here (`log` → `log.1` → …) assumed
+/// one player at a time. A second one renamed the first's open file out
+/// from under it — the first went on writing to a path that no longer
+/// existed, the UI kept naming the old one, and a few more starts unlinked
+/// it altogether (PR #5 review). Nobody renames anybody now.
+fn default_log_name() -> String {
+    format!("{LOG_PREFIX}{}.log", std::process::id())
 }
 
-/// Resolve a target to a path, creating directories and rotating as asked.
+/// Keep the directory to the last few runs by deleting the oldest, rather
+/// than by shuffling names around. Files touched within [`SWEEP_GRACE`] are
+/// never candidates, so a running player's log survives however many other
+/// players come and go.
+fn sweep(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut ours: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|e| {
+            e.file_name().to_str().is_some_and(|n| n.starts_with(LOG_PREFIX))
+                && e.file_type().map(|t| t.is_file()).unwrap_or(false)
+        })
+        .filter_map(|e| {
+            let when = e.metadata().and_then(|m| m.modified()).ok()?;
+            Some((when, e.path()))
+        })
+        .collect();
+    // Newest first, so everything past KEEP is a candidate.
+    ours.sort_by(|a, b| b.0.cmp(&a.0));
+    let now = std::time::SystemTime::now();
+    for (when, path) in ours.into_iter().skip(KEEP) {
+        let idle = now.duration_since(when).unwrap_or_default();
+        if idle > SWEEP_GRACE {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// Resolve a target to a path, creating directories and sweeping as asked.
 fn resolve_target(target: Target) -> Option<PathBuf> {
     match target {
         Target::Off => None,
         Target::Default => {
             let dir = crate::config::log_dir()?;
             fs::create_dir_all(&dir).ok()?;
-            rotate(&dir, "mstream-player.log");
-            Some(dir.join("mstream-player.log"))
+            sweep(&dir);
+            Some(dir.join(default_log_name()))
         }
         Target::Path(path) => {
             if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -416,7 +524,8 @@ fn open_sink(path: &Path, backlog: &[String], how: Opening) -> bool {
     for line in backlog {
         let _ = writeln!(file, "{line}");
     }
-    *SINK.lock().unwrap() = Some(file);
+    let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+    *SINK.lock().unwrap() = Some(Sink { file, path: path.to_path_buf(), written });
     true
 }
 
@@ -441,11 +550,36 @@ fn filter_for(level: Level) -> EnvFilter {
     EnvFilter::new(level.label())
 }
 
+/// Which file, if any, this run should write to.
+///
+/// Split out from [`init`] because it is the part worth testing: `init`
+/// installs a process-global subscriber and can only run once.
+fn decide(env_target: Target, config_write: bool, run: Run) -> Option<Target> {
+    match (env_target, run) {
+        // Asking for a log by name works everywhere, one-shots included.
+        (Target::Path(p), _) => Some(Target::Path(p)),
+        (Target::Default, _) => Some(Target::Default),
+        // A config switch is the player's own setting; a one-shot command
+        // has no session to log and must not disturb the directory.
+        (Target::Off, Run::Session) if config_write => Some(Target::Default),
+        (Target::Off, _) => None,
+    }
+}
+
 /// Install the subscriber and apply whatever the environment and config ask
 /// for. Call once, first thing in main — anything that dials before this
 /// speaks into the void. Returns the active path, for the boot line.
+/// What kind of run is starting. A player or a jukebox is a session worth
+/// a file of its own; `keys`, `ls` and the rest are one-shots that answer
+/// and exit.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Run {
+    Session,
+    OneShot,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-pub fn init() -> Option<PathBuf> {
+pub fn init(run: Run) -> Option<PathBuf> {
     let env_target = wants(std::env::var("MSTREAM_LOG").ok().as_deref());
     let (config_write, level) = crate::config::load()
         .ok()
@@ -454,11 +588,16 @@ pub fn init() -> Option<PathBuf> {
 
     // Environment outranks config; a bare config switch gets the default
     // location the same as MSTREAM_LOG=1 would.
-    let (write, path) = match env_target {
-        Target::Off if !config_write => (false, None),
-        Target::Off => (true, resolve_target(Target::Default)),
-        target => (true, resolve_target(target)),
-    };
+    //
+    // Except for a one-shot, where the config switch is ignored. `[log]
+    // write = true` is set in the player's Settings and means "keep a log
+    // of my listening"; honouring it in `mstream-player keys` meant every
+    // such invocation opened, swept and rotated the default location, so a
+    // handful of them deleted the session someone was trying to keep
+    // (PR #5 review). An explicit MSTREAM_LOG still works everywhere —
+    // asking for a log by name is asking for it here too.
+    let path = decide(env_target, config_write, run).and_then(resolve_target);
+    let write = path.is_some();
 
     // Installed at the level, not at the write switch: the ring starts
     // filling from boot, so a session that goes wrong before anyone thought
@@ -643,6 +782,25 @@ mod tests {
         assert_eq!(Level::parse("loud"), None);
     }
 
+    /// `mstream-player keys` has nothing to log, and used to open, sweep
+    /// and rotate the default location anyway — a few invocations deleted
+    /// the session someone was keeping (PR #5 review).
+    #[test]
+    fn a_one_shot_command_leaves_the_session_log_alone() {
+        // The config switch belongs to the player, not to `keys`.
+        assert_eq!(decide(Target::Off, true, Run::OneShot), None);
+        assert_eq!(decide(Target::Off, true, Run::Session), Some(Target::Default));
+        assert_eq!(decide(Target::Off, false, Run::Session), None);
+
+        // But asking for a log by name works from anywhere.
+        let named = PathBuf::from("/tmp/asked-for.log");
+        assert_eq!(
+            decide(Target::Path(named.clone()), false, Run::OneShot),
+            Some(Target::Path(named))
+        );
+        assert_eq!(decide(Target::Default, false, Run::OneShot), Some(Target::Default));
+    }
+
     #[test]
     fn old_one_field_configs_keep_their_meaning() {
         // A set level meant writing at that level…
@@ -655,26 +813,85 @@ mod tests {
         assert_eq!(settled_from_config(Some(true), ""), (true, Level::Info));
     }
 
+    /// The sweep bounds how many runs the directory keeps — by deleting
+    /// the oldest, never by renaming anyone's open file.
     #[test]
-    fn rotation_keeps_the_last_runs_and_drops_the_oldest() {
-        let dir = std::env::temp_dir().join("mstream-player-test-logrotate");
+    fn the_sweep_keeps_the_recent_runs_and_spares_the_living() {
+        let dir = std::env::temp_dir().join("mstream-player-test-logsweep");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        for name in
-            ["mstream-player.log", "mstream-player.log.1", "mstream-player.log.4"]
-        {
-            fs::write(dir.join(name), name).unwrap();
+
+        // Six old runs and one file that is not ours.
+        let old = std::time::SystemTime::now() - SWEEP_GRACE * 2;
+        let mut names = Vec::new();
+        for pid in 1..=6 {
+            let name = format!("{LOG_PREFIX}{pid}.log");
+            let path = dir.join(&name);
+            fs::write(&path, &name).unwrap();
+            filetime_set(&path, old);
+            names.push(name);
         }
+        fs::write(dir.join("notes.txt"), "not ours").unwrap();
 
-        rotate(&dir, "mstream-player.log");
+        sweep(&dir);
 
-        // The live file moved to .1, old .1 to .2, and the .4 fell away.
-        assert!(!dir.join("mstream-player.log").exists());
-        assert_eq!(fs::read_to_string(dir.join("mstream-player.log.1")).unwrap(),
-            "mstream-player.log");
-        assert_eq!(fs::read_to_string(dir.join("mstream-player.log.2")).unwrap(),
-            "mstream-player.log.1");
-        assert!(!dir.join("mstream-player.log.4").exists());
+        let left: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            left.iter().filter(|n| n.starts_with(LOG_PREFIX)).count(),
+            KEEP,
+            "the oldest beyond KEEP are gone: {left:?}"
+        );
+        assert!(left.contains(&"notes.txt".to_string()), "and nothing else is touched");
+
+        // A file touched just now is spared however far down the list it
+        // sits — that is a player still running.
+        let fresh = dir.join(format!("{LOG_PREFIX}999.log"));
+        fs::write(&fresh, "live").unwrap();
+        for pid in 10..=20 {
+            let path = dir.join(format!("{LOG_PREFIX}{pid}.log"));
+            fs::write(&path, "old").unwrap();
+            filetime_set(&path, old);
+        }
+        sweep(&dir);
+        assert!(fresh.exists(), "a live player's log survives the sweep");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Backdate a file so the sweep sees it as an old run.
+    fn filetime_set(path: &Path, when: std::time::SystemTime) {
+        let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(when).unwrap();
+    }
+
+    /// A long session must not grow one file without end.
+    #[test]
+    fn a_file_past_its_bound_rolls_aside_and_keeps_going() {
+        let dir = std::env::temp_dir().join("mstream-player-test-logroll");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run.log");
+
+        // Just enough room left for one more line, and not for the next.
+        let file = create_private(&path).unwrap();
+        let mut sink = Sink { file, path: path.clone(), written: MAX_FILE_BYTES - 100 };
+        sink.write_rolling(b"the last of the old file\n").unwrap();
+        sink.write_rolling(&[b'x'; 200]).unwrap();
+        sink.write_rolling(b"and the first of the new\n").unwrap();
+        drop(sink);
+
+        let rolled = path.with_extension("log.1");
+        assert!(rolled.exists(), "the predecessor is kept beside it");
+        let current = fs::read_to_string(&path).unwrap();
+        assert!(current.contains("rolled at"), "the new file says why: {current}");
+        assert!(current.contains("and the first of the new"));
+        assert!(!current.contains("the last of the old"), "that line is in the predecessor");
+        assert!(fs::read_to_string(&rolled).unwrap().contains("the last of the old"));
+
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -790,22 +1007,46 @@ mod tests {
         assert_eq!(small.since(small.total).len(), 0);
     }
 
+    /// On a local ring, never the process-global one: the app tests assert
+    /// that a session with no subscriber has captured nothing, and a test
+    /// that filled the shared ring made that a coin toss under parallel
+    /// execution (PR #5 review).
     #[test]
     fn the_tail_reads_the_end_of_the_ring_and_no_more_than_asked() {
-        let mut ring = RING.lock().unwrap();
-        ring.lines.clear();
-        ring.pending.clear();
+        let mut ring = Ring::default();
         for n in 1..=40 {
             ring.push_bytes(&format!("line {n}\n"));
         }
-        drop(ring);
 
-        assert_eq!(tail(5), ["line 36", "line 37", "line 38", "line 39", "line 40"]);
-        assert_eq!(captured(), 40);
+        assert_eq!(ring.tail(5), ["line 36", "line 37", "line 38", "line 39", "line 40"]);
+        assert_eq!(ring.lines.len(), 40);
         // Asking for more than exists is not an error, just everything.
-        assert_eq!(tail(500).len(), 40);
+        assert_eq!(ring.tail(500).len(), 40);
+        assert_eq!(ring.tail(0).len(), 0);
+    }
 
-        let mut ring = RING.lock().unwrap();
-        ring.lines.clear();
+    #[test]
+    fn the_ring_holds_a_bounded_amount_of_memory() {
+        let mut ring = Ring::default();
+        // Lines far too fat for the budget: the count bound never fires,
+        // the byte bound does.
+        let fat = "x".repeat(64 * 1024);
+        for _ in 0..200 {
+            ring.push_bytes(&format!("{fat}\n"));
+        }
+        assert!(ring.lines.len() < RING_LINES, "evicted by weight, not by count");
+        assert!(ring.bytes <= RING_BYTES, "{} bytes held", ring.bytes);
+
+        // The accounting stays honest as lines come and go.
+        assert_eq!(ring.bytes, ring.lines.iter().map(String::len).sum::<usize>());
+
+        // An event with no newline at all cannot escape either bound: the
+        // line cap chops it into pieces and the byte budget evicts them, so
+        // a runaway writer costs a fixed amount of memory rather than all
+        // of it.
+        let mut ring = Ring::default();
+        ring.push_bytes(&"y".repeat(RING_BYTES * 3));
+        assert!(ring.bytes <= RING_BYTES, "{} bytes held", ring.bytes);
+        assert!(!ring.lines.is_empty(), "and it still holds the recent part");
     }
 }

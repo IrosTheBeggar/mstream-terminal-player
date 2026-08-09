@@ -843,11 +843,23 @@ four that blocked, plus the two the review called out as merge-blocking in their
   one `MSTREAM_ENGINE_TRACE` truncated each other and wrote at their own offsets, NUL-filling the
   overlap. It appends and signs each run again. Pinned by a two-player smoke (2 banners, 0 NULs).
 
-Left for a follow-up, with the review's reasoning recorded: no size cap on a long-running
-session's file (rotation happens only at open); every one-shot CLI subcommand rotates the default
-log; cross-process rotation races; the ring's worst-case memory (128 MiB with 64 KiB lines) does
-not match its comment; and the two new tests that mutate the process-global ring should stop
-racing each other.
+The five follow-ups, closed the same day:
+
+- **No size cap on a long session's file.** The sink now carries its own path and byte count, so
+  it can roll itself at 8 MiB to a `.1` sibling and continue — bounded without reaching for a
+  second lock (the writer's order stays RING, then SINK).
+- **One-shot subcommands disturbed the session log.** `init` takes a `Run`: a config `write =
+  true` is the player's own setting and no longer applies to `keys` or `ls`, which used to sweep
+  and rotate the directory on every invocation. An explicit `MSTREAM_LOG` still works anywhere.
+- **Cross-process rotation races.** The rename chain is gone. Every run writes
+  `mstream-player-<pid>.log` and the directory is bounded by *sweeping* the oldest instead —
+  skipping anything touched in the last ten minutes, so a running player's file is never a
+  candidate. Nobody renames anybody.
+- **The ring's memory ceiling** is now real: a byte budget (2 MiB) beside the line count, since
+  2 000 lines at the 64 KiB line cap was 128 MiB, not the "few hundred kilobytes" the comment
+  claimed.
+- **Tests racing on the global ring**: the tail test works on a local `Ring` now, so the app
+  tests' "nothing captured yet" assertion is no longer a coin toss under parallel execution.
 
 #### The ring: a log you can read without keeping ✅ 2026-08-07 (branch `logs`)
 

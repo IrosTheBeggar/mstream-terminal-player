@@ -259,7 +259,14 @@ fn main() {
     // The boot line goes to stderr — in the TUI it scrolls away under the
     // alternate screen and comes back in scrollback after quit, and the
     // goodbye line at teardown says it again for whoever missed it.
-    if let Some(path) = logging::init() {
+    //
+    // A one-shot subcommand keeps its hands off the default location: see
+    // logging::init.
+    let run = match &cli.command {
+        None | Some(Command::Tui(_)) | Some(Command::Serve(_)) => logging::Run::Session,
+        Some(_) => logging::Run::OneShot,
+    };
+    if let Some(path) = logging::init(run) {
         eprintln!("logging to {}", path.display());
     }
 

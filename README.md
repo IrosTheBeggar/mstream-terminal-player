@@ -475,10 +475,13 @@ the TUI deliberately silences stderr while it draws, so files are how a session 
 afterwards.
 
 - `MSTREAM_LOG=1` captures what the *dependencies* narrate — iroh's relay connects, holepunch
-  attempts and path changes, HTTP retries — into `<cache>/logs/mstream-player.log`, keeping the
-  last few runs beside it as `.1` through `.4`. `MSTREAM_LOG=/path/to/file` writes exactly there
-  instead. `RUST_LOG` chooses how much is said (the usual tracing filter grammar; unset means
-  `info`). The player prints `logging to …` at start and again at quit.
+  attempts and path changes, HTTP retries — into `<cache>/logs/`, one file per run named for its
+  process, with the last few runs kept and older ones swept away. `MSTREAM_LOG=/path/to/file`
+  writes exactly there instead. `RUST_LOG` chooses how much is said (the usual tracing filter
+  grammar; unset means `info`). The player prints `logging to …` at start and again at quit.
+  A file that reaches 8 MiB rolls aside to `.1` and a fresh one continues, so a jukebox left
+  running for a week is bounded. One-shot commands like `keys` and `ls` never touch any of
+  this unless `MSTREAM_LOG` names a file for them.
 - `MSTREAM_ENGINE_TRACE=/path/to/file` is the player's own flight recorder: one timestamped line
   per transition decision — plays, announcements, seeks and their clamps, prepares, open failures
   with reasons, retries, handovers — plus every diagnostic the TUI kept off the screen. Each run
