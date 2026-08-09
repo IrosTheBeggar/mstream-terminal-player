@@ -437,6 +437,8 @@ pub fn run(args: ReplayArgs) -> i32 {
         // Same palette the real binary would draw with, so a replay is a
         // faithful picture of what someone's config actually produces.
         ui::set_theme(crate::tui::theme_for(&start.theme));
+        ui::set_glyphs(crate::tui::glyphs_for(&start.display));
+        ui::set_sizing(ui::Sizing::from_prefs(&start.display));
         crate::tui::app_from(start)
     } else {
         App::new(None, None, None)

@@ -174,9 +174,14 @@ impl Action {
             Action::ToggleRepeat => "repeat",
             Action::ToggleShuffle => "shuffle",
             Action::ToggleAutoDj => "auto-dj",
-            Action::OpenDjPanel => "auto-dj-panel",
-            Action::StartJourney => "sonic-journey",
+            Action::StartJourney => "sonic-path",
             Action::ToggleHelp => "help",
+            // Nameable because the browser binds it: it is what Esc means
+            // there, and everything in that table is the user's to move.
+            // The overlays that also raise it — text entry, the genre
+            // chooser — claim Esc before the table is ever consulted, so
+            // rebinding this cannot strand anybody inside one.
+            Action::Cancel => "cancel",
             Action::Quit => "quit",
             // Text entry, and the keys the overlays claim for themselves.
             // Those tables aren't rebindable — the panel and the full-screen
@@ -186,9 +191,11 @@ impl Action {
             | Action::Input(_)
             | Action::Backspace
             | Action::Submit
-            | Action::Cancel
             | Action::NowTabNext
-            | Action::NowTabPrev => return None,
+            | Action::NowTabPrev
+            | Action::SelectNowTab(_)
+            | Action::NowLeft
+            | Action::NowRight => return None,
         })
     }
 
@@ -252,20 +259,24 @@ fn default_normal() -> Vec<Binding> {
         help: Some("show / hide the queue"),
     },
     // One digit per visible tab; `select_tab` ignores a number past the end,
-    // so a server without Discover simply has nothing on 5. Listed one per
+    // so a server without Discover simply has nothing on 4. Listed one per
     // row because "which tab is 3" is the thing a reader actually wants.
     Binding { keys: vec![ch('1')], action: Action::SelectTab(0), help: Some("Files") },
     Binding { keys: vec![ch('2')], action: Action::SelectTab(1), help: Some("Library") },
-    Binding { keys: vec![ch('3')], action: Action::SelectTab(2), help: Some("Playlists") },
-    Binding { keys: vec![ch('4')], action: Action::SelectTab(3), help: Some("Search") },
+    Binding { keys: vec![ch('3')], action: Action::SelectTab(2), help: Some("Search") },
+    Binding {
+        keys: vec![ch('4')],
+        action: Action::SelectTab(3),
+        help: Some("Discover, if enabled"),
+    },
     Binding {
         keys: vec![ch('5')],
         action: Action::SelectTab(4),
-        help: Some("Discover, if enabled"),
+        help: Some("Sonic Path, if enabled"),
     },
-    // Settings is always available, so on a server without Discover it
-    // slides onto 5 — the strip numbers by position, and the strip is
-    // the truth.
+    // Settings is always available, so on a server with neither discovery
+    // tab it slides onto 4 — the strip numbers by position, and the strip
+    // is the truth.
     Binding { keys: vec![ch('6')], action: Action::SelectTab(5), help: Some("Settings") },
     Binding { keys: vec![ch('/')], action: Action::StartSearch, help: Some("search") },
     // `/` already asks the server. This one narrows what is already on
@@ -313,12 +324,24 @@ fn default_normal() -> Vec<Binding> {
     Binding { keys: vec![ch('r')], action: Action::ToggleRepeat, help: Some("repeat") },
     Binding { keys: vec![ch('s')], action: Action::ToggleShuffle, help: Some("shuffle") },
     Binding { keys: vec![ch('A')], action: Action::ToggleAutoDj, help: Some("auto-dj on / off") },
-    Binding { keys: vec![ch('D')], action: Action::OpenDjPanel, help: Some("auto-dj settings") },
-    Binding { keys: vec![ch('J')], action: Action::StartJourney, help: Some("sonic journey") },
+    // The shortcut into the Sonic Path tab: it fills the destination in
+    // rather than being a second way of plotting the same arc.
     Binding {
-        keys: vec![ch('?'), key(KeyCode::Esc)],
-        action: Action::ToggleHelp,
-        help: Some("this help"),
+        keys: vec![ch('J')],
+        action: Action::StartJourney,
+        help: Some("sonic path to here"),
+    },
+    Binding { keys: vec![ch('?')], action: Action::ToggleHelp, help: Some("this help") },
+    // Esc is the way *out* of things first and the key list second. It used
+    // to be a second name for the help overlay, which meant the three
+    // things that wanted it — an armed picker, the Crossfade rows, a Sonic
+    // Path sub-node — could never have it, since no key in this mode
+    // produced `Cancel` at all. Falls through to the help when there is
+    // nothing to call off, so it still opens the list from a bare listing.
+    Binding {
+        keys: vec![key(KeyCode::Esc)],
+        action: Action::Cancel,
+        help: Some("go back, or this help"),
     },
     Binding { keys: vec![ch('q'), ctrl('c')], action: Action::Quit, help: Some("quit") },
     ]
@@ -358,12 +381,34 @@ fn default_panel() -> Vec<Binding> {
 /// the keys that mean something different once the browser is off screen.
 fn default_now() -> Vec<Binding> {
     vec![
+    // The numbers are the navigation here, as they are on the browser
+    // screen. ←→ used to switch tabs with Auto-DJ as the exception — which
+    // put the only escape key that mattered on the only screen where it was
+    // different, and left people stuck on it. A key that means one thing
+    // everywhere beats a key that means the right thing four times out of
+    // five. Outside this view these digits pick browser tabs; in here that
+    // change would happen behind a screen nobody can see.
+    Binding { keys: vec![ch('1')], action: Action::SelectNowTab(0), help: None },
+    Binding { keys: vec![ch('2')], action: Action::SelectNowTab(1), help: None },
+    Binding { keys: vec![ch('3')], action: Action::SelectNowTab(2), help: None },
+    Binding { keys: vec![ch('4')], action: Action::SelectNowTab(3), help: None },
+    Binding { keys: vec![ch('5')], action: Action::SelectNowTab(4), help: None },
+    // There is no sixth tab here, and that is exactly why it is bound: left
+    // free it fell through to the browser's `6` and moved the Settings tab
+    // behind a screen nobody can see. `SelectNowTab` bounds-checks, so this
+    // is a digit that does nothing — which is what it should do.
+    Binding { keys: vec![ch('6')], action: Action::SelectNowTab(5), help: None },
+    // Kept as a second way round, and as the one that needs no counting.
+    Binding { keys: vec![key(KeyCode::Tab)], action: Action::NowTabNext, help: None },
+    Binding { keys: vec![key(KeyCode::BackTab)], action: Action::NowTabPrev, help: None },
+    // Handed to whichever tab is in front. Auto-DJ adjusts the row under
+    // the cursor with them; nothing else wants them.
     Binding {
-        keys: vec![key(KeyCode::Right), ch('l'), key(KeyCode::Tab)],
-        action: Action::NowTabNext,
+        keys: vec![key(KeyCode::Right), ch('l')],
+        action: Action::NowRight,
         help: None,
     },
-    Binding { keys: vec![key(KeyCode::Left), ch('h')], action: Action::NowTabPrev, help: None },
+    Binding { keys: vec![key(KeyCode::Left), ch('h')], action: Action::NowLeft, help: None },
     // The visualiser's own tab, on its own key: `←→` already belongs to the
     // panel's tabs and `↑↓` to whatever list is in them.
     Binding { keys: vec![ch('v')], action: Action::CycleViz, help: None },
@@ -534,7 +579,7 @@ impl Keymap {
     /// The whole map as a `[keys]` section, ready to paste into config.toml.
     pub fn to_config_toml(&self) -> String {
         let mut out = String::from(
-            "# Auto-DJ panel and other overlays keep their own keys.\n\
+            "# The full-screen view and the genre chooser keep their own keys.\n\
              # Naming an action replaces its keys; give it [] to unbind it.\n\
              [keys]\n",
         );

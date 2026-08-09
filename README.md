@@ -93,9 +93,23 @@ to allow is `*.relay.n0.iroh.link` on TCP 443.
 **Files** browses folders as they sit on disk, opening wherever the server says
 is most useful — straight inside your library when there is only one, or the
 list to choose from when there are several. `h` from there goes up to the list
-either way. **Library** browses by tags — artists, albums,
-genres, and recently added — and **Search** and **Playlists** do what they say. `Enter` on a
-track queues everything visible and starts there; `a` queues just that one.
+either way. **Library** browses by tags — artists, albums, genres, recently
+added — and by **playlists**, which are a way of cutting the library like any
+other and live in there rather than on a tab of their own. **Search** does
+what it says. `Enter` on a track queues everything visible and starts there;
+`a` queues just that one.
+
+The browser draws as **Miller columns** — the listings you came through, then
+the one you are in, then the queue when it is open. How many of the context
+columns fit is the terminal's call: the trail fills innermost-first, so a
+narrow terminal shows the folder you just left and a wide one shows the way
+back to the top. Spare width is shared rather than dumped on the current
+column, since a context column pinned at twenty clips most album names.
+
+```toml
+[display]
+miller_columns = 4    # the ceiling, counting the column you are in
+```
 
 Where you are and what you are hearing are drawn separately: the cursor is a
 highlighted background, the playing track is in colour, and a row that is both
@@ -114,15 +128,20 @@ window.
 | `h` | go back |
 | `a` | add the highlighted track to the queue |
 | `Tab` | switch between browser and queue |
-| `1` … `6` | Files / Library / Playlists / Search / Discover / Settings · `/` search |
+| `1` … `6` | Files / Library / Search / Discover / Sonic Path / Settings · `/` search |
 | `0` | full-screen now playing |
 | `Space` | play or pause · `n` / `p` next / previous |
 | `i` | jump to whatever is playing · `0` full-screen now playing |
 | `[` `]` | seek 5s · `{` `}` seek a minute · `-` `+` volume |
 | `d` / `C` | remove from queue / clear queue |
-| `r` / `s` | repeat / shuffle · `A` auto-dj · `D` auto-dj panel |
-| `J` | sonic journey to the highlighted track |
+| `r` / `s` | repeat / shuffle · `A` auto-dj |
+| `J` | sonic path to the highlighted track |
 | `?` | help · `q` quit |
+
+Every screen the player has is behind a number: `1`–`6` are the tabs, in the
+order the strip draws them, and `0` is the full-screen player with Auto-DJ,
+the visualiser and the queue on its own tabs. Nothing worth finding is hidden
+behind a letter you would have to already know.
 
 `?` shows the same list in the app. It is generated from the key table
 itself, so it cannot fall out of step with what the keys actually do.
@@ -150,8 +169,9 @@ binding never means unbinding another by hand first. A line the player can't
 read costs you that line and nothing else — it says what was wrong on the
 first screen and carries on. `Ctrl+C` always quits, whatever the file says.
 
-Overlays like the Auto-DJ panel keep their own keys, since they draw their
-own hints along the bottom.
+The genre chooser and the full-screen view keep their own keys, since both
+draw their own hints along the bottom — `mstream-player keys` lists them
+under their own headings, and `[keys]` does not reach them.
 
 ### Colours
 
@@ -216,6 +236,81 @@ you set there is what config.toml remembers. The tab's other room is
 `mstream-player serve --crossfade 6` / `--gapless`; the legacy spawn contract
 keeps all of it off.
 
+## The progress bar
+
+On a server that can draw them, the bar *is* the track — its shape under the
+playhead, so a breakdown or a quiet passage is something you can aim at
+rather than hunt for:
+
+```
+▁▁▁▁▁▁▁▃▇▇██▇▆▇▆▅█▇▇▇█████▇▇▇█▇▆█▇▇▆▇▆▅▇▇▇▇▇▄▅▇▇██▇▆▇█▇▆▇▆▆▆█▇███▆▇█▆▇▇██▇▁▁  0:40 / 4:23
+```
+
+Mirrored about the line through the middle, which is what makes it read as a
+recording rather than as a bar chart. The whole band is the scrubber — click
+either row.
+
+The full-screen view (`0`) always mirrors: its body is a facts column and a
+tabbed panel, so a row spent there costs nobody a row of music. The browser
+screen's transport is different — its rows come straight out of the list, and
+on an 80×24 terminal two of them are already an eighth of it. So it mirrors
+only when the terminal is tall enough to spare a row, and drops back to the
+single-row bar when it isn't:
+
+```toml
+[display]
+mirror_min_height = 30    # 0 to always mirror, 9999 to never (max 65535)
+```
+
+The colours are the same three channels as the plain bar — accent behind the
+playhead, dim ahead of it, and a marker where a click would land — so it is
+still the same control, just wearing the song.
+
+Two things it deliberately isn't. It shows **energy**, not peaks: the server
+already sends peaks, and taking the peak again over the three seconds a
+column covers answers "was anything loud here", which on a modern master is
+yes from end to end. And it shows a track's **shape, not its level** —
+scaled to the band that track actually uses, because nothing here applies
+ReplayGain and a quietly-mastered record would otherwise be a flat line. Two
+tracks side by side say nothing about which is louder.
+
+### Glyphs, and the Windows console
+
+A font either has a character or it prints a box, and the Windows 10 default
+console — conhost with Consolas — stops at the old CP437 repertoire. Of what
+this player draws, Consolas is missing six of the eight eighth-height blocks,
+`▏`, `▶`, `◆`, `⏸` and every braille pattern; it keeps `█ ░ ▒ ▓ ▄ ─ │`.
+
+So the player picks a glyph set at startup. On a terminal that can take them
+it draws the shapes above. On a legacy console it draws the waveform as
+*density* rather than height — `░▒▓█`, one row, no mirror — which is coarser
+but renders everywhere:
+
+```
+░░░░░░░░▓██▓▓▓▓▒▓▓▓▓▓████▓▓██▓▓▓█▓▒▓▓▒▓▓▓▓▓▒▒▓█▓█▓▓█▓▓█▓▒▒▓▓███▓▓▓█▒▓░░  0:30 / 4:23
+```
+
+It reads `WT_SESSION` — Windows Terminal sets it, conhost does not — and
+assumes anything that isn't Windows is fine. Pin it either way:
+
+```toml
+[display]
+glyphs = "full"     # or "legacy", or "auto" (the default)
+```
+
+The visualizer needs no fallback: it draws in half blocks (`▀ ▄ █`), which
+every console font has. The real fix for the rest is a font with more than
+CP437 in it: run the player from Windows Terminal, or point conhost at
+Cascadia Mono (right-click the title bar → Properties → Font) and set
+`glyphs = "full"`.
+
+It needs `ffmpeg` on the server. Without it — or for a track the scan hasn't
+reached, or one living on a federated peer — the bar draws as it always did.
+The player asks once, believes the answer, and stops asking for the session.
+It also asks for the *next* track's shape while the current one plays, since
+generating one the server hasn't seen costs an ffmpeg decode and a shape
+that arrives thirty seconds in is a bar that changes under you.
+
 ## Mouse
 
 Clicking the progress bar seeks there. The bar lights up under the pointer
@@ -276,7 +371,7 @@ Servers running in public mode (no users configured) need no login — just pass
 It's a view rather than a dialog, so every key still means what it means
 everywhere else — `Space`, `n`, the seek keys and the volume keys all keep
 working while you're looking at it, and `0` goes back. The key is the same
-Camelot code the Auto-DJ panel matches on, with the tag's own spelling beside
+Camelot code Auto-DJ matches on, with the tag's own spelling beside
 it. Tags a track doesn't have are left out rather than shown empty.
 
 ## Now Playing
@@ -286,42 +381,77 @@ labelled column, a full-width transport along the foot, and a tabbed panel on
 the right.
 
 ```
-┌ Now Playing ────────────────────────────────────────────────────────────┐
-│                              │ Queue  Lyrics  Discover  Auto-DJ  Visual… │
-│ Rewind The Track             │ ──────────────────────────────────────────│
-│ Bassnectar                   │ ▶ Bassnectar - Rewind The Track      3:29 │
-│                              │   Bassnectar - Mic Check             4:02 │
-│ Album   Divergent Spectrum   │   Bassnectar - Elastic               3:02 │
-│ Year    2011                 │                                           │
-│ Tempo   174 BPM              │                                           │
-│ Key     8A  A minor          │                                           │
-│──────────────────────────────┴───────────────────────────────────────────│
-│████████████████████▍               1:11 / 3:29                           │
-│←→ tab   ↑↓ list   Enter play   d remove   0 back        vol 100%  dj sim… │
-└──────────────────────────────────────────────────────────────────────────┘
+  Now Playing
+                          │ [1:Queue]  2:Discover   3:Auto-DJ   4:Visualizer
+  6AM                     │ ───────────────────────────────────────────────
+  Boukmanflow             │ > Boukmanflow - 6AM                        2:03
+                          │   Boukmanflow - Been a While               2:07
+  Year    2023            │   Boukmanflow - Being stuck                2:19
+  Genre   rap, jazzrap    │   Boukmanflow - Better Days                2:41
+  Tempo   93 BPM          │   Boukmanflow - BIG PICTURE                2:46
+  Key     5A  C minor     │   Boukmanflow - Bout2skate                 2:16
+  Format  MP3   192 kbps  │   Boukmanflow - Buckets                    1:55
+ ─────────────────────────┴────────────────────────────────────────────────
+ ▓▓▓▓▒▒▒▓▓▒▒▒▒▓▓░▒▒░▓▒░░░░▓░▒█░▒▓░▒▒▓▒▓▒░░▒▓▓▓▒▓▒█▓▒▒▒▒▒▓░▒█░  0:02 / 2:03
+ 1-4 tab   ↑↓ list   Enter play   d remove   0 back                vol 100%
 ```
 
-`←` `→` move between tabs, `↑` `↓` move within one. It's a view rather than a
-dialog, so everything else keeps working — `Space`, `n`, `p`, seeking and
-volume all behave as they do outside, including wherever `[keys]` moved them.
-`Esc` or `0` leaves.
+The digits pick a tab, numbered on the strip in the order it draws them —
+`1`–`4` above, because that session's track has no lyrics. The footer counts
+them for you rather than promising a key the strip does not have. `↑` `↓`
+move within a tab, and `Tab` and `Shift+Tab` step along it for anyone who
+would rather not count. It's a view rather than a dialog, so everything else
+keeps working — `Space`, `n`, `p`, seeking and volume all behave as they do
+outside, including wherever `[keys]` moved them. `Esc` or `0` leaves.
+
+The numbers rather than `←` `→` for a reason worth stating: **Auto-DJ's rows
+are values**, so `←` `→` adjust them there. When the arrows were also the
+navigation, that made the one tab you could get stuck on the one tab whose
+way out was different — and people got stuck on it. The arrows now belong to
+whichever tab is in front, and the way between tabs is the same key
+everywhere.
 
 **Queue** shares the browser screen's selection, so `Enter` plays and `d`
-removes the row under the cursor either way. **Auto-DJ** reports what it is set
-to without offering to change it — `D` stays the one place that happens.
-**Lyrics** appears only for a track the server has words for, so the strip
+removes the row under the cursor either way. **Auto-DJ** is where Auto-DJ is
+*set*, not just reported. **Lyrics** appears only
+for a track the server has words for, so the strip
 changes shape as the queue moves. **Discover** needs the server's index. Where
 the strip won't fit, it shows the tab you're on between arrows rather than
 truncating the last name.
 
-Lyrics, Discover and the visualizer are stubs for now; the layout is what's
-real.
+Lyrics is the last stub; everything else on the strip does what it says.
+
+### The Discover panel
+
+The full-screen view's Discover tab follows the speakers. No seed to pick,
+no menu — one question, asked again whenever the answer would change.
+
+```
+ Songs similar to what's playing
+
+  83%  ALM - Manor                            4:11
+  81%  ALM - Hip Hop Factory                  5:02
+  80%  Color Out - Ghosts (Abludo Remix)      4:09
+```
+
+The number is how close the server thinks it is — these arrive in order, so
+a rank would say nothing a position doesn't, where the percentage says how
+much of a neighbour it actually is.
+
+`Enter` queues one and starts it, `a` just queues it — neither throws away
+the queue you are in the middle of, which is the one thing the browser's
+Discover tab does differently.
+
+To look around from something *other* than what is playing, that is the
+[Discover tab](#discover)'s job — this is a panel you glance at, not one you
+steer.
 
 ## Auto-DJ
 
 Press `A` to cycle Auto-DJ: **off → similar → tempo+key**. When the queue has
-nothing left after the track that's playing, it quietly adds one more.
-Press `D` for the panel, where the rest of it lives.
+nothing left after the track that's playing, it quietly adds one more. The
+rest of it lives on the **Auto-DJ tab of the full-screen player** — `0`, then
+across to it.
 
 - **similar** uses the server's audio-embedding index (`discovery`), so picks
   sound like what you're listening to rather than merely sharing a tag.
@@ -335,7 +465,7 @@ when you connect somewhere that lacks one. If the index is there but the track
 hasn't been analysed yet, it falls back to tempo+key and says so instead of
 going quiet. `mstream-player info` lists what a given server has enabled.
 
-### The panel (`D`)
+### The tab (`0`, then the Auto-DJ tab)
 
 | Setting | |
 |---|---|
@@ -345,9 +475,10 @@ going quiet. `mstream-player info` lists what a given server has enabled.
 | **Key matching** | `compatible` is the Camelot neighbourhood; `strict` never leaves the seed's key. |
 | **Rating floor** · **Artist cooldown** | skip anything below a rating; keep the last N artists out. |
 | **Genres** | whitelist or blacklist. A whitelist also excludes untagged tracks — "only these" is the stricter promise. |
+| **Sample** | `Enter` asks for three picks, so you can see what a setting does before committing to it. |
 
-`↑↓` choose · `←→` adjust · `p` samples three picks so you can hear what a
-setting does before committing to it · `Esc` closes. Settings persist.
+`↑↓` choose · `←→` adjust · `Enter` sets · `1`–`5` leaves for another tab.
+Settings persist.
 
 The sonic pool is a **hard** constraint: tempo, key and artist all relax
 inside it, but it never widens. If nothing is similar enough the player says
@@ -356,19 +487,33 @@ Rows that need the server's embedding index only appear where it exists.
 
 ## Discover
 
-Press `5` with a track playing or highlighted, and the Discover tab opens
-anchored on it:
+Press `4`, and the tab asks what to look around from before it looks:
+
+```
+┌ Discover · look around from… ────────────────────────────┐
+│> What's playing   Bassnectar - Rewind The Track          │
+│  Choose a song…   the next track you open lands here     │
+└──────────────────────────────────────────────────────────┘
+```
+
+*Choose a song…* arms the browser the way Sonic Path does — pick anything,
+anywhere, and the tab opens back up on it. That is what the step is for:
+**you can ask what a track sounds like without playing it.**
+
+Either way you land on the two ways of looking:
 
 ```
 ┌ Discover · from Bassnectar - Rewind The Track ───────────┐
+│  ..                                                      │
 │> Similar tracks    in your library                       │
 │  Similar artists   like Bassnectar                       │
 └──────────────────────────────────────────────────────────┘
 ```
 
-**Similar tracks** are ordinary rows — `Enter` plays from there, `a` queues
-one, exactly as everywhere else. **Similar artists** shows how close each one
-is, how many ways in it has, and what the model thinks it sounds like:
+**Similar tracks** are ordinary rows, each led by how close the server
+thinks it is — `Enter` plays from there, `a` queues one, exactly as
+everywhere else. **Similar artists** shows how close each one is, how many
+ways in it has, and what the model thinks it sounds like:
 
 ```
 ┌ Artists like Bassnectar ─────────────────────────────────┐
@@ -382,33 +527,59 @@ you were already listening to*, rather than whatever they're best known for.
 
 The tab only appears on servers that have the discovery index.
 
-## Sonic Journey
+## Sonic Path
 
-Highlight a track and press `J`: the player plots a route to it from whatever
-is playing, through tracks that sit between the two in the server's embedding
-space. With nothing playing it takes two presses — one to mark where to set
-off from, one to say where to end up.
+`5` opens the Sonic Path tab — the webapp's panel, in a terminal. Pick a song
+to start from and one to end on, choose a length, and the server fills the
+road between them with tracks that sit along the arc joining the two in its
+embedding space.
 
 ```
-┌ Sonic Journey ──────────────────────────────────┐
-│  From    Boukmanflow - Bout2skate               │
-│  To      Boukmanflow - The Hangout              │
-│  Stops   14   ←→ to change                      │
-│                                                 │
-│   1.   0%  Boukmanflow - Bout2skate             │
-│   2.   8%  Boukmanflow - NewRapCity             │
-│   …                                             │
-│   7.  46%  ALM - Goodbye 78                     │
-│   …                                             │
-│  14. 100%  Boukmanflow - The Hangout            │
-└─────────────────────────────────────────────────┘
+ Sonic Path
+ > Start song       ALM - 3rd Dimension
+   End song         not set — Enter to choose
+   Length           ▓▓▓▓░░░░░░  14 stops   ←→ adjust
+   Build the path   choose both ends first
 ```
 
-The percentage is how far along the arc each stop sits. Changing the length
-re-plots rather than trimming — a shorter journey passes through different
-places. `Enter` makes it the queue and starts it; `Esc` walks away.
+`Enter` on either end offers the two ways the webapp does: **use playing
+song**, or **pick from library**. Picking from the library *arms* the
+browser — it drops you in the file explorer with a banner along the foot, and
+the next track you open anywhere (files, library, search, a playlist) lands in
+the field instead of on the speakers. `Esc` calls it off.
 
-Needs the server's discovery index; without it the key says so instead.
+Build, and the setup gives way to the path:
+
+```
+ ALM - 3rd Dimension → ALM - Destiny
+ > ▶ Play the path     14 stops · 1h 02m · replaces the queue
+   Queue all           onto the end of what's already there
+   Save as playlist…   name it and write it to the server
+   Length              ▓▓▓▓░░░░░░  14 stops   ←→ adjust
+   Regenerate          plot 14 stops again
+   Start over          back to choosing two songs
+   ◆  1.   0%  ALM - 3rd Dimension                                      4:23
+      2.   8%  ALM - Manor                                              4:11
+      3.  15%  ALM - Hip Hop Factory                                    5:02
+      …
+   ◆ 14. 100%  ALM - Destiny                                            6:21
+```
+
+The percentage is how far along the arc each stop sits, and `◆` marks the two
+you chose. The stops are ordinary track rows, so `Enter` on one plays the path
+from there and `a` queues just that stop — no new keys to learn.
+
+Changing the length re-plots rather than trimming, so it does not fire on
+every keystroke: move the slider, then **Regenerate**. A shorter path passes
+through different places entirely.
+
+`J` on a highlighted track is the shortcut in: it opens this tab aimed at that
+track and plots it straight away, taking whatever is playing as the start —
+but only when no start is set. An end you have already chosen stays chosen,
+so `J` re-aims a path rather than resetting one.
+
+The tab only appears on servers with the discovery index; `J` says so where it
+is missing.
 
 To see what Auto-DJ would pick without launching the player:
 

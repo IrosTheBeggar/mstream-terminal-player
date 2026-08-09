@@ -14,7 +14,7 @@ use crate::api::types::fmt_duration;
 
 use super::app::{
     App, CONNECT_METHODS, ConnectStage, DjRow, Entry, Focus, MessageKind, NowTab, Queue, Repeat,
-    SearchNode, SettingsNode, Tab,
+    SearchNode, SettingsNode, SonicNode, SonicRow, SonicView, Tab,
 };
 use super::worker::{AutoDjMode, DiscoverNode, LibraryNode};
 use crate::api::types::{Track, TrackMetadata};
@@ -64,6 +64,121 @@ impl Theme {
         set(&mut theme.folder, &prefs.folder, "folder");
         (theme, warnings)
     }
+}
+
+/// The glyphs the drawing code varies, resolved once at startup — the same
+/// shape as [`THEME`] and for the same reason.
+static GLYPHS: OnceLock<Glyphs> = OnceLock::new();
+
+/// What the terminal's font can be trusted to draw.
+///
+/// Not decoration: a font either has a character or it prints a box, and the
+/// Windows 10 default console is conhost with Consolas, which stops at the
+/// old CP437 repertoire. Probed rather than assumed — of what this UI draws,
+/// Consolas is missing six of the eight eighth-blocks, `▏`, `▶`, `◆`, `★`,
+/// `⏸` and every braille pattern, while keeping `█ ░ ▓ ▄ ─ │`. That is
+/// exactly why the bar looked right before it learned to draw a waveform.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Glyphs {
+    /// Nine steps from empty to full, for the waveform.
+    ///
+    /// What the steps *mean* depends on [`Glyphs::mirrored`]: heights when
+    /// the font has the eighth blocks, densities when it does not.
+    ///
+    /// When mirrored, this **must be symmetric under `8 - n`** — the lower
+    /// half is drawn by indexing the complement and reversing, so ink(n) +
+    /// ink(8-n) has to come to a full cell or the two halves disagree about
+    /// where the middle is.
+    pub eighths: [&'static str; 9],
+    /// Whether the waveform is drawn as a shape mirrored about a centre
+    /// line, or as one row.
+    ///
+    /// Not a preference — an arithmetic consequence. A console font offers
+    /// exactly three heights (empty, `▄`, `█`), and the symmetry a mirror
+    /// needs then forces every value between to the same half-height: the
+    /// whole band comes out as a flat wall of `▄`. Density has four steps
+    /// (`░▒▓█`) and needs no symmetry at all, so that is what a legacy
+    /// console draws, in the single row it had before waveforms existed.
+    pub mirrored: bool,
+    /// The row on the speakers, and the caret that marks where a click would
+    /// land or where typing is going.
+    pub playing: &'static str,
+    pub caret: &'static str,
+    /// Paused, in the transport.
+    pub paused: &'static str,
+    /// The two ends of a Sonic Path — the tracks that were chosen, as
+    /// against the waypoints between them.
+    pub seed: &'static str,
+    /// Frames of the "waiting on the server" spinner.
+    pub spinner: &'static [&'static str],
+}
+
+/// Everything a modern terminal font has.
+const RICH: Glyphs = Glyphs {
+    eighths: [
+        " ", "\u{2581}", "\u{2582}", "\u{2583}", "\u{2584}", "\u{2585}", "\u{2586}", "\u{2587}",
+        "\u{2588}",
+    ],
+    mirrored: true,
+    playing: "\u{25b6}",
+    caret: "\u{258f}",
+    paused: "\u{23f8}",
+    seed: "\u{25c6}",
+    spinner: &["\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280f}"],
+};
+
+/// What CP437 had, which is what every console font still carries.
+///
+/// The waveform is drawn as density rather than height — `░▒▓█`, four steps
+/// in one row. Coarse on purpose: a chunky shape that renders beats a
+/// precise one that prints boxes.
+const LEGACY: Glyphs = Glyphs {
+    eighths: [
+        " ", "\u{2591}", "\u{2591}", "\u{2592}", "\u{2592}", "\u{2593}", "\u{2593}", "\u{2588}",
+        "\u{2588}",
+    ],
+    mirrored: false,
+    playing: ">",
+    caret: "|",
+    paused: "=",
+    seed: "*",
+    // A spinner is motion, not shape; the ASCII one has been fine since the
+    // seventies.
+    spinner: &["|", "/", "-", "\\"],
+};
+
+impl Glyphs {
+    /// `auto` asks the terminal, anything else is taken at its word.
+    ///
+    /// `WT_SESSION` is set by Windows Terminal and not by conhost, which is
+    /// the whole of the question on Windows. Everywhere else — including the
+    /// browser build, where the page picks the font — a modern font is a
+    /// safe assumption.
+    pub fn from_prefs(prefs: &crate::config::DisplayPrefs) -> (Self, Vec<String>) {
+        match prefs.glyphs.trim().to_ascii_lowercase().as_str() {
+            "full" => (RICH, Vec::new()),
+            "legacy" => (LEGACY, Vec::new()),
+            "auto" => (Glyphs::detect(), Vec::new()),
+            other => (
+                Glyphs::detect(),
+                vec![format!(
+                    "display.glyphs: '{other}' is not auto, full or legacy — using auto"
+                )],
+            ),
+        }
+    }
+
+    fn detect() -> Self {
+        if !cfg!(windows) || std::env::var_os("WT_SESSION").is_some() { RICH } else { LEGACY }
+    }
+}
+
+pub fn set_glyphs(glyphs: Glyphs) {
+    let _ = GLYPHS.set(glyphs);
+}
+
+pub(crate) fn glyphs() -> &'static Glyphs {
+    GLYPHS.get_or_init(Glyphs::detect)
 }
 
 pub fn set_theme(theme: Theme) {
@@ -125,9 +240,13 @@ fn parse_color(raw: &str) -> Option<Color> {
 /// Left gutter the cursor symbol reserves on every browser row, blank or not.
 const CURSOR: &str = "> ";
 
-/// Braille spinner. Ten frames is slow enough to read as turning rather than
-/// flickering at the rate the event loop advances it.
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// Which frame the spinner is on. The frame count differs between the two
+/// glyph sets — braille turns in ten, ASCII in four — so the modulo has to
+/// ask the set rather than a constant.
+fn spinner_frame(app: &App) -> &'static str {
+    let frames = glyphs().spinner;
+    frames[app.spinner % frames.len()]
+}
 
 /// The mStream wordmark, character for character as the server prints it at
 /// boot (cli-boot-wrapper.js).
@@ -257,6 +376,78 @@ pub(crate) struct NowRegions {
     pub keys: Rect,
 }
 
+/// Rows the full-screen transport gives the waveform *above* the bar.
+///
+/// The bar row is the other half of a shape mirrored about the line between
+/// them, which is what makes it read as a waveform rather than as a bar
+/// chart. One, because the halves have to match and the lower one is the
+/// scrubber.
+///
+/// The browser transport spends it too, but only where there is room —
+/// [`transport_wave_rows`] gates it on `mirror_min_height`, since two rows
+/// are an eighth of the list on an 80x24 terminal and nothing on a full
+/// screen.
+const WAVE_HALF_ROWS: u16 = 1;
+
+/// What the full-screen transport claims above its bar.
+///
+/// Unconditional on height: that view's body is a facts column and a tabbed
+/// panel, not a list you scroll, so a row spent here costs nobody a row of
+/// music. Nothing at all on a terminal whose font cannot mirror — see
+/// [`Glyphs::mirrored`].
+fn wave_half_rows() -> u16 {
+    if glyphs().mirrored { WAVE_HALF_ROWS } else { 0 }
+}
+
+/// The numbers `[display]` sets that are about *how much fits* rather than
+/// which characters to draw with. Resolved once at startup, the same shape
+/// as [`THEME`] and [`GLYPHS`] — and for the extra reason that the layout
+/// has to be a pure function of the area plus settings that cannot move
+/// mid-frame, or [`progress_area`] and the drawing would disagree.
+static SIZING: OnceLock<Sizing> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sizing {
+    pub mirror_min_height: u16,
+    pub miller_columns: usize,
+}
+
+impl Default for Sizing {
+    fn default() -> Self {
+        Sizing {
+            mirror_min_height: crate::config::DEFAULT_MIRROR_MIN_HEIGHT,
+            miller_columns: crate::config::DEFAULT_MILLER_COLUMNS,
+        }
+    }
+}
+
+impl Sizing {
+    pub fn from_prefs(prefs: &crate::config::DisplayPrefs) -> Self {
+        Sizing {
+            mirror_min_height: prefs.mirror_min_height,
+            miller_columns: prefs.miller_columns,
+        }
+    }
+}
+
+pub fn set_sizing(sizing: Sizing) {
+    let _ = SIZING.set(sizing);
+}
+
+fn sizing() -> &'static Sizing {
+    SIZING.get_or_init(Sizing::default)
+}
+
+/// The same, for the browser screen — where the row does come out of the
+/// list, so a short terminal keeps its single bar.
+///
+/// A pure function of the height and of settings fixed at startup, which is
+/// the rule that matters: [`progress_area`] works this out again *after* the
+/// frame is drawn, to answer a click, and the two must never disagree.
+fn transport_wave_rows(height: u16) -> u16 {
+    if height >= sizing().mirror_min_height { wave_half_rows() } else { 0 }
+}
+
 pub(crate) fn now_regions(area: Rect) -> NowRegions {
     let inner = Rect {
         x: area.x + 1,
@@ -267,7 +458,7 @@ pub(crate) fn now_regions(area: Rect) -> NowRegions {
     let [body, rule, gauge, keys] = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(1 + wave_half_rows()),
         Constraint::Length(1),
     ])
     .areas(inner);
@@ -281,8 +472,9 @@ pub(crate) fn progress_area(app: &App, area: Rect) -> Rect {
         now_regions(area).gauge
     } else {
         let transport = regions(area).transport;
-        // The band is two rows: what is playing, then the bar under it.
-        Rect { y: transport.y + 1, height: 1, ..transport }
+        // The first row of the band names what is playing; everything under
+        // it is the bar, which on a tall terminal is the mirrored pair.
+        Rect { y: transport.y + 1, height: transport.height.saturating_sub(1), ..transport }
     }
 }
 
@@ -291,7 +483,9 @@ pub(crate) fn regions(area: Rect) -> Regions {
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(1),
-        Constraint::Length(2),
+        // What is playing, the bar, and — where the terminal has rows to
+        // spare — the mirrored half above it.
+        Constraint::Length(2 + transport_wave_rows(area.height)),
         Constraint::Length(1),
     ])
     .areas(area);
@@ -314,6 +508,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         if app.log_view.is_some() {
             render_log_view(frame, area, app);
         }
+        // The genre chooser is the other modal, and it belongs to a tab of
+        // this view — so it has to be drawn here as well. It was only ever
+        // drawn on the browser screen, which meant the old `D` panel opened
+        // invisibly over the full-screen view and ate the keyboard.
+        if app.dj_panel.genres.is_some() {
+            render_genre_picker(frame, area, app);
+        }
         if app.show_help {
             render_help(frame, area, app);
         }
@@ -335,11 +536,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_transport(frame, transport, app);
     render_footer(frame, footer, app);
 
-    if app.dj_panel.is_some() {
-        render_dj_panel(frame, area, app);
+    if app.dj_panel.genres.is_some() {
+        render_genre_picker(frame, area, app);
     }
-    if app.journey.is_some() {
-        render_journey(frame, area, app);
+    if app.sonic_playlist_name.is_some() {
+        render_playlist_prompt(frame, area, app);
     }
     if app.log_view.is_some() {
         render_log_view(frame, area, app);
@@ -586,22 +787,47 @@ fn render_location(frame: &mut Frame, area: Rect, app: &mut App) {
 /// How wide each column gets. The one you are in is the one you are reading,
 /// so it is fed first; the context columns take what is left, and drop off
 /// entirely rather than shrink to the point of saying nothing.
+///
+/// How many of them there can be is [`Sizing::miller_columns`], counting the
+/// current one — a ceiling, not a promise. Width decides the rest: the trail
+/// is filled innermost-first, so a narrow terminal shows the folder you just
+/// came out of and a wide one shows the way back to the top. It used to be
+/// pinned at two whatever the width, which on a wide terminal threw away the
+/// context it plainly had room for (reported live, browsing by artist).
 fn column_widths(total: u16, trail: usize, queue: bool) -> Vec<u16> {
     const CURRENT_MIN: u16 = 28;
     const QUEUE_MIN: u16 = 22;
+    /// What a context column needs to be worth drawing, and as wide as one
+    /// is worth letting get — past this it is spending width on a listing
+    /// nobody is reading.
     const TRAIL_WIDTH: u16 = 20;
-    const TRAIL_MAX: usize = 2;
+    const TRAIL_WIDE: u16 = 32;
 
     let queue_width = if queue { QUEUE_MIN.min(total.saturating_sub(CURRENT_MIN)) } else { 0 };
     let mut spare = total.saturating_sub(CURRENT_MIN + queue_width);
+    // The column you are in is one of them, so the trail may have the rest.
+    let cap = sizing().miller_columns.saturating_sub(1);
     let mut shown = 0;
-    while shown < trail.min(TRAIL_MAX) && spare >= TRAIL_WIDTH {
+    while shown < trail.min(cap) && spare >= TRAIL_WIDTH {
         spare -= TRAIL_WIDTH;
         shown += 1;
     }
 
+    // What is left once everyone has their minimum. Half of it widens the
+    // columns you came through — at twenty they clip most album names, and
+    // a column of "Free Instrumentals, Vol…" is context you cannot read —
+    // and the column you are actually in keeps the rest.
     let mut widths = vec![TRAIL_WIDTH; shown];
-    widths.push(total.saturating_sub(TRAIL_WIDTH * shown as u16 + queue_width));
+    if shown > 0 && spare > 0 {
+        let share = (spare / 2) / shown as u16;
+        let grow = share.min(TRAIL_WIDE - TRAIL_WIDTH);
+        for width in &mut widths {
+            *width += grow;
+        }
+    }
+
+    let used: u16 = widths.iter().sum();
+    widths.push(total.saturating_sub(used + queue_width));
     if queue {
         widths.push(queue_width);
     }
@@ -737,7 +963,7 @@ fn render_queue_column(frame: &mut Frame, area: Rect, app: &mut App) {
         .map(|(row, track)| {
             let playing = Some(window.start + row) == current;
             let style = if playing { Style::new().fg(accent()) } else { Style::new() };
-            let marker = if playing { "\u{25b6} " } else { "  " };
+            let marker = if playing { format!("{} ", glyphs().playing) } else { "  ".to_string() };
             ListItem::new(Line::from(Span::styled(
                 fit(&format!("{marker}{}", track.display_name()), inner.width as usize),
                 style,
@@ -769,9 +995,9 @@ fn divider(frame: &mut Frame, area: Rect) {
 /// What an empty column should say. "Nothing here" and "not here yet"
 /// look identical on screen and mean opposite things, so the answer turns
 /// on whether a request is still out.
-fn empty_hint(app: &App) -> String {
+pub(crate) fn empty_hint(app: &App) -> String {
     if app.pane().loading {
-        return format!("{} loading\u{2026}", SPINNER[app.spinner % SPINNER.len()]);
+        return format!("{} loading\u{2026}", spinner_frame(app));
     }
     // "(empty directory)" under a filter that matched nothing is a lie about
     // the directory.
@@ -781,13 +1007,16 @@ fn empty_hint(app: &App) -> String {
     }
     match app.tab {
         Tab::Files => "(empty directory)",
-        Tab::Library => "(nothing here)",
         // Inside an opened playlist the pane is that playlist's tracks;
         // "(no playlists)" there would deny the ones sitting in the list.
-        Tab::Playlists if app.playlist_open.is_some() => "(empty playlist)",
-        Tab::Playlists => "(no playlists)",
+        Tab::Library => match app.library_node() {
+            LibraryNode::Playlists => "(no playlists)",
+            LibraryNode::Playlist(_) => "(empty playlist)",
+            _ => "(nothing here)",
+        },
         Tab::Search => "type a query and press Enter",
         Tab::Discover => "(nothing similar)",
+        Tab::SonicPath => "(nothing to set here)",
         Tab::Settings => "(no settings here yet)",
     }
     .to_string()
@@ -811,10 +1040,8 @@ pub(crate) fn browser_title(app: &App) -> String {
             LibraryNode::Genres => " Genres ".to_string(),
             LibraryNode::Genre(genre) => format!(" Genre: {genre} "),
             LibraryNode::Recent => " Recently Added ".to_string(),
-        },
-        Tab::Playlists => match &app.playlist_open {
-            Some(name) => format!(" Playlist: {name} "),
-            None => " Playlists ".to_string(),
+            LibraryNode::Playlists => " Playlists ".to_string(),
+            LibraryNode::Playlist(name) => format!(" Playlist: {name} "),
         },
         Tab::Search => {
             let query = if app.query.is_empty() { "…" } else { &app.query };
@@ -840,8 +1067,9 @@ pub(crate) fn browser_title(app: &App) -> String {
                 .as_ref()
                 .map_or_else(|| "nothing yet".to_string(), Track::display_name);
             match app.discover_node() {
-                DiscoverNode::Root => format!(" Discover · from {seed} "),
-                DiscoverNode::Tracks => format!(" Sounds like {seed} "),
+                DiscoverNode::Root => " Discover · look around from… ".to_string(),
+                DiscoverNode::Mode => format!(" Discover · from {seed} "),
+                DiscoverNode::Tracks => format!(" Songs similar to {seed} "),
                 DiscoverNode::Artists => {
                     let artist = app
                         .discover_seed
@@ -853,6 +1081,23 @@ pub(crate) fn browser_title(app: &App) -> String {
                 DiscoverNode::Artist(artist) => format!(" Ways into {artist} "),
             }
         }
+        // The title carries what the rows cannot: which end is being chosen,
+        // or — once a path exists — the two songs it runs between, which is
+        // the one fact the results rows never repeat.
+        Tab::SonicPath => match app.sonic_node() {
+            SonicNode::Side(side) => format!(" Sonic Path · {} ", side.label()),
+            SonicNode::Root if app.sonic.view == SonicView::Results => {
+                let end = |track: Option<&Track>| {
+                    track.map(Track::display_name).unwrap_or_else(|| "?".to_string())
+                };
+                format!(
+                    " {} \u{2192} {} ",
+                    end(app.sonic.start.as_ref()),
+                    end(app.sonic.end.as_ref())
+                )
+            }
+            SonicNode::Root => " Sonic Path ".to_string(),
+        },
         Tab::Settings => match app.settings_node() {
             SettingsNode::Root => " Settings ".to_string(),
             SettingsNode::Crossfade => " Settings · Crossfade ".to_string(),
@@ -881,7 +1126,6 @@ fn entry_line(entry: &Entry, width: usize, playing: Option<&str>) -> Line<'stati
         Entry::Node { label, .. } => {
             Line::from(Span::styled(label.clone(), Style::new().fg(folder())))
         }
-        Entry::Playlist { name } => Line::from(format!("♪ {name}")),
         // The count is flushed right, the same column the durations make, so
         // the menu reads down the numbers.
         Entry::Search { label, detail, .. } => {
@@ -913,6 +1157,34 @@ fn entry_line(entry: &Entry, width: usize, playing: Option<&str>) -> Line<'stati
             let name = fit(label, width);
             let room = width.saturating_sub(width_of(&name) + 3);
             let mut spans = vec![Span::styled(name, Style::new().fg(folder()))];
+            if room > 1 {
+                spans.push(Span::styled(
+                    format!("   {}", fit(detail, room)),
+                    Style::new().fg(dim()),
+                ));
+            }
+            Line::from(spans)
+        }
+        // The same two-column shape as a Setting row, with one difference:
+        // the rows that *do* something rather than hold a value are drawn in
+        // the accent, so the actions read as buttons and not as more settings.
+        Entry::Sonic { label, detail, row } => {
+            let style = match row {
+                // A sentence about how the plot went, not a control.
+                SonicRow::Status => Style::new().fg(dim()),
+                SonicRow::Build
+                | SonicRow::Play
+                | SonicRow::QueueAll
+                | SonicRow::SavePlaylist
+                | SonicRow::Regenerate
+                | SonicRow::StartOver
+                | SonicRow::UsePlaying
+                | SonicRow::PickFromLibrary => Style::new().fg(accent()),
+                _ => Style::new().fg(folder()),
+            };
+            let name = fit(label, width);
+            let room = width.saturating_sub(width_of(&name) + 3);
+            let mut spans = vec![Span::styled(name, style)];
             if room > 1 {
                 spans.push(Span::styled(
                     format!("   {}", fit(detail, room)),
@@ -960,7 +1232,7 @@ fn queue_title(queue: &Queue) -> String {
 }
 
 /// A whole-queue length, in the coarsest unit that still says something.
-fn fmt_span(seconds: f64) -> String {
+pub(crate) fn fmt_span(seconds: f64) -> String {
     if !seconds.is_finite() || seconds <= 0.0 {
         return "0m".to_string();
     }
@@ -1029,9 +1301,19 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
         rule,
     );
 
+    // The band is a mirrored pair: the shape above the line, the scrubber
+    // below it. Both are laid out against the same bar width, so they stack
+    // into one object rather than two things that happen to be adjacent.
+    let [wave_area, bar_area] =
+        Layout::vertical([Constraint::Length(wave_half_rows()), Constraint::Length(1)])
+            .areas(gauge_area);
     frame.render_widget(
-        Paragraph::new(progress_line(app, gauge_area.width as usize, hovering(app, gauge_area))),
-        gauge_area,
+        Paragraph::new(waveform_top_line(app, gauge_area.width as usize)),
+        wave_area,
+    );
+    frame.render_widget(
+        Paragraph::new(progress_line(app, gauge_area.width as usize, hovering(app, gauge_area), glyphs().mirrored)),
+        bar_area,
     );
 
     // The keys that work here, and the modes -- there is no footer down here
@@ -1045,7 +1327,7 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
     .areas(keys_area);
     frame.render_widget(
         Paragraph::new(Span::styled(
-            fit(now_keys_hint(app), left.width as usize),
+            fit(&now_keys_hint(app), left.width as usize),
             Style::new().fg(dim()),
         )),
         left,
@@ -1069,7 +1351,9 @@ const TAB_GAP: &str = " ";
 /// so this does not change as the selection moves.
 fn tab_strip_width(app: &App) -> u16 {
     let tabs = app.now_tabs();
-    let names: usize = tabs.iter().map(|t| width_of(t.title()) + 2).sum();
+    // `+ 2` for the brackets, `+ 2` for the "n:" — the number is the key
+    // that gets you here, and a key nobody can see is a key nobody presses.
+    let names: usize = tabs.iter().map(|t| width_of(t.title()) + 4).sum();
     let gaps = tabs.len().saturating_sub(1) * TAB_GAP.len();
     (names + gaps) as u16
 }
@@ -1082,16 +1366,22 @@ fn tab_strip(app: &App, width: u16) -> Line<'static> {
     let active = Style::new().fg(accent()).add_modifier(Modifier::BOLD);
     let rest = Style::new();
 
+    let tabs = app.now_tabs();
+    let numbered = |tab: NowTab| {
+        let at = tabs.iter().position(|t| *t == tab).unwrap_or(0);
+        format!("{}:{}", at + 1, tab.title())
+    };
+
     if tab_strip_width(app) > width {
         return Line::from(vec![
             Span::styled("‹ ", Style::new().fg(dim())),
-            Span::styled(current.title(), active),
+            Span::styled(numbered(current), active),
             Span::styled(" ›", Style::new().fg(dim())),
         ]);
     }
 
     let mut spans = Vec::new();
-    for tab in app.now_tabs() {
+    for tab in tabs.iter().copied() {
         if !spans.is_empty() {
             spans.push(Span::raw(TAB_GAP));
         }
@@ -1104,7 +1394,7 @@ fn tab_strip(app: &App, width: u16) -> Line<'static> {
         let (open, close) = if tab == current { ("[", "]") } else { (" ", " ") };
         let style = if tab == current { active } else { rest };
         spans.push(Span::styled(open, style));
-        spans.push(Span::styled(tab.title(), style));
+        spans.push(Span::styled(numbered(tab), style));
         spans.push(Span::styled(close, style));
     }
     Line::from(spans)
@@ -1123,15 +1413,29 @@ fn rule_with_junction(width: u16, at: u16) -> String {
 
 /// The key hints along the foot. Only what does something on the tab in front
 /// of you: offering "Enter play" while the lyrics are up is a small lie.
-fn now_keys_hint(app: &App) -> &'static str {
-    match app.now_tab() {
-        NowTab::Queue => "←→ tab   ↑↓ list   Enter play   d remove   0 back",
-        NowTab::Visualizer if app.viz.mode.plots_samples() => {
-            "←→ tab   v mode   . dots   0 back"
-        }
-        NowTab::Visualizer => "←→ tab   v mode   0 back",
-        _ => "←→ tab   ↑↓ scroll   0 back",
-    }
+fn now_keys_hint(app: &App) -> String {
+    // The numbers are the navigation on every one of these, which is the
+    // point: the tab you can get stuck on and the tab you cannot must not
+    // have different ways out.
+    //
+    // Counted rather than written down, because the strip is filtered:
+    // Lyrics comes and goes with the track and Discover with the server, so
+    // a hard-coded "1-5" advertised two keys that do nothing on most
+    // sessions — and named a fifth tab on a session that has three.
+    let tabs = match app.now_tabs().len() {
+        0 | 1 => String::new(),
+        2 => "1-2 tab   ".to_string(),
+        n => format!("1-{n} tab   "),
+    };
+    let rest = match app.now_tab() {
+        NowTab::Queue => "↑↓ list   Enter play   d remove   0 back",
+        NowTab::AutoDj => "↑↓ choose   ←→ adjust   Enter set   0 back",
+        NowTab::Discover => "↑↓ list   Enter play   a queue   0 back",
+        NowTab::Visualizer if app.viz.mode.plots_samples() => "v mode   . dots   0 back",
+        NowTab::Visualizer => "v mode   0 back",
+        _ => "↑↓ scroll   0 back",
+    };
+    format!("{tabs}{rest}")
 }
 
 /// The tab strip, and whichever tab is open under it.
@@ -1152,13 +1456,11 @@ fn render_now_panel(frame: &mut Frame, area: Rect, app: &mut App) {
 
     match app.now_tab() {
         NowTab::Queue => render_now_queue(frame, content, app),
-        NowTab::AutoDj => frame.render_widget(Paragraph::new(autodj_summary(app)), content),
+        NowTab::AutoDj => render_now_autodj(frame, content, app),
         NowTab::Lyrics => {
             render_now_placeholder(frame, content, "words go here", "not wired up yet")
         }
-        NowTab::Discover => {
-            render_now_placeholder(frame, content, "what this sounds like", "not wired up yet")
-        }
+        NowTab::Discover => render_now_discover(frame, content, app),
         NowTab::Visualizer => render_now_visualizer(frame, content, app),
     }
 }
@@ -1223,6 +1525,104 @@ fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
+/// What the track on the speakers sounds like, as neighbours you can play.
+///
+/// A list rather than the browser tab's drill: this panel follows what is
+/// playing and has one question to ask about it. Picking a different seed,
+/// or asking about artists instead, is the Discover *tab*'s job — you go
+/// there to look something up; you glance at this while the music plays.
+fn render_now_discover(frame: &mut Frame, area: Rect, app: &mut App) {
+    let [head, rest] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(area);
+    // A list of neighbours with no name on it is a list of strangers.
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                fit("Songs similar to what's playing", area.width as usize),
+                Style::new().fg(dim()),
+            )),
+            Line::raw(""),
+        ]),
+        head,
+    );
+
+    let Some(shown) = app.now_discover.as_ref() else {
+        return render_now_placeholder(frame, rest, "", "nothing playing to compare against");
+    };
+    if shown.pending {
+        return render_now_placeholder(frame, rest, "", &format!("{} looking…", spinner_frame(app)));
+    }
+    if shown.tracks.is_empty() {
+        // The server's own words when it has them — an unanalysed track and
+        // a library with nothing close are different answers.
+        let why = shown.note.clone().unwrap_or_else(|| "nothing close in your library".into());
+        return render_now_placeholder(frame, rest, "", &why);
+    }
+
+    let width = rest.width as usize;
+    // The offset goes back to the app, not into a local: `ListState` is
+    // `Copy`, so correcting into one that dies with the frame compiles
+    // happily and pins the cursor to the bottom row for ever after. Same
+    // rule, and the same reason, as `render_now_queue` below.
+    let mut state = ListState::default().with_selected(Some(app.now_scroll));
+    *state.offset_mut() = app.now_offset;
+    let (window, mut visible) = visible_rows(&mut state, shown.tracks.len(), rest.height);
+    app.now_offset = state.offset();
+    let playing = app.now_playing.as_ref().map(|t| t.filepath.as_str());
+
+    let items: Vec<ListItem> = shown.tracks[window]
+        .iter()
+        .map(|near| {
+            // The seed's nearest neighbour is sometimes the seed.
+            let is_playing = playing == Some(near.filepath.as_str());
+            let name = near.clone().into_track().display_name();
+            let detail = near.metadata.duration.map(fmt_duration).unwrap_or_default();
+            near_row(&name, near.similarity, &detail, width, is_playing)
+        })
+        .collect();
+
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+        rest,
+        &mut visible,
+    );
+}
+
+/// One neighbour: how close it is, what it is, and one dim fact on the
+/// right.
+///
+/// The percentage leads because it is what the row is *for* — these arrive
+/// in order, so a position in the list says nothing a rank could not, while
+/// the number says how much of a neighbour it actually is.
+fn near_row(
+    name: &str,
+    similarity: f64,
+    detail: &str,
+    width: usize,
+    playing: bool,
+) -> ListItem<'static> {
+    let style = if playing {
+        Style::new().fg(accent()).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new()
+    };
+    let near = format!("{:>3.0}%  ", (similarity * 100.0).clamp(0.0, 100.0));
+    let detail_width = if detail.is_empty() { 0 } else { width_of(detail) + 1 };
+    let name = fit(name, width.saturating_sub(width_of(&near) + detail_width));
+    let gap = width
+        .saturating_sub(width_of(&near) + width_of(&name) + detail_width.saturating_sub(1))
+        .max(1);
+    let mut spans = vec![
+        Span::styled(near, Style::new().fg(dim())),
+        Span::styled(name, style),
+    ];
+    if !detail.is_empty() {
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(detail.to_string(), Style::new().fg(dim())));
+    }
+    ListItem::new(Line::from(spans))
+}
+
 fn render_now_placeholder(frame: &mut Frame, area: Rect, what: &str, why: &str) {
     let lines = vec![
         Line::raw(""),
@@ -1257,7 +1657,7 @@ fn render_now_queue(frame: &mut Frame, area: Rect, app: &mut App) {
         .map(|(row, track)| {
             let playing = Some(window.start + row) == current;
             let style = if playing { Style::new().fg(accent()) } else { Style::new() };
-            let marker = if playing { "\u{25b6} " } else { "  " };
+            let marker = if playing { format!("{} ", glyphs().playing) } else { "  ".to_string() };
             let name = format!("{marker}{}", track.display_name());
             let Some(duration) = track.metadata.duration else {
                 return ListItem::new(Line::from(Span::styled(name, style)));
@@ -1279,51 +1679,6 @@ fn render_now_queue(frame: &mut Frame, area: Rect, app: &mut App) {
         area,
         &mut shown,
     );
-}
-
-/// What Auto-DJ is set to, read-only. `D` stays the one place it changes: two
-/// screens editing one set of settings is two things to keep in step.
-fn autodj_summary(app: &App) -> Vec<Line<'static>> {
-    let faint = Style::new().fg(dim());
-    let row = |label: &str, value: String| {
-        Line::from(vec![Span::styled(format!("{label:<9}"), faint), Span::raw(value)])
-    };
-
-    let mut lines = vec![Line::raw(""), row("Mode", app.autodj.label().to_string())];
-    if app.autodj != AutoDjMode::Off {
-        let dj = &app.dj;
-        if app.capabilities.discovery {
-            lines.push(row(
-                "Pool",
-                match dj.sonic_tightness {
-                    0 => "any".to_string(),
-                    tightness => format!("sonic, tightness {tightness}"),
-                },
-            ));
-        }
-        lines.push(row("Tempo", format!("±{} BPM", dj.tempo_tolerance)));
-        lines.push(row("Key", dj.key_matching.label().to_string()));
-        if dj.min_rating > 0 {
-            lines.push(row("Rating", format!("{}+", dj.min_rating)));
-        }
-        if dj.artist_cooldown > 0 {
-            lines.push(row("Cooldown", format!("last {} artists", dj.artist_cooldown)));
-        }
-        if !dj.genres.is_empty() {
-            lines.push(row("Genres", format!("{} {}", dj.genre_mode.label(), dj.genres.len())));
-        }
-    }
-
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        if app.autodj == AutoDjMode::Off {
-            "A turns it on \u{b7} D opens the panel"
-        } else {
-            "D opens the panel to change it"
-        },
-        faint,
-    )));
-    lines
 }
 
 /// The left-hand column: what is playing, then what the tags know about it as
@@ -1507,11 +1862,11 @@ fn fact_row(lines: &mut Vec<Line<'static>>, label: &str, value: Vec<Span<'static
 /// reply, which is the same thing happening.
 fn transport_state(app: &App) -> (&'static str, &'static str) {
     if app.is_starting() {
-        (SPINNER[app.spinner % SPINNER.len()], "starting")
+        (spinner_frame(app), "starting")
     } else if app.status.paused {
-        ("⏸", "paused")
+        (glyphs().paused, "paused")
     } else if app.status.playing {
-        ("▶", "playing")
+        (glyphs().playing, "playing")
     } else {
         ("■", "stopped")
     }
@@ -1564,7 +1919,146 @@ fn hovering(app: &App, bar: Rect) -> Option<u16> {
     app.pointer.filter(|at| bar.contains(*at)).map(|at| at.x - bar.x)
 }
 
-fn progress_line(app: &App, width: usize, hovered: Option<u16>) -> Line<'static> {
+/// Squash the server's 800 bars down to the columns actually on screen, and
+/// scale the result to fill the height available.
+///
+/// **Root-mean-square, not peak** — measured, not assumed. The server's bars
+/// are already peaks, and taking the peak again over the ~10 that share a
+/// column asks "was anything loud in these three seconds?". On a modern
+/// master the answer is yes everywhere: against demo.mstream.io that drew 83
+/// of 86 columns at full height, a brick with a fade at each end. RMS asks
+/// how much energy was in those three seconds, which is the question whose
+/// answer is the shape of the song.
+///
+/// Then **normalised to the track's own loudest column**. Nothing here
+/// applies ReplayGain, so levels between tracks vary by more than the eight
+/// heights a row can draw; without this a quietly-mastered record is a flat
+/// line. The cost is honest and worth naming: this shows a track's shape,
+/// not its level, and two tracks drawn side by side say nothing about which
+/// is louder.
+fn resample_bars(bars: &[u8], columns: usize) -> Vec<u8> {
+    if columns == 0 || bars.is_empty() {
+        return Vec::new();
+    }
+    let energy: Vec<f64> = (0..columns)
+        .map(|column| {
+            let start = column * bars.len() / columns;
+            let end = ((column + 1) * bars.len() / columns).max(start + 1).min(bars.len());
+            let window = &bars[start..end];
+            let sum: f64 = window.iter().map(|b| f64::from(*b).powi(2)).sum();
+            (sum / window.len() as f64).sqrt()
+        })
+        .collect();
+
+    // Stretched onto the band this track actually uses, rather than onto
+    // 0..255. Measured against demo.mstream.io: after RMS, a densely
+    // mastered track's body sits between 230 and 250, and eight heights
+    // cannot show a twenty-wide band — it drew as a brick with a fade at
+    // each end. Mapping [quiet, loudest] onto the full height instead spends
+    // all eight glyphs on the range that varies, which is what makes a
+    // breakdown visible enough to seek to.
+    //
+    // The floor is a low percentile rather than the minimum, because nearly
+    // every track fades in and out: one near-silent column at each end would
+    // otherwise anchor the bottom at zero and undo the whole stretch. On a
+    // genuinely dynamic recording the band is already wide and this changes
+    // almost nothing.
+    let loudest = energy.iter().copied().fold(0.0_f64, f64::max);
+    if loudest <= 0.0 {
+        return vec![0; columns];
+    }
+    let mut sorted: Vec<f64> = energy.clone();
+    sorted.sort_by(f64::total_cmp);
+    let quiet = sorted[sorted.len() / 10];
+    // A track with no variation to stretch — a test tone, or a bar one
+    // column wide — has `quiet == loudest`, and stretching it would map its
+    // only height to nothing. Show it at its own level instead.
+    let (floor, span) = match loudest - quiet > f64::EPSILON {
+        true => (quiet, loudest - quiet),
+        false => (0.0, loudest),
+    };
+    energy.iter().map(|e| (((e - floor) / span * 255.0).round().clamp(0.0, 255.0)) as u8).collect()
+}
+
+/// A column's amplitude as eighths of one cell.
+///
+/// Over 255, not 256: the loudest column of a track *is* 255, and dividing
+/// by the count of values rather than the largest one put it at seven
+/// eighths — the full block unreachable, the clamp below it dead, and every
+/// waveform drawn a notch short of the ceiling it was scaled to.
+fn eighths(amplitude: u8) -> usize {
+    (usize::from(amplitude) * 8 / 255).min(8)
+}
+
+/// The half of the shape *above* the centre line, in the full-screen view.
+///
+/// The scrubber row below is the other half, which is why [`WAVE_HALF_ROWS`]
+/// is one and not a knob: the two have to match, and the lower one is the
+/// control itself. A taller band means redesigning that row too.
+///
+/// This half needs no trick — a waveform grows outward from the centre, and
+/// the centre is the *bottom* of this row, which is exactly where a lower
+/// block starts. It is the half below that has to hang (see
+/// [`progress_line`]'s `hangs`).
+fn waveform_top_line(app: &App, width: usize) -> Line<'static> {
+    if !glyphs().mirrored {
+        return Line::raw("");
+    }
+    let (_, _, bar_width) = progress_parts(app, width);
+    let Some(bar_width) = bar_width else { return Line::raw("") };
+    let Some(wave) = playing_waveform(app, bar_width) else {
+        // With a track on but no shape for it, the scrubber below is an
+        // ordinary progress bar and this half has nothing to add.
+        if app.now_playing.is_some() {
+            return Line::raw("");
+        }
+        // With nothing playing at all, the band is a flat line through its
+        // own middle — which is what a silent waveform looks like. An empty
+        // half over a full one reads as neither silence nor progress.
+        return Line::from(Span::styled(
+            glyphs().eighths[1].repeat(bar_width),
+            Style::new().fg(dim()),
+        ));
+    };
+
+    let filled = (app.status.progress() * bar_width as f64).round() as usize;
+    let filled = filled.min(bar_width);
+
+    let spans: Vec<Span<'static>> = (0..bar_width)
+        .map(|column| {
+            // Matched to the scrubber's `.max(1)`, so a quiet passage is a
+            // thin line through the middle rather than a gap in the band.
+            let height = eighths(wave.get(column).copied().unwrap_or(0)).max(1);
+            let colour = if column < filled { accent() } else { dim() };
+            Span::styled(glyphs().eighths[height], Style::new().fg(colour))
+        })
+        .collect();
+    Line::from(spans)
+}
+
+/// The shape of what is playing, resampled to `columns`, when there is one.
+///
+/// Absent for every ordinary reason — a server with no ffmpeg, a track the
+/// scan has not reached, a federated track, or simply a request still out —
+/// and every one of them draws the plain bar instead. It is a decoration on
+/// a control that works without it.
+fn playing_waveform(app: &App, columns: usize) -> Option<Vec<u8>> {
+    let filepath = &app.now_playing.as_ref()?.filepath;
+    let bars = app.waveforms.get(filepath)?.as_ref()?;
+    Some(resample_bars(bars, columns))
+}
+
+/// The scrubber: the shape, the playhead, the hover marker and the time.
+///
+/// `hangs` is what makes the full-screen band a mirror rather than two bar
+/// charts. On its own — the compact transport — the shape grows up from the
+/// bottom of the row, which is what a single-row waveform should do. As the
+/// lower half of a pair it has to grow *down from the centre*, so it is
+/// drawn `REVERSED`: that swaps the two colours at render time and turns
+/// "bottom `n` eighths inked" into "top `n` inked", without this code ever
+/// needing to know the terminal's background. Unicode has no eighth-
+/// resolution blocks that hang, which is why the trick is needed at all.
+fn progress_line(app: &App, width: usize, hovered: Option<u16>, hangs: bool) -> Line<'static> {
     let (position, total, bar_width) = progress_parts(app, width);
     let Some(bar_width) = bar_width else {
         let time = format!("{position} / {total}");
@@ -1584,17 +2078,44 @@ fn progress_line(app: &App, width: usize, hovered: Option<u16>) -> Line<'static>
     // control rather than a readout, and one column carries a marker for
     // where a click would land. Built a column at a time and then run
     // together — splicing the marker into three or five segments took more
-    // arithmetic than it saved and got the edges wrong.
+    // arithmetic than it saved and got the edges wrong. (With a waveform the
+    // runs mostly stop merging, since neighbouring columns rarely share a
+    // height. That costs a span per column on one line, which is nothing;
+    // the merging still earns its keep on the plain bar underneath.)
     let rest = if at.is_some() { folder() } else { dim() };
     let played = Style::new().fg(accent());
     let unplayed = Style::new().fg(rest);
     let marker = Style::new().fg(Color::White).add_modifier(Modifier::BOLD);
 
+    // The shape of the track, when the server has one. Only the glyph
+    // changes: what is behind the playhead, what is ahead of it and where a
+    // click would land are the same three channels either way, so the bar
+    // goes on being the same control whether or not this arrived.
+    let wave = playing_waveform(app, bar_width);
+
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut run: Option<(&'static str, Style, usize)> = None;
     for column in 0..bar_width {
         let (glyph, style) = if Some(column) == at {
-            ("\u{258f}", marker)
+            (glyphs().caret, marker)
+        } else if let Some(peak) = wave.as_ref().and_then(|w| w.get(column).copied()) {
+            // 0..=255 onto the eight heights. Never empty: a hole in the
+            // middle of a waveform reads as a rendering fault, where a low
+            // column reads as a quiet passage.
+            let height = eighths(peak).max(1);
+            let style = if column < filled { played } else { unplayed };
+            match hangs {
+                // `8 - height` because REVERSED inks the part the glyph
+                // leaves blank.
+                true => (glyphs().eighths[8 - height], style.add_modifier(Modifier::REVERSED)),
+                false => (glyphs().eighths[height], style),
+            }
+        } else if hangs && app.now_playing.is_none() {
+            // The other half of the silent line the upper row is drawing.
+            // Only in the mirrored band: a single-row bar with nothing
+            // playing is a track nobody has started, and the flat track it
+            // has always drawn says that better than a hairline would.
+            (glyphs().eighths[7], unplayed.add_modifier(Modifier::REVERSED))
         } else if column < filled {
             ("\u{2588}", played)
         } else {
@@ -1620,8 +2141,16 @@ fn progress_line(app: &App, width: usize, hovered: Option<u16>) -> Line<'static>
 }
 
 fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
-    let [title_area, gauge_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+    // The band is however many rows `regions` gave it: the name, then the
+    // bar, and above the bar the mirrored half when there was room. Split
+    // off the name and let the rest fall to the pair, so this cannot
+    // disagree with the layout about how tall it is.
+    let [title_area, band] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let [wave_area, gauge_area] =
+        Layout::vertical([Constraint::Length(band.height.saturating_sub(1)), Constraint::Length(1)])
+            .areas(band);
+    let mirrored = wave_area.height > 0;
 
     let (label, style) = match (&app.now_playing, app.audio_available) {
         (_, false) => ("audio device unavailable".to_string(), Style::new().fg(Color::Red)),
@@ -1636,8 +2165,16 @@ fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
     };
     frame.render_widget(Paragraph::new(Span::styled(label, style)), title_area);
 
+    if mirrored {
+        frame.render_widget(
+            Paragraph::new(waveform_top_line(app, wave_area.width as usize)),
+            wave_area,
+        );
+    }
+    // Hovering is asked about the whole band, so the pointer lights the bar
+    // from either row of the pair.
     frame.render_widget(
-        Paragraph::new(progress_line(app, gauge_area.width as usize, hovering(app, gauge_area))),
+        Paragraph::new(progress_line(app, gauge_area.width as usize, hovering(app, band), mirrored)),
         gauge_area,
     );
 }
@@ -1646,7 +2183,7 @@ fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
 /// it says how much is hidden, which is the question a short list raises.
 fn filter_readout(app: &App) -> String {
     let pane = app.pane();
-    let caret = if app.filtering { "\u{258F}" } else { "" };
+    let caret = if app.filtering { glyphs().caret } else { "" };
     let mut out = format!("filter: {}{caret}", pane.filter);
     if !pane.filter.trim().is_empty() {
         let (shown, total) = pane.counts();
@@ -1669,11 +2206,31 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let [message_area, modes_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(modes_width)]).areas(area);
 
+    // An armed picker outranks everything but an error: Enter has stopped
+    // meaning play, and nothing else on screen would say so. The webapp
+    // floats a banner over the library for the same reason.
+    //
+    // An error is the exception because it is news and this is a standing
+    // state. Ranked above it, the banner hid every failure raised while a
+    // pick was armed — and it stands until the pick is answered, so those
+    // failures were not delayed, they were never shown at all.
+    let failing = matches!(&app.message, Some(m) if matches!(m.kind, MessageKind::Error));
+    let message = if let Some(who) = app.capture.filter(|_| !failing) {
+        Span::styled(
+            fit(
+                &format!(
+                    "picking the {} song — Enter on any track · Esc cancel",
+                    who.shout()
+                ),
+                message_area.width as usize,
+            ),
+            Style::new().fg(accent()).add_modifier(Modifier::BOLD),
+        )
     // A filter outranks both the message and the hint while one is on: it is
     // the explanation for a list that is shorter than it should be, and
     // leaving that unsaid is how a filtered pane gets mistaken for an empty
     // library.
-    let message = if app.filtering || !app.pane().filter.is_empty() {
+    } else if app.filtering || !app.pane().filter.is_empty() {
         Span::styled(
             fit(&filter_readout(app), message_area.width as usize),
             Style::new().fg(accent()),
@@ -1768,6 +2325,34 @@ fn fit(text: &str, width: usize) -> String {
         used += w;
     }
     out.push('…');
+    out
+}
+
+/// [`fit`] from the other end: keep the *last* `width` columns.
+///
+/// What a one-line editor needs. `fit` keeps the beginning, which is right
+/// for a label you are reading and wrong for a field you are typing into —
+/// there the end is where the caret is, and a caret pushed off the edge
+/// makes a working keyboard look broken.
+fn tail(text: &str, width: usize) -> String {
+    if width_of(text) <= width {
+        return text.to_string();
+    }
+    if width <= 1 {
+        return String::new();
+    }
+    let mut kept: Vec<char> = Vec::new();
+    let mut used = 0;
+    for c in text.chars().rev() {
+        let w = char_width(c);
+        if used + w > width - 1 {
+            break;
+        }
+        kept.push(c);
+        used += w;
+    }
+    let mut out = String::from("…");
+    out.extend(kept.into_iter().rev());
     out
 }
 
@@ -1974,81 +2559,16 @@ fn render_connecting(frame: &mut Frame, area: Rect, app: &App) {
     render_centered_block(frame, area, lines);
 }
 
-/// A Sonic Journey: the arc from one track to another, ready to become the
-/// queue.
-fn render_journey(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(journey) = app.journey.as_ref() else { return };
-    let faint = Style::new().fg(dim());
-
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("  From    ", faint),
-            Span::raw(journey.from.display_name()),
-        ]),
-        Line::from(vec![
-            Span::styled("  To      ", faint),
-            Span::raw(journey.to.display_name()),
-        ]),
-        Line::from(vec![
-            Span::styled("  Stops   ", faint),
-            Span::raw(journey.length.to_string()),
-            Span::styled("   ←→ to change", faint),
-        ]),
-        Line::raw(""),
-    ];
-
-    if journey.pending {
-        lines.push(Line::from(Span::styled("  plotting the route…", faint)));
-    } else if journey.stops.is_empty() {
-        lines.push(Line::from(Span::styled("  no route between these two", faint)));
-    } else {
-        // Leave room for the three header lines, the hint, and the borders.
-        let visible = (area.height as usize).saturating_sub(10).max(3);
-        let shown = journey.stops.iter().enumerate().skip(journey.offset).take(visible);
-        for (index, stop) in shown {
-            let position = format!("{:>3.0}%", stop.t * 100.0);
-            // The ends are the tracks that were chosen; everything between is
-            // the server's pick for that point on the arc.
-            let is_end = index == 0 || index + 1 == journey.stops.len();
-            let style = if is_end { Style::new().fg(accent()) } else { Style::new() };
-            lines.push(Line::from(vec![
-                Span::styled(format!("  {:>2}. ", index + 1), faint),
-                Span::styled(position, faint),
-                Span::styled(format!("  {}", stop.metadata_display()), style),
-            ]));
-        }
-        let remaining = journey.stops.len().saturating_sub(journey.offset + visible);
-        if remaining > 0 {
-            lines.push(Line::from(Span::styled(format!("      … {remaining} more"), faint)));
-        }
-    }
-
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        "  ↑↓ scroll · ←→ stops · Enter queue it · Esc cancel",
-        faint,
-    )));
-
-    let height = (lines.len() as u16 + 2).min(area.height);
-    let box_area = centered_rect(70, height, area);
-    frame.render_widget(Clear, box_area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(accent()))
-        .title(" Sonic Journey ");
-    let inner = block.inner(box_area);
-    frame.render_widget(block, box_area);
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-/// The Auto-DJ panel: what the picker is being told to do, and what that
+/// The Auto-DJ tab: what the picker is being told to do, and what that
 /// actually produces.
-fn render_dj_panel(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(panel) = app.dj_panel.as_ref() else { return };
-    if panel.genres.is_some() {
-        return render_genre_picker(frame, area, app);
-    }
-
+///
+/// The player's one settings surface for Auto-DJ. It was a modal behind `D`
+/// as well as a read-only summary here, which meant two screens describing
+/// one set of values — and the modal was never drawn over this view at all,
+/// so pressing `D` in the full-screen player opened something invisible that
+/// swallowed the keyboard.
+fn render_now_autodj(frame: &mut Frame, area: Rect, app: &App) {
+    let panel = &app.dj_panel;
     let mut lines: Vec<Line> = Vec::new();
     // Widest label plus a gutter, so the values form a column.
     let label_width = panel.rows.iter().map(|r| r.label().len()).max().unwrap_or(0) + 2;
@@ -2069,24 +2589,8 @@ fn render_dj_panel(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(spans));
     }
 
-    lines.push(Line::raw(""));
     lines.extend(dj_sample_lines(app));
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        "  ↑↓ choose · ←→ adjust · p sample · Esc close",
-        Style::new().fg(dim()),
-    )));
-
-    let height = (lines.len() as u16 + 2).min(area.height);
-    let box_area = centered_rect(66, height, area);
-    frame.render_widget(Clear, box_area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(accent()))
-        .title(" Auto-DJ ");
-    let inner = block.inner(box_area);
-    frame.render_widget(block, box_area);
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// The right-hand side of a settings row: the value, plus whatever context
@@ -2184,38 +2688,54 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
             }
             spans
         }
+        // The row's own value stays short — this panel is a column beside
+        // the facts, not a full-width modal any more. What the sample
+        // actually picked goes underneath, where a title has room.
+        DjRow::Sample => {
+            let panel = &app.dj_panel;
+            if panel.sample_pending {
+                return vec![Span::styled("picking…", faint)];
+            }
+            match panel.sample.len() {
+                0 => vec![Span::styled("Enter to preview", faint)],
+                n => vec![Span::raw(format!("{n} picks"))],
+            }
+        }
     }
 }
 
-/// The sample block: what these settings actually pick, and how big a pool
-/// they leave to pick from.
+/// The sample itself: how big a pool these settings leave, and what came
+/// out of it, under the rows that produced them.
 fn dj_sample_lines(app: &App) -> Vec<Line<'static>> {
-    let Some(panel) = app.dj_panel.as_ref() else { return Vec::new() };
+    let panel = &app.dj_panel;
     let faint = Style::new().fg(dim());
-    let mut lines = vec![Line::from(Span::styled("  Sample", faint))];
-
+    let mut lines = Vec::new();
+    // The pool size is the number that makes the tightness slider tunable,
+    // so it survives the sample it arrived with.
     if let Some(pool) = &panel.pool {
+        lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
-            format!("  {} tracks inside the sonic pool", pool.pool_size),
+            format!("  {} tracks in the sonic pool", pool.pool_size),
             faint,
         )));
     }
-    if panel.sample_pending {
-        lines.push(Line::from(Span::styled("  picking…", faint)));
+    if panel.sample.is_empty() {
         return lines;
     }
-    if panel.sample.is_empty() {
-        lines.push(Line::from(Span::styled("  press p to see what these settings pick", faint)));
-        return lines;
+    if lines.is_empty() {
+        lines.push(Line::raw(""));
     }
     for (index, track) in panel.sample.iter().enumerate() {
-        lines.push(Line::from(format!("  {}. {}", index + 1, track.display_name())));
+        lines.push(Line::from(Span::styled(
+            format!("  {}. {}", index + 1, track.display_name()),
+            faint,
+        )));
     }
     lines
 }
 
 fn render_genre_picker(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(picker) = app.dj_panel.as_ref().and_then(|p| p.genres.as_ref()) else { return };
+    let Some(picker) = app.dj_panel.genres.as_ref() else { return };
 
     let mut lines: Vec<Line> = Vec::new();
     if picker.loading {
@@ -2254,6 +2774,44 @@ fn render_genre_picker(frame: &mut Frame, area: Rect, app: &App) {
         .border_style(Style::new().fg(accent()))
         .title(format!(" Genres · {} ", app.dj.genre_mode.label()));
     let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Naming the playlist a path is about to become. A box rather than a footer
+/// prompt: unlike the filter and the search box there is nothing behind it
+/// that reacts as you type, so the typing wants somewhere of its own.
+fn render_playlist_prompt(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(name) = app.sonic_playlist_name.as_ref() else { return };
+
+    let box_area = centered_rect(60, 6, area);
+    frame.render_widget(Clear, box_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(accent()))
+        .title(" Save as playlist ");
+    let inner = block.inner(box_area);
+
+    // The suggested name is two track names and an arrow, so it starts
+    // longer than the box on any ordinary terminal. Show its *end*: the
+    // caret has to stay on screen, or typing into a full field looks like
+    // typing into a dead one.
+    let room = (inner.width as usize).saturating_sub(2 + width_of(glyphs().caret));
+    let shown = tail(name, room);
+
+    let lines = vec![
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw(format!("  {shown}")),
+            Span::styled(glyphs().caret, Style::new().fg(accent())),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            format!("  {} stops \u{b7} Enter save \u{b7} Esc cancel", app.sonic.stops.len()),
+            Style::new().fg(dim()),
+        )),
+    ];
+
     frame.render_widget(block, box_area);
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -2369,6 +2927,8 @@ mod tests {
             discovery_p2p: false,
             federation_discovery: false,
         };
+        // What a real ping does on the way in: the Auto-DJ rows depend on it.
+        app.dj_panel.rebuild(app.capabilities);
         app
     }
 
@@ -2694,7 +3254,7 @@ mod tests {
         assert!(text.contains("vol 100%"));
         app.handle_action(Action::CycleFocus);
         let text = draw(&mut app);
-        assert!(text.contains("▶"), "the queue column marks the current track");
+        assert!(text.contains(glyphs().playing), "the queue column marks the current track");
         assert!(
             !text.contains("repeat off") && !text.contains("dj off"),
             "modes that are off are not worth the width: {text}"
@@ -2821,31 +3381,57 @@ mod tests {
     }
 
     #[test]
-    fn the_tabs_move_under_the_arrows_and_come_back_round() {
+    fn the_numbers_reach_every_tab_including_the_one_you_can_get_stuck_on() {
+        // ←→ used to navigate, with Auto-DJ as the exception because its
+        // rows are values — which put the only escape that mattered on the
+        // only screen where it was different. Reported live as "once you go
+        // to Auto-DJ you can't go back".
         let mut app = connected_app();
         app.now_playing = Some(tagged_track());
         app.handle_action(Action::ToggleNowPlaying);
-        assert_eq!(app.input_mode(), InputMode::Now, "the view claims the arrows");
+        assert_eq!(app.input_mode(), InputMode::Now, "the view claims the keys");
 
-        // The tagged track has no lyrics, so that tab is not in the strip and
-        // the arrows must not stop on it.
+        // The tagged track has no lyrics, so that tab is not in the strip —
+        // and the numbers close over the gap rather than leaving a dead key.
         assert_eq!(app.now_tabs(), vec![NowTab::Queue, NowTab::Discover, NowTab::AutoDj, NowTab::Visualizer]);
 
-        let right = |app: &mut App| {
-            let action = app.keymap.action(key_event(KeyCode::Right), InputMode::Now).unwrap();
+        let press = |app: &mut App, code| {
+            let action = app.keymap.action(key_event(code), InputMode::Now).unwrap();
             app.handle_action(action);
         };
-        right(&mut app);
-        assert_eq!(app.now_tab(), NowTab::Discover);
-        right(&mut app);
-        right(&mut app);
-        assert_eq!(app.now_tab(), NowTab::Visualizer);
-        right(&mut app);
-        assert_eq!(app.now_tab(), NowTab::Queue, "off the end and round again");
+        for (digit, expected) in [
+            ('3', NowTab::AutoDj),
+            ('1', NowTab::Queue),
+            ('4', NowTab::Visualizer),
+            ('2', NowTab::Discover),
+        ] {
+            press(&mut app, KeyCode::Char(digit));
+            assert_eq!(app.now_tab(), expected, "{digit} is {expected:?}");
+        }
 
-        let left = app.keymap.action(key_event(KeyCode::Left), InputMode::Now).unwrap();
-        app.handle_action(left);
-        assert_eq!(app.now_tab(), NowTab::Visualizer, "and the other way");
+        // Every tab is reachable from Auto-DJ, which is the whole point.
+        press(&mut app, KeyCode::Char('3'));
+        assert_eq!(app.now_tab(), NowTab::AutoDj);
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!(app.now_tab(), NowTab::Queue, "and back out again");
+
+        // A number past the end is nothing, not a panic — the strip is
+        // shorter here than its five slots.
+        press(&mut app, KeyCode::Char('5'));
+        assert_eq!(app.now_tab(), NowTab::Queue);
+
+        // Tab and Shift+Tab stay as the way that needs no counting.
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.now_tab(), NowTab::Discover);
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.now_tab(), NowTab::Queue);
+
+        // And ←→ no longer move between tabs at all: on Auto-DJ they adjust,
+        // everywhere else they are simply free.
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.now_tab(), NowTab::Queue, "→ is not navigation any more");
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.now_tab(), NowTab::Queue);
     }
 
     #[test]
@@ -2982,7 +3568,10 @@ mod tests {
     }
 
     #[test]
-    fn the_auto_dj_tab_reports_without_offering_to_change_anything() {
+    fn the_auto_dj_tab_is_where_auto_dj_is_changed() {
+        // It reported and pointed at a modal behind `D` — a second screen
+        // describing one set of values, and one that never drew over this
+        // view at all. The tab is the panel now.
         let mut app = connected_app();
         app.now_playing = Some(tagged_track());
         app.handle_action(Action::ToggleNowPlaying);
@@ -2991,8 +3580,11 @@ mod tests {
 
         let text = draw(&mut app);
         assert!(text.contains("Mode") && text.contains("tempo+key"), "{text}");
-        assert!(text.contains("Tempo") && text.contains("BPM"), "{text}");
-        assert!(text.contains("D opens the panel"), "one place to change it: {text}");
+        assert!(text.contains("Tempo window"), "{text}");
+        assert!(!text.contains("opens the panel"), "there is no other panel: {text}");
+
+        app.handle_action(Action::NowRight);
+        assert_ne!(app.autodj, AutoDjMode::BpmKey, "the row under the cursor moved");
     }
 
     fn key_event(code: KeyCode) -> KeyEvent {
@@ -3038,7 +3630,7 @@ mod tests {
         app.status.position = 30.0;
         app.status.duration = 60.0;
 
-        let line = progress_line(&app, 40, None);
+        let line = progress_line(&app, 40, None, false);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.ends_with("0:30 / 1:00"), "{text}");
         // Half filled, and the other half is a visible track: ratatui's Gauge
@@ -3051,8 +3643,353 @@ mod tests {
 
         // No room for a bar: the time still gets said.
         let cramped: String =
-            progress_line(&app, 12, None).spans.iter().map(|s| s.content.as_ref()).collect();
+            progress_line(&app, 12, None, false).spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(cramped.contains("0:30"), "{cramped}");
+    }
+
+    #[test]
+    fn the_legacy_glyphs_are_what_a_console_font_actually_has() {
+        // Probed, not assumed: of what this UI draws, Consolas — the Windows
+        // 10 default console font — is missing six of the eight eighth
+        // blocks, ▏, ▶, ◆, ⏸ and every braille pattern. It keeps the old
+        // CP437 shapes, so those are what the fallback is built from.
+        let cp437 = [
+            " ", "\u{2591}", "\u{2592}", "\u{2593}", "\u{2584}", "\u{2588}", ">", "|", "=", "*",
+            "/", "-", "\\",
+        ];
+        for glyph in LEGACY.eighths {
+            assert!(cp437.contains(&glyph), "{glyph:?} is not something every console has");
+        }
+        for glyph in [LEGACY.playing, LEGACY.caret, LEGACY.paused, LEGACY.seed] {
+            assert!(cp437.contains(&glyph), "{glyph:?} is not something every console has");
+        }
+        assert!(LEGACY.spinner.iter().all(|g| cp437.contains(g)));
+
+        // Density, not height: three heights cannot carry a mirror. The
+        // symmetry one needs (ink(n) + ink(8-n) = a full cell) forces every
+        // value between empty and full onto the same half-height, and the
+        // whole band comes out as a flat wall of ▄ — measured, on this
+        // machine, before the fallback changed to shading.
+        assert!(!LEGACY.mirrored);
+        assert!(LEGACY.eighths.contains(&"\u{2591}") && LEGACY.eighths.contains(&"\u{2593}"));
+
+        // Where a set does mirror, that symmetry has to hold, or the two
+        // halves disagree about where the middle is — a shape with a step
+        // in it down the centre line.
+        //
+        // Measured against how much of a cell each glyph actually inks. An
+        // earlier version compared each entry with the two endpoints, which
+        // is true of any nine glyphs with different ends and so said nothing
+        // about the seven in between — the only ones that can be wrong.
+        fn ink(glyph: &str) -> usize {
+            match glyph {
+                " " => 0,
+                "\u{2581}" => 1,
+                "\u{2582}" => 2,
+                "\u{2583}" => 3,
+                "\u{2584}" => 4,
+                "\u{2585}" => 5,
+                "\u{2586}" => 6,
+                "\u{2587}" => 7,
+                "\u{2588}" => 8,
+                other => panic!("{other:?} has no height a mirror could measure"),
+            }
+        }
+        for set in [RICH, LEGACY].into_iter().filter(|s| s.mirrored) {
+            for height in 0..=8usize {
+                assert_eq!(
+                    ink(set.eighths[height]),
+                    height,
+                    "eighths[{height}] does not fill {height} eighths in {:?}",
+                    set.eighths
+                );
+                assert_eq!(
+                    ink(set.eighths[height]) + ink(set.eighths[8 - height]),
+                    8,
+                    "height {height} and its complement do not make one cell in {:?}",
+                    set.eighths
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_glyph_set_is_pinned_by_config_and_guessed_otherwise() {
+        use crate::config::DisplayPrefs;
+        let prefs = |value: &str| DisplayPrefs { glyphs: value.into(), ..Default::default() };
+
+        assert_eq!(Glyphs::from_prefs(&prefs("full")).0, RICH);
+        assert_eq!(Glyphs::from_prefs(&prefs("legacy")).0, LEGACY);
+        assert_eq!(Glyphs::from_prefs(&prefs("  FULL  ")).0, RICH, "trimmed and case-folded");
+
+        // An unreadable value costs that value and nothing else — the same
+        // bargain `[theme]` and `[keys]` make.
+        let (set, warnings) = Glyphs::from_prefs(&prefs("fancy"));
+        assert_eq!(set, Glyphs::detect());
+        assert!(warnings[0].contains("display.glyphs"), "{warnings:?}");
+
+        // And the guess: anything not Windows has these glyphs, and on
+        // Windows the question is whether this is Windows Terminal.
+        assert_eq!(Glyphs::from_prefs(&prefs("auto")).0, Glyphs::detect());
+        if !cfg!(windows) {
+            assert_eq!(Glyphs::detect(), RICH);
+        }
+    }
+
+    #[test]
+    fn the_waveform_shows_energy_rather_than_saturating_on_peaks() {
+        // Found live against demo.mstream.io: resampling by peak drew 83 of
+        // 86 columns at full height. The server's bars are already peaks, so
+        // peak-of-peaks over the ~10 sharing a column asks "was anything
+        // loud in these three seconds", and on a modern master that is yes
+        // everywhere. A column of alternating loud and quiet is a quieter
+        // passage than a column that is loud throughout, and only an energy
+        // measure says so.
+        let solid = vec![250; 20];
+        let sparse: Vec<u8> = (0..20).map(|i| if i % 2 == 0 { 250 } else { 40 }).collect();
+        let a = resample_bars(&solid, 1)[0];
+        let b = resample_bars(&[solid.clone(), sparse].concat(), 2);
+        assert_eq!(a, 255, "a column with nothing but signal is full height");
+        assert!(b[1] < b[0], "and the half-empty one is shorter: {b:?}");
+
+        // Scaled to the band each track actually uses, since nothing here
+        // applies ReplayGain: a quiet master and a loud one both fill the
+        // row, and both keep their own shape.
+        let quiet = resample_bars(&[10, 10, 10, 40, 40, 40], 2);
+        let loud = resample_bars(&[100, 100, 100, 255, 255, 255], 2);
+        assert_eq!((quiet[0], quiet[1]), (0, 255), "level is not what this draws");
+        assert_eq!((loud[0], loud[1]), (0, 255));
+
+        // A densely mastered body — everything between 230 and 250 — is the
+        // case a plain 0..255 scaling could not show at all: eight heights
+        // over a twenty-wide band is one height. Stretched, it has shape.
+        let dense: Vec<u8> = (0..80).map(|i| 230 + (i % 3) as u8 * 10).collect();
+        let drawn = resample_bars(&dense, 8);
+        assert!(drawn.iter().any(|h| *h > 200) && drawn.iter().any(|h| *h < 60), "{drawn:?}");
+
+        // No variation at all is drawn at its own level, not at nothing.
+        assert_eq!(resample_bars(&[200; 16], 4), vec![255, 255, 255, 255]);
+
+        // Exactly as many columns as asked for, whichever way the ratio goes.
+        // 800 is what the server sends, whatever the track's length.
+        let full: Vec<u8> = (0..800).map(|i| (i % 256) as u8).collect();
+        assert_eq!(resample_bars(&full, 73).len(), 73);
+        assert_eq!(resample_bars(&full, 1).len(), 1);
+        // More columns than bars: every column still gets a value rather
+        // than an empty range panicking on `start..start`.
+        assert_eq!(resample_bars(&[9, 4], 5).len(), 5);
+        // Silence has no loudest column to scale against — flat, not a
+        // division by zero.
+        assert_eq!(resample_bars(&[0; 16], 4), vec![0, 0, 0, 0]);
+        // And the degenerate ends are answers, not panics.
+        assert!(resample_bars(&full, 0).is_empty());
+        assert!(resample_bars(&[], 10).is_empty());
+
+        // The floor is the *tenth percentile*, not the minimum, and every
+        // case above is too narrow to tell the two apart: `sorted[len / 10]`
+        // collapses to `sorted[0]` under ten columns. Twenty columns puts
+        // the floor on the third-quietest, so the two below it are what
+        // proves which of the two rules is in force — under a minimum floor
+        // the third would scale to something above zero.
+        let mut body: Vec<u8> = (0..240).map(|i| 150 + (i % 7) as u8 * 15).collect();
+        body[..24].fill(3); // two whole columns of near-silence
+        body[24..36].fill(60); // and the one that becomes the floor
+        let wide = resample_bars(&body, 20);
+        assert_eq!(wide.len(), 20);
+        assert_eq!(
+            (wide[0], wide[1], wide[2]),
+            (0, 0, 0),
+            "everything at or under the tenth percentile is the bottom: {wide:?}"
+        );
+        assert!(wide[3..].iter().any(|h| *h == 255), "and the loudest still reaches the top");
+    }
+
+    #[test]
+    fn the_loudest_column_reaches_the_top_of_the_cell() {
+        // `amplitude * 8 / 256` cannot return 8 — 255 is the largest input
+        // and lands on 7 — so the full block was unreachable and every
+        // waveform drew a notch short of the height it had been scaled to.
+        assert_eq!(eighths(255), 8);
+        assert_eq!(eighths(0), 0);
+        // Still monotonic, and still eight steps rather than nine crammed in.
+        let steps: Vec<usize> = (0..=255u8).map(eighths).collect();
+        assert!(steps.windows(2).all(|w| w[0] <= w[1]), "heights only go up");
+        assert_eq!(*steps.iter().max().unwrap(), 8);
+        assert!(steps.iter().all(|h| *h <= 8), "and never off the end of the glyph set");
+    }
+
+    #[test]
+    fn the_waveform_decorates_the_bar_without_taking_it_over() {
+        let mut app = connected_app();
+        app.status.position = 30.0;
+        app.status.duration = 60.0;
+        app.now_playing = Some(Track { filepath: "lib/a.mp3".into(), metadata: Default::default() });
+
+        // Nothing cached yet: the plain bar, exactly as before.
+        let plain: String =
+            progress_line(&app, 40, None, false).spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(plain.contains('█') && plain.contains('░'), "{plain}");
+
+        // A shape that starts silent and ends loud.
+        let bars: Vec<u8> = (0..800).map(|i| (i / 4) as u8).collect();
+        app.waveforms.insert("lib/a.mp3".into(), Some(bars));
+        let line = progress_line(&app, 40, None, false);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.ends_with("0:30 / 1:00"), "the time is untouched: {text}");
+        assert!(
+            text.chars().any(|c| glyphs().eighths[1..8].contains(&c.to_string().as_str())),
+            "the shape is drawn: {text}"
+        );
+        // The plain bar has exactly two glyphs, played and not. Anything
+        // wearing a shape has more than that, whether the steps are heights
+        // or densities.
+        let bar: String = text.chars().take_while(|c| !c.is_ascii_digit()).collect();
+        let distinct: std::collections::HashSet<char> = bar.trim().chars().collect();
+        assert!(distinct.len() > 2, "it replaces the flat track: {text}");
+
+        // The three channels are unchanged: played is the accent, unplayed
+        // is not, and the bar is still a control rather than a picture.
+        let bar_spans: Vec<&Span> =
+            line.spans.iter().take_while(|s| !s.content.starts_with("  ")).collect();
+        assert!(bar_spans.iter().any(|s| s.style.fg == Some(accent())), "{text}");
+        assert!(bar_spans.iter().any(|s| s.style.fg == Some(dim())), "{text}");
+
+        // A track the server has no shape for keeps the plain bar rather
+        // than drawing nothing.
+        app.waveforms.insert("lib/a.mp3".into(), None);
+        let none: String =
+            progress_line(&app, 40, None, false).spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(none.contains('█') && none.contains('░'), "{none}");
+    }
+
+    #[test]
+    fn the_full_screen_band_mirrors_the_shape_above_the_scrubber() {
+        // One row of block glyphs is eight heights, which is a bar chart
+        // rather than a waveform. The full-screen view has room for the
+        // other half, and a shape mirrored about the line between them is
+        // what reads as a recording.
+        let mut app = connected_app();
+        app.status.position = 30.0;
+        app.status.duration = 60.0;
+        app.now_playing = Some(Track { filepath: "lib/a.mp3".into(), metadata: Default::default() });
+        // Quiet at one end, loud at the other.
+        let bars: Vec<u8> = (0..800).map(|i| (i / 4) as u8).collect();
+        app.waveforms.insert("lib/a.mp3".into(), Some(bars));
+
+        // Whether there is a mirror at all is the font's call, so this
+        // asserts whichever answer is in force on the machine running it —
+        // both are correct, and CI runs one of each.
+        if !glyphs().mirrored {
+            assert!(
+                waveform_top_line(&app, 40).spans.is_empty(),
+                "a console font draws one row of density, not two of height"
+            );
+            assert_eq!(wave_half_rows(), 0, "and claims no row for the half it cannot draw");
+            return;
+        }
+
+        // The shape grows *outward* from the line between the two rows, so
+        // the upper half is an ordinary lower block — the centre is the
+        // bottom of that row, which is where a lower block already starts.
+        let top = waveform_top_line(&app, 40);
+        assert!(!top.spans.is_empty(), "the upper half is drawn");
+        assert!(
+            top.spans.iter().all(|s| !s.style.add_modifier.contains(Modifier::REVERSED)),
+            "the upper half needs no trick"
+        );
+
+        // The half below has to hang from the centre instead, and Unicode
+        // has no eighth-resolution block that does — so it is the same glyph
+        // REVERSED, which swaps which part of the cell is inked.
+        let bottom = progress_line(&app, 40, None, true);
+        let shape: Vec<&Span> = bottom
+            .spans
+            .iter()
+            .filter(|s| glyphs().eighths[1..].iter().any(|g| s.content.contains(g)))
+            .collect();
+        assert!(!shape.is_empty(), "the lower half is drawn");
+        assert!(
+            shape.iter().all(|s| s.style.add_modifier.contains(Modifier::REVERSED)),
+            "and it hangs"
+        );
+
+        // Both wear the same two colours, split at the same place, so the
+        // pair reads as one object rather than two adjacent pictures.
+        for half in [&top, &bottom] {
+            assert!(half.spans.iter().any(|s| s.style.fg == Some(accent())));
+            assert!(half.spans.iter().any(|s| s.style.fg == Some(dim())));
+        }
+
+        // With no shape to draw there is no half to draw it in — and the
+        // scrubber falls back to the flat bar it always was.
+        app.waveforms.insert("lib/a.mp3".into(), None);
+        assert!(waveform_top_line(&app, 40).spans.is_empty());
+        let plain: String = progress_line(&app, 40, None, true)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(plain.contains('█') && plain.contains('░'), "{plain}");
+    }
+
+    #[test]
+    fn silence_draws_a_flat_line_rather_than_half_a_band() {
+        // Nothing playing used to leave the upper half blank over a full
+        // lower one, which reads as neither silence nor progress. A silent
+        // waveform is a line through the middle.
+        let mut app = connected_app();
+        assert!(app.now_playing.is_none());
+        if !glyphs().mirrored {
+            return; // no band to be half of
+        }
+
+        let top = waveform_top_line(&app, 40);
+        let text: String = top.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.is_empty(), "the upper half is drawn");
+        assert!(
+            text.chars().all(|c| c.to_string() == glyphs().eighths[1]),
+            "and it is the thinnest glyph, all the way across: {text:?}"
+        );
+
+        // The half below meets it, hanging from the same centre line.
+        let bottom = progress_line(&app, 40, None, true);
+        let shape: Vec<&Span> = bottom
+            .spans
+            .iter()
+            .filter(|s| s.content.contains(glyphs().eighths[7]))
+            .collect();
+        assert!(!shape.is_empty(), "the lower half is drawn: {bottom:?}");
+        assert!(shape.iter().all(|s| s.style.add_modifier.contains(Modifier::REVERSED)));
+        let drawn: String = bottom.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!drawn.contains('░'), "and the flat track is gone with it: {drawn}");
+        assert!(drawn.ends_with("0:00 / --:--"), "the time still says its piece: {drawn}");
+
+        // A track that is simply stopped is not silence — it has a shape, or
+        // failing that a progress bar, and either is more use than a line.
+        app.now_playing =
+            Some(Track { filepath: "lib/a.mp3".into(), metadata: Default::default() });
+        assert!(waveform_top_line(&app, 40).spans.is_empty(), "no half without a shape");
+        let stopped: String = progress_line(&app, 40, None, true)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(stopped.contains('░'), "the flat track is back: {stopped}");
+    }
+
+    #[test]
+    fn the_hover_marker_survives_the_waveform() {
+        // The marker is the one column that says where a click would land,
+        // so the shape must not be allowed to paint over it.
+        let mut app = connected_app();
+        app.status.position = 0.0;
+        app.status.duration = 60.0;
+        app.now_playing = Some(Track { filepath: "lib/a.mp3".into(), metadata: Default::default() });
+        app.waveforms.insert("lib/a.mp3".into(), Some(vec![255; 800]));
+
+        let text: String =
+            progress_line(&app, 40, Some(3), false).spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains(glyphs().caret), "the marker is still there: {text}");
     }
 
     #[test]
@@ -3112,14 +4049,19 @@ mod tests {
         app.now_playing = Some(track);
         app.handle_action(Action::ToggleNowPlaying);
 
-        // Wide enough: every tab is named.
-        let wide = draw_sized(&mut app, 100, 16);
-        assert!(wide.contains("[Queue]  Lyrics   Discover   Auto-DJ   Visualizer "), "{wide}");
+        // Wide enough: every tab is named, and wearing the number that
+        // reaches it.
+        let wide = draw_sized(&mut app, 110, 16);
+        assert!(
+            wide.contains("[1:Queue]  2:Lyrics   3:Discover   4:Auto-DJ   5:Visualizer "),
+            "{wide}"
+        );
 
         // Not wide enough: the one you are on, and arrows for the rest. A tab
-        // chopped to "Vis" reads as a bug; this reads as a choice.
+        // chopped to "Vis" reads as a bug; this reads as a choice. The number
+        // survives the squeeze — it is the way out of wherever you are.
         let narrow = draw_sized(&mut app, 64, 16);
-        assert!(narrow.contains("‹ Queue ›"), "{narrow}");
+        assert!(narrow.contains("‹ 1:Queue ›"), "{narrow}");
         assert!(!narrow.contains("Discover"), "{narrow}");
     }
 
@@ -3319,30 +4261,34 @@ mod tests {
         // A list of neighbours means nothing without saying neighbours of
         // what, so every view in the tab carries the seed in its title.
         let mut app = connected_app();
-        app.files.set(vec![crate::tui::app::Entry::Track {
-            label: "seed".into(),
-            track: Box::new(Track {
-                filepath: "lib/seed.mp3".into(),
-                metadata: TrackMetadata {
-                    artist: Some("Seed Artist".into()),
-                    title: Some("Seed Song".into()),
-                    ..Default::default()
-                },
-            }),
+        app.queue.replace(vec![Track {
+            filepath: "lib/seed.mp3".into(),
+            metadata: TrackMetadata {
+                artist: Some("Seed Artist".into()),
+                title: Some("Seed Song".into()),
+                ..Default::default()
+            },
         }]);
-        app.files.state.select(Some(0));
+        app.play_index(0);
 
         let discover = app.tabs().iter().position(|t| *t == Tab::Discover).unwrap();
         app.handle_action(Action::SelectTab(discover));
         let text = draw(&mut app);
-        assert!(text.contains("5:Discover"));
+        assert!(text.contains("4:Discover"));
+        // The tab opens on the question, not on a guess about the answer.
+        assert!(text.contains("look around from"), "got:\n{text}");
+        assert!(text.contains("What's playing") && text.contains("Choose a song"));
+
+        // Take what's playing, and the title names it from then on.
+        app.handle_action(Action::Activate);
+        let text = draw(&mut app);
         assert!(text.contains("Seed Artist - Seed Song"), "the title names the seed:\n{text}");
         assert!(text.contains("Similar tracks"));
         assert!(text.contains("like Seed Artist"), "and the artist row names the artist");
 
         // Artist rows carry how close, how many ways in, and what it sounds
         // like — the three things that decide whether to open one.
-        app.discover.state.select(Some(1));
+        app.discover.state.select(Some(2));
         app.handle_action(Action::Activate);
         app.apply_event(crate::tui::worker::Event::Discover {
             node: crate::tui::worker::DiscoverNode::Artists,
@@ -3359,6 +4305,8 @@ mod tests {
                 },
             ]),
             note: None,
+            dest: crate::tui::worker::DiscoverDest::Browser,
+            seed: "lib/seed.mp3".into(),
         });
         let text = draw(&mut app);
         assert!(text.contains("Artists like Seed Artist"), "got:\n{text}");
@@ -3369,7 +4317,7 @@ mod tests {
     }
 
     #[test]
-    fn a_journey_shows_the_arc_it_would_queue() {
+    fn a_sonic_path_shows_the_arc_it_would_queue() {
         let mut app = connected_app();
         app.queue.replace(vec![Track {
             filepath: "lib/start.mp3".into(),
@@ -3394,10 +4342,11 @@ mod tests {
         app.files.state.select(Some(0));
         app.handle_action(Action::StartJourney);
 
-        // While it's in flight the panel says so rather than looking empty.
+        // The tab names both ends while the plot is in flight, so the wait
+        // is not a blank screen.
         let text = draw_sized(&mut app, 100, 30);
-        assert!(text.contains("Sonic Journey"));
-        assert!(text.contains("plotting the route"), "got:\n{text}");
+        assert!(text.contains("First - Departure"), "got:\n{text}");
+        assert!(text.contains("Last - Arrival"), "got:\n{text}");
 
         app.apply_event(crate::tui::worker::Event::Journey {
             stops: vec![
@@ -3433,20 +4382,23 @@ mod tests {
                 },
             ],
             note: None,
-            length: app.journey.as_ref().unwrap().length,
+            length: app.sonic.length,
         });
 
         let text = draw_sized(&mut app, 100, 30);
         assert!(text.contains("First - Departure"));
         assert!(text.contains("Middle - Somewhere"));
         assert!(text.contains("Last - Arrival"));
-        // The arc position is what makes it a journey rather than a playlist.
+        // The arc position is what makes it a path rather than a playlist.
         assert!(text.contains("0%") && text.contains("50%") && text.contains("100%"), "got:\n{text}");
-        assert!(text.contains("Enter queue it"));
+        // And what can be done with it, in the webapp's own order.
+        assert!(text.contains("Play the path"), "got:\n{text}");
+        assert!(text.contains("Queue all") && text.contains("Save as playlist"));
+        assert!(text.contains("Start over"));
     }
 
     #[test]
-    fn a_journey_survives_a_small_terminal() {
+    fn a_sonic_path_survives_a_small_terminal() {
         let mut app = connected_app();
         app.queue.replace(vec![Track { filepath: "a".into(), metadata: Default::default() }]);
         app.play_index(0);
@@ -3466,19 +4418,27 @@ mod tests {
                 })
                 .collect(),
             note: None,
-            length: app.journey.as_ref().unwrap().length,
+            length: app.sonic.length,
         });
-        // A 32-stop arc in a short terminal must scroll, not overflow.
-        let text = draw_sized(&mut app, 60, 20);
-        assert!(text.contains("more"), "the rest is accounted for:\n{text}");
+        // A 32-stop path in a short terminal scrolls like any other list.
+        draw_sized(&mut app, 60, 20);
         draw_sized(&mut app, 24, 9);
     }
 
+    /// The Auto-DJ tab, as its own screen rather than as a modal over the
+    /// browser: `0` opens the full-screen view, then the tab.
+    fn on_the_dj_tab(app: &mut App) {
+        app.handle_action(Action::ToggleNowPlaying);
+        while app.now_tab() != NowTab::AutoDj {
+            app.handle_action(Action::NowTabNext);
+        }
+    }
+
     #[test]
-    fn the_dj_panel_shows_each_setting_with_what_it_means() {
+    fn the_dj_tab_shows_each_setting_with_what_it_means() {
         let mut app = connected_app();
         app.dj.sonic_tightness = 60;
-        app.handle_action(Action::OpenDjPanel);
+        on_the_dj_tab(&mut app);
         let text = draw_sized(&mut app, 100, 34);
 
         assert!(text.contains("Auto-DJ"));
@@ -3491,24 +4451,33 @@ mod tests {
         assert!(text.contains("60%"));
         // And the tempo row says what the fallback widens to.
         assert!(text.contains("±6%") && text.contains("±12%"), "got:\n{text}");
-        assert!(text.contains("press p to see what these settings pick"));
+        assert!(text.contains("Sample") && text.contains("Enter to preview"), "got:\n{text}");
+        // ←→ mean adjust here, so the hint has to say what moves between
+        // tabs — the same thing it says on every other one, counted from
+        // the strip this session actually has. This app has no Lyrics tab
+        // (the track carries none), so promising a fifth digit would be
+        // promising a key that does nothing.
+        assert_eq!(app.now_tabs().len(), 4);
+        assert!(text.contains("1-4 tab") && text.contains("←→ adjust"), "got:\n{text}");
+        assert!(!text.contains("1-5 tab"));
     }
 
     #[test]
-    fn the_dj_panel_hides_the_sonic_rows_without_an_index() {
+    fn the_dj_tab_hides_the_sonic_rows_without_an_index() {
         let mut app = connected_app();
         app.capabilities = Default::default();
-        app.handle_action(Action::OpenDjPanel);
+        app.dj_panel = Default::default();
+        on_the_dj_tab(&mut app);
         let text = draw_sized(&mut app, 100, 34);
         assert!(!text.contains("Sonic pool"), "nothing promises a pool that can't exist");
         assert!(!text.contains("Anchor"));
-        assert!(text.contains("Tempo window"), "the rest of the panel is still there");
+        assert!(text.contains("Tempo window"), "the rest of the tab is still there");
     }
 
     #[test]
-    fn the_dj_panel_reports_the_pool_and_the_sample() {
+    fn the_dj_tab_reports_the_pool_and_the_sample() {
         let mut app = connected_app();
-        app.handle_action(Action::OpenDjPanel);
+        on_the_dj_tab(&mut app);
         app.apply_event(crate::tui::worker::Event::AutoDjSample {
             tracks: vec![Track {
                 filepath: "lib/x.mp3".into(),
@@ -3526,7 +4495,7 @@ mod tests {
         });
         let text = draw_sized(&mut app, 100, 34);
         // The pool size is the number that makes the slider tunable.
-        assert!(text.contains("1247 tracks inside the sonic pool"), "got:\n{text}");
+        assert!(text.contains("1247 tracks in the sonic pool"), "got:\n{text}");
         assert!(text.contains("1. Band - Song"), "got:\n{text}");
     }
 
@@ -3534,12 +4503,9 @@ mod tests {
     fn the_genre_chooser_marks_what_is_selected() {
         let mut app = connected_app();
         app.dj.genres = vec!["Techno".into()];
-        app.handle_action(Action::OpenDjPanel);
-        let genres = {
-            let rows = &app.dj_panel.as_ref().unwrap().rows;
-            rows.iter().position(|r| *r == crate::tui::app::DjRow::Genres).unwrap()
-        };
-        app.dj_panel.as_mut().unwrap().row = genres;
+        on_the_dj_tab(&mut app);
+        app.dj_panel.row =
+            app.dj_panel.rows.iter().position(|r| *r == DjRow::Genres).unwrap();
         app.handle_action(Action::Activate);
         app.apply_event(crate::tui::worker::Event::Genres(vec![
             crate::api::types::Genre { name: "Ambient".into(), track_count: None },
@@ -3553,9 +4519,9 @@ mod tests {
     }
 
     #[test]
-    fn the_dj_panel_survives_a_small_terminal() {
+    fn the_dj_tab_survives_a_small_terminal() {
         let mut app = connected_app();
-        app.handle_action(Action::OpenDjPanel);
+        on_the_dj_tab(&mut app);
         // Must not panic, and must not try to draw outside the frame.
         draw_sized(&mut app, 40, 12);
         draw_sized(&mut app, 20, 8);
@@ -3698,6 +4664,47 @@ mod tests {
     }
 
     #[test]
+    fn the_trail_takes_the_width_it_is_given_up_to_the_cap() {
+        // Reported live, browsing by artist on a wide terminal: the first
+        // column fell off the screen after a couple of levels, with plenty
+        // of room left. The count was pinned at two whatever the width.
+        let cap = sizing().miller_columns;
+        let deep = 8;
+
+        // Wide enough for the lot: the cap is what stops it, and the current
+        // column is one of them.
+        let wide = column_widths(240, deep, false);
+        assert_eq!(wide.len(), cap, "the cap counts the column you are in");
+        assert_eq!(wide.iter().sum::<u16>(), 240);
+        // Surplus width is shared rather than dumped on the current column:
+        // context columns pinned at twenty clip most album names.
+        assert!(wide[..cap - 1].iter().all(|w| *w > 20), "the trail grew: {wide:?}");
+        assert!(wide[..cap - 1].iter().all(|w| *w <= 32), "but only so far: {wide:?}");
+        assert!(*wide.last().unwrap() > wide[0], "and the one being read keeps the most");
+
+        // Narrower: as many as fit, innermost first, and never at the cost
+        // of the column being read.
+        for total in [48u16, 68, 88, 108] {
+            let widths = column_widths(total, deep, false);
+            assert!(widths.len() <= cap, "{total} columns wide gave {}", widths.len());
+            assert_eq!(widths.iter().sum::<u16>(), total, "every column is accounted for");
+            assert!(*widths.last().unwrap() >= 28, "the current column keeps its floor");
+        }
+
+        // Shallow: you cannot show more context than there is.
+        assert_eq!(column_widths(240, 1, false).len(), 2);
+        assert_eq!(column_widths(240, 0, false).len(), 1);
+
+        // The queue is not one of the Miller columns — it is the end of the
+        // chain rather than a step along it — so it takes its width from
+        // outside the count.
+        let with_queue = column_widths(240, deep, true);
+        assert_eq!(with_queue.len(), cap + 1);
+        assert_eq!(*with_queue.last().unwrap(), 22);
+        assert_eq!(with_queue.iter().sum::<u16>(), 240);
+    }
+
+    #[test]
     fn the_columns_build_up_as_you_go_in_and_fall_away_as_you_come_out() {
         use crate::tui::worker::{LibraryData, LibraryNode};
         let mut app = connected_app();
@@ -3746,28 +4753,31 @@ mod tests {
         };
 
         // No pointer on it: half played, half track, and no marker.
-        let cold = progress_line(&app, 40, None);
-        assert!(!text(cold.clone()).contains('\u{258f}'), "{}", text(cold.clone()));
+        let cold = progress_line(&app, 40, None, false);
+        assert!(!text(cold.clone()).contains(glyphs().caret), "{}", text(cold.clone()));
         let track_colour = cold.spans.iter().find(|s| s.content.contains('\u{2591}')).unwrap();
         assert_eq!(track_colour.style.fg, Some(dim()));
 
         // Pointer on it: a marker in that column, and the unplayed part comes
         // up out of the dim so the bar reads as something you can press.
-        let warm = progress_line(&app, 40, Some(20));
+        let warm = progress_line(&app, 40, Some(20), false);
         let drawn = text(warm.clone());
-        assert_eq!(drawn.chars().filter(|c| *c == '\u{258f}').count(), 1, "{drawn}");
+        assert_eq!(drawn.matches(glyphs().caret).count(), 1, "{drawn}");
         assert_eq!(drawn.chars().count(), text(cold).chars().count(), "same width either way");
         let track_colour = warm.spans.iter().find(|s| s.content.contains('\u{2591}')).unwrap();
         assert_eq!(track_colour.style.fg, Some(folder()));
 
         // The marker sits where the pointer is, not where the playhead is.
-        let early = text(progress_line(&app, 40, Some(2)));
-        assert_eq!(early.chars().position(|c| c == '\u{258f}'), Some(2), "{early}");
+        let early = text(progress_line(&app, 40, Some(2), false));
+        // By column, not by byte — the block glyphs either side are three
+        // bytes each.
+        let caret = glyphs().caret.chars().next().unwrap();
+        assert_eq!(early.chars().position(|c| c == caret), Some(2), "{early}");
 
         // A length we do not know is a seek we would refuse, so it does not
         // offer one.
         app.status.duration = 0.0;
-        assert!(!text(progress_line(&app, 40, Some(20))).contains('\u{258f}'));
+        assert!(!text(progress_line(&app, 40, Some(20), false)).contains(glyphs().caret));
     }
 
     #[test]
@@ -3803,6 +4813,64 @@ mod tests {
     }
 
     #[test]
+    fn the_browser_bar_mirrors_only_where_there_are_rows_to_spare() {
+        // The transport's rows come out of the list, so the second one is
+        // worth having on a tall terminal and not on a short one. The
+        // full-screen view is not part of this bargain — its body is a facts
+        // column and a panel, not a list to scroll.
+        if !glyphs().mirrored {
+            return; // a console font has no mirror to spend a row on
+        }
+        let floor = crate::config::DEFAULT_MIRROR_MIN_HEIGHT;
+        let at = |height: u16| Rect { x: 0, y: 0, width: 80, height };
+
+        let short = regions(at(floor - 1)).transport;
+        assert_eq!(short.height, 2, "what is playing, then the bar");
+
+        let tall = regions(at(floor)).transport;
+        assert_eq!(tall.height, 3, "and the mirrored half above it");
+
+        // The list keeps everything the transport did not take, either way.
+        for height in [floor - 1, floor] {
+            let r = regions(at(height));
+            assert_eq!(
+                r.header.height + r.body.height + r.rule.height + r.transport.height + r.footer.height,
+                height,
+                "the rows all go somewhere at {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_click_target_follows_the_bar_up_the_screen() {
+        // `progress_area` works the layout out again *after* the frame is
+        // drawn, to answer a click. If it and `regions` ever disagreed about
+        // how tall the band is, clicks would land on the wrong second.
+        let mut app = connected_app();
+        let floor = crate::config::DEFAULT_MIRROR_MIN_HEIGHT;
+
+        for height in [floor - 1, floor, floor + 20] {
+            let area = Rect { x: 0, y: 0, width: 80, height };
+            let transport = regions(area).transport;
+            let bar = progress_area(&app, area);
+            assert_eq!(bar.y, transport.y + 1, "the name keeps the first row at {height}");
+            assert_eq!(
+                bar.y + bar.height,
+                transport.y + transport.height,
+                "and the bar owns the rest at {height}"
+            );
+        }
+
+        // Whatever the browser screen spends, the full-screen view is
+        // unchanged by the height.
+        app.handle_action(Action::ToggleNowPlaying);
+        for height in [floor - 1, floor] {
+            let area = Rect { x: 0, y: 0, width: 80, height };
+            assert_eq!(progress_area(&app, area).height, 1 + wave_half_rows());
+        }
+    }
+
+    #[test]
     fn the_bar_is_where_the_click_handler_looks_for_it() {
         // Both screens draw a progress bar in a different place, and the one
         // function that answers "where" is the one the drawing uses.
@@ -3815,7 +4883,12 @@ mod tests {
 
         app.handle_action(Action::ToggleNowPlaying);
         let full = progress_area(&app, area);
-        assert_eq!(full.height, 1);
+        // Taller here, and deliberately: the full-screen band is the mirrored
+        // waveform plus the scrubber under it, and the whole of it is one
+        // control. The click handler is row-agnostic — it takes the column
+        // and asks `contains` about the rest — so the extra row is simply a
+        // bigger target rather than anything to special-case.
+        assert_eq!(full.height, 1 + wave_half_rows());
         assert_eq!(full, now_regions(area).gauge, "and the one the view itself lays out");
         // The full-screen view insets by a column either side; the rows the
         // two land on happen to coincide at some heights, which is why this
@@ -3958,7 +5031,7 @@ mod tests {
         let text = draw(&mut app);
         // The caret says the keys are going here; the count says why the list
         // is short. Both matter more than whatever the footer held before.
-        assert!(text.contains("filter: bass\u{258F}"), "{text}");
+        assert!(text.contains(&format!("filter: bass{}", glyphs().caret)), "{text}");
         assert!(text.contains("2 of 3"), "{text}");
         assert!(text.contains("Bassnectar") && text.contains("Basshunter"), "{text}");
         assert!(!text.contains("Portishead"), "the filtered-out row is gone: {text}");
@@ -3967,7 +5040,7 @@ mod tests {
         app.handle_action(Action::Submit);
         let text = draw(&mut app);
         assert!(text.contains("filter: bass"), "{text}");
-        assert!(!text.contains("filter: bass\u{258F}"), "the caret goes with the prompt: {text}");
+        assert!(!text.contains(&format!("filter: bass{}", glyphs().caret)), "the caret goes with the prompt: {text}");
         assert!(text.contains("f to change"), "{text}");
     }
 
@@ -4049,17 +5122,30 @@ mod tests {
         assert!(app.library.trail.is_empty());
     }
 
+    /// Put the cursor inside the Library tab's Playlists node.
+    fn on_the_playlists_node(app: &mut App) {
+        app.handle_action(Action::SelectTab(1));
+        let at =
+            app.library.entries.iter().position(|e| e.label() == "Playlists").unwrap();
+        app.library.state.select(Some(at));
+        app.handle_action(Action::Activate);
+    }
+
     #[test]
     fn a_pane_waiting_on_the_server_says_so_instead_of_saying_it_is_empty() {
         let mut app = connected_app();
         // The bug this exists for: opening Playlists showed "(no playlists)"
         // for as long as the round trip took, which is a different claim.
-        app.handle_action(Action::SelectTab(2));
+        on_the_playlists_node(&mut app);
         let waiting = draw(&mut app);
         assert!(waiting.contains("loading…"), "{waiting}");
         assert!(!waiting.contains("(no playlists)"), "{waiting}");
 
-        app.apply_event(Event::Playlists(Vec::new()));
+        app.apply_event(Event::Library {
+            node: LibraryNode::Playlists,
+            dest: Tab::Library,
+            data: crate::tui::worker::LibraryData::Playlists(Vec::new()),
+        });
         let answered = draw(&mut app);
         assert!(answered.contains("(no playlists)"), "{answered}");
         assert!(!answered.contains("loading…"), "{answered}");
@@ -4068,13 +5154,23 @@ mod tests {
     #[test]
     fn an_empty_playlist_is_not_a_claim_about_the_list() {
         use crate::api::types::PlaylistSummary;
+        use crate::tui::worker::LibraryData;
         let mut app = connected_app();
-        app.handle_action(Action::SelectTab(2));
-        app.apply_event(Event::Playlists(vec![PlaylistSummary { name: "phone".into() }]));
+        on_the_playlists_node(&mut app);
+        app.apply_event(Event::Library {
+            node: LibraryNode::Playlists,
+            dest: Tab::Library,
+            data: LibraryData::Playlists(vec![PlaylistSummary { name: "phone".into() }]),
+        });
         // Open the (empty) playlist: the pane now shows its tracks, and the
         // message must be about them — the list plainly has an entry.
+        app.library.state.select(Some(1));
         app.handle_action(Action::Activate);
-        app.apply_event(Event::PlaylistTracks { name: "phone".into(), tracks: Vec::new() });
+        app.apply_event(Event::Library {
+            node: LibraryNode::Playlist("phone".into()),
+            dest: Tab::Library,
+            data: LibraryData::Tracks(Vec::new()),
+        });
         let text = draw(&mut app);
         assert!(text.contains("(empty playlist)"), "{text}");
         assert!(!text.contains("(no playlists)"), "{text}");
@@ -4095,7 +5191,7 @@ mod tests {
     #[test]
     fn a_failed_request_stops_the_spinner_rather_than_turning_forever() {
         let mut app = connected_app();
-        app.handle_action(Action::SelectTab(2));
+        on_the_playlists_node(&mut app);
         app.apply_event(Event::Error("server said no".into()));
         let text = draw(&mut app);
         assert!(!text.contains("loading…"), "{text}");
@@ -4105,7 +5201,7 @@ mod tests {
     #[test]
     fn the_spinner_turns() {
         let mut app = connected_app();
-        app.handle_action(Action::SelectTab(2));
+        on_the_playlists_node(&mut app);
         let first = draw(&mut app);
         app.spinner += 1;
         let second = draw(&mut app);
@@ -4115,7 +5211,7 @@ mod tests {
     #[test]
     fn search_tab_shows_the_query_and_result_summary() {
         let mut app = connected_app();
-        app.handle_action(Action::SelectTab(3));
+        app.handle_action(Action::SelectTab(2));
         for c in "moon".chars() {
             app.handle_action(Action::Input(c));
         }
@@ -4133,7 +5229,7 @@ mod tests {
     fn the_search_menu_says_what_matched_and_how_many() {
         use crate::api::types::{SearchGroup, SearchResults, SearchTrack};
         let mut app = connected_app();
-        app.handle_action(Action::SelectTab(3));
+        app.handle_action(Action::SelectTab(2));
         for c in "moon".chars() {
             app.handle_action(Action::Input(c));
         }
@@ -4182,7 +5278,7 @@ mod tests {
         app.session.username = Some("tester".into());
         for width in [76, 80, 100, 140] {
             let text = draw_sized(&mut app, width, 20);
-            for tab in ["1:Files", "2:Library", "3:Playlists", "4:Search"] {
+            for tab in ["1:Files", "2:Library", "3:Search", "4:Discover"] {
                 assert!(text.contains(tab), "{tab} missing at {width} columns");
             }
         }
@@ -4213,30 +5309,32 @@ mod tests {
 
         // Less room: the scheme is the first thing worth giving up, and it
         // goes to a reminder of a key. The username is not up for trade, so
-        // the extras shorten before it does. (Widths sit a Settings tab
-        // wider than they used to — the strip grew a sixth member.)
-        let mid = draw_sized(&mut app, 108, 20);
+        // the extras shorten before it does. (Widths came back in when
+        // Playlists left the strip for the Library tab.)
+        let mid = draw_sized(&mut app, 110, 20);
         assert!(mid.contains("tester@host:3000"), "kept who as well as where");
         assert!(mid.contains("0:Now") && mid.contains("Tab:Queue"));
         assert!(!mid.contains("0:Now Playing"), "the long form is what gave way: {mid}");
 
         // Genuinely tight: the extras go entirely, and every tab is still
-        // whole — including Discover, which only exists on a server with
-        // discovery, and Settings behind it.
-        let narrow = draw_sized(&mut app, 84, 20);
+        // whole — including the two that only exist on a server with a
+        // discovery index, and Settings behind them.
+        let narrow = draw_sized(&mut app, 86, 20);
         assert!(!narrow.contains("0:Now"), "a hint is not worth a tab: {narrow}");
         assert!(narrow.contains("tester@host:3000"));
-        assert!(narrow.contains("5:Discover"));
+        assert!(narrow.contains("4:Discover"));
+        assert!(narrow.contains("5:Sonic Path"));
         assert!(narrow.contains("6:Settings"));
 
-        // A server without discovery has no fifth tab, so the same label
-        // survives in a narrower terminal.
+        // A server without a discovery index has neither, so the same label
+        // survives in a much narrower terminal.
         let mut plain = connected_app();
         plain.capabilities = Default::default();
         plain.session.username = Some("tester".into());
-        let text = draw_sized(&mut plain, 84, 20);
+        let text = draw_sized(&mut plain, 72, 20);
         assert!(!text.contains("Discover"), "no tab for a feature this server lacks");
-        assert!(text.contains("5:Settings"), "Settings slides onto the freed number");
+        assert!(!text.contains("Sonic Path"), "nor for the path it cannot plot");
+        assert!(text.contains("4:Settings"), "Settings slides onto the freed number");
         assert!(text.contains("tester@http://host:3000"), "and the freed width shows");
     }
 

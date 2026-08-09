@@ -74,6 +74,9 @@ pub(crate) struct Startup {
     pub keys: std::collections::BTreeMap<String, Vec<String>>,
     /// The `[theme]` section, likewise.
     pub theme: config::ThemePrefs,
+    /// The `[display]` section — which glyphs the font can be trusted with,
+    /// and how much the layout is allowed to spend.
+    pub display: config::DisplayPrefs,
     /// Whether to ask the terminal to report the mouse.
     pub mouse: config::MousePrefs,
 }
@@ -130,6 +133,7 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
         tunnel_code,
         keys: config.keys,
         theme: config.theme,
+        display: config.display,
         mouse: config.mouse,
     }
 }
@@ -156,6 +160,18 @@ pub(crate) fn theme_for(prefs: &config::ThemePrefs) -> ui::Theme {
         eprintln!("warning: {warning}");
     }
     theme
+}
+
+/// The glyph set in force, reporting an unreadable `display.glyphs` the same
+/// way an unreadable colour is reported: on stderr, before the terminal is
+/// claimed.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn glyphs_for(prefs: &config::DisplayPrefs) -> ui::Glyphs {
+    let (glyphs, warnings) = ui::Glyphs::from_prefs(prefs);
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
+    glyphs
 }
 
 /// Build the app from a resolved [`Startup`].
@@ -185,6 +201,8 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     let api_tx = worker::spawn_api(event_tx.clone());
 
     ui::set_theme(theme_for(&start.theme));
+    ui::set_glyphs(glyphs_for(&start.display));
+    ui::set_sizing(ui::Sizing::from_prefs(&start.display));
     let mouse = start.mouse.enabled;
 
     let mut app = app_from(start);
@@ -583,6 +601,42 @@ mod tests {
             key.clone(),
         ];
         assert_eq!(collapse_moves(inputs), vec![moved(3, 1), click, moved(9, 9), key]);
+    }
+
+    #[test]
+    fn a_click_on_either_row_of_a_mirrored_bar_seeks() {
+        // On a tall terminal the bar is two rows — the shape and the
+        // scrubber — and the whole band is the control. The handler takes
+        // the column and asks `contains` about the row, so the extra row
+        // costs it nothing and buys a bigger target.
+        let height = config::DEFAULT_MIRROR_MIN_HEIGHT + 4;
+        let area = Rect { x: 0, y: 0, width: 80, height };
+        let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
+        app.connected = true;
+        app.status.duration = 300.0;
+        app.status.source = "http://host/a.mp3".into();
+
+        let bar = ui::progress_area(&app, area);
+        for row in bar.y..bar.y + bar.height {
+            let effects = on_mouse(
+                &mut app,
+                mouse_at(MouseEventKind::Down(MouseButton::Left), bar.x, row),
+                area,
+            );
+            assert_eq!(
+                effects,
+                vec![Effect::Audio(AudioCmd::Seek(0.0))],
+                "row {row} of the band is the same control"
+            );
+        }
+
+        // And the row above the band is the track's name, which is not.
+        let effects = on_mouse(
+            &mut app,
+            mouse_at(MouseEventKind::Down(MouseButton::Left), bar.x, bar.y - 1),
+            area,
+        );
+        assert!(effects.is_empty(), "the name is not a scrubber");
     }
 
     #[test]

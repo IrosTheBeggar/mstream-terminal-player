@@ -791,6 +791,323 @@ an unanswered browse can leave path one level shallower than the pane until the 
 navigation (self-heals; both failures' undos fire); the flight-recorder file grows without
 bound across sessions (it is a debug facility you opt into per-run).
 
+#### D1 — Sonic Path takes the library's slot ✅ 2026-08-07
+
+Auto-DJ had two homes: the modal behind `D`, reachable from the browser, and a read-only
+summary on the full-screen view's Auto-DJ tab that pointed at it. Sonic Journey (B2) was a
+third overlay plotting the same arc the webapp gives a whole panel to. Both moved to where
+the thing they describe already lives, and the guiding rule was **every screen behind a
+number** — nothing worth finding hidden behind a letter you would have to already know.
+
+- **Auto-DJ is now the tab, not a modal over it.** The summary became the panel: `↑↓` walk
+  the rows, `←→` adjust, `Enter` sets, and the sample is a row rather than a key (`p` is
+  "previous track" in that view and the overlay used to steal it). The one tab whose rows are
+  values, so it claims `←→` — `Tab` / `Shift+Tab` switch tabs there, which is why
+  `Action::NowLeft`/`NowRight` exist separately from `NowTabPrev`/`NowTabNext`.
+- **The modal was invisible where it mattered.** `render()` returns early in fullscreen, so
+  `D` inside the now-playing view opened a panel that never drew and ate the keyboard. Gone
+  with the modal; the genre chooser (the one overlay left) is now drawn in both branches.
+- **Sonic Path is a tab — `6`, beside Discover, gated on `discoveryPath`.** Its rows are
+  ordinary `Entry` values, so the tab costs no new navigation: `↑↓`, `Enter`, `a`, the
+  filter, the queue column and the trail all keep meaning what they mean, and the stops come
+  back as real `Entry::Track` rows. `Enter` on a stop plays the path from there; `a` queues
+  just that stop.
+- **The webapp's capture flow, keyed.** "Pick from library" arms `App::sonic_capture` and
+  drops the user in the file browser with a banner along the foot; the next track they open
+  *anywhere* fills the field instead of playing. It lives on the App rather than on
+  `SonicPath` for the same reason `VUEPLAYERCORE.songCapture` does — it is answered from
+  whichever tab they wander into.
+- **Length is still a replot, and now says so.** The old overlay refetched on every `←→`;
+  the tab moves the slider locally and leaves the asking to Build / Regenerate, which is
+  both the webapp's shape and one request instead of twenty.
+- **Full parity, including save-as-playlist** — `POST /api/v1/playlist/save`, a new
+  `ApiCmd::SavePlaylist`, and a name prompt pre-filled with `start → end`.
+- `J` survives as the shortcut in: it opens the tab aimed at the highlighted track, with
+  whatever is playing as the start, and plots straight away. Two presses are no longer a
+  thing — the tab is where the second end is chosen.
+
+Verified live against demo.mstream.io through `replay --live`: the tab strip numbers to
+`7:Settings`, arming from an empty Start field walked into the browser and came back with
+`ALM - 3rd Dimension` in the field, and a 14-stop path plotted, listed its arc positions and
+offered Play / Queue all / Save as playlist / Regenerate / Start over.
+
+#### D2 — The waveform bar ✅ 2026-08-08
+
+First item off the terminal-player audit (cmus, ncmpcpp, musikcube, termusic,
+rmpc, and the closer analogues jellyfin-tui and sonic-tui). Nothing in that
+survey draws a waveform under the progress bar; mStream has had
+`GET /api/v1/db/waveform` all along and no client here ever called it.
+
+800 peak magnitudes per track, whatever its length. The bar keeps its three
+channels — accent behind the playhead, dim ahead, marker under the pointer —
+and only the glyph changes, so it goes on being the same control whether or
+not a shape arrived.
+
+- **No ping flag, so probe once and latch.** Waveforms are the only optional
+  feature the ping does not advertise, so "no flag, no probe" has nothing to
+  read. `Client::no_waveforms` is the next best thing, and the same shape as
+  `plain_listings`: a 503 means the *server* has no ffmpeg, which is a fact
+  about the server, so the session costs one wasted request rather than one
+  per track. A 500 is ffmpeg's settled verdict on that content (the server
+  writes a failure marker), and a 404 covers both "not scanned" and "lives
+  on a federated peer" — `federation-stream.js` puts waveforms out of scope
+  deliberately. All four fold into `None`, and `None` draws the plain bar.
+- **Energy, not peaks — measured, not reasoned.** The scoping said peak, on
+  the grounds that the server bins by peak-of-peaks. Live against
+  demo.mstream.io that drew **83 of 86 columns at full height**: peak over
+  the ~10 bars sharing a column asks "was anything loud in these three
+  seconds", and on a modern master it is yes everywhere. RMS asks how much
+  energy was in them, which is the question whose answer is the shape.
+- **Then stretched onto the band the track uses.** RMS alone still drew a
+  brick: a dense body sits between 230 and 250, and eight heights cannot
+  show a twenty-wide band. Mapping [10th percentile, loudest] onto the full
+  height spends all eight glyphs where the variation is. The floor is a
+  percentile rather than the minimum because nearly every track fades in and
+  out, and one near-silent column at each end would anchor the bottom at
+  zero and undo the stretch. The honest cost: this shows shape, not level.
+- **Prefetched, and deliberately not off the announcement.** A cold waveform
+  costs an ffmpeg decode, so one fetched when the track starts can arrive
+  well into it. The obvious hook was `announced` — but that only exists when
+  a blend or gapless seam needs it, and someone with crossfade off is
+  exactly who would notice a late bar. So it falls back to the plain next
+  row, except under shuffle, where the pick re-rolls on every call and
+  prefetching would fetch the library one dispatch at a time.
+
+- **Mirrored in the full-screen view.** One row of block elements is eight
+  heights, which reads as a bar chart; the shape needs a centre line to grow
+  out of. The full-screen band is now two rows — the half above drawn with
+  ordinary lower blocks (the centre is the bottom of that row, where a lower
+  block already starts), the half below drawn with the *same* glyph
+  `REVERSED`, since Unicode has one-eighth, one-half and full for the upward
+  direction and nothing between. Reversing swaps which part of the cell is
+  inked without this code ever knowing the terminal's background. The whole
+  band is the click target: `progress_area` grew a row and the handler was
+  already row-agnostic, so it is a bigger target and nothing to special-case.
+  The compact transport keeps its single row — those two rows are an eighth
+  of the list on an 80x24 terminal.
+- **Considered and deferred: `ratatui-image`.** Real pixel resolution via
+  Sixel/Kitty/iTerm2 would beat eight heights, but two things rule it out
+  *here*: the crate's compatibility matrix has no Windows row at all
+  (conhost has no graphics protocol; the half-block fallback is two levels,
+  worse than what we have), and the played/unplayed split moves continuously,
+  so a raster bar means re-encoding a Sixel blob every frame — the crate
+  itself says encoding is blocking and should be offloaded. It is designed
+  for images that are drawn once. Kept on the audit list for **album art**
+  in the now-playing pane, which is exactly that.
+
+Verified live: intro ramp, body variation and outro fade all legible on two
+dense hip-hop masters, on both the browser transport and the full-screen
+gauge. Pinned by `the_waveform_shows_energy_rather_than_saturating_on_peaks`,
+`the_full_screen_band_mirrors_the_shape_above_the_scrubber`,
+`the_waveform_decorates_the_bar_without_taking_it_over`,
+`the_hover_marker_survives_the_waveform`, and three app-level tests for the
+one-ask-per-track rule and the prefetch.
+
+#### D3 — Glyph sets, and what a console font actually has ✅ 2026-08-08
+
+Reported live: the waveform rendered as `?` boxes. Not a codepage problem —
+the console was already UTF-8. **Consolas has no glyphs for most of what the
+UI draws.** Probed rather than recalled, by walking every non-ASCII character
+in `src/tui` and `src/api` against the font's `CharacterToGlyphMap`:
+
+| Missing from Consolas | Used by |
+|---|---|
+| `▁▂▃▅▆▇` (six of eight) | the waveform |
+| `▏` | the hover marker, the filter caret |
+| `▶` `◆` `⏸` | queue marker, Sonic Path ends, transport |
+| braille `U+2800`+ | the spinner, and the whole visualizer |
+
+Present: `█ ░ ▒ ▓ ▄ ─ │ ■` — the CP437 set, which is exactly why the bar
+looked right until it learned to draw a waveform. It only ever used `█` and
+`░`. Cascadia Mono (Windows Terminal's default) has everything; so does every
+ordinary Linux and macOS terminal font.
+
+`Glyphs` resolves once at startup, the same shape as `Theme`, from
+`[display] glyphs = auto | full | legacy`. `auto` reads `WT_SESSION` —
+Windows Terminal sets it, conhost does not — and assumes anything not Windows
+is fine, which covers the browser build too.
+
+- **The fallback is density, not height, and that was forced.** The first
+  attempt quantised the eighths onto the three heights CP437 has (empty, `▄`,
+  `█`). It drew a flat wall of `▄`, and the reason is arithmetic rather than
+  taste: a mirrored half is drawn by indexing the complement and reversing,
+  so it needs `ink(n) + ink(8-n)` to come to a full cell — and with only
+  `{0, 4, 8}` available the only quantiser satisfying that sends everything
+  between to 4. Density has four steps (`░▒▓█`), needs no symmetry, and fits
+  the single row the transport had before waveforms existed. `Glyphs::
+  mirrored` carries that, and the full-screen band claims no row for a half
+  it cannot draw.
+- **The tests now run both sets.** They assert against `glyphs()` rather than
+  literals, so a Linux runner exercises the rich path and a Windows one
+  exercises the fallback — which is how this was caught in the first place.
+  The symmetry invariant is pinned for any set claiming to mirror, and the
+  legacy set is checked against a hard-coded CP437 list.
+
+**Still outstanding:** the visualizer is braille sub-cell plotting with no
+fallback, so a legacy console still shows boxes there. Deliberately deferred
+— the canvas is built on braille and a block-based renderer is its own piece
+of work.
+
+#### D4 — Numbers all the way down ✅ 2026-08-08
+
+Reported live: "once the user goes to Auto-DJ, they can't go back."
+
+`Tab` did work, and the footer said so. That is not the same as it being
+findable — and the shape of the trap is the lesson. D1 gave the full-screen
+view `←→` for navigation *except* on Auto-DJ, whose rows are values and
+wanted the arrows for adjustment. So the one tab a user could get stuck on
+was the one tab whose way out was different from every other, and the
+exception fired exactly where the rule was most needed.
+
+`1`–`5` now pick a tab in the full-screen view, indexing the *visible* ones
+the way the browser's numbers do, so they stay 1..n with no gaps whatever
+this track and this server allow. The strip wears the numbers — a key nobody
+can see is a key nobody presses — and keeps them in the narrow fallback,
+where the way out matters most. `←→` are handed to whichever tab is in
+front: Auto-DJ adjusts with them, nothing else wants them. `Tab` and
+`Shift+Tab` stay for anyone who would rather not count.
+
+The digits already did nothing useful here: outside the view they pick
+browser tabs, and in fullscreen that changed a screen nobody could see.
+
+Two general points banked from this, since the same shape will recur:
+
+- **A key that means one thing everywhere beats a key that means the right
+  thing four times out of five.** The arrows were locally better on four
+  tabs and catastrophic on the fifth, and the fifth is where the user was.
+- **Discoverability is a rendering problem as much as a binding one.** The
+  fix was not only rebinding but putting the number on the tab.
+
+#### D5 — Miller columns take the width they are given ✅ 2026-08-08
+
+Reported live: browsing by artist on a wide terminal, the first column fell
+off after a couple of levels with plenty of room left. `column_widths` had a
+`TRAIL_MAX: usize = 2` that no amount of width could move.
+
+The count is now `[display] miller_columns` (default 4, counting the column
+you are in) and it is a *ceiling*, not a promise — width still decides, the
+trail still fills innermost-first, and the current column still keeps its
+floor. The queue is deliberately outside the count: it is the end of the
+chain rather than a step along it.
+
+Two things came out of looking at the result rather than the diff:
+
+- **Surplus width had nowhere to go but the current column.** At 160 columns
+  that made a 100-wide list of tracks beside three 20-wide context columns
+  clipping every album name to "Stim Pack Volume o". Half the surplus now
+  widens the trail (to a 32 ceiling — past that it is spending width on a
+  listing nobody is reading) and the rest stays with the column being read.
+- **Three `[display]` knobs was one OnceLock too many.** `mirror_min_height`
+  and `miller_columns` folded into a `Sizing` value set once at startup,
+  beside `Theme` and `Glyphs`. The layout has to be a pure function of the
+  area plus settings that cannot move mid-frame — `progress_area` re-derives
+  it after the draw to answer a click — so "resolved once at startup" is
+  load-bearing rather than tidiness.
+
+#### D6 — Playlists move into the Library ✅ 2026-08-08
+
+A tab of its own, for something that is a way of cutting the library like
+artists or genres are. It came with a parallel copy of machinery the Library
+tab already had: its own `Pane`, its own `playlist_open` cursor doing by hand
+what `Drill::wants` does for every other tab, two `ApiCmd`s, two `Event`s and
+an `Entry::Playlist` variant.
+
+They are now two `LibraryNode`s — `Playlists` and `Playlist(name)` — and the
+rows are ordinary `Entry::Node`s, so the drill, the trail columns, the
+stale-reply guard, the spinner and the Miller columns all apply without a
+line of their own. Net: **six tabs instead of seven**, and a `Pane`, a
+cursor, two commands, two events and an `Entry` variant deleted.
+
+Two things fell out of the move rather than being designed in:
+
+- **The list refreshes now.** The tab cached its playlists and only fetched
+  on first visit, so one made anywhere else never appeared. A library node is
+  asked for on the way in like every other.
+- **`step_out`'s catch-all became unreachable.** Playlists was the last tab
+  not handled explicitly, so the match is exhaustive and the compiler now
+  checks it — the audit-#59 property, arrived at by subtraction.
+
+`Tab::ALL` is `[Files, Library, Search, Discover, SonicPath, Settings]`, and
+the digits move with it: Search is 3, Discover 4, Sonic Path 5, Settings 6.
+
+#### D7 — The now-playing Discover panel ✅ 2026-08-08
+
+The second of the two `"not wired up yet"` placeholders. It shows the
+server's nearest neighbours to whatever is on the speakers, in order, and
+re-asks when the track changes.
+
+- **A destination on the command, not a second command.** Both surfaces ask
+  for `DiscoverNode::Tracks` about different seeds, so their replies had to
+  be told apart. `ApiCmd::Discover` and `Event::Discover` carry a
+  `DiscoverDest` — exactly what audit #64 asks for, against the alternative
+  of a variant whose only job is to be a different name.
+- **And a seed on the reply.** The browser tab tells a stale answer by its
+  node, because walking around changes the node. This panel's node never
+  changes — it is always "tracks like the seed" — so the seed is the only
+  thing that can say which track an answer is about. Without it, a reply for
+  the track that just ended would land under the name of the one now
+  playing.
+- **The refresh rides the dispatch funnel**, like the waveform prefetch:
+  "the track changed" and "the tab opened" are two events with one answer,
+  and a panel that asks whenever what it holds disagrees with what is
+  sounding cannot be left describing the wrong song. It asks nothing while
+  the tab is not the one being looked at.
+- **`Enter` queues and plays; `a` queues.** Neither replaces the queue,
+  which is what the browser's `Enter` on a track row does — reasonable while
+  browsing, wrong in the middle of listening to the thing you are getting
+  recommendations from.
+
+Lyrics is now the last placeholder on that strip.
+
+#### D8 — Discover asks what to look around from ✅ 2026-08-08
+
+D7 made the full-screen panel follow the speakers, which answers one
+question well and another not at all: **what does *this* track sound like,
+without playing it?** The browser's Discover tab could not answer it either
+— it anchored on whatever was highlighted when you opened it, which meant
+the seed was something you never said out loud and could not change. So the
+tab grew the step in front:
+
+```
+Discover · look around from…   →  Songs / Artists  →  the list
+  What's playing                                       83%  ALM - Manor
+  Choose a song…                                       81%  ALM - Hip Hop Factory
+```
+
+**The two Discover views are different things, and the split is the point.**
+The panel is glanced at while music plays: one question, re-asked when the
+answer would change, no steering. The tab is somewhere you *go* to look
+something up, so it asks. Putting the drill on the panel — which is where it
+was first built — made the glance into a menu and still left the tab
+guessing.
+
+- **The seed is resolved when it is picked, not read live.** "What's
+  playing" means the track that *was* playing when you said so. A list that
+  re-aimed itself every time a song ended is exactly what the panel is, and
+  that is unusable for looking something up.
+- **`Choose a song…` reuses the Sonic Path capture**, which is what turned
+  two armed-picker fields into one `Capture` enum carrying who is waiting.
+  Arming also drops out of the full-screen view — the picking happens in the
+  browser, and arming from fullscreen left the user choosing from a listing
+  they could not see.
+- **Nothing seeds the tab implicitly any more.** `set_discover_seed` took
+  the cursor's track on every tab switch and on every step back to the root;
+  both are gone. `discover_seed` now only ever holds what a row named, so
+  the title can be trusted.
+- **Percentages instead of ranks.** The rows arrive in order, so a number
+  counting them says nothing their position doesn't. The cosine says how
+  much of a neighbour each one actually is — and it was being thrown away:
+  `DiscoverData::Tracks` carried `Vec<Track>`, built by `SimilarTrack::
+  into_track()`, which drops the similarity. It carries `Vec<SimilarTrack>`
+  now, and both views show the number.
+- **The stale guard needed both halves, on both arms.** Seed *and* node: the
+  two lists are asked for separately about the same seed, so an artists
+  reply arriving after the user asked for songs is as wrong as a reply about
+  another track — and "similar tracks" is the same node whatever it is
+  similar *to*, so the node alone cannot catch a re-seeded tab. The panel's
+  arm had both from the start; the browser's was written with `..` and
+  guarded on the node until the review found it, which is exactly the shape
+  of bug a doc claiming otherwise helps hide.
 #### Logging round ✅ 2026-08-07 (branch `logging`)
 
 The four improvements the post-release overview named, in one coherent shape:

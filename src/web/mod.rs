@@ -138,10 +138,16 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         tunnel_code: None,
         keys: Default::default(),
         theme: config::ThemePrefs::default(),
+        display: config::DisplayPrefs::default(),
         mouse: config::MousePrefs::default(),
     };
     let (theme, _warnings) = ui::Theme::from_prefs(&start.theme);
     ui::set_theme(theme);
+    // The page picks its own font, and it is a modern one — so this resolves
+    // to the full set rather than the console-safe fallback.
+    let (glyphs, _warnings) = ui::Glyphs::from_prefs(&start.display);
+    ui::set_glyphs(glyphs);
+    ui::set_sizing(ui::Sizing::from_prefs(&start.display));
 
     let mut app = app_from(start);
     let tap = crate::engine::tap::AudioTap::new();
@@ -247,6 +253,11 @@ fn translate(event: ratzilla::event::KeyEvent) -> Option<KeyEvent> {
         Web::Char(c) => KeyCode::Char(c),
         Web::Enter => KeyCode::Enter,
         Web::Esc => KeyCode::Esc,
+        // The browser reports Shift+Tab as Tab with the shift flag; crossterm
+        // gives it a code of its own, and the keymap's `Key` carries only
+        // ctrl — so the split has to happen here, or Shift+Tab would arrive
+        // as plain Tab and the Auto-DJ tab would have no way back.
+        Web::Tab if event.shift => KeyCode::BackTab,
         Web::Tab => KeyCode::Tab,
         Web::Backspace => KeyCode::Backspace,
         Web::Up => KeyCode::Up,

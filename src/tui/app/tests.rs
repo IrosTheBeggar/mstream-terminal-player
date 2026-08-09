@@ -63,6 +63,8 @@ fn connected_app() -> App {
         discovery_p2p: false,
         federation_discovery: false,
     };
+    // What a real ping does on the way in: the Auto-DJ rows depend on it.
+    app.dj_panel.rebuild(app.capabilities);
     app
 }
 
@@ -158,6 +160,32 @@ fn type_filter(app: &mut App, text: &str) {
 
 fn labels(app: &App) -> Vec<&str> {
     app.pane().entries.iter().map(Entry::label).collect()
+}
+
+/// Open the Library tab's Playlists node and answer it with these names.
+///
+/// Playlists are a library node like any other now, so getting to them is
+/// the same drill as getting to artists — which is the point of the move.
+fn browsing_playlists(app: &mut App, names: &[&str]) {
+    app.handle_action(Action::SelectTab(1));
+    let at = app
+        .library
+        .entries
+        .iter()
+        .position(|e| e.label() == "Playlists")
+        .expect("the library menu offers playlists");
+    app.library.state.select(Some(at));
+    app.handle_action(Action::Activate);
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlists,
+        dest: Tab::Library,
+        data: LibraryData::Playlists(
+            names
+                .iter()
+                .map(|name| crate::api::types::PlaylistSummary { name: (*name).to_string() })
+                .collect(),
+        ),
+    });
 }
 
 #[test]
@@ -503,12 +531,33 @@ fn the_dj_mode_row_steps_left_even_when_the_ring_is_two_long() {
     // server while right worked.
     let mut app = connected_app();
     app.capabilities = crate::api::types::Capabilities::default();
-    app.handle_action(Action::OpenDjPanel);
+    app.dj_panel = Default::default();
+    on_the_dj_tab(&mut app);
 
-    app.handle_action(Action::Back); // left on the Mode row
+    app.handle_action(Action::NowLeft); // left on the Mode row
     assert_eq!(app.autodj, AutoDjMode::BpmKey, "left from Off reaches the other mode");
-    app.handle_action(Action::Back);
+    app.handle_action(Action::NowLeft);
     assert_eq!(app.autodj, AutoDjMode::Off, "and left again comes back round");
+}
+
+/// Put the cursor on the Auto-DJ tab of the full-screen view, which is the
+/// only place its settings are edited now.
+fn on_the_dj_tab(app: &mut App) {
+    app.handle_action(Action::ToggleNowPlaying);
+    while app.now_tab() != NowTab::AutoDj {
+        app.handle_action(Action::NowTabNext);
+    }
+}
+
+/// Index of the Sonic Path tab among the visible ones.
+fn sonic_tab(app: &App) -> usize {
+    app.tabs().iter().position(|t| *t == Tab::SonicPath).expect("sonic path is available")
+}
+
+/// Index of the Settings tab, which slides along the strip as the optional
+/// tabs in front of it come and go.
+fn settings_tab(app: &App) -> usize {
+    app.tabs().iter().position(|t| *t == Tab::Settings).expect("settings is always there")
 }
 
 #[test]
@@ -722,9 +771,16 @@ fn a_failed_browse_takes_its_column_back_with_it() {
         assert_eq!(app.path, "library/Air");
         assert_eq!(app.files.trail.len(), 1, "one column pushed on the way in");
 
+        assert!(app.files.entries.is_empty() && app.files.loading, "waiting, not showing stale rows");
+
         app.apply_event(Event::Error("tunnel died".into()));
         assert_eq!(app.path, "", "the failed browse walks its path back");
         assert!(app.files.trail.is_empty(), "and takes its column with it");
+        // The rows come back off that column: the way in emptied the pane so
+        // the wait could spin, and an error must not leave it looking empty.
+        assert_eq!(app.files.entries, listing(), "the folder we are standing in is back");
+        assert_eq!(app.files.state.selected(), Some(0), "on the row that was clicked");
+        assert!(!app.files.loading);
     }
     // A listing that does answer keeps its navigation.
     app.files.set(listing());
@@ -739,6 +795,301 @@ fn a_failed_browse_takes_its_column_back_with_it() {
     // An unrelated error later must not undo a browse that already landed.
     app.apply_event(Event::Error("art fetch failed".into()));
     assert_eq!(app.path, "library/Air");
+}
+
+/// Every waveform request in these effects, by filepath.
+fn waveforms_asked(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Api(ApiCmd::Waveform { filepath }) => Some(filepath.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_waveform_is_asked_for_once_per_track() {
+    let mut app = connected_app();
+    app.queue.replace(vec![track("a"), track("b")]);
+
+    let effects = app.handle_action(Action::PlayPause);
+    assert!(waveforms_asked(&effects).contains(&"a".to_string()), "the shape of what started");
+
+    // Asking again for the same track costs nothing: the placeholder the
+    // first ask left is what stops it, exactly as it does for art.
+    let effects = app.play_index(0);
+    assert!(waveforms_asked(&effects).is_empty(), "{effects:?}");
+
+    app.apply_event(Event::Waveform { filepath: "a".into(), bars: Some(vec![7; 800]), settled: true });
+    assert_eq!(app.waveforms.get("a").unwrap().as_ref().unwrap().len(), 800);
+
+    // And a server with nothing to give is remembered just as firmly — a
+    // track with no shape must not be re-asked on every replay.
+    app.apply_event(Event::Waveform { filepath: "a".into(), bars: None, settled: true });
+    assert!(app.waveforms.get("a").unwrap().is_none());
+    assert!(waveforms_asked(&app.play_index(0)).is_empty());
+}
+
+#[test]
+fn a_shape_nobody_answered_for_is_asked_for_again() {
+    // The endpoint's own documentation says the first call can take as long
+    // as ffmpeg takes. A request that falls over is the likeliest outcome
+    // for exactly the track that most needs one — so it must leave the slot
+    // free, or one bad moment is the last word on that track all session.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("a")]);
+    assert!(waveforms_asked(&app.handle_action(Action::PlayPause)).contains(&"a".to_string()));
+
+    app.apply_event(Event::Waveform { filepath: "a".into(), bars: None, settled: false });
+    assert!(!app.waveforms.contains_key("a"), "nothing was learned, so nothing is remembered");
+    assert!(
+        waveforms_asked(&app.play_index(0)).contains(&"a".to_string()),
+        "and playing it again asks again"
+    );
+
+    // A settled "no shape" still stops the asking — the two must not have
+    // been collapsed the other way round either.
+    app.apply_event(Event::Waveform { filepath: "a".into(), bars: None, settled: true });
+    assert!(waveforms_asked(&app.play_index(0)).is_empty());
+}
+
+#[test]
+fn the_next_tracks_waveform_is_fetched_before_it_plays() {
+    // Generating one costs an ffmpeg decode — up to half a minute — so a
+    // shape asked for when the track starts can arrive well into it. The
+    // announcement machinery already worked out what is coming, for the
+    // crossfade; this rides along with it.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("a"), track("b")]);
+
+    let effects = app.handle_action(Action::PlayPause);
+    let asked = waveforms_asked(&effects);
+    assert!(asked.contains(&"a".to_string()), "what is playing: {asked:?}");
+    assert!(asked.contains(&"b".to_string()), "and what is coming: {asked:?}");
+
+    // It lands while the first track is still on, and is waiting when the
+    // second starts — which is the whole point.
+    app.apply_event(Event::Waveform { filepath: "b".into(), bars: Some(vec![9; 800]), settled: true });
+    let effects = app.handle_action(Action::NextTrack);
+    assert!(waveforms_asked(&effects).is_empty(), "already in hand: {effects:?}");
+    assert!(app.waveforms.get("b").unwrap().is_some());
+}
+
+#[test]
+fn a_queue_edit_moves_the_prefetch_with_it() {
+    // The prefetch reads the announcement, so it has to follow one: a queue
+    // edit that changes what comes next changes which shape is worth having.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("a"), track("b")]);
+    app.handle_action(Action::PlayPause);
+    assert!(app.waveforms.contains_key("b"));
+
+    // Drop 'b' and put 'c' in its place.
+    app.queue.state.select(Some(1));
+    app.focus = Focus::Queue;
+    app.handle_action(Action::RemoveFromQueue);
+    app.queue.push(track("c"));
+    let effects = app.handle_action(Action::JumpToPlaying);
+    assert!(waveforms_asked(&effects).contains(&"c".to_string()), "{effects:?}");
+}
+
+#[test]
+fn opening_a_folder_spins_instead_of_showing_the_one_you_left() {
+    // Reported live: a folder opened and its parent's rows stayed on screen
+    // for a beat while the listing was out — with the trail column beside
+    // them already moved on, so it read as a folder that opened into itself.
+    // Every other tab's drill-in cleared; the file browser was the one that
+    // did not.
+    let mut app = connected_app();
+    app.path = "library".into();
+    app.files.set(vec![
+        Entry::Dir { label: "Air".into(), path: "library/Air".into() },
+        Entry::Track { label: "loose.mp3".into(), track: Box::new(track("library/loose.mp3")) },
+    ]);
+    app.files.state.select(Some(0));
+
+    app.handle_action(Action::Activate);
+    assert!(app.files.entries.is_empty(), "the folder you left is not the folder you opened");
+    assert!(app.files.loading, "and the wait says so");
+
+    // Which is what puts the spinner on screen rather than a claim about
+    // the new folder's contents.
+    let hint = crate::tui::ui::empty_hint(&app);
+    assert!(hint.contains("loading"), "got {hint:?}");
+
+    app.apply_event(Event::Listing(Box::new(listing("library/Air", &[], &["a.mp3"]))));
+    assert!(!app.files.loading);
+    assert_eq!(app.files.entries.len(), 2, "'..' and the track");
+}
+
+/// A neighbour as the server sends one: a path and how close it is.
+fn near(path: &str, similarity: f64) -> crate::api::types::SimilarTrack {
+    crate::api::types::SimilarTrack {
+        filepath: path.to_string(),
+        similarity,
+        metadata: TrackMetadata::default(),
+    }
+}
+
+/// Put the cursor on the full-screen view's Discover tab.
+fn on_the_now_discover_tab(app: &mut App) {
+    app.handle_action(Action::ToggleNowPlaying);
+    while app.now_tab() != NowTab::Discover {
+        app.handle_action(Action::NowTabNext);
+    }
+}
+
+#[test]
+fn the_discover_tab_asks_what_to_look_around_from_before_anything_else() {
+    // The step that lets you ask about a track without playing it — which
+    // the full-screen panel cannot do, since it follows the speakers.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("playing")]);
+    app.play_index(0);
+    app.handle_action(Action::SelectTab(discover_tab(&app)));
+    assert_eq!(*app.discover_node(), DiscoverNode::Root);
+    assert_eq!(labels(&app), vec!["What's playing", "Choose a song…"]);
+
+    // Taking what's playing settles the seed and offers the two ways of
+    // looking — no request yet, both menus are static.
+    let effects = app.handle_action(Action::Activate);
+    assert!(effects.is_empty(), "choosing a seed asks the server nothing: {effects:?}");
+    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
+    assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "playing");
+    assert_eq!(labels(&app), vec!["..", "Similar tracks", "Similar artists"]);
+
+    // And then a list, which does cost one.
+    app.discover.state.select(Some(1));
+    let effects = app.handle_action(Action::Activate);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Api(ApiCmd::Discover { node: DiscoverNode::Tracks, dest: DiscoverDest::Browser, seed })]
+            if seed.filepath == "playing"
+    ));
+
+    // Back walks out a level at a time, and both menus come back without
+    // asking again.
+    app.handle_action(Action::Back);
+    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
+    assert!(app.handle_action(Action::Back).is_empty());
+    assert_eq!(*app.discover_node(), DiscoverNode::Root);
+}
+
+#[test]
+fn a_discover_seed_can_be_pointed_at_rather_than_played() {
+    let mut app = connected_app();
+    browsing(&mut app, &["curious"], 0);
+    app.handle_action(Action::SelectTab(discover_tab(&app)));
+
+    app.handle_action(Action::Down); // "Choose a song…"
+    app.handle_action(Action::Activate);
+    assert_eq!(app.capture, Some(Capture::Discover));
+    assert_eq!(app.tab, Tab::Files, "and it puts you where the songs are");
+
+    let effects = app.handle_action(Action::Activate);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))),
+        "pointing at a track is not playing it"
+    );
+    assert!(app.queue.items.is_empty(), "nor queueing it");
+
+    // Back on the tab, on the seed just chosen, asking which way to look.
+    assert_eq!(app.tab, Tab::Discover);
+    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
+    assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "curious");
+    assert_eq!(app.capture, None, "one track, then it disarms");
+}
+
+#[test]
+fn how_close_leads_the_row_rather_than_where_it_sits() {
+    // The rows arrive in order, so a rank says nothing a position does not.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("playing")]);
+    app.play_index(0);
+    app.handle_action(Action::SelectTab(discover_tab(&app)));
+    app.handle_action(Action::Activate); // seed: what's playing
+    app.discover.state.select(Some(1));
+    app.handle_action(Action::Activate); // similar tracks
+
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![near("near-one", 0.9412), near("near-two", 0.836)]),
+        note: None,
+        dest: DiscoverDest::Browser,
+        seed: "playing".into(),
+    });
+    assert_eq!(labels(&app), vec!["..", " 94%  near-one", " 84%  near-two"]);
+}
+
+#[test]
+fn the_full_screen_panel_still_just_follows_the_speakers() {
+    // It is glanced at while a track plays, so it steers itself: no seed to
+    // choose, no menu, one question re-asked when the answer would change.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("first"), track("second")]);
+    app.play_index(0);
+    assert!(app.now_discover.is_none(), "nothing until the tab is looked at");
+
+    on_the_now_discover_tab(&mut app);
+    assert_eq!(app.now_discover.as_ref().unwrap().seed, "first");
+
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![near("near-one", 0.94), near("near-two", 0.9)]),
+        note: None,
+        dest: DiscoverDest::NowPlaying,
+        seed: "first".into(),
+    });
+    assert_eq!(app.now_discover.as_ref().unwrap().tracks.len(), 2);
+
+    // `a` queues the row under the cursor rather than reaching past the
+    // panel to whatever the hidden browser had selected; Enter plays it.
+    app.handle_action(Action::Down);
+    app.handle_action(Action::AddToQueue);
+    assert_eq!(app.queue.items.last().unwrap().filepath, "near-two");
+
+    // The track changing re-aims it, and the old answer is dropped.
+    app.handle_action(Action::NextTrack);
+    assert_eq!(app.now_discover.as_ref().unwrap().seed, "second");
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![near("stale", 0.5)]),
+        note: None,
+        dest: DiscoverDest::NowPlaying,
+        seed: "first".into(),
+    });
+    assert!(app.now_discover.as_ref().unwrap().tracks.is_empty());
+    assert!(app.now_discover.as_ref().unwrap().pending);
+
+    // And the browser tab's reply never lands here.
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![near("browser", 0.8)]),
+        note: None,
+        dest: DiscoverDest::Browser,
+        seed: "second".into(),
+    });
+    assert!(app.now_discover.as_ref().unwrap().pending);
+}
+
+#[test]
+fn opening_a_playlist_spins_instead_of_showing_the_list_of_playlists() {
+    let mut app = connected_app();
+    browsing_playlists(&mut app, &["phone", "car"]);
+
+    app.library.state.select(Some(1)); // past the ".."
+    app.handle_action(Action::Activate);
+    assert!(app.library.entries.is_empty(), "the list of playlists is not this playlist");
+    assert!(app.library.loading);
+
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlist("phone".into()),
+        dest: Tab::Library,
+        data: LibraryData::Tracks(vec![track("a")]),
+    });
+    assert!(!app.library.loading);
+    assert_eq!(app.library.entries.len(), 2, "'..' and the track");
 }
 
 #[test]
@@ -806,7 +1157,7 @@ fn fast_seek_presses_build_on_each_other_not_the_stale_status() {
 fn every_class_a_search_matched_is_reachable() {
     use crate::api::types::{SearchGroup, SearchTrack};
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(3));
+    app.handle_action(Action::SelectTab(2));
     let hit = |p: &str| SearchTrack {
         name: p.to_string(),
         filepath: p.to_string(),
@@ -1465,107 +1816,136 @@ fn searching_from_the_query_box_emits_one_search() {
 }
 
 #[test]
-fn opening_the_playlists_tab_loads_them_once() {
+fn opening_the_playlists_node_asks_every_time() {
+    // The old tab cached its list and only fetched on first visit, so a
+    // playlist made anywhere else never appeared. A library node is asked
+    // for on the way in like every other, which is the behaviour worth
+    // having and came free with the move.
     let mut app = connected_app();
-    let effects = app.handle_action(Action::SelectTab(2));
-    assert_eq!(effects, vec![Effect::Api(ApiCmd::Playlists)]);
+    app.handle_action(Action::SelectTab(1));
+    let at = app.library.entries.iter().position(|e| e.label() == "Playlists").unwrap();
+    app.library.state.select(Some(at));
 
-    app.apply_event(Event::Playlists(vec![crate::api::types::PlaylistSummary {
-        name: "Roadtrip".into(),
-    }]));
-    // Already loaded: switching back doesn't refetch.
-    app.handle_action(Action::SelectTab(0));
-    assert!(app.handle_action(Action::SelectTab(2)).is_empty());
+    let asked = |effects: &[Effect]| {
+        effects.iter().any(|e| {
+            matches!(e, Effect::Api(ApiCmd::Library { node: LibraryNode::Playlists, .. }))
+        })
+    };
+    assert!(asked(&app.handle_action(Action::Activate)));
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlists,
+        dest: Tab::Library,
+        data: LibraryData::Playlists(vec![crate::api::types::PlaylistSummary {
+            name: "Roadtrip".into(),
+        }]),
+    });
+    assert_eq!(labels(&app), vec!["..", "Roadtrip"]);
+
+    // Out and back in asks again.
+    app.handle_action(Action::Back);
+    assert!(asked(&app.handle_action(Action::Activate)));
 }
 
 #[test]
 fn a_pane_knows_when_its_contents_are_still_on_the_wire() {
     let mut app = connected_app();
-    assert!(!app.playlists.loading);
+    assert!(!app.library.loading);
 
-    app.handle_action(Action::SelectTab(2));
-    assert!(app.playlists.loading, "asking marks the pane, not the call site");
+    app.handle_action(Action::SelectTab(1));
+    app.handle_action(Action::Activate); // into Artists
+    assert!(app.library.loading, "asking marks the pane, not the call site");
     // Only the pane that was asked for — leaving the tab mid-flight must
     // not leave a spinner turning somewhere it was never requested.
     assert!(!app.files.loading && !app.search.loading);
 
-    app.apply_event(Event::Playlists(Vec::new()));
-    assert!(!app.playlists.loading, "the reply lands through Pane::set");
+    app.apply_event(Event::Library {
+        node: LibraryNode::Artists,
+        dest: Tab::Library,
+        data: LibraryData::Artists(Vec::new()),
+    });
+    assert!(!app.library.loading, "the reply lands through Pane::set");
 }
 
 #[test]
 fn a_request_that_fails_is_no_longer_pending() {
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(2));
+    app.handle_action(Action::SelectTab(1));
+    app.handle_action(Action::Activate);
     // Nothing calls `Pane::set` on the way out of an error, so this is the
     // one path that would otherwise spin forever.
     app.apply_event(Event::Error("nope".into()));
-    assert!(!app.playlists.loading);
+    assert!(!app.library.loading);
 }
 
 #[test]
 fn playlist_tracks_open_and_close() {
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(2));
-    app.apply_event(Event::Playlists(vec![crate::api::types::PlaylistSummary {
-        name: "Roadtrip".into(),
-    }]));
+    browsing_playlists(&mut app, &["Roadtrip"]);
 
+    app.library.state.select(Some(1));
     let effects = app.handle_action(Action::Activate);
-    assert_eq!(effects, vec![Effect::Api(ApiCmd::LoadPlaylist("Roadtrip".into()))]);
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::Library {
+            node: LibraryNode::Playlist("Roadtrip".into()),
+            dest: Tab::Library,
+        })]
+    );
 
-    app.apply_event(Event::PlaylistTracks {
-        name: "Roadtrip".into(),
-        tracks: vec![track("lib/a.mp3")],
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlist("Roadtrip".into()),
+        dest: Tab::Library,
+        data: LibraryData::Tracks(vec![track("lib/a.mp3")]),
     });
-    assert_eq!(app.playlists.entries.len(), 2); // ".." + one track
-    assert_eq!(app.playlist_open.as_deref(), Some("Roadtrip"));
+    assert_eq!(labels(&app), vec!["..", "a.mp3"]);
 
     let effects = app.handle_action(Action::Back);
     assert!(effects.is_empty(), "the playlist list came back off the trail");
-    assert!(app.playlist_open.is_none());
-    assert_eq!(app.playlists.entries.len(), 1, "the one playlist, restored");
+    assert_eq!(labels(&app), vec!["..", "Roadtrip"], "the one playlist, restored");
+    assert_eq!(app.library_node(), &LibraryNode::Playlists);
 }
 
 #[test]
 fn a_playlist_answering_after_it_was_left_does_not_open_over_the_top() {
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(2));
-    app.apply_event(Event::Playlists(
-        ["Roadtrip", "Dinner"]
-            .iter()
-            .map(|name| crate::api::types::PlaylistSummary { name: (*name).to_string() })
-            .collect(),
-    ));
+    browsing_playlists(&mut app, &["Roadtrip", "Dinner"]);
 
-    // Open one and change your mind before it answers. Which playlist is
-    // open is now decided on the way in rather than by whatever replied
-    // last, so the way out has something to close.
+    // Open one and change your mind before it answers. Which node is open
+    // is decided on the way in rather than by whatever replied last, so a
+    // late reply can be told apart from a wanted one — the drill's own
+    // stale-reply rule, which playlists now get for nothing.
+    app.library.state.select(Some(1));
     app.handle_action(Action::Activate);
-    assert_eq!(app.playlist_open.as_deref(), Some("Roadtrip"));
-    assert!(app.message.as_ref().unwrap().text.contains("loading playlist"));
+    assert_eq!(app.library_node(), &LibraryNode::Playlist("Roadtrip".into()));
     app.handle_action(Action::Back);
-    assert!(app.playlist_open.is_none());
-    assert!(app.message.is_none(), "and the note about loading it goes too");
+    assert_eq!(app.library_node(), &LibraryNode::Playlists);
 
-    app.apply_event(Event::PlaylistTracks {
-        name: "Roadtrip".into(),
-        tracks: vec![track("lib/a.mp3")],
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlist("Roadtrip".into()),
+        dest: Tab::Library,
+        data: LibraryData::Tracks(vec![track("lib/a.mp3")]),
     });
-    assert!(app.playlist_open.is_none(), "closed stays closed");
-    assert_eq!(labels(&app), vec!["Roadtrip", "Dinner"], "and the list is still the list");
+    assert_eq!(labels(&app), vec!["..", "Roadtrip", "Dinner"], "the list is still the list");
 
     // The same rule when the change of mind is another playlist: the one
     // on screen must be the one named at the top of it.
-    app.handle_action(Action::Down);
+    app.library.state.select(Some(2));
     app.handle_action(Action::Activate);
-    assert_eq!(app.playlist_open.as_deref(), Some("Dinner"));
-    app.apply_event(Event::PlaylistTracks {
-        name: "Roadtrip".into(),
-        tracks: vec![track("lib/a.mp3")],
+    assert_eq!(app.library_node(), &LibraryNode::Playlist("Dinner".into()));
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlist("Roadtrip".into()),
+        dest: Tab::Library,
+        data: LibraryData::Tracks(vec![track("lib/a.mp3")]),
     });
-    assert_eq!(app.playlist_open.as_deref(), Some("Dinner"));
-    assert_eq!(labels(&app), vec!["Roadtrip", "Dinner"], "Roadtrip's tracks are not it");
+    assert!(app.library.entries.is_empty(), "Roadtrip's tracks are not it");
+    assert!(app.library.loading, "and Dinner is still coming");
+
+    app.apply_event(Event::Library {
+        node: LibraryNode::Playlist("Dinner".into()),
+        dest: Tab::Library,
+        data: LibraryData::Tracks(vec![track("lib/b.mp3")]),
+    });
+    assert_eq!(labels(&app), vec!["..", "b.mp3"], "the one asked for lands");
 }
 
 #[test]
@@ -1573,7 +1953,7 @@ fn library_tab_opens_on_a_static_menu_without_a_request() {
     let mut app = connected_app();
     let effects = app.handle_action(Action::SelectTab(1));
     assert!(effects.is_empty(), "the mode menu costs no round-trip");
-    assert_eq!(app.library.entries.len(), 4);
+    assert_eq!(app.library.entries.len(), 5);
     assert_eq!(app.library_node(), &LibraryNode::Root);
 
     let labels: Vec<&str> = app
@@ -1585,7 +1965,7 @@ fn library_tab_opens_on_a_static_menu_without_a_request() {
             _ => "?",
         })
         .collect();
-    assert_eq!(labels, ["Artists", "Albums", "Genres", "Recently Added"]);
+    assert_eq!(labels, ["Artists", "Albums", "Genres", "Recently Added", "Playlists"]);
 }
 
 #[test]
@@ -1672,7 +2052,7 @@ fn back_walks_the_library_stack_to_the_menu() {
     let effects = app.handle_action(Action::Back);
     assert!(effects.is_empty(), "returning to the static menu needs no request");
     assert_eq!(app.library_node(), &LibraryNode::Root);
-    assert_eq!(app.library.entries.len(), 4);
+    assert_eq!(app.library.entries.len(), 5);
 
     // Already at the top.
     assert!(app.handle_action(Action::Back).is_empty());
@@ -1691,7 +2071,7 @@ fn a_reply_for_an_abandoned_view_is_discarded() {
         data: LibraryData::Artists(vec!["Ghost".into()]),
     });
     assert_eq!(app.library_node(), &LibraryNode::Root);
-    assert_eq!(app.library.entries.len(), 4, "the menu is untouched by the late reply");
+    assert_eq!(app.library.entries.len(), 5, "the menu is untouched by the late reply");
 }
 
 #[test]
@@ -1890,59 +2270,92 @@ fn the_discover_tab_is_absent_where_the_server_cannot_serve_it() {
     let mut plain = connected_app();
     plain.capabilities = Default::default();
     assert!(!plain.tabs().contains(&Tab::Discover));
-    // And the numbers stay 1..n so no key points at a gap — Settings slides
-    // onto 5, and the strip's positional numbers stay the truth.
-    assert_eq!(plain.tabs().len(), 5);
-    assert_eq!(plain.tabs()[4], Tab::Settings);
-    assert!(plain.handle_action(Action::SelectTab(5)).is_empty(), "there is no sixth tab");
+    // And the numbers stay 1..n so no key points at a gap — Files, Library,
+    // Search, Settings, with the strip's positional numbers the truth.
+    assert_eq!(plain.tabs().len(), 4);
+    assert_eq!(plain.tabs()[3], Tab::Settings);
+    assert!(plain.handle_action(Action::SelectTab(4)).is_empty(), "there is no fifth tab");
     assert_ne!(plain.tab, Tab::Discover);
 }
 
 #[test]
-fn opening_discover_anchors_on_what_is_highlighted() {
-    // The cursor was on a track in another tab, and that is the obvious
-    // thing to mean by "more like this".
+fn opening_discover_asks_rather_than_guessing_what_you_meant() {
+    // The tab used to take whatever the cursor happened to be on, which
+    // made "more like this" mean something you never said out loud — and
+    // gave you no way to say anything else. Now it asks.
     let mut app = connected_app();
     browsing(&mut app, &["a", "b"], 1);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
 
     assert_eq!(app.tab, Tab::Discover);
-    assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "b");
-    // The mode menu costs no request.
+    assert!(app.discover_seed.is_none(), "a highlighted row is not an answer");
+    // Two ways of answering, and the menu costs no request.
     assert_eq!(app.discover.entries.len(), 2);
 }
 
 #[test]
-fn what_is_playing_wins_over_what_is_merely_highlighted() {
+fn the_seed_row_names_the_track_it_would_take() {
+    // "What's playing" is only a useful thing to choose if you can see what
+    // it would choose without choosing it.
     let mut app = connected_app();
+    let Entry::Discover { detail, .. } = &connected_app().discover_root_entries()[0] else {
+        panic!("the first row is the seed row");
+    };
+    assert_eq!(detail, "nothing playing");
+
     app.queue.replace(vec![track("playing")]);
     app.play_index(0);
-    browsing(&mut app, &["highlighted"], 0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
+    let Entry::Discover { detail, .. } = &app.discover.entries[0] else {
+        panic!("the first row is the seed row");
+    };
+    assert_eq!(detail, &track("playing").display_name());
+
+    // And taking it puts that track — not the cursor's — under the tab.
+    app.handle_action(Action::Activate);
     assert_eq!(app.discover_seed.as_ref().unwrap().filepath, "playing");
+    assert_eq!(*app.discover_node(), DiscoverNode::Mode);
 }
 
 #[test]
 fn similar_tracks_are_ordinary_playable_rows() {
     let mut app = connected_app();
-    browsing(&mut app, &["seed"], 0);
+    app.queue.replace(vec![track("seed")]);
+    app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
+    app.handle_action(Action::Activate); // seed: what's playing
 
+    app.discover.state.select(Some(1)); // "Similar tracks"
     let effects = app.handle_action(Action::Activate);
     assert!(matches!(
         effects.as_slice(),
-        [Effect::Api(ApiCmd::Discover { node: DiscoverNode::Tracks, seed })]
+        [Effect::Api(ApiCmd::Discover { node: DiscoverNode::Tracks, seed, dest: DiscoverDest::Browser })]
             if seed.filepath == "seed"
     ));
 
     app.apply_event(Event::Discover {
         node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![track("near-one"), track("near-two")]),
+        data: DiscoverData::Tracks(vec![near("near-one", 0.94), near("near-two", 0.9)]),
         note: None,
+        dest: DiscoverDest::Browser,
+        seed: "seed".into(),
     });
     // Parent row plus the two neighbours, and Enter plays them like any
     // other list — no new concept to learn.
     assert_eq!(app.discover.entries.len(), 3);
+
+    // A reply about a seed the tab is no longer pointed at is dropped. The
+    // node alone cannot catch this: "similar tracks" is the same node
+    // whatever it is similar *to*, so a slow first answer would land under
+    // the second seed's title and be read as being about it.
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![near("about-something-else", 0.99)]),
+        note: None,
+        dest: DiscoverDest::Browser,
+        seed: "a track we walked away from".into(),
+    });
+    assert_eq!(app.discover.entries.len(), 3, "the list is still the one we asked for");
     app.discover.state.select(Some(1));
     let effects = app.handle_action(Action::Activate);
     assert_eq!(app.queue.items.len(), 2);
@@ -1955,9 +2368,11 @@ fn an_artist_drills_into_its_ways_in_without_asking_again() {
     // The entry points arrived with the artist list, so going in costs
     // nothing — the whole reason the server sends them inline.
     let mut app = connected_app();
-    browsing(&mut app, &["seed"], 0);
+    app.queue.replace(vec![track("seed")]);
+    app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
-    app.discover.state.select(Some(1)); // "Similar artists"
+    app.handle_action(Action::Activate); // seed: what's playing
+    app.discover.state.select(Some(2)); // "Similar artists"
     app.handle_action(Action::Activate);
 
     app.apply_event(Event::Discover {
@@ -1967,6 +2382,8 @@ fn an_artist_drills_into_its_ways_in_without_asking_again() {
             similar_artist("Other", 0.80, &[]),
         ]),
         note: None,
+        dest: DiscoverDest::Browser,
+        seed: "seed".into(),
     });
     assert_eq!(app.discover.entries.len(), 3, "parent plus two artists");
 
@@ -1992,8 +2409,10 @@ fn a_discover_reply_for_a_view_already_left_is_dropped() {
 
     app.apply_event(Event::Discover {
         node: DiscoverNode::Tracks,
-        data: DiscoverData::Tracks(vec![track("late")]),
+        data: DiscoverData::Tracks(vec![near("late", 0.8)]),
         note: None,
+        dest: DiscoverDest::Browser,
+        seed: "seed".into(),
     });
     assert_eq!(*app.discover_node(), DiscoverNode::Root);
     assert_eq!(app.discover.entries.len(), 2, "still the mode menu");
@@ -2003,10 +2422,10 @@ fn a_discover_reply_for_a_view_already_left_is_dropped() {
 fn discovery_with_nothing_to_go_on_says_so() {
     let mut app = connected_app();
     app.handle_action(Action::SelectTab(discover_tab(&app)));
-    assert!(app.discover_seed.is_none(), "nothing playing, nothing highlighted");
+    assert!(app.discover_seed.is_none(), "nothing playing, nothing chosen");
 
     assert!(app.handle_action(Action::Activate).is_empty());
-    assert!(app.message.as_ref().unwrap().text.contains("play or highlight a track"));
+    assert!(app.message.as_ref().unwrap().text.contains("nothing is playing"));
 }
 
 #[test]
@@ -2245,9 +2664,10 @@ fn one_track_playing_forgives_the_failures_before_it() {
 }
 
 #[test]
-fn a_journey_sets_off_from_what_is_playing() {
+fn j_aims_the_sonic_path_at_the_highlighted_track() {
     // One keypress when something is already playing: that track is the
-    // obvious place to leave from.
+    // obvious place to leave from, and the highlighted one is where to
+    // arrive — so there is nothing left to ask and it plots straight away.
     let mut app = connected_app();
     app.queue.replace(vec![track("playing")]);
     app.play_index(0);
@@ -2262,46 +2682,43 @@ fn a_journey_sets_off_from_what_is_playing() {
             length: 14,
         })]
     );
-    let journey = app.journey.as_ref().unwrap();
-    assert!(journey.pending);
-    assert_eq!(journey.from.filepath, "playing");
-    assert_eq!(journey.to.filepath, "far-away");
+    assert_eq!(app.tab, Tab::SonicPath, "and it opens the tab it filled in");
+    assert!(app.sonic.pending);
+    assert_eq!(app.sonic.view, SonicView::Results);
+    assert_eq!(app.sonic.start.as_ref().unwrap().filepath, "playing");
+    assert_eq!(app.sonic.end.as_ref().unwrap().filepath, "far-away");
 }
 
 #[test]
-fn with_nothing_playing_a_journey_takes_two_presses() {
+fn with_nothing_playing_j_fills_the_destination_and_waits() {
     let mut app = connected_app();
     browsing(&mut app, &["a", "b"], 0);
 
-    // First press marks where to set off from and says so.
+    // Nowhere to set off from, so nothing is asked for — but the tab is
+    // open on the half of the answer that is known.
     assert!(app.handle_action(Action::StartJourney).is_empty());
-    assert!(app.journey.is_none(), "no request until there are two ends");
-    assert_eq!(app.journey_from.as_ref().unwrap().filepath, "a");
-    assert!(app.message.as_ref().unwrap().text.contains("press J"));
-
-    // Second press, on a different track, plots it.
-    app.files.state.select(Some(1));
-    let effects = app.handle_action(Action::StartJourney);
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::Api(ApiCmd::Journey { start, end, .. })] if start == "a" && end == "b"
-    ));
-    assert!(app.journey_from.is_none(), "the pending start is consumed");
+    assert_eq!(app.tab, Tab::SonicPath);
+    assert_eq!(app.sonic.view, SonicView::Setup);
+    assert_eq!(app.sonic.end.as_ref().unwrap().filepath, "a");
+    assert!(app.sonic.start.is_none());
+    assert!(app.message.as_ref().unwrap().text.contains("set off from"));
 }
 
 #[test]
-fn a_journey_needs_a_server_that_can_plot_one() {
+fn a_sonic_path_needs_a_server_that_can_plot_one() {
     let mut app = connected_app();
     app.capabilities.discovery_path = false;
     browsing(&mut app, &["a"], 0);
 
     assert!(app.handle_action(Action::StartJourney).is_empty());
-    assert!(app.journey.is_none());
-    assert!(app.message.as_ref().unwrap().text.contains("can't plot journeys"));
+    assert!(app.sonic.end.is_none());
+    assert!(app.message.as_ref().unwrap().text.contains("can't plot sonic paths"));
+    // And there is no tab offering to, either.
+    assert!(!app.tabs().contains(&Tab::SonicPath));
 }
 
 #[test]
-fn a_journey_needs_a_track_not_a_folder() {
+fn a_sonic_path_needs_a_track_not_a_folder() {
     let mut app = connected_app();
     app.files.set(vec![Entry::Dir {
         label: "an album".into(),
@@ -2313,62 +2730,334 @@ fn a_journey_needs_a_track_not_a_folder() {
     assert!(app.message.as_ref().unwrap().text.contains("highlight a track"));
 }
 
+/// Put the cursor on the Sonic Path row with this action.
+fn on_sonic_row(app: &mut App, row: SonicRow) {
+    let at = app
+        .sonic_pane
+        .entries
+        .iter()
+        .position(|e| matches!(e, Entry::Sonic { row: r, .. } if *r == row))
+        .unwrap_or_else(|| panic!("no {row:?} row in {:?}", app.sonic_pane.entries));
+    app.sonic_pane.state.select(Some(at));
+}
+
 #[test]
 fn changing_the_length_asks_for_a_different_arc() {
-    // The stops aren't a list to trim — a shorter journey is a different
-    // set of waypoints, so it has to be replotted.
+    // The stops aren't a list to trim — a shorter path is a different set
+    // of waypoints, so it has to be replotted. Sliding the length does not
+    // ask on its own, though: that would be a request per keystroke.
     let mut app = connected_app();
     app.queue.replace(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
-    let asked = app.journey.as_ref().unwrap().length;
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: asked,
+        length: app.sonic.length,
     });
-    assert!(!app.journey.as_ref().unwrap().pending);
+    assert!(!app.sonic.pending);
 
-    let effects = app.handle_action(Action::SeekForward);
+    on_sonic_row(&mut app, SonicRow::Length);
+    assert!(app.handle_action(Action::Activate).is_empty(), "a slide is not a request");
+    assert_eq!(app.sonic.length, 15);
+
+    on_sonic_row(&mut app, SonicRow::Regenerate);
+    let effects = app.handle_action(Action::Activate);
     assert!(matches!(
         effects.as_slice(),
-        [Effect::Api(ApiCmd::Journey { length: 16, .. })]
+        [Effect::Api(ApiCmd::Journey { length: 15, .. })]
     ));
-    assert!(app.journey.as_ref().unwrap().pending, "waiting on the new arc");
+    assert!(app.sonic.pending, "waiting on the new arc");
 
     // And it stops at the ends the server accepts rather than asking for
     // a length it would reject.
+    on_sonic_row(&mut app, SonicRow::Length);
     for _ in 0..40 {
         app.handle_action(Action::Back);
     }
-    assert_eq!(app.journey.as_ref().unwrap().length, 4);
-    assert!(app.handle_action(Action::Back).is_empty(), "no request at the floor");
+    assert_eq!(app.sonic.length, 4);
+    assert!(app.handle_action(Action::Back).is_empty(), "nothing left to move");
 }
 
 #[test]
-fn queueing_a_journey_replaces_the_queue_and_starts_it() {
+fn playing_a_sonic_path_replaces_the_queue_and_starts_it() {
     let mut app = connected_app();
     app.queue.replace(vec![track("old")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
-    let asked = app.journey.as_ref().unwrap().length;
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: asked,
+        length: app.sonic.length,
     });
 
-    let effects = app.handle_action(Action::Submit);
-    assert!(app.journey.is_none(), "the panel closes once it's the queue");
+    on_sonic_row(&mut app, SonicRow::Play);
+    let effects = app.handle_action(Action::Activate);
     assert_eq!(
         app.queue.items.iter().map(|t| t.filepath.as_str()).collect::<Vec<_>>(),
         vec!["from", "mid", "to"],
-        "the arc is the queue, in order"
+        "the path is the queue, in order"
     );
     assert_eq!(app.queue.current, Some(0));
     assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+    // The path stays on screen — it is a place, not a modal that spends
+    // itself the moment it is used.
+    assert_eq!(app.tab, Tab::SonicPath);
+    assert_eq!(app.sonic.stops.len(), 3);
+}
+
+#[test]
+fn queueing_a_sonic_path_adds_to_what_is_already_there() {
+    let mut app = connected_app();
+    app.queue.replace(vec![track("old")]);
+    app.play_index(0);
+    browsing(&mut app, &["to"], 0);
+    app.handle_action(Action::StartJourney);
+    app.apply_event(Event::Journey {
+        stops: vec![stop("from", 0.0), stop("to", 1.0)],
+        note: None,
+        length: app.sonic.length,
+    });
+
+    on_sonic_row(&mut app, SonicRow::QueueAll);
+    app.handle_action(Action::Activate);
+    assert_eq!(
+        app.queue.items.iter().map(|t| t.filepath.as_str()).collect::<Vec<_>>(),
+        vec!["old", "from", "to"],
+        "onto the end, not over the top"
+    );
+    assert_eq!(app.queue.current, Some(0), "and what was playing goes on playing");
+}
+
+#[test]
+fn a_stop_row_is_an_ordinary_track_row() {
+    // The whole reason the stops are Entry::Track: `a` queues one, and
+    // Enter plays the path from there — no new keys, no new rules.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("from")]);
+    app.play_index(0);
+    browsing(&mut app, &["to"], 0);
+    app.handle_action(Action::StartJourney);
+    app.apply_event(Event::Journey {
+        stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
+        note: None,
+        length: app.sonic.length,
+    });
+
+    let mid = app
+        .sonic_pane
+        .entries
+        .iter()
+        .position(|e| matches!(e, Entry::Track { track, .. } if track.filepath == "mid"))
+        .expect("the stops are track rows");
+    app.sonic_pane.state.select(Some(mid));
+    app.handle_action(Action::AddToQueue);
+    assert_eq!(app.queue.items.last().unwrap().filepath, "mid");
+
+    let effects = app.handle_action(Action::Activate);
+    assert_eq!(
+        app.queue.items.iter().map(|t| t.filepath.as_str()).collect::<Vec<_>>(),
+        vec!["from", "mid", "to"],
+        "Enter takes the whole path and starts where the cursor is"
+    );
+    assert_eq!(app.queue.current, Some(1));
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+}
+
+#[test]
+fn picking_a_song_from_the_library_fills_the_end_that_asked() {
+    // The webapp's capture flow: arm a field, go and click a song
+    // anywhere, and it lands in the field instead of the queue.
+    let mut app = connected_app();
+    browsing(&mut app, &["chosen"], 0);
+    app.handle_action(Action::SelectTab(sonic_tab(&app)));
+
+    on_sonic_row(&mut app, SonicRow::End(SonicSide::End));
+    app.handle_action(Action::Activate); // into the End song's menu
+    on_sonic_row(&mut app, SonicRow::PickFromLibrary);
+    app.handle_action(Action::Activate);
+
+    assert_eq!(app.capture, Some(Capture::Sonic(SonicSide::End)));
+    assert_eq!(app.tab, Tab::Files, "and it puts you where the songs are");
+
+    // Enter on a track now fills the field rather than playing it.
+    let effects = app.handle_action(Action::Activate);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))),
+        "an armed pick does not start playback"
+    );
+    assert!(app.queue.items.is_empty(), "nor queue anything");
+    assert_eq!(app.sonic.end.as_ref().unwrap().filepath, "chosen");
+    assert_eq!(app.capture, None, "one row, then it disarms");
+    assert_eq!(app.tab, Tab::SonicPath, "and hands you back to the panel");
+}
+
+#[test]
+fn an_armed_pick_is_called_off_by_escape() {
+    let mut app = connected_app();
+    browsing(&mut app, &["a"], 0);
+    app.handle_action(Action::SelectTab(sonic_tab(&app)));
+    on_sonic_row(&mut app, SonicRow::End(SonicSide::Start));
+    app.handle_action(Action::Activate);
+    on_sonic_row(&mut app, SonicRow::PickFromLibrary);
+    app.handle_action(Action::Activate);
+    assert_eq!(app.capture, Some(Capture::Sonic(SonicSide::Start)));
+
+    app.handle_action(Action::Cancel);
+    assert_eq!(app.capture, None);
+    assert_eq!(app.tab, Tab::SonicPath, "back where the arming was asked for");
+
+    // And Enter means play again.
+    app.handle_action(Action::SelectTab(0));
+    let effects = app.handle_action(Action::Activate);
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+}
+
+#[test]
+fn use_playing_song_takes_what_is_on_the_speakers() {
+    let mut app = connected_app();
+    app.queue.replace(vec![track("sounding")]);
+    app.play_index(0);
+    app.handle_action(Action::SelectTab(sonic_tab(&app)));
+    // Landing on the tab with something playing already suggests it as the
+    // start, so this test drives the End field.
+    assert_eq!(app.sonic.start.as_ref().unwrap().filepath, "sounding");
+
+    on_sonic_row(&mut app, SonicRow::End(SonicSide::End));
+    app.handle_action(Action::Activate);
+    on_sonic_row(&mut app, SonicRow::UsePlaying);
+    app.handle_action(Action::Activate);
+    assert_eq!(app.sonic.end.as_ref().unwrap().filepath, "sounding");
+    assert_eq!(app.capture, None, "nothing was armed — it was already in hand");
+}
+
+#[test]
+fn clearing_an_end_puts_the_row_back_to_not_set() {
+    let mut app = connected_app();
+    app.queue.replace(vec![track("sounding")]);
+    app.play_index(0);
+    app.handle_action(Action::SelectTab(sonic_tab(&app)));
+    assert!(app.sonic.start.is_some());
+
+    on_sonic_row(&mut app, SonicRow::End(SonicSide::Start));
+    app.handle_action(Action::Activate);
+    on_sonic_row(&mut app, SonicRow::Clear);
+    app.handle_action(Action::Activate);
+    assert!(app.sonic.start.is_none());
+    assert!(matches!(app.sonic_node(), SonicNode::Root), "and it comes back out");
+}
+
+#[test]
+fn saving_a_path_as_a_playlist_asks_for_a_name_first() {
+    let mut app = connected_app();
+    app.queue.replace(vec![track("from")]);
+    app.play_index(0);
+    browsing(&mut app, &["to"], 0);
+    app.handle_action(Action::StartJourney);
+    app.apply_event(Event::Journey {
+        stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
+        note: None,
+        length: app.sonic.length,
+    });
+
+    on_sonic_row(&mut app, SonicRow::SavePlaylist);
+    assert!(app.handle_action(Action::Activate).is_empty(), "nothing is written yet");
+    assert!(app.sonic_playlist_name.is_some(), "the prompt is up");
+    assert_eq!(app.input_mode(), InputMode::Editing, "and it has the keyboard");
+
+    // Whatever was suggested is replaced by what gets typed.
+    for _ in 0..80 {
+        app.handle_action(Action::Backspace);
+    }
+    for c in "Night drive".chars() {
+        app.handle_action(Action::Input(c));
+    }
+    let effects = app.handle_action(Action::Submit);
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::SavePlaylist {
+            name: "Night drive".into(),
+            files: vec!["from".into(), "mid".into(), "to".into()],
+        })]
+    );
+    assert!(app.sonic_playlist_name.is_none(), "and the prompt closes");
+
+    app.apply_event(Event::PlaylistSaved { name: "Night drive".into(), count: 3 });
+    assert!(app.message.as_ref().unwrap().text.contains("Night drive"));
+}
+
+#[test]
+fn the_path_says_what_it_is_doing_and_why_it_came_back_empty() {
+    // A results view with no stops under the controls and no word about
+    // why is the one state this tab must never be in.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("from")]);
+    app.play_index(0);
+    browsing(&mut app, &["to"], 0);
+    app.handle_action(Action::StartJourney);
+
+    let status = |app: &App| {
+        app.sonic_pane.entries.iter().find_map(|e| match e {
+            Entry::Sonic { label, row: SonicRow::Status, .. } => Some(label.clone()),
+            _ => None,
+        })
+    };
+    assert!(status(&app).unwrap().contains("plotting"), "the wait is visible");
+
+    // The server's own explanation outranks ours: it names the end that is
+    // holding things up, which "no path found" would throw away.
+    app.apply_event(Event::Journey {
+        stops: Vec::new(),
+        note: Some("the destination hasn't been analysed yet".into()),
+        length: app.sonic.length,
+    });
+    assert_eq!(status(&app).as_deref(), Some("the destination hasn't been analysed yet"));
+
+    // And with no explanation, an empty answer still gets one.
+    app.sonic.note = None;
+    app.refresh_sonic_rows();
+    assert!(status(&app).unwrap().contains("no path found"));
+
+    // Enter on it does nothing rather than something invented.
+    let at = app
+        .sonic_pane
+        .entries
+        .iter()
+        .position(|e| matches!(e, Entry::Sonic { row: SonicRow::Status, .. }))
+        .unwrap();
+    app.sonic_pane.state.select(Some(at));
+    assert!(app.handle_action(Action::Activate).is_empty());
+
+    // A failure nothing will answer must not leave the tab plotting forever.
+    on_sonic_row(&mut app, SonicRow::Regenerate);
+    app.handle_action(Action::Activate);
+    assert!(app.sonic.pending);
+    app.apply_event(Event::Error("the server hung up".into()));
+    assert!(!app.sonic.pending);
+    assert!(!status(&app).unwrap().contains("plotting"));
+}
+
+#[test]
+fn start_over_clears_both_ends_and_the_path() {
+    let mut app = connected_app();
+    app.queue.replace(vec![track("from")]);
+    app.play_index(0);
+    browsing(&mut app, &["to"], 0);
+    app.handle_action(Action::StartJourney);
+    app.apply_event(Event::Journey {
+        stops: vec![stop("from", 0.0), stop("to", 1.0)],
+        note: None,
+        length: app.sonic.length,
+    });
+
+    on_sonic_row(&mut app, SonicRow::StartOver);
+    app.handle_action(Action::Activate);
+    assert_eq!(app.sonic.view, SonicView::Setup);
+    assert!(app.sonic.start.is_none() && app.sonic.end.is_none());
+    assert!(app.sonic.stops.is_empty());
+    assert_eq!(app.sonic.length, 14, "back to the default length too");
 }
 
 #[test]
@@ -2377,7 +3066,7 @@ fn search_replies_that_pass_each_other_cannot_swap_the_results() {
     // search can land after the reply for the current one. Only the
     // query last submitted is still wanted.
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(3));
+    app.handle_action(Action::SelectTab(2));
     for c in "one".chars() {
         app.handle_action(Action::Input(c));
     }
@@ -2406,34 +3095,36 @@ fn search_replies_that_pass_each_other_cannot_swap_the_results() {
 }
 
 #[test]
-fn a_journey_reply_for_a_length_since_changed_keeps_waiting() {
+fn a_path_reply_for_a_length_since_changed_keeps_waiting() {
     let mut app = connected_app();
     app.queue.replace(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
-    let first = app.journey.as_ref().unwrap().length;
-    app.handle_action(Action::SeekForward); // ask for a longer arc
+    let first = app.sonic.length;
+    // Ask for a longer one before the first reply lands.
+    on_sonic_row(&mut app, SonicRow::Length);
+    app.handle_action(Action::Activate);
+    on_sonic_row(&mut app, SonicRow::Regenerate);
+    app.handle_action(Action::Activate);
 
     // The reply to the original length answers a request nobody is
-    // tracking any more: the stops stay empty and the panel keeps waiting.
+    // tracking any more: the stops stay empty and the tab keeps waiting.
     app.apply_event(Event::Journey {
         stops: vec![stop("stale", 0.0)],
         note: None,
         length: first,
     });
-    let journey = app.journey.as_ref().unwrap();
-    assert!(journey.stops.is_empty(), "an arc of the wrong length is not this arc");
-    assert!(journey.pending, "still waiting on the length actually asked for");
+    assert!(app.sonic.stops.is_empty(), "an arc of the wrong length is not this arc");
+    assert!(app.sonic.pending, "still waiting on the length actually asked for");
 
     app.apply_event(Event::Journey {
         stops: vec![stop("fresh", 0.0)],
         note: None,
-        length: first + 2,
+        length: first + 1,
     });
-    let journey = app.journey.as_ref().unwrap();
-    assert_eq!(journey.stops.len(), 1);
-    assert!(!journey.pending);
+    assert_eq!(app.sonic.stops.len(), 1);
+    assert!(!app.sonic.pending);
 }
 
 #[test]
@@ -2442,7 +3133,7 @@ fn drilling_out_of_search_lights_the_search_tab_spinner() {
     // forget a case: the old SearchDrill command wasn't in its table at
     // all, and this spinner never lit.
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(3));
+    app.handle_action(Action::SelectTab(2));
     app.search_submitted = Some("moon".into());
     app.apply_event(Event::SearchResults {
         query: "moon".into(),
@@ -2460,32 +3151,31 @@ fn drilling_out_of_search_lights_the_search_tab_spinner() {
 }
 
 #[test]
-fn a_journey_reply_that_arrives_after_it_is_closed_is_dropped() {
+fn a_path_reply_that_arrives_after_start_over_is_dropped() {
     let mut app = connected_app();
     app.queue.replace(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
-    app.handle_action(Action::Cancel);
+    app.reset_sonic_path();
 
     app.apply_event(Event::Journey { stops: vec![stop("late", 0.0)], note: None, length: 14 });
-    assert!(app.journey.is_none(), "it stays closed");
+    assert!(app.sonic.stops.is_empty(), "a path nobody is waiting for is not drawn");
     assert_eq!(app.queue.items.len(), 1, "and nothing is queued behind the user's back");
 }
 
 #[test]
-fn the_panel_only_offers_rows_the_server_can_honour() {
-    let mut app = connected_app();
-    app.handle_action(Action::OpenDjPanel);
-    let rows = &app.dj_panel.as_ref().unwrap().rows;
+fn the_dj_tab_only_offers_rows_the_server_can_honour() {
+    let app = connected_app();
+    let rows = &app.dj_panel.rows;
     assert!(rows.contains(&DjRow::Tightness), "this server has the index");
     assert!(rows.contains(&DjRow::Anchor));
 
     // Without it, a row promising a sonic pool would be a lie.
     let mut app = connected_app();
     app.capabilities = Default::default();
-    app.handle_action(Action::OpenDjPanel);
-    let rows = &app.dj_panel.as_ref().unwrap().rows;
+    app.dj_panel.rebuild(app.capabilities);
+    let rows = &app.dj_panel.rows;
     assert!(!rows.contains(&DjRow::Tightness));
     assert!(!rows.contains(&DjRow::Anchor));
     assert!(rows.contains(&DjRow::Tempo), "the rest is still there");
@@ -2680,7 +3370,11 @@ fn jumping_to_what_is_playing_goes_to_the_queue() {
     app.focus = Focus::Browser;
     app.queue.state.select(Some(0));
 
-    assert!(app.handle_action(Action::JumpToPlaying).is_empty());
+    // Moving the cursor is all it does — nothing about playback changes.
+    // (It can still carry a waveform prefetch, the way any dispatch can:
+    // that rides the funnel rather than belonging to this action.)
+    let effects = app.handle_action(Action::JumpToPlaying);
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Audio(_))), "{effects:?}");
     assert_eq!(app.focus, Focus::Queue);
     assert_eq!(app.queue.state.selected(), Some(1), "the playing row, not the first");
     assert!(app.message.as_ref().unwrap().text.contains("Band - Song"));
@@ -2727,22 +3421,12 @@ fn half_a_page_is_half_of_a_page() {
 }
 
 #[test]
-fn the_panel_binds_its_own_keys_rather_than_the_players() {
-    // Found live: `p` reached the panel as "previous track", so the
-    // sample key silently did nothing.
+fn the_genre_chooser_binds_its_own_keys_rather_than_the_players() {
+    // The one modal left. Sharing the player's bindings meant `p` arrived
+    // as "previous track" inside it.
     let key = |c: char| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
     assert_eq!(map_key(key('p'), InputMode::Normal), Some(Action::PrevTrack));
     assert_eq!(map_key(key('p'), InputMode::Panel), Some(Action::Input('p')));
-
-    // Left/right come from three shapes, all meaning "adjust".
-    for c in ['h', '['] {
-        assert_eq!(map_key(key(c), InputMode::Panel), Some(Action::Back));
-    }
-    for c in ['l', ']'] {
-        assert_eq!(map_key(key(c), InputMode::Panel), Some(Action::SeekForward));
-    }
-    // And the panel's own key closes it, as does Esc.
-    assert_eq!(map_key(key('D'), InputMode::Panel), Some(Action::Cancel));
     assert_eq!(
         map_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), InputMode::Panel),
         Some(Action::Cancel)
@@ -2750,65 +3434,86 @@ fn the_panel_binds_its_own_keys_rather_than_the_players() {
 }
 
 #[test]
-fn the_panel_owns_the_keyboard_while_it_is_open() {
+fn the_arrows_belong_to_the_tab_and_the_numbers_do_the_navigating() {
+    let press = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    assert_eq!(map_key(press(KeyCode::Left), InputMode::Now), Some(Action::NowLeft));
+    assert_eq!(map_key(press(KeyCode::Right), InputMode::Now), Some(Action::NowRight));
+    assert_eq!(map_key(press(KeyCode::Tab), InputMode::Now), Some(Action::NowTabNext));
+    assert_eq!(map_key(press(KeyCode::BackTab), InputMode::Now), Some(Action::NowTabPrev));
+    // In this view the digits reach its own tabs, not the browser's — which
+    // are behind a screen nobody can see from here.
+    assert_eq!(map_key(press(KeyCode::Char('1')), InputMode::Now), Some(Action::SelectNowTab(0)));
+    assert_eq!(map_key(press(KeyCode::Char('1')), InputMode::Normal), Some(Action::SelectTab(0)));
+
     let mut app = connected_app();
-    assert_eq!(app.input_mode(), InputMode::Normal);
-    app.handle_action(Action::OpenDjPanel);
-    assert_eq!(app.input_mode(), InputMode::Panel);
-    app.handle_action(Action::Cancel);
-    assert_eq!(app.input_mode(), InputMode::Normal);
+    on_the_dj_tab(&mut app);
+    app.handle_action(Action::NowRight);
+    assert_eq!(app.autodj, AutoDjMode::Similar, "→ adjusted the Mode row");
+    assert_eq!(app.now_tab(), NowTab::AutoDj, "and did not leave the tab");
+
+    // The way out is the same key it is on every other tab.
+    let queue = app.now_tabs().iter().position(|t| *t == NowTab::Queue).unwrap();
+    app.handle_action(Action::SelectNowTab(queue));
+    assert_eq!(app.now_tab(), NowTab::Queue);
+
+    // ←→ never navigate now, on any tab — the rule is the same everywhere.
+    app.handle_action(Action::NowLeft);
+    assert_eq!(app.now_tab(), NowTab::Queue);
+    app.handle_action(Action::NowRight);
+    assert_eq!(app.now_tab(), NowTab::Queue);
 }
 
 #[test]
-fn the_panel_takes_the_keys_the_player_would_otherwise_use() {
-    // Space is the toggle inside the genre chooser and pause outside it;
-    // arrows move settings, not the browser. Leaking either would make
-    // editing settings play music.
+fn the_genre_chooser_owns_the_keyboard_while_it_is_open() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
-    app.handle_action(Action::OpenDjPanel);
+    assert_eq!(app.input_mode(), InputMode::Normal);
+    on_the_dj_tab(&mut app);
+    assert_eq!(app.input_mode(), InputMode::Now);
 
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Genres).unwrap();
+    app.handle_action(Action::Activate);
+    assert_eq!(app.input_mode(), InputMode::Panel);
+
+    // Space toggles a genre in there rather than pausing the music.
+    app.queue.replace(vec![track("a")]);
     let effects = app.handle_action(Action::PlayPause);
-    assert!(effects.is_empty(), "no playback from inside the panel");
-    app.handle_action(Action::Down);
-    assert_eq!(app.dj_panel.as_ref().unwrap().row, 1, "moves the panel, not the queue");
-    assert_eq!(app.queue.current, None);
+    assert!(effects.is_empty(), "no playback from inside the chooser");
 
     app.handle_action(Action::Cancel);
-    assert!(app.dj_panel.is_none(), "Esc closes it");
+    assert_eq!(app.input_mode(), InputMode::Now);
 }
 
 #[test]
 fn adjusting_a_row_changes_the_setting_it_names() {
     let mut app = connected_app();
-    app.handle_action(Action::OpenDjPanel);
+    on_the_dj_tab(&mut app);
 
     // Row 0 is the mode; stepping right cycles it.
-    app.handle_action(Action::SeekForward);
+    app.handle_action(Action::NowRight);
     assert_eq!(app.autodj, AutoDjMode::Similar);
 
     // Tightness moves in useful steps and stops at the ends rather than
     // wrapping — a slider that wraps loses your place.
-    app.dj_panel.as_mut().unwrap().row = 1;
-    assert_eq!(app.dj_panel.as_ref().unwrap().selected(), DjRow::Tightness);
-    app.handle_action(Action::SeekForward);
+    app.dj_panel.row = 1;
+    assert_eq!(app.dj_panel.selected(), DjRow::Tightness);
+    app.handle_action(Action::NowRight);
     assert_eq!(app.dj.sonic_tightness, 5);
     for _ in 0..40 {
-        app.handle_action(Action::SeekForward);
+        app.handle_action(Action::NowRight);
     }
     assert_eq!(app.dj.sonic_tightness, 100, "clamped at the top");
     for _ in 0..40 {
-        app.handle_action(Action::Back);
+        app.handle_action(Action::NowLeft);
     }
     assert_eq!(app.dj.sonic_tightness, 0, "and at the bottom, which is off");
 }
 
 #[test]
-fn panel_settings_are_remembered() {
+fn dj_tab_settings_are_remembered() {
     let mut app = connected_app();
-    app.handle_action(Action::OpenDjPanel);
-    app.dj_panel.as_mut().unwrap().row = 1;
-    app.handle_action(Action::SeekForward); // tightness 5
+    on_the_dj_tab(&mut app);
+    app.dj_panel.row = 1;
+    app.handle_action(Action::NowRight); // tightness 5
 
     let saved = app.prefs();
     assert_eq!(saved.dj.sonic_tightness, 5);
@@ -2817,16 +3522,15 @@ fn panel_settings_are_remembered() {
 }
 
 #[test]
-fn g_and_shift_g_jump_to_the_ends_of_the_panel() {
-    // Found live: both keys were bound in panel mode but the settings
-    // list ignored them, so `G` silently did nothing.
+fn g_and_shift_g_jump_to_the_ends_of_the_dj_tab() {
+    // Found live: both keys were bound but the settings list ignored them,
+    // so `G` silently did nothing.
     let mut app = connected_app();
-    app.handle_action(Action::OpenDjPanel);
+    on_the_dj_tab(&mut app);
     app.handle_action(Action::Last);
-    let panel = app.dj_panel.as_ref().unwrap();
-    assert_eq!(panel.selected(), DjRow::Genres, "the last row");
+    assert_eq!(app.dj_panel.selected(), DjRow::Sample, "the last row");
     app.handle_action(Action::First);
-    assert_eq!(app.dj_panel.as_ref().unwrap().selected(), DjRow::Mode);
+    assert_eq!(app.dj_panel.selected(), DjRow::Mode);
 }
 
 #[test]
@@ -2834,27 +3538,19 @@ fn choosing_a_genre_switches_the_filter_on() {
     // Picking genres while the mode is off would do nothing at all, which
     // reads as the chooser being broken.
     let mut app = connected_app();
-    app.handle_action(Action::OpenDjPanel);
-    let genres = app
-        .dj_panel
-        .as_ref()
-        .unwrap()
-        .rows
-        .iter()
-        .position(|r| *r == DjRow::Genres)
-        .unwrap();
-    app.dj_panel.as_mut().unwrap().row = genres;
-    assert_eq!(app.dj_panel.as_ref().unwrap().selected(), DjRow::Genres);
+    on_the_dj_tab(&mut app);
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Genres).unwrap();
+    assert_eq!(app.dj_panel.selected(), DjRow::Genres);
 
     let effects = app.handle_action(Action::Activate);
     assert_eq!(effects, vec![Effect::Api(ApiCmd::Genres)]);
-    assert!(app.dj_panel.as_ref().unwrap().genres.as_ref().unwrap().loading);
+    assert!(app.dj_panel.genres.as_ref().unwrap().loading);
 
     app.apply_event(Event::Genres(vec![
         Genre { name: "Ambient".into(), track_count: Some(4) },
         Genre { name: "Techno".into(), track_count: Some(9) },
     ]));
-    let picker = app.dj_panel.as_ref().unwrap().genres.as_ref().unwrap();
+    let picker = app.dj_panel.genres.as_ref().unwrap();
     assert_eq!(picker.all, vec!["Ambient", "Techno"]);
     assert!(!picker.loading);
 
@@ -2867,23 +3563,26 @@ fn choosing_a_genre_switches_the_filter_on() {
     assert!(app.dj.genres.is_empty());
 
     app.handle_action(Action::Submit);
-    assert!(app.dj_panel.as_ref().unwrap().genres.is_none(), "Enter closes the chooser");
-    assert!(app.dj_panel.is_some(), "back to the panel, not out of it");
+    assert!(app.dj_panel.genres.is_none(), "Enter closes the chooser");
+    assert_eq!(app.now_tab(), NowTab::AutoDj, "back to the tab, not out of it");
 }
 
 #[test]
 fn sampling_asks_for_picks_without_queueing_any() {
     let mut app = connected_app();
-    app.handle_action(Action::OpenDjPanel);
+    on_the_dj_tab(&mut app);
+    // The sample is its own row now: `p` is "previous track" everywhere in
+    // this view, so the ask had to be something no other key wanted.
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Sample).unwrap();
 
-    let effects = app.handle_action(Action::Input('p'));
+    let effects = app.handle_action(Action::Activate);
     match effects.as_slice() {
         [Effect::Api(ApiCmd::AutoDjSample { count, .. })] => assert_eq!(*count, 3),
         other => panic!("unexpected {other:?}"),
     }
-    assert!(app.dj_panel.as_ref().unwrap().sample_pending);
+    assert!(app.dj_panel.sample_pending);
     // A second press while one is out must not pile on.
-    assert!(app.handle_action(Action::Input('p')).is_empty());
+    assert!(app.handle_action(Action::Activate).is_empty());
 
     app.apply_event(Event::AutoDjSample {
         tracks: vec![track("one"), track("two")],
@@ -2893,11 +3592,123 @@ fn sampling_asks_for_picks_without_queueing_any() {
         }),
         note: None,
     });
-    let panel = app.dj_panel.as_ref().unwrap();
+    let panel = &app.dj_panel;
     assert_eq!(panel.sample.len(), 2);
     assert_eq!(panel.pool.as_ref().unwrap().pool_size, 1247);
     assert!(!panel.sample_pending);
     assert!(app.queue.items.is_empty(), "a sample is not a queue");
+}
+
+#[test]
+fn a_cleared_end_stays_cleared_when_you_come_back() {
+    // The seeding is for a panel nobody has touched. Reading that off "both
+    // ends are empty" made clearing the only end you had chosen look
+    // identical to never having chosen one — so stepping away and back
+    // filled it straight back in, which is the one thing it must not do.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("playing")]);
+    app.play_index(0);
+
+    let sonic = sonic_tab(&app);
+    app.handle_action(Action::SelectTab(sonic));
+    assert_eq!(
+        app.sonic.start.as_ref().map(|t| t.filepath.as_str()),
+        Some("playing"),
+        "a pristine panel does take what is playing"
+    );
+
+    // Clear it, which is the state that used to read as pristine.
+    app.sonic.set_side(SonicSide::Start, None);
+    assert!(app.sonic.start.is_none() && app.sonic.end.is_none());
+
+    app.handle_action(Action::SelectTab(0));
+    app.handle_action(Action::SelectTab(sonic));
+    assert!(app.sonic.start.is_none(), "cleared is a choice, and it is kept");
+
+    // Start over is a pristine panel again, so the seeding comes back.
+    app.reset_sonic_path();
+    app.handle_action(Action::SelectTab(0));
+    app.handle_action(Action::SelectTab(sonic));
+    assert_eq!(app.sonic.start.as_ref().map(|t| t.filepath.as_str()), Some("playing"));
+}
+
+#[test]
+fn changing_the_length_stops_waiting_for_a_path_of_the_old_one() {
+    // `consume_journey` drops a reply whose length is not the current one,
+    // so once the slider moves, nothing is coming — and a wait kept for it
+    // left the row saying "plotting…" for the rest of the session.
+    let mut app = connected_app();
+    let sonic = sonic_tab(&app);
+    app.handle_action(Action::SelectTab(sonic));
+    app.sonic.set_side(SonicSide::Start, Some(track("a")));
+    app.sonic.set_side(SonicSide::End, Some(track("b")));
+    app.refresh_sonic_rows();
+
+    // Build, from the row that builds.
+    let build = app
+        .sonic_pane
+        .entries
+        .iter()
+        .position(|e| matches!(e, Entry::Sonic { row: SonicRow::Build, .. }))
+        .expect("a Build row");
+    app.sonic_pane.state.select(Some(build));
+    assert!(!app.handle_action(Action::Activate).is_empty(), "the request goes out");
+    assert!(app.sonic.pending);
+
+    let was = app.sonic.length;
+    let length = app
+        .sonic_pane
+        .entries
+        .iter()
+        .position(|e| matches!(e, Entry::Sonic { row: SonicRow::Length, .. }))
+        .expect("a Length row");
+    app.sonic_pane.state.select(Some(length));
+    assert!(app.sonic_step(1).is_some(), "→ on the length row is the adjuster");
+    assert_ne!(app.sonic.length, was, "the slider moved");
+    assert!(!app.sonic.pending, "nothing is coming, so nothing is being waited for");
+
+    // And the reply plotted for the old length is still ignored when it
+    // lands — clearing the wait must not have opened a door for it.
+    app.consume_journey(Vec::new(), None, was);
+    assert!(!app.sonic.fetched, "a path of the wrong length is not this panel's answer");
+}
+
+#[test]
+fn a_wait_nothing_will_answer_is_given_up_on() {
+    // Every "waiting" flag in the player has to be cleared by the error
+    // funnel as well as by its own reply, because the reply is exactly what
+    // an error means you will not get. Two of these were missed: the
+    // Auto-DJ sample lost its reset when the panel stopped being a modal
+    // that could be closed, and the full-screen Discover panel never had
+    // one — and neither can be retried while its flag is still up.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("first")]);
+    app.play_index(0);
+    on_the_now_discover_tab(&mut app);
+    assert!(app.now_discover.as_ref().unwrap().pending);
+
+    // Same view, one tab along — leaving Discover does not answer its wait.
+    while app.now_tab() != NowTab::AutoDj {
+        app.handle_action(Action::NowTabNext);
+    }
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Sample).unwrap();
+    app.handle_action(Action::Activate);
+    assert!(app.dj_panel.sample_pending);
+
+    app.apply_event(Event::Error("the server hung up".into()));
+
+    assert!(!app.dj_panel.sample_pending, "the sample row is askable again");
+    let shown = app.now_discover.as_ref().unwrap();
+    assert!(!shown.pending, "the panel stops saying it is looking");
+    // And it must not claim the *server* said there was nothing close —
+    // that is an answer, and this is the absence of one.
+    let why = shown.note.as_deref().unwrap_or_default();
+    assert!(!why.contains("nothing close"), "got {why:?}");
+    assert!(why.contains("didn't come back"), "got {why:?}");
+
+    // Asking again is the point of clearing it.
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Sample).unwrap();
+    assert!(!app.handle_action(Action::Activate).is_empty(), "the sample can be re-asked");
 }
 
 #[test]
@@ -3116,7 +3927,7 @@ fn a_fallback_note_is_surfaced_instead_of_the_track_name() {
 #[test]
 fn selection_stays_in_bounds() {
     let mut pane = Pane::default();
-    pane.set(vec![Entry::Parent, Entry::Playlist { name: "x".into() }]);
+    pane.set(vec![Entry::Parent, Entry::Node { label: "x".into(), node: LibraryNode::Artists }]);
     pane.move_by(-5);
     assert_eq!(pane.state.selected(), Some(0));
     pane.move_by(50);
@@ -3633,7 +4444,7 @@ fn choosing_a_level_does_not_persist_the_write_switch() {
 fn the_settings_menu_reads_the_state_at_a_glance_and_backs_out_whole() {
     let mut app = connected_app();
     app.crossfade = 6.0;
-    app.handle_action(Action::SelectTab(5));
+    app.handle_action(Action::SelectTab(settings_tab(&app)));
     assert!(
         matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("6s blend")),
         "the root row summarises without opening"
@@ -3654,7 +4465,7 @@ fn the_settings_menu_reads_the_state_at_a_glance_and_backs_out_whole() {
     app.handle_action(Action::SelectTab(0));
     app.crossfade = 0.0;
     app.gapless = true;
-    app.handle_action(Action::SelectTab(5));
+    app.handle_action(Action::SelectTab(settings_tab(&app)));
     assert!(
         matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("gapless")),
         "a revisit reads the values as they are now"
@@ -3666,7 +4477,7 @@ fn a_fractional_crossfade_snaps_to_whole_steps() {
     // A hand-written 4.5 must step to 5 and 4 — not 5.5 forever.
     let mut app = connected_app();
     app.crossfade = 4.5;
-    app.handle_action(Action::SelectTab(5));
+    app.handle_action(Action::SelectTab(settings_tab(&app)));
     app.handle_action(Action::Activate); // cursor rests on Blend length
 
     app.handle_action(Action::Activate);
@@ -3718,7 +4529,7 @@ fn turning_crossfade_on_withdraws_a_standing_seam_announcement() {
     }));
     assert_eq!(announced_url(&effects).as_deref(), Some(url.as_str()), "the seam stands");
 
-    app.handle_action(Action::SelectTab(5));
+    app.handle_action(Action::SelectTab(settings_tab(&app)));
     app.handle_action(Action::Activate); // cursor rests on Blend length
     let effects = app.handle_action(Action::Activate); // crossfade 0 -> 1
     assert!(
@@ -3730,7 +4541,7 @@ fn turning_crossfade_on_withdraws_a_standing_seam_announcement() {
 #[test]
 fn the_settings_tab_adjusts_the_blend_and_tells_the_engine_in_the_same_keystroke() {
     let mut app = connected_app();
-    app.handle_action(Action::SelectTab(5));
+    app.handle_action(Action::SelectTab(settings_tab(&app)));
     assert_eq!(app.tab, Tab::Settings, "6 lands on Settings");
     assert!(
         matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::CrossfadeMenu, .. })),

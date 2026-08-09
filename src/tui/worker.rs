@@ -91,13 +91,18 @@ pub enum ApiCmd {
     /// Walk from one track to another through the embedding space.
     Journey { start: String, end: String, length: u32 },
     /// Fill a Discover view. `seed` is the track it all hangs off.
-    Discover { node: DiscoverNode, seed: Box<Track> },
-    Playlists,
-    LoadPlaylist(String),
+    Discover { node: DiscoverNode, seed: Box<Track>, dest: DiscoverDest },
+    /// Write a whole track list to a playlist, creating it or replacing what
+    /// was there. Sonic Path's "save as playlist" is the only caller.
+    SavePlaylist { name: String, files: Vec<String> },
     Search(String),
     /// Fetch and decode one cover, named by the art file a track's metadata
     /// carries. The app caches the answer under that name.
     AlbumArt { file: String },
+    /// Fetch a track's shape for the progress bar. Keyed by filepath rather
+    /// than by an art file: a waveform belongs to one recording, not to an
+    /// album.
+    Waveform { filepath: String },
     Shutdown,
 }
 
@@ -122,8 +127,12 @@ pub struct DjRequest {
 /// and the identity of what comes back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscoverNode {
-    /// The mode menu — static, needs no request.
+    /// What to look around *from*: what is playing, or anything you care to
+    /// point at. Static, needs no request — and being able to ask about a
+    /// track without playing it is why the tab starts here.
     Root,
+    /// What to look *at*: songs, or artists. Also static.
+    Mode,
     /// Tracks that sound like the seed.
     Tracks,
     /// Artists that sound like the seed's artist.
@@ -135,8 +144,28 @@ pub enum DiscoverNode {
 
 #[derive(Debug)]
 pub enum DiscoverData {
-    Tracks(Vec<Track>),
+    /// Neighbours with how close each one is. Both views lead their rows
+    /// with the number: these arrive in order, so a position says nothing a
+    /// rank could not, where the cosine says how much of a neighbour each
+    /// one actually is. It used to be dropped on the way to the browser
+    /// tab, which is why this carries `SimilarTrack` and not `Track`.
+    Tracks(Vec<crate::api::types::SimilarTrack>),
     Artists(Vec<SimilarArtist>),
+}
+
+/// Which Discover surface asked, echoed back on the reply.
+///
+/// Two of them want the same data about different seeds: the browser tab
+/// drills from a seed it captured when you opened it, and the now-playing
+/// panel follows whatever is on the speakers. Carrying the destination is
+/// what audit #64 asks for — the alternative is a second command whose only
+/// job is to be a different variant name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoverDest {
+    /// The Discover tab in the browser.
+    Browser,
+    /// The Discover tab of the full-screen view.
+    NowPlaying,
 }
 
 /// A position in the tag-based library hierarchy. Doubles as the request (what
@@ -153,6 +182,11 @@ pub enum LibraryNode {
     Genres,
     Genre(String),
     Recent,
+    /// Your own lists, which are a way of browsing the library like any
+    /// other — they were a tab of their own until they turned out to need
+    /// every machine the Library tab already had.
+    Playlists,
+    Playlist(String),
 }
 
 #[derive(Debug)]
@@ -160,6 +194,7 @@ pub enum LibraryData {
     Artists(Vec<String>),
     Albums(Vec<Album>),
     Genres(Vec<Genre>),
+    Playlists(Vec<PlaylistSummary>),
     Tracks(Vec<Track>),
 }
 
@@ -312,9 +347,19 @@ pub enum Event {
     /// arc while one is still in flight is a race the UI can lose.
     Journey { stops: Vec<JourneyStop>, note: Option<String>, length: u32 },
     /// A Discover view's contents, tagged with the node they belong to.
-    Discover { node: DiscoverNode, data: DiscoverData, note: Option<String> },
-    Playlists(Vec<PlaylistSummary>),
-    PlaylistTracks { name: String, tracks: Vec<Track> },
+    /// `seed` is the filepath it was asked about. The browser tab tells a
+    /// stale reply by its node; the now-playing panel follows the speakers,
+    /// where the node never changes and the seed is the only thing that does.
+    Discover {
+        node: DiscoverNode,
+        data: DiscoverData,
+        note: Option<String>,
+        dest: DiscoverDest,
+        seed: String,
+    },
+    /// A playlist was written. Carries the name so the confirmation can say
+    /// which one, and how many tracks went into it.
+    PlaylistSaved { name: String, count: usize },
     /// `query` is the search these results answer — replies can pass each
     /// other now, and the box's contents name the one still wanted.
     SearchResults { query: String, results: Box<SearchResults> },
@@ -322,6 +367,18 @@ pub enum Event {
     /// kind of failure. Art is a nicety: nothing about it is ever worth a
     /// message the user has to read.
     AlbumArt { file: String, art: Option<art::Art> },
+    /// A track's shape, or `None` for every flavour of "there isn't one".
+    /// Like art, never worth a message: the bar it decorates draws perfectly
+    /// well without it.
+    /// The shape of a track, or the news that it has none.
+    ///
+    /// `settled` is the difference between the server answering "no
+    /// waveform" — which it will answer the same way forever, so the answer
+    /// is worth keeping — and nobody answering at all. Collapsing the two
+    /// meant one dropped connection cached a permanent "this track has no
+    /// shape", on the endpoint whose whole design assumes the first call is
+    /// the slow one.
+    Waveform { filepath: String, bars: Option<Vec<u8>>, settled: bool },
     /// Credentials are missing or expired — the UI drops back to the
     /// connect screen.
     Unauthorized,
@@ -815,10 +872,12 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         ApiCmd::Journey { start, end, length } => {
             crate::api::wait(journey(c, &start, &end, length))
         }
-        ApiCmd::Discover { node, seed } => crate::api::wait(discover(c, &node, &seed)),
-        ApiCmd::Playlists => c.playlists().map(Event::Playlists),
-        ApiCmd::LoadPlaylist(name) => {
-            c.playlist_load(&name).map(|tracks| Event::PlaylistTracks { name, tracks })
+        ApiCmd::Discover { node, seed, dest } => {
+            crate::api::wait(discover(c, &node, &seed, dest))
+        }
+        ApiCmd::SavePlaylist { name, files } => {
+            let count = files.len();
+            c.playlist_save(&name, &files).map(|()| Event::PlaylistSaved { name, count })
         }
         ApiCmd::Search(query) => {
             c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r) })
@@ -830,6 +889,16 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
             // render loop only ever meets covers already at terminal scale.
             let art = c.album_art(&file).ok().and_then(|bytes| art::decode(&bytes));
             Ok(Event::AlbumArt { file, art })
+        }
+        ApiCmd::Waveform { filepath } => {
+            // Same rule as art: a shape nobody could draw is not news. The
+            // client already folds the server's four ways of saying "no
+            // waveform" into `Ok(None)`; anything left is a real transport
+            // failure, which is worth less than a message here — but it is
+            // not an answer, so it must not be remembered as one.
+            let answer = c.waveform(&filepath);
+            let settled = answer.is_ok();
+            Ok(Event::Waveform { filepath, bars: answer.ok().flatten(), settled })
         }
         // The connection commands never reach here; api_loop keeps them.
         ApiCmd::Connect { .. }
@@ -995,6 +1064,10 @@ pub(crate) async fn load_library(
         }
         LibraryNode::Recent => {
             LibraryData::Tracks(client.recently_added_async(RECENT_LIMIT).await?)
+        }
+        LibraryNode::Playlists => LibraryData::Playlists(client.playlists_async().await?),
+        LibraryNode::Playlist(name) => {
+            LibraryData::Tracks(client.playlist_load_async(name).await?)
         }
     })
 }
@@ -1187,20 +1260,25 @@ pub(crate) async fn discover(
     client: &Client,
     node: &DiscoverNode,
     seed: &Track,
+    dest: DiscoverDest,
 ) -> Result<Event, ApiError> {
     let disabled = |data| Event::Discover {
         node: node.clone(),
         data,
         note: Some("discovery is switched off on this server".into()),
+        dest,
+        seed: seed.filepath.clone(),
     };
 
     match node {
-        // Both are answered without asking the server: the mode menu is
-        // static, and an artist's ways in arrived with the artist list.
-        DiscoverNode::Root | DiscoverNode::Artist(_) => Ok(Event::Discover {
+        // All three are answered without asking the server: the two menus
+        // are static, and an artist's ways in arrived with the artist list.
+        DiscoverNode::Root | DiscoverNode::Mode | DiscoverNode::Artist(_) => Ok(Event::Discover {
             node: node.clone(),
             data: DiscoverData::Tracks(Vec::new()),
             note: None,
+            dest,
+            seed: seed.filepath.clone(),
         }),
 
         DiscoverNode::Tracks => {
@@ -1218,10 +1296,10 @@ pub(crate) async fn discover(
             };
             Ok(Event::Discover {
                 node: node.clone(),
-                data: DiscoverData::Tracks(
-                    found.results.into_iter().map(|r| r.into_track()).collect(),
-                ),
+                data: DiscoverData::Tracks(found.results),
                 note,
+                dest,
+                seed: seed.filepath.clone(),
             })
         }
 
@@ -1232,6 +1310,8 @@ pub(crate) async fn discover(
                     node: node.clone(),
                     data: DiscoverData::Artists(Vec::new()),
                     note: Some("this track has no artist tag to compare against".into()),
+                    dest,
+                    seed: seed.filepath.clone(),
                 });
             };
             let Some(found) = client.similar_artists_async(artist, DISCOVER_LIMIT).await? else {
@@ -1255,6 +1335,8 @@ pub(crate) async fn discover(
                 node: node.clone(),
                 data: DiscoverData::Artists(found.results),
                 note,
+                dest,
+                seed: seed.filepath.clone(),
             })
         }
     }

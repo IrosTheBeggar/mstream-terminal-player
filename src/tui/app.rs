@@ -21,7 +21,8 @@ use crate::player::PlayerStatus;
 use crate::tui::art::Art;
 
 use super::worker::{
-    ApiCmd, AudioCmd, AutoDjMode, DiscoverData, DiscoverNode, DjRequest, Event, LibraryData,
+    ApiCmd, AudioCmd, AutoDjMode, DiscoverData, DiscoverDest, DiscoverNode, DjRequest, Event,
+    LibraryData,
     LibraryNode,
 };
 
@@ -63,23 +64,29 @@ pub enum Effect {
 pub enum Tab {
     Files,
     Library,
-    Playlists,
     Search,
     Discover,
+    SonicPath,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] =
-        [Tab::Files, Tab::Library, Tab::Playlists, Tab::Search, Tab::Discover, Tab::Settings];
+    pub const ALL: [Tab; 6] = [
+        Tab::Files,
+        Tab::Library,
+        Tab::Search,
+        Tab::Discover,
+        Tab::SonicPath,
+        Tab::Settings,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Files => "Files",
             Tab::Library => "Library",
-            Tab::Playlists => "Playlists",
             Tab::Search => "Search",
             Tab::Discover => "Discover",
+            Tab::SonicPath => "Sonic Path",
             Tab::Settings => "Settings",
         }
     }
@@ -89,6 +96,9 @@ impl Tab {
     pub fn available(self, capabilities: crate::api::types::Capabilities) -> bool {
         match self {
             Tab::Discover => capabilities.discovery,
+            // Its own flag, not `discovery`: the server reports the two
+            // separately and an index without paths is a real configuration.
+            Tab::SonicPath => capabilities.discovery_path,
             _ => true,
         }
     }
@@ -281,6 +291,19 @@ pub enum Action {
     ToggleNowPlaying,
     NowTabNext,
     NowTabPrev,
+    /// One of the full-screen view's tabs, by position among the visible
+    /// ones — the same rule the browser's numbers follow, so they stay 1..n
+    /// with no gaps whichever tabs this track and this server allow.
+    SelectNowTab(usize),
+    /// ←/→ in the full-screen view, offered to whichever tab is in front.
+    /// Auto-DJ takes them to adjust the row under the cursor; the rest have
+    /// no use for them.
+    ///
+    /// They used to switch tabs, with Auto-DJ as the exception — which meant
+    /// the one screen you could get *stuck* on was the one whose escape key
+    /// was different. Navigation is the numbers now.
+    NowLeft,
+    NowRight,
     VolumeUp,
     VolumeDown,
     RemoveFromQueue,
@@ -288,7 +311,7 @@ pub enum Action {
     ToggleRepeat,
     ToggleShuffle,
     ToggleAutoDj,
-    OpenDjPanel,
+    /// `J` — open the Sonic Path tab aimed at the highlighted track.
     StartJourney,
     StartSearch,
     StartFilter,
@@ -308,7 +331,6 @@ pub enum Entry {
     Dir { label: String, path: String },
     /// A step deeper into the tag-based library (an artist, album, genre…).
     Node { label: String, node: LibraryNode },
-    Playlist { name: String },
     /// A row in the search-class menu: what it matched on, and how many.
     Search { label: String, detail: String, node: SearchNode },
     /// A step deeper into Discover. `detail` is the dim right-hand column —
@@ -317,6 +339,10 @@ pub enum Entry {
     /// A row in the Settings tab: a drill into a settings group, or a live
     /// value. `detail` carries the current value and its meaning.
     Setting { label: String, detail: String, row: SettingRow },
+    /// A row in the Sonic Path tab — a chosen end, a length, or a thing to
+    /// do with the path. Same shape as [`Entry::Setting`] and for the same
+    /// reason: a label on the left, what it is set to on the right.
+    Sonic { label: String, detail: String, row: SonicRow },
     Track { label: String, track: Box<Track> },
 }
 
@@ -328,10 +354,10 @@ impl Entry {
             Entry::Parent => "..",
             Entry::Dir { label, .. } => label,
             Entry::Node { label, .. } => label,
-            Entry::Playlist { name } => name,
             Entry::Search { label, .. } => label,
             Entry::Discover { label, .. } => label,
             Entry::Setting { label, .. } => label,
+            Entry::Sonic { label, .. } => label,
             Entry::Track { label, .. } => label,
         }
     }
@@ -664,14 +690,16 @@ pub struct Message {
     pub kind: MessageKind,
 }
 
-// Auto-DJ and the journey live in `autodj` (audit #57) — named for what it
-// does, since `dj` is already the crate's Camelot/BPM helpers. The way in —
-// the connect screen, and the [`Session`] it produces — lives in `session`
-// (audit #56), re-exported so every caller keeps saying `app::ConnectForm`.
+// Auto-DJ lives in `autodj` (audit #57) — named for what it does, since `dj`
+// is already the crate's Camelot/BPM helpers. The Sonic Path tab, which used
+// to share that file as an overlay, is `sonic`. The way in — the connect
+// screen, and the [`Session`] it produces — lives in `session` (audit #56),
+// re-exported so every caller keeps saying `app::ConnectForm`.
 mod autodj;
-mod entries;
+pub(crate) mod entries;
 mod nav;
 mod session;
+mod sonic;
 
 // The row builders moved out whole (audit #61); the app and its tests
 // go on naming them exactly as they did.
@@ -699,6 +727,11 @@ pub enum DjRow {
     Rating,
     Cooldown,
     Genres,
+    /// Not a setting — the row that asks what these settings actually pick.
+    /// A row rather than a key of its own, because in a tab (as opposed to
+    /// the modal this used to be) every key that means something has to be
+    /// one the rest of the player is not already using.
+    Sample,
 }
 
 impl DjRow {
@@ -712,17 +745,19 @@ impl DjRow {
             DjRow::Rating => "Rating floor",
             DjRow::Cooldown => "Artist cooldown",
             DjRow::Genres => "Genres",
+            DjRow::Sample => "Sample",
         }
     }
 }
 
-/// The Auto-DJ panel's own state. Rows shown depend on what the server can
-/// do, so the panel is built fresh from capabilities each time it opens.
-#[derive(Debug, Default)]
+/// The Auto-DJ tab's own state. Rows shown depend on what the server can do,
+/// so they are rebuilt when a ping says what that is.
+#[derive(Debug)]
 pub struct DjPanel {
     pub rows: Vec<DjRow>,
     pub row: usize,
-    /// Genre chooser, when open over the panel.
+    /// Genre chooser, when open over the tab. The one modal left in Auto-DJ:
+    /// a list you toggle through needs the keyboard to itself.
     pub genres: Option<GenrePicker>,
     /// Sample picks from the current settings, and what the pool looked like.
     pub sample: Vec<Track>,
@@ -730,8 +765,21 @@ pub struct DjPanel {
     pub pool: Option<crate::api::types::SonicReport>,
 }
 
+impl Default for DjPanel {
+    fn default() -> Self {
+        DjPanel {
+            rows: DjPanel::rows_for(crate::api::types::Capabilities::default()),
+            row: 0,
+            genres: None,
+            sample: Vec::new(),
+            sample_pending: false,
+            pool: None,
+        }
+    }
+}
+
 impl DjPanel {
-    fn new(capabilities: crate::api::types::Capabilities) -> Self {
+    fn rows_for(capabilities: crate::api::types::Capabilities) -> Vec<DjRow> {
         let mut rows = vec![DjRow::Mode];
         // No index, no pool — and no row promising one.
         if capabilities.discovery {
@@ -744,8 +792,17 @@ impl DjPanel {
             DjRow::Rating,
             DjRow::Cooldown,
             DjRow::Genres,
+            DjRow::Sample,
         ]);
-        DjPanel { rows, ..Default::default() }
+        rows
+    }
+
+    /// Fit the rows to what this server offers, keeping the cursor on screen.
+    /// Called when a ping lands, which is the only thing that can change the
+    /// answer.
+    pub(super) fn rebuild(&mut self, capabilities: crate::api::types::Capabilities) {
+        self.rows = DjPanel::rows_for(capabilities);
+        self.row = self.row.min(self.rows.len().saturating_sub(1));
     }
 
     pub fn selected(&self) -> DjRow {
@@ -753,18 +810,205 @@ impl DjPanel {
     }
 }
 
-/// A walk from one track to another through the embedding space, waiting to
-/// be looked at and queued.
+// ── Sonic Path ──────────────────────────────────────────────────────────────
+
+/// Who is waiting for the next song you pick.
+///
+/// Two panels arm the browser this way now, and they want the same gesture
+/// answered differently — so the arming carries who asked rather than each
+/// keeping its own flag and its own copy of the interception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capture {
+    /// One end of a Sonic Path.
+    Sonic(SonicSide),
+    /// The full-screen Discover panel's seed: what to look around from,
+    /// which is how you ask about a track without playing it.
+    Discover,
+}
+
+impl Capture {
+    /// What the banner along the foot calls it.
+    pub fn shout(self) -> &'static str {
+        match self {
+            Capture::Sonic(side) => side.shout(),
+            Capture::Discover => "SEED",
+        }
+    }
+}
+
+/// Which end of the path a row or an armed picker is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SonicSide {
+    Start,
+    End,
+}
+
+impl SonicSide {
+    pub fn label(self) -> &'static str {
+        match self {
+            SonicSide::Start => "Start song",
+            SonicSide::End => "End song",
+        }
+    }
+
+    /// How the arming banner names it — shouted, because the banner is the
+    /// only thing on screen saying why Enter is not doing its usual job.
+    pub fn shout(self) -> &'static str {
+        match self {
+            SonicSide::Start => "START",
+            SonicSide::End => "END",
+        }
+    }
+}
+
+/// Where the Sonic Path tab is in its own little hierarchy. Mirrors
+/// [`SettingsNode`]: a root list of rows, and one drill-in per end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SonicNode {
+    /// Picking the two ends and a length, or looking at the path that came
+    /// back — which of those is [`SonicPath::view`], not a different node,
+    /// because Back out of either means "leave the tab", not "un-build".
+    Root,
+    /// One end's little menu: use what's playing, pick from the library,
+    /// clear it.
+    Side(SonicSide),
+}
+
+/// Which of the tab's two faces is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SonicView {
+    /// Choose the ends and the length.
+    Setup,
+    /// The path itself, with what can be done to it.
+    Results,
+}
+
+/// One actionable row in the Sonic Path tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SonicRow {
+    /// Setup: drill into an end's menu.
+    End(SonicSide),
+    /// Setup and results both: how many stops to ask for.
+    Length,
+    Build,
+    /// Inside an end's menu.
+    UsePlaying,
+    PickFromLibrary,
+    Clear,
+    /// Results.
+    Play,
+    QueueAll,
+    SavePlaylist,
+    Regenerate,
+    StartOver,
+    /// Not a control — how the plot went, on a row of its own. Enter does
+    /// nothing on it, which is the point: an unanalysed end or a library
+    /// that ran out of waypoints is an answer, and it wants saying where
+    /// the answer would have been.
+    Status,
+}
+
+/// The Sonic Path tab's state: two ends, a length, and whatever the server
+/// last drew between them.
+///
+/// The webapp's panel, in the shapes this player already has — the ends are
+/// [`Track`]s rather than cards, the slider is a row with ←→ on it, and the
+/// stops become ordinary track rows so `Enter`, `a` and the queue keys all
+/// go on meaning what they mean everywhere else.
 #[derive(Debug)]
-pub struct Journey {
-    pub from: Track,
-    pub to: Track,
+pub struct SonicPath {
+    pub view: SonicView,
+    pub start: Option<Track>,
+    pub end: Option<Track>,
     /// Total stops asked for, both ends included.
     pub length: u32,
     pub stops: Vec<crate::api::types::JourneyStop>,
     pub pending: bool,
-    /// First visible row, so a long arc can be scrolled.
-    pub offset: usize,
+    /// Whether a build has ever come back, so an empty list can tell "no
+    /// path between these two" from "you haven't asked yet".
+    pub fetched: bool,
+    /// What the server's answer needs explaining as — an unanalysed end, two
+    /// copies of one recording, a library that ran out of waypoints. Kept on
+    /// the panel rather than flashed in the footer: it is the state of what
+    /// is on screen, not news.
+    pub note: Option<String>,
+    /// Whether either end has ever been set or cleared here.
+    ///
+    /// Not `start.is_none() && end.is_none()`: that is also the state you
+    /// get by clearing the only end you had chosen, so seeding on it filled
+    /// the panel straight back in — the one thing the seeding promises not
+    /// to do. Cleared by "Start over", which is a pristine panel again.
+    pub touched: bool,
+}
+
+impl Default for SonicPath {
+    fn default() -> Self {
+        SonicPath {
+            view: SonicView::Setup,
+            start: None,
+            end: None,
+            length: crate::api::types::JOURNEY_DEFAULT_LENGTH,
+            stops: Vec::new(),
+            pending: false,
+            fetched: false,
+            note: None,
+            touched: false,
+        }
+    }
+}
+
+impl SonicPath {
+    pub fn side(&self, side: SonicSide) -> Option<&Track> {
+        match side {
+            SonicSide::Start => self.start.as_ref(),
+            SonicSide::End => self.end.as_ref(),
+        }
+    }
+
+    fn set_side(&mut self, side: SonicSide, track: Option<Track>) {
+        self.touched = true;
+        match side {
+            SonicSide::Start => self.start = track,
+            SonicSide::End => self.end = track,
+        }
+    }
+
+    /// Both ends chosen — the only state [`SonicRow::Build`] can act from.
+    pub fn ready(&self) -> bool {
+        self.start.is_some() && self.end.is_some()
+    }
+
+    /// The stops as a queue.
+    pub fn tracks(&self) -> Vec<Track> {
+        self.stops.iter().map(|stop| stop.to_track()).collect()
+    }
+}
+
+/// What the full-screen view's Discover tab is showing.
+///
+/// One question, asked about whatever is on the speakers, and re-asked when
+/// that changes. Choosing what to look around from belongs on the Discover
+/// *tab*, which is a place you go to look something up; this is a panel you
+/// glance at while a track plays, and it should need no steering.
+///
+/// Deliberately not the browser tab's state, for that reason: that one is a
+/// drill anchored on a seed you chose, and it stays put while you walk
+/// around inside it. Sharing them would mean drilling into an artist in the
+/// browser silently changing what "what this sounds like" says about the
+/// track you are listening to.
+#[derive(Debug)]
+pub struct NowDiscover {
+    /// The filepath it was asked about. A reply naming anything else is
+    /// about a track that has since finished, and the panel is already
+    /// showing the next one's wait.
+    pub seed: String,
+    pub tracks: Vec<crate::api::types::SimilarTrack>,
+    pub pending: bool,
+    /// Why the list is short or empty, in the server's own words — an
+    /// unanalysed track, a library with nothing close, discovery switched
+    /// off. Kept here rather than flashed in the footer: it describes what
+    /// is on screen.
+    pub note: Option<String>,
 }
 
 /// Choosing which genres the filter applies to.
@@ -835,8 +1079,6 @@ pub struct App {
     /// same chain -- artist, album, track, queued -- so it reads better as one
     /// more column than as a separate pane that is always there.
     pub queue_column: bool,
-    pub playlists: Pane,
-    pub playlist_open: Option<String>,
     pub discover: Pane,
     pub settings: Pane,
     /// Breadcrumb through the Discover tab, mirroring `library_stack`.
@@ -847,6 +1089,8 @@ pub struct App {
     pub discover_seed: Option<Track>,
     /// The last artist list, kept so drilling into one of them costs nothing.
     pub discover_artists: Vec<crate::api::types::SimilarArtist>,
+    /// The full-screen view's own Discover panel, once it has asked.
+    pub now_discover: Option<NowDiscover>,
     pub search: Pane,
     pub query: String,
     pub editing_query: bool,
@@ -870,12 +1114,22 @@ pub struct App {
     pub autodj: AutoDjMode,
     /// How Auto-DJ chooses, beyond the mode.
     pub dj: dj::Settings,
-    /// The settings panel, when it is open.
-    pub dj_panel: Option<DjPanel>,
-    /// The journey being looked at, when one is.
-    pub journey: Option<Journey>,
-    /// A journey start chosen but not yet paired with a destination.
-    pub journey_from: Option<Track>,
+    /// The Auto-DJ tab of the full-screen view: which row the cursor is on,
+    /// what a sample produced, the genre chooser when it is open. Always
+    /// present now that the tab *is* the panel — there is no separate modal
+    /// to be open or shut.
+    pub dj_panel: DjPanel,
+    /// The Sonic Path tab: two ends, a length, and the path between them.
+    pub sonic: SonicPath,
+    pub sonic_pane: Pane,
+    pub sonic_stack: Drill<SonicNode>,
+    /// An armed song picker: the next track chosen anywhere in the browser
+    /// goes to whoever asked instead of playing. The webapp's `songCapture`,
+    /// and the reason it lives on the App rather than on the panel that
+    /// armed it — it is answered from whichever tab the user wanders into.
+    pub capture: Option<Capture>,
+    /// The playlist name being typed, when the save prompt is up.
+    pub sonic_playlist_name: Option<String>,
     /// Tracks played recently, newest first. Feeds both the sonic anchor and
     /// the artist cooldown, so the session anchors on where it has been
     /// rather than only on the song currently sounding.
@@ -957,6 +1211,14 @@ pub struct App {
     /// waiting" — the two draw the same, and the entry is what stops a
     /// second request either way.
     pub art: HashMap<String, Option<Art>>,
+    /// Track shapes fetched this session, keyed by filepath. `None` records
+    /// both "asked, nothing there" and "asked, still waiting" — the bar draws
+    /// the same either way, and the entry is what stops a second request.
+    ///
+    /// Keyed by filepath rather than by an art file, because a waveform
+    /// belongs to one recording where a cover belongs to a whole album — so
+    /// this turns over faster than [`App::art`] does.
+    pub waveforms: HashMap<String, Option<Vec<u8>>>,
     pub audio_available: bool,
     /// A copy of the audio coming out of the engine, for the visualiser to
     /// draw. Read-only from here and `None` off the real audio thread, so a
@@ -988,6 +1250,12 @@ pub struct App {
     /// keeps using the queue's own selection, so `d` there removes the row you
     /// are looking at rather than one the other screen had highlighted.
     pub now_scroll: usize,
+    /// Where the window onto that list starts. Kept beside the cursor rather
+    /// than worked out fresh each frame: a scroll offset computed into a
+    /// local is thrown away with the frame, so the next one starts from the
+    /// top again and pins the cursor to the bottom edge for good — the trap
+    /// [`crate::tui::ui`] documents on the queue panel.
+    pub now_offset: usize,
 
     pub message: Option<Message>,
     pub show_help: bool,
@@ -1022,14 +1290,13 @@ impl App {
             search_hits: None,
             search_stack: Drill::new(SearchNode::Root),
             queue_column: false,
-            playlists: Pane::default(),
-            playlist_open: None,
             discover: Pane::default(),
             discover_stack: Drill::new(DiscoverNode::Root),
             settings: Pane::default(),
             settings_stack: Drill::new(SettingsNode::Root),
             discover_seed: None,
             discover_artists: Vec::new(),
+            now_discover: None,
             search: Pane::default(),
             query: String::new(),
             editing_query: false,
@@ -1041,9 +1308,12 @@ impl App {
             libraries: Vec::new(),
             autodj: AutoDjMode::Off,
             dj: dj::Settings::default(),
-            dj_panel: None,
-            journey: None,
-            journey_from: None,
+            dj_panel: DjPanel::default(),
+            sonic: SonicPath::default(),
+            sonic_pane: Pane::default(),
+            sonic_stack: Drill::new(SonicNode::Root),
+            capture: None,
+            sonic_playlist_name: None,
             autodj_recent: Vec::new(),
             autodj_ignore: Vec::new(),
             autodj_pending: false,
@@ -1066,6 +1336,7 @@ impl App {
             announced: None,
             now_playing: None,
             art: HashMap::new(),
+            waveforms: HashMap::new(),
             audio_available: true,
             tap: None,
             pointer: None,
@@ -1075,6 +1346,7 @@ impl App {
             spinner: 0,
             now_tab: NowTab::Queue,
             now_scroll: 0,
+            now_offset: 0,
             message: None,
             show_help: false,
             should_quit: false,
@@ -1170,10 +1442,15 @@ impl App {
     }
 
     pub fn input_mode(&self) -> InputMode {
-        if !self.connected || self.editing_query || self.filtering {
+        if !self.connected
+            || self.editing_query
+            || self.filtering
+            || self.sonic_playlist_name.is_some()
+        {
             InputMode::Editing
-        } else if self.dj_panel.is_some() || self.journey.is_some() {
-            // A modal drawn over the full-screen view still owns the keyboard.
+        } else if self.dj_panel.genres.is_some() {
+            // The last modal in the player, and it is drawn over the
+            // full-screen view, so it still owns the keyboard there.
             InputMode::Panel
         } else if self.fullscreen {
             InputMode::Now
@@ -1214,6 +1491,7 @@ impl App {
         let next = (at + delta).rem_euclid(tabs.len() as isize) as usize;
         self.now_tab = tabs[next];
         self.now_scroll = 0;
+        self.now_offset = 0;
         Vec::new()
     }
 
@@ -1235,9 +1513,9 @@ impl App {
         match tab {
             Tab::Files => &self.files,
             Tab::Library => &self.library,
-            Tab::Playlists => &self.playlists,
             Tab::Search => &self.search,
             Tab::Discover => &self.discover,
+            Tab::SonicPath => &self.sonic_pane,
             Tab::Settings => &self.settings,
         }
     }
@@ -1246,9 +1524,9 @@ impl App {
         match tab {
             Tab::Files => &mut self.files,
             Tab::Library => &mut self.library,
-            Tab::Playlists => &mut self.playlists,
             Tab::Search => &mut self.search,
             Tab::Discover => &mut self.discover,
+            Tab::SonicPath => &mut self.sonic_pane,
             Tab::Settings => &mut self.settings,
         }
     }
@@ -1283,7 +1561,6 @@ impl App {
             let tab = match effect {
                 Effect::Api(ApiCmd::Browse(_)) => Tab::Files,
                 Effect::Api(ApiCmd::Library { dest, .. }) => *dest,
-                Effect::Api(ApiCmd::Playlists | ApiCmd::LoadPlaylist(_)) => Tab::Playlists,
                 Effect::Api(ApiCmd::Search(_)) => Tab::Search,
                 Effect::Api(ApiCmd::Discover { .. }) => Tab::Discover,
                 _ => continue,
@@ -1348,6 +1625,32 @@ impl App {
         for tab in Tab::ALL {
             self.pane_for_mut(tab).loading = false;
         }
+        // The Sonic Path tab keeps its own wait, since what it is waiting for
+        // is a path rather than a listing — and a wait nothing will answer
+        // leaves the tab saying "plotting…" for the rest of the session.
+        if self.sonic.pending {
+            self.sonic.pending = false;
+            self.sonic.fetched = true;
+            self.refresh_sonic_rows();
+        }
+        // So does the full-screen Discover panel. Its wait is only ever
+        // cleared by a matching reply, and `refresh_now_discover` will not
+        // re-ask while an entry for this seed exists — so an error left it
+        // spinning "looking…" until the track ended.
+        if let Some(shown) = self.now_discover.as_mut() {
+            if shown.pending {
+                shown.pending = false;
+                // Not the empty-list wording: "nothing close in your
+                // library" is the server's answer, and this is the absence
+                // of one. What actually went wrong is in the footer.
+                shown.note = Some("that look didn't come back".into());
+            }
+        }
+        // And the Auto-DJ sample. It used to be a modal, and closing the
+        // modal dropped the panel and this flag with it; as a tab the panel
+        // outlives every request, so one failed sample disabled the row for
+        // the rest of the session.
+        self.dj_panel.sample_pending = false;
     }
 
     /// Where the Search tab is: the class menu, one class, or something
@@ -1367,6 +1670,10 @@ impl App {
 
     pub fn discover_node(&self) -> &DiscoverNode {
         self.discover_stack.here()
+    }
+
+    pub fn sonic_node(&self) -> &SonicNode {
+        self.sonic_stack.here()
     }
 
     /// The tabs this server can actually serve, in order. The numbers on the
@@ -1403,6 +1710,11 @@ impl App {
     pub fn handle_action(&mut self, action: Action) -> Vec<Effect> {
         let mut effects = self.act(action);
         effects.extend(self.refresh_prepared());
+        // Rides the same funnel as the announcement it reads, so a queue
+        // edit that changes what comes next also changes which shape is
+        // being fetched ahead of it.
+        effects.extend(self.prefetch_waveform());
+        effects.extend(self.refresh_now_discover());
         self.note_pending(&effects);
         effects
     }
@@ -1413,15 +1725,19 @@ impl App {
             return self.handle_connect_action(action);
         }
         // Panels are modal: they own the arrow keys and the letters they use,
-        // so playback shortcuts can't fire while one is up.
+        // so playback shortcuts can't fire while one is up. Auto-DJ is no
+        // longer one of them — it is a tab in the full-screen view now — but
+        // the genre chooser it opens still is.
         if self.log_view.is_some() {
             return self.handle_log_view_action(action);
         }
-        if self.dj_panel.is_some() {
-            return self.handle_dj_action(action);
+        if self.dj_panel.genres.is_some() {
+            return self.handle_genre_action(action);
         }
-        if self.journey.is_some() {
-            return self.handle_journey_action(action);
+        if self.sonic_playlist_name.is_some()
+            && let Some(effects) = self.handle_playlist_name_action(&action)
+        {
+            return effects;
         }
         if self.editing_query
             && let Some(effects) = self.handle_query_action(&action)
@@ -1446,12 +1762,36 @@ impl App {
                 Vec::new()
             }
             Action::Cancel => {
-                self.show_help = false;
+                // The overlay is drawn over everything, so it is what the
+                // user is looking at and the first thing Esc takes away.
+                if self.show_help {
+                    self.show_help = false;
+                    return Vec::new();
+                }
+                // An armed picker is the loudest thing on screen, so Esc
+                // means "stop picking" before it means anything else — and
+                // it goes back to whichever panel did the asking, the way
+                // answering it does. Sending both to Sonic Path dropped a
+                // cancelled Discover pick on a tab it had never been on.
+                if let Some(who) = self.capture.take() {
+                    self.message = None;
+                    return match who {
+                        Capture::Sonic(_) => self.open_sonic_tab(),
+                        Capture::Discover => self.open_discover_tab(),
+                    };
+                }
                 // The guaranteed way out of the settings value rows, where
                 // the left arrow has been given to adjustment.
                 if self.tab == Tab::Settings && *self.settings_node() != SettingsNode::Root {
                     return self.go_back();
                 }
+                if self.tab == Tab::SonicPath && !self.sonic_stack.wants(&SonicNode::Root) {
+                    return self.go_back();
+                }
+                // Nothing to call off. Esc has meant "the key list" since
+                // before it meant anything else, and a listing with nothing
+                // open is exactly where people still reach for it.
+                self.show_help = true;
                 Vec::new()
             }
             Action::CycleFocus if !self.fullscreen => {
@@ -1481,7 +1821,11 @@ impl App {
                 if self.fullscreen {
                     match self.now_tab() {
                         NowTab::Queue => self.queue.select_first(),
-                        _ => self.now_scroll = 0,
+                        NowTab::AutoDj => self.dj_panel.row = 0,
+                        _ => {
+                            self.now_scroll = 0;
+                            self.now_offset = 0;
+                        }
                     }
                 } else {
                     match self.focus {
@@ -1495,9 +1839,13 @@ impl App {
                 if self.fullscreen {
                     // The scrolling tabs have no bottom to know about, so
                     // in the full-screen view Last only means something on
-                    // the queue.
-                    if self.now_tab() == NowTab::Queue {
-                        self.queue.select_last();
+                    // the two that are lists.
+                    match self.now_tab() {
+                        NowTab::Queue => self.queue.select_last(),
+                        NowTab::AutoDj => {
+                            self.dj_panel.row = self.dj_panel.rows.len().saturating_sub(1);
+                        }
+                        _ => {}
                     }
                 } else {
                     match self.focus {
@@ -1510,10 +1858,11 @@ impl App {
 
             Action::Activate => self.activate(),
             Action::Back => {
-                // On a Settings VALUE row, ← means "less", exactly as it
-                // does in the Auto-DJ panel — the way out is Esc, h on the
-                // `..` row, or the row above it.
+                // On a Settings or Sonic Path VALUE row, ← means "less" —
+                // the way out is Esc, h on the `..` row, or the row above it.
                 if let Some(effects) = self.settings_step(-1) {
+                    effects
+                } else if let Some(effects) = self.sonic_step(-1) {
                     effects
                 } else {
                     self.go_back()
@@ -1535,6 +1884,23 @@ impl App {
             }
             Action::NowTabNext => self.move_now_tab(1),
             Action::NowTabPrev => self.move_now_tab(-1),
+            Action::SelectNowTab(index) => {
+                // The strip is filtered — Lyrics comes and goes with the
+                // track, Discover with the server — so a digit past its end
+                // is a key this session does not have. It does nothing here
+                // rather than falling through to the browser tabs, which
+                // would move a screen nobody can see.
+                if let Some(tab) = self.now_tabs().get(index).copied() {
+                    self.now_tab = tab;
+                    self.now_scroll = 0;
+                    self.now_offset = 0;
+                }
+                Vec::new()
+            }
+            // Offered to the tab in front; only Auto-DJ has a use for them.
+            Action::NowLeft if self.on_dj_tab() => self.adjust_dj_row(-1),
+            Action::NowRight if self.on_dj_tab() => self.adjust_dj_row(1),
+            Action::NowLeft | Action::NowRight => Vec::new(),
             Action::VolumeUp => self.change_volume(VOLUME_STEP),
             Action::VolumeDown => self.change_volume(-VOLUME_STEP),
 
@@ -1558,7 +1924,6 @@ impl App {
                 Vec::new()
             }
             Action::ToggleAutoDj => self.cycle_autodj(),
-            Action::OpenDjPanel => self.open_dj_panel(),
             Action::StartJourney => self.start_journey(),
 
             Action::StartSearch => {
@@ -1664,10 +2029,6 @@ impl App {
             return Vec::new();
         };
         let already_here = self.tab == tab;
-        // Whatever the cursor is on *now* is what "more like this" means, and
-        // switching tabs moves the cursor somewhere else entirely — so the
-        // candidate has to be taken before the change, not after.
-        let carried = self.now_playing.clone().or_else(|| self.selected_track());
         self.tab = tab;
         self.focus = Focus::Browser;
 
@@ -1679,13 +2040,32 @@ impl App {
                 Vec::new()
             }
             Tab::Discover => {
-                self.set_discover_seed(carried);
                 if self.discover_stack.unopened() {
                     self.discover_stack.enter(DiscoverNode::Root);
                 }
                 if *self.discover_node() == DiscoverNode::Root {
                     self.discover.set(self.discover_root_entries());
                 }
+                Vec::new()
+            }
+            Tab::SonicPath => {
+                if self.sonic_stack.unopened() {
+                    self.sonic_stack.enter(SonicNode::Root);
+                }
+                // Landing on a pristine tab with something playing: seed the
+                // start, the way "Use playing song" would. Only on a panel
+                // nobody has touched — clearing an end and stepping away
+                // must not have it quietly filled back in, which is what
+                // reading "pristine" off the two ends being empty did.
+                if self.sonic.view == SonicView::Setup
+                    && !self.sonic.touched
+                    && self.sonic.start.is_none()
+                    && self.sonic.end.is_none()
+                    && let Some(track) = self.now_playing.clone()
+                {
+                    self.sonic.start = Some(track);
+                }
+                self.refresh_sonic_rows();
                 Vec::new()
             }
             Tab::Settings => {
@@ -1698,9 +2078,6 @@ impl App {
                 // cursor where it was left.
                 self.refresh_settings_rows();
                 Vec::new()
-            }
-            Tab::Playlists if self.playlists.entries.is_empty() => {
-                vec![Effect::Api(ApiCmd::Playlists)]
             }
             // Pressing the Search tab while already on it means "another
             // one" — there is nowhere else that keystroke could sensibly go,
@@ -1739,7 +2116,23 @@ impl App {
             if self.now_tab() == NowTab::Queue {
                 return self.move_queue_selection(delta);
             }
+            // The Auto-DJ tab is a list of settings, not a wall of text: the
+            // arrows walk its rows, the way they do in every other list.
+            if self.now_tab() == NowTab::AutoDj {
+                let last = self.dj_panel.rows.len().saturating_sub(1);
+                let row = (self.dj_panel.row as isize + delta).clamp(0, last as isize);
+                self.dj_panel.row = row as usize;
+                return Vec::new();
+            }
             self.now_scroll = self.now_scroll.saturating_add_signed(delta);
+            // Discover is rows to pick from rather than text to scroll, so
+            // its cursor stops at the last one instead of walking off the
+            // end into nothing.
+            if self.now_tab() == NowTab::Discover
+                && let Some(shown) = &self.now_discover
+            {
+                self.now_scroll = self.now_scroll.min(shown.tracks.len().saturating_sub(1));
+            }
             return Vec::new();
         }
         match self.focus {
@@ -1760,8 +2153,18 @@ impl App {
 
     fn activate(&mut self) -> Vec<Effect> {
         // In the full-screen view there is no browser on screen to open into,
-        // so Enter means the one thing it can mean: play what is highlighted.
+        // so Enter means the one thing the tab in front of you can mean.
         if self.fullscreen {
+            if self.on_dj_tab() {
+                return self.activate_dj_row();
+            }
+            // Enter on a neighbour queues it and starts it.
+            if let Some(track) = self.now_discover_selected() {
+                let label = track.display_name();
+                self.queue.push(track);
+                self.info(format!("playing {label}"));
+                return self.play_index(self.queue.items.len() - 1);
+            }
             if self.now_tab() != NowTab::Queue {
                 return Vec::new();
             }
@@ -1769,6 +2172,16 @@ impl App {
                 Some(index) => self.play_index(index),
                 None => Vec::new(),
             };
+        }
+
+        // An armed picker takes the next track chosen anywhere, exactly as
+        // the webapp's does — the browser is where the songs are, so this is
+        // where the arming is answered.
+        if let Some(who) = self.capture
+            && self.focus == Focus::Browser
+            && let Some(Entry::Track { track, .. }) = self.pane().selected().cloned()
+        {
+            return self.answer_capture(who, *track);
         }
 
         if self.focus == Focus::Queue {
@@ -1787,6 +2200,14 @@ impl App {
                 let pushed = self.push_trail();
                 let prev = std::mem::replace(&mut self.path, path.clone());
                 self.browse_undo = Some((prev, pushed));
+                // Empty it, so what shows while the reply is out is this
+                // folder's spinner and not the last folder's contents. The
+                // trail column beside it has already moved, so leaving the
+                // old rows there read as a folder that opened into itself —
+                // and on a fast server it flashed past too quickly to be
+                // anything but a glitch. Every other tab's drill-in has
+                // always cleared; the file browser was the one that didn't.
+                self.pane_mut().set(Vec::new());
                 vec![Effect::Api(ApiCmd::Browse(path))]
             }
             Entry::Node { node, label } if self.tab == Tab::Search => {
@@ -1819,21 +2240,12 @@ impl App {
                     }
                 }
             }
-            Entry::Discover { node, label, .. } => {
-                self.push_trail();
-                self.open_discover(node, &label)
-            }
-            Entry::Playlist { name } => {
-                self.push_trail();
-                self.info(format!("loading playlist {name}…"));
-                // Open now rather than when the tracks land, so this is a
-                // record of where the user went instead of a record of what
-                // last answered — which is what lets a late reply be told
-                // apart from a wanted one, and lets Back close a playlist
-                // that has not answered yet.
-                self.playlist_open = Some(name.clone());
-                vec![Effect::Api(ApiCmd::LoadPlaylist(name))]
-            }
+            // The trail column is pushed inside, not here: two of these rows
+            // do not drill anywhere — "Choose a song…" arms the picker, and
+            // "What's playing" with nothing playing only complains — and a
+            // column pushed for a step that never happened is a duplicate of
+            // the one beside it that repeating the gesture keeps stacking.
+            Entry::Discover { node, label, .. } => self.open_discover(node, &label),
             Entry::Setting { row, .. } => match row {
                 SettingRow::CrossfadeMenu => {
                     self.push_trail();
@@ -1856,6 +2268,7 @@ impl App {
                 | SettingRow::LogWrite
                 | SettingRow::LogLevel => self.adjust_setting(1),
             },
+            Entry::Sonic { row, .. } => self.activate_sonic_row(row),
             Entry::Track { .. } => {
                 // Enqueue everything visible and start at the highlighted row —
                 // what every other player does on Enter.
@@ -1993,20 +2406,15 @@ impl App {
                     }
                 }
             }
-            Tab::Playlists if self.playlist_open.is_some() => {
-                self.playlist_open = None;
-                vec![Effect::Api(ApiCmd::Playlists)]
-            }
             Tab::Discover => {
                 let Some(node) = self.discover_stack.back() else {
-                    return None; // already at the mode menu
+                    return None; // already at the question the tab starts on
                 };
                 match node {
                     DiscoverNode::Root => {
-                        // Back at the top: re-anchor on whatever is current,
-                        // so the next look starts from where you are now.
-                        let carried = self.now_playing.clone();
-                        self.set_discover_seed(carried);
+                        // Back at the question. The seed stays as it was —
+                        // the menu is about to ask for it again, and the row
+                        // it is answered with is what sets it.
                         self.discover.set(self.discover_root_entries());
                         Vec::new()
                     }
@@ -2018,6 +2426,13 @@ impl App {
                     }
                     node => self.request_discover(node),
                 }
+            }
+            Tab::SonicPath => {
+                let Some(_) = self.sonic_stack.back() else {
+                    return None; // already at the path itself
+                };
+                self.refresh_sonic_rows();
+                Vec::new()
             }
             Tab::Settings => {
                 let Some(node) = self.settings_stack.back() else {
@@ -2032,7 +2447,6 @@ impl App {
                 }
                 Vec::new()
             }
-            _ => Vec::new(),
         })
     }
 
@@ -2332,22 +2746,39 @@ impl App {
 
     // ── Discover ────────────────────────────────────────────────────────────
 
-    /// Re-anchor Discover, keeping the previous seed when there is no new
-    /// candidate — stepping around inside the tab must not lose it.
-    fn set_discover_seed(&mut self, candidate: Option<Track>) {
-        if let Some(seed) = candidate {
-            self.discover_seed = Some(seed);
-        }
+    /// What to look around from. Static, so opening the tab costs no
+    /// request — and it is the step that lets you ask about a track you are
+    /// not listening to, which is the one thing the full-screen panel
+    /// cannot do.
+    fn discover_root_entries(&self) -> Vec<Entry> {
+        vec![
+            Entry::Discover {
+                label: "What's playing".into(),
+                detail: self
+                    .now_playing
+                    .as_ref()
+                    .map_or_else(|| "nothing playing".to_string(), Track::display_name),
+                node: DiscoverNode::Mode,
+            },
+            Entry::Discover {
+                label: "Choose a song…".into(),
+                detail: "the next track you open lands here".into(),
+                // Not a node to drill into: it arms the browser, and the
+                // node it lands on is chosen when the track is.
+                node: DiscoverNode::Root,
+            },
+        ]
     }
 
-    /// The mode menu. Static, so opening the tab costs no request.
-    fn discover_root_entries(&self) -> Vec<Entry> {
+    /// What to look at, once there is something to look around.
+    fn discover_mode_entries(&self) -> Vec<Entry> {
         let artist = self
             .discover_seed
             .as_ref()
             .and_then(|t| t.metadata.artist.clone())
             .unwrap_or_default();
         vec![
+            Entry::Parent,
             Entry::Discover {
                 label: "Similar tracks".into(),
                 detail: "in your library".into(),
@@ -2402,26 +2833,124 @@ impl App {
     }
 
     fn open_discover(&mut self, node: DiscoverNode, label: &str) -> Vec<Effect> {
+        // The "choose a song" row: it is not somewhere to go, it is a way of
+        // saying where to look from. The browser answers it.
+        if node == DiscoverNode::Root {
+            return self.arm_capture(Capture::Discover);
+        }
         // An artist's ways in are already here; going in costs nothing.
         if let DiscoverNode::Artist(artist) = &node {
             let entries = self.discover_entry_point_entries(artist);
+            self.push_trail();
             self.discover_stack.enter(node);
             self.discover.set(entries);
             self.message = None;
             return Vec::new();
         }
+        // "What's playing" resolves to the track that *was* playing when it
+        // was chosen: a seed that moved under you would change what the list
+        // below it is about while you were reading it.
+        if node == DiscoverNode::Mode {
+            let Some(playing) = self.now_playing.clone() else {
+                self.error("nothing is playing to look around from");
+                return Vec::new();
+            };
+            self.discover_seed = Some(playing);
+            self.push_trail();
+            self.discover_stack.enter(node);
+            self.discover.set(self.discover_mode_entries());
+            self.message = None;
+            return Vec::new();
+        }
+        self.push_trail();
         self.discover_stack.enter(node.clone());
         self.discover.set(Vec::new());
         self.info(format!("looking for {}…", label.to_lowercase()));
         self.request_discover(node)
     }
 
+    /// Put the Discover tab back in front, if this server has one.
+    ///
+    /// It always does when a Discover capture is in play — the row that arms
+    /// it only exists on that tab — but the tab list is built from the
+    /// server's capabilities, so this asks rather than assumes.
+    pub(super) fn open_discover_tab(&mut self) -> Vec<Effect> {
+        match self.tabs().iter().position(|tab| *tab == Tab::Discover) {
+            Some(index) => self.select_tab(index),
+            None => Vec::new(),
+        }
+    }
+
+    /// A track pointed at rather than played: it becomes what the tab looks
+    /// around from, and the tab opens on the two ways of looking.
+    pub(super) fn seed_discover(&mut self, seed: Track) -> Vec<Effect> {
+        let label = seed.display_name();
+        self.discover_seed = Some(seed);
+        self.discover_stack.restart();
+        self.discover_stack.enter(DiscoverNode::Mode);
+        let entries = self.discover_mode_entries();
+        let effects = self.open_discover_tab();
+        self.discover.set(entries);
+        self.info(format!("looking around {label}"));
+        effects
+    }
+
     fn request_discover(&mut self, node: DiscoverNode) -> Vec<Effect> {
         let Some(seed) = self.discover_seed.clone() else {
-            self.error("play or highlight a track first — discovery needs somewhere to start");
+            self.error("pick something to look around from first");
             return Vec::new();
         };
-        vec![Effect::Api(ApiCmd::Discover { node, seed: Box::new(seed) })]
+        vec![Effect::Api(ApiCmd::Discover {
+            node,
+            seed: Box::new(seed),
+            dest: DiscoverDest::Browser,
+        })]
+    }
+
+    /// Whether the full-screen Discover panel is the thing in front of you,
+    /// and so owns the arrows and Enter.
+    pub(super) fn on_now_discover(&self) -> bool {
+        self.fullscreen && self.now_tab() == NowTab::Discover
+    }
+
+    /// Keep the full-screen Discover panel pointed at what is playing.
+    ///
+    /// Rides the dispatch funnel rather than hanging off "the track changed"
+    /// and "the tab opened" separately: those are two events with one
+    /// answer, and a panel that asks whenever what it holds does not match
+    /// what is sounding cannot be left describing the track before this one.
+    /// The entry is the guard against asking twice — it exists from the
+    /// moment the request goes out.
+    fn refresh_now_discover(&mut self) -> Option<Effect> {
+        if !self.on_now_discover() {
+            return None;
+        }
+        let seed = self.now_playing.clone()?;
+        if self.now_discover.as_ref().is_some_and(|shown| shown.seed == seed.filepath) {
+            return None;
+        }
+        self.now_discover = Some(NowDiscover {
+            seed: seed.filepath.clone(),
+            tracks: Vec::new(),
+            pending: true,
+            note: None,
+        });
+        self.now_scroll = 0;
+        self.now_offset = 0;
+        Some(Effect::Api(ApiCmd::Discover {
+            node: DiscoverNode::Tracks,
+            seed: Box::new(seed),
+            dest: DiscoverDest::NowPlaying,
+        }))
+    }
+
+    /// The neighbour under the cursor, when that panel is what is up.
+    fn now_discover_selected(&self) -> Option<Track> {
+        if !self.on_now_discover() {
+            return None;
+        }
+        let shown = self.now_discover.as_ref()?;
+        shown.tracks.get(self.now_scroll).map(|near| near.clone().into_track())
     }
 
     /// Put the cursor back on the playing track.
@@ -2481,6 +3010,20 @@ impl App {
     }
 
     fn add_selected_to_queue(&mut self) -> Vec<Effect> {
+        // The full-screen Discover panel has a highlighted row of its own,
+        // and `a` means there what it means everywhere else. Without this it
+        // would reach past the panel to whatever the hidden browser had
+        // under its cursor.
+        if let Some(track) = self.now_discover_selected() {
+            let label = track.display_name();
+            let was_empty = self.queue.items.is_empty();
+            self.queue.push(track);
+            self.info(format!("queued {label}"));
+            if was_empty && self.status.is_idle() {
+                return self.play_index(0);
+            }
+            return Vec::new();
+        }
         if self.focus != Focus::Browser {
             return Vec::new();
         }
@@ -2662,6 +3205,9 @@ impl App {
         };
         self.queue.start(index);
         let hint = track.metadata.duration;
+        // Taken before the track moves into `now_playing`; the shape is
+        // asked for by path, so nothing else about the track is needed.
+        let filepath = track.filepath.clone();
         self.remember_played(&track);
         self.now_playing = Some(track);
         // Every Play wipes the engine's pending next (play_source clears
@@ -2678,6 +3224,7 @@ impl App {
 
         let mut effects = vec![Effect::Audio(AudioCmd::Play { url, duration_hint: hint })];
         effects.extend(self.fetch_art());
+        effects.extend(self.fetch_waveform(&filepath));
         effects.extend(self.maybe_autodj());
         effects
     }
@@ -2695,6 +3242,56 @@ impl App {
         }
         self.art.insert(file.clone(), None);
         Some(Effect::Api(ApiCmd::AlbumArt { file }))
+    }
+
+    /// Ask for a track's shape, unless the cache already holds it — or the
+    /// placeholder a previous ask left, which is what stops the same track
+    /// being asked for twice.
+    ///
+    /// Takes a filepath rather than reading `now_playing`, because the whole
+    /// point is that it is also called for the track that has not started
+    /// yet (see [`App::prefetch_waveform`]).
+    fn fetch_waveform(&mut self, filepath: &str) -> Option<Effect> {
+        if self.waveforms.contains_key(filepath) {
+            return None;
+        }
+        if self.waveforms.len() >= ART_CACHE_CAP {
+            self.waveforms.clear();
+        }
+        self.waveforms.insert(filepath.to_string(), None);
+        Some(Effect::Api(ApiCmd::Waveform { filepath: filepath.to_string() }))
+    }
+
+    /// Ask for the *next* track's shape while this one is still playing.
+    ///
+    /// A waveform the server has not built before costs an ffmpeg decode —
+    /// up to half a minute — so a shape fetched when the track starts can
+    /// arrive well into it, and the bar visibly changes under the playhead.
+    ///
+    /// Deliberately **not** simply "whatever was announced". The
+    /// announcement only exists when a blend or a gapless seam needs one
+    /// (see [`App::pick_announcement`]), and someone listening with
+    /// crossfade off is exactly the person who would notice a bar arriving
+    /// late. So it falls back to the plain next row — except under shuffle,
+    /// where the pick is rolled fresh on every call and prefetching would
+    /// mean fetching the library one dispatch at a time. That is the whole
+    /// reason the announcement is *held* rather than recomputed, and with
+    /// no announcement to borrow there is nothing stable to ask for.
+    fn prefetch_waveform(&mut self) -> Option<Effect> {
+        // Only while something is actually on. With nothing playing there is
+        // no "next" to be ahead of — the row after a stopped cursor is just
+        // the top of the queue, and asking for it turns every keystroke on a
+        // stopped player into a request.
+        self.now_playing.as_ref()?;
+        let next = match &self.announced {
+            Some(next) => next.filepath.clone(),
+            None if !self.queue.shuffle => {
+                let index = self.queue.next_index(false)?;
+                self.queue.items.get(index)?.filepath.clone()
+            }
+            None => return None,
+        };
+        self.fetch_waveform(&next)
     }
 
     fn play_pause(&mut self) -> Vec<Effect> {
@@ -2780,6 +3377,8 @@ impl App {
         }
         let mut effects = self.consume(event);
         effects.extend(self.refresh_prepared());
+        effects.extend(self.prefetch_waveform());
+        effects.extend(self.refresh_now_discover());
         self.note_pending(&effects);
         effects
     }
@@ -2950,18 +3549,54 @@ impl App {
                 self.message = None;
                 Vec::new()
             }
-            Event::Discover { node, data, note } => {
+            // The full-screen panel's own answer, told apart from the
+            // browser tab's by the destination it carried out with it.
+            Event::Discover { data, note, seed, dest: DiscoverDest::NowPlaying, .. } => {
+                // A reply about a seed the panel has since been re-aimed at
+                // something else describes a wait that is already over —
+                // and the two lists are asked for separately, so the shape
+                // of the answer says which of them it belongs to.
+                let Some(shown) = self.now_discover.as_mut().filter(|s| s.seed == seed) else {
+                    return Vec::new();
+                };
+                // It only ever asks for tracks; anything else is a reply to
+                // a question this panel did not put.
+                let DiscoverData::Tracks(tracks) = data else { return Vec::new() };
+                shown.pending = false;
+                shown.tracks = tracks;
+                shown.note = note;
+                self.now_scroll = 0;
+        self.now_offset = 0;
+                Vec::new()
+            }
+            Event::Discover { node, data, note, dest: DiscoverDest::Browser, seed } => {
                 // Drop a reply for a view the user has already left, the same
-                // rule the Library tab follows.
+                // rule the Library tab follows — and one for a seed the tab
+                // has since been re-pointed at, which the node alone cannot
+                // tell apart: "similar tracks" is the same node whatever it
+                // is similar *to*, so a slow first answer would land under
+                // the second seed's title and be read as being about it.
                 if !self.discover_stack.wants(&node) {
                     return Vec::new();
                 }
+                if self.discover_seed.as_ref().is_some_and(|on| on.filepath != seed) {
+                    return Vec::new();
+                }
                 match data {
-                    DiscoverData::Tracks(tracks) => {
+                    // How close leads the row. These arrive in order, so a
+                    // number counting them would say nothing their position
+                    // does not — the cosine says how much of a neighbour
+                    // each one actually is, which is the question the whole
+                    // tab exists to answer.
+                    DiscoverData::Tracks(near) => {
                         let mut entries = vec![Entry::Parent];
-                        entries.extend(tracks.into_iter().map(|track| Entry::Track {
-                            label: track.display_name(),
-                            track: Box::new(track),
+                        entries.extend(near.into_iter().map(|near| {
+                            let percent = (near.similarity * 100.0).clamp(0.0, 100.0);
+                            let track = near.into_track();
+                            Entry::Track {
+                                label: format!("{percent:>3.0}%  {}", track.display_name()),
+                                track: Box::new(track),
+                            }
                         }));
                         self.discover.set(entries);
                     }
@@ -2990,32 +3625,22 @@ impl App {
                 self.art.insert(file, art);
                 Vec::new()
             }
-            Event::Playlists(playlists) => {
-                self.playlist_open = None;
-                self.playlists.set(
-                    playlists
-                        .into_iter()
-                        .map(|p| Entry::Playlist { name: p.name })
-                        .collect(),
-                );
-                Vec::new()
-            }
-            Event::PlaylistTracks { name, tracks } => {
-                // A playlist the user has closed, or moved off to another —
-                // its tracks would otherwise open over the top of whatever
-                // they went to instead, under that one's name.
-                if self.playlist_open.as_deref() != Some(name.as_str()) {
-                    return Vec::new();
+            // Same rule, and here it is the whole point: a shape asked for
+            // ahead of the track lands while something else is still
+            // playing, and is filed for when it starts.
+            Event::Waveform { filepath, bars, settled } => {
+                // The slot was claimed when the question went out, so that
+                // nothing asks twice. An unanswered question has to give it
+                // back — otherwise one dropped connection is the last word
+                // on that track for the rest of the session.
+                if settled {
+                    self.waveforms.insert(filepath, bars);
+                } else {
+                    self.waveforms.remove(&filepath);
                 }
-                let mut entries = vec![Entry::Parent];
-                entries.extend(tracks.into_iter().map(|t| Entry::Track {
-                    label: t.display_name(),
-                    track: Box::new(t),
-                }));
-                self.playlists.set(entries);
-                self.message = None;
                 Vec::new()
             }
+            Event::PlaylistSaved { name, count } => self.consume_playlist_saved(name, count),
             Event::SearchResults { query, results } => {
                 // Replies can pass each other now that each answers on its
                 // own thread; only the search still standing in the box is
@@ -3056,10 +3681,19 @@ impl App {
                 // The browse this error answers will never repaint the pane,
                 // so its navigation must not stand: put the path back and
                 // take the phantom column with it (see `browse_undo`).
+                //
+                // The rows come back too, off that same column — the way in
+                // emptied the pane so the wait could show a spinner, and
+                // without this a failed browse would leave the user staring
+                // at "(empty directory)" for a folder that is not empty and
+                // is not even the one they are standing in.
                 if let Some((path, pushed)) = self.browse_undo.take() {
                     self.path = path;
-                    if pushed {
-                        self.files.trail.pop();
+                    // The spinner is already out: `clear_pending` runs ahead
+                    // of every error, for exactly this reason.
+                    if pushed && let Some(step) = self.files.trail.pop() {
+                        self.files.entries = step.entries;
+                        self.files.state.select(Some(step.chosen));
                     }
                 }
                 self.error(e);

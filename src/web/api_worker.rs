@@ -117,24 +117,20 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
-        ApiCmd::Discover { node, seed } => {
-            with_session(session, async |s| worker::discover(&s.client, &node, &seed).await)
-                .await
-        }
-
-        ApiCmd::Playlists => {
+        ApiCmd::Discover { node, seed, dest } => {
             with_session(session, async |s| {
-                s.client.playlists_async().await.map(Event::Playlists)
+                worker::discover(&s.client, &node, &seed, dest).await
             })
             .await
         }
 
-        ApiCmd::LoadPlaylist(name) => {
+        ApiCmd::SavePlaylist { name, files } => {
             with_session(session, async |s| {
+                let count = files.len();
                 s.client
-                    .playlist_load_async(&name)
+                    .playlist_save_async(&name, &files)
                     .await
-                    .map(|tracks| Event::PlaylistTracks { name: name.clone(), tracks })
+                    .map(|()| Event::PlaylistSaved { name: name.clone(), count })
             })
             .await
         }
@@ -162,6 +158,22 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
                 None => None,
             };
             Some(Event::AlbumArt { file, art })
+        }
+
+        ApiCmd::Waveform { filepath } => {
+            // Art's rule, for the same reason: a shape nobody could draw is
+            // not worth the "not connected" toast `with_session` would raise.
+            let client = session.borrow().as_ref().map(|s| s.client.clone());
+            // Not connected is not an answer either, so it leaves the slot
+            // free for the next attempt exactly as a failed fetch does.
+            let (bars, settled) = match client {
+                Some(c) => match c.waveform_async(&filepath).await {
+                    Ok(bars) => (bars, true),
+                    Err(_) => (None, false),
+                },
+                None => (None, false),
+            };
+            Some(Event::Waveform { filepath, bars, settled })
         }
     }
 }
