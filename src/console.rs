@@ -28,16 +28,20 @@ pub fn stderr_free() -> bool {
 }
 
 /// Like `eprintln!`, for diagnostics that can fire while the TUI owns the
-/// terminal. Silent then: the only reader is the person the smear would
-/// land on, and in the TUI the same news travels as an event instead.
-/// The CLI and serve modes, which can print, still get their lines.
+/// terminal. Silent there — the only reader is the person the smear would
+/// land on — but no longer lost: every line also goes to the flight
+/// recorder when one is on (`MSTREAM_ENGINE_TRACE`), which is how a TUI
+/// session's tunnel re-dials and open failures become readable after the
+/// fact instead of vanishing with the alternate screen. The CLI and serve
+/// modes, which can print, still get their lines on stderr as ever.
 #[macro_export]
 macro_rules! stderrln {
-    ($($arg:tt)*) => {
+    ($($arg:tt)*) => {{
+        $crate::engine::trace::line(format_args!($($arg)*));
         if $crate::console::stderr_free() {
             eprintln!($($arg)*);
         }
-    };
+    }};
 }
 
 #[cfg(test)]

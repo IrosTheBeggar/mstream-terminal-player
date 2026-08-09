@@ -61,6 +61,10 @@ pub struct Config {
     pub player: PlayerPrefs,
     #[serde(default, skip_serializing_if = "CachePrefs::is_unset")]
     pub cache: CachePrefs,
+    /// `[log]` — how loud the debug log is, as the Settings tab left it.
+    /// Absent means off; MSTREAM_LOG and RUST_LOG outrank it.
+    #[serde(default, skip_serializing_if = "LogPrefs::is_unset")]
+    pub log: LogPrefs,
     /// `[theme]` — the three colours the drawing code actually varies. Unset
     /// means palette names, so the terminal's own scheme picks the hues.
     #[serde(default, skip_serializing_if = "ThemePrefs::is_unset")]
@@ -96,6 +100,7 @@ impl Default for Config {
             version: SCHEMA_VERSION,
             player: PlayerPrefs::default(),
             cache: CachePrefs::default(),
+            log: LogPrefs::default(),
             theme: ThemePrefs::default(),
             display: DisplayPrefs::default(),
             mouse: MousePrefs::default(),
@@ -221,6 +226,26 @@ impl Default for AutoDjPrefs {
 /// `[cache]` — where scratch data lives. Today that is only the streaming
 /// spool (the playing track's buffer, one file at a time); a persistent
 /// track cache would live under the same root if one ever grows.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogPrefs {
+    /// Whether the debug log is written at all. Absent in configs from the
+    /// one-field days, where a set `level` meant both switch and loudness —
+    /// logging::init honours that reading when this key is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write: Option<bool>,
+    /// "info", "debug" or "trace" — how loud, once writing at all.
+    pub level: String,
+    #[serde(flatten)]
+    pub extra: Keep,
+}
+
+impl LogPrefs {
+    pub fn is_unset(&self) -> bool {
+        self.write.is_none() && self.level.is_empty() && self.extra.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CachePrefs {
@@ -475,6 +500,12 @@ pub fn credentials_path() -> Result<PathBuf, String> {
 /// `None` (no usable location at all) lets the engine fall back to OS temp.
 pub fn spool_dir() -> Option<PathBuf> {
     cache_root().map(|root| root.join("spool"))
+}
+
+/// Where the optional debug log goes when `MSTREAM_LOG` asks for the
+/// default location: a `logs` room in the same cache the spool lives in.
+pub fn log_dir() -> Option<PathBuf> {
+    cache_root().map(|root| root.join("logs"))
 }
 
 fn cache_root() -> Option<PathBuf> {
@@ -864,6 +895,8 @@ mod tests {
         config.player.autodj = "similar".into();
         config.player.crossfade_seconds = 6.0;
         config.player.gapless = true;
+        config.log.write = Some(true);
+        config.log.level = "debug".into();
         touch_server(&mut config, "http://host:3000", Some("alice".into()));
         set_last_path(&mut config, "http://host:3000", "music/Artist");
         save(&config).unwrap();
@@ -877,6 +910,13 @@ mod tests {
         assert_eq!(loaded.player.repeat, "all");
         assert_eq!(loaded.player.crossfade_seconds, 6.0);
         assert!(loaded.player.gapless);
+        assert_eq!(loaded.log.write, Some(true), "the write switch persists");
+        assert_eq!(loaded.log.level, "debug", "and so does the level");
+        // Untouched is the absence of the section, not lines saying so.
+        let mut quiet = loaded.clone();
+        quiet.log.write = None;
+        quiet.log.level = String::new();
+        assert!(!toml::to_string_pretty(&quiet).unwrap().contains("[log]"));
         assert_eq!(loaded.servers[0].username.as_deref(), Some("alice"));
         assert_eq!(loaded.servers[0].last_path.as_deref(), Some("music/Artist"));
 

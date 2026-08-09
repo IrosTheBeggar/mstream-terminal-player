@@ -4346,6 +4346,101 @@ fn gapless_repeat_one_announces_its_own_seam() {
 }
 
 #[test]
+fn the_logs_room_switches_levels_and_opens_the_viewer() {
+    let mut app = connected_app();
+    app.handle_action(Action::SelectTab(5));
+    app.handle_action(Action::Down); // Crossfade → Logs
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogsMenu, .. })),
+        "the root has a Logs row"
+    );
+    app.handle_action(Action::Activate);
+    assert_eq!(*app.settings_node(), SettingsNode::Logs);
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogWrite, .. })),
+        "the cursor rests on the write switch"
+    );
+
+    // In tests no subscriber is installed, so flipping the switch on takes
+    // the degraded road: the file cannot open, the switch snaps back to
+    // off, and the row says so — which is also what a read-only disk
+    // would do in a real session.
+    app.handle_action(Action::Activate);
+    assert!(!app.log_write);
+    assert!(app.message.as_ref().unwrap().text.contains("no log file"));
+    assert_eq!(app.chosen_log_write(), Some(false), "the switch was chosen here");
+    assert_eq!(app.chosen_log_level(), None, "but the level was not — it must not persist");
+
+    // The level is its own row, adjustable whether or not anything writes
+    // yet — it is the loudness the switch will use.
+    app.handle_action(Action::Down);
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::LogLevel, .. }))
+    );
+    app.handle_action(Action::Activate);
+    app.handle_action(Action::Activate);
+    assert_eq!(app.log_level, crate::logging::Level::Trace);
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { detail, .. }) if detail.contains("trace")),
+        "the row reads the level back"
+    );
+
+    // No subscriber in a unit test means nothing was ever captured, so the
+    // viewer refuses politely — the same words a fresh session would give
+    // before anything had been logged.
+    app.handle_action(Action::Down);
+    assert!(
+        matches!(app.pane().selected(), Some(Entry::Setting { row: SettingRow::ViewLog, .. }))
+    );
+    app.handle_action(Action::Activate);
+    assert!(app.log_view.is_none());
+    assert!(app.message.as_ref().unwrap().text.contains("nothing captured"));
+
+    // With lines in hand the viewer is modal: j scrolls it and does not
+    // move the settings cursor; q closes the viewer, not the player.
+    app.log_view = Some(LogView {
+        source: "in memory · not written to disk".into(),
+        lines: (1..=50).map(|n| format!("line {n}")).collect(),
+        scroll: usize::MAX,
+        follow: true,
+        refreshed: crate::clock::Instant::now(),
+    });
+    let before = app.pane().state.selected();
+    app.handle_action(Action::Down);
+    assert_eq!(app.pane().state.selected(), before, "the list under it holds still");
+    assert!(!app.log_view.as_ref().unwrap().follow, "scrolling detaches from the end");
+    app.handle_action(Action::Last);
+    assert!(app.log_view.as_ref().unwrap().follow, "G re-attaches");
+    app.handle_action(Action::Quit);
+    assert!(app.log_view.is_none(), "q closes the viewer");
+    assert!(!app.should_quit, "and only the viewer");
+
+    // Untouched sessions remember nothing.
+    let fresh = connected_app();
+    assert_eq!(fresh.chosen_log_write(), None);
+    assert_eq!(fresh.chosen_log_level(), None);
+}
+
+/// The two switches persist independently: walking the level in a session
+/// that the environment turned logging on for must not also write
+/// `write = true` into the config and keep it on forever after.
+#[test]
+fn choosing_a_level_does_not_persist_the_write_switch() {
+    let mut app = connected_app();
+    // As if MSTREAM_LOG=1 had started this session writing.
+    app.log_write = true;
+    app.handle_action(Action::SelectTab(5));
+    app.handle_action(Action::Down);      // Logs
+    app.handle_action(Action::Activate);  // into the room
+    app.handle_action(Action::Down);      // Log level
+    app.handle_action(Action::Activate);  // info -> debug
+
+    assert_eq!(app.log_level, crate::logging::Level::Debug);
+    assert_eq!(app.chosen_log_level(), Some(crate::logging::Level::Debug));
+    assert_eq!(app.chosen_log_write(), None, "the switch was never touched here");
+}
+
+#[test]
 fn the_settings_menu_reads_the_state_at_a_glance_and_backs_out_whole() {
     let mut app = connected_app();
     app.crossfade = 6.0;
