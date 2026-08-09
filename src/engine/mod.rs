@@ -578,6 +578,16 @@ struct State {
     /// length (verify round, critic). This flag is the record; the tick
     /// skips the remnant the moment it becomes current.
     orphaned_tail: bool,
+    /// Which "waiting" gate the recorder was last told about, so a gate
+    /// that holds for minutes is one line rather than eight a second.
+    ///
+    /// The tick calls `crossfade_step` at ~8 Hz whether or not anything has
+    /// changed, so a level-triggered line here is a firehose: a player
+    /// paused near a track boundary would fill the log's whole in-memory
+    /// ring with one repeated sentence in about four minutes, evicting the
+    /// session it exists to hold (PR #5 review). Edge-triggered, the same
+    /// gate says its piece once and then keeps quiet.
+    gate_noted: Option<&'static str>,
     /// What the TUI said should play after the current track. The TUI keeps
     /// its own queue and feeds this engine one source at a time, so unlike
     /// serve mode the engine cannot pick a next; it has to be told. Consulted
@@ -831,6 +841,16 @@ impl State {
     /// around it: the outgoing half is hushed down a stop-length ramp, a
     /// half-risen fade snaps to full. The prepared next, if any, stays —
     /// a seek does not change what comes after.
+    /// Say a gate is holding — once per stretch of it holding, not once
+    /// per tick. See [`State::gate_noted`].
+    fn note_gate(&mut self, what: &'static str) {
+        if self.gate_noted == Some(what) {
+            return;
+        }
+        self.gate_noted = Some(what);
+        etrace!("{what}");
+    }
+
     fn snap_out_of_blend(&mut self) {
         if self.outgoing.is_empty() {
             return;
@@ -899,6 +919,7 @@ impl Engine {
             pause_fade: false,
             pausing: None,
             orphaned_tail: false,
+            gate_noted: None,
             pending_next: None,
             next: NextTrack::Idle,
             outgoing: Vec::new(),
@@ -1525,7 +1546,7 @@ impl Engine {
         // handover under a paused track would start sounding on its own.
         if s.sink.is_paused() {
             if matches!(s.next, NextTrack::Ready { .. }) {
-                etrace!("blend waiting: paused");
+                s.note_gate("blend waiting: paused");
             }
             return;
         }
@@ -1535,10 +1556,12 @@ impl Engine {
         // three sources in one sink and confuse every boundary check.
         if !s.outgoing.is_empty() || s.appended.is_some() || s.orphaned_tail {
             if matches!(s.next, NextTrack::Ready { .. }) {
-                etrace!("blend waiting: a transition is still draining");
+                s.note_gate("blend waiting: a transition is still draining");
             }
             return;
         }
+        // Past every gate: the next one that closes is news again.
+        s.gate_noted = None;
         // A duration the engine does not know is a fade point — or an
         // append point — it cannot find; live transcodes stay on the
         // ordinary advance path. (A duration *hint* that is wrong misplaces

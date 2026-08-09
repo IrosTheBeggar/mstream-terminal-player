@@ -211,7 +211,8 @@ Everything lives in the **Settings** tab (`6`): Enter opens Crossfade, `←` `�
 walk the blend length, and Enter toggles the rest — **Gapless**, **Blend
 skips** (a manual skip crosses in a second instead of cutting), and **Pause
 fade** (pause and resume ride a short ramp instead of landing mid-note). What
-you set there is what config.toml remembers. The jukebox has the first pair as
+you set there is what config.toml remembers. The tab's other room is
+**Logs** — see Diagnostics below. The jukebox has the first pair as
 `mstream-player serve --crossfade 6` / `--gapless`; the legacy spawn contract
 keeps all of it off.
 
@@ -448,6 +449,47 @@ crash are swept at the next start. To put it elsewhere, set
 [cache]
 dir = "/mnt/scratch"   # spool files land in <dir>/spool
 ```
+
+### Diagnostics
+
+The Settings tab has a **Logs** room. The player is always capturing a session into a bounded
+in-memory ring — the last couple of thousand lines, held for as long as it runs and gone when it
+quits — so **View log** opens a real session at any time, written or not (`j`/`k` scroll, `G`
+follows the end as new lines arrive, `q` closes). That is usually all a "what just happened?"
+needs, and it leaves nothing behind on disk.
+
+Whatever the level, secrets are taken out before a line reaches either the ring or the file:
+query strings (an mStream media URL carries `?token=…`) and any credentials in a URL are
+replaced with `<redacted>`, and the file is created readable only by you. The log is meant to be
+attachable to a bug report.
+
+**Write log** (off by default) decides whether the same lines are also kept in a file. Turn it on
+and the file opens *carrying what has already been captured*, so the thing you just watched
+happen is in it — no restart, no environment variable. **Log level** (info by default) is how
+much is captured at all: info is the player narrating its own decisions (what it played, seeked,
+prepared, handed over, and what failed), while debug and trace add what iroh, the HTTP stack and
+the spool have to say. Both switches are remembered in config.toml.
+
+Underneath sit two switches, off by default, each writing to a file and never to the screen —
+the TUI deliberately silences stderr while it draws, so files are how a session explains itself
+afterwards.
+
+- `MSTREAM_LOG=1` captures what the *dependencies* narrate — iroh's relay connects, holepunch
+  attempts and path changes, HTTP retries — into `<cache>/logs/`, one file per run named for its
+  process, with the last few runs kept and older ones swept away. `MSTREAM_LOG=/path/to/file`
+  writes exactly there instead. `RUST_LOG` chooses how much is said (the usual tracing filter
+  grammar; unset means `info`). The player prints `logging to …` at start and again at quit.
+  A file that reaches 8 MiB rolls aside to `.1` and a fresh one continues, so a jukebox left
+  running for a week is bounded. One-shot commands like `keys` and `ls` never touch any of
+  this unless `MSTREAM_LOG` names a file for them.
+- `MSTREAM_ENGINE_TRACE=/path/to/file` is the player's own flight recorder: one timestamped line
+  per transition decision — plays, announcements, seeks and their clamps, prepares, open failures
+  with reasons, retries, handovers — plus every diagnostic the TUI kept off the screen. Each run
+  appends and signs itself with a banner, so two players sharing one path interleave rather than
+  overwrite each other.
+
+The first is for "what did the network do"; the second for "what did the player decide". A bug
+report with both attached usually answers itself.
 
 ## Playback
 

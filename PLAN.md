@@ -791,6 +791,126 @@ an unanswered browse can leave path one level shallower than the pane until the 
 navigation (self-heals; both failures' undos fire); the flight-recorder file grows without
 bound across sessions (it is a debug facility you opt into per-run).
 
+#### Logging round ✅ 2026-08-07 (branch `logging`)
+
+The four improvements the post-release overview named, in one coherent shape:
+
+- **`stderrln!` tees into the flight recorder.** The TUI's silence rule stands — the screen is
+  never smeared — but the silenced lines (tunnel re-dials, accept failures, open errors) now
+  land in `MSTREAM_ENGINE_TRACE` when it is on, instead of vanishing with the alternate screen.
+- **`MSTREAM_LOG` installs a `tracing` subscriber** (new `logging.rs`, tracing-subscriber with
+  env-filter): everything iroh, reqwest, hyper and stream-download narrate — relay connects,
+  holepunch attempts, path upgrades, reconnects — written to a file, never the terminal, filtered
+  by `RUST_LOG` (default `info`). The blindness that cost a day of tunnel archaeology, ended.
+- **A standard location with rotation**: `MSTREAM_LOG=1` means `<cache>/logs/mstream-player.log`
+  with the last four runs kept beside it (`.1`–`.4`, logrotate-shift, no date dependency);
+  an explicit path means exactly that file. `logging to …` prints at boot, and the TUI says it
+  again at quit once the terminal is a terminal — both moments a person can actually read.
+- **Recorder hygiene**: the trace file truncates at start and opens with a version header —
+  one run per file, bounded even when the variable lives in a shell profile.
+
+Kept deliberately: two files, two questions. `MSTREAM_LOG` answers "what did the network do",
+the recorder answers "what did the player decide" — merging them would bury the forty decision
+lines under ten thousand of hyper's.
+
+#### PR #5 review round ✅ 2026-08-08 (branch `logs`)
+
+Seven review lenses over the diagnostics diff, each finding put to two skeptics, then a
+completeness critic: 39 raw findings, 20 survived, 13 distinct after dedup. Six fixed here — the
+four that blocked, plus the two the review called out as merge-blocking in their own right:
+
+- **The auth token was captured.** Our own lines were redacted, but stream-download names the URL
+  it is fetching in a span field and reqwest logs request URLs at debug — and an mStream media
+  URL carries `?token=<jwt>`. It reached the ring, the viewer and the file the README invites
+  people to attach to bug reports. Scrubbing now happens in the writer, where both destinations
+  meet (query strings and URL userinfo → `<redacted>`), and the file is created `0600`. Pinned by
+  a unit test on the exact leaked shape and a live trace-level smoke that greps for the secret.
+- **A paused player flooded the ring.** `etrace!` became an always-on tracing event, and two
+  `crossfade_step` gates log on every tick — so a pause near a boundary wrote ~8 lines a second
+  and evicted the whole 2 000-line ring in four minutes, destroying the session the feature
+  exists to hold. The gates are edge-triggered now (`State::gate_noted`): once per stretch, and
+  the next closure still speaks. Pinned by a smoke that pauses for 20 s and counts one line.
+- **Re-enabling Write log truncated the file.** `File::create` on a path the session had already
+  written destroyed everything past the ring. Opening now distinguishes `Fresh` from `Resume`:
+  a resume appends, and pours only the stretch captured while writing was off, tracked by a
+  monotonic line counter on the ring. Pinned by unit tests and a UI toggle smoke.
+- **The log viewer panicked in the browser build.** `std::time::Instant::now()` panics on
+  wasm32-unknown-unknown — the reason `crate::clock` exists — and `cargo check` cannot see it.
+  All shared sites now use the shim, including a pre-existing one in `seek_goal`.
+- **One `log_touched` flag persisted both switches**, so walking the level in a session started
+  by `MSTREAM_LOG=1` also wrote `write = true` and turned on permanent disk logging. Split.
+- **The flight recorder had lost `O_APPEND`** in the earlier hygiene change: two players sharing
+  one `MSTREAM_ENGINE_TRACE` truncated each other and wrote at their own offsets, NUL-filling the
+  overlap. It appends and signs each run again. Pinned by a two-player smoke (2 banners, 0 NULs).
+
+The five follow-ups, closed the same day:
+
+- **No size cap on a long session's file.** The sink now carries its own path and byte count, so
+  it can roll itself at 8 MiB to a `.1` sibling and continue — bounded without reaching for a
+  second lock (the writer's order stays RING, then SINK).
+- **One-shot subcommands disturbed the session log.** `init` takes a `Run`: a config `write =
+  true` is the player's own setting and no longer applies to `keys` or `ls`, which used to sweep
+  and rotate the directory on every invocation. An explicit `MSTREAM_LOG` still works anywhere.
+- **Cross-process rotation races.** The rename chain is gone. Every run writes
+  `mstream-player-<pid>.log` and the directory is bounded by *sweeping* the oldest instead —
+  skipping anything touched in the last ten minutes, so a running player's file is never a
+  candidate. Nobody renames anybody.
+- **The ring's memory ceiling** is now real: a byte budget (2 MiB) beside the line count, since
+  2 000 lines at the 64 KiB line cap was 128 MiB, not the "few hundred kilobytes" the comment
+  claimed.
+- **Tests racing on the global ring**: the tail test works on a local `Ring` now, so the app
+  tests' "nothing captured yet" assertion is no longer a coin toss under parallel execution.
+
+#### The ring: a log you can read without keeping ✅ 2026-08-07 (branch `logs`)
+
+"Is there any way to view logs without writing them?" — there is now. Every event the level
+admits goes into a bounded in-memory ring (2 000 lines, whole-line assembly since the fmt layer
+hands an event over in pieces, oldest dropped, a 64 KiB guard on a line that never ends), and
+**View log** reads the ring rather than the file. So a session can be inspected at any moment
+with nothing on disk, and the viewer's title says which it is — a path, or "in memory · not
+written to disk".
+
+Two consequences worth naming. The filter no longer consults the write switch: the level is what
+gets *captured*, not merely what gets persisted, which is what makes viewing-without-writing
+possible at all. And turning Write log on now pours the ring into the file first (`── N lines
+captured before writing began ──`), because the reason anyone turns writing on is the thing they
+just watched happen; without it the file would begin at the keystroke and miss exactly that.
+
+The ring also exposed a product gap: at the default `info` level the dependencies are nearly
+silent (iroh and reqwest keep their detail at debug and trace), so a default session had nothing
+to show. The engine's flight-recorder lines are now emitted as `tracing` events too
+(`target: "mstream"`), which puts the player's own voice — plays, announcements, seeks and their
+clamps, prepares, open failures, handovers, tunnel re-dials — in the ring at info. The default
+log is now the story of what the player decided, and raising the level adds what the network was
+doing underneath.
+
+#### Logs in Settings, split in two ✅ 2026-08-07 (branch `logging`)
+
+Follow-up shaped by use: one row conflated whether logs are written with how loud they are.
+Now **Write log** (bool, default off) owns the file, and **Log level** (info · debug · trace,
+default info) owns the loudness — a write-time threshold, adjustable live while writing and
+waiting patiently while not. Old one-field configs keep their meaning (`level = "trace"`
+alone still means writing at trace; `"off"` means off — `settled_from_config`, unit-pinned),
+both switches persist through both save paths, and the viewer shows whatever was captured
+even after the switch goes back off. The always-installed-subscriber architecture is what
+made the split free. Re-proved live in the pty drive: switch on → toast, level to trace →
+26 KB in two seconds, viewer, quit, `write = true` and `level = "trace"` in config.
+
+#### Logs in Settings ✅ 2026-08-07 (branch `logging`)
+
+The mobile app's debugging room, grown here: **Settings → Logs** holds a **Log level** row
+(off · info · debug · trace, the same ←→ grammar as Blend length) and a **View log** row that
+opens the tail of the file inside the player — modal, `j`/`k` scrolling, `G` following the end
+on a one-second refresh, `q` out. Turning the level up mid-session works because the round
+before this one left the subscriber always installed behind a reloadable filter and a
+late-binding writer: the first step up opens the rotated default file on the spot, and a
+chosen level (only a *chosen* one — environment-forced sessions don't count) persists as
+`[log] level` in config.toml through both save paths. Sessions with no subscriber (unit
+tests, embedding) degrade honestly: the row reports that no file could open and snaps back
+to off. Pinned by the settings-room app test, the config round-trip, and a pty drive of the
+real TUI: level to trace, 26 KB of telemetry inside two seconds, viewer in and out, goodbye
+line, config remembering `trace`.
+
 ### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
 Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install
 matrix, then the "later" items inside the same three days: one-line installers for sh and

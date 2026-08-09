@@ -11,6 +11,10 @@ mod config;
 mod console;
 mod dj;
 mod input;
+/// The debug log. Its file half is native-only inside the module; the
+/// level type and switches are shared, because the Settings tab that
+/// drives them is drawing code the browser build keeps.
+mod logging;
 mod player;
 mod tui;
 
@@ -249,6 +253,22 @@ fn listening_seconds(raw: &str) -> Result<f64, String> {
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let cli = Cli::parse();
+
+    // The debug log first, before anything can dial: a subscriber installed
+    // after the first connection has already missed the interesting part.
+    // The boot line goes to stderr — in the TUI it scrolls away under the
+    // alternate screen and comes back in scrollback after quit, and the
+    // goodbye line at teardown says it again for whoever missed it.
+    //
+    // A one-shot subcommand keeps its hands off the default location: see
+    // logging::init.
+    let run = match &cli.command {
+        None | Some(Command::Tui(_)) | Some(Command::Serve(_)) => logging::Run::Session,
+        Some(_) => logging::Run::OneShot,
+    };
+    if let Some(path) = logging::init(run) {
+        eprintln!("logging to {}", path.display());
+    }
 
     // Streaming scratch space (PLAN A1): each playing track spools to a temp
     // file. Decide where those belong before anything can open a stream, and
