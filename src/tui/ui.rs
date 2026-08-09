@@ -240,8 +240,6 @@ fn parse_color(raw: &str) -> Option<Color> {
 /// Left gutter the cursor symbol reserves on every browser row, blank or not.
 const CURSOR: &str = "> ";
 
-/// Braille spinner. Ten frames is slow enough to read as turning rather than
-/// flickering at the rate the event loop advances it.
 /// Which frame the spinner is on. The frame count differs between the two
 /// glyph sets — braille turns in ten, ASCII in four — so the modulo has to
 /// ask the set rather than a constant.
@@ -383,9 +381,12 @@ pub(crate) struct NowRegions {
 /// The bar row is the other half of a shape mirrored about the line between
 /// them, which is what makes it read as a waveform rather than as a bar
 /// chart. One, because the halves have to match and the lower one is the
-/// scrubber. The compact browser transport gets none of this: its two rows
-/// are already an eighth of the list on an 80x24 terminal, and it keeps the
-/// single-row version.
+/// scrubber.
+///
+/// The browser transport spends it too, but only where there is room —
+/// [`transport_wave_rows`] gates it on `mirror_min_height`, since two rows
+/// are an eighth of the list on an 80x24 terminal and nothing on a full
+/// screen.
 const WAVE_HALF_ROWS: u16 = 1;
 
 /// What the full-screen transport claims above its bar.
@@ -1277,7 +1278,7 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
     .areas(keys_area);
     frame.render_widget(
         Paragraph::new(Span::styled(
-            fit(now_keys_hint(app), left.width as usize),
+            fit(&now_keys_hint(app), left.width as usize),
             Style::new().fg(dim()),
         )),
         left,
@@ -1363,20 +1364,29 @@ fn rule_with_junction(width: u16, at: u16) -> String {
 
 /// The key hints along the foot. Only what does something on the tab in front
 /// of you: offering "Enter play" while the lyrics are up is a small lie.
-fn now_keys_hint(app: &App) -> &'static str {
+fn now_keys_hint(app: &App) -> String {
     // The numbers are the navigation on every one of these, which is the
     // point: the tab you can get stuck on and the tab you cannot must not
     // have different ways out.
-    match app.now_tab() {
-        NowTab::Queue => "1-5 tab   ↑↓ list   Enter play   d remove   0 back",
-        NowTab::AutoDj => "1-5 tab   ↑↓ choose   ←→ adjust   Enter set   0 back",
-        NowTab::Discover => "1-5 tab   ↑↓ list   Enter play   a queue   0 back",
-        NowTab::Visualizer if app.viz.mode.plots_samples() => {
-            "1-5 tab   v mode   . dots   0 back"
-        }
-        NowTab::Visualizer => "1-5 tab   v mode   0 back",
-        _ => "1-5 tab   ↑↓ scroll   0 back",
-    }
+    //
+    // Counted rather than written down, because the strip is filtered:
+    // Lyrics comes and goes with the track and Discover with the server, so
+    // a hard-coded "1-5" advertised two keys that do nothing on most
+    // sessions — and named a fifth tab on a session that has three.
+    let tabs = match app.now_tabs().len() {
+        0 | 1 => String::new(),
+        2 => "1-2 tab   ".to_string(),
+        n => format!("1-{n} tab   "),
+    };
+    let rest = match app.now_tab() {
+        NowTab::Queue => "↑↓ list   Enter play   d remove   0 back",
+        NowTab::AutoDj => "↑↓ choose   ←→ adjust   Enter set   0 back",
+        NowTab::Discover => "↑↓ list   Enter play   a queue   0 back",
+        NowTab::Visualizer if app.viz.mode.plots_samples() => "v mode   . dots   0 back",
+        NowTab::Visualizer => "v mode   0 back",
+        _ => "↑↓ scroll   0 back",
+    };
+    format!("{tabs}{rest}")
 }
 
 /// The tab strip, and whichever tab is open under it.
@@ -1501,8 +1511,14 @@ fn render_now_discover(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let width = rest.width as usize;
+    // The offset goes back to the app, not into a local: `ListState` is
+    // `Copy`, so correcting into one that dies with the frame compiles
+    // happily and pins the cursor to the bottom row for ever after. Same
+    // rule, and the same reason, as `render_now_queue` below.
     let mut state = ListState::default().with_selected(Some(app.now_scroll));
+    *state.offset_mut() = app.now_offset;
     let (window, mut visible) = visible_rows(&mut state, shown.tracks.len(), rest.height);
+    app.now_offset = state.offset();
     let playing = app.now_playing.as_ref().map(|t| t.filepath.as_str());
 
     let items: Vec<ListItem> = shown.tracks[window]
@@ -1916,8 +1932,13 @@ fn resample_bars(bars: &[u8], columns: usize) -> Vec<u8> {
 }
 
 /// A column's amplitude as eighths of one cell.
+///
+/// Over 255, not 256: the loudest column of a track *is* 255, and dividing
+/// by the count of values rather than the largest one put it at seven
+/// eighths — the full block unreachable, the clamp below it dead, and every
+/// waveform drawn a notch short of the ceiling it was scaled to.
 fn eighths(amplitude: u8) -> usize {
-    (usize::from(amplitude) * 8 / 256).min(8)
+    (usize::from(amplitude) * 8 / 255).min(8)
 }
 
 /// The half of the shape *above* the centre line, in the full-screen view.
@@ -2136,10 +2157,16 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let [message_area, modes_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(modes_width)]).areas(area);
 
-    // An armed picker outranks everything: Enter has stopped meaning play,
-    // and nothing else on screen would say so. The webapp floats a banner
-    // over the library for the same reason.
-    let message = if let Some(who) = app.capture {
+    // An armed picker outranks everything but an error: Enter has stopped
+    // meaning play, and nothing else on screen would say so. The webapp
+    // floats a banner over the library for the same reason.
+    //
+    // An error is the exception because it is news and this is a standing
+    // state. Ranked above it, the banner hid every failure raised while a
+    // pick was armed — and it stands until the pick is answered, so those
+    // failures were not delayed, they were never shown at all.
+    let failing = matches!(&app.message, Some(m) if matches!(m.kind, MessageKind::Error));
+    let message = if let Some(who) = app.capture.filter(|_| !failing) {
         Span::styled(
             fit(
                 &format!(
@@ -2249,6 +2276,34 @@ fn fit(text: &str, width: usize) -> String {
         used += w;
     }
     out.push('…');
+    out
+}
+
+/// [`fit`] from the other end: keep the *last* `width` columns.
+///
+/// What a one-line editor needs. `fit` keeps the beginning, which is right
+/// for a label you are reading and wrong for a field you are typing into —
+/// there the end is where the caret is, and a caret pushed off the edge
+/// makes a working keyboard look broken.
+fn tail(text: &str, width: usize) -> String {
+    if width_of(text) <= width {
+        return text.to_string();
+    }
+    if width <= 1 {
+        return String::new();
+    }
+    let mut kept: Vec<char> = Vec::new();
+    let mut used = 0;
+    for c in text.chars().rev() {
+        let w = char_width(c);
+        if used + w > width - 1 {
+            break;
+        }
+        kept.push(c);
+        used += w;
+    }
+    let mut out = String::from("…");
+    out.extend(kept.into_iter().rev());
     out
 }
 
@@ -2679,9 +2734,28 @@ fn render_genre_picker(frame: &mut Frame, area: Rect, app: &App) {
 /// that reacts as you type, so the typing wants somewhere of its own.
 fn render_playlist_prompt(frame: &mut Frame, area: Rect, app: &App) {
     let Some(name) = app.sonic_playlist_name.as_ref() else { return };
+
+    let box_area = centered_rect(60, 6, area);
+    frame.render_widget(Clear, box_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(accent()))
+        .title(" Save as playlist ");
+    let inner = block.inner(box_area);
+
+    // The suggested name is two track names and an arrow, so it starts
+    // longer than the box on any ordinary terminal. Show its *end*: the
+    // caret has to stay on screen, or typing into a full field looks like
+    // typing into a dead one.
+    let room = (inner.width as usize).saturating_sub(2 + width_of(glyphs().caret));
+    let shown = tail(name, room);
+
     let lines = vec![
         Line::raw(""),
-        Line::from(vec![Span::raw(format!("  {name}")), Span::styled(glyphs().caret, Style::new().fg(accent()))]),
+        Line::from(vec![
+            Span::raw(format!("  {shown}")),
+            Span::styled(glyphs().caret, Style::new().fg(accent())),
+        ]),
         Line::raw(""),
         Line::from(Span::styled(
             format!("  {} stops \u{b7} Enter save \u{b7} Esc cancel", app.sonic.stops.len()),
@@ -2689,13 +2763,6 @@ fn render_playlist_prompt(frame: &mut Frame, area: Rect, app: &App) {
         )),
     ];
 
-    let box_area = centered_rect(60, lines.len() as u16 + 2, area);
-    frame.render_widget(Clear, box_area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(accent()))
-        .title(" Save as playlist ");
-    let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -3560,13 +3627,37 @@ mod tests {
         // Where a set does mirror, that symmetry has to hold, or the two
         // halves disagree about where the middle is — a shape with a step
         // in it down the centre line.
+        //
+        // Measured against how much of a cell each glyph actually inks. An
+        // earlier version compared each entry with the two endpoints, which
+        // is true of any nine glyphs with different ends and so said nothing
+        // about the seven in between — the only ones that can be wrong.
+        fn ink(glyph: &str) -> usize {
+            match glyph {
+                " " => 0,
+                "\u{2581}" => 1,
+                "\u{2582}" => 2,
+                "\u{2583}" => 3,
+                "\u{2584}" => 4,
+                "\u{2585}" => 5,
+                "\u{2586}" => 6,
+                "\u{2587}" => 7,
+                "\u{2588}" => 8,
+                other => panic!("{other:?} has no height a mirror could measure"),
+            }
+        }
         for set in [RICH, LEGACY].into_iter().filter(|s| s.mirrored) {
             for height in 0..=8usize {
-                let complement = 8 - height;
                 assert_eq!(
-                    set.eighths[height] == set.eighths[8],
-                    set.eighths[complement] == set.eighths[0],
-                    "height {height} does not mirror in {:?}",
+                    ink(set.eighths[height]),
+                    height,
+                    "eighths[{height}] does not fill {height} eighths in {:?}",
+                    set.eighths
+                );
+                assert_eq!(
+                    ink(set.eighths[height]) + ink(set.eighths[8 - height]),
+                    8,
+                    "height {height} and its complement do not make one cell in {:?}",
                     set.eighths
                 );
             }
@@ -3644,6 +3735,38 @@ mod tests {
         // And the degenerate ends are answers, not panics.
         assert!(resample_bars(&full, 0).is_empty());
         assert!(resample_bars(&[], 10).is_empty());
+
+        // The floor is the *tenth percentile*, not the minimum, and every
+        // case above is too narrow to tell the two apart: `sorted[len / 10]`
+        // collapses to `sorted[0]` under ten columns. Twenty columns puts
+        // the floor on the third-quietest, so the two below it are what
+        // proves which of the two rules is in force — under a minimum floor
+        // the third would scale to something above zero.
+        let mut body: Vec<u8> = (0..240).map(|i| 150 + (i % 7) as u8 * 15).collect();
+        body[..24].fill(3); // two whole columns of near-silence
+        body[24..36].fill(60); // and the one that becomes the floor
+        let wide = resample_bars(&body, 20);
+        assert_eq!(wide.len(), 20);
+        assert_eq!(
+            (wide[0], wide[1], wide[2]),
+            (0, 0, 0),
+            "everything at or under the tenth percentile is the bottom: {wide:?}"
+        );
+        assert!(wide[3..].iter().any(|h| *h == 255), "and the loudest still reaches the top");
+    }
+
+    #[test]
+    fn the_loudest_column_reaches_the_top_of_the_cell() {
+        // `amplitude * 8 / 256` cannot return 8 — 255 is the largest input
+        // and lands on 7 — so the full block was unreachable and every
+        // waveform drew a notch short of the height it had been scaled to.
+        assert_eq!(eighths(255), 8);
+        assert_eq!(eighths(0), 0);
+        // Still monotonic, and still eight steps rather than nine crammed in.
+        let steps: Vec<usize> = (0..=255u8).map(eighths).collect();
+        assert!(steps.windows(2).all(|w| w[0] <= w[1]), "heights only go up");
+        assert_eq!(*steps.iter().max().unwrap(), 8);
+        assert!(steps.iter().all(|h| *h <= 8), "and never off the end of the glyph set");
     }
 
     #[test]
@@ -4134,7 +4257,7 @@ mod tests {
             ]),
             note: None,
             dest: crate::tui::worker::DiscoverDest::Browser,
-            seed: String::new(),
+            seed: "lib/seed.mp3".into(),
         });
         let text = draw(&mut app);
         assert!(text.contains("Artists like Seed Artist"), "got:\n{text}");
@@ -4281,8 +4404,13 @@ mod tests {
         assert!(text.contains("±6%") && text.contains("±12%"), "got:\n{text}");
         assert!(text.contains("Sample") && text.contains("Enter to preview"), "got:\n{text}");
         // ←→ mean adjust here, so the hint has to say what moves between
-        // tabs — the same thing it says on every other one.
-        assert!(text.contains("1-5 tab") && text.contains("←→ adjust"), "got:\n{text}");
+        // tabs — the same thing it says on every other one, counted from
+        // the strip this session actually has. This app has no Lyrics tab
+        // (the track carries none), so promising a fifth digit would be
+        // promising a key that does nothing.
+        assert_eq!(app.now_tabs().len(), 4);
+        assert!(text.contains("1-4 tab") && text.contains("←→ adjust"), "got:\n{text}");
+        assert!(!text.contains("1-5 tab"));
     }
 
     #[test]

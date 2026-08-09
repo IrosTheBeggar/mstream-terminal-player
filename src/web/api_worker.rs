@@ -164,11 +164,16 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             // Art's rule, for the same reason: a shape nobody could draw is
             // not worth the "not connected" toast `with_session` would raise.
             let client = session.borrow().as_ref().map(|s| s.client.clone());
-            let bars = match client {
-                Some(c) => c.waveform_async(&filepath).await.ok().flatten(),
-                None => None,
+            // Not connected is not an answer either, so it leaves the slot
+            // free for the next attempt exactly as a failed fetch does.
+            let (bars, settled) = match client {
+                Some(c) => match c.waveform_async(&filepath).await {
+                    Ok(bars) => (bars, true),
+                    Err(_) => (None, false),
+                },
+                None => (None, false),
             };
-            Some(Event::Waveform { filepath, bars })
+            Some(Event::Waveform { filepath, bars, settled })
         }
     }
 }

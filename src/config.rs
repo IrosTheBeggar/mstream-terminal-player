@@ -298,9 +298,11 @@ pub struct DisplayPrefs {
     /// The compact transport is two rows — what is playing, then the bar —
     /// and on an 80x24 terminal that is already an eighth of the list. A
     /// third row is worth it when there are rows to spare and not when there
-    /// aren't, which is a question only the terminal can answer. `0` always,
-    /// something enormous never. The full-screen view mirrors regardless:
-    /// its body is a facts column and a panel rather than a list to scroll.
+    /// aren't, which is a question only the terminal can answer. `0` always;
+    /// to turn it off, any height taller than a terminal — `9999` does it,
+    /// where a number over 65535 does not parse as a `u16` and costs you the
+    /// whole file. The full-screen view mirrors regardless: its body is a
+    /// facts column and a panel rather than a list to scroll.
     pub mirror_min_height: u16,
     /// How many listing columns the browser will show at once, the one you
     /// are in included — the Miller columns.

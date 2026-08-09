@@ -32,6 +32,16 @@ use urls::TranscodeCodec;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(not(target_arch = "wasm32"))]
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// The ceiling for the one endpoint that can make the server work before it
+/// can answer.
+///
+/// [`Client::waveform_async`] documents a first call as taking as long as
+/// ffmpeg takes to decode the track — up to 30 seconds. Under the shared
+/// [`REQUEST_TIMEOUT`] that is not a slow success, it is a guaranteed
+/// failure: the exact case the endpoint exists to serve could never come
+/// back, and the caller cached the timeout as "this track has no shape".
+#[cfg(not(target_arch = "wasm32"))]
+const DECODE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// The directory to ask [`Client::file_explorer`] for when what you want is
 /// "wherever it makes sense to start".
@@ -228,8 +238,30 @@ impl Client {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Result<T, ApiError> {
+        self.send_within(method, path, body, None).await
+    }
+
+    /// `send`, with a ceiling of this request's own instead of the client's.
+    ///
+    /// Only [`DECODE_TIMEOUT`] uses it. The browser build ignores the
+    /// argument because the fetch backend has no per-request timeout to
+    /// set — the browser owns that, as it does the connect timeout.
+    async fn send_within<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        longest: Option<std::time::Duration>,
+    ) -> Result<T, ApiError> {
         let url = self.endpoint(path)?;
+        #[allow(unused_mut)]
         let mut req = self.http.request(method, url);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(longest) = longest {
+            req = req.timeout(longest);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = longest;
         if let Some(token) = &self.token {
             req = req.header("x-access-token", token);
         }
@@ -628,7 +660,14 @@ impl Client {
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("filepath", filepath)
             .finish();
-        match self.get::<WaveformResponse>(&format!("api/v1/db/waveform?{query}")).await {
+        let path = format!("api/v1/db/waveform?{query}");
+        #[cfg(not(target_arch = "wasm32"))]
+        let sent =
+            self.send_within::<WaveformResponse>(Method::GET, &path, None, Some(DECODE_TIMEOUT))
+                .await;
+        #[cfg(target_arch = "wasm32")]
+        let sent = self.get::<WaveformResponse>(&path).await;
+        match sent {
             // An empty array is "nothing to draw", not a flat line.
             Ok(response) => Ok((!response.waveform.is_empty()).then_some(response.waveform)),
             Err(ApiError::Server { status: 503, .. }) => {

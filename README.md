@@ -169,8 +169,9 @@ binding never means unbinding another by hand first. A line the player can't
 read costs you that line and nothing else — it says what was wrong on the
 first screen and carries on. `Ctrl+C` always quits, whatever the file says.
 
-The genre chooser keeps its own keys, since it draws its own hints along the
-bottom.
+The genre chooser and the full-screen view keep their own keys, since both
+draw their own hints along the bottom — `mstream-player keys` lists them
+under their own headings, and `[keys]` does not reach them.
 
 ### Colours
 
@@ -257,7 +258,7 @@ single-row bar when it isn't:
 
 ```toml
 [display]
-mirror_min_height = 30    # 0 to always mirror, something huge to never
+mirror_min_height = 30    # 0 to always mirror, 9999 to never (max 65535)
 ```
 
 The colours are the same three channels as the plain bar — accent behind the
@@ -296,9 +297,9 @@ assumes anything that isn't Windows is fine. Pin it either way:
 glyphs = "full"     # or "legacy", or "auto" (the default)
 ```
 
-**The visualizer is braille and has no fallback yet**, so on a legacy console
-it is still a wall of boxes. The real fix for all of it is a font with more
-than CP437 in it: run the player from Windows Terminal, or point conhost at
+The visualizer needs no fallback: it draws in half blocks (`▀ ▄ █`), which
+every console font has. The real fix for the rest is a font with more than
+CP437 in it: run the player from Windows Terminal, or point conhost at
 Cascadia Mono (right-click the title bar → Properties → Font) and set
 `glyphs = "full"`.
 
@@ -379,23 +380,25 @@ labelled column, a full-width transport along the foot, and a tabbed panel on
 the right.
 
 ```
-┌ Now Playing ────────────────────────────────────────────────────────────┐
-│                              │ 1:Queue  2:Lyrics  3:Discover  4:Auto-DJ… │
-│ Rewind The Track             │ ──────────────────────────────────────────│
-│ Bassnectar                   │ ▶ Bassnectar - Rewind The Track      3:29 │
-│                              │   Bassnectar - Mic Check             4:02 │
-│ Album   Divergent Spectrum   │   Bassnectar - Elastic               3:02 │
-│ Year    2011                 │                                           │
-│ Tempo   174 BPM              │                                           │
-│ Key     8A  A minor          │                                           │
-│──────────────────────────────┴───────────────────────────────────────────│
-│▃▅▂▆▃▇▄▁▅▃▆▂▄▇▃▅▁▄▆▂▅▃▇▄▂▆▁▅▃▄▆▂▇▃▅▁▄▂▆▃▅▇▂▄▁▃▆▅▂▇▄▃▁▅▆   1:11 / 3:29    │
-│1-5 tab   ↑↓ list   Enter play   d remove   0 back       vol 100%  dj sim… │
-└──────────────────────────────────────────────────────────────────────────┘
+  Now Playing
+                          │ [1:Queue]  2:Discover   3:Auto-DJ   4:Visualizer
+  6AM                     │ ───────────────────────────────────────────────
+  Boukmanflow             │ > Boukmanflow - 6AM                        2:03
+                          │   Boukmanflow - Been a While               2:07
+  Year    2023            │   Boukmanflow - Being stuck                2:19
+  Genre   rap, jazzrap    │   Boukmanflow - Better Days                2:41
+  Tempo   93 BPM          │   Boukmanflow - BIG PICTURE                2:46
+  Key     5A  C minor     │   Boukmanflow - Bout2skate                 2:16
+  Format  MP3   192 kbps  │   Boukmanflow - Buckets                    1:55
+ ─────────────────────────┴────────────────────────────────────────────────
+ ▓▓▓▓▒▒▒▓▓▒▒▒▒▓▓░▒▒░▓▒░░░░▓░▒█░▒▓░▒▒▓▒▓▒░░▒▓▓▓▒▓▒█▓▒▒▒▒▒▓░▒█░  0:02 / 2:03
+ 1-4 tab   ↑↓ list   Enter play   d remove   0 back                vol 100%
 ```
 
-`1`–`5` pick a tab, numbered on the strip in the order it draws them, and
-`↑` `↓` move within one. `Tab` and `Shift+Tab` step along it for anyone who
+The digits pick a tab, numbered on the strip in the order it draws them —
+`1`–`4` above, because that session's track has no lyrics. The footer counts
+them for you rather than promising a key the strip does not have. `↑` `↓`
+move within a tab, and `Tab` and `Shift+Tab` step along it for anyone who
 would rather not count. It's a view rather than a dialog, so everything else
 keeps working — `Space`, `n`, `p`, seeking and volume all behave as they do
 outside, including wherever `[keys]` moved them. `Esc` or `0` leaves.
@@ -570,7 +573,9 @@ every keystroke: move the slider, then **Regenerate**. A shorter path passes
 through different places entirely.
 
 `J` on a highlighted track is the shortcut in: it opens this tab aimed at that
-track, with whatever is playing as the start, and plots it straight away.
+track and plots it straight away, taking whatever is playing as the start —
+but only when no start is set. An end you have already chosen stays chosen,
+so `J` re-aims a path rather than resetting one.
 
 The tab only appears on servers with the discovery index; `J` says so where it
 is missing.

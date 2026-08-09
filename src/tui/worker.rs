@@ -144,9 +144,11 @@ pub enum DiscoverNode {
 
 #[derive(Debug)]
 pub enum DiscoverData {
-    /// Neighbours with how close each one is. The browser tab drops the
-    /// number and draws playable rows; the full-screen panel shows it,
-    /// which is the difference between a list and a ranking.
+    /// Neighbours with how close each one is. Both views lead their rows
+    /// with the number: these arrive in order, so a position says nothing a
+    /// rank could not, where the cosine says how much of a neighbour each
+    /// one actually is. It used to be dropped on the way to the browser
+    /// tab, which is why this carries `SimilarTrack` and not `Track`.
     Tracks(Vec<crate::api::types::SimilarTrack>),
     Artists(Vec<SimilarArtist>),
 }
@@ -368,7 +370,15 @@ pub enum Event {
     /// A track's shape, or `None` for every flavour of "there isn't one".
     /// Like art, never worth a message: the bar it decorates draws perfectly
     /// well without it.
-    Waveform { filepath: String, bars: Option<Vec<u8>> },
+    /// The shape of a track, or the news that it has none.
+    ///
+    /// `settled` is the difference between the server answering "no
+    /// waveform" — which it will answer the same way forever, so the answer
+    /// is worth keeping — and nobody answering at all. Collapsing the two
+    /// meant one dropped connection cached a permanent "this track has no
+    /// shape", on the endpoint whose whole design assumes the first call is
+    /// the slow one.
+    Waveform { filepath: String, bars: Option<Vec<u8>>, settled: bool },
     /// Credentials are missing or expired — the UI drops back to the
     /// connect screen.
     Unauthorized,
@@ -883,10 +893,12 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         ApiCmd::Waveform { filepath } => {
             // Same rule as art: a shape nobody could draw is not news. The
             // client already folds the server's four ways of saying "no
-            // waveform" into `None`; anything left is a real transport
-            // failure, and even that is worth less than a message here.
-            let bars = c.waveform(&filepath).ok().flatten();
-            Ok(Event::Waveform { filepath, bars })
+            // waveform" into `Ok(None)`; anything left is a real transport
+            // failure, which is worth less than a message here — but it is
+            // not an answer, so it must not be remembered as one.
+            let answer = c.waveform(&filepath);
+            let settled = answer.is_ok();
+            Ok(Event::Waveform { filepath, bars: answer.ok().flatten(), settled })
         }
         // The connection commands never reach here; api_loop keeps them.
         ApiCmd::Connect { .. }

@@ -176,6 +176,12 @@ impl Action {
             Action::ToggleAutoDj => "auto-dj",
             Action::StartJourney => "sonic-path",
             Action::ToggleHelp => "help",
+            // Nameable because the browser binds it: it is what Esc means
+            // there, and everything in that table is the user's to move.
+            // The overlays that also raise it — text entry, the genre
+            // chooser — claim Esc before the table is ever consulted, so
+            // rebinding this cannot strand anybody inside one.
+            Action::Cancel => "cancel",
             Action::Quit => "quit",
             // Text entry, and the keys the overlays claim for themselves.
             // Those tables aren't rebindable — the panel and the full-screen
@@ -185,7 +191,6 @@ impl Action {
             | Action::Input(_)
             | Action::Backspace
             | Action::Submit
-            | Action::Cancel
             | Action::NowTabNext
             | Action::NowTabPrev
             | Action::SelectNowTab(_)
@@ -326,10 +331,17 @@ fn default_normal() -> Vec<Binding> {
         action: Action::StartJourney,
         help: Some("sonic path to here"),
     },
+    Binding { keys: vec![ch('?')], action: Action::ToggleHelp, help: Some("this help") },
+    // Esc is the way *out* of things first and the key list second. It used
+    // to be a second name for the help overlay, which meant the three
+    // things that wanted it — an armed picker, the Crossfade rows, a Sonic
+    // Path sub-node — could never have it, since no key in this mode
+    // produced `Cancel` at all. Falls through to the help when there is
+    // nothing to call off, so it still opens the list from a bare listing.
     Binding {
-        keys: vec![ch('?'), key(KeyCode::Esc)],
-        action: Action::ToggleHelp,
-        help: Some("this help"),
+        keys: vec![key(KeyCode::Esc)],
+        action: Action::Cancel,
+        help: Some("go back, or this help"),
     },
     Binding { keys: vec![ch('q'), ctrl('c')], action: Action::Quit, help: Some("quit") },
     ]
@@ -381,6 +393,11 @@ fn default_now() -> Vec<Binding> {
     Binding { keys: vec![ch('3')], action: Action::SelectNowTab(2), help: None },
     Binding { keys: vec![ch('4')], action: Action::SelectNowTab(3), help: None },
     Binding { keys: vec![ch('5')], action: Action::SelectNowTab(4), help: None },
+    // There is no sixth tab here, and that is exactly why it is bound: left
+    // free it fell through to the browser's `6` and moved the Settings tab
+    // behind a screen nobody can see. `SelectNowTab` bounds-checks, so this
+    // is a digit that does nothing — which is what it should do.
+    Binding { keys: vec![ch('6')], action: Action::SelectNowTab(5), help: None },
     // Kept as a second way round, and as the one that needs no counting.
     Binding { keys: vec![key(KeyCode::Tab)], action: Action::NowTabNext, help: None },
     Binding { keys: vec![key(KeyCode::BackTab)], action: Action::NowTabPrev, help: None },

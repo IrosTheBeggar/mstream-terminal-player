@@ -821,13 +821,36 @@ fn a_waveform_is_asked_for_once_per_track() {
     let effects = app.play_index(0);
     assert!(waveforms_asked(&effects).is_empty(), "{effects:?}");
 
-    app.apply_event(Event::Waveform { filepath: "a".into(), bars: Some(vec![7; 800]) });
+    app.apply_event(Event::Waveform { filepath: "a".into(), bars: Some(vec![7; 800]), settled: true });
     assert_eq!(app.waveforms.get("a").unwrap().as_ref().unwrap().len(), 800);
 
     // And a server with nothing to give is remembered just as firmly — a
     // track with no shape must not be re-asked on every replay.
-    app.apply_event(Event::Waveform { filepath: "a".into(), bars: None });
+    app.apply_event(Event::Waveform { filepath: "a".into(), bars: None, settled: true });
     assert!(app.waveforms.get("a").unwrap().is_none());
+    assert!(waveforms_asked(&app.play_index(0)).is_empty());
+}
+
+#[test]
+fn a_shape_nobody_answered_for_is_asked_for_again() {
+    // The endpoint's own documentation says the first call can take as long
+    // as ffmpeg takes. A request that falls over is the likeliest outcome
+    // for exactly the track that most needs one — so it must leave the slot
+    // free, or one bad moment is the last word on that track all session.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("a")]);
+    assert!(waveforms_asked(&app.handle_action(Action::PlayPause)).contains(&"a".to_string()));
+
+    app.apply_event(Event::Waveform { filepath: "a".into(), bars: None, settled: false });
+    assert!(!app.waveforms.contains_key("a"), "nothing was learned, so nothing is remembered");
+    assert!(
+        waveforms_asked(&app.play_index(0)).contains(&"a".to_string()),
+        "and playing it again asks again"
+    );
+
+    // A settled "no shape" still stops the asking — the two must not have
+    // been collapsed the other way round either.
+    app.apply_event(Event::Waveform { filepath: "a".into(), bars: None, settled: true });
     assert!(waveforms_asked(&app.play_index(0)).is_empty());
 }
 
@@ -847,7 +870,7 @@ fn the_next_tracks_waveform_is_fetched_before_it_plays() {
 
     // It lands while the first track is still on, and is waiting when the
     // second starts — which is the whole point.
-    app.apply_event(Event::Waveform { filepath: "b".into(), bars: Some(vec![9; 800]) });
+    app.apply_event(Event::Waveform { filepath: "b".into(), bars: Some(vec![9; 800]), settled: true });
     let effects = app.handle_action(Action::NextTrack);
     assert!(waveforms_asked(&effects).is_empty(), "already in hand: {effects:?}");
     assert!(app.waveforms.get("b").unwrap().is_some());
@@ -2315,11 +2338,24 @@ fn similar_tracks_are_ordinary_playable_rows() {
         data: DiscoverData::Tracks(vec![near("near-one", 0.94), near("near-two", 0.9)]),
         note: None,
         dest: DiscoverDest::Browser,
-        seed: String::new(),
+        seed: "seed".into(),
     });
     // Parent row plus the two neighbours, and Enter plays them like any
     // other list — no new concept to learn.
     assert_eq!(app.discover.entries.len(), 3);
+
+    // A reply about a seed the tab is no longer pointed at is dropped. The
+    // node alone cannot catch this: "similar tracks" is the same node
+    // whatever it is similar *to*, so a slow first answer would land under
+    // the second seed's title and be read as being about it.
+    app.apply_event(Event::Discover {
+        node: DiscoverNode::Tracks,
+        data: DiscoverData::Tracks(vec![near("about-something-else", 0.99)]),
+        note: None,
+        dest: DiscoverDest::Browser,
+        seed: "a track we walked away from".into(),
+    });
+    assert_eq!(app.discover.entries.len(), 3, "the list is still the one we asked for");
     app.discover.state.select(Some(1));
     let effects = app.handle_action(Action::Activate);
     assert_eq!(app.queue.items.len(), 2);
@@ -2347,7 +2383,7 @@ fn an_artist_drills_into_its_ways_in_without_asking_again() {
         ]),
         note: None,
         dest: DiscoverDest::Browser,
-        seed: String::new(),
+        seed: "seed".into(),
     });
     assert_eq!(app.discover.entries.len(), 3, "parent plus two artists");
 
@@ -2376,7 +2412,7 @@ fn a_discover_reply_for_a_view_already_left_is_dropped() {
         data: DiscoverData::Tracks(vec![near("late", 0.8)]),
         note: None,
         dest: DiscoverDest::Browser,
-        seed: String::new(),
+        seed: "seed".into(),
     });
     assert_eq!(*app.discover_node(), DiscoverNode::Root);
     assert_eq!(app.discover.entries.len(), 2, "still the mode menu");
@@ -3561,6 +3597,118 @@ fn sampling_asks_for_picks_without_queueing_any() {
     assert_eq!(panel.pool.as_ref().unwrap().pool_size, 1247);
     assert!(!panel.sample_pending);
     assert!(app.queue.items.is_empty(), "a sample is not a queue");
+}
+
+#[test]
+fn a_cleared_end_stays_cleared_when_you_come_back() {
+    // The seeding is for a panel nobody has touched. Reading that off "both
+    // ends are empty" made clearing the only end you had chosen look
+    // identical to never having chosen one — so stepping away and back
+    // filled it straight back in, which is the one thing it must not do.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("playing")]);
+    app.play_index(0);
+
+    let sonic = sonic_tab(&app);
+    app.handle_action(Action::SelectTab(sonic));
+    assert_eq!(
+        app.sonic.start.as_ref().map(|t| t.filepath.as_str()),
+        Some("playing"),
+        "a pristine panel does take what is playing"
+    );
+
+    // Clear it, which is the state that used to read as pristine.
+    app.sonic.set_side(SonicSide::Start, None);
+    assert!(app.sonic.start.is_none() && app.sonic.end.is_none());
+
+    app.handle_action(Action::SelectTab(0));
+    app.handle_action(Action::SelectTab(sonic));
+    assert!(app.sonic.start.is_none(), "cleared is a choice, and it is kept");
+
+    // Start over is a pristine panel again, so the seeding comes back.
+    app.reset_sonic_path();
+    app.handle_action(Action::SelectTab(0));
+    app.handle_action(Action::SelectTab(sonic));
+    assert_eq!(app.sonic.start.as_ref().map(|t| t.filepath.as_str()), Some("playing"));
+}
+
+#[test]
+fn changing_the_length_stops_waiting_for_a_path_of_the_old_one() {
+    // `consume_journey` drops a reply whose length is not the current one,
+    // so once the slider moves, nothing is coming — and a wait kept for it
+    // left the row saying "plotting…" for the rest of the session.
+    let mut app = connected_app();
+    let sonic = sonic_tab(&app);
+    app.handle_action(Action::SelectTab(sonic));
+    app.sonic.set_side(SonicSide::Start, Some(track("a")));
+    app.sonic.set_side(SonicSide::End, Some(track("b")));
+    app.refresh_sonic_rows();
+
+    // Build, from the row that builds.
+    let build = app
+        .sonic_pane
+        .entries
+        .iter()
+        .position(|e| matches!(e, Entry::Sonic { row: SonicRow::Build, .. }))
+        .expect("a Build row");
+    app.sonic_pane.state.select(Some(build));
+    assert!(!app.handle_action(Action::Activate).is_empty(), "the request goes out");
+    assert!(app.sonic.pending);
+
+    let was = app.sonic.length;
+    let length = app
+        .sonic_pane
+        .entries
+        .iter()
+        .position(|e| matches!(e, Entry::Sonic { row: SonicRow::Length, .. }))
+        .expect("a Length row");
+    app.sonic_pane.state.select(Some(length));
+    assert!(app.sonic_step(1).is_some(), "→ on the length row is the adjuster");
+    assert_ne!(app.sonic.length, was, "the slider moved");
+    assert!(!app.sonic.pending, "nothing is coming, so nothing is being waited for");
+
+    // And the reply plotted for the old length is still ignored when it
+    // lands — clearing the wait must not have opened a door for it.
+    app.consume_journey(Vec::new(), None, was);
+    assert!(!app.sonic.fetched, "a path of the wrong length is not this panel's answer");
+}
+
+#[test]
+fn a_wait_nothing_will_answer_is_given_up_on() {
+    // Every "waiting" flag in the player has to be cleared by the error
+    // funnel as well as by its own reply, because the reply is exactly what
+    // an error means you will not get. Two of these were missed: the
+    // Auto-DJ sample lost its reset when the panel stopped being a modal
+    // that could be closed, and the full-screen Discover panel never had
+    // one — and neither can be retried while its flag is still up.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("first")]);
+    app.play_index(0);
+    on_the_now_discover_tab(&mut app);
+    assert!(app.now_discover.as_ref().unwrap().pending);
+
+    // Same view, one tab along — leaving Discover does not answer its wait.
+    while app.now_tab() != NowTab::AutoDj {
+        app.handle_action(Action::NowTabNext);
+    }
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Sample).unwrap();
+    app.handle_action(Action::Activate);
+    assert!(app.dj_panel.sample_pending);
+
+    app.apply_event(Event::Error("the server hung up".into()));
+
+    assert!(!app.dj_panel.sample_pending, "the sample row is askable again");
+    let shown = app.now_discover.as_ref().unwrap();
+    assert!(!shown.pending, "the panel stops saying it is looking");
+    // And it must not claim the *server* said there was nothing close —
+    // that is an answer, and this is the absence of one.
+    let why = shown.note.as_deref().unwrap_or_default();
+    assert!(!why.contains("nothing close"), "got {why:?}");
+    assert!(why.contains("didn't come back"), "got {why:?}");
+
+    // Asking again is the point of clearing it.
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Sample).unwrap();
+    assert!(!app.handle_action(Action::Activate).is_empty(), "the sample can be re-asked");
 }
 
 #[test]

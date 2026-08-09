@@ -1100,9 +1100,14 @@ guessing.
   `DiscoverData::Tracks` carried `Vec<Track>`, built by `SimilarTrack::
   into_track()`, which drops the similarity. It carries `Vec<SimilarTrack>`
   now, and both views show the number.
-- **The stale guard needed both halves.** Seed *and* node: the two lists are
-  asked for separately about the same seed, so an artists reply arriving
-  after the user asked for songs is as wrong as a reply about another track.
+- **The stale guard needed both halves, on both arms.** Seed *and* node: the
+  two lists are asked for separately about the same seed, so an artists
+  reply arriving after the user asked for songs is as wrong as a reply about
+  another track — and "similar tracks" is the same node whatever it is
+  similar *to*, so the node alone cannot catch a re-seeded tab. The panel's
+  arm had both from the start; the browser's was written with `..` and
+  guarded on the node until the review found it, which is exactly the shape
+  of bug a doc claiming otherwise helps hide.
 
 ### Phase 5 — Release & install ✅ DONE 2026-08-06 (v0.1.0 → v0.1.2)
 Tag-driven releases (binaries + `manifest.json` with per-file sha256) and the README install

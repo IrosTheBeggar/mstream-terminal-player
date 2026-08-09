@@ -26,11 +26,17 @@ impl App {
     // ── Getting there ───────────────────────────────────────────────────────
 
     /// Show the tab, refusing politely on a server that cannot plot paths.
+    ///
+    /// Leaves the full-screen view on the way, because this is navigation
+    /// and the tab it navigates to is drawn on the browser screen. Without
+    /// that, `J` from the full-screen view rewrote the panel and could fire
+    /// a build request with nothing on screen to show for either.
     pub(super) fn open_sonic_tab(&mut self) -> Vec<Effect> {
         if !self.capabilities.discovery_path {
             self.error("this server can't plot sonic paths — it has no discovery index");
             return Vec::new();
         }
+        self.fullscreen = false;
         match self.tabs().iter().position(|tab| *tab == Tab::SonicPath) {
             Some(index) => self.select_tab(index),
             None => Vec::new(),
@@ -45,7 +51,12 @@ impl App {
             self.error("this server can't plot sonic paths — it has no discovery index");
             return Vec::new();
         }
-        let Some(picked) = self.selected_track() else {
+        // The full-screen Discover panel has a highlighted row of its own,
+        // and it is the one on screen — `a` already prefers it for the same
+        // reason. Without this, `J` there travelled to whatever the hidden
+        // browser happened to be pointing at.
+        let picked = self.now_discover_selected().or_else(|| self.selected_track());
+        let Some(picked) = picked else {
             self.error("highlight a track to travel to");
             return Vec::new();
         };
@@ -251,7 +262,10 @@ impl App {
             };
             entries.extend([
                 Entry::Sonic {
-                    label: "\u{25b6} Play the path".to_string(),
+                    // Through the glyph set, not spelled out: U+25B6 is one
+                    // of the characters a console font does not have, and
+                    // this row is the tab's headline.
+                    label: format!("{} Play the path", crate::tui::ui::glyphs().playing),
                     detail: format!("{length} \u{b7} replaces the queue"),
                     row: SonicRow::Play,
                 },
@@ -444,6 +458,12 @@ impl App {
         // Deliberately not a refetch: sliding the length would otherwise put
         // a request on the wire per keystroke. Build (or Regenerate, which
         // is the same row by another name) is what asks.
+        //
+        // But a path already on the wire was plotted for the length that has
+        // just changed, and `consume_journey` drops a reply whose length is
+        // not the current one — so nothing is coming, and a wait kept for it
+        // left the row saying "plotting…" for the rest of the session.
+        self.sonic.pending = false;
         self.refresh_sonic_rows();
         Vec::new()
     }

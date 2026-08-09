@@ -901,6 +901,13 @@ pub struct SonicPath {
     /// the panel rather than flashed in the footer: it is the state of what
     /// is on screen, not news.
     pub note: Option<String>,
+    /// Whether either end has ever been set or cleared here.
+    ///
+    /// Not `start.is_none() && end.is_none()`: that is also the state you
+    /// get by clearing the only end you had chosen, so seeding on it filled
+    /// the panel straight back in — the one thing the seeding promises not
+    /// to do. Cleared by "Start over", which is a pristine panel again.
+    pub touched: bool,
 }
 
 impl Default for SonicPath {
@@ -914,6 +921,7 @@ impl Default for SonicPath {
             pending: false,
             fetched: false,
             note: None,
+            touched: false,
         }
     }
 }
@@ -927,6 +935,7 @@ impl SonicPath {
     }
 
     fn set_side(&mut self, side: SonicSide, track: Option<Track>) {
+        self.touched = true;
         match side {
             SonicSide::Start => self.start = track,
             SonicSide::End => self.end = track,
@@ -946,18 +955,16 @@ impl SonicPath {
 
 /// What the full-screen view's Discover tab is showing.
 ///
-/// Deliberately not the browser tab's state. That one is a drill anchored on
-/// a seed captured when you opened it, and it stays put while you walk
-/// around inside it; this one follows whatever is on the speakers and has
-/// one view. Sharing them would mean drilling into an artist in the browser
-/// silently changing what "what this sounds like" says about the track you
-/// are listening to.
-/// What the full-screen view's Discover tab is showing.
-///
 /// One question, asked about whatever is on the speakers, and re-asked when
 /// that changes. Choosing what to look around from belongs on the Discover
 /// *tab*, which is a place you go to look something up; this is a panel you
 /// glance at while a track plays, and it should need no steering.
+///
+/// Deliberately not the browser tab's state, for that reason: that one is a
+/// drill anchored on a seed you chose, and it stays put while you walk
+/// around inside it. Sharing them would mean drilling into an artist in the
+/// browser silently changing what "what this sounds like" says about the
+/// track you are listening to.
 #[derive(Debug)]
 pub struct NowDiscover {
     /// The filepath it was asked about. A reply naming anything else is
@@ -1135,7 +1142,7 @@ pub struct App {
     /// trusted only briefly: the engine may lawfully land a forward seek
     /// short of the ask (its end-of-track runway clamp), and an expired
     /// goal must not keep outvoting reality.
-    seek_goal: Option<(f64, std::time::Instant)>,
+    seek_goal: Option<(f64, crate::clock::Instant)>,
     pub volume: f32,
     /// Seconds of blend between tracks, from `crossfade_seconds` in
     /// config.toml; 0 is off. Also adjustable in the Auto-DJ panel (C4).
@@ -1197,6 +1204,12 @@ pub struct App {
     /// keeps using the queue's own selection, so `d` there removes the row you
     /// are looking at rather than one the other screen had highlighted.
     pub now_scroll: usize,
+    /// Where the window onto that list starts. Kept beside the cursor rather
+    /// than worked out fresh each frame: a scroll offset computed into a
+    /// local is thrown away with the frame, so the next one starts from the
+    /// top again and pins the cursor to the bottom edge for good — the trap
+    /// [`crate::tui::ui`] documents on the queue panel.
+    pub now_offset: usize,
 
     pub message: Option<Message>,
     pub show_help: bool,
@@ -1282,6 +1295,7 @@ impl App {
             spinner: 0,
             now_tab: NowTab::Queue,
             now_scroll: 0,
+            now_offset: 0,
             message: None,
             show_help: false,
             should_quit: false,
@@ -1426,6 +1440,7 @@ impl App {
         let next = (at + delta).rem_euclid(tabs.len() as isize) as usize;
         self.now_tab = tabs[next];
         self.now_scroll = 0;
+        self.now_offset = 0;
         Vec::new()
     }
 
@@ -1567,6 +1582,24 @@ impl App {
             self.sonic.fetched = true;
             self.refresh_sonic_rows();
         }
+        // So does the full-screen Discover panel. Its wait is only ever
+        // cleared by a matching reply, and `refresh_now_discover` will not
+        // re-ask while an entry for this seed exists — so an error left it
+        // spinning "looking…" until the track ended.
+        if let Some(shown) = self.now_discover.as_mut() {
+            if shown.pending {
+                shown.pending = false;
+                // Not the empty-list wording: "nothing close in your
+                // library" is the server's answer, and this is the absence
+                // of one. What actually went wrong is in the footer.
+                shown.note = Some("that look didn't come back".into());
+            }
+        }
+        // And the Auto-DJ sample. It used to be a modal, and closing the
+        // modal dropped the panel and this flag with it; as a tab the panel
+        // outlives every request, so one failed sample disabled the row for
+        // the rest of the session.
+        self.dj_panel.sample_pending = false;
     }
 
     /// Where the Search tab is: the class menu, one class, or something
@@ -1673,12 +1706,23 @@ impl App {
                 Vec::new()
             }
             Action::Cancel => {
-                self.show_help = false;
+                // The overlay is drawn over everything, so it is what the
+                // user is looking at and the first thing Esc takes away.
+                if self.show_help {
+                    self.show_help = false;
+                    return Vec::new();
+                }
                 // An armed picker is the loudest thing on screen, so Esc
-                // means "stop picking" before it means anything else.
-                if self.capture.take().is_some() {
+                // means "stop picking" before it means anything else — and
+                // it goes back to whichever panel did the asking, the way
+                // answering it does. Sending both to Sonic Path dropped a
+                // cancelled Discover pick on a tab it had never been on.
+                if let Some(who) = self.capture.take() {
                     self.message = None;
-                    return self.open_sonic_tab();
+                    return match who {
+                        Capture::Sonic(_) => self.open_sonic_tab(),
+                        Capture::Discover => self.open_discover_tab(),
+                    };
                 }
                 // The guaranteed way out of the Crossfade rows, where the
                 // left arrow has been given to adjustment.
@@ -1688,6 +1732,10 @@ impl App {
                 if self.tab == Tab::SonicPath && !self.sonic_stack.wants(&SonicNode::Root) {
                     return self.go_back();
                 }
+                // Nothing to call off. Esc has meant "the key list" since
+                // before it meant anything else, and a listing with nothing
+                // open is exactly where people still reach for it.
+                self.show_help = true;
                 Vec::new()
             }
             Action::CycleFocus if !self.fullscreen => {
@@ -1718,7 +1766,10 @@ impl App {
                     match self.now_tab() {
                         NowTab::Queue => self.queue.select_first(),
                         NowTab::AutoDj => self.dj_panel.row = 0,
-                        _ => self.now_scroll = 0,
+                        _ => {
+                            self.now_scroll = 0;
+                            self.now_offset = 0;
+                        }
                     }
                 } else {
                     match self.focus {
@@ -1778,9 +1829,15 @@ impl App {
             Action::NowTabNext => self.move_now_tab(1),
             Action::NowTabPrev => self.move_now_tab(-1),
             Action::SelectNowTab(index) => {
+                // The strip is filtered — Lyrics comes and goes with the
+                // track, Discover with the server — so a digit past its end
+                // is a key this session does not have. It does nothing here
+                // rather than falling through to the browser tabs, which
+                // would move a screen nobody can see.
                 if let Some(tab) = self.now_tabs().get(index).copied() {
                     self.now_tab = tab;
                     self.now_scroll = 0;
+                    self.now_offset = 0;
                 }
                 Vec::new()
             }
@@ -1942,8 +1999,10 @@ impl App {
                 // Landing on a pristine tab with something playing: seed the
                 // start, the way "Use playing song" would. Only on a panel
                 // nobody has touched — clearing an end and stepping away
-                // must not have it quietly filled back in.
+                // must not have it quietly filled back in, which is what
+                // reading "pristine" off the two ends being empty did.
                 if self.sonic.view == SonicView::Setup
+                    && !self.sonic.touched
                     && self.sonic.start.is_none()
                     && self.sonic.end.is_none()
                     && let Some(track) = self.now_playing.clone()
@@ -2125,10 +2184,12 @@ impl App {
                     }
                 }
             }
-            Entry::Discover { node, label, .. } => {
-                self.push_trail();
-                self.open_discover(node, &label)
-            }
+            // The trail column is pushed inside, not here: two of these rows
+            // do not drill anywhere — "Choose a song…" arms the picker, and
+            // "What's playing" with nothing playing only complains — and a
+            // column pushed for a step that never happened is a duplicate of
+            // the one beside it that repeating the gesture keeps stacking.
+            Entry::Discover { node, label, .. } => self.open_discover(node, &label),
             Entry::Setting { row, .. } => match row {
                 SettingRow::CrossfadeMenu => {
                     self.push_trail();
@@ -2282,7 +2343,7 @@ impl App {
             }
             Tab::Discover => {
                 let Some(node) = self.discover_stack.back() else {
-                    return None; // already at the mode menu
+                    return None; // already at the question the tab starts on
                 };
                 match node {
                     DiscoverNode::Root => {
@@ -2555,6 +2616,7 @@ impl App {
         // An artist's ways in are already here; going in costs nothing.
         if let DiscoverNode::Artist(artist) = &node {
             let entries = self.discover_entry_point_entries(artist);
+            self.push_trail();
             self.discover_stack.enter(node);
             self.discover.set(entries);
             self.message = None;
@@ -2569,15 +2631,29 @@ impl App {
                 return Vec::new();
             };
             self.discover_seed = Some(playing);
+            self.push_trail();
             self.discover_stack.enter(node);
             self.discover.set(self.discover_mode_entries());
             self.message = None;
             return Vec::new();
         }
+        self.push_trail();
         self.discover_stack.enter(node.clone());
         self.discover.set(Vec::new());
         self.info(format!("looking for {}…", label.to_lowercase()));
         self.request_discover(node)
+    }
+
+    /// Put the Discover tab back in front, if this server has one.
+    ///
+    /// It always does when a Discover capture is in play — the row that arms
+    /// it only exists on that tab — but the tab list is built from the
+    /// server's capabilities, so this asks rather than assumes.
+    pub(super) fn open_discover_tab(&mut self) -> Vec<Effect> {
+        match self.tabs().iter().position(|tab| *tab == Tab::Discover) {
+            Some(index) => self.select_tab(index),
+            None => Vec::new(),
+        }
     }
 
     /// A track pointed at rather than played: it becomes what the tab looks
@@ -2588,10 +2664,7 @@ impl App {
         self.discover_stack.restart();
         self.discover_stack.enter(DiscoverNode::Mode);
         let entries = self.discover_mode_entries();
-        let effects = match self.tabs().iter().position(|tab| *tab == Tab::Discover) {
-            Some(index) => self.select_tab(index),
-            None => Vec::new(),
-        };
+        let effects = self.open_discover_tab();
         self.discover.set(entries);
         self.info(format!("looking around {label}"));
         effects
@@ -2638,6 +2711,7 @@ impl App {
             note: None,
         });
         self.now_scroll = 0;
+        self.now_offset = 0;
         Some(Effect::Api(ApiCmd::Discover {
             node: DiscoverNode::Tracks,
             seed: Box::new(seed),
@@ -3061,7 +3135,7 @@ impl App {
         if self.status.duration > 0.0 {
             target = target.min(self.status.duration);
         }
-        self.seek_goal = Some((target, std::time::Instant::now()));
+        self.seek_goal = Some((target, crate::clock::Instant::now()));
         vec![Effect::Audio(AudioCmd::Seek(target))]
     }
 
@@ -3267,12 +3341,20 @@ impl App {
                 shown.tracks = tracks;
                 shown.note = note;
                 self.now_scroll = 0;
+        self.now_offset = 0;
                 Vec::new()
             }
-            Event::Discover { node, data, note, dest: DiscoverDest::Browser, .. } => {
+            Event::Discover { node, data, note, dest: DiscoverDest::Browser, seed } => {
                 // Drop a reply for a view the user has already left, the same
-                // rule the Library tab follows.
+                // rule the Library tab follows — and one for a seed the tab
+                // has since been re-pointed at, which the node alone cannot
+                // tell apart: "similar tracks" is the same node whatever it
+                // is similar *to*, so a slow first answer would land under
+                // the second seed's title and be read as being about it.
                 if !self.discover_stack.wants(&node) {
+                    return Vec::new();
+                }
+                if self.discover_seed.as_ref().is_some_and(|on| on.filepath != seed) {
                     return Vec::new();
                 }
                 match data {
@@ -3321,8 +3403,16 @@ impl App {
             // Same rule, and here it is the whole point: a shape asked for
             // ahead of the track lands while something else is still
             // playing, and is filed for when it starts.
-            Event::Waveform { filepath, bars } => {
-                self.waveforms.insert(filepath, bars);
+            Event::Waveform { filepath, bars, settled } => {
+                // The slot was claimed when the question went out, so that
+                // nothing asks twice. An unanswered question has to give it
+                // back — otherwise one dropped connection is the last word
+                // on that track for the rest of the session.
+                if settled {
+                    self.waveforms.insert(filepath, bars);
+                } else {
+                    self.waveforms.remove(&filepath);
+                }
                 Vec::new()
             }
             Event::PlaylistSaved { name, count } => self.consume_playlist_saved(name, count),
