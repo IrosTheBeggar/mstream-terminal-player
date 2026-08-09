@@ -458,6 +458,11 @@ quits — so **View log** opens a real session at any time, written or not (`j`/
 follows the end as new lines arrive, `q` closes). That is usually all a "what just happened?"
 needs, and it leaves nothing behind on disk.
 
+Whatever the level, secrets are taken out before a line reaches either the ring or the file:
+query strings (an mStream media URL carries `?token=…`) and any credentials in a URL are
+replaced with `<redacted>`, and the file is created readable only by you. The log is meant to be
+attachable to a bug report.
+
 **Write log** (off by default) decides whether the same lines are also kept in a file. Turn it on
 and the file opens *carrying what has already been captured*, so the thing you just watched
 happen is in it — no restart, no environment variable. **Log level** (info by default) is how
@@ -476,8 +481,9 @@ afterwards.
   `info`). The player prints `logging to …` at start and again at quit.
 - `MSTREAM_ENGINE_TRACE=/path/to/file` is the player's own flight recorder: one timestamped line
   per transition decision — plays, announcements, seeks and their clamps, prepares, open failures
-  with reasons, retries, handovers — plus every diagnostic the TUI kept off the screen. The file
-  is truncated at each start, so it is always exactly one run.
+  with reasons, retries, handovers — plus every diagnostic the TUI kept off the screen. Each run
+  appends and signs itself with a banner, so two players sharing one path interleave rather than
+  overwrite each other.
 
 The first is for "what did the network do"; the second for "what did the player decide". A bug
 report with both attached usually answers itself.

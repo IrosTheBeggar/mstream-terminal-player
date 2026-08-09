@@ -813,6 +813,42 @@ Kept deliberately: two files, two questions. `MSTREAM_LOG` answers "what did the
 the recorder answers "what did the player decide" — merging them would bury the forty decision
 lines under ten thousand of hyper's.
 
+#### PR #5 review round ✅ 2026-08-08 (branch `logs`)
+
+Seven review lenses over the diagnostics diff, each finding put to two skeptics, then a
+completeness critic: 39 raw findings, 20 survived, 13 distinct after dedup. Six fixed here — the
+four that blocked, plus the two the review called out as merge-blocking in their own right:
+
+- **The auth token was captured.** Our own lines were redacted, but stream-download names the URL
+  it is fetching in a span field and reqwest logs request URLs at debug — and an mStream media
+  URL carries `?token=<jwt>`. It reached the ring, the viewer and the file the README invites
+  people to attach to bug reports. Scrubbing now happens in the writer, where both destinations
+  meet (query strings and URL userinfo → `<redacted>`), and the file is created `0600`. Pinned by
+  a unit test on the exact leaked shape and a live trace-level smoke that greps for the secret.
+- **A paused player flooded the ring.** `etrace!` became an always-on tracing event, and two
+  `crossfade_step` gates log on every tick — so a pause near a boundary wrote ~8 lines a second
+  and evicted the whole 2 000-line ring in four minutes, destroying the session the feature
+  exists to hold. The gates are edge-triggered now (`State::gate_noted`): once per stretch, and
+  the next closure still speaks. Pinned by a smoke that pauses for 20 s and counts one line.
+- **Re-enabling Write log truncated the file.** `File::create` on a path the session had already
+  written destroyed everything past the ring. Opening now distinguishes `Fresh` from `Resume`:
+  a resume appends, and pours only the stretch captured while writing was off, tracked by a
+  monotonic line counter on the ring. Pinned by unit tests and a UI toggle smoke.
+- **The log viewer panicked in the browser build.** `std::time::Instant::now()` panics on
+  wasm32-unknown-unknown — the reason `crate::clock` exists — and `cargo check` cannot see it.
+  All shared sites now use the shim, including a pre-existing one in `seek_goal`.
+- **One `log_touched` flag persisted both switches**, so walking the level in a session started
+  by `MSTREAM_LOG=1` also wrote `write = true` and turned on permanent disk logging. Split.
+- **The flight recorder had lost `O_APPEND`** in the earlier hygiene change: two players sharing
+  one `MSTREAM_ENGINE_TRACE` truncated each other and wrote at their own offsets, NUL-filling the
+  overlap. It appends and signs each run again. Pinned by a two-player smoke (2 banners, 0 NULs).
+
+Left for a follow-up, with the review's reasoning recorded: no size cap on a long-running
+session's file (rotation happens only at open); every one-shot CLI subcommand rotates the default
+log; cross-process rotation races; the ring's worst-case memory (128 MiB with 64 KiB lines) does
+not match its comment; and the two new tests that mutate the process-global ring should stop
+racing each other.
+
 #### The ring: a log you can read without keeping ✅ 2026-08-07 (branch `logs`)
 
 "Is there any way to view logs without writing them?" — there is now. Every event the level

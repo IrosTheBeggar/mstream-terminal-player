@@ -142,6 +142,10 @@ pub enum SettingRow {
 /// while open. Its source is the in-memory ring, so it reads the same
 /// whether or not a file is being written — the label just says which of
 /// those is true.
+///
+/// Times come from [`crate::clock`], never `std::time::Instant`: std's
+/// `now()` panics on wasm32-unknown-unknown, and this is drawing code the
+/// browser build compiles and runs (PR #5 review).
 pub struct LogView {
     pub source: String,
     pub lines: Vec<String>,
@@ -149,7 +153,7 @@ pub struct LogView {
     /// Stick to the end as new lines arrive, until the user scrolls away;
     /// `G` re-attaches.
     pub follow: bool,
-    refreshed: std::time::Instant,
+    refreshed: crate::clock::Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -900,7 +904,13 @@ pub struct App {
     /// made here, not ones the environment forced.
     pub log_write: bool,
     pub log_level: crate::logging::Level,
-    log_touched: bool,
+    /// Which of the two the user actually chose in this session's Settings,
+    /// tracked separately. One flag for both meant that nudging the level
+    /// in a session started with MSTREAM_LOG=1 also persisted `write =
+    /// true`, quietly turning on permanent disk logging nobody asked for
+    /// (PR #5 review).
+    log_write_touched: bool,
+    log_level_touched: bool,
     /// The log viewer, while it is open — it owns the movement keys.
     pub log_view: Option<LogView>,
     /// How the Quick Connect tunnel is reaching the server, when this
@@ -924,7 +934,7 @@ pub struct App {
     /// trusted only briefly: the engine may lawfully land a forward seek
     /// short of the ask (its end-of-track runway clamp), and an expired
     /// goal must not keep outvoting reality.
-    seek_goal: Option<(f64, std::time::Instant)>,
+    seek_goal: Option<(f64, crate::clock::Instant)>,
     pub volume: f32,
     /// Seconds of blend between tracks, from `crossfade_seconds` in
     /// config.toml; 0 is off. Also adjustable in the Auto-DJ panel (C4).
@@ -1043,7 +1053,8 @@ impl App {
             browse_undo: None,
             log_write: crate::logging::writing(),
             log_level: crate::logging::level(),
-            log_touched: false,
+            log_write_touched: false,
+            log_level_touched: false,
             log_view: None,
             tunnel_path: None,
             seek_goal: None,
@@ -2203,7 +2214,7 @@ impl App {
             }
             SettingRow::LogWrite => {
                 self.log_write = !self.log_write;
-                self.log_touched = true;
+                self.log_write_touched = true;
                 match crate::logging::set_write(self.log_write) {
                     Some(path) => self.info(format!("logging to {}", path.display())),
                     None if self.log_write => {
@@ -2218,7 +2229,7 @@ impl App {
             }
             SettingRow::LogLevel => {
                 self.log_level = self.log_level.step(delta);
-                self.log_touched = true;
+                self.log_level_touched = true;
                 crate::logging::set_level(self.log_level);
                 self.refresh_settings_rows();
                 return Vec::new();
@@ -2231,11 +2242,16 @@ impl App {
         vec![effect]
     }
 
-    /// The log switches to remember at quit — Some only when the user chose
-    /// them in this session's Settings, so an environment-forced session
-    /// never silently becomes configuration.
-    pub fn chosen_log_prefs(&self) -> Option<(bool, crate::logging::Level)> {
-        self.log_touched.then_some((self.log_write, self.log_level))
+    /// The write switch to remember at quit, if the user set it here.
+    pub fn chosen_log_write(&self) -> Option<bool> {
+        self.log_write_touched.then_some(self.log_write)
+    }
+
+    /// The level to remember at quit, if the user set it here. Independent
+    /// of the switch: choosing how loud a log would be is not choosing to
+    /// keep one.
+    pub fn chosen_log_level(&self) -> Option<crate::logging::Level> {
+        self.log_level_touched.then_some(self.log_level)
     }
 
     /// Open the log viewer on the current file, tail-first — or say why not.
@@ -2250,7 +2266,7 @@ impl App {
             lines,
             scroll: usize::MAX, // clamped to the end at render
             follow: true,
-            refreshed: std::time::Instant::now(),
+            refreshed: crate::clock::Instant::now(),
         });
         Vec::new()
     }
@@ -2311,7 +2327,7 @@ impl App {
             return;
         }
         view.lines = crate::logging::tail(LOG_VIEW_LINES);
-        view.refreshed = std::time::Instant::now();
+        view.refreshed = crate::clock::Instant::now();
     }
 
     // ── Discover ────────────────────────────────────────────────────────────
@@ -2747,7 +2763,7 @@ impl App {
         if self.status.duration > 0.0 {
             target = target.min(self.status.duration);
         }
-        self.seek_goal = Some((target, std::time::Instant::now()));
+        self.seek_goal = Some((target, crate::clock::Instant::now()));
         vec![Effect::Audio(AudioCmd::Seek(target))]
     }
 

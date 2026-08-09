@@ -3557,8 +3557,8 @@ fn the_logs_room_switches_levels_and_opens_the_viewer() {
     app.handle_action(Action::Activate);
     assert!(!app.log_write);
     assert!(app.message.as_ref().unwrap().text.contains("no log file"));
-    assert_eq!(app.chosen_log_prefs(), Some((false, crate::logging::Level::Info)),
-        "touched: the choice would persist");
+    assert_eq!(app.chosen_log_write(), Some(false), "the switch was chosen here");
+    assert_eq!(app.chosen_log_level(), None, "but the level was not — it must not persist");
 
     // The level is its own row, adjustable whether or not anything writes
     // yet — it is the loudness the switch will use.
@@ -3592,7 +3592,7 @@ fn the_logs_room_switches_levels_and_opens_the_viewer() {
         lines: (1..=50).map(|n| format!("line {n}")).collect(),
         scroll: usize::MAX,
         follow: true,
-        refreshed: std::time::Instant::now(),
+        refreshed: crate::clock::Instant::now(),
     });
     let before = app.pane().state.selected();
     app.handle_action(Action::Down);
@@ -3606,7 +3606,27 @@ fn the_logs_room_switches_levels_and_opens_the_viewer() {
 
     // Untouched sessions remember nothing.
     let fresh = connected_app();
-    assert_eq!(fresh.chosen_log_prefs(), None);
+    assert_eq!(fresh.chosen_log_write(), None);
+    assert_eq!(fresh.chosen_log_level(), None);
+}
+
+/// The two switches persist independently: walking the level in a session
+/// that the environment turned logging on for must not also write
+/// `write = true` into the config and keep it on forever after.
+#[test]
+fn choosing_a_level_does_not_persist_the_write_switch() {
+    let mut app = connected_app();
+    // As if MSTREAM_LOG=1 had started this session writing.
+    app.log_write = true;
+    app.handle_action(Action::SelectTab(5));
+    app.handle_action(Action::Down);      // Logs
+    app.handle_action(Action::Activate);  // into the room
+    app.handle_action(Action::Down);      // Log level
+    app.handle_action(Action::Activate);  // info -> debug
+
+    assert_eq!(app.log_level, crate::logging::Level::Debug);
+    assert_eq!(app.chosen_log_level(), Some(crate::logging::Level::Debug));
+    assert_eq!(app.chosen_log_write(), None, "the switch was never touched here");
 }
 
 #[test]

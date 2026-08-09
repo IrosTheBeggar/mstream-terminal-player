@@ -113,6 +113,10 @@ static RING: LazyLock<Mutex<Ring>> = LazyLock::new(|| Mutex::new(Ring::default()
 
 #[derive(Default)]
 struct Ring {
+    /// How many lines have ever been pushed — not how many are held. It is
+    /// what lets writing resume without either losing the stretch captured
+    /// while it was off or repeating the stretch already in the file.
+    total: u64,
     lines: VecDeque<String>,
     /// The tail of a line the writer has not finished handing over: the fmt
     /// layer may deliver one event in several writes, and half a line in
@@ -141,7 +145,65 @@ impl Ring {
             self.lines.pop_front();
         }
         self.lines.push_back(line);
+        self.total += 1;
     }
+
+    /// The lines pushed at or after `mark` that the ring still holds. A
+    /// mark older than the ring's memory yields everything it has, which is
+    /// the honest answer: what fell out is gone.
+    fn since(&self, mark: u64) -> Vec<String> {
+        let oldest = self.total - self.lines.len() as u64;
+        let skip = mark.saturating_sub(oldest) as usize;
+        self.lines.iter().skip(skip).cloned().collect()
+    }
+}
+
+/// Take the secrets out of a formatted log line.
+///
+/// The player's own lines are careful (`http::redact_source`), but most of
+/// what is captured belongs to other crates: stream-download names the URL
+/// it is fetching in a span field, reqwest and hyper log request URLs at
+/// debug — and an mStream media URL carries `?token=<jwt>`. A log the
+/// README invites people to attach to a bug report must not be a way to
+/// hand a stranger a working credential, so the scrub happens where both
+/// destinations meet rather than at each crate's call site.
+///
+/// Two shapes go: a query string (everything from `?` to the next
+/// delimiter) and userinfo in a URL (`//user:pass@host`, which is how a
+/// proxy's credentials would arrive). The cost is a few characters of any
+/// prose that happens to contain a question mark, which is the right price.
+fn scrub(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(['?', '@']) {
+        let (head, tail) = rest.split_at(at);
+        if tail.starts_with('?') {
+            out.push_str(head);
+            out.push_str("?<redacted>");
+            let after = &tail[1..];
+            let end = after.find([' ', '"', '\'', ')', ',', '\\']).unwrap_or(after.len());
+            rest = &after[end..];
+            continue;
+        }
+        // An '@': redact backwards over the userinfo when this is a URL's
+        // authority, and otherwise leave the character alone (an '@' in
+        // ordinary prose is not a secret).
+        match head.rfind("//") {
+            // Everything between the `//` and the `@` is userinfo only if
+            // nothing has ended the authority in between.
+            Some(slashes) if !head[slashes + 2..].contains([' ', '/']) => {
+                out.push_str(&head[..slashes + 2]);
+                out.push_str("<redacted>@");
+            }
+            _ => {
+                out.push_str(head);
+                out.push('@');
+            }
+        }
+        rest = &tail[1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The last `max` lines the ring holds, oldest first.
@@ -154,6 +216,16 @@ pub fn tail(max: usize) -> Vec<String> {
 /// How many lines have been captured this session.
 pub fn captured() -> usize {
     RING.lock().unwrap().lines.len()
+}
+
+/// How many lines have ever been captured — the mark writing resumes from.
+fn ring_total() -> u64 {
+    RING.lock().unwrap().total
+}
+
+/// What the ring has held since `mark`.
+fn ring_since(mark: u64) -> Vec<String> {
+    RING.lock().unwrap().since(mark)
 }
 
 /// The file events land in, arriving whenever logging is first turned on.
@@ -179,14 +251,22 @@ struct LateGuard;
 #[cfg(not(target_arch = "wasm32"))]
 impl Write for LateGuard {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // Scrubbed once, here, before either destination sees it. This is
+        // the only place both roads pass through, and the alternative —
+        // trusting every crate in the tree to keep secrets out of its own
+        // log lines — is not a discipline anyone can hold. See [`scrub`].
+        let text = scrub(&String::from_utf8_lossy(buf));
         // The ring first and always: it is what the viewer reads, and it
         // must hold a session whether or not a file is being written.
-        RING.lock().unwrap().push_bytes(&String::from_utf8_lossy(buf));
-        match &mut *SINK.lock().unwrap() {
-            Some(file) => file.write(buf),
-            // Nothing on disk to take it, and nothing wrong with that.
-            None => Ok(buf.len()),
+        RING.lock().unwrap().push_bytes(&text);
+        if let Some(file) = &mut *SINK.lock().unwrap() {
+            // write_all, not write: a short write would otherwise leave the
+            // caller to retry a remainder the ring has already taken.
+            file.write_all(text.as_bytes())?;
         }
+        // Every byte of `buf` was accounted for, whatever the scrubbed
+        // length turned out to be.
+        Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
         match &mut *SINK.lock().unwrap() {
@@ -202,12 +282,17 @@ impl Write for LateGuard {
 /// show what was captured).
 #[cfg(not(target_arch = "wasm32"))]
 static HANDLE: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
-static STATE: Mutex<State> = Mutex::new(State { write: false, level: Level::Info, path: None });
+static STATE: Mutex<State> =
+    Mutex::new(State { write: false, level: Level::Info, path: None, gap_mark: None });
 
 struct State {
     write: bool,
     level: Level,
     path: Option<PathBuf>,
+    /// Where the file stopped keeping up: the ring's total at the moment
+    /// writing was switched off. Resuming pours exactly the lines captured
+    /// since, so nothing is lost and nothing is written twice.
+    gap_mark: Option<u64>,
 }
 
 /// What `MSTREAM_LOG` asked for.
@@ -262,25 +347,74 @@ fn resolve_target(target: Target) -> Option<PathBuf> {
     }
 }
 
-/// Truncate `path` into a fresh signed file and point the writer at it.
+/// Create (or truncate) a log file only its owner can read.
 ///
-/// `backlog` is what the ring already holds — poured in first, because the
-/// reason someone turns writing on is usually the thing they just watched
-/// happen. Without it the file would begin at the keystroke and miss
-/// exactly that.
+/// The scrub in [`scrub`] is the first defence and the load-bearing one,
+/// but a diagnostic log is still a record of what someone listened to and
+/// when, and this machine may not be theirs alone. `credentials.toml` is
+/// owner-only for the same reason; on Windows the inherited ACL of a
+/// per-user cache directory is the equivalent.
 #[cfg(not(target_arch = "wasm32"))]
-fn open_sink(path: &Path, backlog: &[String]) -> bool {
-    let Ok(mut file) = File::create(path) else { return false };
-    let _ = writeln!(
-        file,
-        "── mstream-player v{} — RUST_LOG overrides the level when set ──",
-        env!("CARGO_PKG_VERSION")
-    );
-    if !backlog.is_empty() {
-        let _ = writeln!(file, "── {} lines captured before writing began ──", backlog.len());
-        for line in backlog {
-            let _ = writeln!(file, "{line}");
+fn create_private(path: &Path) -> std::io::Result<File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// Whether a file is being started or picked back up.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq)]
+enum Opening {
+    /// A file this session has not written to: truncate and sign it.
+    Fresh,
+    /// A file this session already wrote and let go of. It is opened for
+    /// APPEND — `File::create` here would truncate away everything already
+    /// written, which is exactly what turning the switch off and on again
+    /// used to do (PR #5 review).
+    Resume,
+}
+
+/// Point the writer at `path`, pouring `backlog` in behind it.
+///
+/// On a fresh file the backlog is what the ring already holds, because the
+/// reason someone turns writing on is usually the thing they just watched
+/// happen; without it the file would begin at the keystroke and miss
+/// exactly that. On a resume the backlog is only the stretch captured while
+/// writing was off — the rest is already in the file.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_sink(path: &Path, backlog: &[String], how: Opening) -> bool {
+    let opened = match how {
+        Opening::Fresh => create_private(path),
+        Opening::Resume => fs::OpenOptions::new().append(true).create(true).open(path),
+    };
+    let Ok(mut file) = opened else { return false };
+    match how {
+        Opening::Fresh => {
+            let _ = writeln!(
+                file,
+                "── mstream-player v{} — RUST_LOG overrides the level when set ──",
+                env!("CARGO_PKG_VERSION")
+            );
+            if !backlog.is_empty() {
+                let _ =
+                    writeln!(file, "── {} lines captured before writing began ──", backlog.len());
+            }
         }
+        Opening::Resume => {
+            let _ = writeln!(
+                file,
+                "── writing resumed — {} lines captured while it was off ──",
+                backlog.len()
+            );
+        }
+    }
+    for line in backlog {
+        let _ = writeln!(file, "{line}");
     }
     *SINK.lock().unwrap() = Some(file);
     true
@@ -345,9 +479,12 @@ pub fn init() -> Option<PathBuf> {
     let _ = HANDLE.set(handle);
 
     // Nothing has been captured yet at boot, so the file opens empty.
-    let path = path.filter(|p| open_sink(p, &[]));
+    let path = path.filter(|p| open_sink(p, &[], Opening::Fresh));
     let write = write && path.is_some();
-    *STATE.lock().unwrap() = State { write, level, path: path.clone() };
+    // A file opened at boot is already up to date with the ring; one that
+    // was not opened owes everything, which is what a None mark means to
+    // the first turn-on.
+    *STATE.lock().unwrap() = State { write, level, path: path.clone(), gap_mark: None };
     path.filter(|_| write)
 }
 
@@ -389,8 +526,17 @@ fn apply_filter(_level: Level) {}
 /// [`subscriber_ready`] before any path is resolved — but the shared code
 /// path names it, so it exists and refuses.
 #[cfg(target_arch = "wasm32")]
-fn open_sink(_path: &Path, _backlog: &[String]) -> bool {
+fn open_sink(_path: &Path, _backlog: &[String], _how: Opening) -> bool {
     false
+}
+
+/// The browser build never opens anything, but the shared setter names the
+/// distinction, so the type exists there too.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, PartialEq)]
+enum Opening {
+    Fresh,
+    Resume,
 }
 
 /// Flip whether the captured log is also *written*, from the Settings tab.
@@ -402,25 +548,35 @@ pub fn set_write(on: bool) -> Option<PathBuf> {
     if !subscriber_ready() {
         return None;
     }
-    // The ring's lock is taken and released before the sink's: the writer
+    // The ring's locks are taken and released before the sink's: the writer
     // takes them in that order too, and one order is what makes it safe.
-    let backlog = if on { tail(usize::MAX) } else { Vec::new() };
     let mut state = STATE.lock().unwrap();
-    if on && state.path.is_none() {
-        state.path = resolve_target(Target::Default).filter(|p| open_sink(p, &backlog));
-    } else if on {
-        // A file this session already opened and let go of: re-point the
-        // writer at it, carrying over what has been captured since.
-        if let Some(path) = state.path.clone() {
-            state.path = Some(path.clone()).filter(|p| open_sink(p, &backlog));
+    if on {
+        match state.path.clone() {
+            // A path means this session already has a file. Whatever the
+            // marks say, it is picked back up rather than started over:
+            // truncating a session's own log is never the right answer.
+            Some(path) => {
+                let missed = state.gap_mark.map(ring_since).unwrap_or_default();
+                state.path = Some(path).filter(|p| open_sink(p, &missed, Opening::Resume));
+            }
+            // The first time: a new file, carrying everything so far.
+            None => {
+                let backlog = tail(usize::MAX);
+                state.path = resolve_target(Target::Default)
+                    .filter(|p| open_sink(p, &backlog, Opening::Fresh));
+            }
         }
+        state.gap_mark = None;
     }
     state.write = on && state.path.is_some();
     // Turning writing off leaves the filter alone: the ring goes on
     // holding the session, which is the whole point of being able to read
-    // a log without keeping one.
+    // a log without keeping one. The mark is where the file stopped
+    // keeping up, so resuming knows exactly what it owes.
     if !state.write {
         close_sink();
+        state.gap_mark = Some(ring_total());
     }
     state.path.clone().filter(|_| state.write)
 }
@@ -552,6 +708,86 @@ mod tests {
         ring.push_bytes(&"x".repeat(RING_LINE_CAP + 10));
         assert_eq!(ring.lines.len(), 1);
         assert!(ring.pending.len() < RING_LINE_CAP);
+    }
+
+    /// The log is a thing people attach to bug reports. Nothing in it may
+    /// be a working credential — and the lines that carry them come from
+    /// other crates, not ours.
+    #[test]
+    fn a_captured_line_never_carries_a_token_or_a_password() {
+        // stream-download's span field, the exact shape that leaked.
+        let line = r#"DEBUG new{url="https://host/media/a.mp3?token=eyJhbGciOi"}: requesting"#;
+        let scrubbed = scrub(line);
+        assert!(!scrubbed.contains("eyJhbGciOi"), "{scrubbed}");
+        assert!(scrubbed.contains("a.mp3?<redacted>"), "{scrubbed}");
+        assert!(scrubbed.contains("requesting"), "the rest of the line survives: {scrubbed}");
+
+        // A proxy's credentials arrive as userinfo.
+        assert_eq!(
+            scrub("connecting via http://alice:hunter2@proxy.corp:8080"),
+            "connecting via http://<redacted>@proxy.corp:8080"
+        );
+        // Several on one line, and a token that ends at a quote or a comma.
+        let many = scrub(r#"a=http://h/x?token=A, b=http://h/y?token=B"#);
+        assert!(!many.contains('A') || !many.contains("token"), "{many}");
+        assert_eq!(many, "a=http://h/x?<redacted>, b=http://h/y?<redacted>");
+
+        // Ordinary prose keeps its punctuation: an '@' that is not a URL's
+        // authority, and a '?' that is not a query.
+        assert_eq!(scrub("ask sherika@example about it"), "ask sherika@example about it");
+        assert_eq!(scrub("what now?"), "what now?<redacted>");
+        assert_eq!(scrub("no secrets here"), "no secrets here");
+    }
+
+    /// Writing off and on again must not cost the file its history — and
+    /// must not write the same stretch twice.
+    #[test]
+    fn resuming_a_file_appends_the_gap_and_keeps_what_was_there() {
+        let dir = std::env::temp_dir().join("mstream-player-test-resume");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run.log");
+
+        // A first stretch, written.
+        assert!(open_sink(&path, &["one".into(), "two".into()], Opening::Fresh));
+        *SINK.lock().unwrap() = None;
+        let after_first = fs::read_to_string(&path).unwrap();
+        assert!(after_first.contains("one") && after_first.contains("two"));
+
+        // Writing was off for a while; the ring kept "three".
+        assert!(open_sink(&path, &["three".into()], Opening::Resume));
+        *SINK.lock().unwrap() = None;
+        let after_resume = fs::read_to_string(&path).unwrap();
+        assert!(after_resume.contains("one"), "the earlier stretch survives: {after_resume}");
+        assert!(after_resume.contains("three"), "the gap is poured in: {after_resume}");
+        assert_eq!(after_resume.matches("two").count(), 1, "and nothing is doubled");
+        assert!(after_resume.contains("writing resumed"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The mark is what makes the gap exact: everything captured while the
+    /// file was closed, and nothing that was already in it.
+    #[test]
+    fn the_ring_can_say_what_happened_since_a_mark() {
+        let mut ring = Ring::default();
+        for n in 1..=5 {
+            ring.push_bytes(&format!("line {n}\n"));
+        }
+        let mark = ring.total;
+        for n in 6..=8 {
+            ring.push_bytes(&format!("line {n}\n"));
+        }
+        assert_eq!(ring.since(mark), ["line 6", "line 7", "line 8"]);
+        assert_eq!(ring.since(0).len(), 8, "a mark at the beginning is everything");
+
+        // A mark older than the ring's memory yields what is left, not a panic.
+        let mut small = Ring::default();
+        for n in 0..RING_LINES + 50 {
+            small.push_bytes(&format!("{n}\n"));
+        }
+        assert_eq!(small.since(0).len(), RING_LINES);
+        assert_eq!(small.since(small.total).len(), 0);
     }
 
     #[test]

@@ -445,8 +445,13 @@ fn pop_window_title() {
 /// the browser build has no config file to write.
 #[cfg(not(target_arch = "wasm32"))]
 fn adopt_log_level(config: &mut config::Config, app: &App) {
-    if let Some((write, level)) = app.chosen_log_prefs() {
+    // Each switch persists only if this session's Settings actually set it:
+    // walking the level under MSTREAM_LOG=1 must not also write `write =
+    // true` and turn on disk logging for every run afterwards.
+    if let Some(write) = app.chosen_log_write() {
         config.log.write = Some(write);
+    }
+    if let Some(level) = app.chosen_log_level() {
         config.log.level = level.label().to_string();
     }
 }

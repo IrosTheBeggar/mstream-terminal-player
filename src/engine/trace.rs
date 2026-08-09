@@ -11,22 +11,32 @@
 //! crate::logging).
 
 use std::ffi::OsStr;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 static SINK: OnceLock<Option<(Mutex<File>, Instant)>> = OnceLock::new();
 
-/// The recorder's file: truncated, so the file *is* this run — it used to
-/// append forever, which read as one endless session and grew without
-/// bound when the variable lived in a shell profile. The header names the
-/// build, since a trace is usually read next to a bug report.
+/// The recorder's file: opened for APPEND, and each run signs itself.
+///
+/// It briefly truncated instead, so a file would be exactly one run — which
+/// was wrong in the case this facility is most used in. Two players sharing
+/// one `MSTREAM_ENGINE_TRACE` (a variable that lives in a shell profile is
+/// inherited by every player started from that shell) each truncated the
+/// other's file and then wrote at their own offsets, filling the overlap
+/// with NULs and destroying both accounts (PR #5 review). O_APPEND puts
+/// every line at the end whoever is writing, so the worst two players do to
+/// each other now is interleave.
+///
+/// The cost is a file that grows across runs, which is the right price
+/// here: this facility is opt-in and short-lived, and the rotating,
+/// size-managed channel is the other one (`MSTREAM_LOG`, crate::logging).
 fn start_file(path: &OsStr) -> Option<File> {
-    let mut file = File::create(path).ok()?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path).ok()?;
     let _ = writeln!(
         file,
-        "── mstream-player v{} — one run per file ──",
+        "\n── mstream-player v{} — run started ──",
         env!("CARGO_PKG_VERSION")
     );
     Some(file)
@@ -59,20 +69,33 @@ pub(crate) fn line(args: std::fmt::Arguments) {
 mod tests {
     use super::*;
 
+    /// Two players may share one MSTREAM_ENGINE_TRACE, so a run signs
+    /// itself and appends — it must never destroy an account already there.
     #[test]
-    fn a_fresh_run_truncates_and_signs_its_file() {
+    fn a_run_signs_itself_and_keeps_what_came_before() {
         let path = std::env::temp_dir().join("mstream-player-test-trace.log");
-        std::fs::write(&path, "left over from an earlier run
-").unwrap();
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, "[    0.000s] an earlier run\n").unwrap();
 
         let mut file = start_file(path.as_os_str()).expect("open");
         writeln!(file, "[    0.000s] play something").unwrap();
         drop(file);
 
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains("left over"), "the old run must be gone: {text}");
-        assert!(text.starts_with("── mstream-player v"), "{text}");
+        assert!(text.contains("an earlier run"), "the earlier account survives: {text}");
+        assert!(text.contains("── mstream-player v"), "and this run signs itself: {text}");
         assert!(text.contains("play something"));
+
+        // A second player opening the same path writes after it, not over it.
+        let mut second = start_file(path.as_os_str()).expect("open again");
+        writeln!(second, "[    0.000s] the other player").unwrap();
+        drop(second);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("play something"), "the first player's lines stand: {text}");
+        assert!(text.contains("the other player"));
+        assert!(!text.contains('\0'), "and nothing is filled with NULs: {text:?}");
+        assert_eq!(text.matches("run started").count(), 2, "two runs, two banners");
+
         let _ = std::fs::remove_file(&path);
     }
 }
