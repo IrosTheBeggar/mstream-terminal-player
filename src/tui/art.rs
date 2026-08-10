@@ -7,7 +7,16 @@
 //! module deliberately knows pixels, not cells — how covers become
 //! *characters* is the visualizer's business, over in `viz` — and only
 //! [`decode`] knows the `image` crate exists.
+//!
+//! The thumbnail is not the whole story any more. A terminal that speaks
+//! kitty or sixel wants the cover at hundreds of pixels a side, which is
+//! far more than the mosaic ever needs, so an [`Art`] also keeps the bytes
+//! it was decoded from. Keeping the *encoded* bytes rather than a second
+//! larger buffer is the whole trick: a jpeg cover is tens of kilobytes
+//! where the pixels it unpacks to are hundreds, and the cache holds
+//! sixty-four of them. Who unpacks them, and how big, is `tui::graphics`.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ratatui::style::Color;
@@ -31,6 +40,11 @@ pub struct Art {
     height: u32,
     /// Row-major RGB, three bytes a pixel.
     rgb: Vec<u8>,
+    /// The bytes this was decoded from, for a renderer that wants the cover
+    /// at more than [`MAX_SIDE`]. Shared rather than copied: the clone that
+    /// goes to the cache and the clone the drawing path holds are the same
+    /// picture, and this is the larger half of it.
+    source: Arc<[u8]>,
 }
 
 /// Dimensions only. The derived form prints every pixel byte, which turns
@@ -52,25 +66,67 @@ impl PartialEq for Art {
 impl Art {
     /// Wrap raw RGB rows, refusing shapes that don't add up — the length
     /// check is what lets every index below go unchecked.
+    ///
+    /// For tests, which want a cover of a known four pixels rather than a
+    /// round trip through a codec. It carries no source bytes, so an `Art`
+    /// built this way can be sampled but not drawn as a picture — which is
+    /// the right way round: the tests are the build that has no terminal to
+    /// draw one on.
+    #[cfg(test)]
     pub fn from_rgb(width: u32, height: u32, rgb: Vec<u8>) -> Option<Art> {
+        Art::build(width, height, rgb, Arc::from([].as_slice()))
+    }
+
+    fn build(width: u32, height: u32, rgb: Vec<u8>, source: Arc<[u8]>) -> Option<Art> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         if width == 0 || height == 0 || rgb.len() != (width * height * 3) as usize {
             return None;
         }
-        Some(Art { id: NEXT.fetch_add(1, Ordering::Relaxed), width, height, rgb })
+        Some(Art { id: NEXT.fetch_add(1, Ordering::Relaxed), width, height, rgb, source })
     }
 
     pub fn id(&self) -> u64 {
         self.id
     }
+
+    /// The bytes this cover arrived as, or empty for one built from pixels.
+    pub fn source(&self) -> &[u8] {
+        &self.source
+    }
 }
 
-/// Decode whatever the server sent and shrink it to [`MAX_SIDE`]. `None`
-/// covers every way bytes fail to be a usable image; the caller treats
-/// that the same as having no art at all.
+/// The largest cover whose bytes are worth keeping beside the thumbnail,
+/// in source pixels. Two costs ride on this, and the pixel count is the
+/// honest measure of the worse one: the pixel renderer decodes the source
+/// again at draw time, on the thread the keyboard is waiting on, and a
+/// scan-of-the-booklet cover that decodes to twenty megapixels is half a
+/// second of frozen UI where a normal cover is ten milliseconds. Four
+/// megapixels — past 2000x2000, which streaming art does not reach —
+/// bounds that and, with it, the cache's byte weight. Covers past it keep
+/// only the thumbnail and draw as mosaic, which is what every cover did
+/// before the pixel path existed.
+const MAX_SOURCE_PIXELS: u32 = 4_194_304;
+
+/// Decode whatever the server sent and shrink it to [`MAX_SIDE`], keeping
+/// the bytes for anyone who wants it bigger. `None` covers every way bytes
+/// fail to be a usable image; the caller treats that the same as having no
+/// art at all.
 pub fn decode(bytes: &[u8]) -> Option<Art> {
-    let image = image::load_from_memory(bytes).ok()?.thumbnail(MAX_SIDE, MAX_SIDE).into_rgb8();
-    Art::from_rgb(image.width(), image.height(), image.into_raw())
+    let decoded = image::load_from_memory(bytes).ok()?;
+    let source = if keeps_source(decoded.width(), decoded.height()) {
+        Arc::from(bytes)
+    } else {
+        Arc::from([].as_slice())
+    };
+    let image = decoded.thumbnail(MAX_SIDE, MAX_SIDE).into_rgb8();
+    Art::build(image.width(), image.height(), image.into_raw(), source)
+}
+
+/// Whether a cover of these source dimensions keeps its bytes. The browser
+/// build never does — ratzilla's DOM backend has no pixel protocol, so
+/// sixty-four covers' bytes would be memory spent on nothing.
+fn keeps_source(width: u32, height: u32) -> bool {
+    !cfg!(target_arch = "wasm32") && width.saturating_mul(height) <= MAX_SOURCE_PIXELS
 }
 
 /// The colour at (x, y) when the cover is scaled to *fill* a width × height
@@ -160,7 +216,22 @@ mod tests {
         let art = decode(&bytes.into_inner()).unwrap();
         assert_eq!((art.width, art.height), (MAX_SIDE, MAX_SIDE));
         assert_eq!(&art.rgb[..3], &[10, 200, 30]);
+        assert!(!art.source().is_empty(), "an ordinary cover keeps its bytes");
 
         assert!(decode(b"not an image").is_none());
+    }
+
+    #[test]
+    fn oversized_covers_keep_the_thumbnail_but_not_the_bytes() {
+        // The predicate rather than a twenty-megapixel fixture: encoding
+        // one to prove it gets dropped would cost the suite more time than
+        // the branch is worth.
+        assert!(keeps_source(2000, 2000));
+        assert!(!keeps_source(2100, 2100), "past four megapixels the bytes go");
+        assert!(!keeps_source(u32::MAX, u32::MAX), "and the product must not wrap");
+
+        // Pixels handed over directly never have bytes to keep.
+        let art = Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+        assert!(art.source().is_empty());
     }
 }

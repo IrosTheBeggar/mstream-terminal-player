@@ -1284,10 +1284,23 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
         .padding(Padding::horizontal(1));
     let facts_inner = divider.inner(facts_area);
     frame.render_widget(divider, facts_area);
-    frame.render_widget(
-        Paragraph::new(now_playing_card(app, facts_inner.width as usize)),
-        facts_inner,
-    );
+    let card = now_playing_card(app, facts_inner.width as usize);
+    // The card takes the rows it filled and the cover gets what is left
+    // under it, one blank row apart — pinned under the facts it belongs
+    // to rather than floating in the column's leftover space.
+    let used = (card.len() as u16).saturating_add(1);
+    frame.render_widget(Paragraph::new(card), facts_inner);
+    if facts_inner.height > used {
+        render_facts_cover(
+            frame,
+            Rect {
+                y: facts_inner.y + used,
+                height: facts_inner.height - used,
+                ..facts_inner
+            },
+            app,
+        );
+    }
     render_now_panel(frame, panel_area, app);
 
     frame.render_widget(
@@ -1621,6 +1634,49 @@ fn near_row(
         spans.push(Span::styled(detail.to_string(), Style::new().fg(dim())));
     }
     ListItem::new(Line::from(spans))
+}
+
+/// The cover under the facts: real pixels where the terminal has them, and
+/// the half-block mosaic everywhere else — which is not a degraded mode
+/// but what every terminal without kitty, sixel or iTerm2 sees, and what
+/// the tests and the browser build see always. A cover that is missing, or
+/// still on its way, draws nothing at all: the facts above are the
+/// information, and a placeholder under them would dress absence up as a
+/// fact.
+fn render_facts_cover(frame: &mut Frame, area: Rect, app: &mut App) {
+    // Spelled out field by field for the reason the visualiser spells its
+    // cover out: the borrow checker has to see that the art cache and the
+    // fields below are different fields, because those are taken mutably
+    // while the cache's borrow is still held.
+    let cover = app
+        .now_playing
+        .as_ref()
+        .and_then(|track| track.metadata.album_art.as_deref())
+        .and_then(|file| app.art.get(file))
+        .and_then(|art| art.as_ref());
+    let Some(cover) = cover else {
+        return;
+    };
+
+    // Near-square, pinned to the top. A cell is about twice as tall as it
+    // is wide, so width/2 rows is a square box; handed the whole leftover
+    // instead, the pixel path's fit would centre the picture vertically —
+    // a cover floating mid-column, attached to nothing.
+    let height = area.height.min(area.width / 2);
+    if height < 3 {
+        return;
+    }
+    let area = Rect { height, ..area };
+
+    if app.graphics.draw(frame, area, cover) {
+        return;
+    }
+
+    let mut canvas = crate::tui::canvas::Canvas::new(area);
+    if !canvas.is_empty() {
+        app.cover_pane.draw(&mut canvas, cover);
+        frame.render_widget(Paragraph::new(canvas.into_lines()), area);
+    }
 }
 
 fn render_now_placeholder(frame: &mut Frame, area: Rect, what: &str, why: &str) {
@@ -4935,6 +4991,58 @@ mod tests {
         assert!(!text.contains("dots") && !text.contains("lines"), "nothing to join: {text}");
         // ...but the preference is still held for when you go back to one.
         assert!(app.viz.scatter);
+    }
+
+    #[test]
+    fn the_cover_sits_under_the_facts_as_pixels_or_as_the_mosaic() {
+        // Tall enough that the facts column has room under the card; the
+        // default 26 rows leave the cover no box at all, by design — a
+        // column with no spare rows draws no picture rather than a squeezed
+        // one.
+        let tall = |app: &mut App| draw_sized(app, 90, 44);
+        let full = |s: &str| s.matches(crate::tui::canvas::FULL).count();
+
+        let mut app = connected_app();
+        app.fullscreen = true;
+        let mut track = tagged_track();
+        track.metadata.album_art = Some("aa.jpeg".into());
+        app.now_playing = Some(track);
+
+        // Nothing fetched yet: a blank corner, not a placeholder — absence
+        // dressed up as a fact is how a column starts lying.
+        let empty = tall(&mut app);
+        assert!(!empty.contains('\u{10EEEE}'), "{empty}");
+
+        // A real decode, so the art carries the bytes the pixel path wants.
+        let png = image::RgbImage::from_pixel(64, 64, image::Rgb([200, 40, 40]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        png.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let art = crate::tui::art::decode(&bytes.into_inner()).unwrap();
+        app.art.insert("aa.jpeg".into(), Some(art));
+
+        // A terminal that can: kitty's placeholder cells under the facts,
+        // on the queue tab, with no visualiser anywhere in the frame — and
+        // no thirty-a-second poll held open for a picture that never moves.
+        app.graphics =
+            crate::tui::graphics::Graphics::forced(ratatui_image::picker::ProtocolType::Kitty);
+        let pixels = tall(&mut app);
+        assert!(pixels.contains('\u{10EEEE}'), "kitty draws by placeholder cells: {pixels}");
+        assert!(!app.drawing_audio(), "a still picture must not cost thirty frames a second");
+
+        // The same frame on a terminal that cannot: the mosaic fills the
+        // same box, and the kitty debris is nowhere in the cells.
+        app.graphics = crate::tui::graphics::Graphics::disabled();
+        let mosaic = tall(&mut app);
+        assert!(!mosaic.contains('\u{10EEEE}'), "{mosaic}");
+        assert!(
+            full(&mosaic) > full(&pixels),
+            "the mosaic is drawn where the pixels were: {mosaic}"
+        );
+
+        // And on the short default terminal, the card wins the column: no
+        // picture, no panic, no placeholder.
+        let short = draw(&mut app);
+        assert!(!short.contains('\u{10EEEE}'), "{short}");
     }
 
     #[test]

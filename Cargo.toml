@@ -45,6 +45,19 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ratatui = { version = "0.30.2", features = ["crossterm"] }
+# Album art at the terminal's own resolution, where the terminal has one:
+# kitty, sixel or iTerm2. Native only, and for two reasons — the wasm build
+# draws through ratzilla's DOM backend, where a sixel escape sequence is
+# just bytes in a <div>, and the crate's rustix dependency is gated
+# `cfg(not(windows))`, which wasm32-unknown-unknown satisfies.
+#
+# default-features = false is load-bearing, not tidiness. The defaults are
+# ["image-defaults", "crossterm", "chafa-dyn"]: chafa-dyn probes pkg-config
+# for the libchafa C library, which under Cross.toml is a Docker-image
+# problem in five triples at once, and image-defaults turns image's default
+# features back on, undoing the jpeg+png trim above and pulling rayon plus
+# every codec. What the crate needs from image (png) it asks for itself.
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
 rodio = { version = "0.22", features = ["symphonia-all"] }
 tiny_http = "0.12"
 # Held at 0.5 on purpose: rodio 0.22 decodes through symphonia 0.5.x, and a

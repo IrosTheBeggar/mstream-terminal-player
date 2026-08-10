@@ -7,6 +7,7 @@
 pub mod app;
 pub mod art;
 pub mod canvas;
+pub mod graphics;
 pub mod keymap;
 pub mod ui;
 pub mod viz;
@@ -210,6 +211,12 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     let pending = app.start();
 
     let mut terminal = ratatui::init();
+    // After init and before anything is drawn: the query writes escape
+    // sequences and reads the replies, which wants raw mode already on (so
+    // the answer arrives as bytes rather than as a line) and the alternate
+    // screen already up (so a terminal that answers something unexpected
+    // makes its mess somewhere that gets thrown away on restore).
+    app.graphics = graphics::Graphics::probe();
     // Asking for mouse reports takes click-drag selection away from the
     // terminal, so a failure to turn it on is not worth refusing to start
     // over — the player is a keyboard app that also answers a pointer.

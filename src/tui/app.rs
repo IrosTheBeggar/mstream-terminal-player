@@ -1219,6 +1219,12 @@ pub struct App {
     /// belongs to one recording where a cover belongs to a whole album — so
     /// this turns over faster than [`App::art`] does.
     pub waveforms: HashMap<String, Option<Vec<u8>>>,
+    /// What the terminal can draw as pixels rather than characters, and the
+    /// cover encoded for it. Starts off and is only ever turned on by the
+    /// real binary against a real terminal — a test, a replay run and the
+    /// browser build all keep the character rendering, which is the point
+    /// (see `tui::graphics`).
+    pub graphics: crate::tui::graphics::Graphics,
     pub audio_available: bool,
     /// A copy of the audio coming out of the engine, for the visualiser to
     /// draw. Read-only from here and `None` off the real audio thread, so a
@@ -1230,6 +1236,10 @@ pub struct App {
     /// frames — bars fall from where they were, and a spectrogram is nothing
     /// but where it has been.
     pub viz: crate::tui::viz::Visualizer,
+    /// The facts column's copy of the cover mosaic, resampled to its box
+    /// and kept between frames. Separate from the visualiser's own grid on
+    /// purpose: the two draw at different sizes in the same frame.
+    pub cover_pane: crate::tui::viz::CoverPane,
     /// The tap's latest audio, refilled in place each frame. The visualiser
     /// asks thirty times a second and the answer is the same size every
     /// time, so the buffer is kept rather than allocated per frame — and
@@ -1337,10 +1347,12 @@ impl App {
             now_playing: None,
             art: HashMap::new(),
             waveforms: HashMap::new(),
+            graphics: crate::tui::graphics::Graphics::disabled(),
             audio_available: true,
             tap: None,
             pointer: None,
             viz: Default::default(),
+            cover_pane: Default::default(),
             heard: Default::default(),
             fullscreen: false,
             spinner: 0,

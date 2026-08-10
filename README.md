@@ -419,6 +419,20 @@ changes shape as the queue moves. **Discover** needs the server's index. Where
 the strip won't fit, it shows the tab you're on between arrows rather than
 truncating the last name.
 
+**Visualizer** cycles modes with `v`: spectrum, cover, scope, vectorscope, vu.
+
+The facts column keeps the album cover under the track's details — as real
+pixels on a terminal that can draw them (kitty, sixel, iTerm2), and as the
+same half-block mosaic the cover visualizer uses on every other terminal. The
+player asks the terminal itself at startup; anything that doesn't answer with
+a pixel protocol — Terminal.app, a pipe, tmux without passthrough — gets the
+mosaic, with no escape bytes ever written blind. Terminals lie in both
+directions, so both lies have an override: `MSTREAM_NO_GRAPHICS=1` forces the
+mosaic on a terminal that advertises more than it delivers,
+`MSTREAM_GRAPHICS=kitty|sixel|iterm2` forces a protocol on one that hides
+what it can draw, and `mstream-player graphics-probe` prints what your
+terminal answered, then draws a test card both ways so one glance settles it.
+
 Lyrics is the last stub; everything else on the strip does what it says.
 
 ### The Discover panel
