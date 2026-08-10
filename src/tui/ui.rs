@@ -471,11 +471,25 @@ pub(crate) fn progress_area(app: &App, area: Rect) -> Rect {
     if app.fullscreen {
         now_regions(area).gauge
     } else {
-        let transport = regions(area).transport;
+        let transport = transport_inset(regions(area).transport);
         // The first row of the band names what is playing; everything under
         // it is the bar, which on a tall terminal is the mirrored pair.
         Rect { y: transport.y + 1, height: transport.height.saturating_sub(1), ..transport }
     }
+}
+
+/// The transport, pulled in to the one-column margin the full-screen view
+/// keeps.
+///
+/// Not cosmetic: the bar resamples the track's shape to the columns it
+/// has, so a browser bar two columns wider than the full-screen one drew
+/// the same track as two slightly different waveforms, and `0` made the
+/// band wiggle. One inset — used by the drawing and by [`progress_area`]
+/// alike — makes the two screens' bars the same width on the same rows,
+/// so the shape holds perfectly still as the screens swap, and a click
+/// lands on the column that was actually drawn.
+fn transport_inset(transport: Rect) -> Rect {
+    Rect { x: transport.x + 1, width: transport.width.saturating_sub(2), ..transport }
 }
 
 pub(crate) fn regions(area: Rect) -> Regions {
@@ -2197,6 +2211,10 @@ fn progress_line(app: &App, width: usize, hovered: Option<u16>, hangs: bool) -> 
 }
 
 fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
+    // The margin the full-screen view keeps, so the two screens' bars are
+    // the same width and the same track draws as the same shape on both
+    // (see `transport_inset`).
+    let area = transport_inset(area);
     // The band is however many rows `regions` gave it: the name, then the
     // bar, and above the bar the mirrored half when there was room. Split
     // off the name and let the rest fall to the pair, so this cannot
@@ -4898,6 +4916,40 @@ mod tests {
     }
 
     #[test]
+    fn the_waveform_is_the_same_shape_on_both_screens() {
+        // The browser and the full-screen view draw the same band on the
+        // same rows. Before the shared inset the browser's bar was two
+        // columns wider, the track resampled to a different column count,
+        // and pressing `0` made the whole shape wiggle.
+        let mut app = connected_app();
+        app.now_playing = Some(tagged_track());
+        app.status.duration = 209.0;
+        app.status.position = 60.0;
+        // A shape with something at every scale, so any resampling
+        // difference between the screens shows up as differing glyphs.
+        let bars: Vec<u8> =
+            (0..800).map(|i| ((i * 37) % 251) as u8).collect();
+        app.waveforms.insert("lib/a.mp3".into(), Some(bars));
+
+        let band_rows = |text: &str| {
+            // The wave half and the scrubber sit on the same two rows of
+            // both screens: just above the footer on the browser, just
+            // above the keys line on the full-screen view.
+            let lines: Vec<&str> = text.lines().collect();
+            let n = lines.len();
+            (lines[n - 3].to_string(), lines[n - 2].to_string())
+        };
+
+        let browser = band_rows(&draw_sized(&mut app, 120, 40));
+        app.handle_action(Action::ToggleNowPlaying);
+        let full = band_rows(&draw_sized(&mut app, 120, 40));
+
+        // Sanity: the band is really there, not two blank rows agreeing.
+        assert!(browser.0.contains(glyphs().eighths[8]), "{}", browser.0);
+        assert_eq!(browser, full, "one track, one shape, either screen");
+    }
+
+    #[test]
     fn the_click_target_follows_the_bar_up_the_screen() {
         // `progress_area` works the layout out again *after* the frame is
         // drawn, to answer a click. If it and `regions` ever disagreed about
@@ -4946,10 +4998,10 @@ mod tests {
         // bigger target rather than anything to special-case.
         assert_eq!(full.height, 1 + wave_half_rows());
         assert_eq!(full, now_regions(area).gauge, "and the one the view itself lays out");
-        // The full-screen view insets by a column either side; the rows the
-        // two land on happen to coincide at some heights, which is why this
-        // checks the width rather than the row.
-        assert_eq!((full.x, full.width), (bar.x + 1, bar.width - 2));
+        // The browser bar wears the same one-column inset the full-screen
+        // view keeps — that is what makes the same track resample to the
+        // same shape on both screens (see `transport_inset`).
+        assert_eq!((full.x, full.width), (bar.x, bar.width));
     }
 
     #[test]
