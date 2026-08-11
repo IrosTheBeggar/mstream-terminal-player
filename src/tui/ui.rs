@@ -4917,6 +4917,11 @@ mod tests {
 
     #[test]
     fn the_waveform_is_the_same_shape_on_both_screens() {
+        // The band under test is the mirrored pair, which the legacy glyph
+        // set does not draw — the same guard the other mirror tests wear.
+        if !glyphs().mirrored {
+            return;
+        }
         // The browser and the full-screen view draw the same band on the
         // same rows. Before the shared inset the browser's bar was two
         // columns wider, the track resampled to a different column count,
@@ -5047,21 +5052,25 @@ mod tests {
 
     #[test]
     fn the_cover_sits_under_the_facts_as_pixels_or_as_the_mosaic() {
-        // Tall enough that the facts column has room under the card; the
-        // default 26 rows leave the cover no box at all, by design — a
-        // column with no spare rows draws no picture rather than a squeezed
-        // one.
         let tall = |app: &mut App| draw_sized(app, 90, 44);
         let full = |s: &str| s.matches(crate::tui::canvas::FULL).count();
+        // Kitty from the start, so every absence asserted below is the
+        // layout's doing and not a disabled pixel path making the
+        // assertion true for free.
+        let kitty = || {
+            crate::tui::graphics::Graphics::forced(ratatui_image::picker::ProtocolType::Kitty)
+        };
 
         let mut app = connected_app();
         app.fullscreen = true;
+        app.graphics = kitty();
         let mut track = tagged_track();
         track.metadata.album_art = Some("aa.jpeg".into());
         app.now_playing = Some(track);
 
         // Nothing fetched yet: a blank corner, not a placeholder — absence
-        // dressed up as a fact is how a column starts lying.
+        // dressed up as a fact is how a column starts lying. The pixel
+        // path is live; what is missing is only the cover.
         let empty = tall(&mut app);
         assert!(!empty.contains('\u{10EEEE}'), "{empty}");
 
@@ -5075,8 +5084,6 @@ mod tests {
         // A terminal that can: kitty's placeholder cells under the facts,
         // on the queue tab, with no visualiser anywhere in the frame — and
         // no thirty-a-second poll held open for a picture that never moves.
-        app.graphics =
-            crate::tui::graphics::Graphics::forced(ratatui_image::picker::ProtocolType::Kitty);
         let pixels = tall(&mut app);
         assert!(pixels.contains('\u{10EEEE}'), "kitty draws by placeholder cells: {pixels}");
         assert!(!app.drawing_audio(), "a still picture must not cost thirty frames a second");
@@ -5091,10 +5098,20 @@ mod tests {
             "the mosaic is drawn where the pixels were: {mosaic}"
         );
 
-        // And on the short default terminal, the card wins the column: no
-        // picture, no panic, no placeholder.
-        let short = draw(&mut app);
-        assert!(!short.contains('\u{10EEEE}'), "{short}");
+        // At the boundary height this card leaves exactly three spare rows
+        // — enough for a small cover, and it draws one. One row shorter
+        // and the leftover is under the three-row floor, so the card wins
+        // the column and the picture is dropped rather than squeezed. The
+        // boundary is 26 rows on mirrored glyphs and 25 on the legacy set,
+        // whose band spends one row fewer — derived, so the test says the
+        // same thing on both. Both sides drawn with kitty live, so the
+        // absence leg cannot pass by the pixel path being off.
+        app.graphics = kitty();
+        let boundary = 25 + wave_half_rows();
+        let short = draw_sized(&mut app, 90, boundary);
+        assert!(short.contains('\u{10EEEE}'), "three rows are a cover: {short}");
+        let shorter = draw_sized(&mut app, 90, boundary - 1);
+        assert!(!shorter.contains('\u{10EEEE}'), "two rows are not: {shorter}");
     }
 
     #[test]

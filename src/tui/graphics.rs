@@ -49,6 +49,26 @@ mod native {
         /// panel rebuilds it, and everything else reuses it. The same
         /// bargain `viz::CoverGrid` strikes, keyed the same way.
         cached: Option<Cached>,
+        /// The last attempt that came to nothing, so it is not made again
+        /// next frame. Failure here is as sticky as success: a cover that
+        /// will not decode, or fits this box at zero size, would otherwise
+        /// be fully re-decoded thirty times a second for as long as the
+        /// view is up — the mosaic drawing quietly over the waste.
+        refused: Option<Refusal>,
+        /// How many render-time decodes have run, for the tests that pin
+        /// the caching above — a cache that silently stopped caching would
+        /// otherwise still pass every drawing assertion.
+        #[cfg(test)]
+        decodes: std::cell::Cell<u32>,
+    }
+
+    /// What failed, precisely enough not to over-refuse: a decode failure
+    /// is the art's for good, a zero fit or a refused encoder is only this
+    /// art in this box — a resize deserves a fresh try.
+    struct Refusal {
+        art: u64,
+        /// `None` when the bytes would not decode at all.
+        area: Option<(u16, u16)>,
     }
 
     struct Cached {
@@ -114,12 +134,7 @@ mod native {
                 if let Some(protocol) = protocol {
                     let font = ratatui::crossterm::terminal::window_size()
                         .ok()
-                        .filter(|s| {
-                            s.columns > 0 && s.rows > 0 && s.width > 0 && s.height > 0
-                        })
-                        .map(|s| {
-                            ratatui_image::FontSize::new(s.width / s.columns, s.height / s.rows)
-                        })
+                        .and_then(forced_font)
                         .unwrap_or(ratatui_image::FontSize::new(10, 20));
                     // Deprecated in favour of the query — which is the
                     // thing being overridden.
@@ -127,7 +142,7 @@ mod native {
                     let mut picker = Picker::from_fontsize(font);
                     picker.set_protocol_type(protocol);
                     tracing::info!("terminal graphics: forced {forced:?}, cell {font:?}");
-                    return Graphics { picker: Some(picker), cached: None };
+                    return Graphics { picker: Some(picker), ..Graphics::disabled() };
                 }
             }
 
@@ -166,7 +181,7 @@ mod native {
                 picker.set_protocol_type(ProtocolType::Iterm2);
             }
 
-            let graphics = Graphics { picker, cached: None };
+            let graphics = Graphics { picker, ..Graphics::disabled() };
             // One line in the flight recorder: which way this terminal
             // answered is the first fact every cover-looks-wrong report
             // needs, and it is unknowable after the fact.
@@ -199,7 +214,13 @@ mod native {
         /// A `Graphics` that never draws. What every build that is not the
         /// real binary gets, and what `App` starts with.
         pub fn disabled() -> Graphics {
-            Graphics { picker: None, cached: None }
+            Graphics {
+                picker: None,
+                cached: None,
+                refused: None,
+                #[cfg(test)]
+                decodes: std::cell::Cell::new(0),
+            }
         }
 
         /// Which protocol is carrying the picture, for `graphics-probe` to
@@ -245,6 +266,14 @@ mod native {
             if area.width == 0 || area.height == 0 {
                 return false;
             }
+            // A failure already on record answers without the decode that
+            // discovering it again would cost — see `Refusal`.
+            if let Some(refusal) = &self.refused
+                && refusal.art == art.id()
+                && refusal.area.is_none_or(|a| a == (area.width, area.height))
+            {
+                return false;
+            }
             let font = picker.font_size();
             let font = (font.width, font.height);
 
@@ -260,16 +289,33 @@ mod native {
                 // Decoded here rather than kept decoded: the cache holds
                 // sixty-four covers, and at this size the pixels are an
                 // order of magnitude more memory than the bytes.
+                #[cfg(test)]
+                self.decodes.set(self.decodes.get() + 1);
                 let Ok(source) = image::load_from_memory(art.source()) else {
+                    self.refused = Some(Refusal { art: art.id(), area: None });
                     return false;
                 };
                 let dimensions = (source.width(), source.height());
                 let size = fit(area, font, dimensions.0, dimensions.1);
                 if size.0 == 0 || size.1 == 0 {
+                    self.refused =
+                        Some(Refusal { art: art.id(), area: Some((area.width, area.height)) });
                     return false;
                 }
                 let fitted = Size::new(size.0, size.1);
-                let Ok(protocol) = picker.new_protocol(source, fitted, Resize::Fit(None)) else {
+                // Scale rather than Fit: Fit never enlarges, so a cover
+                // smaller than its box kept its own size while `centre`
+                // placed the box's — small art sat off-centre in blank
+                // slack where the mosaic fills the panel. Scale meets the
+                // box exactly; the box already has the cover's shape, so
+                // nothing distorts. Triangle over the Nearest default
+                // because enlargement is now a path a low-res cover
+                // actually takes, and Nearest enlarges into mosaic — the
+                // thing this rendering exists to be better than.
+                let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
+                let Ok(protocol) = picker.new_protocol(source, fitted, resize) else {
+                    self.refused =
+                        Some(Refusal { art: art.id(), area: Some((area.width, area.height)) });
                     return false;
                 };
                 self.cached = Some(Cached { art: art.id(), source: dimensions, size, protocol });
@@ -292,8 +338,27 @@ mod native {
             #[allow(deprecated)]
             let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(10, 20));
             picker.set_protocol_type(protocol);
-            Graphics { picker: Some(picker), cached: None }
+            Graphics { picker: Some(picker), ..Graphics::disabled() }
         }
+    }
+
+    /// The cell size a window-size report implies, or `None` for a report
+    /// with a zero anywhere in it. Clamped to sanity in both directions:
+    /// some terminals report pixel fields smaller than the cell grid — the
+    /// quotient truncates to a zero-wide font that upstream divides by —
+    /// and a transiently one-column window implies a font wider than any
+    /// glyph ever drawn, which overflows upstream's pixel arithmetic
+    /// instead.
+    fn forced_font(
+        size: ratatui::crossterm::terminal::WindowSize,
+    ) -> Option<ratatui_image::FontSize> {
+        if size.columns == 0 || size.rows == 0 || size.width == 0 || size.height == 0 {
+            return None;
+        }
+        Some(ratatui_image::FontSize::new(
+            (size.width / size.columns).clamp(1, 128),
+            (size.height / size.rows).clamp(1, 128),
+        ))
     }
 
     /// How many cells a `w` × `h` pixel image takes when scaled to the
@@ -494,6 +559,118 @@ mod native {
             let graphics = Graphics::disabled();
             assert_eq!(graphics.protocol(), None);
             assert_eq!(format!("{graphics:?}"), "Graphics(off)");
+        }
+
+        #[test]
+        fn a_small_cover_is_enlarged_to_fill_its_fitted_box() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // A 64px cover in a 400x200px area: Fit would have kept it at
+            // its own 7x4 cells anchored where `centre` placed the 20x10
+            // box the arithmetic promised — small art hanging in the box's
+            // slack. Scale meets the promise. Kitty writes each row's
+            // placeholders into the row's first cell as one string, so the
+            // evidence is the char count and where the rows start: 20
+            // placeholder chars per row, 10 rows, first cell at column 10
+            // — the centred box exactly. Any of enlargement, centring or
+            // the fit regressing moves at least one of the three.
+            let art = a_cover(64);
+            let mut graphics = Graphics::forced(ProtocolType::Kitty);
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            let mut drew = false;
+            terminal.draw(|frame| drew = graphics.draw(frame, frame.area(), &art)).unwrap();
+            assert!(drew, "a small cover still draws");
+
+            let buffer = terminal.backend().buffer();
+            let mut chars = 0;
+            let (mut xs, mut ys) = ((u16::MAX, 0u16), (u16::MAX, 0u16));
+            for y in 0..10 {
+                for x in 0..40 {
+                    let here =
+                        buffer[(x, y)].symbol().matches('\u{10EEEE}').count();
+                    if here > 0 {
+                        chars += here;
+                        xs = (xs.0.min(x), xs.1.max(x));
+                        ys = (ys.0.min(y), ys.1.max(y));
+                    }
+                }
+            }
+            assert_eq!(chars, 20 * 10, "every cell of the fitted box is covered");
+            assert_eq!(xs.0, 10, "the box starts at the centred column");
+            assert_eq!(ys, (0, 9), "and spans the rows the fit promised");
+        }
+
+        /// Wide and short, so a small box fits it at zero rows.
+        fn a_banner() -> crate::tui::art::Art {
+            let mut pixels = image::RgbImage::new(560, 140);
+            for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+                let v = ((x * 3) ^ (y * 11)) as u8;
+                *pixel = image::Rgb([v, 255 - v, v.wrapping_mul(5)]);
+            }
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            pixels.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+            crate::tui::art::decode(&bytes.into_inner()).unwrap()
+        }
+
+        #[test]
+        fn a_cover_that_cannot_fit_is_refused_once_not_every_frame() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // The banner in a 60x60px box fits at zero rows: no picture.
+            // Learning that costs one full decode — and only one, where it
+            // used to cost one per frame, thirty a second, for as long as
+            // the view stayed up with the mosaic drawing over the waste.
+            let art = a_banner();
+            let mut graphics = Graphics::forced(ProtocolType::Kitty);
+            let mut terminal = Terminal::new(TestBackend::new(6, 3)).unwrap();
+            for _ in 0..3 {
+                terminal
+                    .draw(|frame| assert!(!graphics.draw(frame, frame.area(), &art)))
+                    .unwrap();
+            }
+            assert_eq!(graphics.decodes.get(), 1, "one decode buys the whole answer");
+
+            // A resize is a different question and earns a fresh attempt.
+            let mut terminal = Terminal::new(TestBackend::new(24, 12)).unwrap();
+            let mut drew = false;
+            terminal.draw(|frame| drew = graphics.draw(frame, frame.area(), &art)).unwrap();
+            assert!(drew, "the banner fits a real panel");
+            assert_eq!(graphics.decodes.get(), 2);
+
+            // Bytes that never decode are refused at every size for the
+            // price of one failed attempt (a from_rgb art has no source).
+            let pixels = crate::tui::art::Art::from_rgb(2, 2, vec![0; 12]).unwrap();
+            for size in [(6, 3), (24, 12)] {
+                let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).unwrap();
+                terminal
+                    .draw(|frame| assert!(!graphics.draw(frame, frame.area(), &pixels)))
+                    .unwrap();
+            }
+            assert_eq!(graphics.decodes.get(), 3, "undecodable bytes are asked exactly once");
+        }
+
+        #[test]
+        fn a_degenerate_window_report_cannot_produce_a_zero_font() {
+            use ratatui::crossterm::terminal::WindowSize;
+            // Pixel fields smaller than the cell grid — some conpty and
+            // embedded hosts report this — used to truncate to a zero-wide
+            // font that upstream divides by.
+            let font =
+                forced_font(WindowSize { rows: 50, columns: 200, width: 100, height: 100 })
+                    .unwrap();
+            assert_eq!((font.width, font.height), (1, 2));
+            // A transiently one-column window implies an absurd font.
+            let font =
+                forced_font(WindowSize { rows: 1, columns: 1, width: 3840, height: 2160 })
+                    .unwrap();
+            assert_eq!((font.width, font.height), (128, 128));
+            // A zero anywhere means the report is unusable, not clampable.
+            assert!(
+                forced_font(WindowSize { rows: 0, columns: 80, width: 800, height: 600 })
+                    .is_none()
+            );
         }
     }
 }

@@ -107,13 +107,22 @@ impl Art {
 /// before the pixel path existed.
 const MAX_SOURCE_PIXELS: u32 = 4_194_304;
 
+/// And the same bound in encoded bytes. The pixel gate bounds the decode
+/// cost but not residency: a PNG can carry ancillary chunks and
+/// stored-mode deflate, so a picture of few pixels can legally arrive as
+/// a file of any size — and the art cache pins sixty-four of these for
+/// the session. Four megabytes holds every photographic cover under the
+/// pixel cap; a file past it is padding, not picture, and keeps only the
+/// thumbnail.
+const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+
 /// Decode whatever the server sent and shrink it to [`MAX_SIDE`], keeping
 /// the bytes for anyone who wants it bigger. `None` covers every way bytes
 /// fail to be a usable image; the caller treats that the same as having no
 /// art at all.
 pub fn decode(bytes: &[u8]) -> Option<Art> {
     let decoded = image::load_from_memory(bytes).ok()?;
-    let source = if keeps_source(decoded.width(), decoded.height()) {
+    let source = if keeps_source(bytes.len(), decoded.width(), decoded.height()) {
         Arc::from(bytes)
     } else {
         Arc::from([].as_slice())
@@ -122,11 +131,13 @@ pub fn decode(bytes: &[u8]) -> Option<Art> {
     Art::build(image.width(), image.height(), image.into_raw(), source)
 }
 
-/// Whether a cover of these source dimensions keeps its bytes. The browser
-/// build never does — ratzilla's DOM backend has no pixel protocol, so
-/// sixty-four covers' bytes would be memory spent on nothing.
-fn keeps_source(width: u32, height: u32) -> bool {
-    !cfg!(target_arch = "wasm32") && width.saturating_mul(height) <= MAX_SOURCE_PIXELS
+/// Whether a cover this size — as a file, and decoded — keeps its bytes.
+/// The browser build never does — ratzilla's DOM backend has no pixel
+/// protocol, so sixty-four covers' bytes would be memory spent on nothing.
+fn keeps_source(len: usize, width: u32, height: u32) -> bool {
+    !cfg!(target_arch = "wasm32")
+        && len <= MAX_SOURCE_BYTES
+        && width.saturating_mul(height) <= MAX_SOURCE_PIXELS
 }
 
 /// The colour at (x, y) when the cover is scaled to *fill* a width × height
@@ -226,12 +237,34 @@ mod tests {
         // The predicate rather than a twenty-megapixel fixture: encoding
         // one to prove it gets dropped would cost the suite more time than
         // the branch is worth.
-        assert!(keeps_source(2000, 2000));
-        assert!(!keeps_source(2100, 2100), "past four megapixels the bytes go");
-        assert!(!keeps_source(u32::MAX, u32::MAX), "and the product must not wrap");
+        assert!(keeps_source(500_000, 2000, 2000));
+        assert!(!keeps_source(500_000, 2100, 2100), "past four megapixels the bytes go");
+        assert!(!keeps_source(500_000, u32::MAX, u32::MAX), "and the product must not wrap");
+        assert!(
+            !keeps_source(MAX_SOURCE_BYTES + 1, 100, 100),
+            "a small picture in an enormous file is padding, not art"
+        );
 
         // Pixels handed over directly never have bytes to keep.
         let art = Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
         assert!(art.source().is_empty());
+    }
+
+    #[test]
+    fn a_chunk_padded_file_keeps_the_thumbnail_and_drops_the_bytes() {
+        // The whole decode path this time, not just the predicate: a real
+        // PNG whose pixels pass the pixel gate, padded past the byte gate
+        // the way an ancillary-chunk-stuffed file would arrive. The image
+        // still decodes — trailing garbage after IEND is tolerated — so
+        // the thumbnail survives while the residency does not.
+        let small = image::RgbImage::from_pixel(50, 50, image::Rgb([7, 8, 9]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        small.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let mut padded = bytes.into_inner();
+        padded.resize(MAX_SOURCE_BYTES + 1, 0);
+
+        let art = decode(&padded).expect("the pixels are still a valid image");
+        assert_eq!((art.width, art.height), (MAX_SIDE, MAX_SIDE));
+        assert!(art.source().is_empty(), "the bytes go; the mosaic carries it");
     }
 }

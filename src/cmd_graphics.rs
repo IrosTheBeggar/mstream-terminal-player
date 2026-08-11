@@ -27,6 +27,24 @@ const DEMO_ROWS: u16 = 8;
 const DEMO_COLS: u16 = 16;
 
 pub fn run() -> i32 {
+    // Before the probe, not after: the query writes escape sequences to
+    // stdout unconditionally and waits on stdin for the answers, so with
+    // either end redirected it lands the queries as binary soup in the
+    // capture, stalls out its whole timeout against a terminal that was
+    // never asked — and, timing out, leaves the crate's echo-off termios
+    // for the shell to trip over. A diagnostic must not need diagnosing.
+    let stdout_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let stdin_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    if !stdout_tty || !stdin_tty {
+        let which = match (stdout_tty, stdin_tty) {
+            (false, true) => "stdout is not a terminal",
+            (true, false) => "stdin is not a terminal",
+            _ => "neither stdout nor stdin is a terminal",
+        };
+        println!("({which} — the probe asks the terminal through both, so there is nothing to ask; run this from an interactive session)");
+        return 0;
+    }
+
     let start = std::time::Instant::now();
     let mut graphics = Graphics::probe();
     let elapsed = start.elapsed();
@@ -35,15 +53,6 @@ pub fn run() -> i32 {
     println!("{}", graphics.diagnostics());
     if std::env::var("MSTREAM_NO_GRAPHICS").is_ok_and(|v| !v.is_empty() && v != "0") {
         println!("(MSTREAM_NO_GRAPHICS is set — unset it to let the probe ask)");
-    }
-
-    // The facts above still mean something piped into a file; the
-    // demonstration doesn't — an inline viewport needs a terminal to
-    // position itself in, and without one the attempt is an ioctl error
-    // dressed as output.
-    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        println!("(stdout is not a terminal — skipping the demonstration)");
-        return 0;
     }
 
     let Some(card) = test_card() else {
