@@ -471,11 +471,25 @@ pub(crate) fn progress_area(app: &App, area: Rect) -> Rect {
     if app.fullscreen {
         now_regions(area).gauge
     } else {
-        let transport = regions(area).transport;
+        let transport = transport_inset(regions(area).transport);
         // The first row of the band names what is playing; everything under
         // it is the bar, which on a tall terminal is the mirrored pair.
         Rect { y: transport.y + 1, height: transport.height.saturating_sub(1), ..transport }
     }
+}
+
+/// The transport, pulled in to the one-column margin the full-screen view
+/// keeps.
+///
+/// Not cosmetic: the bar resamples the track's shape to the columns it
+/// has, so a browser bar two columns wider than the full-screen one drew
+/// the same track as two slightly different waveforms, and `0` made the
+/// band wiggle. One inset — used by the drawing and by [`progress_area`]
+/// alike — makes the two screens' bars the same width on the same rows,
+/// so the shape holds perfectly still as the screens swap, and a click
+/// lands on the column that was actually drawn.
+fn transport_inset(transport: Rect) -> Rect {
+    Rect { x: transport.x + 1, width: transport.width.saturating_sub(2), ..transport }
 }
 
 pub(crate) fn regions(area: Rect) -> Regions {
@@ -1284,10 +1298,23 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
         .padding(Padding::horizontal(1));
     let facts_inner = divider.inner(facts_area);
     frame.render_widget(divider, facts_area);
-    frame.render_widget(
-        Paragraph::new(now_playing_card(app, facts_inner.width as usize)),
-        facts_inner,
-    );
+    let card = now_playing_card(app, facts_inner.width as usize);
+    // The card takes the rows it filled and the cover gets what is left
+    // under it, one blank row apart — pinned under the facts it belongs
+    // to rather than floating in the column's leftover space.
+    let used = (card.len() as u16).saturating_add(1);
+    frame.render_widget(Paragraph::new(card), facts_inner);
+    if facts_inner.height > used {
+        render_facts_cover(
+            frame,
+            Rect {
+                y: facts_inner.y + used,
+                height: facts_inner.height - used,
+                ..facts_inner
+            },
+            app,
+        );
+    }
     render_now_panel(frame, panel_area, app);
 
     frame.render_widget(
@@ -1621,6 +1648,49 @@ fn near_row(
         spans.push(Span::styled(detail.to_string(), Style::new().fg(dim())));
     }
     ListItem::new(Line::from(spans))
+}
+
+/// The cover under the facts: real pixels where the terminal has them, and
+/// the half-block mosaic everywhere else — which is not a degraded mode
+/// but what every terminal without kitty, sixel or iTerm2 sees, and what
+/// the tests and the browser build see always. A cover that is missing, or
+/// still on its way, draws nothing at all: the facts above are the
+/// information, and a placeholder under them would dress absence up as a
+/// fact.
+fn render_facts_cover(frame: &mut Frame, area: Rect, app: &mut App) {
+    // Spelled out field by field for the reason the visualiser spells its
+    // cover out: the borrow checker has to see that the art cache and the
+    // fields below are different fields, because those are taken mutably
+    // while the cache's borrow is still held.
+    let cover = app
+        .now_playing
+        .as_ref()
+        .and_then(|track| track.metadata.album_art.as_deref())
+        .and_then(|file| app.art.get(file))
+        .and_then(|art| art.as_ref());
+    let Some(cover) = cover else {
+        return;
+    };
+
+    // Near-square, pinned to the top. A cell is about twice as tall as it
+    // is wide, so width/2 rows is a square box; handed the whole leftover
+    // instead, the pixel path's fit would centre the picture vertically —
+    // a cover floating mid-column, attached to nothing.
+    let height = area.height.min(area.width / 2);
+    if height < 3 {
+        return;
+    }
+    let area = Rect { height, ..area };
+
+    if app.graphics.draw(frame, area, cover) {
+        return;
+    }
+
+    let mut canvas = crate::tui::canvas::Canvas::new(area);
+    if !canvas.is_empty() {
+        app.cover_pane.draw(&mut canvas, cover);
+        frame.render_widget(Paragraph::new(canvas.into_lines()), area);
+    }
 }
 
 fn render_now_placeholder(frame: &mut Frame, area: Rect, what: &str, why: &str) {
@@ -2141,6 +2211,10 @@ fn progress_line(app: &App, width: usize, hovered: Option<u16>, hangs: bool) -> 
 }
 
 fn render_transport(frame: &mut Frame, area: Rect, app: &App) {
+    // The margin the full-screen view keeps, so the two screens' bars are
+    // the same width and the same track draws as the same shape on both
+    // (see `transport_inset`).
+    let area = transport_inset(area);
     // The band is however many rows `regions` gave it: the name, then the
     // bar, and above the bar the mirrored half when there was room. Split
     // off the name and let the rest fall to the pair, so this cannot
@@ -4842,6 +4916,45 @@ mod tests {
     }
 
     #[test]
+    fn the_waveform_is_the_same_shape_on_both_screens() {
+        // The band under test is the mirrored pair, which the legacy glyph
+        // set does not draw — the same guard the other mirror tests wear.
+        if !glyphs().mirrored {
+            return;
+        }
+        // The browser and the full-screen view draw the same band on the
+        // same rows. Before the shared inset the browser's bar was two
+        // columns wider, the track resampled to a different column count,
+        // and pressing `0` made the whole shape wiggle.
+        let mut app = connected_app();
+        app.now_playing = Some(tagged_track());
+        app.status.duration = 209.0;
+        app.status.position = 60.0;
+        // A shape with something at every scale, so any resampling
+        // difference between the screens shows up as differing glyphs.
+        let bars: Vec<u8> =
+            (0..800).map(|i| ((i * 37) % 251) as u8).collect();
+        app.waveforms.insert("lib/a.mp3".into(), Some(bars));
+
+        let band_rows = |text: &str| {
+            // The wave half and the scrubber sit on the same two rows of
+            // both screens: just above the footer on the browser, just
+            // above the keys line on the full-screen view.
+            let lines: Vec<&str> = text.lines().collect();
+            let n = lines.len();
+            (lines[n - 3].to_string(), lines[n - 2].to_string())
+        };
+
+        let browser = band_rows(&draw_sized(&mut app, 120, 40));
+        app.handle_action(Action::ToggleNowPlaying);
+        let full = band_rows(&draw_sized(&mut app, 120, 40));
+
+        // Sanity: the band is really there, not two blank rows agreeing.
+        assert!(browser.0.contains(glyphs().eighths[8]), "{}", browser.0);
+        assert_eq!(browser, full, "one track, one shape, either screen");
+    }
+
+    #[test]
     fn the_click_target_follows_the_bar_up_the_screen() {
         // `progress_area` works the layout out again *after* the frame is
         // drawn, to answer a click. If it and `regions` ever disagreed about
@@ -4890,10 +5003,10 @@ mod tests {
         // bigger target rather than anything to special-case.
         assert_eq!(full.height, 1 + wave_half_rows());
         assert_eq!(full, now_regions(area).gauge, "and the one the view itself lays out");
-        // The full-screen view insets by a column either side; the rows the
-        // two land on happen to coincide at some heights, which is why this
-        // checks the width rather than the row.
-        assert_eq!((full.x, full.width), (bar.x + 1, bar.width - 2));
+        // The browser bar wears the same one-column inset the full-screen
+        // view keeps — that is what makes the same track resample to the
+        // same shape on both screens (see `transport_inset`).
+        assert_eq!((full.x, full.width), (bar.x, bar.width));
     }
 
     #[test]
@@ -4935,6 +5048,70 @@ mod tests {
         assert!(!text.contains("dots") && !text.contains("lines"), "nothing to join: {text}");
         // ...but the preference is still held for when you go back to one.
         assert!(app.viz.scatter);
+    }
+
+    #[test]
+    fn the_cover_sits_under_the_facts_as_pixels_or_as_the_mosaic() {
+        let tall = |app: &mut App| draw_sized(app, 90, 44);
+        let full = |s: &str| s.matches(crate::tui::canvas::FULL).count();
+        // Kitty from the start, so every absence asserted below is the
+        // layout's doing and not a disabled pixel path making the
+        // assertion true for free.
+        let kitty = || {
+            crate::tui::graphics::Graphics::forced(ratatui_image::picker::ProtocolType::Kitty)
+        };
+
+        let mut app = connected_app();
+        app.fullscreen = true;
+        app.graphics = kitty();
+        let mut track = tagged_track();
+        track.metadata.album_art = Some("aa.jpeg".into());
+        app.now_playing = Some(track);
+
+        // Nothing fetched yet: a blank corner, not a placeholder — absence
+        // dressed up as a fact is how a column starts lying. The pixel
+        // path is live; what is missing is only the cover.
+        let empty = tall(&mut app);
+        assert!(!empty.contains('\u{10EEEE}'), "{empty}");
+
+        // A real decode, so the art carries the bytes the pixel path wants.
+        let png = image::RgbImage::from_pixel(64, 64, image::Rgb([200, 40, 40]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        png.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let art = crate::tui::art::decode(&bytes.into_inner()).unwrap();
+        app.art.insert("aa.jpeg".into(), Some(art));
+
+        // A terminal that can: kitty's placeholder cells under the facts,
+        // on the queue tab, with no visualiser anywhere in the frame — and
+        // no thirty-a-second poll held open for a picture that never moves.
+        let pixels = tall(&mut app);
+        assert!(pixels.contains('\u{10EEEE}'), "kitty draws by placeholder cells: {pixels}");
+        assert!(!app.drawing_audio(), "a still picture must not cost thirty frames a second");
+
+        // The same frame on a terminal that cannot: the mosaic fills the
+        // same box, and the kitty debris is nowhere in the cells.
+        app.graphics = crate::tui::graphics::Graphics::disabled();
+        let mosaic = tall(&mut app);
+        assert!(!mosaic.contains('\u{10EEEE}'), "{mosaic}");
+        assert!(
+            full(&mosaic) > full(&pixels),
+            "the mosaic is drawn where the pixels were: {mosaic}"
+        );
+
+        // At the boundary height this card leaves exactly three spare rows
+        // — enough for a small cover, and it draws one. One row shorter
+        // and the leftover is under the three-row floor, so the card wins
+        // the column and the picture is dropped rather than squeezed. The
+        // boundary is 26 rows on mirrored glyphs and 25 on the legacy set,
+        // whose band spends one row fewer — derived, so the test says the
+        // same thing on both. Both sides drawn with kitty live, so the
+        // absence leg cannot pass by the pixel path being off.
+        app.graphics = kitty();
+        let boundary = 25 + wave_half_rows();
+        let short = draw_sized(&mut app, 90, boundary);
+        assert!(short.contains('\u{10EEEE}'), "three rows are a cover: {short}");
+        let shorter = draw_sized(&mut app, 90, boundary - 1);
+        assert!(!shorter.contains('\u{10EEEE}'), "two rows are not: {shorter}");
     }
 
     #[test]

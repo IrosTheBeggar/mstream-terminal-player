@@ -146,18 +146,22 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         }
 
         ApiCmd::AlbumArt { file } => {
-            // Every failure is "no art", exactly as the native worker treats
-            // it — even a missing session, which the next real request will
-            // report in its own voice. Not `with_session`, whose "not
-            // connected" error toast is precisely what art must never raise.
+            // The waveform's rule, exactly as the native worker applies
+            // it: a 404 or undecodable bytes settle as "no art"; a
+            // transport failure — or no session yet — is not an answer
+            // and gives the slot back. Not `with_session`, whose "not
+            // connected" error toast is precisely what art must never
+            // raise.
             let client = session.borrow().as_ref().map(|s| s.client.clone());
-            let art = match client {
-                Some(c) => {
-                    c.album_art_async(&file).await.ok().and_then(|bytes| art::decode(&bytes))
-                }
-                None => None,
+            let (art, settled) = match client {
+                Some(c) => match c.album_art_async(&file).await {
+                    Ok(bytes) => (art::decode(&bytes), true),
+                    Err(ApiError::NotFound(_)) => (None, true),
+                    Err(_) => (None, false),
+                },
+                None => (None, false),
             };
-            Some(Event::AlbumArt { file, art })
+            Some(Event::AlbumArt { file, art, settled })
         }
 
         ApiCmd::Waveform { filepath } => {

@@ -2649,6 +2649,35 @@ fn a_queue_where_nothing_plays_gives_up_instead_of_looping() {
 }
 
 #[test]
+fn running_out_of_queue_ends_the_run_of_failures() {
+    // Repeat off: the walk dies at the queue's end, not at the give-up
+    // threshold. The count used to survive that ending one short of the
+    // limit, and the first hiccup after the network came back was
+    // declared the end of everything on a queue that was otherwise fine.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("a"), track("b"), track("c")]);
+    app.handle_action(Action::PlayPause);
+    let second = app.handle_action(Action::NextTrack);
+    // The network dies on b; the walk fails through c and runs out.
+    let third = app.apply_event(failed(&second, "network is down"));
+    let ended = app.apply_event(failed(&third, "network is down"));
+    assert_eq!(ended, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.queue.current, None, "the walk ran out of queue");
+    assert_eq!(app.failures, 0, "and the run of failures ended with it");
+
+    // The engine reports the stop the dead end asked for, as it would live.
+    app.apply_event(Event::Status(PlayerStatus::default()));
+
+    // The network returns; one track hiccups. That is a skip, not the
+    // end of everything.
+    let again = app.handle_action(Action::PlayPause);
+    app.apply_event(failed(&again, "one bad moment"));
+    let message = app.message.as_ref().unwrap().text.clone();
+    assert!(message.contains("skipping"), "{message}");
+    assert!(!message.contains("nor could the rest"), "{message}");
+}
+
+#[test]
 fn one_track_playing_forgives_the_failures_before_it() {
     // The give-up counter is about a *run* of failures. A queue with one
     // bad file every few tracks must keep going indefinitely.
@@ -3990,15 +4019,40 @@ fn a_cover_reply_reaches_the_playing_track_whenever_it_lands() {
     // The reply lands — including one that took long enough for the track
     // to have been paused, seeked, anything but skipped.
     let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
-    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(art.clone()) });
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(art.clone()), settled: true });
     assert_eq!(now_art(&app), Some(&art));
 
     // "The server has no cover for this" is also an answer, and it must
     // not leave the previous track's art on screen.
     app.queue.replace(vec![track_with_cover("lib/b.mp3", "bb.jpeg")]);
     app.play_index(0);
-    app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: None });
+    app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: None, settled: true });
     assert_eq!(now_art(&app), None);
+}
+
+#[test]
+fn a_cover_nobody_answered_for_is_asked_for_again() {
+    // The wifi dying mid-fetch is the likeliest way to lose a cover, and
+    // it used to be the last word: the placeholder stayed, the fetch was
+    // never retried, and the album stayed coverless for the rest of the
+    // session while the waveform beside it quietly recovered. The
+    // waveform's rule, applied here.
+    let mut app = connected_app();
+    app.queue.replace(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
+    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into() });
+    assert!(app.play_index(0).contains(&asked));
+
+    // The fetch dies with the network: nothing was learned, so nothing is
+    // remembered, and the next play asks again.
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: false });
+    assert!(!app.art.contains_key("aa.jpeg"), "an unanswered ask gives the slot back");
+    assert!(app.play_index(0).contains(&asked), "and playing it again asks again");
+
+    // The server's own "there is no art" still settles it — the two must
+    // not have been collapsed the other way round either.
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: true });
+    assert!(app.art.get("aa.jpeg").is_some_and(|art| art.is_none()));
+    assert!(!app.play_index(0).contains(&asked));
 }
 
 #[test]

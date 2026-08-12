@@ -7,6 +7,7 @@
 pub mod app;
 pub mod art;
 pub mod canvas;
+pub mod graphics;
 pub mod keymap;
 pub mod ui;
 pub mod viz;
@@ -210,6 +211,13 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     let pending = app.start();
 
     let mut terminal = ratatui::init();
+    // After init and before anything is drawn — not because the query
+    // needs raw mode (the crate flips termios itself; graphics-probe calls
+    // it cooked and works), but because the alternate screen is already up,
+    // so a terminal that answers something unexpected makes its mess
+    // somewhere that gets thrown away on restore — and because init's
+    // saved state is what cleans up if the query's own restore is lost.
+    app.graphics = graphics::Graphics::probe();
     // Asking for mouse reports takes click-drag selection away from the
     // terminal, so a failure to turn it on is not worth refusing to start
     // over — the player is a keyboard app that also answers a pointer.
@@ -363,6 +371,12 @@ fn event_loop(
                         let area = Rect { x: 0, y: 0, width: size.width, height: size.height };
                         pending.extend(on_mouse(app, mouse, area));
                     }
+                    // A resize is also how a tmux reattach announces a new
+                    // terminal behind the same tty — one whose image store
+                    // never saw kitty's transmit-once upload. Let graphics
+                    // re-send where that matters; ratatui handles the
+                    // layout side itself.
+                    TermEvent::Resize(..) => app.graphics.refresh(),
                     _ => {}
                 }
             }

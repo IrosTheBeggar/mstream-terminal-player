@@ -173,15 +173,14 @@ impl Visualizer {
             }
         }
 
-        self.still = !sounding
-            && match self.mode {
-                VizMode::Bars | VizMode::Cover => self.bars.at_rest(),
-                VizMode::Vu => self.vu.at_rest(),
-                // Drawn straight from the samples, and the samples are
-                // silence: this frame is already the flat line the next one
-                // would be.
-                VizMode::Scope | VizMode::Vectorscope => true,
-            };
+        self.still = match self.mode {
+            VizMode::Bars | VizMode::Cover => !sounding && self.bars.at_rest(),
+            VizMode::Vu => !sounding && self.vu.at_rest(),
+            // Drawn straight from the samples, and paused the samples are
+            // silence: that frame is already the flat line the next one
+            // would be.
+            VizMode::Scope | VizMode::Vectorscope => !sounding,
+        };
     }
 
     /// Whether the picture has stopped moving — nothing is sounding and
@@ -635,6 +634,31 @@ fn draw_cover(canvas: &mut Canvas, bars: &[f32], cover: Option<&Art>, grid: &mut
         } else {
             for y in top..height {
                 canvas.set(x, y, ramp(1.0 - y as f32 / height as f32));
+            }
+        }
+    }
+}
+
+/// The cover fully lit and holding still, for the facts column of the
+/// now-playing view — the picture on a terminal that cannot draw pixels.
+///
+/// Deliberately the same resampling the Cover mode uses, so the column's
+/// mosaic and the lit mode show the same picture — but through a grid of
+/// its own rather than the visualiser's: the two draw at different sizes
+/// in the same frame, and one grid keyed on size would resample the cover
+/// twice a frame, every frame, for as long as both were on screen.
+#[derive(Debug, Default)]
+pub struct CoverPane {
+    grid: CoverGrid,
+}
+
+impl CoverPane {
+    pub fn draw(&mut self, canvas: &mut Canvas, art: &Art) {
+        self.grid.refresh(art, canvas.width(), canvas.height());
+        let width = i32::from(canvas.width());
+        for y in 0..i32::from(canvas.height()) {
+            for x in 0..width {
+                canvas.set(x, y, self.grid.bright[(y * width + x) as usize]);
             }
         }
     }
@@ -1531,6 +1555,8 @@ mod tests {
         for mode in VIZ_MODES {
             let mut viz = Visualizer { mode, ..Default::default() };
             let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 40, height: 10 });
+            // Every mode is given no cover, which keeps the Cover mode's
+            // own no-picture path under test.
             // Several times, so the modes that carry state across a frame do.
             for _ in 0..6 {
                 viz.draw_after(&mut canvas, &heard, FRAME, true, None);
@@ -1546,6 +1572,29 @@ mod tests {
                 })
                 .sum();
             assert!(drawn > 0, "{} drew nothing", mode.title());
+        }
+    }
+
+    #[test]
+    fn the_cover_pane_paints_its_whole_box() {
+        let art = orange_art();
+        let mut pane = CoverPane::default();
+        // Twice at each size: the second pass runs on the cached grid, and
+        // the size change is what forces the resample.
+        for (width, height) in [(8, 4), (8, 4), (12, 3), (12, 3)] {
+            let mut canvas = Canvas::new(Rect { x: 0, y: 0, width, height });
+            pane.draw(&mut canvas, &art);
+            let blank: usize = canvas
+                .into_lines()
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|s| s.content.chars().filter(|c| *c == ' ').count())
+                        .sum::<usize>()
+                })
+                .sum();
+            assert_eq!(blank, 0, "{width}x{height}: a cover leaves no cell empty");
         }
     }
 

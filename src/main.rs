@@ -19,6 +19,8 @@ mod player;
 mod tui;
 
 #[cfg(not(target_arch = "wasm32"))]
+mod cmd_graphics;
+#[cfg(not(target_arch = "wasm32"))]
 mod cmd_library;
 #[cfg(not(target_arch = "wasm32"))]
 mod cmd_play;
@@ -165,6 +167,8 @@ enum Command {
     Dj(cmd_library::DjArgs),
     /// Dial a Quick Connect pairing code and probe the tunnel (diagnostic)
     QuickconnectProbe { code: String },
+    /// Show whether this terminal can draw covers as pixels (diagnostic)
+    GraphicsProbe,
     /// Drive the interactive player from a script (smoke testing)
     Replay(replay::ReplayArgs),
     /// Print the key bindings as a config.toml section, ready to edit
@@ -295,6 +299,7 @@ fn main() {
         (Some(Command::QuickconnectProbe { code }), _) => {
             std::process::exit(quickconnect::probe(&code));
         }
+        (Some(Command::GraphicsProbe), _) => std::process::exit(cmd_graphics::run()),
         (Some(Command::Replay(args)), _) => std::process::exit(replay::run(args)),
         (Some(Command::Keys), _) => {
             // The bindings in force, not the built-in ones: someone asking
