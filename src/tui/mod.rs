@@ -211,11 +211,12 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     let pending = app.start();
 
     let mut terminal = ratatui::init();
-    // After init and before anything is drawn: the query writes escape
-    // sequences and reads the replies, which wants raw mode already on (so
-    // the answer arrives as bytes rather than as a line) and the alternate
-    // screen already up (so a terminal that answers something unexpected
-    // makes its mess somewhere that gets thrown away on restore).
+    // After init and before anything is drawn — not because the query
+    // needs raw mode (the crate flips termios itself; graphics-probe calls
+    // it cooked and works), but because the alternate screen is already up,
+    // so a terminal that answers something unexpected makes its mess
+    // somewhere that gets thrown away on restore — and because init's
+    // saved state is what cleans up if the query's own restore is lost.
     app.graphics = graphics::Graphics::probe();
     // Asking for mouse reports takes click-drag selection away from the
     // terminal, so a failure to turn it on is not worth refusing to start

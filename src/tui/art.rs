@@ -111,9 +111,11 @@ const MAX_SOURCE_PIXELS: u32 = 4_194_304;
 /// cost but not residency: a PNG can carry ancillary chunks and
 /// stored-mode deflate, so a picture of few pixels can legally arrive as
 /// a file of any size — and the art cache pins sixty-four of these for
-/// the session. Four megabytes holds every photographic cover under the
-/// pixel cap; a file past it is padding, not picture, and keeps only the
-/// thumbnail.
+/// the session. Four megabytes holds cover art as it actually ships —
+/// JPEG, well under two — while a photographic PNG near the pixel cap
+/// can legitimately weigh more and quietly keeps only the thumbnail,
+/// drawing as mosaic. That trade is deliberate: residency is bounded by
+/// what is typical, not by the largest thing that is technically art.
 const MAX_SOURCE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Decode whatever the server sent and shrink it to [`MAX_SIDE`], keeping
@@ -243,6 +245,10 @@ mod tests {
         assert!(
             !keeps_source(MAX_SOURCE_BYTES + 1, 100, 100),
             "a small picture in an enormous file is padding, not art"
+        );
+        assert!(
+            keeps_source(MAX_SOURCE_BYTES, 100, 100),
+            "the cap itself is still art — the boundary is inclusive"
         );
 
         // Pixels handed over directly never have bytes to keep.

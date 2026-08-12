@@ -109,10 +109,14 @@ mod native {
 
     impl Graphics {
         /// Ask the terminal what it can draw. Writes escape sequences to
-        /// stdio and reads the replies, so it belongs at startup with the
-        /// terminal already in raw mode — never inside a draw. Bounded: the
+        /// stdio and reads the replies — the crate handles raw mode itself,
+        /// so the caller owes it only a real terminal and a moment nothing
+        /// else is talking: at startup, never inside a draw. Bounded: the
         /// crate answers within two seconds even opposite a terminal that
-        /// says nothing, and immediately when stdin is not a tty at all.
+        /// says nothing — and on such a terminal its termios restore can
+        /// be lost with its reader thread, so callers bracket the call in
+        /// state they re-assert themselves (ratatui::init/restore in the
+        /// player, a crossterm raw-mode snapshot in graphics-probe).
         ///
         /// `MSTREAM_NO_GRAPHICS=1` skips the whole question. The probe is
         /// as honest as the terminal's own answers, and a terminal that
@@ -207,9 +211,11 @@ mod native {
         /// The probe's whole answer as one printable line, for the
         /// `graphics-probe` diagnostic. The capability list is upstream's
         /// raw finding, worth seeing when the conclusion looks wrong —
-        /// "sixel" in the capabilities but half-blocks in the answer says
-        /// the kill switch or a filter got involved; nothing in the
-        /// capabilities says the terminal never answered.
+        /// kitty in the capabilities with iterm2 as the protocol is the
+        /// demotion doing its job. The mosaic verdict is one fixed line
+        /// with no list at all: every road there discards the picker,
+        /// answers and all, so it cannot say whether the terminal
+        /// answered halfblocks-only or never answered anything.
         pub fn diagnostics(&self) -> String {
             match &self.picker {
                 Some(picker) => {
@@ -664,6 +670,22 @@ mod native {
             let graphics = Graphics::disabled();
             assert_eq!(graphics.protocol(), None);
             assert_eq!(format!("{graphics:?}"), "Graphics(off)");
+        }
+
+        #[test]
+        fn the_diagnostics_name_the_protocol_and_the_cell_or_say_there_is_none() {
+            // The line graphics-probe prints is the one artifact a
+            // cover-looks-wrong report can carry; it must name the
+            // protocol and the cell size it was decided with.
+            let line = Graphics::forced(ProtocolType::Sixel).diagnostics();
+            assert!(line.contains("protocol sixel"), "{line}");
+            assert!(line.contains("cell 10x20 px"), "{line}");
+
+            // And the mosaic verdict is the one fixed sentence — no
+            // protocol, no cell size, nothing to misread as an answer.
+            let line = Graphics::disabled().diagnostics();
+            assert!(line.contains("no pixel protocol"), "{line}");
+            assert!(!line.contains("cell"), "{line}");
         }
 
         #[test]
