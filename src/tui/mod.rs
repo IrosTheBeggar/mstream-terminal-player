@@ -370,6 +370,12 @@ fn event_loop(
                         let area = Rect { x: 0, y: 0, width: size.width, height: size.height };
                         pending.extend(on_mouse(app, mouse, area));
                     }
+                    // A resize is also how a tmux reattach announces a new
+                    // terminal behind the same tty — one whose image store
+                    // never saw kitty's transmit-once upload. Let graphics
+                    // re-send where that matters; ratatui handles the
+                    // layout side itself.
+                    TermEvent::Resize(..) => app.graphics.refresh(),
                     _ => {}
                 }
             }

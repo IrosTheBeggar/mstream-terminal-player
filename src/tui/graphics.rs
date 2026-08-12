@@ -55,6 +55,12 @@ mod native {
         /// be fully re-decoded thirty times a second for as long as the
         /// view is up — the mosaic drawing quietly over the waste.
         refused: Option<Refusal>,
+        /// Whether the picker's cell size may be re-read from the
+        /// window-size ioctl as the session runs. True for every picker a
+        /// real terminal produced; false for the test constructor, whose
+        /// 10x20 must not drift toward whatever terminal happens to be
+        /// running the suite.
+        adaptive: bool,
         /// How many render-time decodes have run, for the tests that pin
         /// the caching above — a cache that silently stopped caching would
         /// otherwise still pass every drawing assertion.
@@ -80,6 +86,13 @@ mod native {
         /// How many cells the picture came out as. This, not the area, is
         /// what the cache turns on — see [`Graphics::draw`].
         size: (u16, u16),
+        /// How many cells the protocol actually encoded — the fit floors
+        /// its two dimensions independently, so for aspect ratios the
+        /// rounding does not favour, the picture comes out a cell or so
+        /// smaller than the box it was fitted to. Centring on the box
+        /// left that slack hanging below and to the right; the picture's
+        /// own size is what belongs in the middle.
+        shown: (u16, u16),
         protocol: Protocol,
     }
 
@@ -142,7 +155,11 @@ mod native {
                     let mut picker = Picker::from_fontsize(font);
                     picker.set_protocol_type(protocol);
                     tracing::info!("terminal graphics: forced {forced:?}, cell {font:?}");
-                    return Graphics { picker: Some(picker), ..Graphics::disabled() };
+                    return Graphics {
+                        picker: Some(picker),
+                        adaptive: true,
+                        ..Graphics::disabled()
+                    };
                 }
             }
 
@@ -167,21 +184,19 @@ mod native {
             // was nothing left in front to wait behind, the cell-size
             // report lost that race, and the probe read "no answers at
             // all" (found on 3.6.11: the blacklisted probe came back
-            // empty in 25 ms; the full query never does). Not under tmux:
-            // these variables outlive the terminal that set them, and a
-            // tmux session may be attached from somewhere that has never
-            // heard of iTerm2.
+            // empty in 25 ms; the full query never does). Not under a
+            // multiplexer — tmux, zellij, or screen: these variables
+            // outlive the terminal that set them (iTerm2 forwards
+            // LC_TERMINAL through ssh on purpose), and inside a
+            // multiplexer the queries were answered by the multiplexer,
+            // whose own protocol support is what actually matters.
             if let Some(picker) = picker.as_mut()
-                && matches!(picker.protocol_type(), ProtocolType::Kitty | ProtocolType::Sixel)
-                && std::env::var_os("TMUX").is_none()
-                && ["TERM_PROGRAM", "LC_TERMINAL"]
-                    .iter()
-                    .any(|var| std::env::var(var).is_ok_and(|v| v.contains("iTerm")))
+                && demote_for_iterm2(picker.protocol_type(), |var| std::env::var(var).ok())
             {
                 picker.set_protocol_type(ProtocolType::Iterm2);
             }
 
-            let graphics = Graphics { picker, ..Graphics::disabled() };
+            let graphics = Graphics { picker, adaptive: true, ..Graphics::disabled() };
             // One line in the flight recorder: which way this terminal
             // answered is the first fact every cover-looks-wrong report
             // needs, and it is unknowable after the fact.
@@ -218,6 +233,7 @@ mod native {
                 picker: None,
                 cached: None,
                 refused: None,
+                adaptive: false,
                 #[cfg(test)]
                 decodes: std::cell::Cell::new(0),
             }
@@ -259,7 +275,64 @@ mod native {
         /// slow drag of a terminal edge would re-encode on every cell
         /// crossed; keyed on the size, most of those cost the arithmetic
         /// below and nothing else.
+        /// The terminal behind this session was replaced — a tmux reattach
+        /// puts a fresh kitty instance behind the same tty, and the image
+        /// store the cached transmission lives in went with the old one.
+        /// Kitty is the one protocol that transmits pixels once and then
+        /// draws by reference; sixel and iTerm2 carry their pixels in the
+        /// cells and survive a full repaint on their own. Called on every
+        /// terminal resize, which a reattach almost always delivers; a
+        /// same-size reattach stays blank only until the next resize or
+        /// track change.
+        pub fn refresh(&mut self) {
+            if self.picker.as_ref().is_some_and(|p| p.protocol_type() == ProtocolType::Kitty) {
+                self.cached = None;
+            }
+        }
+
+        /// Keep the picker's cell size current. Cmd+minus mid-session
+        /// changes the font; the window keeps its pixels; and a sixel
+        /// image encoded against the old cell size paints over its
+        /// neighbours (kitty and iTerm2 scale to cells and shrug). The
+        /// window-size ioctl is the same well the forced path drinks from
+        /// — no escape bytes, microseconds — and a report without pixels
+        /// keeps the probed font. The picker is rebuilt rather than
+        /// adjusted because upstream exposes no setter; its capability
+        /// list goes with it, which only `graphics-probe` prints, and
+        /// that prints before any draw.
+        fn refresh_font(&mut self) {
+            if !self.adaptive {
+                return;
+            }
+            let Some(picker) = self.picker.as_ref() else {
+                return;
+            };
+            let Some(fresh) =
+                ratatui::crossterm::terminal::window_size().ok().and_then(forced_font)
+            else {
+                return;
+            };
+            let held = picker.font_size();
+            if (held.width, held.height) == (fresh.width, fresh.height) {
+                return;
+            }
+            let protocol = picker.protocol_type();
+            #[allow(deprecated)]
+            let mut rebuilt = Picker::from_fontsize(fresh);
+            rebuilt.set_protocol_type(protocol);
+            self.picker = Some(rebuilt);
+            // Everything remembered was measured against the old cells.
+            self.cached = None;
+            self.refused = None;
+            tracing::info!(
+                "terminal graphics: cell size now {}x{} px",
+                fresh.width,
+                fresh.height
+            );
+        }
+
         pub fn draw(&mut self, frame: &mut Frame, area: Rect, art: &Art) -> bool {
+            self.refresh_font();
             let Some(picker) = self.picker.as_ref() else {
                 return false;
             };
@@ -318,12 +391,19 @@ mod native {
                         Some(Refusal { art: art.id(), area: Some((area.width, area.height)) });
                     return false;
                 };
-                self.cached = Some(Cached { art: art.id(), source: dimensions, size, protocol });
+                let shown = protocol.size();
+                self.cached = Some(Cached {
+                    art: art.id(),
+                    source: dimensions,
+                    size,
+                    shown: (shown.width, shown.height),
+                    protocol,
+                });
             }
 
             // Unwrap: the branch above either filled this or returned.
             let held = self.cached.as_ref().expect("just built");
-            frame.render_widget(Image::new(&held.protocol), centre(area, held.size));
+            frame.render_widget(Image::new(&held.protocol), centre(area, held.shown));
             true
         }
     }
@@ -340,6 +420,28 @@ mod native {
             picker.set_protocol_type(protocol);
             Graphics { picker: Some(picker), ..Graphics::disabled() }
         }
+    }
+
+    /// Whether a queried protocol should give way to iTerm2's own.
+    ///
+    /// True only when the answers evidently came from iTerm2 itself: one
+    /// of the variables it sets names it, and no multiplexer sits in
+    /// between. Under tmux, zellij or screen the queries were answered by
+    /// the multiplexer — demoting on the outer terminal's leftover
+    /// environment would pick a protocol the thing actually drawing may
+    /// not speak (zellij answers DA1's sixel bit and draws no OSC 1337 at
+    /// all).
+    fn demote_for_iterm2(
+        protocol: ProtocolType,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> bool {
+        matches!(protocol, ProtocolType::Kitty | ProtocolType::Sixel)
+            && env("TMUX").is_none()
+            && env("ZELLIJ").is_none()
+            && env("STY").is_none()
+            && ["TERM_PROGRAM", "LC_TERMINAL"]
+                .iter()
+                .any(|var| env(var).is_some_and(|v| v.contains("iTerm")))
     }
 
     /// The cell size a window-size report implies, or `None` for a report
@@ -381,9 +483,12 @@ mod native {
         let (aw, ah) = (u64::from(area.width) * fw, u64::from(area.height) * fh);
         let (w, h) = (u64::from(w), u64::from(h));
         // Whole-pixel scale, taken as a ratio rather than a float so the
-        // two dimensions cannot round apart.
-        let cells_w = (aw.min(w * ah / h) / fw) as u16;
-        let cells_h = (ah.min(h * aw / w) / fh) as u16;
+        // two dimensions cannot round apart. The 65535 cap keeps the
+        // fitted size inside upstream's u16 pixel arithmetic even at the
+        // font clamp's ceiling — unreachable from today's panels, but a
+        // wrapping multiply is not a bug worth leaving a door open for.
+        let cells_w = (aw.min(w * ah / h) / fw).min(65535 / fw) as u16;
+        let cells_h = (ah.min(h * aw / w) / fh).min(65535 / fh) as u16;
         (cells_w.min(area.width), cells_h.min(area.height))
     }
 
@@ -649,6 +754,51 @@ mod native {
                     .unwrap();
             }
             assert_eq!(graphics.decodes.get(), 3, "undecodable bytes are asked exactly once");
+        }
+
+        #[test]
+        fn the_demotion_knows_the_real_iterm2_from_its_leftover_environment() {
+            let iterm = |var: &str| match var {
+                "LC_TERMINAL" => Some("iTerm2".to_string()),
+                _ => None,
+            };
+            assert!(demote_for_iterm2(ProtocolType::Kitty, iterm));
+            assert!(demote_for_iterm2(ProtocolType::Sixel, iterm));
+            // Its own protocol needs no demoting; halfblocks never got in.
+            assert!(!demote_for_iterm2(ProtocolType::Iterm2, iterm));
+            assert!(!demote_for_iterm2(ProtocolType::Halfblocks, iterm));
+
+            // Under any multiplexer the queries were answered by the
+            // multiplexer, and the outer terminal's leftover environment
+            // must not outvote what it said — zellij answers DA1's sixel
+            // bit and draws no OSC 1337 at all.
+            for mux in ["TMUX", "ZELLIJ", "STY"] {
+                let inside = |var: &str| match var {
+                    "LC_TERMINAL" => Some("iTerm2".to_string()),
+                    v if v == mux => Some("1".to_string()),
+                    _ => None,
+                };
+                assert!(!demote_for_iterm2(ProtocolType::Kitty, inside), "{mux}");
+            }
+
+            // A terminal that never said iTerm keeps what it answered.
+            assert!(!demote_for_iterm2(ProtocolType::Kitty, |_| None));
+            let wezterm = |var: &str| match var {
+                "TERM_PROGRAM" => Some("WezTerm".to_string()),
+                _ => None,
+            };
+            assert!(!demote_for_iterm2(ProtocolType::Kitty, wezterm));
+        }
+
+        #[test]
+        fn a_fit_never_escapes_upstreams_pixel_arithmetic() {
+            // A thousand cells at the font clamp's 128px ceiling would be
+            // 128000 pixels a side — far past the u16 upstream multiplies
+            // in. The cap trades cells no panel has for a multiply that
+            // cannot wrap.
+            let (w, h) = fit(area(1000, 1000), (128, 128), 4000, 4000);
+            assert_eq!((w, h), (511, 511));
+            assert!(u32::from(w) * 128 <= 65535 && u32::from(h) * 128 <= 65535);
         }
 
         #[test]

@@ -45,9 +45,18 @@ pub fn run() -> i32 {
         return 0;
     }
 
+    // A tty that answers nothing leaves the crate's private raw mode
+    // behind: its restore rides a reader thread that stays parked in
+    // read() past the query timeout. Bracketing the probe with
+    // crossterm's raw mode snapshots the real state first and re-asserts
+    // it after, so the shell gets its echo back whatever the terminal
+    // did. (The player's own probe sits inside ratatui::init/restore,
+    // which is the same bracket at session scale.)
+    let _ = ratatui::crossterm::terminal::enable_raw_mode();
     let start = std::time::Instant::now();
     let mut graphics = Graphics::probe();
     let elapsed = start.elapsed();
+    let _ = ratatui::crossterm::terminal::disable_raw_mode();
 
     println!("probe answered in {elapsed:?}");
     println!("{}", graphics.diagnostics());
@@ -79,9 +88,14 @@ pub fn run() -> i32 {
         TerminalOptions { viewport: Viewport::Inline(DEMO_ROWS + 1) },
     ) {
         Ok(terminal) => terminal,
+        // An inline viewport asks the terminal where the cursor is; a
+        // terminal that answered none of the probe's questions will not
+        // answer this one either. The facts above are the diagnosis —
+        // a demonstration that cannot be positioned is a skip, not a
+        // failure.
         Err(e) => {
-            eprintln!("could not draw the demonstration: {e}");
-            return 1;
+            println!("(no answer to the cursor query ({e}) — skipping the demonstration)");
+            return 0;
         }
     };
 
