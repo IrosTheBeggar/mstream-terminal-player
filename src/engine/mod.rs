@@ -205,6 +205,66 @@ struct Prepared {
 /// length for binary-search seeking on files without a SEEKTABLE block —
 /// rodio 0.20 hardcoded byte_len to None, which made those files
 /// unseekable (audit finding #13).
+/// How long a direct play may spend opening before it counts as failed.
+/// `http::OPEN_TIMEOUT` clocks the request and headers, but the decode
+/// probe after it reads the stream body with the network's full patience
+/// — stream-download's watchdog reconnects a stalled read forever, by
+/// design. Against a connection that black-holes mid-probe (a wifi flap's
+/// signature), that patience parked the audio thread, the state lock and
+/// every status behind it until the process died: audio from the old sink
+/// kept playing under a "starting" that could never end. The bound turns
+/// that into an ordinary failed open, which the queue already knows how
+/// to survive.
+#[cfg(not(test))]
+const START_TIMEOUT: Duration = Duration::from_secs(20);
+/// Tests stall sockets for real; nobody wants twenty seconds of it.
+#[cfg(test)]
+const START_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// [`open_entry`] with a deadline, for the path that blocks the audio
+/// thread. Same thread-and-channel shape as [`spawn_prepare`], and the
+/// same abandonment contract: a result that arrives after the deadline
+/// drops into a closed channel, taking the reader and its spool file
+/// with it.
+fn open_entry_bounded(entry: &QueueEntry) -> Result<Prepared, String> {
+    if !http::is_http_url(&entry.path) {
+        // Local files open or fail in microseconds; a thread per open
+        // would be pure ceremony.
+        return open_entry(entry);
+    }
+    let (tx, rx) = mpsc::channel();
+    let moved = entry.clone();
+    let spawned = std::thread::Builder::new()
+        // The prepare thread's name, deliberately: its pact with the
+        // panic hook (symphonia panics on malformed files; the hook
+        // stands back for this name) is exactly the pact this thread
+        // needs.
+        .name(PREPARE_THREAD.into())
+        .spawn(move || {
+            let opened =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| open_entry(&moved)));
+            if let Ok(result) = opened {
+                let _ = tx.send(result);
+            }
+        });
+    if spawned.is_err() {
+        // A box that cannot spawn a thread still deserves its music; the
+        // unbounded open is the behaviour this path always had.
+        return open_entry(entry);
+    }
+    match rx.recv_timeout(START_TIMEOUT) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "the stream stalled while opening — gave up after {}s",
+            START_TIMEOUT.as_secs()
+        )),
+        // The open thread panicked and the catch dropped the sender.
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("the decoder gave up on the stream".into())
+        }
+    }
+}
+
 fn open_entry(entry: &QueueEntry) -> Result<Prepared, String> {
     let path = entry.path.clone();
     // Diagnostics here go through `stderrln!`: these fire mid-session
@@ -616,7 +676,7 @@ impl State {
             return Err(EngineError::OutOfBounds);
         }
         let entry = self.q.queue[self.q.index].clone();
-        let prepared = open_entry(&entry).map_err(EngineError::Unplayable)?;
+        let prepared = open_entry_bounded(&entry).map_err(EngineError::Unplayable)?;
         self.install(mixer, prepared);
         Ok(())
     }
@@ -1761,6 +1821,47 @@ fn probe_duration(path: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stream_that_stalls_mid_probe_fails_the_start_instead_of_wedging() {
+        // Headers arrive, a few bytes arrive, then nothing — forever. The
+        // shape a wifi flap leaves behind, and the one `http::open`'s own
+        // timeout cannot catch: the open succeeds, and it is the decode
+        // probe after it that used to wait out stream-download's eternal
+        // reconnect patience on the audio thread, under the state lock,
+        // with a "starting" on screen that could never end.
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut request = [0u8; 1024];
+                    let _ = stream.read(&mut request);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 1000000\r\n\
+                          content-type: audio/mpeg\r\n\r\nID3\x04\x00\x00\x00\x00\x00\x00",
+                    );
+                    let _ = stream.flush();
+                    // And now: silence, for longer than anyone will wait.
+                    std::thread::sleep(Duration::from_secs(60));
+                });
+            }
+        });
+
+        let entry =
+            QueueEntry { path: format!("http://{addr}/stalled.mp3"), duration_hint: None };
+        let started = Instant::now();
+        let err = match open_entry_bounded(&entry) {
+            Err(e) => e,
+            Ok(_) => panic!("a stalled stream must not open"),
+        };
+        let waited = started.elapsed();
+        assert!(err.contains("stalled while opening"), "{err}");
+        // Bounded is the claim, not sharp: a busy CI box wakes late.
+        assert!(waited < Duration::from_secs(10), "took {waited:?}");
+    }
 
     #[test]
     fn a_seek_too_large_for_a_duration_is_refused_not_a_panic() {

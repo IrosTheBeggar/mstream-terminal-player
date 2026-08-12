@@ -3337,6 +3337,13 @@ impl App {
             None => {
                 self.now_playing = None;
                 self.queue.current = None;
+                // The run of failures ends with the queue, not one short
+                // of the threshold: an offline walk that died here used to
+                // leave the count a hair under the limit, and the first
+                // hiccup after the network returned was declared the end
+                // of everything ("nor could the rest") on a queue that was
+                // otherwise fine.
+                self.failures = 0;
                 vec![Effect::Audio(AudioCmd::Stop)]
             }
         }
@@ -3629,12 +3636,19 @@ impl App {
             | Event::Journey { .. }
             | Event::Genres(_)
             | Event::AutoDjPick { .. }) => self.consume_dj(event),
-            Event::AlbumArt { file, art } => {
+            Event::AlbumArt { file, art, settled } => {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just
                 // means the next track off that album finds its cover
-                // already here.
-                self.art.insert(file, art);
+                // already here. An unanswered question gives its slot back
+                // instead — the waveform's rule, learned here the hard
+                // way: a fetch that died with the wifi used to leave the
+                // album coverless for the rest of the session.
+                if settled {
+                    self.art.insert(file, art);
+                } else {
+                    self.art.remove(&file);
+                }
                 Vec::new()
             }
             // Same rule, and here it is the whole point: a shape asked for

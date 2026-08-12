@@ -363,10 +363,12 @@ pub enum Event {
     /// `query` is the search these results answer — replies can pass each
     /// other now, and the box's contents name the one still wanted.
     SearchResults { query: String, results: Box<SearchResults> },
-    /// A cover, decoded and shrunk to terminal scale — or `None` for any
-    /// kind of failure. Art is a nicety: nothing about it is ever worth a
-    /// message the user has to read.
-    AlbumArt { file: String, art: Option<art::Art> },
+    /// A cover, decoded and shrunk to terminal scale — or `None` with
+    /// `settled` saying which kind of `None` it is: the server's word that
+    /// there is no art (remembered), or a failure to ask (forgotten, so
+    /// the next track off that album asks again). Art is a nicety: nothing
+    /// about it is ever worth a message the user has to read.
+    AlbumArt { file: String, art: Option<art::Art>, settled: bool },
     /// A track's shape, or `None` for every flavour of "there isn't one".
     /// Like art, never worth a message: the bar it decorates draws perfectly
     /// well without it.
@@ -883,12 +885,18 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
             c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r) })
         }
         ApiCmd::AlbumArt { file } => {
-            // Every failure is "no art" — a fetch that 404s, bytes that
-            // don't decode, even a dead session, which the next real
-            // request will report in its own voice. Decoded here so the
-            // render loop only ever meets covers already at terminal scale.
-            let art = c.album_art(&file).ok().and_then(|bytes| art::decode(&bytes));
-            Ok(Event::AlbumArt { file, art })
+            // The waveform's rule, because this cache burned without it: a
+            // 404 and bytes that won't decode are the server's own word
+            // that there is no art — settled, remembered, never asked
+            // again. A transport failure is not an answer, and remembering
+            // it as one meant a fetch that died with the wifi left that
+            // album coverless for the rest of the session. Decoded here so
+            // the render loop only ever meets covers already at terminal
+            // scale.
+            let answer = c.album_art(&file);
+            let settled = matches!(&answer, Ok(_) | Err(ApiError::NotFound(_)));
+            let art = answer.ok().and_then(|bytes| art::decode(&bytes));
+            Ok(Event::AlbumArt { file, art, settled })
         }
         ApiCmd::Waveform { filepath } => {
             // Same rule as art: a shape nobody could draw is not news. The
