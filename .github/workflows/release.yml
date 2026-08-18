@@ -132,6 +132,16 @@ jobs:
             --identifier io.mstream.player --sign "$identity" "$bin"
           codesign --verify --strict --verbose=2 "$bin"
 
+          # The signing key's job is done: notarytool below submits the
+          # already-signed binary with API-key auth and needs no keychain.
+          # Take it out of the search list and delete it now rather than
+          # leaving an unlocked, codesign-authorized Developer ID keychain on
+          # the runner for the rest of the job (the `if: always()` step below
+          # covers a failure that exits this script before this line).
+          security list-keychains -d user -s login.keychain
+          security delete-keychain "$keychain"
+          echo "signing keychain removed"
+
           echo "$ASC_API_KEY" > "$RUNNER_TEMP/asc.p8"
           ditto -c -k "$bin" "$RUNNER_TEMP/notarize.zip"
           # Team keys carry an issuer UUID; individual keys must not pass
@@ -144,6 +154,20 @@ jobs:
             --key "$RUNNER_TEMP/asc.p8" --key-id "$ASC_KEY_ID" \
             "${issuer[@]}" --wait --timeout 15m
           rm "$RUNNER_TEMP/asc.p8"
+
+      # If the sign step failed between creating the keychain and its own
+      # removal (a codesign or verify failure), the keychain must still not
+      # outlive the step. Idempotent: an already-deleted keychain is simply
+      # not there; an unsigned build never created one.
+      - name: Remove signing keychain (always)
+        if: always() && runner.os == 'macOS'
+        run: |
+          security list-keychains -d user -s login.keychain 2>/dev/null || true
+          if [ -f "$RUNNER_TEMP/signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/signing.keychain-db" && echo "signing keychain removed (cleanup step)"
+          else
+            echo "no signing keychain present (already removed, or this build shipped unsigned)"
+          fi
 
       - name: Stage binary
         shell: bash
