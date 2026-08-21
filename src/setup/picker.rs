@@ -32,33 +32,32 @@ pub const DIALOG_TITLE: &str = "Add a music folder to mStream";
 
 #[cfg(target_os = "macos")]
 pub fn pick_folder() -> Pick {
-    // NSOpenPanel must run on the main thread; the wizard's event loop is
-    // the main thread, so a plain blocking call is exactly right. But a
-    // terminal-launched process is not the ACTIVE app, and an inactive
-    // app's panel opens behind every window without key focus — the wizard
-    // then blocks on a dialog nobody can see. Activate first, and hand
-    // focus back afterwards so the next keystroke still lands in the
-    // terminal rather than in a windowless active app.
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-    use objc2_foundation::MainThreadMarker;
-
-    let app = MainThreadMarker::new().map(|mtm| NSApplication::sharedApplication(mtm));
-    if let Some(app) = &app {
-        // A process that never declared an activation policy may have its
-        // activation requests ignored wholesale — Accessory is the
-        // panel-capable, no-Dock-icon policy (the tray launcher's choice).
-        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-        #[allow(deprecated)] // the non-deprecated activate() ignores requests
-        // from apps the user is not "engaged with", which is exactly us
-        app.activateIgnoringOtherApps(true);
-    }
-    let picked = rfd::FileDialog::new().set_title(DIALOG_TITLE).pick_folder();
-    if let Some(app) = &app {
-        app.deactivate();
-    }
-    match picked {
-        Some(path) => Pick::Folder(path),
-        None => Pick::Cancelled,
+    // Deliberately NOT rfd here: an NSOpenPanel opened by a terminal-launched
+    // process stays behind every window without key focus — live testing
+    // went through activation policies and activateIgnoringOtherApps and the
+    // panel never fronted. osascript runs the chooser in its own app
+    // context, which fronts the way every mac shell script relies on. The
+    // wizard blocks on the child exactly as it would on a modal panel.
+    let script = format!("POSIX path of (choose folder with prompt \"{DIALOG_TITLE}\")");
+    match std::process::Command::new("/usr/bin/osascript").arg("-e").arg(&script).output() {
+        Ok(out) if out.status.success() => {
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if path.is_empty() {
+                Pick::Cancelled
+            } else {
+                Pick::Folder(PathBuf::from(path))
+            }
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            // -128 is AppleScript's "User canceled".
+            if err.contains("-128") {
+                Pick::Cancelled
+            } else {
+                Pick::Unavailable(err.trim().to_string())
+            }
+        }
+        Err(e) => Pick::Unavailable(e.to_string()),
     }
 }
 

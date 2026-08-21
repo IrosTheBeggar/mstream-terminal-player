@@ -108,17 +108,14 @@ qrcode = { version = "0.14", default-features = false }
 # session bus (the wizard falls back to its server-side browser). macOS
 # and Windows get rfd's native NSOpenPanel / IFileOpenDialog, which link
 # only system frameworks.
-[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+# Windows only: IFileOpenDialog from a console app is standard and fronts
+# fine. macOS deliberately does NOT use rfd — an NSOpenPanel opened by a
+# terminal-launched process stays behind every window without key focus
+# (live-tested through activation policies and activateIgnoringOtherApps;
+# it never fronted) — the mac picker shells out to osascript instead,
+# which runs the chooser in its own app context.
+[target.'cfg(windows)'.dependencies]
 rfd = { version = "0.15", default-features = false }
-
-# NSOpenPanel from a terminal-launched process opens BEHIND every window
-# and without key focus unless the process activates itself first — the
-# wizard then looks hung while it blocks on an invisible dialog (observed
-# on the first live click-through). Both crates are already in rfd's own
-# tree; making them direct deps costs nothing new.
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.11", default-features = false, features = ["tokio"] }

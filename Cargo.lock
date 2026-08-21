@@ -2787,8 +2787,6 @@ dependencies = [
  "iroh",
  "iroh-tickets",
  "mdns-sd",
- "objc2-app-kit",
- "objc2-foundation",
  "qrcode",
  "ratatui",
  "ratatui-image",
