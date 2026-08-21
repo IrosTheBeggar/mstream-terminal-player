@@ -30,10 +30,36 @@ pub enum Pick {
 
 pub const DIALOG_TITLE: &str = "Add a music folder to mStream";
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(target_os = "macos")]
 pub fn pick_folder() -> Pick {
     // NSOpenPanel must run on the main thread; the wizard's event loop is
-    // the main thread, so a plain blocking call is exactly right.
+    // the main thread, so a plain blocking call is exactly right. But a
+    // terminal-launched process is not the ACTIVE app, and an inactive
+    // app's panel opens behind every window without key focus — the wizard
+    // then blocks on a dialog nobody can see. Activate first, and hand
+    // focus back afterwards so the next keystroke still lands in the
+    // terminal rather than in a windowless active app.
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::MainThreadMarker;
+
+    let app = MainThreadMarker::new().map(|mtm| NSApplication::sharedApplication(mtm));
+    if let Some(app) = &app {
+        #[allow(deprecated)] // the non-deprecated activate() ignores requests
+        // from apps the user is not "engaged with", which is exactly us
+        app.activateIgnoringOtherApps(true);
+    }
+    let picked = rfd::FileDialog::new().set_title(DIALOG_TITLE).pick_folder();
+    if let Some(app) = &app {
+        app.deactivate();
+    }
+    match picked {
+        Some(path) => Pick::Folder(path),
+        None => Pick::Cancelled,
+    }
+}
+
+#[cfg(windows)]
+pub fn pick_folder() -> Pick {
     match rfd::FileDialog::new().set_title(DIALOG_TITLE).pick_folder() {
         Some(path) => Pick::Folder(path),
         None => Pick::Cancelled,
