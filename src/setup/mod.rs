@@ -62,6 +62,8 @@ const ACCENT: Color = Color::LightBlue;
 const BRIGHT: Color = Color::Cyan;
 const DIM: Color = Color::DarkGray;
 const WARN: Color = Color::Yellow;
+/// The 3b-modal gold, promoted to a fixture: the rule above the footer.
+const GOLD: Color = Color::Yellow;
 const OK: Color = Color::Green;
 
 fn accent() -> Style {
@@ -78,7 +80,6 @@ fn bold() -> Style {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Screen {
-    Welcome,
     Folders,
     Login,
     Extras,
@@ -86,14 +87,13 @@ pub(crate) enum Screen {
 }
 
 impl Screen {
-    /// The 1-of-4 step this screen is, for the footer; Welcome carries none.
-    fn step(self) -> Option<u8> {
+    /// The 1-of-4 step this screen is, for the footer.
+    fn step(self) -> u8 {
         match self {
-            Screen::Welcome => None,
-            Screen::Folders => Some(1),
-            Screen::Login => Some(2),
-            Screen::Extras => Some(3),
-            Screen::Done => Some(4),
+            Screen::Folders => 1,
+            Screen::Login => 2,
+            Screen::Extras => 3,
+            Screen::Done => 4,
         }
     }
 }
@@ -166,12 +166,12 @@ pub(crate) enum LoginField {
 /// the last-drawn rect wins, which is what puts modals above screens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Act {
-    Begin,
     SelectFolder(usize),
     RenameFolder(usize),
     BrowseNative,
     TypePath,
     RemoveFolder,
+    RemoveAt(usize),
     ContinueFolders,
     Focus(LoginField),
     CreateAdmin,
@@ -258,7 +258,7 @@ impl Wizard {
     fn new(client: Client) -> Self {
         Wizard {
             client,
-            screen: Screen::Welcome,
+            screen: Screen::Folders,
             modal: Modal::None,
             folders: Vec::new(),
             sel: 0,
@@ -325,7 +325,6 @@ impl Wizard {
 
     fn act(&mut self, act: Act) -> Option<Outcome> {
         match act {
-            Act::Begin => self.queue(Op::Ping, "reaching the server…"),
             Act::SelectFolder(i) => {
                 self.finish_rename();
                 self.sel = i.min(self.folders.len().saturating_sub(1));
@@ -349,6 +348,12 @@ impl Wizard {
                 self.refresh_completion();
             }
             Act::RemoveFolder => self.remove_selected(),
+            Act::RemoveAt(i) => {
+                if i < self.folders.len() {
+                    self.sel = i;
+                    self.remove_selected();
+                }
+            }
             Act::ContinueFolders => {
                 self.finish_rename();
                 if self.folders.is_empty() {
@@ -479,10 +484,7 @@ impl Wizard {
         self.busy = None;
         match op {
             Op::Ping => match self.client.ping() {
-                Ok(_) => {
-                    self.note = None;
-                    self.screen = Screen::Folders;
-                }
+                Ok(_) => self.note = None,
                 Err(e) => self.fail("could not reach the server", e),
             },
             Op::PickNative => match picker::pick_folder() {
@@ -828,6 +830,7 @@ pub fn run(args: SetupArgs) -> i32 {
     };
 
     let mut wizard = Wizard::new(client);
+    wizard.queue(Op::Ping, "reaching the server…");
 
     let mut terminal = ratatui::init();
     // A wizard whose buttons cannot be clicked is half a wizard; like the
@@ -1050,11 +1053,6 @@ fn handle_key(wizard: &mut Wizard, code: KeyCode) -> Option<Outcome> {
     }
 
     match wizard.screen {
-        Screen::Welcome => match code {
-            KeyCode::Enter => wizard.act(Act::Begin),
-            KeyCode::Char('q') => Some(Outcome::Quit),
-            _ => None,
-        },
         Screen::Folders => match code {
             KeyCode::Up => wizard.act(Act::SelectFolder(wizard.sel.saturating_sub(1))),
             KeyCode::Down => wizard.act(Act::SelectFolder(wizard.sel + 1)),
@@ -1138,19 +1136,6 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         return;
     }
 
-    // Header.
-    let header = Rect { x: 2, y: 0, width: area.width.saturating_sub(4), height: 1 };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("mStream Setup", Style::default().fg(BRIGHT).add_modifier(Modifier::BOLD)),
-        ])),
-        header,
-    );
-    frame.render_widget(
-        Paragraph::new(Span::styled(wizard.client.server(), dim())).alignment(Alignment::Right),
-        header,
-    );
-
     // The centered column everything lives in.
     let width = COLUMN.min(area.width.saturating_sub(4));
     let column = Rect {
@@ -1161,7 +1146,6 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     };
 
     match wizard.screen {
-        Screen::Welcome => draw_welcome(frame, wizard, column),
         Screen::Folders => draw_folders(frame, wizard, column),
         Screen::Login => draw_login(frame, wizard, column),
         Screen::Extras => draw_extras(frame, wizard, column),
@@ -1181,12 +1165,14 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         frame.render_widget(Paragraph::new(Span::styled(busy, accent())), busy_area);
     }
 
-    // Footer.
+    // Footer, under its gold rule.
+    let rule = Rect { x: 2, y: area.height.saturating_sub(2), width: area.width - 4, height: 1 };
+    frame.render_widget(
+        Paragraph::new(Span::styled("─".repeat(rule.width as usize), Style::default().fg(GOLD))),
+        rule,
+    );
     let footer = Rect { x: 2, y: area.height.saturating_sub(1), width: area.width - 4, height: 1 };
-    let step = match wizard.screen.step() {
-        Some(step) => format!("Step {step} of 4"),
-        None => String::new(),
-    };
+    let step = format!("Step {} of 4", wizard.screen.step());
     frame.render_widget(Paragraph::new(Span::styled(step, dim())), footer);
     frame.render_widget(
         Paragraph::new(Span::styled(footer_hint(wizard), dim())).alignment(Alignment::Right),
@@ -1206,7 +1192,6 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
         (Modal::Browser(_), _) => "↑ ↓ move · Enter open · a add this folder · Esc close",
         (Modal::PathEntry(_), _) => "Tab complete · ↑ ↓ pick · Enter add folder · Esc close",
         (Modal::SkipWarning, _) => "Enter go public · Esc back",
-        (_, Screen::Welcome) => "Enter begin · q quit",
         (_, Screen::Folders) => "b browse · t type a path · Enter rename · c continue",
         (_, Screen::Login) => "Tab next field · Enter create · Esc skip",
         (_, Screen::Extras) => "Space toggle · c continue",
@@ -1250,97 +1235,72 @@ fn card(frame: &mut Frame, at: Rect, focused: bool) -> Rect {
     inner
 }
 
-fn draw_welcome(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
-    let mut y = column.y + column.height / 6;
-    let logo = [
-        r"            ____  _                            ",
-        r"  _ __ ___ / ___|| |_ _ __ ___  __ _ _ __ ___  ",
-        r" | '_ ` _ \\___ \| __| '__/ _ \/ _` | '_ ` _ \ ",
-        r" | | | | | |___) | |_| |  __/ (_| | | | | | |  ",
-        r" |_| |_| |_|____/ \__|_|\___|\__,_|_| |_| |_|  ",
-    ];
-    for line in logo {
-        let rect = Rect { x: column.x, y, width: column.width, height: 1 };
+const LOGO: [&str; 5] = [
+    r"            ____  _                            ",
+    r"  _ __ ___ / ___|| |_ _ __ ___  __ _ _ __ ___  ",
+    r" | '_ ` _ \ ___ \| __| '__/ _ \/ _` | '_ ` _ \ ",
+    r" | | | | | |___) | |_| |  __/ (_| | | | | | |  ",
+    r" |_| |_| |_|____/ \__|_|\___|\__,_|_| |_| |_|  ",
+];
+
+fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
+    let mut y = column.y;
+    for line in LOGO {
         frame.render_widget(
             Paragraph::new(Span::styled(line, accent())).alignment(Alignment::Center),
-            rect,
-        );
-        y += 1;
-    }
-    y += 2;
-    let lines = [
-        ("Welcome. Your music is about to be everywhere.", bold()),
-        ("", dim()),
-        ("This takes about two minutes: pick your music folders,", Style::default()),
-        ("create your login, and connect your phone.", Style::default()),
-        ("No accounts, no cloud — this server is yours.", Style::default()),
-        ("", dim()),
-        ("Mouse or keyboard, whichever you like.", dim()),
-    ];
-    for (text, style) in lines {
-        let rect = Rect { x: column.x, y, width: column.width, height: 1 };
-        frame.render_widget(
-            Paragraph::new(Span::styled(text, style)).alignment(Alignment::Center),
-            rect,
+            Rect { x: column.x, y, width: column.width, height: 1 },
         );
         y += 1;
     }
     y += 1;
-    let label = "Get Started ▸";
-    let x = column.x + (column.width.saturating_sub(label.len() as u16 + 4)) / 2;
-    button(frame, wizard, Rect { x, y, width: column.width, height: 1 }, label, true, Act::Begin);
-}
-
-fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
-    let mut y = column.y;
     frame.render_widget(
         Paragraph::new(Span::styled("Where does your music live?", bold())),
         Rect { x: column.x, y, width: column.width, height: 1 },
     );
-    y += 1;
-    let hint = if wizard.folders.len() <= 1 {
-        "Pick folders on this machine. One folder is simply called media."
-    } else {
-        "Several folders — each gets a short name your apps will see."
-    };
-    frame.render_widget(
-        Paragraph::new(Span::styled(hint, dim())),
-        Rect { x: column.x, y, width: column.width, height: 1 },
-    );
     y += 2;
 
-    let show_names = wizard.folders.len() > 1;
     for i in 0..wizard.folders.len() {
         let selected = i == wizard.sel;
         let rect = Rect { x: column.x, y, width: column.width, height: 3 };
         let inner = card(frame, rect, selected);
         wizard.clicks.push((rect, Act::SelectFolder(i)));
 
+        // [name]  /the/path                                            ✕
         let folder = &wizard.folders[i];
+        let name = match (&wizard.editing, selected) {
+            (Some(draft), true) => format!("[{draft}▏]"),
+            _ => format!("[{}]", folder.name),
+        };
+        let name_width = (name.chars().count() as u16).min(inner.width);
+        let name_rect = Rect { x: inner.x + 1, y: inner.y, width: name_width, height: 1 };
+        let name_style = if wizard.editing.is_some() && selected {
+            Style::default().fg(BRIGHT)
+        } else {
+            accent()
+        };
+        frame.render_widget(Paragraph::new(Span::styled(name, name_style)), name_rect);
+        wizard.clicks.push((name_rect, Act::RenameFolder(i)));
+
+        let path_x = name_rect.right() + 2;
         frame.render_widget(
             Paragraph::new(Span::raw(folder.path.clone())),
-            Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(20), height: 1 },
-        );
-        if show_names || folder.named_by_user {
-            let name = match (&wizard.editing, selected) {
-                (Some(draft), true) => format!("[{draft}▏]"),
-                _ => format!("[{}]", folder.name),
-            };
-            let width = (name.chars().count() as u16).min(inner.width);
-            let name_rect = Rect {
-                x: inner.right().saturating_sub(width + 1),
+            Rect {
+                x: path_x,
                 y: inner.y,
-                width,
+                width: inner.right().saturating_sub(path_x + 4),
                 height: 1,
-            };
-            let style = if wizard.editing.is_some() && selected {
-                Style::default().fg(BRIGHT)
-            } else {
-                accent()
-            };
-            frame.render_widget(Paragraph::new(Span::styled(name, style)), name_rect);
-            wizard.clicks.push((name_rect, Act::RenameFolder(i)));
-        }
+            },
+        );
+
+        let x_rect = Rect { x: inner.right().saturating_sub(2), y: inner.y, width: 1, height: 1 };
+        let x_hover = wizard.pointer.is_some_and(|p| x_rect.contains(p));
+        let x_style = if x_hover {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else {
+            dim()
+        };
+        frame.render_widget(Paragraph::new(Span::styled("✕", x_style)), x_rect);
+        wizard.clicks.push((x_rect, Act::RemoveAt(i)));
         y += 3;
     }
 
@@ -1354,28 +1314,20 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let inner = block.inner(add_rect);
     frame.render_widget(block, add_rect);
     frame.render_widget(
-        Paragraph::new(Span::styled("+ Browse for a folder…", accent()))
+        Paragraph::new(Span::styled("Click to open file picker", accent()))
             .alignment(Alignment::Center),
         inner,
     );
     wizard.clicks.push((add_rect, Act::BrowseNative));
     y += 4;
 
-    let type_rect = button(
+    button(
         frame,
         wizard,
         Rect { x: column.x, y, width: column.width, height: 1 },
         "type a path",
         false,
         Act::TypePath,
-    );
-    button(
-        frame,
-        wizard,
-        Rect { x: type_rect.right() + 2, y, width: column.width, height: 1 },
-        "remove selected",
-        false,
-        Act::RemoveFolder,
     );
 
     let label = "Continue ▸";
