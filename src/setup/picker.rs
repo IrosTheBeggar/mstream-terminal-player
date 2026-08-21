@@ -39,11 +39,15 @@ pub fn pick_folder() -> Pick {
     // then blocks on a dialog nobody can see. Activate first, and hand
     // focus back afterwards so the next keystroke still lands in the
     // terminal rather than in a windowless active app.
-    use objc2_app_kit::NSApplication;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
     use objc2_foundation::MainThreadMarker;
 
     let app = MainThreadMarker::new().map(|mtm| NSApplication::sharedApplication(mtm));
     if let Some(app) = &app {
+        // A process that never declared an activation policy may have its
+        // activation requests ignored wholesale — Accessory is the
+        // panel-capable, no-Dock-icon policy (the tray launcher's choice).
+        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         #[allow(deprecated)] // the non-deprecated activate() ignores requests
         // from apps the user is not "engaged with", which is exactly us
         app.activateIgnoringOtherApps(true);
