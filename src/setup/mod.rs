@@ -15,6 +15,8 @@
 
 pub mod picker;
 
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use clap::Args;
@@ -208,6 +210,102 @@ enum Op {
     PollProgress,
 }
 
+/// What the worker sends back for each [`Op`].
+enum Done {
+    Ping(Result<(), ApiError>),
+    Picked(picker::Pick),
+    Browsed(Result<crate::api::types::DirListing, ApiError>),
+    Completed { dir: String, listing: Result<crate::api::types::DirListing, ApiError> },
+    /// Which folder indexes were committed this attempt, and the first
+    /// failure if one stopped the batch.
+    FoldersCommitted { committed: Vec<usize>, error: Option<(String, ApiError)> },
+    /// The new admin's token — the main thread rebuilds its client around
+    /// it so every later op runs authenticated.
+    AdminCreated(Result<String, ApiError>),
+    ExtrasCommitted { applied: Vec<usize>, error: Option<(String, ApiError)> },
+    Iroh(Result<crate::api::types::IrohStatus, ApiError>),
+    Progress(Result<Vec<crate::api::types::ScanProgressRow>, ApiError>),
+}
+
+/// Everything an op needs to run away from the UI state. Snapshotted at
+/// dispatch time — the worker never sees the Wizard.
+enum Job {
+    Plain(Op),
+    Folders(Vec<(usize, String, String)>),
+    Admin { username: String, password: String, vpaths: Vec<String> },
+    Extras(Vec<(usize, &'static str, bool)>),
+}
+
+/// The worker thread: one op at a time, results back over the channel. The
+/// picker runs here too, so the UI stays live while a dialog is open.
+fn spawn_worker() -> (Sender<(Arc<Client>, Job)>, Receiver<Done>) {
+    let (job_tx, job_rx) = std::sync::mpsc::channel::<(Arc<Client>, Job)>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<Done>();
+    std::thread::spawn(move || {
+        while let Ok((client, job)) = job_rx.recv() {
+            let done = match job {
+                Job::Plain(Op::Ping) => Done::Ping(client.ping().map(|_| ())),
+                Job::Plain(Op::PickNative) => Done::Picked(picker::pick_folder()),
+                Job::Plain(Op::OpenBrowser(path)) | Job::Plain(Op::BrowseTo(path)) => {
+                    Done::Browsed(client.admin_file_explorer(&path))
+                }
+                Job::Plain(Op::Complete(dir)) => {
+                    let listing = client.admin_file_explorer(&dir);
+                    Done::Completed { dir, listing }
+                }
+                Job::Plain(Op::LoadDone) => Done::Iroh(client.admin_iroh()),
+                Job::Plain(Op::PollProgress) => Done::Progress(client.scan_progress()),
+                // These three carry snapshots instead.
+                Job::Plain(Op::CommitFolders | Op::CreateAdmin | Op::CommitExtras) => continue,
+                Job::Folders(batch) => {
+                    let mut committed = Vec::new();
+                    let mut error = None;
+                    for (i, path, name) in batch {
+                        match client.admin_add_directory(&path, &name) {
+                            Ok(_) => committed.push(i),
+                            Err(e) => {
+                                error = Some((name, e));
+                                break;
+                            }
+                        }
+                    }
+                    Done::FoldersCommitted { committed, error }
+                }
+                Job::Admin { username, password, vpaths } => Done::AdminCreated(
+                    client
+                        .admin_create_user(&username, &password, &vpaths, true)
+                        .and_then(|_| client.login_shared(&username, &password))
+                        .map(|resp| resp.token),
+                ),
+                Job::Extras(batch) => {
+                    let mut applied = Vec::new();
+                    let mut error = None;
+                    for (i, label, on) in batch {
+                        let result = match i {
+                            0 => client.admin_update_mode(if on { "stage" } else { "notify" }).map(|_| ()),
+                            1 if on => client.admin_auto_boot_audio(true).map(|_| ()),
+                            2 if on => client.admin_discovery_enabled(true).map(|_| ()),
+                            _ => Ok(()),
+                        };
+                        match result {
+                            Ok(()) => applied.push(i),
+                            Err(e) => {
+                                error = Some((label.to_string(), e));
+                                break;
+                            }
+                        }
+                    }
+                    Done::ExtrasCommitted { applied, error }
+                }
+            };
+            if done_tx.send(done).is_err() {
+                return;
+            }
+        }
+    });
+    (job_tx, done_rx)
+}
+
 /// How the loop ended.
 enum Outcome {
     Quit,
@@ -215,7 +313,7 @@ enum Outcome {
 }
 
 pub(crate) struct Wizard {
-    client: Client,
+    client: Arc<Client>,
     pub screen: Screen,
     pub modal: Modal,
 
@@ -247,6 +345,10 @@ pub(crate) struct Wizard {
     pub note: Option<(String, bool)>,
     busy: Option<&'static str>,
     queued: Option<Op>,
+    /// An op is running on the worker; further queues wait (completions
+    /// supersede each other instead).
+    in_flight: bool,
+    pending_complete: Option<String>,
     last_poll: Instant,
 
     clicks: Vec<(Rect, Act)>,
@@ -257,7 +359,7 @@ pub(crate) struct Wizard {
 impl Wizard {
     fn new(client: Client) -> Self {
         Wizard {
-            client,
+            client: Arc::new(client),
             screen: Screen::Folders,
             modal: Modal::None,
             folders: Vec::new(),
@@ -277,6 +379,8 @@ impl Wizard {
             note: None,
             busy: None,
             queued: None,
+            in_flight: false,
+            pending_complete: None,
             last_poll: Instant::now(),
             clicks: Vec::new(),
             pointer: None,
@@ -426,6 +530,8 @@ impl Wizard {
                 draft.listed_for = dir.clone();
                 draft.entries.clear();
                 self.queued = Some(Op::Complete(dir));
+                // Quiet: no busy note for something that follows every
+                // keystroke.
             }
         }
     }
@@ -477,120 +583,142 @@ impl Wizard {
         None
     }
 
-    // ── Server calls (run between draws) ────────────────────────────────────
+    // ── Server calls ────────────────────────────────────────────────────────
+    //
+    // Every op runs on the worker thread (below) — the loop stays live, keys
+    // keep landing, and a slow server (or an open picker dialog) can never
+    // freeze the UI. The first cut ran ops synchronously between draws and a
+    // boot-busy server blocked the loop for eight seconds; the buffered
+    // keystrokes then replayed into the wrong screens.
 
-    fn run_queued(&mut self) {
+    /// Hand the queued op to the worker. Ops are single-flight: while one is
+    /// in flight the UI shows its busy note and further queues are ignored
+    /// (completion listings replace instead — typing outruns the network).
+    fn dispatch_queued(&mut self, to_worker: &Sender<(Arc<Client>, Job)>) {
+        if self.in_flight {
+            // A newer completion wish supersedes a stale one; anything else
+            // waits its turn behind the running op.
+            match self.queued.take() {
+                Some(Op::Complete(dir)) => self.pending_complete = Some(dir),
+                other => self.queued = other,
+            }
+            return;
+        }
         let Some(op) = self.queued.take() else { return };
+        // Snapshot whatever the op needs — the worker never sees the Wizard.
+        let job = match op {
+            Op::CommitFolders => Job::Folders(
+                self.folders
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| !f.committed)
+                    .map(|(i, f)| (i, f.path.clone(), f.name.clone()))
+                    .collect(),
+            ),
+            Op::CreateAdmin => Job::Admin {
+                username: self.username.clone(),
+                password: self.password.clone(),
+                vpaths: self.folders.iter().map(|f| f.name.clone()).collect(),
+            },
+            Op::CommitExtras => Job::Extras(
+                [(0usize, "updates"), (1, "server audio"), (2, "discovery")]
+                    .into_iter()
+                    .filter(|(i, _)| !self.extras_done[*i])
+                    .map(|(i, label)| (i, label, self.extras[i]))
+                    .collect(),
+            ),
+            other => Job::Plain(other),
+        };
+        self.in_flight = true;
+        if to_worker.send((self.client.clone(), job)).is_err() {
+            self.in_flight = false;
+            self.note = Some(("the worker thread is gone — restart the wizard".into(), true));
+        }
+    }
+
+    /// Fold one worker result back into the state.
+    fn apply(&mut self, done: Done) {
+        self.in_flight = false;
         self.busy = None;
-        match op {
-            Op::Ping => match self.client.ping() {
-                Ok(_) => self.note = None,
-                Err(e) => self.fail("could not reach the server", e),
-            },
-            Op::PickNative => match picker::pick_folder() {
-                picker::Pick::Folder(path) => self.add_folder(path.display().to_string()),
-                picker::Pick::Cancelled => {}
-                picker::Pick::Unavailable(why) => {
-                    self.note = Some((
-                        format!("no native picker here ({why}) — browsing on the server instead"),
-                        false,
-                    ));
-                    self.queue(Op::OpenBrowser("~".to_string()), "listing…");
-                }
-            },
-            Op::OpenBrowser(path) | Op::BrowseTo(path) => {
-                match self.client.admin_file_explorer(&path) {
-                    Ok(listing) => {
-                        self.modal = Modal::Browser(Browse {
-                            path: listing.path,
-                            dirs: listing.directories.into_iter().map(|d| d.name).collect(),
-                            sel: 0,
-                        });
-                    }
-                    Err(e) => self.fail("could not browse there", e),
-                }
+        if let Some(dir) = self.pending_complete.take() {
+            self.queue(Op::Complete(dir), "");
+        }
+        match done {
+            Done::Ping(Ok(())) => self.note = None,
+            Done::Ping(Err(e)) => self.fail("could not reach the server", e),
+            Done::Picked(picker::Pick::Folder(path)) => {
+                self.add_folder(path.display().to_string());
             }
-            Op::Complete(dir) => {
+            Done::Picked(picker::Pick::Cancelled) => {}
+            Done::Picked(picker::Pick::Unavailable(why)) => {
+                self.note = Some((
+                    format!("no native picker here ({why}) — browsing on the server instead"),
+                    false,
+                ));
+                self.queue(Op::OpenBrowser("~".to_string()), "listing…");
+            }
+            Done::Browsed(Ok(listing)) => {
+                self.modal = Modal::Browser(Browse {
+                    path: listing.path,
+                    dirs: listing.directories.into_iter().map(|d| d.name).collect(),
+                    sel: 0,
+                });
+            }
+            Done::Browsed(Err(e)) => self.fail("could not browse there", e),
+            Done::Completed { dir, listing } => {
                 // The user may have typed on: only install the listing if it
-                // still answers the draft's current dir-part.
-                match self.client.admin_file_explorer(&dir) {
-                    Ok(listing) => {
-                        if let Modal::PathEntry(draft) = &mut self.modal {
-                            if draft.listed_for == dir {
-                                draft.listed_path = listing.path;
-                                draft.entries =
-                                    listing.directories.into_iter().map(|d| d.name).collect();
-                            }
-                        }
+                // still answers the draft's current dir-part. A failure is
+                // an empty list — mid-typing dirs are bogus half the time.
+                if let (Modal::PathEntry(draft), Ok(listing)) = (&mut self.modal, listing) {
+                    if draft.listed_for == dir {
+                        draft.listed_path = listing.path;
+                        draft.entries =
+                            listing.directories.into_iter().map(|d| d.name).collect();
                     }
-                    // Mid-typing the dir-part is bogus half the time; an
-                    // empty list is the honest render for that.
-                    Err(_) => {}
                 }
             }
-            Op::CommitFolders => {
-                for i in 0..self.folders.len() {
-                    if self.folders[i].committed {
-                        continue;
-                    }
-                    let (path, name) = (self.folders[i].path.clone(), self.folders[i].name.clone());
-                    match self.client.admin_add_directory(&path, &name) {
-                        Ok(_) => self.folders[i].committed = true,
-                        Err(e) => {
-                            self.fail(&format!("could not add {name}"), e);
-                            return;
-                        }
+            Done::FoldersCommitted { committed, error } => {
+                for i in committed {
+                    if let Some(folder) = self.folders.get_mut(i) {
+                        folder.committed = true;
                     }
                 }
-                self.note = None;
-                self.screen = Screen::Login;
+                match error {
+                    Some((name, e)) => self.fail(&format!("could not add {name}"), e),
+                    None => {
+                        self.note = None;
+                        self.screen = Screen::Login;
+                    }
+                }
             }
-            Op::CreateAdmin => {
-                let vpaths: Vec<String> = self.folders.iter().map(|f| f.name.clone()).collect();
-                if let Err(e) =
-                    self.client.admin_create_user(&self.username, &self.password, &vpaths, true)
-                {
-                    return self.fail("could not create the login", e);
-                }
-                // Sign in as the account that now guards the server, and
-                // remember it — finishing the wizard should leave the player
-                // itself ready to use.
-                if let Err(e) = self.client.login(&self.username.clone(), &self.password.clone()) {
-                    return self.fail("created, but could not sign in", e);
+            Done::AdminCreated(Ok(token)) => {
+                // Creating the first user closed the open-admin window; swap
+                // in a token-carrying client so the rest of the wizard (and
+                // any job the worker gets from now on) stays authorized.
+                match Client::new(&self.client.server()) {
+                    Ok(fresh) => self.client = Arc::new(fresh.with_token(Some(token))),
+                    Err(e) => return self.fail("could not keep the session", e),
                 }
                 self.remember_session();
                 self.note = None;
                 self.screen = Screen::Extras;
             }
-            Op::CommitExtras => {
-                let steps: [(usize, &str, fn(&Client, bool) -> Result<(), ApiError>); 3] = [
-                    (0, "updates", |c, on| {
-                        c.admin_update_mode(if on { "stage" } else { "notify" }).map(|_| ())
-                    }),
-                    (1, "server audio", |c, on| {
-                        if on { c.admin_auto_boot_audio(true).map(|_| ()) } else { Ok(()) }
-                    }),
-                    (2, "discovery", |c, on| {
-                        if on { c.admin_discovery_enabled(true).map(|_| ()) } else { Ok(()) }
-                    }),
-                ];
-                for (i, label, apply) in steps {
-                    if self.extras_done[i] {
-                        continue;
-                    }
-                    match apply(&self.client, self.extras[i]) {
-                        Ok(()) => self.extras_done[i] = true,
-                        Err(e) => {
-                            return self.fail(&format!("could not set up {label}"), e);
-                        }
+            Done::AdminCreated(Err(e)) => self.fail("could not create the login", e),
+            Done::ExtrasCommitted { applied, error } => {
+                for i in applied {
+                    self.extras_done[i] = true;
+                }
+                match error {
+                    Some((label, e)) => self.fail(&format!("could not set up {label}"), e),
+                    None => {
+                        self.note = None;
+                        self.screen = Screen::Done;
+                        self.queue(Op::LoadDone, "fetching your Quick Connect code…");
                     }
                 }
-                self.note = None;
-                self.screen = Screen::Done;
-                self.queue(Op::LoadDone, "fetching your Quick Connect code…");
             }
-            Op::LoadDone => {
-                match self.client.admin_iroh() {
+            Done::Iroh(result) => {
+                match result {
                     Ok(status) => match status.qr.as_deref() {
                         Some(ticket) if status.enabled => match qr_lines(ticket) {
                             Some(lines) => {
@@ -598,7 +726,10 @@ impl Wizard {
                                 self.qr_note =
                                     "Scan with the mStream app to connect from anywhere — no port forwarding.".to_string();
                             }
-                            None => self.qr_note = "Quick Connect is on — the code is in the admin panel.".to_string(),
+                            None => {
+                                self.qr_note =
+                                    "Quick Connect is on — the code is in the admin panel.".to_string();
+                            }
                         },
                         _ if !status.enabled => {
                             self.qr_note =
@@ -613,27 +744,23 @@ impl Wizard {
                 }
                 self.queue(Op::PollProgress, "");
             }
-            Op::PollProgress => {
+            Done::Progress(rows) => {
                 self.last_poll = Instant::now();
-                match self.client.scan_progress() {
+                match rows {
                     Ok(rows) if rows.is_empty() => {
                         self.progress = "Library scan complete.".to_string();
                     }
                     Ok(rows) => {
                         let row = &rows[0];
+                        let more = if rows.len() > 1 { ", more queued" } else { "" };
                         self.progress = match row.pct {
                             Some(pct) => format!(
                                 "Scanning {} — {}% ({} tracks so far{})",
-                                row.vpath,
-                                pct,
-                                row.scanned,
-                                if rows.len() > 1 { ", more queued" } else { "" }
+                                row.vpath, pct, row.scanned, more
                             ),
                             None => format!(
                                 "Scanning {} — {} tracks so far{}",
-                                row.vpath,
-                                row.scanned,
-                                if rows.len() > 1 { ", more queued" } else { "" }
+                                row.vpath, row.scanned, more
                             ),
                         };
                     }
@@ -832,11 +959,13 @@ pub fn run(args: SetupArgs) -> i32 {
     let mut wizard = Wizard::new(client);
     wizard.queue(Op::Ping, "reaching the server…");
 
+    let (to_worker, from_worker) = spawn_worker();
+
     let mut terminal = ratatui::init();
     // A wizard whose buttons cannot be clicked is half a wizard; like the
     // player, a terminal that refuses mouse reports still works by keys.
     let mouse_on = execute!(std::io::stdout(), EnableMouseCapture).is_ok();
-    let outcome = event_loop(&mut terminal, &mut wizard, mouse_on);
+    let outcome = event_loop(&mut terminal, &mut wizard, mouse_on, &to_worker, &from_worker);
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         set_pointer_shape(false, true);
@@ -872,10 +1001,26 @@ fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     wizard: &mut Wizard,
     mouse_on: bool,
+    to_worker: &Sender<(Arc<Client>, Job)>,
+    from_worker: &Receiver<Done>,
 ) -> std::io::Result<Outcome> {
     let mut hand = false;
     loop {
         terminal.draw(|frame| render(frame, wizard))?;
+
+        // Fold in whatever the worker finished, then hand it the next op.
+        loop {
+            match from_worker.try_recv() {
+                Ok(done) => wizard.apply(done),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    wizard.note =
+                        Some(("the worker thread is gone — restart the wizard".into(), true));
+                    break;
+                }
+            }
+        }
+        wizard.dispatch_queued(to_worker);
 
         // The hand cursor follows whether the pointer is over anything
         // clickable in the frame just drawn.
@@ -887,11 +1032,9 @@ fn event_loop(
             set_pointer_shape(hand, mouse_on);
         }
 
-        // Server calls run here, after their "working…" frame is visible.
-        wizard.run_queued();
-
         if wizard.screen == Screen::Done
             && wizard.queued.is_none()
+            && !wizard.in_flight
             && wizard.last_poll.elapsed() >= PROGRESS_EVERY
         {
             wizard.queued = Some(Op::PollProgress);

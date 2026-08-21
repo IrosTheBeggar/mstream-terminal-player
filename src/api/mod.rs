@@ -329,6 +329,18 @@ impl Client {
         .await
     }
 
+    /// Authenticate WITHOUT storing the token — for callers holding the
+    /// client behind an Arc (the setup wizard's worker), which rebuild a
+    /// token-carrying client from the response instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn login_shared(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<LoginResponse, ApiError> {
+        wait(self.login_async(username, password))
+    }
+
     /// Authenticate and store the returned token on this client.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn login(&mut self, username: &str, password: &str) -> Result<LoginResponse, ApiError> {
