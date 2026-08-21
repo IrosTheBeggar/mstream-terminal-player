@@ -7,8 +7,8 @@
 //! logs in and continues with the token).
 //!
 //! The look is the "airy minimal" direction from the design canvas: one
-//! centered column, sparse rounded borders, a ghost step numeral, filled
-//! buttons. Mouse-first — every control is clickable — and every action has
+//! centered column, sparse rounded borders, filled buttons that light up
+//! under the pointer. Mouse-first — every control is clickable — and every action has
 //! a key. All decisions live in [`Wizard`]; the loop below only draws,
 //! reads input, and runs one queued server call per pass (queued so the
 //! "working…" frame is on screen while the call blocks).
@@ -220,6 +220,8 @@ pub(crate) struct Wizard {
     last_poll: Instant,
 
     clicks: Vec<(Rect, Act)>,
+    /// Where the mouse last was, for hover styling. None until it moves.
+    pointer: Option<Position>,
 }
 
 impl Wizard {
@@ -247,6 +249,7 @@ impl Wizard {
             queued: None,
             last_poll: Instant::now(),
             clicks: Vec::new(),
+            pointer: None,
         }
     }
 
@@ -681,20 +684,6 @@ fn qr_lines(data: &str) -> Option<Vec<String>> {
     Some(rendered.lines().map(str::to_string).collect())
 }
 
-/// The ghost step numeral: "0N" in a 5-row block font, drawn dim behind the
-/// top-right of the card — the airy design's one flourish.
-pub(crate) fn ghost_digits(step: u8) -> Vec<String> {
-    const FONT: [[&str; 5]; 5] = [
-        ["█████", "█   █", "█   █", "█   █", "█████"], // 0
-        ["  █  ", " ██  ", "  █  ", "  █  ", "█████"], // 1
-        ["█████", "    █", "█████", "█    ", "█████"], // 2
-        ["█████", "    █", " ████", "    █", "█████"], // 3
-        ["█  █ ", "█  █ ", "█████", "   █ ", "   █ "], // 4
-    ];
-    let digit = FONT[(step as usize).min(4)];
-    (0..5).map(|row| format!("{}  {}", FONT[0][row], digit[row])).collect()
-}
-
 // ── Entry ────────────────────────────────────────────────────────────────────
 
 pub fn run(args: SetupArgs) -> i32 {
@@ -719,9 +708,10 @@ pub fn run(args: SetupArgs) -> i32 {
     // A wizard whose buttons cannot be clicked is half a wizard; like the
     // player, a terminal that refuses mouse reports still works by keys.
     let mouse_on = execute!(std::io::stdout(), EnableMouseCapture).is_ok();
-    let outcome = event_loop(&mut terminal, &mut wizard);
+    let outcome = event_loop(&mut terminal, &mut wizard, mouse_on);
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        set_pointer_shape(false, true);
     }
     ratatui::restore();
 
@@ -738,12 +728,36 @@ pub fn run(args: SetupArgs) -> i32 {
     }
 }
 
+/// Ask the terminal for a hand cursor over clickables (OSC 22, the xterm
+/// pointerShape control). iTerm2, kitty, WezTerm and friends honor it;
+/// everything else ignores the sequence, which costs nothing. Emitted only
+/// on state CHANGES so the stream is not littered with it.
+fn set_pointer_shape(hand: bool, mouse_on: bool) {
+    if !mouse_on {
+        return;
+    }
+    let sequence = if hand { "\x1b]22;pointer\x1b\\" } else { "\x1b]22;default\x1b\\" };
+    let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(sequence));
+}
+
 fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     wizard: &mut Wizard,
+    mouse_on: bool,
 ) -> std::io::Result<Outcome> {
+    let mut hand = false;
     loop {
         terminal.draw(|frame| render(frame, wizard))?;
+
+        // The hand cursor follows whether the pointer is over anything
+        // clickable in the frame just drawn.
+        let over = wizard
+            .pointer
+            .is_some_and(|p| wizard.clicks.iter().any(|(rect, _)| rect.contains(p)));
+        if over != hand {
+            hand = over;
+            set_pointer_shape(hand, mouse_on);
+        }
 
         // Server calls run here, after their "working…" frame is visible.
         wizard.run_queued();
@@ -759,34 +773,51 @@ fn event_loop(
         if !event::poll(POLL)? {
             continue;
         }
-        match event::read()? {
-            TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && key.code == KeyCode::Char('c')
-                {
-                    return Ok(Outcome::Quit);
-                }
-                if let Some(outcome) = handle_key(wizard, key.code) {
-                    return Ok(outcome);
-                }
-            }
-            TermEvent::Mouse(mouse) => {
-                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                    let at = Position { x: mouse.column, y: mouse.row };
-                    let hit = wizard
-                        .clicks
-                        .iter()
-                        .rev()
-                        .find(|(rect, _)| rect.contains(at))
-                        .map(|(_, act)| act.clone());
-                    if let Some(act) = hit {
-                        if let Some(outcome) = wizard.act(act) {
-                            return Ok(outcome);
-                        }
+        // Drain everything queued before the next draw: mouse capture arms
+        // any-motion tracking, so a sweep of the pointer is one event per
+        // cell crossed — pointer updates are cheap, but each must not cost
+        // a frame (the player's collapse-moves lesson).
+        let mut inputs = vec![event::read()?];
+        while event::poll(Duration::ZERO)? {
+            inputs.push(event::read()?);
+        }
+        for input in inputs {
+            match input {
+                TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('c')
+                    {
+                        return Ok(Outcome::Quit);
+                    }
+                    if let Some(outcome) = handle_key(wizard, key.code) {
+                        return Ok(outcome);
                     }
                 }
+                TermEvent::Mouse(mouse) => {
+                    let at = Position { x: mouse.column, y: mouse.row };
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            wizard.pointer = Some(at);
+                            let hit = wizard
+                                .clicks
+                                .iter()
+                                .rev()
+                                .find(|(rect, _)| rect.contains(at))
+                                .map(|(_, act)| act.clone());
+                            if let Some(act) = hit {
+                                if let Some(outcome) = wizard.act(act) {
+                                    return Ok(outcome);
+                                }
+                            }
+                        }
+                        MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                            wizard.pointer = Some(at);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 }
@@ -967,21 +998,6 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         height: area.height.saturating_sub(4),
     };
 
-    if let Some(step) = wizard.screen.step() {
-        let ghost = ghost_digits(step);
-        let ghost_width = ghost[0].chars().count() as u16;
-        let ghost_area = Rect {
-            x: column.right().saturating_sub(ghost_width),
-            y: column.y,
-            width: ghost_width.min(area.width.saturating_sub(1)),
-            height: 5,
-        };
-        frame.render_widget(
-            Paragraph::new(ghost.into_iter().map(Line::from).collect::<Vec<_>>()).style(dim()),
-            ghost_area,
-        );
-    }
-
     match wizard.screen {
         Screen::Welcome => draw_welcome(frame, wizard, column),
         Screen::Folders => draw_folders(frame, wizard, column),
@@ -1036,17 +1052,28 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
     }
 }
 
-/// A one-line clickable button; returns the rect it drew into.
-fn button(frame: &mut Frame, at: Rect, label: &str, focused: bool) -> Rect {
+/// A one-line clickable button: draws itself, registers its click, and
+/// lights up when the pointer is over it. Returns the rect it drew into.
+fn button(
+    frame: &mut Frame,
+    wizard: &mut Wizard,
+    at: Rect,
+    label: &str,
+    primary: bool,
+    act: Act,
+) -> Rect {
     let text = format!("  {label}  ");
     let width = (text.chars().count() as u16).min(at.width);
     let rect = Rect { x: at.x, y: at.y, width, height: 1 };
-    let style = if focused {
-        Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)
-    } else {
-        dim()
+    let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
+    let style = match (primary, hovered) {
+        (true, true) => Style::default().fg(Color::Black).bg(BRIGHT).add_modifier(Modifier::BOLD),
+        (true, false) => Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD),
+        (false, true) => Style::default().fg(BRIGHT).add_modifier(Modifier::BOLD),
+        (false, false) => dim(),
     };
     frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
+    wizard.clicks.push((rect, act));
     rect
 }
 
@@ -1099,8 +1126,7 @@ fn draw_welcome(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     y += 1;
     let label = "Get Started ▸";
     let x = column.x + (column.width.saturating_sub(label.len() as u16 + 4)) / 2;
-    let rect = button(frame, Rect { x, y, width: column.width, height: 1 }, label, true);
-    wizard.clicks.push((rect, Act::Begin));
+    button(frame, wizard, Rect { x, y, width: column.width, height: 1 }, label, true, Act::Begin);
 }
 
 fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
@@ -1156,12 +1182,13 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         y += 3;
     }
 
-    // The dashed add-card.
+    // The add-card, button-like: its border lights up under the pointer.
     let add_rect = Rect { x: column.x, y, width: column.width, height: 3 };
+    let add_hover = wizard.pointer.is_some_and(|p| add_rect.contains(p));
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(dim());
+        .border_style(if add_hover { accent() } else { dim() });
     let inner = block.inner(add_rect);
     frame.render_widget(block, add_rect);
     frame.render_widget(
@@ -1172,21 +1199,26 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     wizard.clicks.push((add_rect, Act::BrowseNative));
     y += 4;
 
-    let type_rect =
-        button(frame, Rect { x: column.x, y, width: column.width, height: 1 }, "type a path", false);
-    wizard.clicks.push((type_rect, Act::TypePath));
-    let remove_rect = button(
+    let type_rect = button(
         frame,
+        wizard,
+        Rect { x: column.x, y, width: column.width, height: 1 },
+        "type a path",
+        false,
+        Act::TypePath,
+    );
+    button(
+        frame,
+        wizard,
         Rect { x: type_rect.right() + 2, y, width: column.width, height: 1 },
         "remove selected",
         false,
+        Act::RemoveFolder,
     );
-    wizard.clicks.push((remove_rect, Act::RemoveFolder));
 
     let label = "Continue ▸";
     let x = column.right().saturating_sub(label.len() as u16 + 4);
-    let rect = button(frame, Rect { x, y, width: column.width, height: 1 }, label, true);
-    wizard.clicks.push((rect, Act::ContinueFolders));
+    button(frame, wizard, Rect { x, y, width: column.width, height: 1 }, label, true, Act::ContinueFolders);
 }
 
 fn field_row(
@@ -1238,15 +1270,15 @@ fn draw_login(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     y = field_row(frame, wizard, x, y, width, "CONFIRM PASSWORD", confirm, LoginField::Confirm, focus == LoginField::Confirm);
     y += 1;
 
-    let rect = button(frame, Rect { x, y, width, height: 1 }, "Create Admin ▸", true);
-    wizard.clicks.push((rect, Act::CreateAdmin));
-    let skip = button(
+    let rect = button(frame, wizard, Rect { x, y, width, height: 1 }, "Create Admin ▸", true, Act::CreateAdmin);
+    button(
         frame,
+        wizard,
         Rect { x: rect.right() + 2, y, width, height: 1 },
         "Skip for now",
         false,
+        Act::SkipLogin,
     );
-    wizard.clicks.push((skip, Act::SkipLogin));
 }
 
 fn mask(secret: &str) -> String {
@@ -1295,8 +1327,7 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 
     let label = "Continue ▸";
     let x = column.right().saturating_sub(label.len() as u16 + 4);
-    let rect = button(frame, Rect { x, y, width: column.width, height: 1 }, label, true);
-    wizard.clicks.push((rect, Act::ContinueExtras));
+    button(frame, wizard, Rect { x, y, width: column.width, height: 1 }, label, true, Act::ContinueExtras);
 }
 
 fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
@@ -1335,18 +1366,20 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 
     let open = button(
         frame,
+        wizard,
         Rect { x: column.x, y, width: column.width, height: 1 },
         "Open the Player ▸",
         true,
+        Act::OpenPlayer,
     );
-    wizard.clicks.push((open, Act::OpenPlayer));
-    let finish = button(
+    button(
         frame,
+        wizard,
         Rect { x: open.right() + 2, y, width: column.width, height: 1 },
         "Finish",
         false,
+        Act::Finish,
     );
-    wizard.clicks.push((finish, Act::Finish));
 }
 
 fn modal_frame(frame: &mut Frame, area: Rect, width: u16, height: u16, title_color: Color) -> Rect {
@@ -1384,15 +1417,22 @@ fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     let y = inner.bottom().saturating_sub(1);
-    let back = button(frame, Rect { x: inner.x, y, width: inner.width, height: 1 }, "◂ Back — create a login", true);
-    wizard.clicks.push((back, Act::SkipCancel));
-    let go = button(
+    let back = button(
         frame,
+        wizard,
+        Rect { x: inner.x, y, width: inner.width, height: 1 },
+        "◂ Back — create a login",
+        true,
+        Act::SkipCancel,
+    );
+    button(
+        frame,
+        wizard,
         Rect { x: back.right() + 2, y, width: inner.width, height: 1 },
         "Go public anyway",
         false,
+        Act::SkipConfirm,
     );
-    wizard.clicks.push((go, Act::SkipConfirm));
 }
 
 fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Browse) {
@@ -1431,20 +1471,17 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
     }
 
     let y = inner.bottom().saturating_sub(1);
-    let up = button(frame, Rect { x: inner.x, y, width: inner.width, height: 1 }, "◂ up", false);
-    wizard.clicks.push((up, Act::BrowseUp));
-    let open = button(frame, Rect { x: up.right() + 1, y, width: inner.width, height: 1 }, "open", false);
-    wizard.clicks.push((open, Act::BrowseEnter));
+    let up = button(frame, wizard, Rect { x: inner.x, y, width: inner.width, height: 1 }, "◂ up", false, Act::BrowseUp);
+    let open = button(frame, wizard, Rect { x: up.right() + 1, y, width: inner.width, height: 1 }, "open", false, Act::BrowseEnter);
     let add = button(
         frame,
+        wizard,
         Rect { x: open.right() + 1, y, width: inner.width, height: 1 },
         "Add this folder ▸",
         true,
+        Act::BrowseAdd,
     );
-    wizard.clicks.push((add, Act::BrowseAdd));
-    let cancel =
-        button(frame, Rect { x: add.right() + 1, y, width: inner.width, height: 1 }, "close", false);
-    wizard.clicks.push((cancel, Act::BrowseCancel));
+    button(frame, wizard, Rect { x: add.right() + 1, y, width: inner.width, height: 1 }, "close", false, Act::BrowseCancel);
 }
 
 fn draw_path_entry(frame: &mut Frame, area: Rect, draft: &str) {
@@ -1562,13 +1599,4 @@ mod tests {
         assert!(matches!(wizard.queued, Some(Op::CreateAdmin)));
     }
 
-    #[test]
-    fn ghost_digits_are_five_rows_of_equal_width() {
-        for step in 1..=4 {
-            let rows = ghost_digits(step);
-            assert_eq!(rows.len(), 5);
-            let width = rows[0].chars().count();
-            assert!(rows.iter().all(|r| r.chars().count() == width));
-        }
-    }
 }
