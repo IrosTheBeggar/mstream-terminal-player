@@ -1,0 +1,37 @@
+# Tell mStream a release is out so its pin-bump PR opens itself: this
+# fires a repository_dispatch that mStream's update-mstream-player-manifest
+# workflow consumes (it re-downloads and sha256-verifies every binary
+# against this release's manifest.json before pinning anything, then opens
+# a review PR — a human merges it there).
+#
+# MSTREAM_REPO_TOKEN: fine-grained PAT — Repository access:
+# IrosTheBeggar/mStream only; Permissions: Contents: Read and write.
+# Failure mode when it expires: no pin-bump PR appears after a release;
+# mStream's workflow_dispatch (tag input) is the manual fallback.
+#
+# `release: published` on purpose: draft releases have no public asset
+# URLs, and mStream's update script needs them.
+name: Notify mStream
+on:
+  release:
+    types: [published]
+jobs:
+  notify:
+    if: ${{ !github.event.release.draft && !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fire player-release dispatch
+        env:
+          TOKEN: ${{ secrets.MSTREAM_REPO_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::MSTREAM_REPO_TOKEN is not set — mStream was not notified; run its update-mstream-player-manifest workflow by hand for $TAG"
+            exit 0
+          fi
+          curl -sf -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/IrosTheBeggar/mStream/dispatches \
+            -d "{\"event_type\":\"player-release\",\"client_payload\":{\"tag\":\"$TAG\"}}"
+          echo "notified mStream: $TAG"
