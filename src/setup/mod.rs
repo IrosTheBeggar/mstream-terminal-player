@@ -106,8 +106,34 @@ pub(crate) enum Modal {
     /// The server-side directory browser (native picker unavailable, or
     /// chosen on purpose — it is the only browse that works over SSH).
     Browser(Browse),
-    /// Typing an absolute path by hand.
-    PathEntry(String),
+    /// Typing an absolute path by hand, with server-fed tab completion.
+    PathEntry(PathDraft),
+}
+
+/// The type-a-path modal's state: the text, plus a cached listing of the
+/// directory the text currently sits in, from which suggestions derive.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct PathDraft {
+    pub text: String,
+    /// The dir-part the cached entries belong to (as derived from the text).
+    pub listed_for: String,
+    /// The server-resolved absolute form of that dir (what accepts build on).
+    pub listed_path: String,
+    pub entries: Vec<String>,
+    /// Keyboard cursor within the CURRENT suggestion list, if any.
+    pub sel: Option<usize>,
+}
+
+impl PathDraft {
+    /// The entries that match the current partial segment, in order.
+    pub fn suggestions(&self) -> Vec<String> {
+        let (_, partial) = split_input(&self.text);
+        self.entries
+            .iter()
+            .filter(|e| starts_with_fold(e, &partial))
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -159,6 +185,7 @@ enum Act {
     BrowseUp,
     BrowseAdd,
     BrowseCancel,
+    PathSuggest(usize),
     OpenPlayer,
     Finish,
 }
@@ -171,6 +198,9 @@ enum Op {
     PickNative,
     OpenBrowser(String),
     BrowseTo(String),
+    /// List a directory for the type-a-path modal's suggestions. Quiet:
+    /// no busy note, and a failure just leaves the list empty.
+    Complete(String),
     CommitFolders,
     CreateAdmin,
     CommitExtras,
@@ -314,7 +344,10 @@ impl Wizard {
                 }
             }
             Act::BrowseNative => self.queue(Op::PickNative, "opening the folder picker…"),
-            Act::TypePath => self.modal = Modal::PathEntry(String::new()),
+            Act::TypePath => {
+                self.modal = Modal::PathEntry(PathDraft::default());
+                self.refresh_completion();
+            }
             Act::RemoveFolder => self.remove_selected(),
             Act::ContinueFolders => {
                 self.finish_rename();
@@ -372,10 +405,45 @@ impl Wizard {
                 }
             }
             Act::BrowseCancel => self.modal = Modal::None,
+            Act::PathSuggest(i) => self.accept_suggestion(i),
             Act::OpenPlayer => return Some(Outcome::OpenPlayer),
             Act::Finish => return Some(Outcome::Quit),
         }
         None
+    }
+
+    /// Queue a listing for the dir-part of the draft, if it changed.
+    fn refresh_completion(&mut self) {
+        if let Modal::PathEntry(draft) = &mut self.modal {
+            draft.sel = None;
+            let (dir, _) = split_input(&draft.text);
+            if dir != draft.listed_for {
+                draft.listed_for = dir.clone();
+                draft.entries.clear();
+                self.queued = Some(Op::Complete(dir));
+            }
+        }
+    }
+
+    /// Take suggestion `i` as the next path segment and keep typing inside
+    /// it — the accepted text becomes the server-resolved absolute path, so
+    /// a first completion turns "Mus" into a real /home/... path.
+    fn accept_suggestion(&mut self, i: usize) {
+        if let Modal::PathEntry(draft) = &mut self.modal {
+            let picked = match draft.suggestions().get(i) {
+                Some(entry) => entry.clone(),
+                None => return,
+            };
+            let base = if draft.listed_path.is_empty() {
+                split_input(&draft.text).0
+            } else {
+                draft.listed_path.clone()
+            };
+            let joined = join_server_path(&base, &picked);
+            let sep = if joined.contains('\\') { '\\' } else { '/' };
+            draft.text = format!("{joined}{sep}");
+            self.refresh_completion();
+        }
     }
 
     fn finish_rename(&mut self) {
@@ -438,6 +506,24 @@ impl Wizard {
                         });
                     }
                     Err(e) => self.fail("could not browse there", e),
+                }
+            }
+            Op::Complete(dir) => {
+                // The user may have typed on: only install the listing if it
+                // still answers the draft's current dir-part.
+                match self.client.admin_file_explorer(&dir) {
+                    Ok(listing) => {
+                        if let Modal::PathEntry(draft) = &mut self.modal {
+                            if draft.listed_for == dir {
+                                draft.listed_path = listing.path;
+                                draft.entries =
+                                    listing.directories.into_iter().map(|d| d.name).collect();
+                            }
+                        }
+                    }
+                    // Mid-typing the dir-part is bogus half the time; an
+                    // empty list is the honest render for that.
+                    Err(_) => {}
                 }
             }
             Op::CommitFolders => {
@@ -670,6 +756,45 @@ pub(crate) fn parent_server_path(path: &str) -> Option<String> {
     }
 }
 
+/// Split the type-a-path draft into (dir-part to list, partial segment).
+/// The dir-part keeps its trailing separator; an empty or separator-less
+/// draft completes against the server user's home ("~", which the admin
+/// file-explorer resolves).
+pub(crate) fn split_input(text: &str) -> (String, String) {
+    let cut = text.rfind(['/', '\\']);
+    match cut {
+        Some(i) => (text[..=i].to_string(), text[i + 1..].to_string()),
+        None => ("~".to_string(), text.to_string()),
+    }
+}
+
+/// Case-folded prefix test (mac and Windows server filesystems are
+/// case-insensitive; on Linux this is merely forgiving).
+pub(crate) fn starts_with_fold(name: &str, prefix: &str) -> bool {
+    let mut name_chars = name.chars();
+    prefix.chars().all(|p| {
+        name_chars
+            .next()
+            .is_some_and(|n| n.to_lowercase().eq(p.to_lowercase()))
+    })
+}
+
+/// The longest common prefix of the suggestions, case-insensitively, in the
+/// first entry's own casing.
+pub(crate) fn common_prefix(items: &[String]) -> String {
+    let Some(first) = items.first() else { return String::new() };
+    let mut len = first.chars().count();
+    for item in &items[1..] {
+        let matched = first
+            .chars()
+            .zip(item.chars())
+            .take_while(|(a, b)| a.to_lowercase().eq(b.to_lowercase()))
+            .count();
+        len = len.min(matched);
+    }
+    first.chars().take(len).collect()
+}
+
 /// The pairing ticket as unicode half-blocks, light-on-dark so it scans off
 /// a dark terminal.
 fn qr_lines(data: &str) -> Option<Vec<String>> {
@@ -829,16 +954,53 @@ fn handle_key(wizard: &mut Wizard, code: KeyCode) -> Option<Outcome> {
             match code {
                 KeyCode::Esc => wizard.modal = Modal::None,
                 KeyCode::Backspace => {
-                    draft.pop();
+                    draft.text.pop();
+                    wizard.refresh_completion();
                 }
                 KeyCode::Enter => {
-                    let path = draft.trim().to_string();
+                    let path = draft.text.trim().to_string();
                     wizard.modal = Modal::None;
                     if !path.is_empty() {
                         wizard.add_folder(path);
                     }
                 }
-                KeyCode::Char(c) => draft.push(c),
+                KeyCode::Down => {
+                    let n = draft.suggestions().len();
+                    if n > 0 {
+                        draft.sel = Some(draft.sel.map_or(0, |i| (i + 1) % n));
+                    }
+                }
+                KeyCode::Up => {
+                    let n = draft.suggestions().len();
+                    if n > 0 {
+                        draft.sel = Some(draft.sel.map_or(n - 1, |i| (i + n - 1) % n));
+                    }
+                }
+                KeyCode::Tab | KeyCode::Right => {
+                    let suggestions = draft.suggestions();
+                    if let Some(i) = draft.sel {
+                        wizard.accept_suggestion(i);
+                    } else if suggestions.len() == 1 {
+                        wizard.accept_suggestion(0);
+                    } else if !suggestions.is_empty() {
+                        // Extend to the longest common prefix; if that gains
+                        // nothing, start cycling.
+                        let (_, partial) = split_input(&draft.text);
+                        let lcp = common_prefix(&suggestions);
+                        if lcp.chars().count() > partial.chars().count() {
+                            let keep = draft.text.chars().count() - partial.chars().count();
+                            draft.text = draft.text.chars().take(keep).collect::<String>() + &lcp;
+                            // Same dir-part, narrower partial — no re-list.
+                            draft.sel = None;
+                        } else {
+                            draft.sel = Some(0);
+                        }
+                    }
+                }
+                KeyCode::Char(c) => {
+                    draft.text.push(c);
+                    wizard.refresh_completion();
+                }
                 _ => {}
             }
             return None;
@@ -1035,14 +1197,14 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         Modal::None => {}
         Modal::SkipWarning => draw_skip_warning(frame, wizard, area),
         Modal::Browser(browse) => draw_browser(frame, wizard, area, &browse),
-        Modal::PathEntry(draft) => draw_path_entry(frame, area, &draft),
+        Modal::PathEntry(draft) => draw_path_entry(frame, wizard, area, &draft),
     }
 }
 
 fn footer_hint(wizard: &Wizard) -> &'static str {
     match (&wizard.modal, wizard.screen) {
         (Modal::Browser(_), _) => "↑ ↓ move · Enter open · a add this folder · Esc close",
-        (Modal::PathEntry(_), _) => "type a full path · Enter add · Esc close",
+        (Modal::PathEntry(_), _) => "Tab complete · ↑ ↓ pick · Enter add folder · Esc close",
         (Modal::SkipWarning, _) => "Enter go public · Esc back",
         (_, Screen::Welcome) => "Enter begin · q quit",
         (_, Screen::Folders) => "b browse · t type a path · Enter rename · c continue",
@@ -1484,16 +1646,45 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
     button(frame, wizard, Rect { x: add.right() + 1, y, width: inner.width, height: 1 }, "close", false, Act::BrowseCancel);
 }
 
-fn draw_path_entry(frame: &mut Frame, area: Rect, draft: &str) {
-    let inner = modal_frame(frame, area, 62, 6, ACCENT);
+fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &PathDraft) {
+    let suggestions = draft.suggestions();
+    let shown = suggestions.len().min(6) as u16;
+    let inner = modal_frame(frame, area, 62, 7 + shown, ACCENT);
     frame.render_widget(
         Paragraph::new(Span::styled("Type the full path of a music folder", bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
     frame.render_widget(
-        Paragraph::new(Span::raw(format!("{draft}▏"))),
+        Paragraph::new(Span::raw(format!("{}▏", draft.text))),
         Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 },
     );
+    for (i, entry) in suggestions.iter().take(shown as usize).enumerate() {
+        let selected = draft.sel == Some(i);
+        let rect =
+            Rect { x: inner.x, y: inner.y + 4 + i as u16, width: inner.width, height: 1 };
+        let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
+        let style = if selected {
+            Style::default().fg(Color::Black).bg(ACCENT)
+        } else if hovered {
+            Style::default().fg(BRIGHT)
+        } else {
+            dim()
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(format!("▸ {entry}"), style)),
+            rect,
+        );
+        wizard.clicks.push((rect, Act::PathSuggest(i)));
+    }
+    if suggestions.len() > shown as usize {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!("… and {} more", suggestions.len() - shown as usize),
+                dim(),
+            )),
+            Rect { x: inner.x, y: inner.y + 4 + shown, width: inner.width, height: 1 },
+        );
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1563,6 +1754,44 @@ mod tests {
         assert_eq!(parent_server_path("/"), None);
         assert_eq!(parent_server_path("C:\\Users\\anna").as_deref(), Some("C:\\Users"));
         assert_eq!(parent_server_path("C:\\Users").as_deref(), Some("C:"));
+    }
+
+    #[test]
+    fn path_input_splits_into_listable_dir_and_partial() {
+        assert_eq!(split_input(""), ("~".to_string(), String::new()));
+        assert_eq!(split_input("Mus"), ("~".to_string(), "Mus".to_string()));
+        assert_eq!(split_input("/"), ("/".to_string(), String::new()));
+        assert_eq!(split_input("/Users/an"), ("/Users/".to_string(), "an".to_string()));
+        assert_eq!(split_input("C:\\Us"), ("C:\\".to_string(), "Us".to_string()));
+    }
+
+    #[test]
+    fn suggestions_filter_case_insensitively_and_share_a_prefix() {
+        assert!(starts_with_fold("Music", "mus"));
+        assert!(!starts_with_fold("Music", "musik"));
+        let items = vec!["Music".to_string(), "Musicals".to_string(), "music-old".to_string()];
+        assert_eq!(common_prefix(&items), "Music");
+        assert_eq!(common_prefix(&[]), "");
+    }
+
+    #[test]
+    fn accepting_a_suggestion_extends_into_the_resolved_dir() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.modal = Modal::PathEntry(PathDraft {
+            text: "Mus".to_string(),
+            listed_for: "~".to_string(),
+            listed_path: "/home/anna".to_string(),
+            entries: vec!["Music".to_string(), "Movies".to_string()],
+            sel: None,
+        });
+        wizard.accept_suggestion(0);
+        let Modal::PathEntry(draft) = &wizard.modal else { panic!("modal closed") };
+        assert_eq!(draft.text, "/home/anna/Music/");
+        assert!(
+            matches!(&wizard.queued, Some(Op::Complete(dir)) if dir == "/home/anna/Music/"),
+            "stepping into the dir must queue its listing"
+        );
     }
 
     #[test]
