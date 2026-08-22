@@ -174,11 +174,13 @@ warning. First line: BOLD title in the intent color. Buttons bottom-right
 (1-row; the safe choice fg LightBlue BOLD). Esc always dismisses.
 
 ### Tooltip
-A dwell of ~500ms on a tip target shows a floating box by the pointer: a
-miniature of the neutral modal — `Clear` + ground repaint beneath,
-Rounded border DarkGray, 1-cell inline padding, text default fg, wrapped
-at 40 cells. Placed below-right of the pointer (+2, +1), flipped
-above/pulled left at the frame edges, always fully inside the window.
+A dwell of ~500ms on a tip target shows a floating box: a miniature of
+the neutral modal — `Clear` + ground repaint beneath, Rounded border
+DarkGray, 1-cell inline padding, text default fg, wrapped at 40 cells.
+**Anchored to the TARGET, never the pointer**: centered under the
+target's rect (above it when below would leave the frame), pulled inside
+at the edges — one fixed spot however the pointer roams within the
+target, so the box never jitters (and never repaints while it rests).
 Hides the instant the pointer leaves, on any keypress, and while a modal
 is open. Tip targets are a per-frame rect registry parallel to the click
 registry — a tip rect need not be clickable (the disabled-button

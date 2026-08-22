@@ -1454,9 +1454,9 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     }
 
     // The tooltip draws last — over everything, once the dwell matures.
-    if let (Some((_, text, since)), Some(p)) = (wizard.dwell, wizard.pointer) {
+    if let Some((target, text, since)) = wizard.dwell {
         if since.elapsed() >= TIP_DELAY {
-            draw_tooltip(frame, area, p, text);
+            draw_tooltip(frame, area, target, text);
         }
     }
 }
@@ -1481,32 +1481,34 @@ fn wrap_tip(text: &str) -> Vec<String> {
     lines
 }
 
-/// Where a w×h tooltip goes for a pointer at `p`: below-right of it,
-/// flipped above / pulled left when it would leave `area`, clamped in.
-fn tooltip_rect(area: Rect, p: Position, w: u16, h: u16) -> Rect {
+/// Where a w×h tooltip goes for a tip TARGET: anchored to the target's
+/// rect — centered under it, above it when below would leave `area`,
+/// pulled inside at the edges — so the box holds ONE spot however the
+/// pointer moves within the target (and never redraws while it rests).
+fn tooltip_rect(area: Rect, target: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
-    let mut x = p.x.saturating_add(2);
-    let mut y = p.y.saturating_add(1);
+    let mut x = (target.x + target.width / 2).saturating_sub(w / 2);
+    let mut y = target.bottom();
+    if y + h > area.bottom() {
+        y = target.y.saturating_sub(h);
+    }
     if x + w > area.right() {
         x = area.right().saturating_sub(w);
-    }
-    if y + h > area.bottom() {
-        y = p.y.saturating_sub(h);
     }
     Rect { x: x.max(area.x), y: y.max(area.y), width: w, height: h }
 }
 
-/// A miniature of the neutral modal, floated by the pointer: Clear +
+/// A miniature of the neutral modal, anchored to its target: Clear +
 /// ground repaint beneath, Rounded DIM border, wrapped default-fg text.
-fn draw_tooltip(frame: &mut Frame, area: Rect, pointer: Position, text: &str) {
+fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) {
     let lines = wrap_tip(text);
     if lines.is_empty() {
         return;
     }
     let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
     let h = lines.len() as u16 + 2;
-    let rect = tooltip_rect(area, pointer, w, h);
+    let rect = tooltip_rect(area, target, w, h);
     frame.render_widget(Clear, rect);
     if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
         frame.render_widget(
@@ -2057,22 +2059,26 @@ mod tests {
     }
 
     #[test]
-    fn tooltips_sit_below_right_and_flip_inside_the_frame() {
+    fn tooltips_anchor_to_the_target_and_flip_inside_the_frame() {
         let area = Rect { x: 0, y: 0, width: 100, height: 40 };
-        // Room below-right: offset (+2, +1) from the pointer.
-        let r = tooltip_rect(area, Position { x: 20, y: 10 }, 24, 3);
-        assert_eq!((r.x, r.y), (22, 11));
-        // Near the right edge: pulled left to stay inside.
-        let r = tooltip_rect(area, Position { x: 95, y: 10 }, 24, 3);
-        assert_eq!(r.right(), 100);
-        // Near the bottom: flipped above the pointer.
-        let r = tooltip_rect(area, Position { x: 20, y: 38 }, 24, 3);
-        assert_eq!(r.y, 35);
-        // A corner pointer still yields a rect fully inside the frame.
-        let r = tooltip_rect(area, Position { x: 99, y: 39 }, 24, 3);
+        let mid = Rect { x: 40, y: 10, width: 14, height: 3 };
+        // Room below: centered under the target — and the SAME spot for
+        // any pointer position within it (the anchor is the rect).
+        let r = tooltip_rect(area, mid, 24, 3);
+        assert_eq!((r.x, r.y), (35, 13));
+        // A target in the bottom bar: flipped above it.
+        let bar = Rect { x: 84, y: 37, width: 14, height: 3 };
+        let r = tooltip_rect(area, bar, 22, 3);
+        assert_eq!(r.y, 34);
+        // ...and pulled left so it stays inside the frame.
+        assert!(r.right() <= 100);
+        // A tiny right-edge target ([X]): fully inside the frame.
+        let x_ctl = Rect { x: 88, y: 12, width: 3, height: 1 };
+        let r = tooltip_rect(area, x_ctl, 22, 3);
         assert!(r.right() <= 100 && r.bottom() <= 40);
+        assert_eq!(r.y, 13);
         // Wider than the frame: clamped to it.
-        let r = tooltip_rect(area, Position { x: 0, y: 0 }, 200, 3);
+        let r = tooltip_rect(area, mid, 200, 3);
         assert_eq!(r.width, 100);
     }
 
