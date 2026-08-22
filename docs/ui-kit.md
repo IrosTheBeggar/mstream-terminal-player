@@ -15,11 +15,12 @@ Two regimes, deliberately different:
 - **The setup wizard ships FIXED colors.** It is the brand moment, so it
   looks the same in every terminal that can carry it. `src/setup/theme.rs`
   resolves the table below once at startup through a three-tier ladder:
-  **truecolor** (`COLORTERM` contains `truecolor`/`24bit`) → **256-color**
-  (`TERM` contains `256color`; cube/ramp indexes 16+ only — the first 16
-  are repainted by terminal themes; this is Apple Terminal's tier, it has
-  no truecolor) → **named ANSI** (the floor: the adaptive palette, no
-  ground painting — a 16-color console keeps its own background).
+  **truecolor** (`COLORTERM` contains `truecolor`/`24bit` — macOS 26's
+  Terminal.app advertises this) → **256-color** (`TERM` contains
+  `256color`; cube/ramp indexes 16+ only — the first 16 are repainted by
+  terminal themes; older Apple Terminals land here) → **named ANSI** (the
+  floor: the adaptive palette, no ground painting — a 16-color console
+  keeps its own background).
   `MSTREAM_SETUP_THEME=ansi|256|truecolor` overrides detection.
 - **The player inherits the terminal theme.** Named ANSI only — never
   `Color::Rgb`, never `Color::Indexed` — so the user's own theme paints
@@ -52,9 +53,20 @@ Rules:
 - Cards and panels have **no background fill** — the ground is the only
   background (the wizard's painted GROUND on fixed tiers, the terminal's
   own on the floor).
-- On the fixed tiers, body text takes its fg from the ground fill —
-  never the terminal default, which may be invisible on a painted ground.
-  Anything that `Clear`s (modals) repaints the ground behind itself.
+- **The GROUND is all-or-nothing, gated on OSC 11 ownership.** Terminals
+  reserve margin pixels around the cell grid painted with their DEFAULT
+  background — cell fills can't reach them. At startup the wizard queries
+  the terminal's default background (OSC 11; the answer doubles as
+  capability detection and as the exact restore value) and only if
+  answered does it set the default background — margins included — and
+  paint cell grounds; the original is restored on exit, including the
+  panic path. No answer → no ground anywhere and body text keeps the
+  terminal's default fg. The fixed look must never sit inside a two-tone
+  border of the user's own background.
+- While the ground is owned, body text takes its fg from the ground fill
+  — never the terminal default, which may be invisible on a painted
+  ground. Anything that `Clear`s (modals) repaints the ground behind
+  itself.
 
 ## Spacing — cells and rows
 

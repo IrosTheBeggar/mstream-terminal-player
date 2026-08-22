@@ -96,6 +96,7 @@ mdns-sd = "0.20.3"
 # The setup wizard's QR code, drawn as unicode half-blocks — no image
 # pipeline, just text the terminal already knows how to show.
 qrcode = { version = "0.14", default-features = false }
+terminal-colorsaurus = "1.0.3"
 
 # The setup wizard's native folder picker. Split by backend on purpose
 # (the picker spike, mStream-side, 2026-08-21): rfd's Linux portal backend

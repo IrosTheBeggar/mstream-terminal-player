@@ -959,16 +959,30 @@ pub fn run(args: SetupArgs) -> i32 {
 
     let (to_worker, from_worker) = spawn_worker();
 
+    // Claim the window background BEFORE ratatui takes the terminal — the
+    // OSC 11 query runs its own raw-mode transaction on the tty. Owning
+    // the default background is what colors the margin pixels the terminal
+    // reserves around the cell grid; cell fills alone would leave the
+    // fixed ground inside a border of the user's own background.
+    let claim = theme::acquire_ground();
+    let ground_guard = GroundGuard;
+
     let mut terminal = ratatui::init();
     // A wizard whose buttons cannot be clicked is half a wizard; like the
     // player, a terminal that refuses mouse reports still works by keys.
     let mouse_on = execute!(std::io::stdout(), EnableMouseCapture).is_ok();
+    if let Some(seq) = claim {
+        let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(seq));
+    }
     let outcome = event_loop(&mut terminal, &mut wizard, mouse_on, &to_worker, &from_worker);
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         set_pointer_shape(false, true);
     }
     ratatui::restore();
+    // Hand the background back before anything adaptive (the player, the
+    // shell) takes the screen.
+    drop(ground_guard);
 
     match outcome {
         Ok(Outcome::OpenPlayer) => {
@@ -979,6 +993,18 @@ pub fn run(args: SetupArgs) -> i32 {
         Err(e) => {
             eprintln!("mstream-player: {e}");
             1
+        }
+    }
+}
+
+/// Restores the terminal's original default background (the exact value
+/// the OSC 11 query captured) on drop — including the unwind path, where
+/// ratatui's panic hook restores everything except our background claim.
+struct GroundGuard;
+impl Drop for GroundGuard {
+    fn drop(&mut self) {
+        if let Some(seq) = theme::release_ground() {
+            let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(seq));
         }
     }
 }
@@ -1269,10 +1295,13 @@ fn handle_key(wizard: &mut Wizard, code: KeyCode) -> Option<Outcome> {
 fn render(frame: &mut Frame, wizard: &mut Wizard) {
     wizard.clicks.clear();
     let area = frame.area();
-    // The fixed scheme paints its own ground; body text drawn with no
-    // explicit fg inherits `text` from this fill. On the 16-color floor
-    // `ground` is None and the terminal keeps its own background.
-    if let Some(ground) = th().ground {
+    // The fixed scheme paints its own ground — but only when the terminal
+    // granted OSC 11 ownership of the whole window, margins included
+    // (all or nothing: cell fills alone would sit inside a border of the
+    // user's background). Body text drawn with no explicit fg inherits
+    // `text` from this fill; without the fill it stays the terminal's
+    // default, which is the readable choice on an unknown ground.
+    if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
         frame.render_widget(
             Block::default().style(Style::default().bg(ground).fg(th().text)),
             area,
@@ -1707,8 +1736,8 @@ fn modal_frame(frame: &mut Frame, area: Rect, width: u16, height: u16, title_col
     };
     frame.render_widget(Clear, rect);
     // Clear resets cells to the terminal default — repaint the ground so
-    // the modal interior matches the fixed scheme.
-    if let Some(ground) = th().ground {
+    // the modal interior matches the fixed scheme (when it is owned).
+    if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
         frame.render_widget(
             Block::default().style(Style::default().bg(ground).fg(th().text)),
             rect,

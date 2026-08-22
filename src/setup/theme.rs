@@ -7,16 +7,28 @@
 //!
 //!   truecolor — the design canvas's literal hexes, when the terminal
 //!               advertises 24-bit color (`COLORTERM=truecolor|24bit`).
+//!               macOS 26's Terminal.app advertises this too.
 //!   256-color — hand-tuned indexes from the standardized 6x6x6 cube
 //!               (16..=231) and grayscale ramp; NEVER the first 16
-//!               indexes, which terminal themes repaint. This is what
-//!               Apple Terminal gets — it has no truecolor.
+//!               indexes, which terminal themes repaint. Older Apple
+//!               Terminals (no truecolor) land here.
 //!   ansi      — the named-color floor (the pre-fixed-scheme behavior):
 //!               the wizard still works on a 16-color console.
 //!
 //! `MSTREAM_SETUP_THEME=ansi|256|truecolor` overrides detection — the
 //! test matrix's lever, and the escape hatch for anyone whose terminal
 //! lies about its capabilities. The player TUI is deliberately untouched.
+//!
+//! The GROUND is all-or-nothing. Terminals reserve margin pixels around
+//! the cell grid, painted with their DEFAULT background — cell fills
+//! can't reach them, so painting only cells leaves the fixed ground
+//! sitting inside a border of the user's own color. [`acquire_ground`]
+//! therefore asks for the whole window: it queries the terminal's default
+//! background (OSC 11 — the answer doubles as capability detection and as
+//! the exact value to restore) and only if the terminal answers does the
+//! wizard set the default background and paint cell grounds. No answer →
+//! no ground anywhere: accents stay fixed, text stays the terminal's
+//! default, and there is never a two-tone border.
 
 use std::sync::OnceLock;
 
@@ -39,9 +51,13 @@ pub struct Theme {
     /// Body text — explicit, never the terminal default: on a painted
     /// ground the terminal's own default fg may be invisible.
     pub text: Color,
-    /// The painted background. `None` on the ansi tier — a 16-color
+    /// The cell-fill background. `None` on the ansi tier — a 16-color
     /// terminal keeps its own ground, everything else still reads.
+    /// Painted only while [`ground_owned`] holds.
     pub ground: Option<Color>,
+    /// The same ground as raw RGB, for the OSC 11 default-background set
+    /// (the 256 tier uses its index's actual value, #121212).
+    pub ground_rgb: Option<(u8, u8, u8)>,
     /// Foreground on accent-filled cells (selection rows).
     pub on_accent: Color,
 }
@@ -94,6 +110,7 @@ fn palette(tier: Tier) -> Theme {
             danger: Color::Rgb(0xe0, 0x6c, 0x75),
             text: Color::Rgb(0xd8, 0xde, 0xe9),
             ground: Some(Color::Rgb(0x12, 0x13, 0x1c)),
+            ground_rgb: Some((0x12, 0x13, 0x1c)),
             on_accent: Color::Rgb(0x0d, 0x10, 0x17),
         },
         // Hand-tuned cube/ramp indexes (16..=255 only — the first 16 are
@@ -107,6 +124,7 @@ fn palette(tier: Tier) -> Theme {
             danger: Color::Indexed(167),   // #d75f5f
             text: Color::Indexed(253),     // #dadada
             ground: Some(Color::Indexed(233)), // #121212
+            ground_rgb: Some((0x12, 0x12, 0x12)),
             on_accent: Color::Indexed(232),    // #080808
         },
         // The named floor — the wizard's original adaptive palette.
@@ -119,6 +137,7 @@ fn palette(tier: Tier) -> Theme {
             danger: Color::Red,
             text: Color::Reset,
             ground: None,
+            ground_rgb: None,
             on_accent: Color::Black,
         },
     }
@@ -128,6 +147,52 @@ fn palette(tier: Tier) -> Theme {
 pub fn th() -> &'static Theme {
     static THEME: OnceLock<Theme> = OnceLock::new();
     THEME.get_or_init(|| palette(tier()))
+}
+
+// ── Ground ownership ─────────────────────────────────────────────────────────
+
+/// The terminal's original default background as an OSC 11 color spec,
+/// captured by [`acquire_ground`]'s query. `Some(None)` = asked, refused.
+static LEASE: OnceLock<Option<String>> = OnceLock::new();
+
+fn osc11_set_seq(rgb: (u8, u8, u8)) -> String {
+    format!("\x1b]11;#{:02x}{:02x}{:02x}\x07", rgb.0, rgb.1, rgb.2)
+}
+
+fn osc11_restore_seq(spec: &str) -> String {
+    format!("\x1b]11;{spec}\x07")
+}
+
+/// Ask the terminal for ownership of the whole window background. Returns
+/// the escape that claims it (emit once the terminal is set up), or `None`
+/// when the terminal keeps its ground — the ansi floor, or a terminal that
+/// did not answer the OSC 11 query.
+///
+/// Call BEFORE `ratatui::init()`: the query runs its own raw-mode
+/// transaction on the tty.
+pub fn acquire_ground() -> Option<String> {
+    let rgb = th().ground_rgb?;
+    let lease = LEASE.get_or_init(|| {
+        terminal_colorsaurus::background_color(terminal_colorsaurus::QueryOptions::default())
+            .ok()
+            .map(|c| format!("rgb:{:04x}/{:04x}/{:04x}", c.r, c.g, c.b))
+    });
+    lease.as_ref()?;
+    Some(osc11_set_seq(rgb))
+}
+
+/// True once the terminal answered the query — the gate for painting cell
+/// grounds. All or nothing: without the window margin there is no ground
+/// anywhere, so the fixed look never sits inside a two-tone border.
+pub fn ground_owned() -> bool {
+    LEASE.get().is_some_and(|l| l.is_some())
+}
+
+/// The escape that hands the background back — the exact original the
+/// query captured, not a generic reset.
+pub fn release_ground() -> Option<String> {
+    let original = LEASE.get()?.as_ref()?;
+    Some(osc11_restore_seq(original))
 }
 
 #[cfg(test)]
@@ -157,6 +222,30 @@ mod tests {
         assert!(palette(Tier::Truecolor).ground.is_some());
         assert!(palette(Tier::C256).ground.is_some());
         assert!(palette(Tier::Ansi).ground.is_none(), "16 colors keep the user's ground");
+        for t in [Tier::Truecolor, Tier::C256, Tier::Ansi] {
+            assert_eq!(
+                palette(t).ground.is_some(),
+                palette(t).ground_rgb.is_some(),
+                "cell ground and OSC ground travel together"
+            );
+        }
+    }
+
+    #[test]
+    fn the_osc11_sequences_are_exact() {
+        assert_eq!(osc11_set_seq((0x12, 0x13, 0x1c)), "\x1b]11;#12131c\x07");
+        assert_eq!(
+            osc11_restore_seq("rgb:213d/2743/33e7"),
+            "\x1b]11;rgb:213d/2743/33e7\x07"
+        );
+    }
+
+    #[test]
+    fn ground_is_not_owned_until_the_terminal_answers() {
+        // Nothing in tests runs acquire_ground (it would query the test
+        // runner's tty) — the gate must default closed.
+        assert!(!ground_owned());
+        assert!(release_ground().is_none());
     }
 
     #[test]
