@@ -1285,7 +1285,7 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         x: (area.width - width) / 2,
         y: 2,
         width,
-        height: area.height.saturating_sub(4),
+        height: area.height.saturating_sub(8),
     };
 
     match wizard.screen {
@@ -1306,39 +1306,39 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     if let Some((text, is_err)) = wizard.note.clone() {
         let style = if is_err { Style::default().fg(WARN) } else { dim() };
         let note_area =
-            Rect { x: 2, y: area.height.saturating_sub(4), width: area.width - 4, height: 1 };
+            Rect { x: 2, y: area.height.saturating_sub(6), width: area.width - 4, height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(text, style)), note_area);
     }
     if let Some(busy) = wizard.busy {
         let busy_area =
-            Rect { x: 2, y: area.height.saturating_sub(4), width: area.width - 4, height: 1 };
+            Rect { x: 2, y: area.height.saturating_sub(6), width: area.width - 4, height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(busy, accent())), busy_area);
     }
 
     // Keyboard tips, left, directly above the gold rule.
-    let tips = Rect { x: 2, y: area.height.saturating_sub(3), width: area.width - 4, height: 1 };
+    let tips = Rect { x: 2, y: area.height.saturating_sub(5), width: area.width - 4, height: 1 };
     frame.render_widget(Paragraph::new(Span::styled(footer_hint(wizard), dim())), tips);
 
-    // The one gold rule, with the bottom bar under it: scan widget on the
-    // left (empty until a scan is actually running — folders commit on
+    // The one gold rule, with the 3-row bottom bar under it: scan widget on
+    // the left (empty until a scan is actually running — folders commit on
     // Continue, so that is the NEXT screen at the earliest), the screen's
-    // forward action on the right.
-    let rule = Rect { x: 2, y: area.height.saturating_sub(2), width: area.width - 4, height: 1 };
+    // forward action on the right as the kit's tall primary block.
+    let rule = Rect { x: 2, y: area.height.saturating_sub(4), width: area.width - 4, height: 1 };
     frame.render_widget(
         Paragraph::new(Span::styled("─".repeat(rule.width as usize), Style::default().fg(GOLD))),
         rule,
     );
-    let bar = Rect { x: 2, y: area.height.saturating_sub(1), width: area.width - 4, height: 1 };
+    let bar = Rect { x: 2, y: area.height.saturating_sub(3), width: area.width - 4, height: 3 };
     if !wizard.progress.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(wizard.progress.clone(), Style::default().fg(OK))),
-            bar,
+            Rect { x: bar.x, y: bar.y + 1, width: bar.width.saturating_sub(20), height: 1 },
         );
     }
     if wizard.screen == Screen::Folders {
         let label = "Continue ▸";
         let x = bar.right().saturating_sub(label.len() as u16 + 4);
-        button(frame, wizard, Rect { x, y: bar.y, width: bar.width, height: 1 }, label, true, Act::ContinueFolders);
+        tall_button(frame, wizard, Rect { x, y: bar.y, width: bar.width, height: 3 }, label, Act::ContinueFolders);
     }
 
     match wizard.modal.clone() {
@@ -1359,6 +1359,33 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
         (_, Screen::Extras) => "Space toggle · c continue",
         (_, Screen::Done) => "Enter open the player · f finish",
     }
+}
+
+/// The kit's primary button: a 3-row filled block (padding row, label,
+/// padding row). Draws itself, registers its click, hover brightens.
+/// `at.y` is the TOP row of the three. Returns the rect it drew into.
+fn tall_button(frame: &mut Frame, wizard: &mut Wizard, at: Rect, label: &str, act: Act) -> Rect {
+    let text = format!("  {label}  ");
+    let width = (text.chars().count() as u16).min(at.width);
+    let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
+    let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
+    let bg = if hovered { BRIGHT } else { ACCENT };
+    let fill = Style::default().bg(bg);
+    for row in 0..rect.height {
+        frame.render_widget(
+            Paragraph::new(Span::styled(" ".repeat(width as usize), fill)),
+            Rect { x: rect.x, y: rect.y + row, width, height: 1 },
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            text,
+            Style::default().fg(Color::Black).bg(bg).add_modifier(Modifier::BOLD),
+        )),
+        Rect { x: rect.x, y: rect.y + rect.height / 2, width, height: 1 },
+    );
+    wizard.clicks.push((rect, act));
+    rect
 }
 
 /// A one-line clickable button: draws itself, registers its click, and
@@ -1550,11 +1577,11 @@ fn draw_login(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     y = field_row(frame, wizard, x, y, width, "CONFIRM PASSWORD", confirm, LoginField::Confirm, focus == LoginField::Confirm);
     y += 1;
 
-    let rect = button(frame, wizard, Rect { x, y, width, height: 1 }, "Create Admin ▸", true, Act::CreateAdmin);
+    let rect = tall_button(frame, wizard, Rect { x, y, width, height: 3 }, "Create Admin ▸", Act::CreateAdmin);
     button(
         frame,
         wizard,
-        Rect { x: rect.right() + 2, y, width, height: 1 },
+        Rect { x: rect.right() + 2, y: y + 1, width, height: 1 },
         "Skip for now",
         false,
         Act::SkipLogin,
@@ -1607,7 +1634,7 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 
     let label = "Continue ▸";
     let x = column.right().saturating_sub(label.len() as u16 + 4);
-    button(frame, wizard, Rect { x, y, width: column.width, height: 1 }, label, true, Act::ContinueExtras);
+    tall_button(frame, wizard, Rect { x, y, width: column.width, height: 3 }, label, Act::ContinueExtras);
 }
 
 fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
@@ -1638,18 +1665,17 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     );
     y += 2;
 
-    let open = button(
+    let open = tall_button(
         frame,
         wizard,
-        Rect { x: column.x, y, width: column.width, height: 1 },
+        Rect { x: column.x, y, width: column.width, height: 3 },
         "Open the Player ▸",
-        true,
         Act::OpenPlayer,
     );
     button(
         frame,
         wizard,
-        Rect { x: open.right() + 2, y, width: column.width, height: 1 },
+        Rect { x: open.right() + 2, y: y + 1, width: column.width, height: 1 },
         "Finish",
         false,
         Act::Finish,
