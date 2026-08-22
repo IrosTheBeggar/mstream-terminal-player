@@ -7,13 +7,16 @@
 //! logs in and continues with the token).
 //!
 //! The look is the "airy minimal" direction from the design canvas: one
-//! centered column, sparse rounded borders, filled buttons that light up
-//! under the pointer. Mouse-first — every control is clickable — and every action has
+//! centered column, sparse rounded borders, frame-emphasis buttons that
+//! brighten under the pointer, and a FIXED palette (see [`theme`]) so the
+//! screens look the same in every terminal that can carry it.
+//! Mouse-first — every control is clickable — and every action has
 //! a key. All decisions live in [`Wizard`]; the loop below only draws,
 //! reads input, and runs one queued server call per pass (queued so the
 //! "working…" frame is on screen while the call blocks).
 
 pub mod picker;
+mod theme;
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -56,23 +59,18 @@ pub struct SetupArgs {
 
 // ── Palette ──────────────────────────────────────────────────────────────────
 //
-// Named ANSI colors, never RGB: the wizard inherits the user's terminal
-// theme like the player does, and these are the same families the player's
-// own UI speaks (LightBlue/Cyan accents, DarkGray chrome).
+// The wizard's colors are FIXED — resolved once by [`theme::th`] through a
+// truecolor → 256-cube → named-ANSI ladder, so the setup screens look the
+// same in every terminal that can carry it. Wizard-scoped on purpose: the
+// player keeps inheriting the user's terminal theme through `ui::Theme`.
 
-const ACCENT: Color = Color::LightBlue;
-const BRIGHT: Color = Color::Cyan;
-const DIM: Color = Color::DarkGray;
-const WARN: Color = Color::Yellow;
-/// The 3b-modal gold, promoted to a fixture: the rule above the footer.
-const GOLD: Color = Color::Yellow;
-const OK: Color = Color::Green;
+use theme::th;
 
 fn accent() -> Style {
-    Style::default().fg(ACCENT)
+    Style::default().fg(th().accent)
 }
 fn dim() -> Style {
-    Style::default().fg(DIM)
+    Style::default().fg(th().dim)
 }
 fn bold() -> Style {
     Style::default().add_modifier(Modifier::BOLD)
@@ -1271,6 +1269,15 @@ fn handle_key(wizard: &mut Wizard, code: KeyCode) -> Option<Outcome> {
 fn render(frame: &mut Frame, wizard: &mut Wizard) {
     wizard.clicks.clear();
     let area = frame.area();
+    // The fixed scheme paints its own ground; body text drawn with no
+    // explicit fg inherits `text` from this fill. On the 16-color floor
+    // `ground` is None and the terminal keeps its own background.
+    if let Some(ground) = th().ground {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(ground).fg(th().text)),
+            area,
+        );
+    }
     if area.width < 58 || area.height < 20 {
         frame.render_widget(
             Paragraph::new("please make the terminal a little larger").style(dim()),
@@ -1304,7 +1311,7 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
 
     // Status note (errors, busy) above the keyboard tips.
     if let Some((text, is_err)) = wizard.note.clone() {
-        let style = if is_err { Style::default().fg(WARN) } else { dim() };
+        let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         let note_area =
             Rect { x: 2, y: area.height.saturating_sub(6), width: area.width - 4, height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(text, style)), note_area);
@@ -1325,13 +1332,13 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     // forward action on the right as the kit's tall primary block.
     let rule = Rect { x: 2, y: area.height.saturating_sub(4), width: area.width - 4, height: 1 };
     frame.render_widget(
-        Paragraph::new(Span::styled("─".repeat(rule.width as usize), Style::default().fg(GOLD))),
+        Paragraph::new(Span::styled("─".repeat(rule.width as usize), Style::default().fg(th().gold))),
         rule,
     );
     let bar = Rect { x: 2, y: area.height.saturating_sub(3), width: area.width - 4, height: 3 };
     if !wizard.progress.is_empty() {
         frame.render_widget(
-            Paragraph::new(Span::styled(wizard.progress.clone(), Style::default().fg(OK))),
+            Paragraph::new(Span::styled(wizard.progress.clone(), Style::default().fg(th().ok))),
             Rect { x: bar.x, y: bar.y + 1, width: bar.width.saturating_sub(20), height: 1 },
         );
     }
@@ -1372,7 +1379,7 @@ fn tall_button(frame: &mut Frame, wizard: &mut Wizard, at: Rect, label: &str, ac
     let width = (text.chars().count() as u16 + 2).min(at.width);
     let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
     let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
-    let color = if hovered { BRIGHT } else { ACCENT };
+    let color = if hovered { th().bright } else { th().accent };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1405,9 +1412,9 @@ fn button(
     let rect = Rect { x: at.x, y: at.y, width, height: 1 };
     let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
     let style = match (primary, hovered) {
-        (true, true) => Style::default().fg(BRIGHT).add_modifier(Modifier::BOLD),
-        (true, false) => Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        (false, true) => Style::default().fg(BRIGHT).add_modifier(Modifier::BOLD),
+        (true, true) => Style::default().fg(th().bright).add_modifier(Modifier::BOLD),
+        (true, false) => Style::default().fg(th().accent).add_modifier(Modifier::BOLD),
+        (false, true) => Style::default().fg(th().bright).add_modifier(Modifier::BOLD),
         (false, false) => dim(),
     };
     frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
@@ -1479,14 +1486,14 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
             _ => folder.name.clone(),
         };
         let row_bg = if selected && !editing {
-            Style::default().fg(Color::Black).bg(ACCENT)
+            Style::default().fg(th().on_accent).bg(th().accent)
         } else {
             Style::default()
         };
         let name_style = if editing {
-            Style::default().fg(BRIGHT)
+            Style::default().fg(th().bright)
         } else if selected {
-            Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)
+            Style::default().fg(th().on_accent).bg(th().accent).add_modifier(Modifier::BOLD)
         } else {
             accent()
         };
@@ -1505,7 +1512,7 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         let x_rect = Rect { x: column.x + sel_width + 1, y, width: 3, height: 1 };
         let x_hover = wizard.pointer.is_some_and(|p| x_rect.contains(p));
         let x_style = if x_hover {
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            Style::default().fg(th().danger).add_modifier(Modifier::BOLD)
         } else {
             dim()
         };
@@ -1524,7 +1531,7 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(if add_hover { Style::default().fg(BRIGHT) } else { dim() });
+        .border_style(if add_hover { Style::default().fg(th().bright) } else { dim() });
     let inner = block.inner(add_rect);
     frame.render_widget(block, add_rect);
     frame.render_widget(
@@ -1623,7 +1630,7 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         let inner = card(frame, rect, selected);
         wizard.clicks.push((rect, Act::Toggle(i)));
         let box_span = if wizard.extras[i] {
-            Span::styled("[x] ", Style::default().fg(OK))
+            Span::styled("[x] ", Style::default().fg(th().ok))
         } else {
             Span::styled("[ ] ", dim())
         };
@@ -1699,6 +1706,14 @@ fn modal_frame(frame: &mut Frame, area: Rect, width: u16, height: u16, title_col
         height,
     };
     frame.render_widget(Clear, rect);
+    // Clear resets cells to the terminal default — repaint the ground so
+    // the modal interior matches the fixed scheme.
+    if let Some(ground) = th().ground {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(ground).fg(th().text)),
+            rect,
+        );
+    }
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1709,16 +1724,16 @@ fn modal_frame(frame: &mut Frame, area: Rect, width: u16, height: u16, title_col
 }
 
 fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
-    let inner = modal_frame(frame, area, 62, 13, WARN);
+    let inner = modal_frame(frame, area, 62, 13, th().gold);
     let lines = vec![
-        Line::from(Span::styled("Run in Public Mode?", Style::default().fg(WARN).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled("Run in Public Mode?", Style::default().fg(th().gold).add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from("No login means the server is open to everyone who can reach it."),
         Line::from(""),
-        Line::from(Span::styled("+ Instant access for everyone on your home network", Style::default().fg(OK))),
-        Line::from(Span::styled("+ Nothing to type on TVs and shared devices", Style::default().fg(OK))),
-        Line::from(Span::styled("− Anyone who reaches the server has full control", Style::default().fg(WARN))),
-        Line::from(Span::styled("− Your Quick Connect code becomes a key to everything", Style::default().fg(WARN))),
+        Line::from(Span::styled("+ Instant access for everyone on your home network", Style::default().fg(th().ok))),
+        Line::from(Span::styled("+ Nothing to type on TVs and shared devices", Style::default().fg(th().ok))),
+        Line::from(Span::styled("− Anyone who reaches the server has full control", Style::default().fg(th().gold))),
+        Line::from(Span::styled("− Your Quick Connect code becomes a key to everything", Style::default().fg(th().gold))),
         Line::from(""),
         Line::from(Span::styled("You can add a login later from the admin panel.", dim())),
     ];
@@ -1743,7 +1758,7 @@ fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
 }
 
 fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Browse) {
-    let inner = modal_frame(frame, area, 66, 18, ACCENT);
+    let inner = modal_frame(frame, area, 66, 18, th().accent);
     frame.render_widget(
         Paragraph::new(Span::styled("Browse the server's folders", bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
@@ -1759,7 +1774,7 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
     for (row, i) in (first..browse.dirs.len().min(first + visible)).enumerate() {
         let selected = i == browse.sel;
         let style = if selected {
-            Style::default().fg(Color::Black).bg(ACCENT)
+            Style::default().fg(th().on_accent).bg(th().accent)
         } else {
             Style::default()
         };
@@ -1794,7 +1809,7 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
 fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &PathDraft) {
     let suggestions = draft.suggestions();
     let shown = suggestions.len().min(6) as u16;
-    let inner = modal_frame(frame, area, 62, 7 + shown, ACCENT);
+    let inner = modal_frame(frame, area, 62, 7 + shown, th().accent);
     frame.render_widget(
         Paragraph::new(Span::styled("Type the full path of a music folder", bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
@@ -1809,9 +1824,9 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
             Rect { x: inner.x, y: inner.y + 4 + i as u16, width: inner.width, height: 1 };
         let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
         let style = if selected {
-            Style::default().fg(Color::Black).bg(ACCENT)
+            Style::default().fg(th().on_accent).bg(th().accent)
         } else if hovered {
-            Style::default().fg(BRIGHT)
+            Style::default().fg(th().bright)
         } else {
             dim()
         };

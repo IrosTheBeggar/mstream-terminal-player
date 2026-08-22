@@ -8,28 +8,53 @@ canvas: <https://claude.ai/code/artifact/8eb74e0a-b721-434c-9ff7-b6f02385aab8>.
 The shipped reference implementation is `src/setup/` — when this document
 and that code disagree, fix one of them in the same change.
 
-## Palette — named ANSI only
+## Palette
 
-Never `Color::Rgb`, never `Color::Indexed`: named colors only, so every
-screen inherits the user's own terminal theme (the player's rule too).
+Two regimes, deliberately different:
 
-| Token | Role |
-|---|---|
-| default fg | body text, values, paths |
-| `Color::LightBlue` | ACCENT — actions, name chips, focus borders, selection bg |
-| `Color::Cyan` | BRIGHT — hover states, the active rename chip and caret |
-| `Color::DarkGray` | DIM — hints, labels, idle borders, text buttons, table headers |
-| `Color::Yellow` | GOLD — the bottom rule, warnings/errors, the warning modal |
-| `Color::Green` | OK — checked boxes, progress, success |
-| `Color::Red` | DANGER — destructive hover (the row [X]); never decoration |
+- **The setup wizard ships FIXED colors.** It is the brand moment, so it
+  looks the same in every terminal that can carry it. `src/setup/theme.rs`
+  resolves the table below once at startup through a three-tier ladder:
+  **truecolor** (`COLORTERM` contains `truecolor`/`24bit`) → **256-color**
+  (`TERM` contains `256color`; cube/ramp indexes 16+ only — the first 16
+  are repainted by terminal themes; this is Apple Terminal's tier, it has
+  no truecolor) → **named ANSI** (the floor: the adaptive palette, no
+  ground painting — a 16-color console keeps its own background).
+  `MSTREAM_SETUP_THEME=ansi|256|truecolor` overrides detection.
+- **The player inherits the terminal theme.** Named ANSI only — never
+  `Color::Rgb`, never `Color::Indexed` — so the user's own theme paints
+  the app. Any future fixed-scheme surface opts in the wizard's way:
+  module-local, through its own resolved theme, never by changing the
+  player's `ui::Theme`.
+
+| Token | Role | Truecolor | 256 | Named floor |
+|---|---|---|---|---|
+| TEXT | body text, values, paths | `#d8dee9` | 253 | default fg |
+| GROUND | the painted background (fixed tiers only) | `#12131c` | 233 | terminal's own |
+| ACCENT | actions, name chips, focus borders, selection bg | `#7aabdf` | 110 | `LightBlue` |
+| BRIGHT | hover states, the active rename chip and caret | `#8fd6e8` | 117 | `Cyan` |
+| DIM | hints, labels, idle borders, text buttons, table headers | `#69718f` | 60 | `DarkGray` |
+| GOLD | the bottom rule, warnings/errors, the warning modal | `#e5c07b` | 179 | `Yellow` |
+| OK | checked boxes, progress, success | `#98c379` | 114 | `Green` |
+| DANGER | destructive hover (the row [X]); never decoration | `#e06c75` | 167 | `Red` |
+| ON-ACCENT | fg on accent-filled cells (selection rows) | `#0d1017` | 232 | `Black` |
+
+Element specs below name colors by floor name (LightBlue = ACCENT,
+Cyan = BRIGHT, DarkGray = DIM, Yellow = GOLD, Green = OK, Red = DANGER,
+Black = ON-ACCENT) — this table is the mapping; code goes through the
+tokens.
 
 Rules:
 - Emphasis is `Modifier::BOLD`, and only BOLD. Dim text is fg DarkGray,
   not `Modifier::DIM` (uneven terminal support).
-- Selection bg is LightBlue with black fg. **Hover never uses the
-  selection bg — hover brightens** (DarkGray→Cyan, LightBlue→Cyan).
-- Cards and panels have **no background fill** — the terminal ground is
-  the only background.
+- Selection bg is ACCENT with ON-ACCENT fg. **Hover never uses the
+  selection bg — hover brightens** (DIM→BRIGHT, ACCENT→BRIGHT).
+- Cards and panels have **no background fill** — the ground is the only
+  background (the wizard's painted GROUND on fixed tiers, the terminal's
+  own on the floor).
+- On the fixed tiers, body text takes its fg from the ground fill —
+  never the terminal default, which may be invisible on a painted ground.
+  Anything that `Clear`s (modals) repaints the ground behind itself.
 
 ## Spacing — cells and rows
 
