@@ -1499,8 +1499,29 @@ fn tooltip_rect(area: Rect, target: Rect, w: u16, h: u16) -> Rect {
     Rect { x: x.max(area.x), y: y.max(area.y), width: w, height: h }
 }
 
+/// The caret cell that points the tooltip at its target: a box-drawing
+/// stem merged INTO the border — `┴` on the top border when the box
+/// hangs below the target, `┬` on the bottom border when it floats
+/// above — at the target's center, clamped off the corners. None when
+/// the box neither sits below nor above (degenerate clamps) or is too
+/// narrow to keep its corners.
+fn caret_cell(rect: Rect, target: Rect) -> Option<(u16, u16, &'static str)> {
+    if rect.width < 3 {
+        return None;
+    }
+    let x = (target.x + target.width / 2).clamp(rect.x + 1, rect.right().saturating_sub(2));
+    if rect.y >= target.bottom() {
+        Some((x, rect.y, "┴"))
+    } else if rect.bottom() <= target.y {
+        Some((x, rect.bottom().saturating_sub(1), "┬"))
+    } else {
+        None
+    }
+}
+
 /// A miniature of the neutral modal, anchored to its target: Clear +
-/// ground repaint beneath, Rounded DIM border, wrapped default-fg text.
+/// ground repaint beneath, Rounded DIM border with a caret stem pointing
+/// at the target, wrapped default-fg text.
 fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) {
     let lines = wrap_tip(text);
     if lines.is_empty() {
@@ -1522,6 +1543,12 @@ fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) {
         .border_style(dim());
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
+    if let Some((x, y, glyph)) = caret_cell(rect, target) {
+        frame.render_widget(
+            Paragraph::new(Span::styled(glyph, dim())),
+            Rect { x, y, width: 1, height: 1 },
+        );
+    }
     let body: Vec<Line> = lines.into_iter().map(|l| Line::from(format!(" {l}"))).collect();
     frame.render_widget(Paragraph::new(body), inner);
 }
@@ -2080,6 +2107,27 @@ mod tests {
         // Wider than the frame: clamped to it.
         let r = tooltip_rect(area, mid, 200, 3);
         assert_eq!(r.width, 100);
+    }
+
+    #[test]
+    fn the_caret_stem_points_at_the_target_center_from_the_connecting_edge() {
+        let area = Rect { x: 0, y: 0, width: 100, height: 40 };
+        // Box below the target: `┴` on the TOP border, at the target center.
+        let mid = Rect { x: 40, y: 10, width: 14, height: 3 };
+        let r = tooltip_rect(area, mid, 24, 3);
+        assert_eq!(caret_cell(r, mid), Some((47, r.y, "┴")));
+        // Box above a bottom-bar target: `┬` on the BOTTOM border — and the
+        // stem follows the target center even when the box is pulled left.
+        let bar = Rect { x: 84, y: 37, width: 14, height: 3 };
+        let r = tooltip_rect(area, bar, 22, 3);
+        assert_eq!(caret_cell(r, bar), Some((91, r.bottom() - 1, "┬")));
+        // The stem never lands on a corner.
+        let edge = Rect { x: 97, y: 10, width: 3, height: 1 };
+        let r = tooltip_rect(area, edge, 22, 3);
+        let (x, _, _) = caret_cell(r, edge).unwrap();
+        assert!(x > r.x && x < r.right() - 1);
+        // A box too narrow to keep its corners gets no stem.
+        assert_eq!(caret_cell(Rect { x: 0, y: 5, width: 2, height: 3 }, mid), None);
     }
 
     #[test]

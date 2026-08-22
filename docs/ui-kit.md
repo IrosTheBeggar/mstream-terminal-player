@@ -82,7 +82,8 @@ Rules:
 `▸` forward affordance · `[X]` per-row remove (right of the selection area) · `▏` text caret · `◂` back ·
 `[✓]`/`[ ]` checkboxes · `(•)`/`( )` radios · `•` secret mask · `▰▱`
 progress · `·` hint separator · `─` rules · rounded box-drawing via
-`BorderType::Rounded` · `█▀▄` half-blocks (QR only).
+`BorderType::Rounded` · `┴`/`┬` tooltip caret stems (merged into the
+border, pointing at the target) · `█▀▄` half-blocks (QR only).
 
 - Checkmark is ✓ U+2713; on restricted glyph sets (the player's Glyphs
   trust system) fall back to `[x]` — same width, same colors.
@@ -181,6 +182,11 @@ DarkGray, 1-cell inline padding, text default fg, wrapped at 40 cells.
 target's rect (above it when below would leave the frame), pulled inside
 at the edges — one fixed spot however the pointer roams within the
 target, so the box never jitters (and never repaints while it rests).
+A box-drawing caret merged into the connecting border points at the
+target's center: `┴` on the top border when the box hangs below the
+target (`╭───┴───╮`), `┬` on the bottom border when it floats above
+(`╰───┬───╯`) — one cell, DIM like the border, clamped off the corners,
+tracking the target center even when the box is pulled sideways.
 Hides the instant the pointer leaves, on any keypress, and while a modal
 is open. Tip targets are a per-frame rect registry parallel to the click
 registry — a tip rect need not be clickable (the disabled-button
