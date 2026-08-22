@@ -1361,12 +1361,12 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
     }
 }
 
-/// The kit's primary button: the picker card's geometry — a 3-row
-/// Rounded-border block — kept filled: the border and the label row's
-/// background share the button color (terminal corners cannot carry a
-/// background, so the rounded border glyphs ARE the corners). Hover
-/// brightens border and fill together. `at.y` is the TOP row of the
-/// three. Returns the rect it drew into.
+/// The kit's primary button: a 3-row Rounded frame, NO fill — the frame
+/// color is the emphasis (the kit's chosen answer to the terminal's
+/// button limits: a filled block cannot have rounded corners, so the
+/// standard is the frame and the fills are documented alternatives).
+/// Border and label share the color; hover brightens both to Cyan.
+/// `at.y` is the TOP row of the three. Returns the rect it drew into.
 fn tall_button(frame: &mut Frame, wizard: &mut Wizard, at: Rect, label: &str, act: Act) -> Rect {
     let text = format!("  {label}  ");
     let width = (text.chars().count() as u16 + 2).min(at.width);
@@ -1382,7 +1382,7 @@ fn tall_button(frame: &mut Frame, wizard: &mut Wizard, at: Rect, label: &str, ac
     frame.render_widget(
         Paragraph::new(Span::styled(
             text,
-            Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         )),
         inner,
     );
@@ -1405,8 +1405,8 @@ fn button(
     let rect = Rect { x: at.x, y: at.y, width, height: 1 };
     let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
     let style = match (primary, hovered) {
-        (true, true) => Style::default().fg(Color::Black).bg(BRIGHT).add_modifier(Modifier::BOLD),
-        (true, false) => Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD),
+        (true, true) => Style::default().fg(BRIGHT).add_modifier(Modifier::BOLD),
+        (true, false) => Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         (false, true) => Style::default().fg(BRIGHT).add_modifier(Modifier::BOLD),
         (false, false) => dim(),
     };

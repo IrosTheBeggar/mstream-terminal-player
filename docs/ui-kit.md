@@ -35,12 +35,9 @@ Rules:
 
 - One centered content column per screen, `min(width − 4, 74)` cells.
 - Cards: 3 rows (border + 1 content row); 4 rows with a description line.
-- **Primary buttons are 3-row Rounded blocks, filled**: a
-  `BorderType::Rounded` frame and the label row's background in the
-  button color (corners cannot carry a background — the rounded border
-  glyphs are the corners), matching card geometry. Text buttons are 1
-  row. Modal buttons are 1 row (modals are compact surfaces). Never two
-  primaries in one row group.
+- **Primary buttons are 3-row Rounded frames, no fill** — the frame
+  color is the emphasis. Text buttons are 1 row. Modal buttons are 1 row
+  (modals are compact surfaces). Never two primaries in one row group.
 - Section gaps: 1–2 blank rows.
 
 ## Glyphs — text only, no emoji
@@ -60,14 +57,28 @@ progress · `·` hint separator · `─` rules · rounded box-drawing via
 ## Elements
 
 ### Buttons
-- **Primary**: 3-row Rounded block in LightBlue — border fg LightBlue,
-  label row `  Label  ` fg Black on bg LightBlue, BOLD, `▸` suffix on
-  forward actions. Hover: border and fill brighten to Cyan together.
-  Exactly one per screen, bottom-right (in the bottom bar where the
-  screen has one).
+
+**The terminal's button space** — a cell carries one glyph, one fg, one
+bg, so exactly three shapes exist: a 1-row filled slab (square corners),
+a rounded frame (box-drawing corners, no fill), and a fat fill with
+quarter-cell soft corners (block elements `▗▄▖`/`▝▀▘` in the button
+color). A filled block with truly rounded corners does not exist, and
+smooth pill ends need private-use Powerline glyphs (patched fonts) —
+banned.
+
+- **Primary — THE STANDARD**: 3-row `BorderType::Rounded` frame, no
+  fill; border and `  Label ▸  ` label both fg LightBlue BOLD — the
+  frame color carries the emphasis. Hover: border and label brighten to
+  Cyan together. Exactly one per screen, bottom-right (in the bottom bar
+  where the screen has one).
+- **Alternatives** (sanctioned, deliberate, never a third style on one
+  screen): the 1-row filled slab for dense contexts; the fat soft-corner
+  fill for high-impact moments.
 - **Text**: 1 row, fg DarkGray. Hover: fg Cyan + BOLD.
-- **Disabled** (filled only): bg DarkGray, fg Black, no BOLD, no ▸, no
-  click rect, no hover, no hand cursor. **Text buttons are never
+- **Modal primary**: 1 row, label fg LightBlue BOLD (no frame — modals
+  are compact); the SAFE choice gets it.
+- **Disabled**: the primary frame with border and label fg DarkGray, no
+  `▸`, no click rect, no hover, no hand cursor. **Text buttons are never
   disabled — hide them instead** (a gray text button is indistinguishable
   from an idle one in 16 colors).
 - Every clickable registers a click rect, participates in hover, and
@@ -120,7 +131,7 @@ one DarkGray parenthesized line that says what to DO.
 Centered, `Clear` beneath (no scrim — terminals have no alpha; the
 border carries the weight). Border = intent: LightBlue neutral, Yellow
 warning. First line: BOLD title in the intent color. Buttons bottom-right
-(1-row); the SAFE choice is the primary. Esc always dismisses.
+(1-row; the safe choice fg LightBlue BOLD). Esc always dismisses.
 
 ### Status, progress, notes
 One status line above the keyboard tips. Busy: fg LightBlue,
