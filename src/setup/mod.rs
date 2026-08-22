@@ -39,6 +39,10 @@ use crate::config;
 
 /// How long to wait for input before redrawing anyway.
 const POLL: Duration = Duration::from_millis(100);
+/// How long the pointer rests on a tip target before the tooltip shows.
+const TIP_DELAY: Duration = Duration::from_millis(500);
+/// Tooltip text wraps at this many cells.
+const TIP_WRAP: usize = 40;
 /// How often the Done screen re-asks for scan progress.
 const PROGRESS_EVERY: Duration = Duration::from_millis(1500);
 /// The one vpath name a single folder gets without being asked.
@@ -350,6 +354,13 @@ pub(crate) struct Wizard {
     last_poll: Instant,
 
     clicks: Vec<(Rect, Act)>,
+    /// Tooltip targets, rebuilt each frame like `clicks`. A rect here is
+    /// NOT necessarily clickable — disabled controls register a tip
+    /// (the reason they're disabled) without registering a click.
+    tips: Vec<(Rect, &'static str)>,
+    /// The tip target the pointer is resting on, and since when. The
+    /// tooltip renders once the rest exceeds [`TIP_DELAY`].
+    dwell: Option<(Rect, &'static str, Instant)>,
     /// Where the mouse last was, for hover styling. None until it moves.
     pointer: Option<Position>,
 }
@@ -381,6 +392,8 @@ impl Wizard {
             pending_complete: None,
             last_poll: Instant::now(),
             clicks: Vec::new(),
+            tips: Vec::new(),
+            dwell: None,
             pointer: None,
         }
     }
@@ -1078,6 +1091,23 @@ fn event_loop(
             set_pointer_shape(hand, mouse_on);
         }
 
+        // Tooltip dwell: the timer survives while the pointer stays on the
+        // same tip rect, restarts on a new one, and dies the moment the
+        // pointer leaves (or a modal takes the screen — no tips through it).
+        let tip = match (wizard.pointer, &wizard.modal) {
+            (Some(p), Modal::None) => {
+                wizard.tips.iter().find(|(rect, _)| rect.contains(p)).copied()
+            }
+            _ => None,
+        };
+        wizard.dwell = match (tip, wizard.dwell) {
+            (Some((rect, text)), Some((prev, _, since))) if prev == rect => {
+                Some((rect, text, since))
+            }
+            (Some((rect, text)), _) => Some((rect, text, Instant::now())),
+            (None, _) => None,
+        };
+
         if wizard.screen != Screen::Folders
             && wizard.queued.is_none()
             && !wizard.in_flight
@@ -1101,6 +1131,9 @@ fn event_loop(
         for input in inputs {
             match input {
                 TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                    // Typing dismisses a tooltip (the dwell re-arms if the
+                    // pointer just sits there, like native tooltips).
+                    wizard.dwell = None;
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         && key.code == KeyCode::Char('c')
                     {
@@ -1316,6 +1349,7 @@ fn handle_key(wizard: &mut Wizard, code: KeyCode) -> Option<Outcome> {
 
 fn render(frame: &mut Frame, wizard: &mut Wizard) {
     wizard.clicks.clear();
+    wizard.tips.clear();
     let area = frame.area();
     // The fixed scheme paints its own ground — but only when the terminal
     // granted OSC 11 ownership of the whole window, margins included
@@ -1394,9 +1428,22 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         );
     }
     if wizard.screen == Screen::Folders {
-        let label = "Continue ▸";
+        // Disabled until there is something to continue with; the tooltip
+        // carries the why (the kit's one exception to disabled inertness).
+        let enabled = !wizard.folders.is_empty();
+        let label = if enabled { "Continue ▸" } else { "Continue" };
         let x = bar.right().saturating_sub(label.chars().count() as u16 + 6);
-        tall_button(frame, wizard, Rect { x, y: bar.y, width: bar.width, height: 3 }, label, Act::ContinueFolders);
+        let rect = tall_button(
+            frame,
+            wizard,
+            Rect { x, y: bar.y, width: bar.width, height: 3 },
+            label,
+            enabled,
+            Act::ContinueFolders,
+        );
+        if !enabled {
+            wizard.tips.push((rect, "Add a folder first"));
+        }
     }
 
     match wizard.modal.clone() {
@@ -1405,6 +1452,76 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         Modal::Browser(browse) => draw_browser(frame, wizard, area, &browse),
         Modal::PathEntry(draft) => draw_path_entry(frame, wizard, area, &draft),
     }
+
+    // The tooltip draws last — over everything, once the dwell matures.
+    if let (Some((_, text, since)), Some(p)) = (wizard.dwell, wizard.pointer) {
+        if since.elapsed() >= TIP_DELAY {
+            draw_tooltip(frame, area, p, text);
+        }
+    }
+}
+
+/// Greedy word wrap for tooltip copy, at [`TIP_WRAP`] cells.
+fn wrap_tip(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let need = if line.is_empty() { word.chars().count() } else { word.chars().count() + 1 };
+        if !line.is_empty() && line.chars().count() + need > TIP_WRAP {
+            lines.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+/// Where a w×h tooltip goes for a pointer at `p`: below-right of it,
+/// flipped above / pulled left when it would leave `area`, clamped in.
+fn tooltip_rect(area: Rect, p: Position, w: u16, h: u16) -> Rect {
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    let mut x = p.x.saturating_add(2);
+    let mut y = p.y.saturating_add(1);
+    if x + w > area.right() {
+        x = area.right().saturating_sub(w);
+    }
+    if y + h > area.bottom() {
+        y = p.y.saturating_sub(h);
+    }
+    Rect { x: x.max(area.x), y: y.max(area.y), width: w, height: h }
+}
+
+/// A miniature of the neutral modal, floated by the pointer: Clear +
+/// ground repaint beneath, Rounded DIM border, wrapped default-fg text.
+fn draw_tooltip(frame: &mut Frame, area: Rect, pointer: Position, text: &str) {
+    let lines = wrap_tip(text);
+    if lines.is_empty() {
+        return;
+    }
+    let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
+    let h = lines.len() as u16 + 2;
+    let rect = tooltip_rect(area, pointer, w, h);
+    frame.render_widget(Clear, rect);
+    if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(ground).fg(th().text)),
+            rect,
+        );
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(dim());
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let body: Vec<Line> = lines.into_iter().map(|l| Line::from(format!(" {l}"))).collect();
+    frame.render_widget(Paragraph::new(body), inner);
 }
 
 fn footer_hint(wizard: &Wizard) -> &'static str {
@@ -1424,27 +1541,41 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
 /// button limits: a filled block cannot have rounded corners, so the
 /// standard is the frame and the fills are documented alternatives).
 /// Border and label share the color; hover brightens both to Cyan.
+/// Disabled: everything DIM, no `▸` in the caller's label, no click rect,
+/// no hover, no hand — a tip rect (pushed by the caller) says why.
 /// `at.y` is the TOP row of the three. Returns the rect it drew into.
-fn tall_button(frame: &mut Frame, wizard: &mut Wizard, at: Rect, label: &str, act: Act) -> Rect {
+fn tall_button(
+    frame: &mut Frame,
+    wizard: &mut Wizard,
+    at: Rect,
+    label: &str,
+    enabled: bool,
+    act: Act,
+) -> Rect {
     let text = format!("  {label}  ");
     let width = (text.chars().count() as u16 + 2).min(at.width);
     let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
-    let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
-    let color = if hovered { th().bright } else { th().accent };
+    let hovered = enabled && wizard.pointer.is_some_and(|p| rect.contains(p));
+    let color = match (enabled, hovered) {
+        (false, _) => th().dim,
+        (true, true) => th().bright,
+        (true, false) => th().accent,
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(color));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            text,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        )),
-        inner,
-    );
-    wizard.clicks.push((rect, act));
+    let label_style = if enabled {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(color)
+    };
+    frame.render_widget(Paragraph::new(Span::styled(text, label_style)), inner);
+    if enabled {
+        wizard.clicks.push((rect, act));
+    }
     rect
 }
 
@@ -1555,6 +1686,9 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         let name_rect = Rect { x: column.x, y, width: NAME_W.min(sel_width), height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(name, name_style)), name_rect);
         wizard.clicks.push((name_rect, Act::RenameFolder(i)));
+        if !editing {
+            wizard.tips.push((name_rect, "This folder's name in mStream — click to rename"));
+        }
         let path_x = column.x + NAME_W;
         frame.render_widget(
             Paragraph::new(Span::styled(folder.path.clone(), row_bg)),
@@ -1569,6 +1703,7 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         };
         frame.render_widget(Paragraph::new(Span::styled("[X]", x_style)), x_rect);
         wizard.clicks.push((x_rect, Act::RemoveAt(i)));
+        wizard.tips.push((x_rect, "Remove this folder"));
         y += 1;
     }
     if !wizard.folders.is_empty() {
@@ -1642,8 +1777,9 @@ fn draw_login(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     y = field_row(frame, wizard, x, y, width, "CONFIRM PASSWORD", confirm, LoginField::Confirm, focus == LoginField::Confirm);
     y += 1;
 
-    let rect = tall_button(frame, wizard, Rect { x, y, width, height: 3 }, "Create Admin ▸", Act::CreateAdmin);
-    button(
+    let rect =
+        tall_button(frame, wizard, Rect { x, y, width, height: 3 }, "Create Admin ▸", true, Act::CreateAdmin);
+    let skip = button(
         frame,
         wizard,
         Rect { x: rect.right() + 2, y: y + 1, width, height: 1 },
@@ -1651,6 +1787,7 @@ fn draw_login(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         false,
         Act::SkipLogin,
     );
+    wizard.tips.push((skip, "Continue without accounts — public mode"));
 }
 
 fn mask(secret: &str) -> String {
@@ -1699,7 +1836,7 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 
     let label = "Continue ▸";
     let x = column.right().saturating_sub(label.chars().count() as u16 + 6);
-    tall_button(frame, wizard, Rect { x, y, width: column.width, height: 3 }, label, Act::ContinueExtras);
+    tall_button(frame, wizard, Rect { x, y, width: column.width, height: 3 }, label, true, Act::ContinueExtras);
 }
 
 fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
@@ -1735,6 +1872,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         wizard,
         Rect { x: column.x, y, width: column.width, height: 3 },
         "Open the Player ▸",
+        true,
         Act::OpenPlayer,
     );
     button(
@@ -1906,6 +2044,36 @@ mod tests {
 
     fn folder(path: &str) -> Folder {
         Folder { path: path.to_string(), name: String::new(), named_by_user: false, committed: false }
+    }
+
+    #[test]
+    fn tooltips_wrap_at_the_cap_and_never_split_words() {
+        assert_eq!(wrap_tip("Remove this folder"), vec!["Remove this folder"]);
+        let two = wrap_tip("This folder's name in mStream — click to rename");
+        assert_eq!(two.len(), 2);
+        assert!(two.iter().all(|l| l.chars().count() <= TIP_WRAP));
+        assert_eq!(two.join(" "), "This folder's name in mStream — click to rename");
+        assert!(wrap_tip("   ").is_empty());
+    }
+
+    #[test]
+    fn tooltips_sit_below_right_and_flip_inside_the_frame() {
+        let area = Rect { x: 0, y: 0, width: 100, height: 40 };
+        // Room below-right: offset (+2, +1) from the pointer.
+        let r = tooltip_rect(area, Position { x: 20, y: 10 }, 24, 3);
+        assert_eq!((r.x, r.y), (22, 11));
+        // Near the right edge: pulled left to stay inside.
+        let r = tooltip_rect(area, Position { x: 95, y: 10 }, 24, 3);
+        assert_eq!(r.right(), 100);
+        // Near the bottom: flipped above the pointer.
+        let r = tooltip_rect(area, Position { x: 20, y: 38 }, 24, 3);
+        assert_eq!(r.y, 35);
+        // A corner pointer still yields a rect fully inside the frame.
+        let r = tooltip_rect(area, Position { x: 99, y: 39 }, 24, 3);
+        assert!(r.right() <= 100 && r.bottom() <= 40);
+        // Wider than the frame: clamped to it.
+        let r = tooltip_rect(area, Position { x: 0, y: 0 }, 200, 3);
+        assert_eq!(r.width, 100);
     }
 
     #[test]

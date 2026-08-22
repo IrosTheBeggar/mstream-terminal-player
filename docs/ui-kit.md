@@ -115,7 +115,9 @@ banned.
 - **Modal primary**: 1 row, label fg LightBlue BOLD (no frame — modals
   are compact); the SAFE choice gets it.
 - **Disabled**: the primary frame with border and label fg DarkGray, no
-  `▸`, no click rect, no hover, no hand cursor. **Text buttons are never
+  `▸`, no click rect, no hover, no hand cursor — but it DOES register a
+  tooltip whose text says why it's disabled ("Add a folder first"), the
+  one exception to disabled inertness. **Text buttons are never
   disabled — hide them instead** (a gray text button is indistinguishable
   from an idle one in 16 colors).
 - Every clickable registers a click rect, participates in hover, and
@@ -170,6 +172,22 @@ Centered, `Clear` beneath (no scrim — terminals have no alpha; the
 border carries the weight). Border = intent: LightBlue neutral, Yellow
 warning. First line: BOLD title in the intent color. Buttons bottom-right
 (1-row; the safe choice fg LightBlue BOLD). Esc always dismisses.
+
+### Tooltip
+A dwell of ~500ms on a tip target shows a floating box by the pointer: a
+miniature of the neutral modal — `Clear` + ground repaint beneath,
+Rounded border DarkGray, 1-cell inline padding, text default fg, wrapped
+at 40 cells. Placed below-right of the pointer (+2, +1), flipped
+above/pulled left at the frame edges, always fully inside the window.
+Hides the instant the pointer leaves, on any keypress, and while a modal
+is open. Tip targets are a per-frame rect registry parallel to the click
+registry — a tip rect need not be clickable (the disabled-button
+exception), and a clickable need not have a tip. Rules: tooltips are
+mouse-only enhancement, so nothing may live ONLY in a tooltip (the tips
+line and on-screen copy stay canonical); never tooltip the self-evident;
+disabled controls' tips say WHY they're disabled. Harness note: the text
+reaches the pty as per-word runs (the diff renderer skips unchanged
+space cells) — e2e syncs must match word by word, not the whole phrase.
 
 ### Status, progress, notes
 One status line above the keyboard tips. Busy: fg LightBlue,
