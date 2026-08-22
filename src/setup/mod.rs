@@ -1032,7 +1032,7 @@ fn event_loop(
             set_pointer_shape(hand, mouse_on);
         }
 
-        if wizard.screen == Screen::Done
+        if wizard.screen != Screen::Folders
             && wizard.queued.is_none()
             && !wizard.in_flight
             && wizard.last_poll.elapsed() >= PROGRESS_EVERY
@@ -1295,32 +1295,51 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         Screen::Done => draw_done(frame, wizard, column),
     }
 
-    // Status note.
+    // Step counter, top-right — the chrome's only top element.
+    frame.render_widget(
+        Paragraph::new(Span::styled(format!("{} / 4", wizard.screen.step()), dim()))
+            .alignment(Alignment::Right),
+        Rect { x: 2, y: 0, width: area.width.saturating_sub(4), height: 1 },
+    );
+
+    // Status note (errors, busy) above the keyboard tips.
     if let Some((text, is_err)) = wizard.note.clone() {
         let style = if is_err { Style::default().fg(WARN) } else { dim() };
         let note_area =
-            Rect { x: column.x, y: area.height.saturating_sub(3), width: column.width, height: 1 };
+            Rect { x: 2, y: area.height.saturating_sub(4), width: area.width - 4, height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(text, style)), note_area);
     }
     if let Some(busy) = wizard.busy {
         let busy_area =
-            Rect { x: column.x, y: area.height.saturating_sub(3), width: column.width, height: 1 };
+            Rect { x: 2, y: area.height.saturating_sub(4), width: area.width - 4, height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(busy, accent())), busy_area);
     }
 
-    // Footer, under its gold rule.
+    // Keyboard tips, left, directly above the gold rule.
+    let tips = Rect { x: 2, y: area.height.saturating_sub(3), width: area.width - 4, height: 1 };
+    frame.render_widget(Paragraph::new(Span::styled(footer_hint(wizard), dim())), tips);
+
+    // The one gold rule, with the bottom bar under it: scan widget on the
+    // left (empty until a scan is actually running — folders commit on
+    // Continue, so that is the NEXT screen at the earliest), the screen's
+    // forward action on the right.
     let rule = Rect { x: 2, y: area.height.saturating_sub(2), width: area.width - 4, height: 1 };
     frame.render_widget(
         Paragraph::new(Span::styled("─".repeat(rule.width as usize), Style::default().fg(GOLD))),
         rule,
     );
-    let footer = Rect { x: 2, y: area.height.saturating_sub(1), width: area.width - 4, height: 1 };
-    let step = format!("Step {} of 4", wizard.screen.step());
-    frame.render_widget(Paragraph::new(Span::styled(step, dim())), footer);
-    frame.render_widget(
-        Paragraph::new(Span::styled(footer_hint(wizard), dim())).alignment(Alignment::Right),
-        footer,
-    );
+    let bar = Rect { x: 2, y: area.height.saturating_sub(1), width: area.width - 4, height: 1 };
+    if !wizard.progress.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(wizard.progress.clone(), Style::default().fg(OK))),
+            bar,
+        );
+    }
+    if wizard.screen == Screen::Folders {
+        let label = "Continue ▸";
+        let x = bar.right().saturating_sub(label.len() as u16 + 4);
+        button(frame, wizard, Rect { x, y: bar.y, width: bar.width, height: 1 }, label, true, Act::ContinueFolders);
+    }
 
     match wizard.modal.clone() {
         Modal::None => {}
@@ -1335,7 +1354,7 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
         (Modal::Browser(_), _) => "↑ ↓ move · Enter open · a add this folder · Esc close",
         (Modal::PathEntry(_), _) => "Tab complete · ↑ ↓ pick · Enter add folder · Esc close",
         (Modal::SkipWarning, _) => "Enter go public · Esc back",
-        (_, Screen::Folders) => "b browse · t type a path · Enter rename · c continue",
+        (_, Screen::Folders) => "↑ ↓ rows · Enter rename · r remove · b browse · t type a path · c continue",
         (_, Screen::Login) => "Tab next field · Enter create · Esc skip",
         (_, Screen::Extras) => "Space toggle · c continue",
         (_, Screen::Done) => "Enter open the player · f finish",
@@ -1395,65 +1414,82 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         );
         y += 1;
     }
-    y += 1;
-    frame.render_widget(
-        Paragraph::new(Span::styled("Where does your music live?", bold())),
-        Rect { x: column.x, y, width: column.width, height: 1 },
-    );
     y += 2;
 
+    // The chosen folders as a table: NAME first — the vpath is the point.
+    const NAME_W: u16 = 16;
+    if !wizard.folders.is_empty() {
+        let header = Rect { x: column.x, y, width: column.width, height: 1 };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!("{:<width$}", "NAME", width = NAME_W as usize), dim()),
+                Span::styled("FOLDER", dim()),
+            ])),
+            header,
+        );
+        y += 1;
+        frame.render_widget(
+            Paragraph::new(Span::styled("─".repeat(column.width as usize), dim())),
+            Rect { x: column.x, y, width: column.width, height: 1 },
+        );
+        y += 1;
+    }
     for i in 0..wizard.folders.len() {
         let selected = i == wizard.sel;
-        let rect = Rect { x: column.x, y, width: column.width, height: 3 };
-        let inner = card(frame, rect, selected);
+        let rect = Rect { x: column.x, y, width: column.width, height: 1 };
         wizard.clicks.push((rect, Act::SelectFolder(i)));
 
-        // [name]  /the/path                                            ✕
         let folder = &wizard.folders[i];
-        let name = match (&wizard.editing, selected) {
+        let editing = wizard.editing.is_some() && selected;
+        let name = match (&wizard.editing, editing) {
             (Some(draft), true) => format!("[{draft}▏]"),
-            _ => format!("[{}]", folder.name),
+            _ => folder.name.clone(),
         };
-        let name_width = (name.chars().count() as u16).min(inner.width);
-        let name_rect = Rect { x: inner.x + 1, y: inner.y, width: name_width, height: 1 };
-        let name_style = if wizard.editing.is_some() && selected {
+        let row_bg = if selected && !editing {
+            Style::default().fg(Color::Black).bg(ACCENT)
+        } else {
+            Style::default()
+        };
+        let name_style = if editing {
             Style::default().fg(BRIGHT)
+        } else if selected {
+            Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)
         } else {
             accent()
         };
+        frame.render_widget(Paragraph::new(Span::styled(" ".repeat(column.width as usize), row_bg)), rect);
+        let name_rect = Rect { x: column.x, y, width: NAME_W.min(column.width), height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(name, name_style)), name_rect);
         wizard.clicks.push((name_rect, Act::RenameFolder(i)));
-
-        let path_x = name_rect.right() + 2;
+        let path_x = column.x + NAME_W;
         frame.render_widget(
-            Paragraph::new(Span::raw(folder.path.clone())),
-            Rect {
-                x: path_x,
-                y: inner.y,
-                width: inner.right().saturating_sub(path_x + 4),
-                height: 1,
-            },
+            Paragraph::new(Span::styled(folder.path.clone(), row_bg)),
+            Rect { x: path_x, y, width: column.width.saturating_sub(NAME_W + 3), height: 1 },
         );
-
-        let x_rect = Rect { x: inner.right().saturating_sub(2), y: inner.y, width: 1, height: 1 };
+        let x_rect = Rect { x: column.right().saturating_sub(1), y, width: 1, height: 1 };
         let x_hover = wizard.pointer.is_some_and(|p| x_rect.contains(p));
         let x_style = if x_hover {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else if selected && !editing {
+            Style::default().fg(Color::Black).bg(ACCENT)
         } else {
             dim()
         };
         frame.render_widget(Paragraph::new(Span::styled("✕", x_style)), x_rect);
         wizard.clicks.push((x_rect, Act::RemoveAt(i)));
-        y += 3;
+        y += 1;
+    }
+    if !wizard.folders.is_empty() {
+        y += 1;
     }
 
-    // The add-card, button-like: its border lights up under the pointer.
+    // The picker card — the screen's one add affordance (typing a path is
+    // the `t` shortcut, in the tips line).
     let add_rect = Rect { x: column.x, y, width: column.width, height: 3 };
     let add_hover = wizard.pointer.is_some_and(|p| add_rect.contains(p));
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        // Hover brightens to Cyan — the kit's rule; LightBlue is focus.
         .border_style(if add_hover { Style::default().fg(BRIGHT) } else { dim() });
     let inner = block.inner(add_rect);
     frame.render_widget(block, add_rect);
@@ -1463,20 +1499,6 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         inner,
     );
     wizard.clicks.push((add_rect, Act::BrowseNative));
-    y += 4;
-
-    button(
-        frame,
-        wizard,
-        Rect { x: column.x, y, width: column.width, height: 1 },
-        "type a path",
-        false,
-        Act::TypePath,
-    );
-
-    let label = "Continue ▸";
-    let x = column.right().saturating_sub(label.len() as u16 + 4);
-    button(frame, wizard, Rect { x, y, width: column.width, height: 1 }, label, true, Act::ContinueFolders);
 }
 
 fn field_row(
@@ -1613,12 +1635,6 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true }),
         Rect { x: column.x, y, width: column.width, height: 2 },
-    );
-    y += 2;
-    frame.render_widget(
-        Paragraph::new(Span::styled(wizard.progress.clone(), Style::default().fg(OK)))
-            .alignment(Alignment::Center),
-        Rect { x: column.x, y, width: column.width, height: 1 },
     );
     y += 2;
 
