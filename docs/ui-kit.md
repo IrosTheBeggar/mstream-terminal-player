@@ -202,10 +202,12 @@ forward action as a tall primary on the right.
   pointer back. Emit both name families back to back — X cursor names
   (`left_ptr`/`hand2`) then CSS names (`default`/`pointer`) — so every
   dialect lands on the same shape; unknown names are ignored. Honored by
-  iTerm2, Ghostty, kitty, WezTerm, foot, xterm and VTE; Apple Terminal
-  ignores OSC 22 entirely (probed: no pointer-shape query response, and
-  its I-beam persists even under mouse reporting) — its pointer cannot
-  be changed, which is why the pointer is enhancement, never signal.
+  xterm (where OSC 22 originates), kitty (whose pointer-shapes spec names
+  the CSS shapes), Ghostty and foot. NEITHER macOS terminal implements it
+  — Apple Terminal 470.2 and iTerm2 3.6.11 both probed silent on every
+  query dialect, and their I-beams persist even under mouse reporting —
+  so their pointers cannot be changed by any escape, which is why the
+  pointer is enhancement, never signal.
 - **The UI never blocks.** Network calls and native dialogs run on a
   worker thread; results fold back between draws (see `src/setup/mod.rs`,
   the Job/Done pattern).

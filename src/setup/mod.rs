@@ -1014,10 +1014,12 @@ impl Drop for GroundGuard {
 
 /// The OSC 22 payload for a pointer state — both name families, X cursor
 /// names first and CSS names last, so every dialect lands on the same
-/// shape: xterm resolves the X/theme names, while kitty, Ghostty, iTerm2,
-/// WezTerm, foot and VTE speak the CSS names. Unknown names are ignored,
-/// so the pair is harmless everywhere else (Apple Terminal ignores OSC 22
-/// entirely — its pointer cannot be changed).
+/// shape: xterm (where OSC 22 originates) resolves the X/theme names,
+/// while kitty, Ghostty and foot speak the kitty spec's CSS names.
+/// Unknown names are ignored, so the pair is harmless everywhere else.
+/// Probed 2026-08: NEITHER macOS terminal implements OSC 22 — Apple
+/// Terminal (470.2) and iTerm2 (3.6.11) both keep their I-beam; their
+/// pointers cannot be changed by any escape.
 fn pointer_shape_seq(hand: bool) -> &'static str {
     if hand {
         "\x1b]22;hand2\x1b\\\x1b]22;pointer\x1b\\"
