@@ -1453,7 +1453,8 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(if add_hover { accent() } else { dim() });
+        // Hover brightens to Cyan — the kit's rule; LightBlue is focus.
+        .border_style(if add_hover { Style::default().fg(BRIGHT) } else { dim() });
     let inner = block.inner(add_rect);
     frame.render_widget(block, add_rect);
     frame.render_widget(
