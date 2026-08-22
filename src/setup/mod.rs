@@ -1337,7 +1337,7 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     }
     if wizard.screen == Screen::Folders {
         let label = "Continue ▸";
-        let x = bar.right().saturating_sub(label.len() as u16 + 4);
+        let x = bar.right().saturating_sub(label.chars().count() as u16 + 6);
         tall_button(frame, wizard, Rect { x, y: bar.y, width: bar.width, height: 3 }, label, Act::ContinueFolders);
     }
 
@@ -1361,28 +1361,30 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
     }
 }
 
-/// The kit's primary button: a 3-row filled block (padding row, label,
-/// padding row). Draws itself, registers its click, hover brightens.
-/// `at.y` is the TOP row of the three. Returns the rect it drew into.
+/// The kit's primary button: the picker card's geometry — a 3-row
+/// Rounded-border block — kept filled: the border and the label row's
+/// background share the button color (terminal corners cannot carry a
+/// background, so the rounded border glyphs ARE the corners). Hover
+/// brightens border and fill together. `at.y` is the TOP row of the
+/// three. Returns the rect it drew into.
 fn tall_button(frame: &mut Frame, wizard: &mut Wizard, at: Rect, label: &str, act: Act) -> Rect {
     let text = format!("  {label}  ");
-    let width = (text.chars().count() as u16).min(at.width);
+    let width = (text.chars().count() as u16 + 2).min(at.width);
     let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
     let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
-    let bg = if hovered { BRIGHT } else { ACCENT };
-    let fill = Style::default().bg(bg);
-    for row in 0..rect.height {
-        frame.render_widget(
-            Paragraph::new(Span::styled(" ".repeat(width as usize), fill)),
-            Rect { x: rect.x, y: rect.y + row, width, height: 1 },
-        );
-    }
+    let color = if hovered { BRIGHT } else { ACCENT };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
     frame.render_widget(
         Paragraph::new(Span::styled(
             text,
-            Style::default().fg(Color::Black).bg(bg).add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD),
         )),
-        Rect { x: rect.x, y: rect.y + rect.height / 2, width, height: 1 },
+        inner,
     );
     wizard.clicks.push((rect, act));
     rect
@@ -1633,7 +1635,7 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     y += 1;
 
     let label = "Continue ▸";
-    let x = column.right().saturating_sub(label.len() as u16 + 4);
+    let x = column.right().saturating_sub(label.chars().count() as u16 + 6);
     tall_button(frame, wizard, Rect { x, y, width: column.width, height: 3 }, label, Act::ContinueExtras);
 }
 

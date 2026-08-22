@@ -35,9 +35,12 @@ Rules:
 
 - One centered content column per screen, `min(width − 4, 74)` cells.
 - Cards: 3 rows (border + 1 content row); 4 rows with a description line.
-- **Primary buttons are 3-row filled blocks** (padding row, label row,
-  padding row). Text buttons are 1 row. Modal buttons are 1 row (modals
-  are compact surfaces). Never two primaries in one row group.
+- **Primary buttons are 3-row Rounded blocks, filled**: a
+  `BorderType::Rounded` frame and the label row's background in the
+  button color (corners cannot carry a background — the rounded border
+  glyphs are the corners), matching card geometry. Text buttons are 1
+  row. Modal buttons are 1 row (modals are compact surfaces). Never two
+  primaries in one row group.
 - Section gaps: 1–2 blank rows.
 
 ## Glyphs — text only, no emoji
@@ -57,10 +60,11 @@ progress · `·` hint separator · `─` rules · rounded box-drawing via
 ## Elements
 
 ### Buttons
-- **Primary**: 3-row filled block, bg LightBlue, label `  Label  ` fg
-  Black BOLD, `▸` suffix on forward actions. Hover: bg Cyan across all
-  three rows. Exactly one per screen, bottom-right (in the bottom bar
-  where the screen has one).
+- **Primary**: 3-row Rounded block in LightBlue — border fg LightBlue,
+  label row `  Label  ` fg Black on bg LightBlue, BOLD, `▸` suffix on
+  forward actions. Hover: border and fill brighten to Cyan together.
+  Exactly one per screen, bottom-right (in the bottom bar where the
+  screen has one).
 - **Text**: 1 row, fg DarkGray. Hover: fg Cyan + BOLD.
 - **Disabled** (filled only): bg DarkGray, fg Black, no BOLD, no ▸, no
   click rect, no hover, no hand cursor. **Text buttons are never
