@@ -119,7 +119,8 @@ banned.
   disabled — hide them instead** (a gray text button is indistinguishable
   from an idle one in 16 colors).
 - Every clickable registers a click rect, participates in hover, and
-  joins the OSC 22 hand-cursor set.
+  joins the OSC 22 hand-cursor set (see the pointer contract under
+  Behavioral rules).
 
 ### Text input
 Label above (fg DarkGray, UPPERCASE, small). 3-row Rounded card: idle
@@ -194,6 +195,17 @@ forward action as a tall primary on the right.
   (docker/npm installs, launcher-less bundles). Every action keeps a key
   binding and a named hint in the tips line — hints compress, never
   disappear. Mouse (click, hover, OSC 22 hand cursor) is enhancement.
+- **The pointer contract (OSC 22).** Announce the DEFAULT arrow once at
+  startup (terminals keep their text beam until an app says otherwise),
+  switch to the hand over clickables, emit only on state changes, and
+  reset with the empty name on exit so the shell gets the terminal's own
+  pointer back. Emit both name families back to back — X cursor names
+  (`left_ptr`/`hand2`) then CSS names (`default`/`pointer`) — so every
+  dialect lands on the same shape; unknown names are ignored. Honored by
+  iTerm2, Ghostty, kitty, WezTerm, foot, xterm and VTE; Apple Terminal
+  ignores OSC 22 entirely (probed: no pointer-shape query response, and
+  its I-beam persists even under mouse reporting) — its pointer cannot
+  be changed, which is why the pointer is enhancement, never signal.
 - **The UI never blocks.** Network calls and native dialogs run on a
   worker thread; results fold back between draws (see `src/setup/mod.rs`,
   the Job/Done pattern).

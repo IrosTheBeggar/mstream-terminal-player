@@ -974,10 +974,13 @@ pub fn run(args: SetupArgs) -> i32 {
     if let Some(seq) = claim {
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(seq));
     }
+    // Announce the arrow base — without this, terminals keep their text
+    // beam until the pointer first crosses a clickable.
+    set_pointer_shape(false, mouse_on);
     let outcome = event_loop(&mut terminal, &mut wizard, mouse_on, &to_worker, &from_worker);
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
-        set_pointer_shape(false, true);
+        let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(POINTER_RESET));
     }
     ratatui::restore();
     // Hand the background back before anything adaptive (the player, the
@@ -1009,16 +1012,33 @@ impl Drop for GroundGuard {
     }
 }
 
-/// Ask the terminal for a hand cursor over clickables (OSC 22, the xterm
-/// pointerShape control). iTerm2, kitty, WezTerm and friends honor it;
-/// everything else ignores the sequence, which costs nothing. Emitted only
-/// on state CHANGES so the stream is not littered with it.
+/// The OSC 22 payload for a pointer state — both name families, X cursor
+/// names first and CSS names last, so every dialect lands on the same
+/// shape: xterm resolves the X/theme names, while kitty, Ghostty, iTerm2,
+/// WezTerm, foot and VTE speak the CSS names. Unknown names are ignored,
+/// so the pair is harmless everywhere else (Apple Terminal ignores OSC 22
+/// entirely — its pointer cannot be changed).
+fn pointer_shape_seq(hand: bool) -> &'static str {
+    if hand {
+        "\x1b]22;hand2\x1b\\\x1b]22;pointer\x1b\\"
+    } else {
+        "\x1b]22;left_ptr\x1b\\\x1b]22;default\x1b\\"
+    }
+}
+
+/// Empty name = hand the pointer back to the terminal's own behavior —
+/// the shell underneath wants its text beam again, not our arrow.
+const POINTER_RESET: &str = "\x1b]22;\x1b\\";
+
+/// Set the pointer over the wizard: the default arrow everywhere, a hand
+/// over clickables. Announced once at startup (terminals keep their text
+/// beam until an app says otherwise), then emitted only on state CHANGES
+/// so the stream is not littered with it.
 fn set_pointer_shape(hand: bool, mouse_on: bool) {
     if !mouse_on {
         return;
     }
-    let sequence = if hand { "\x1b]22;pointer\x1b\\" } else { "\x1b]22;default\x1b\\" };
-    let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(sequence));
+    let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(pointer_shape_seq(hand)));
 }
 
 fn event_loop(
@@ -1884,6 +1904,13 @@ mod tests {
 
     fn folder(path: &str) -> Folder {
         Folder { path: path.to_string(), name: String::new(), named_by_user: false, committed: false }
+    }
+
+    #[test]
+    fn pointer_shapes_speak_both_name_families_and_reset_is_empty() {
+        assert_eq!(pointer_shape_seq(true), "\x1b]22;hand2\x1b\\\x1b]22;pointer\x1b\\");
+        assert_eq!(pointer_shape_seq(false), "\x1b]22;left_ptr\x1b\\\x1b]22;default\x1b\\");
+        assert_eq!(POINTER_RESET, "\x1b]22;\x1b\\");
     }
 
     #[test]
