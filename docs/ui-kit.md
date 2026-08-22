@@ -21,7 +21,7 @@ screen inherits the user's own terminal theme (the player's rule too).
 | `Color::DarkGray` | DIM — hints, labels, idle borders, text buttons, table headers |
 | `Color::Yellow` | GOLD — the bottom rule, warnings/errors, the warning modal |
 | `Color::Green` | OK — checked boxes, progress, success |
-| `Color::Red` | DANGER — destructive hover (the row ✕); never decoration |
+| `Color::Red` | DANGER — destructive hover (the row [X]); never decoration |
 
 Rules:
 - Emphasis is `Modifier::BOLD`, and only BOLD. Dim text is fg DarkGray,
@@ -42,7 +42,7 @@ Rules:
 
 ## Glyphs — text only, no emoji
 
-`▸` forward affordance · `✕` per-row remove · `▏` text caret · `◂` back ·
+`▸` forward affordance · `[X]` per-row remove (right of the selection area) · `▏` text caret · `◂` back ·
 `[✓]`/`[ ]` checkboxes · `(•)`/`( )` radios · `•` secret mask · `▰▱`
 progress · `·` hint separator · `─` rules · rounded box-drawing via
 `BorderType::Rounded` · `█▀▄` half-blocks (QR only).

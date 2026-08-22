@@ -1446,9 +1446,13 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     y += 2;
 
     // The chosen folders as a table: NAME first — the vpath is the point.
+    // The [X] remove control sits to the RIGHT of the selection area, not
+    // inside it: selecting a row never highlights its remove button.
     const NAME_W: u16 = 16;
+    const REMOVE_W: u16 = 4; // ' [X]'
+    let sel_width = column.width.saturating_sub(REMOVE_W);
     if !wizard.folders.is_empty() {
-        let header = Rect { x: column.x, y, width: column.width, height: 1 };
+        let header = Rect { x: column.x, y, width: sel_width, height: 1 };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(format!("{:<width$}", "NAME", width = NAME_W as usize), dim()),
@@ -1458,14 +1462,14 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         );
         y += 1;
         frame.render_widget(
-            Paragraph::new(Span::styled("─".repeat(column.width as usize), dim())),
-            Rect { x: column.x, y, width: column.width, height: 1 },
+            Paragraph::new(Span::styled("─".repeat(sel_width as usize), dim())),
+            Rect { x: column.x, y, width: sel_width, height: 1 },
         );
         y += 1;
     }
     for i in 0..wizard.folders.len() {
         let selected = i == wizard.sel;
-        let rect = Rect { x: column.x, y, width: column.width, height: 1 };
+        let rect = Rect { x: column.x, y, width: sel_width, height: 1 };
         wizard.clicks.push((rect, Act::SelectFolder(i)));
 
         let folder = &wizard.folders[i];
@@ -1486,25 +1490,26 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         } else {
             accent()
         };
-        frame.render_widget(Paragraph::new(Span::styled(" ".repeat(column.width as usize), row_bg)), rect);
-        let name_rect = Rect { x: column.x, y, width: NAME_W.min(column.width), height: 1 };
+        frame.render_widget(
+            Paragraph::new(Span::styled(" ".repeat(sel_width as usize), row_bg)),
+            rect,
+        );
+        let name_rect = Rect { x: column.x, y, width: NAME_W.min(sel_width), height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(name, name_style)), name_rect);
         wizard.clicks.push((name_rect, Act::RenameFolder(i)));
         let path_x = column.x + NAME_W;
         frame.render_widget(
             Paragraph::new(Span::styled(folder.path.clone(), row_bg)),
-            Rect { x: path_x, y, width: column.width.saturating_sub(NAME_W + 3), height: 1 },
+            Rect { x: path_x, y, width: sel_width.saturating_sub(NAME_W), height: 1 },
         );
-        let x_rect = Rect { x: column.right().saturating_sub(1), y, width: 1, height: 1 };
+        let x_rect = Rect { x: column.x + sel_width + 1, y, width: 3, height: 1 };
         let x_hover = wizard.pointer.is_some_and(|p| x_rect.contains(p));
         let x_style = if x_hover {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        } else if selected && !editing {
-            Style::default().fg(Color::Black).bg(ACCENT)
         } else {
             dim()
         };
-        frame.render_widget(Paragraph::new(Span::styled("✕", x_style)), x_rect);
+        frame.render_widget(Paragraph::new(Span::styled("[X]", x_style)), x_rect);
         wizard.clicks.push((x_rect, Act::RemoveAt(i)));
         y += 1;
     }
