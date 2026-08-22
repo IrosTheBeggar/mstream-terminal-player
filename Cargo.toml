@@ -93,6 +93,33 @@ iroh-tickets = "1"
 # the tree for one decode call (PLAN.md finding #70).
 base64 = "0.22"
 mdns-sd = "0.20.3"
+# The setup wizard's QR code, drawn as unicode half-blocks — no image
+# pipeline, just text the terminal already knows how to show.
+qrcode = { version = "0.14", default-features = false }
+terminal-colorsaurus = "1.0.3"
+
+# The setup wizard's native folder picker. Split by backend on purpose
+# (the picker spike, mStream-side, 2026-08-21): rfd's Linux portal backend
+# links libwayland-client into NEEDED — fatal for a binary that must load
+# on headless boxes — and its gtk3 backend links GTK, which is a
+# Docker-image problem in five triples at once (the chafa-dyn lesson
+# above). So Linux talks to the XDG portal directly through ashpd, which
+# with default features off is pure Rust over D-Bus: nothing linked,
+# nothing to install at build time, and a clean 1ms failure with no
+# session bus (the wizard falls back to its server-side browser). macOS
+# and Windows get rfd's native NSOpenPanel / IFileOpenDialog, which link
+# only system frameworks.
+# Windows only: IFileOpenDialog from a console app is standard and fronts
+# fine. macOS deliberately does NOT use rfd — an NSOpenPanel opened by a
+# terminal-launched process stays behind every window without key focus
+# (live-tested through activation policies and activateIgnoringOtherApps;
+# it never fronted) — the mac picker shells out to osascript instead,
+# which runs the chooser in its own app context.
+[target.'cfg(windows)'.dependencies]
+rfd = { version = "0.15", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 ratzilla = "0.3.1"

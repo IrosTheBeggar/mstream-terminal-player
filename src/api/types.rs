@@ -805,3 +805,28 @@ mod tests {
         assert!(caps.enabled_names().is_empty());
     }
 }
+
+// ── Setup-wizard shapes ──────────────────────────────────────────────────────
+
+/// `GET api/v1/admin/iroh` — Quick Connect's state and pairing ticket.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct IrohStatus {
+    pub enabled: bool,
+    pub available: bool,
+    pub running: bool,
+    pub online: bool,
+    /// The composite pairing ticket the mobile apps scan. Present once the
+    /// endpoint is up; the wizard renders it as a QR.
+    pub qr: Option<String>,
+}
+
+/// One row of `GET api/v1/scan/progress` — per-library scan state.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ScanProgressRow {
+    pub vpath: String,
+    /// Percent complete, when the server can estimate a total.
+    pub pct: Option<u32>,
+    pub scanned: u64,
+}
