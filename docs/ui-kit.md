@@ -200,7 +200,12 @@ gaps, text left / numbers right, `—` fg DarkGray for missing values, `…`
 truncation at the cell edge. Keyboard-selected row: bg LightBlue fg
 Black; hover row fg Cyan. At most one intent-colored cell per row.
 Overflow: `Scrollbar` right edge (track `│` DarkGray, thumb `█`
-LightBlue, `▲▼` endcaps DarkGray), only when rows overflow. Empty state:
+LightBlue, `▲▼` endcaps DarkGray), only when rows overflow. **The whole
+bar is live**: endcaps step one row, track cells JUMP proportionally to
+the clicked position, a press anywhere arms a THUMB DRAG (ridden on
+mouse-drag, released on mouse-up), the wheel scrolls, and the bar
+brightens under the pointer (thumb and endcaps → Cyan) like every
+clickable. Empty state:
 one DarkGray parenthesized line that says what to DO.
 **Every added folder is validated LOCALLY, on the worker** (a stat can
 hang on a dead mount): exists / is a folder / readable, plus

@@ -136,6 +136,8 @@ pub(crate) struct PathDraft {
     /// First visible suggestion row — the list windows like the folders
     /// table, following the keyboard cursor past the fold.
     pub scroll: usize,
+    /// Last frame's cursor — the view yanks only when it moves.
+    pub sel_anchor: Option<usize>,
     /// Why the current dir-part could not be listed — silence would read
     /// as "no autocomplete here", so the failure is said out loud.
     pub error: Option<String>,
@@ -150,6 +152,7 @@ impl PartialEq for PathDraft {
             && self.entries == other.entries
             && self.sel == other.sel
             && self.scroll == other.scroll
+            && self.sel_anchor == other.sel_anchor
             && self.error == other.error
     }
 }
@@ -260,6 +263,8 @@ enum Act {
     TableScroll(i8),
     PathCancel,
     PathScroll(i8),
+    TableScrollTo(usize),
+    PathScrollTo(usize),
     BrowseRow(usize),
     BrowseEnter,
     BrowseUp,
@@ -413,6 +418,11 @@ pub(crate) struct Wizard {
     reveal: Option<usize>,
     /// Paths waiting for their local validation to be sent to the worker.
     pending_validate: Vec<String>,
+    /// Scrollbar geometry registered this frame: (bar rect, max scroll).
+    table_bar: Option<(Rect, usize)>,
+    path_bar: Option<(Rect, usize)>,
+    /// A scrollbar drag in progress (armed by a press inside a bar).
+    drag: Option<BarKind>,
 
     pub username: String,
     pub password: String,
@@ -469,6 +479,9 @@ impl Wizard {
             sel: None,
             reveal: None,
             pending_validate: Vec::new(),
+            table_bar: None,
+            path_bar: None,
+            drag: None,
             editing: None,
             username: String::new(),
             password: String::new(),
@@ -641,6 +654,12 @@ impl Wizard {
                 };
             }
             Act::PathCancel => self.modal = Modal::None,
+            Act::TableScrollTo(pos) => self.tscroll = pos,
+            Act::PathScrollTo(pos) => {
+                if let Modal::PathEntry(draft) = &mut self.modal {
+                    draft.scroll = pos;
+                }
+            }
             Act::PathScroll(delta) => {
                 if let Modal::PathEntry(draft) = &mut self.modal {
                     draft.scroll = if delta < 0 {
@@ -689,6 +708,7 @@ impl Wizard {
     fn refresh_completion(&mut self) {
         if let Modal::PathEntry(draft) = &mut self.modal {
             draft.sel = None;
+            draft.sel_anchor = None;
             draft.scroll = 0;
             // An empty input suggests nothing: listing a default dir here
             // made bare Tab fill in entries of the home — the completion
@@ -1490,9 +1510,39 @@ fn event_loop(
                                     return Ok(outcome);
                                 }
                             }
+                            // A press anywhere on a scrollbar arms a
+                            // thumb drag (the press itself already
+                            // jumped via the cell's act).
+                            if wizard.table_bar.is_some_and(|(rect, _)| rect.contains(at)) {
+                                wizard.drag = Some(BarKind::Table);
+                            } else if wizard.path_bar.is_some_and(|(rect, _)| rect.contains(at))
+                            {
+                                wizard.drag = Some(BarKind::Path);
+                            }
                         }
-                        MouseEventKind::Moved | MouseEventKind::Drag(_) => {
+                        MouseEventKind::Moved => {
                             wizard.pointer = Some(at);
+                        }
+                        MouseEventKind::Drag(_) => {
+                            wizard.pointer = Some(at);
+                            match wizard.drag {
+                                Some(BarKind::Table) => {
+                                    if let Some((rect, max)) = wizard.table_bar {
+                                        wizard.tscroll = bar_jump(rect, max, at.y);
+                                    }
+                                }
+                                Some(BarKind::Path) => {
+                                    if let Some((rect, max)) = wizard.path_bar {
+                                        if let Modal::PathEntry(draft) = &mut wizard.modal {
+                                            draft.scroll = bar_jump(rect, max, at.y);
+                                        }
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
+                        MouseEventKind::Up(_) => {
+                            wizard.drag = None;
                         }
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                             wizard.pointer = Some(at);
@@ -1735,6 +1785,8 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
 fn render(frame: &mut Frame, wizard: &mut Wizard) {
     wizard.clicks.clear();
     wizard.tips.clear();
+    wizard.table_bar = None;
+    wizard.path_bar = None;
     let area = frame.area();
     // The fixed scheme paints its own ground — but only when the terminal
     // granted OSC 11 ownership of the whole window, margins included
@@ -2065,6 +2117,26 @@ const LOGO: [&str; 5] = [
 /// this, so ragged line widths can't skew per-line centering.
 const LOGO_W: u16 = 46;
 
+/// Which scrollbar a drag is riding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarKind {
+    Table,
+    Path,
+}
+
+/// Map a pointer row on a scrollbar to a scroll position: the track is
+/// proportional, endcap rows clamp to the ends, and a single-cell track
+/// lands midway.
+fn bar_jump(bar: Rect, max_scroll: usize, y: u16) -> usize {
+    let track_top = bar.y + 1;
+    let span = bar.height.saturating_sub(2).max(1) as usize;
+    if span == 1 {
+        return max_scroll / 2;
+    }
+    let rel = y.saturating_sub(track_top).min(span as u16 - 1) as usize;
+    (rel * max_scroll + (span - 1) / 2) / (span - 1)
+}
+
 /// The table viewport: given the row count, a row to reveal (a moved
 /// keyboard cursor, or a fresh add), the wheel offset and the available
 /// height → (first visible index, visible count). The wheel scrolls
@@ -2240,8 +2312,16 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     // column is centered, so the margin cell is always there). Endcaps
     // are click rects; the wheel scrolls too.
     if wizard.folders.len() > visible {
-        let mut state = ScrollbarState::new(wizard.folders.len() - visible + 1).position(first);
+        let max_scroll = wizard.folders.len() - visible;
+        let mut state = ScrollbarState::new(max_scroll + 1).position(first);
         let bar = Rect { x: column.x + column.width, y: rows_y, width: 1, height: visible as u16 };
+        let bar_hover = wizard.pointer.is_some_and(|p| bar.contains(p));
+        let ends = if bar_hover { Style::default().fg(th().bright) } else { dim() };
+        let thumb = if bar_hover {
+            Style::default().fg(th().bright)
+        } else {
+            Style::default().fg(th().accent)
+        };
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .track_symbol(Some("│"))
@@ -2249,17 +2329,27 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
                 .begin_symbol(Some("▲"))
                 .end_symbol(Some("▼"))
                 .track_style(dim())
-                .thumb_style(accent())
-                .begin_style(dim())
-                .end_style(dim()),
+                .thumb_style(thumb)
+                .begin_style(ends)
+                .end_style(ends),
             bar,
             &mut state,
         );
+        // The whole bar is live: track cells jump proportionally (rects
+        // first, so the endcaps win their own cells), endcaps step, and a
+        // press anywhere arms a thumb drag.
+        for ty in (bar.y + 1)..(bar.y + bar.height).saturating_sub(1) {
+            wizard.clicks.push((
+                Rect { x: bar.x, y: ty, width: 1, height: 1 },
+                Act::TableScrollTo(bar_jump(bar, max_scroll, ty)),
+            ));
+        }
         wizard.clicks.push((Rect { x: bar.x, y: bar.y, width: 1, height: 1 }, Act::TableScroll(-1)));
         wizard.clicks.push((
             Rect { x: bar.x, y: bar.y + bar.height - 1, width: 1, height: 1 },
             Act::TableScroll(1),
         ));
+        wizard.table_bar = Some((bar, max_scroll));
     }
 }
 
@@ -2591,9 +2681,12 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
         ))),
         Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 },
     );
-    let (first, visible) = table_view(suggestions.len(), draft.sel, draft.scroll, 6);
+    let sel_moved = draft.sel != draft.sel_anchor;
+    let reveal = if sel_moved { draft.sel } else { None };
+    let (first, visible) = table_view(suggestions.len(), reveal, draft.scroll, 6);
     if let Modal::PathEntry(d) = &mut wizard.modal {
         d.scroll = first;
+        d.sel_anchor = d.sel;
     }
     let overflow = suggestions.len() > visible;
     let row_width = if overflow { inner.width.saturating_sub(1) } else { inner.width };
@@ -2617,13 +2710,20 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
         wizard.clicks.push((rect, Act::PathSuggest(i)));
     }
     if overflow {
-        let mut state =
-            ScrollbarState::new(suggestions.len() - visible + 1).position(first);
+        let max_scroll = suggestions.len() - visible;
+        let mut state = ScrollbarState::new(max_scroll + 1).position(first);
         let bar = Rect {
             x: inner.x + inner.width.saturating_sub(1),
             y: inner.y + 4,
             width: 1,
             height: visible as u16,
+        };
+        let bar_hover = wizard.pointer.is_some_and(|p| bar.contains(p));
+        let ends = if bar_hover { Style::default().fg(th().bright) } else { dim() };
+        let thumb = if bar_hover {
+            Style::default().fg(th().bright)
+        } else {
+            Style::default().fg(th().accent)
         };
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -2632,12 +2732,18 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
                 .begin_symbol(Some("▲"))
                 .end_symbol(Some("▼"))
                 .track_style(dim())
-                .thumb_style(accent())
-                .begin_style(dim())
-                .end_style(dim()),
+                .thumb_style(thumb)
+                .begin_style(ends)
+                .end_style(ends),
             bar,
             &mut state,
         );
+        for ty in (bar.y + 1)..(bar.y + bar.height).saturating_sub(1) {
+            wizard.clicks.push((
+                Rect { x: bar.x, y: ty, width: 1, height: 1 },
+                Act::PathScrollTo(bar_jump(bar, max_scroll, ty)),
+            ));
+        }
         wizard
             .clicks
             .push((Rect { x: bar.x, y: bar.y, width: 1, height: 1 }, Act::PathScroll(-1)));
@@ -2645,6 +2751,7 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
             Rect { x: bar.x, y: bar.y + bar.height - 1, width: 1, height: 1 },
             Act::PathScroll(1),
         ));
+        wizard.path_bar = Some((bar, max_scroll));
     }
     // A listing failure for the current dir-part shows where suggestions
     // would be — kit error style, the server's words.
@@ -2912,6 +3019,20 @@ mod tests {
             matches!(&wizard.queued, Some(Op::Complete(dir)) if dir == "/home/anna/Music/"),
             "stepping into the dir must queue its listing"
         );
+    }
+
+    #[test]
+    fn bar_jump_maps_the_track_proportionally_and_clamps_the_ends() {
+        // A 6-cell bar: endcaps at rows 10 and 15, track rows 11..=14.
+        let bar = Rect { x: 79, y: 10, width: 1, height: 6 };
+        assert_eq!(bar_jump(bar, 9, 11), 0, "top of the track");
+        assert_eq!(bar_jump(bar, 9, 14), 9, "bottom of the track");
+        assert_eq!(bar_jump(bar, 9, 12), 3, "proportional in between");
+        assert_eq!(bar_jump(bar, 9, 10), 0, "endcap rows clamp to the ends");
+        assert_eq!(bar_jump(bar, 9, 40), 9, "past the bar clamps too");
+        // A 3-cell bar has a single track cell: it lands midway.
+        let tiny = Rect { x: 79, y: 10, width: 1, height: 3 };
+        assert_eq!(bar_jump(tiny, 4, 11), 2);
     }
 
     #[test]
