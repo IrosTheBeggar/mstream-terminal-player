@@ -5,15 +5,25 @@ wizard first, any screen after. Every value here is ratatui-renderable:
 named ANSI colors, `BorderType::Rounded`, cell/row spacing, text glyphs.
 The visual companion (the same standard, drawn) lives on the design
 canvas: <https://claude.ai/code/artifact/8eb74e0a-b721-434c-9ff7-b6f02385aab8>.
-The shipped reference implementation is `src/setup/` — when this document
-and that code disagree, fix one of them in the same change.
+The shipped implementation is `src/kit/`: `Surface<A>` (the per-frame
+click/tip/scrollbar registries plus pointer, tooltip dwell, capture and
+hold-repeat, generic over each screen's action enum), the widgets as
+free functions (`tall_button`, `button`, `modal_frame(_anchored)`,
+`modal_close`, `scroll_list`, `draw_tooltip`, `input_display`), the
+pure geometry (`table_view`, `bar_jump`, `tooltip_rect`, `caret_cell`),
+the pointer contract, and `kit::theme` (the fixed palette + the OSC 11
+ground lease). `src/setup/` is the reference consumer — a new screen
+embeds a `Surface`, draws kit widgets, and wires its event loop to the
+surface's `hit`/`arm_bars`/`motion`/`drag_action`/`hold_action`/
+`dwell_tick` in a dozen lines. When this document and that code
+disagree, fix one of them in the same change.
 
 ## Palette
 
 Two regimes, deliberately different:
 
 - **The setup wizard ships FIXED colors.** It is the brand moment, so it
-  looks the same in every terminal that can carry it. `src/setup/theme.rs`
+  looks the same in every terminal that can carry it. `src/kit/theme.rs`
   resolves the table below once at startup through a three-tier ladder:
   **truecolor** (`COLORTERM` contains `truecolor`/`24bit` — macOS 26's
   Terminal.app advertises this) → **256-color** (`TERM` contains

@@ -31,6 +31,8 @@ mod runtime;
 #[cfg(not(target_arch = "wasm32"))]
 mod serve;
 #[cfg(not(target_arch = "wasm32"))]
+mod kit;
+#[cfg(not(target_arch = "wasm32"))]
 mod setup;
 
 /// The browser build (see its module note). Everything below this line that

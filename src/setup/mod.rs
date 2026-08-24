@@ -16,7 +16,6 @@
 //! "working…" frame is on screen while the call blocks).
 
 pub mod picker;
-mod theme;
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -30,29 +29,22 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Alignment, Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-    Wrap,
-};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use crate::api::{ApiError, Client};
 use crate::config;
+use crate::kit::{
+    self, GroundGuard, POINTER_RESET, Surface, accent, bold, dim, set_pointer_shape, theme,
+};
+use crate::kit::theme::th;
 
 /// How long to wait for input before redrawing anyway.
 const POLL: Duration = Duration::from_millis(100);
-/// How long the pointer rests on a tip target before the tooltip shows.
-const TIP_DELAY: Duration = Duration::from_millis(500);
-/// Tooltip text wraps at this many cells.
-const TIP_WRAP: usize = 40;
-/// Hold-to-repeat on scrollbar arrows: the pause before repeating, then
-/// the step cadence (clamped by the loop's 100ms tick).
-const ARROW_DELAY: Duration = Duration::from_millis(400);
-const ARROW_REPEAT: Duration = Duration::from_millis(60);
 /// How often the Done screen re-asks for scan progress.
 const PROGRESS_EVERY: Duration = Duration::from_millis(1500);
 /// The one vpath name a single folder gets without being asked.
@@ -69,25 +61,6 @@ pub struct SetupArgs {
     /// Token for a server that already has accounts (testing)
     #[arg(long, hide = true)]
     token: Option<String>,
-}
-
-// ── Palette ──────────────────────────────────────────────────────────────────
-//
-// The wizard's colors are FIXED — resolved once by [`theme::th`] through a
-// truecolor → 256-cube → named-ANSI ladder, so the setup screens look the
-// same in every terminal that can carry it. Wizard-scoped on purpose: the
-// player keeps inheriting the user's terminal theme through `ui::Theme`.
-
-use theme::th;
-
-fn accent() -> Style {
-    Style::default().fg(th().accent)
-}
-fn dim() -> Style {
-    Style::default().fg(th().dim)
-}
-fn bold() -> Style {
-    Style::default().add_modifier(Modifier::BOLD)
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -422,14 +395,6 @@ pub(crate) struct Wizard {
     reveal: Option<usize>,
     /// Paths waiting for their local validation to be sent to the worker.
     pending_validate: Vec<String>,
-    /// Scrollbar geometry registered this frame: (bar rect, max scroll).
-    table_bar: Option<(Rect, usize)>,
-    path_bar: Option<(Rect, usize)>,
-    /// A scrollbar drag in progress (armed by a press inside a bar).
-    drag: Option<BarKind>,
-    /// A held ▲/▼ endcap: (which bar, direction, when the next step
-    /// fires). Armed on press, repeats each tick, released on mouse-up.
-    arrow_hold: Option<(BarKind, i8, Instant)>,
 
     pub username: String,
     pub password: String,
@@ -464,16 +429,9 @@ pub(crate) struct Wizard {
     tscroll: usize,
     /// Last frame's selection — a change yanks the view to the selection.
     sel_anchor: Option<usize>,
-    clicks: Vec<(Rect, Act)>,
-    /// Tooltip targets, rebuilt each frame like `clicks`. A rect here is
-    /// NOT necessarily clickable — disabled controls register a tip
-    /// (the reason they're disabled) without registering a click.
-    tips: Vec<(Rect, &'static str)>,
-    /// The tip target the pointer is resting on, and since when. The
-    /// tooltip renders once the rest exceeds [`TIP_DELAY`].
-    dwell: Option<(Rect, &'static str, Instant)>,
-    /// Where the mouse last was, for hover styling. None until it moves.
-    pointer: Option<Position>,
+    /// The kit's interaction surface: click/tip/bar registries, pointer,
+    /// tooltip dwell, scrollbar capture and hold-repeat.
+    ui: Surface<Act>,
 }
 
 impl Wizard {
@@ -486,10 +444,6 @@ impl Wizard {
             sel: None,
             reveal: None,
             pending_validate: Vec::new(),
-            table_bar: None,
-            path_bar: None,
-            drag: None,
-            arrow_hold: None,
             editing: None,
             username: String::new(),
             password: String::new(),
@@ -510,10 +464,7 @@ impl Wizard {
             last_poll: Instant::now(),
             tscroll: 0,
             sel_anchor: None,
-            clicks: Vec::new(),
-            tips: Vec::new(),
-            dwell: None,
-            pointer: None,
+            ui: Surface::new(),
         }
     }
 
@@ -752,6 +703,25 @@ impl Wizard {
                     let cursor = new_text.chars().count().saturating_sub(from_end);
                     draft.text = Input::new(new_text).with_cursor(cursor);
                 }
+            }
+            // Collapse doubled separators — typing `/` right after an
+            // expansion or completion that already ended with one is
+            // natural (a leading pair survives for UNC paths).
+            let raw = draft.text.value().to_string();
+            let mut cleaned = String::with_capacity(raw.len());
+            let mut prev_sep = false;
+            for (i, ch) in raw.chars().enumerate() {
+                let is_sep = ch == '/' || ch == '\\';
+                if is_sep && prev_sep && i != 1 {
+                    continue;
+                }
+                prev_sep = is_sep;
+                cleaned.push(ch);
+            }
+            if cleaned != raw {
+                let from_end = raw.chars().count() - draft.text.cursor();
+                let cursor = cleaned.chars().count().saturating_sub(from_end);
+                draft.text = Input::new(cleaned).with_cursor(cursor);
             }
             let (dir, _) = split_input(draft.text.value());
             // Bare text (no separator yet) completes against the home.
@@ -1352,66 +1322,6 @@ pub fn run(args: SetupArgs) -> i32 {
     }
 }
 
-/// The modal's close control: `[X]` on the title row, right edge. Dim
-/// until hovered, then BRIGHT — dismissal is neutral, unlike the row
-/// remove's destructive red. Esc remains the keyboard path (the tip
-/// says so).
-fn modal_close(frame: &mut Frame, wizard: &mut Wizard, inner: Rect, act: Act) {
-    let rect = Rect { x: inner.right().saturating_sub(3), y: inner.y, width: 3, height: 1 };
-    let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
-    let style = if hovered {
-        Style::default().fg(th().bright).add_modifier(Modifier::BOLD)
-    } else {
-        dim()
-    };
-    frame.render_widget(Paragraph::new(Span::styled("[X]", style)), rect);
-    wizard.clicks.push((rect, act));
-    wizard.tips.push((rect, "Close — Esc"));
-}
-
-/// Restores the terminal's original default background (the exact value
-/// the OSC 11 query captured) on drop — including the unwind path, where
-/// ratatui's panic hook restores everything except our background claim.
-struct GroundGuard;
-impl Drop for GroundGuard {
-    fn drop(&mut self) {
-        if let Some(seq) = theme::release_ground() {
-            let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(seq));
-        }
-    }
-}
-
-/// The OSC 22 payload for a pointer state — both name families, X cursor
-/// names first and CSS names last, so every dialect lands on the same
-/// shape: xterm (where OSC 22 originates) resolves the X/theme names,
-/// while kitty, Ghostty and foot speak the kitty spec's CSS names.
-/// Unknown names are ignored, so the pair is harmless everywhere else.
-/// Probed 2026-08: NEITHER macOS terminal implements OSC 22 — Apple
-/// Terminal (470.2) and iTerm2 (3.6.11) both keep their I-beam; their
-/// pointers cannot be changed by any escape.
-fn pointer_shape_seq(hand: bool) -> &'static str {
-    if hand {
-        "\x1b]22;hand2\x1b\\\x1b]22;pointer\x1b\\"
-    } else {
-        "\x1b]22;left_ptr\x1b\\\x1b]22;default\x1b\\"
-    }
-}
-
-/// Empty name = hand the pointer back to the terminal's own behavior —
-/// the shell underneath wants its text beam again, not our arrow.
-const POINTER_RESET: &str = "\x1b]22;\x1b\\";
-
-/// Set the pointer over the wizard: the default arrow everywhere, a hand
-/// over clickables. Announced once at startup (terminals keep their text
-/// beam until an app says otherwise), then emitted only on state CHANGES
-/// so the stream is not littered with it.
-fn set_pointer_shape(hand: bool, mouse_on: bool) {
-    if !mouse_on {
-        return;
-    }
-    let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(pointer_shape_seq(hand)));
-}
-
 fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     wizard: &mut Wizard,
@@ -1439,45 +1349,21 @@ fn event_loop(
 
         // The hand cursor follows whether the pointer is over anything
         // clickable in the frame just drawn.
-        let over = wizard
-            .pointer
-            .is_some_and(|p| wizard.clicks.iter().any(|(rect, _)| rect.contains(p)));
+        let over = wizard.ui.hovering_clickable();
         if over != hand {
             hand = over;
             set_pointer_shape(hand, mouse_on);
         }
 
         // A held scrollbar arrow keeps stepping until the button lifts.
-        if let Some((kind, delta, next)) = wizard.arrow_hold {
-            if Instant::now() >= next {
-                let step = |v: usize| if delta < 0 { v.saturating_sub(1) } else { v + 1 };
-                match kind {
-                    BarKind::Table => wizard.tscroll = step(wizard.tscroll),
-                    BarKind::Path => {
-                        if let Modal::PathEntry(draft) = &mut wizard.modal {
-                            draft.scroll = step(draft.scroll);
-                        }
-                    }
-                }
-                wizard.arrow_hold = Some((kind, delta, Instant::now() + ARROW_REPEAT));
-            }
+        if let Some(act) = wizard.ui.hold_action() {
+            wizard.act(act);
         }
 
-        // Tooltip dwell: the timer survives while the pointer stays on the
-        // same tip rect, restarts on a new one, and dies the moment the
-        // pointer leaves. Tips can't leak through modals — render drops
+        // Tooltip dwell. Tips can't leak through modals — render drops
         // the base registries while one is up, so whatever is registered
-        // belongs to the surface on top.
-        let tip = wizard
-            .pointer
-            .and_then(|p| wizard.tips.iter().find(|(rect, _)| rect.contains(p)).copied());
-        wizard.dwell = match (tip, wizard.dwell) {
-            (Some((rect, text)), Some((prev, _, since))) if prev == rect => {
-                Some((rect, text, since))
-            }
-            (Some((rect, text)), _) => Some((rect, text, Instant::now())),
-            (None, _) => None,
-        };
+        // belongs to the layer on top.
+        wizard.ui.dwell_tick();
 
         if wizard.screen != Screen::Folders
             && wizard.queued.is_none()
@@ -1504,7 +1390,7 @@ fn event_loop(
                 TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
                     // Typing dismisses a tooltip (the dwell re-arms if the
                     // pointer just sits there, like native tooltips).
-                    wizard.dwell = None;
+                    wizard.ui.dismiss_tooltip();
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         && key.code == KeyCode::Char('c')
                     {
@@ -1518,58 +1404,28 @@ fn event_loop(
                     let at = Position { x: mouse.column, y: mouse.row };
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
-                            wizard.pointer = Some(at);
+                            wizard.ui.pointer = Some(at);
                             // Blur commits an in-progress rename: a click
                             // anywhere outside the active chip ends the
                             // edit (Enter's semantics), then the click
                             // proceeds as normal.
                             if let Some((row, _)) = &wizard.editing {
                                 let row = *row;
-                                let on_chip = wizard.clicks.iter().any(|(rect, act)| {
+                                let on_chip = wizard.ui.clicks.iter().any(|(rect, act)| {
                                     *act == Act::RenameFolder(row) && rect.contains(at)
                                 });
                                 if !on_chip {
                                     wizard.finish_rename();
                                 }
                             }
-                            let hit = wizard
-                                .clicks
-                                .iter()
-                                .rev()
-                                .find(|(rect, _)| rect.contains(at))
-                                .map(|(_, act)| act.clone());
-                            if let Some(act) = hit {
+                            if let Some(act) = wizard.ui.hit(at) {
                                 if let Some(outcome) = wizard.act(act) {
                                     return Ok(outcome);
                                 }
                             }
-                            // A press on a scrollbar: endcap rows arm
-                            // hold-to-repeat (the press already stepped
-                            // once via the act), track rows arm a thumb
-                            // drag.
-                            let bar_at = [
-                                (BarKind::Table, wizard.table_bar),
-                                (BarKind::Path, wizard.path_bar),
-                            ]
-                            .into_iter()
-                            .find_map(|(kind, bar)| {
-                                bar.filter(|(rect, _)| rect.contains(at)).map(|_| kind)
-                            });
-                            if let Some(kind) = bar_at {
-                                let (rect, _) = match kind {
-                                    BarKind::Table => wizard.table_bar.unwrap(),
-                                    BarKind::Path => wizard.path_bar.unwrap(),
-                                };
-                                if at.y == rect.y {
-                                    wizard.arrow_hold =
-                                        Some((kind, -1, Instant::now() + ARROW_DELAY));
-                                } else if at.y == rect.y + rect.height - 1 {
-                                    wizard.arrow_hold =
-                                        Some((kind, 1, Instant::now() + ARROW_DELAY));
-                                } else {
-                                    wizard.drag = Some(kind);
-                                }
-                            }
+                            // A press on a scrollbar arms its interaction
+                            // (endcaps hold-repeat, the track a thumb drag).
+                            wizard.ui.arm_bars(at);
                         }
                         // A scrollbar interaction CAPTURES the mouse:
                         // while an arrow is held or the thumb dragged,
@@ -1579,36 +1435,19 @@ fn event_loop(
                         // motion arrives as Drag or plain Moved, so
                         // BOTH honor the capture.
                         MouseEventKind::Moved => {
-                            if wizard.drag.is_none() && wizard.arrow_hold.is_none() {
-                                wizard.pointer = Some(at);
-                            }
+                            wizard.ui.motion(at);
                         }
                         MouseEventKind::Drag(_) => {
-                            if wizard.drag.is_none() && wizard.arrow_hold.is_none() {
-                                wizard.pointer = Some(at);
-                            }
-                            match wizard.drag {
-                                Some(BarKind::Table) => {
-                                    if let Some((rect, max)) = wizard.table_bar {
-                                        wizard.tscroll = bar_jump(rect, max, at.y);
-                                    }
-                                }
-                                Some(BarKind::Path) => {
-                                    if let Some((rect, max)) = wizard.path_bar {
-                                        if let Modal::PathEntry(draft) = &mut wizard.modal {
-                                            draft.scroll = bar_jump(rect, max, at.y);
-                                        }
-                                    }
-                                }
-                                None => {}
+                            wizard.ui.motion(at);
+                            if let Some(act) = wizard.ui.drag_action(at) {
+                                wizard.act(act);
                             }
                         }
                         MouseEventKind::Up(_) => {
-                            wizard.drag = None;
-                            wizard.arrow_hold = None;
+                            wizard.ui.release();
                         }
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                            wizard.pointer = Some(at);
+                            wizard.ui.pointer = Some(at);
                             let up = mouse.kind == MouseEventKind::ScrollUp;
                             if let Modal::PathEntry(draft) = &mut wizard.modal {
                                 draft.scroll = if up {
@@ -1846,10 +1685,7 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
 // ── Drawing ──────────────────────────────────────────────────────────────────
 
 fn render(frame: &mut Frame, wizard: &mut Wizard) {
-    wizard.clicks.clear();
-    wizard.tips.clear();
-    wizard.table_bar = None;
-    wizard.path_bar = None;
+    wizard.ui.begin_frame();
     let area = frame.area();
     // The fixed scheme paints its own ground — but only when the terminal
     // granted OSC 11 ownership of the whole window, margins included
@@ -1885,9 +1721,9 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     // registered is dropped before the modal draws — only the modal's
     // own controls exist while it is up.
     let modal_open = !matches!(wizard.modal, Modal::None);
-    let live_pointer = wizard.pointer;
+    let live_pointer = wizard.ui.pointer;
     if modal_open {
-        wizard.pointer = None;
+        wizard.ui.pointer = None;
     }
 
     match wizard.screen {
@@ -1943,25 +1779,22 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         let enabled = !wizard.folders.is_empty();
         let label = if enabled { "Continue ▸" } else { "Continue" };
         let x = bar.right().saturating_sub(label.chars().count() as u16 + 6);
-        let rect = tall_button(
+        let rect = kit::tall_button(
             frame,
-            wizard,
+            &mut wizard.ui,
             Rect { x, y: bar.y, width: bar.width, height: 3 },
             label,
             enabled,
             Act::ContinueFolders,
         );
         if !enabled {
-            wizard.tips.push((rect, "Add a folder first"));
+            wizard.ui.tip(rect, "Add a folder first");
         }
     }
 
     if modal_open {
-        wizard.pointer = live_pointer;
-        wizard.clicks.clear();
-        wizard.tips.clear();
-        wizard.table_bar = None;
-        wizard.path_bar = None;
+        wizard.ui.pointer = live_pointer;
+        wizard.ui.clear_registries();
     }
     match wizard.modal.clone() {
         Modal::None => {}
@@ -1971,103 +1804,9 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     }
 
     // The tooltip draws last — over everything, once the dwell matures.
-    if let Some((target, text, since)) = wizard.dwell {
-        if since.elapsed() >= TIP_DELAY {
-            draw_tooltip(frame, area, target, text);
-        }
+    if let Some((target, text)) = wizard.ui.ripe_tooltip() {
+        kit::draw_tooltip(frame, area, target, text);
     }
-}
-
-/// Greedy word wrap for tooltip copy, at [`TIP_WRAP`] cells.
-fn wrap_tip(text: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        let need = if line.is_empty() { word.chars().count() } else { word.chars().count() + 1 };
-        if !line.is_empty() && line.chars().count() + need > TIP_WRAP {
-            lines.push(std::mem::take(&mut line));
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(word);
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
-/// Where a w×h tooltip goes for a tip TARGET: anchored to the target's
-/// rect — centered under it, above it when below would leave `area`,
-/// pulled inside at the edges — so the box holds ONE spot however the
-/// pointer moves within the target (and never redraws while it rests).
-fn tooltip_rect(area: Rect, target: Rect, w: u16, h: u16) -> Rect {
-    let w = w.min(area.width);
-    let h = h.min(area.height);
-    let mut x = (target.x + target.width / 2).saturating_sub(w / 2);
-    let mut y = target.bottom();
-    if y + h > area.bottom() {
-        y = target.y.saturating_sub(h);
-    }
-    if x + w > area.right() {
-        x = area.right().saturating_sub(w);
-    }
-    Rect { x: x.max(area.x), y: y.max(area.y), width: w, height: h }
-}
-
-/// The caret cell that points the tooltip at its target: a box-drawing
-/// stem merged INTO the border — `┴` on the top border when the box
-/// hangs below the target, `┬` on the bottom border when it floats
-/// above — at the target's center, clamped off the corners. None when
-/// the box neither sits below nor above (degenerate clamps) or is too
-/// narrow to keep its corners.
-fn caret_cell(rect: Rect, target: Rect) -> Option<(u16, u16, &'static str)> {
-    if rect.width < 3 {
-        return None;
-    }
-    let x = (target.x + target.width / 2).clamp(rect.x + 1, rect.right().saturating_sub(2));
-    if rect.y >= target.bottom() {
-        Some((x, rect.y, "┴"))
-    } else if rect.bottom() <= target.y {
-        Some((x, rect.bottom().saturating_sub(1), "┬"))
-    } else {
-        None
-    }
-}
-
-/// A miniature of the neutral modal, anchored to its target: Clear +
-/// ground repaint beneath, Rounded DIM border with a caret stem pointing
-/// at the target, wrapped default-fg text.
-fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) {
-    let lines = wrap_tip(text);
-    if lines.is_empty() {
-        return;
-    }
-    let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
-    let h = lines.len() as u16 + 2;
-    let rect = tooltip_rect(area, target, w, h);
-    frame.render_widget(Clear, rect);
-    if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
-        frame.render_widget(
-            Block::default().style(Style::default().bg(ground).fg(th().text)),
-            rect,
-        );
-    }
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(dim());
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-    if let Some((x, y, glyph)) = caret_cell(rect, target) {
-        frame.render_widget(
-            Paragraph::new(Span::styled(glyph, dim())),
-            Rect { x, y, width: 1, height: 1 },
-        );
-    }
-    let body: Vec<Line> = lines.into_iter().map(|l| Line::from(format!(" {l}"))).collect();
-    frame.render_widget(Paragraph::new(body), inner);
 }
 
 fn footer_hint(wizard: &Wizard) -> &'static str {
@@ -2089,74 +1828,6 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
         (_, Screen::Extras) => "Space toggle · c continue",
         (_, Screen::Done) => "Enter open the player · f finish",
     }
-}
-
-/// The kit's primary button: a 3-row Rounded frame, NO fill — the frame
-/// color is the emphasis (the kit's chosen answer to the terminal's
-/// button limits: a filled block cannot have rounded corners, so the
-/// standard is the frame and the fills are documented alternatives).
-/// Border and label share the color; hover brightens both to Cyan.
-/// Disabled: everything DIM, no `▸` in the caller's label, no click rect,
-/// no hover, no hand — a tip rect (pushed by the caller) says why.
-/// `at.y` is the TOP row of the three. Returns the rect it drew into.
-fn tall_button(
-    frame: &mut Frame,
-    wizard: &mut Wizard,
-    at: Rect,
-    label: &str,
-    enabled: bool,
-    act: Act,
-) -> Rect {
-    let text = format!("  {label}  ");
-    let width = (text.chars().count() as u16 + 2).min(at.width);
-    let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
-    let hovered = enabled && wizard.pointer.is_some_and(|p| rect.contains(p));
-    let color = match (enabled, hovered) {
-        (false, _) => th().dim,
-        (true, true) => th().bright,
-        (true, false) => th().accent,
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(color));
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-    let label_style = if enabled {
-        Style::default().fg(color).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(color)
-    };
-    frame.render_widget(Paragraph::new(Span::styled(text, label_style)), inner);
-    if enabled {
-        wizard.clicks.push((rect, act));
-    }
-    rect
-}
-
-/// A one-line clickable button: draws itself, registers its click, and
-/// lights up when the pointer is over it. Returns the rect it drew into.
-fn button(
-    frame: &mut Frame,
-    wizard: &mut Wizard,
-    at: Rect,
-    label: &str,
-    primary: bool,
-    act: Act,
-) -> Rect {
-    let text = format!("  {label}  ");
-    let width = (text.chars().count() as u16).min(at.width);
-    let rect = Rect { x: at.x, y: at.y, width, height: 1 };
-    let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
-    let style = match (primary, hovered) {
-        (true, true) => Style::default().fg(th().bright).add_modifier(Modifier::BOLD),
-        (true, false) => Style::default().fg(th().accent).add_modifier(Modifier::BOLD),
-        (false, true) => Style::default().fg(th().bright).add_modifier(Modifier::BOLD),
-        (false, false) => dim(),
-    };
-    frame.render_widget(Paragraph::new(Span::styled(text, style)), rect);
-    wizard.clicks.push((rect, act));
-    rect
 }
 
 fn card(frame: &mut Frame, at: Rect, focused: bool) -> Rect {
@@ -2182,46 +1853,6 @@ const LOGO: [&str; 5] = [
 /// this, so ragged line widths can't skew per-line centering.
 const LOGO_W: u16 = 46;
 
-/// Which scrollbar a drag is riding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BarKind {
-    Table,
-    Path,
-}
-
-/// Map a pointer row on a scrollbar to a scroll position: the track is
-/// proportional, endcap rows clamp to the ends, and a single-cell track
-/// lands midway.
-fn bar_jump(bar: Rect, max_scroll: usize, y: u16) -> usize {
-    let track_top = bar.y + 1;
-    let span = bar.height.saturating_sub(2).max(1) as usize;
-    if span == 1 {
-        return max_scroll / 2;
-    }
-    let rel = y.saturating_sub(track_top).min(span as u16 - 1) as usize;
-    (rel * max_scroll + (span - 1) / 2) / (span - 1)
-}
-
-/// The table viewport: given the row count, a row to reveal (a moved
-/// keyboard cursor, or a fresh add), the wheel offset and the available
-/// height → (first visible index, visible count). The wheel scrolls
-/// freely; a reveal yanks the view to that row.
-fn table_view(len: usize, reveal: Option<usize>, scroll: usize, avail: usize) -> (usize, usize) {
-    if len == 0 || avail == 0 {
-        return (0, 0);
-    }
-    let visible = avail.min(len);
-    let mut first = scroll.min(len - visible);
-    if let Some(row) = reveal {
-        if row < first {
-            first = row;
-        } else if row >= first + visible {
-            first = row + 1 - visible;
-        }
-    }
-    (first, visible)
-}
-
 fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let mut y = column.y;
     let logo_x = column.x + column.width.saturating_sub(LOGO_W) / 2;
@@ -2238,7 +1869,7 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     // the `t` shortcut, in the tips line) — sits ABOVE the table so it
     // holds one spot as folders come and go. Green: the affirmative add.
     let add_rect = Rect { x: column.x, y, width: column.width, height: 3 };
-    let add_hover = wizard.pointer.is_some_and(|p| add_rect.contains(p));
+    let add_hover = wizard.ui.pointer.is_some_and(|p| add_rect.contains(p));
     let add_color = if add_hover { th().bright } else { th().ok };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2254,7 +1885,7 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         .alignment(Alignment::Center),
         inner,
     );
-    wizard.clicks.push((add_rect, Act::BrowseNative));
+    wizard.ui.click(add_rect, Act::BrowseNative);
     y += 4;
 
     // The chosen folders as a table: NAME first — the vpath is the point.
@@ -2295,7 +1926,7 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let sel_moved = wizard.sel != wizard.sel_anchor;
     wizard.sel_anchor = wizard.sel;
     let reveal = wizard.reveal.take().or(if sel_moved { wizard.sel } else { None });
-    let (first, visible) = table_view(wizard.folders.len(), reveal, wizard.tscroll, avail);
+    let (first, visible) = kit::table_view(wizard.folders.len(), reveal, wizard.tscroll, avail);
     wizard.tscroll = first;
     if visible == 0 {
         return;
@@ -2320,7 +1951,7 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         // The rename affordance lights up under the pointer — the same
         // brightening every other clickable gets (a selected row keeps
         // its bg; only the name's fg brightens).
-        let name_hover = !editing && wizard.pointer.is_some_and(|p| name_rect.contains(p));
+        let name_hover = !editing && wizard.ui.pointer.is_some_and(|p| name_rect.contains(p));
         let name_style = if editing {
             Style::default().fg(th().bright)
         } else if name_hover && selected {
@@ -2337,9 +1968,9 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
             rect,
         );
         frame.render_widget(Paragraph::new(Span::styled(name, name_style)), name_rect);
-        wizard.clicks.push((name_rect, Act::RenameFolder(i)));
+        wizard.ui.click(name_rect, Act::RenameFolder(i));
         if !editing {
-            wizard.tips.push((name_rect, "This folder's name in mStream — click to rename"));
+            wizard.ui.tip(name_rect, "This folder's name in mStream — click to rename");
         }
         let path_x = column.x + NAME_W;
         let path_rect =
@@ -2364,64 +1995,36 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         };
         frame.render_widget(Paragraph::new(Span::styled(folder.path.clone(), path_style)), path_rect);
         if let Some(tip) = problem {
-            wizard.tips.push((path_rect, tip));
+            wizard.ui.tip(path_rect, tip);
         }
         let x_rect = Rect { x: column.x + sel_width + 1, y, width: 3, height: 1 };
-        let x_hover = wizard.pointer.is_some_and(|p| x_rect.contains(p));
+        let x_hover = wizard.ui.pointer.is_some_and(|p| x_rect.contains(p));
         let x_style = if x_hover {
             Style::default().fg(th().danger).add_modifier(Modifier::BOLD)
         } else {
             dim()
         };
         frame.render_widget(Paragraph::new(Span::styled("[X]", x_style)), x_rect);
-        wizard.clicks.push((x_rect, Act::RemoveAt(i)));
-        wizard.tips.push((x_rect, "Remove this folder"));
+        wizard.ui.click(x_rect, Act::RemoveAt(i));
+        wizard.ui.tip(x_rect, "Remove this folder");
         y += 1;
     }
 
     // Overflow → the kit's scrollbar, just right of the [X] column (the
     // column is centered, so the margin cell is always there). Endcaps
     // are click rects; the wheel scrolls too.
-    if wizard.folders.len() > visible {
-        let max_scroll = wizard.folders.len() - visible;
-        let mut state = ScrollbarState::new(max_scroll + 1).position(first);
-        let bar = Rect { x: column.x + column.width, y: rows_y, width: 1, height: visible as u16 };
-        let bar_hover = wizard.pointer.is_some_and(|p| bar.contains(p));
-        let ends = if bar_hover { Style::default().fg(th().bright) } else { dim() };
-        let thumb = if bar_hover {
-            Style::default().fg(th().bright)
-        } else {
-            Style::default().fg(th().accent)
-        };
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .track_symbol(Some("│"))
-                .thumb_symbol("█")
-                .begin_symbol(Some("▲"))
-                .end_symbol(Some("▼"))
-                .track_style(dim())
-                .thumb_style(thumb)
-                .begin_style(ends)
-                .end_style(ends),
-            bar,
-            &mut state,
-        );
-        // The whole bar is live: track cells jump proportionally (rects
-        // first, so the endcaps win their own cells), endcaps step, and a
-        // press anywhere arms a thumb drag.
-        for ty in (bar.y + 1)..(bar.y + bar.height).saturating_sub(1) {
-            wizard.clicks.push((
-                Rect { x: bar.x, y: ty, width: 1, height: 1 },
-                Act::TableScrollTo(bar_jump(bar, max_scroll, ty)),
-            ));
-        }
-        wizard.clicks.push((Rect { x: bar.x, y: bar.y, width: 1, height: 1 }, Act::TableScroll(-1)));
-        wizard.clicks.push((
-            Rect { x: bar.x, y: bar.y + bar.height - 1, width: 1, height: 1 },
-            Act::TableScroll(1),
-        ));
-        wizard.table_bar = Some((bar, max_scroll));
-    }
+    let bar = Rect { x: column.x + column.width, y: rows_y, width: 1, height: visible as u16 };
+    kit::scroll_list(
+        frame,
+        &mut wizard.ui,
+        bar,
+        wizard.folders.len(),
+        visible,
+        first,
+        Act::TableScroll(-1),
+        Act::TableScroll(1),
+        Act::TableScrollTo,
+    );
 }
 
 fn field_row(
@@ -2443,7 +2046,7 @@ fn field_row(
     let inner = card(frame, rect, focused);
     let shown = if focused { format!("{value}▏") } else { value };
     frame.render_widget(Paragraph::new(Span::raw(shown)), inner);
-    wizard.clicks.push((rect, Act::Focus(field)));
+    wizard.ui.click(rect, Act::Focus(field));
     y + 4
 }
 
@@ -2474,16 +2077,16 @@ fn draw_login(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     y += 1;
 
     let rect =
-        tall_button(frame, wizard, Rect { x, y, width, height: 3 }, "Create Admin ▸", true, Act::CreateAdmin);
-    let skip = button(
+        kit::tall_button(frame, &mut wizard.ui, Rect { x, y, width, height: 3 }, "Create Admin ▸", true, Act::CreateAdmin);
+    let skip = kit::button(
         frame,
-        wizard,
+        &mut wizard.ui,
         Rect { x: rect.right() + 2, y: y + 1, width, height: 1 },
         "Skip for now",
         false,
         Act::SkipLogin,
     );
-    wizard.tips.push((skip, "Continue without accounts — public mode"));
+    wizard.ui.tip(skip, "Continue without accounts — public mode");
 }
 
 fn mask(secret: &str) -> String {
@@ -2512,7 +2115,7 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         let selected = i == wizard.extras_sel;
         let rect = Rect { x: column.x, y, width: column.width, height: 4 };
         let inner = card(frame, rect, selected);
-        wizard.clicks.push((rect, Act::Toggle(i)));
+        wizard.ui.click(rect, Act::Toggle(i));
         let box_span = if wizard.extras[i] {
             Span::styled("[x] ", Style::default().fg(th().ok))
         } else {
@@ -2532,7 +2135,7 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 
     let label = "Continue ▸";
     let x = column.right().saturating_sub(label.chars().count() as u16 + 6);
-    tall_button(frame, wizard, Rect { x, y, width: column.width, height: 3 }, label, true, Act::ContinueExtras);
+    kit::tall_button(frame, &mut wizard.ui, Rect { x, y, width: column.width, height: 3 }, label, true, Act::ContinueExtras);
 }
 
 fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
@@ -2563,17 +2166,17 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     );
     y += 2;
 
-    let open = tall_button(
+    let open = kit::tall_button(
         frame,
-        wizard,
+        &mut wizard.ui,
         Rect { x: column.x, y, width: column.width, height: 3 },
         "Open the Player ▸",
         true,
         Act::OpenPlayer,
     );
-    button(
+    kit::button(
         frame,
-        wizard,
+        &mut wizard.ui,
         Rect { x: open.right() + 2, y: y + 1, width: column.width, height: 1 },
         "Finish",
         false,
@@ -2581,51 +2184,8 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     );
 }
 
-fn modal_frame(frame: &mut Frame, area: Rect, width: u16, height: u16, title_color: Color) -> Rect {
-    modal_frame_anchored(frame, area, width, height, height, title_color)
-}
-
-/// Like [`modal_frame`], but vertically positioned as if the modal were
-/// `max_height` tall: a modal whose height varies (the path entry's
-/// suggestion list) keeps a FIXED top edge and grows downward — the
-/// input line never jumps as suggestions come and go.
-fn modal_frame_anchored(
-    frame: &mut Frame,
-    area: Rect,
-    width: u16,
-    height: u16,
-    max_height: u16,
-    title_color: Color,
-) -> Rect {
-    let width = width.min(area.width.saturating_sub(4));
-    let height = height.min(area.height.saturating_sub(2));
-    let max_height = max_height.max(height).min(area.height.saturating_sub(2));
-    let rect = Rect {
-        x: (area.width - width) / 2,
-        y: (area.height - max_height) / 2,
-        width,
-        height,
-    };
-    frame.render_widget(Clear, rect);
-    // Clear resets cells to the terminal default — repaint the ground so
-    // the modal interior matches the fixed scheme (when it is owned).
-    if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
-        frame.render_widget(
-            Block::default().style(Style::default().bg(ground).fg(th().text)),
-            rect,
-        );
-    }
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(title_color));
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-    inner
-}
-
 fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
-    let inner = modal_frame(frame, area, 62, 13, th().gold);
+    let inner = kit::modal_frame(frame, area, 62, 13, th().gold);
     let lines = vec![
         Line::from(Span::styled("Run in Public Mode?", Style::default().fg(th().gold).add_modifier(Modifier::BOLD))),
         Line::from(""),
@@ -2640,17 +2200,17 @@ fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     let y = inner.bottom().saturating_sub(1);
-    let back = button(
+    let back = kit::button(
         frame,
-        wizard,
+        &mut wizard.ui,
         Rect { x: inner.x, y, width: inner.width, height: 1 },
         "◂ Back — create a login",
         true,
         Act::SkipCancel,
     );
-    button(
+    kit::button(
         frame,
-        wizard,
+        &mut wizard.ui,
         Rect { x: back.right() + 2, y, width: inner.width, height: 1 },
         "Go public anyway",
         false,
@@ -2659,12 +2219,12 @@ fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
 }
 
 fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Browse) {
-    let inner = modal_frame(frame, area, 66, 18, th().accent);
+    let inner = kit::modal_frame(frame, area, 66, 18, th().accent);
     frame.render_widget(
         Paragraph::new(Span::styled("Browse the server's folders", bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
-    modal_close(frame, wizard, inner, Act::BrowseCancel);
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::BrowseCancel);
     frame.render_widget(
         Paragraph::new(Span::styled(browse.path.clone(), dim())),
         Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
@@ -2685,7 +2245,7 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
             Paragraph::new(Span::styled(format!("▸ {}", browse.dirs[i]), style)),
             rect,
         );
-        wizard.clicks.push((rect, Act::BrowseRow(i)));
+        wizard.ui.click(rect, Act::BrowseRow(i));
     }
     if browse.dirs.is_empty() {
         frame.render_widget(
@@ -2695,42 +2255,17 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
     }
 
     let y = inner.bottom().saturating_sub(1);
-    let up = button(frame, wizard, Rect { x: inner.x, y, width: inner.width, height: 1 }, "◂ up", false, Act::BrowseUp);
-    let open = button(frame, wizard, Rect { x: up.right() + 1, y, width: inner.width, height: 1 }, "open", false, Act::BrowseEnter);
-    let add = button(
+    let up = kit::button(frame, &mut wizard.ui, Rect { x: inner.x, y, width: inner.width, height: 1 }, "◂ up", false, Act::BrowseUp);
+    let open = kit::button(frame, &mut wizard.ui, Rect { x: up.right() + 1, y, width: inner.width, height: 1 }, "open", false, Act::BrowseEnter);
+    let add = kit::button(
         frame,
-        wizard,
+        &mut wizard.ui,
         Rect { x: open.right() + 1, y, width: inner.width, height: 1 },
         "Add this folder ▸",
         true,
         Act::BrowseAdd,
     );
-    button(frame, wizard, Rect { x: add.right() + 1, y, width: inner.width, height: 1 }, "close", false, Act::BrowseCancel);
-}
-
-/// The input line with the caret at the CURSOR (mid-line edits are real
-/// now), windowed so the caret stays visible: clipped edges render `…`.
-fn input_display(value: &str, cursor: usize, width: u16) -> String {
-    let w = width as usize;
-    if w < 3 {
-        return "…".to_string();
-    }
-    let mut chars: Vec<char> = value.chars().collect();
-    let cursor = cursor.min(chars.len());
-    chars.insert(cursor, '▏');
-    let total = chars.len();
-    if total <= w {
-        return chars.into_iter().collect();
-    }
-    let start = cursor.saturating_sub(w.saturating_sub(2)).min(total - w);
-    let mut out: Vec<char> = chars[start..start + w].to_vec();
-    if start > 0 {
-        out[0] = '…';
-    }
-    if start + w < total {
-        out[w - 1] = '…';
-    }
-    out.into_iter().collect()
+    kit::button(frame, &mut wizard.ui, Rect { x: add.right() + 1, y, width: inner.width, height: 1 }, "close", false, Act::BrowseCancel);
 }
 
 fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &PathDraft) {
@@ -2738,14 +2273,14 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
     let shown = suggestions.len().min(6) as u16;
     // Anchored as if always full: the title and input hold one spot and
     // the suggestion list grows DOWNWARD beneath them.
-    let inner = modal_frame_anchored(frame, area, 62, 7 + shown, 13, th().accent);
+    let inner = kit::modal_frame_anchored(frame, area, 62, 7 + shown, 13, th().accent);
     frame.render_widget(
         Paragraph::new(Span::styled("Type the full path of a music folder", bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
-    modal_close(frame, wizard, inner, Act::PathCancel);
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::PathCancel);
     frame.render_widget(
-        Paragraph::new(Span::raw(input_display(
+        Paragraph::new(Span::raw(kit::input_display(
             draft.text.value(),
             draft.text.cursor(),
             inner.width,
@@ -2754,7 +2289,7 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
     );
     let sel_moved = draft.sel != draft.sel_anchor;
     let reveal = if sel_moved { draft.sel } else { None };
-    let (first, visible) = table_view(suggestions.len(), reveal, draft.scroll, 6);
+    let (first, visible) = kit::table_view(suggestions.len(), reveal, draft.scroll, 6);
     if let Modal::PathEntry(d) = &mut wizard.modal {
         d.scroll = first;
         d.sel_anchor = d.sel;
@@ -2766,7 +2301,7 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
         let selected = draft.sel == Some(i);
         let rect =
             Rect { x: inner.x, y: inner.y + 4 + row as u16, width: row_width, height: 1 };
-        let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
+        let hovered = wizard.ui.pointer.is_some_and(|p| rect.contains(p));
         let style = if selected {
             Style::default().fg(th().on_accent).bg(th().accent)
         } else if hovered {
@@ -2778,52 +2313,25 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
             Paragraph::new(Span::styled(format!("▸ {entry}"), style)),
             rect,
         );
-        wizard.clicks.push((rect, Act::PathSuggest(i)));
+        wizard.ui.click(rect, Act::PathSuggest(i));
     }
-    if overflow {
-        let max_scroll = suggestions.len() - visible;
-        let mut state = ScrollbarState::new(max_scroll + 1).position(first);
-        let bar = Rect {
-            x: inner.x + inner.width.saturating_sub(1),
-            y: inner.y + 4,
-            width: 1,
-            height: visible as u16,
-        };
-        let bar_hover = wizard.pointer.is_some_and(|p| bar.contains(p));
-        let ends = if bar_hover { Style::default().fg(th().bright) } else { dim() };
-        let thumb = if bar_hover {
-            Style::default().fg(th().bright)
-        } else {
-            Style::default().fg(th().accent)
-        };
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .track_symbol(Some("│"))
-                .thumb_symbol("█")
-                .begin_symbol(Some("▲"))
-                .end_symbol(Some("▼"))
-                .track_style(dim())
-                .thumb_style(thumb)
-                .begin_style(ends)
-                .end_style(ends),
-            bar,
-            &mut state,
-        );
-        for ty in (bar.y + 1)..(bar.y + bar.height).saturating_sub(1) {
-            wizard.clicks.push((
-                Rect { x: bar.x, y: ty, width: 1, height: 1 },
-                Act::PathScrollTo(bar_jump(bar, max_scroll, ty)),
-            ));
-        }
-        wizard
-            .clicks
-            .push((Rect { x: bar.x, y: bar.y, width: 1, height: 1 }, Act::PathScroll(-1)));
-        wizard.clicks.push((
-            Rect { x: bar.x, y: bar.y + bar.height - 1, width: 1, height: 1 },
-            Act::PathScroll(1),
-        ));
-        wizard.path_bar = Some((bar, max_scroll));
-    }
+    let bar = Rect {
+        x: inner.x + inner.width.saturating_sub(1),
+        y: inner.y + 4,
+        width: 1,
+        height: visible as u16,
+    };
+    kit::scroll_list(
+        frame,
+        &mut wizard.ui,
+        bar,
+        suggestions.len(),
+        visible,
+        first,
+        Act::PathScroll(-1),
+        Act::PathScroll(1),
+        Act::PathScrollTo,
+    );
     // A listing failure for the current dir-part shows where suggestions
     // would be — kit error style, the server's words.
     if let Some(err) = &draft.error {
@@ -2850,80 +2358,6 @@ mod tests {
             canonical: None,
             nested_in: None,
         }
-    }
-
-    #[test]
-    fn tooltips_wrap_at_the_cap_and_never_split_words() {
-        assert_eq!(wrap_tip("Remove this folder"), vec!["Remove this folder"]);
-        let two = wrap_tip("This folder's name in mStream — click to rename");
-        assert_eq!(two.len(), 2);
-        assert!(two.iter().all(|l| l.chars().count() <= TIP_WRAP));
-        assert_eq!(two.join(" "), "This folder's name in mStream — click to rename");
-        assert!(wrap_tip("   ").is_empty());
-    }
-
-    #[test]
-    fn tooltips_anchor_to_the_target_and_flip_inside_the_frame() {
-        let area = Rect { x: 0, y: 0, width: 100, height: 40 };
-        let mid = Rect { x: 40, y: 10, width: 14, height: 3 };
-        // Room below: centered under the target — and the SAME spot for
-        // any pointer position within it (the anchor is the rect).
-        let r = tooltip_rect(area, mid, 24, 3);
-        assert_eq!((r.x, r.y), (35, 13));
-        // A target in the bottom bar: flipped above it.
-        let bar = Rect { x: 84, y: 37, width: 14, height: 3 };
-        let r = tooltip_rect(area, bar, 22, 3);
-        assert_eq!(r.y, 34);
-        // ...and pulled left so it stays inside the frame.
-        assert!(r.right() <= 100);
-        // A tiny right-edge target ([X]): fully inside the frame.
-        let x_ctl = Rect { x: 88, y: 12, width: 3, height: 1 };
-        let r = tooltip_rect(area, x_ctl, 22, 3);
-        assert!(r.right() <= 100 && r.bottom() <= 40);
-        assert_eq!(r.y, 13);
-        // Wider than the frame: clamped to it.
-        let r = tooltip_rect(area, mid, 200, 3);
-        assert_eq!(r.width, 100);
-    }
-
-    #[test]
-    fn the_caret_stem_points_at_the_target_center_from_the_connecting_edge() {
-        let area = Rect { x: 0, y: 0, width: 100, height: 40 };
-        // Box below the target: `┴` on the TOP border, at the target center.
-        let mid = Rect { x: 40, y: 10, width: 14, height: 3 };
-        let r = tooltip_rect(area, mid, 24, 3);
-        assert_eq!(caret_cell(r, mid), Some((47, r.y, "┴")));
-        // Box above a bottom-bar target: `┬` on the BOTTOM border — and the
-        // stem follows the target center even when the box is pulled left.
-        let bar = Rect { x: 84, y: 37, width: 14, height: 3 };
-        let r = tooltip_rect(area, bar, 22, 3);
-        assert_eq!(caret_cell(r, bar), Some((91, r.bottom() - 1, "┬")));
-        // The stem never lands on a corner.
-        let edge = Rect { x: 97, y: 10, width: 3, height: 1 };
-        let r = tooltip_rect(area, edge, 22, 3);
-        let (x, _, _) = caret_cell(r, edge).unwrap();
-        assert!(x > r.x && x < r.right() - 1);
-        // A box too narrow to keep its corners gets no stem.
-        assert_eq!(caret_cell(Rect { x: 0, y: 5, width: 2, height: 3 }, mid), None);
-    }
-
-    #[test]
-    fn the_table_view_scrolls_freely_but_follows_a_reveal() {
-        // Everything fits: no scrolling, whatever the wheel said.
-        assert_eq!(table_view(3, None, 9, 10), (0, 3));
-        // Overflow: the wheel offset holds while nothing asks to be seen.
-        assert_eq!(table_view(20, None, 5, 8), (5, 8));
-        // The wheel offset clamps to the last full viewport.
-        assert_eq!(table_view(20, None, 99, 8), (12, 8));
-        // A reveal below the view yanks the view down to it…
-        assert_eq!(table_view(20, Some(15), 0, 8), (8, 8));
-        // …and one above yanks it back up.
-        assert_eq!(table_view(20, Some(2), 10, 8), (2, 8));
-        // A reveal already in view leaves the view alone.
-        assert_eq!(table_view(20, Some(6), 5, 8), (5, 8));
-        // Degenerate: nothing to show.
-        assert_eq!(table_view(0, None, 0, 8), (0, 0));
-        assert_eq!(table_view(5, None, 0, 0), (0, 0));
     }
 
     #[test]
@@ -2986,13 +2420,6 @@ mod tests {
         assert!(LOGO[2].contains(r"_ \\___ \|"), "m's trailing and S's leading backslash are ADJACENT");
         assert!(LOGO[3].contains(r"| |_| | |  __/"));
         assert!(LOGO[4].contains(r"\__|_|  \___|"));
-    }
-
-    #[test]
-    fn pointer_shapes_speak_both_name_families_and_reset_is_empty() {
-        assert_eq!(pointer_shape_seq(true), "\x1b]22;hand2\x1b\\\x1b]22;pointer\x1b\\");
-        assert_eq!(pointer_shape_seq(false), "\x1b]22;left_ptr\x1b\\\x1b]22;default\x1b\\");
-        assert_eq!(POINTER_RESET, "\x1b]22;\x1b\\");
     }
 
     #[test]
@@ -3090,20 +2517,6 @@ mod tests {
             matches!(&wizard.queued, Some(Op::Complete(dir)) if dir == "/home/anna/Music/"),
             "stepping into the dir must queue its listing"
         );
-    }
-
-    #[test]
-    fn bar_jump_maps_the_track_proportionally_and_clamps_the_ends() {
-        // A 6-cell bar: endcaps at rows 10 and 15, track rows 11..=14.
-        let bar = Rect { x: 79, y: 10, width: 1, height: 6 };
-        assert_eq!(bar_jump(bar, 9, 11), 0, "top of the track");
-        assert_eq!(bar_jump(bar, 9, 14), 9, "bottom of the track");
-        assert_eq!(bar_jump(bar, 9, 12), 3, "proportional in between");
-        assert_eq!(bar_jump(bar, 9, 10), 0, "endcap rows clamp to the ends");
-        assert_eq!(bar_jump(bar, 9, 40), 9, "past the bar clamps too");
-        // A 3-cell bar has a single track cell: it lands midway.
-        let tiny = Rect { x: 79, y: 10, width: 1, height: 3 };
-        assert_eq!(bar_jump(tiny, 4, 11), 2);
     }
 
     #[test]
@@ -3228,6 +2641,24 @@ mod tests {
     }
 
     #[test]
+    fn doubled_separators_collapse_as_typed() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        // Typing `/` right after the tilde expansion's own separator.
+        wizard.modal = Modal::PathEntry(PathDraft { text: "/home/anna//".into(), ..PathDraft::default() });
+        wizard.refresh_completion();
+        let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
+        assert_eq!(draft.text.value(), "/home/anna/");
+        assert_eq!(draft.text.cursor(), draft.text.value().chars().count());
+        // A UNC lead survives; inner doubles still collapse.
+        wizard.modal =
+            Modal::PathEntry(PathDraft { text: r"\\server\music\\rock".into(), ..PathDraft::default() });
+        wizard.refresh_completion();
+        let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
+        assert_eq!(draft.text.value(), r"\\server\music\rock");
+    }
+
+    #[test]
     fn an_empty_input_suggests_nothing() {
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
@@ -3240,25 +2671,6 @@ mod tests {
         assert!(wizard.queued.is_none(), "no listing for an empty input");
         let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
         assert!(draft.entries.is_empty() && draft.suggestions().is_empty());
-    }
-
-    #[test]
-    fn a_long_input_windows_around_the_cursor() {
-        assert_eq!(input_display("short", 5, 20), "short▏");
-        let long = "/very/long/path/that/does/not/fit/anywhere/music";
-        // Cursor at the end: the tail stays visible.
-        let shown = input_display(long, long.chars().count(), 20);
-        assert_eq!(shown.chars().count(), 20);
-        assert!(shown.starts_with('…') && shown.ends_with("music▏"));
-        // Cursor at the start: the head stays visible, the caret leads.
-        let shown = input_display(long, 0, 20);
-        assert!(shown.starts_with("▏/very") && shown.ends_with('…'));
-        // Cursor mid-string: both edges clip.
-        let shown = input_display(long, 24, 20);
-        assert_eq!(shown.chars().count(), 20);
-        assert!(shown.starts_with('…') && shown.ends_with('…') && shown.contains('▏'));
-        // Exactly at the width: untouched, caret mid-line where it sits.
-        assert_eq!(input_display("123456789", 4, 10), "1234▏56789");
     }
 
     #[test]
