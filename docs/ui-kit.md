@@ -193,6 +193,14 @@ warning. First line: BOLD title in the intent color. Buttons bottom-right
 nothing, background hover and tooltips sleep, the hand cursor follows
 only the modal's own controls — the base draw sees no pointer and its
 rect registries are dropped before the modal draws.
+Dismissable pickers (path entry, the server browser) carry a `[X]`
+close on the title row, right edge: DIM, hover BRIGHT + BOLD —
+dismissal is neutral; red stays reserved for the destructive row
+remove. Its tooltip names the keyboard path ("Close — Esc"). Warning
+gates (the public-mode modal) get NO `[X]` — they force an explicit
+choice.
+A modal whose height varies (the suggestion list) anchors as if always
+at full height: title and input hold one spot, the list grows DOWNWARD.
 
 ### Tooltip
 A dwell of ~500ms on a tip target shows a floating box: a miniature of
@@ -207,8 +215,9 @@ target's center: `┴` on the top border when the box hangs below the
 target (`╭───┴───╮`), `┬` on the bottom border when it floats above
 (`╰───┬───╯`) — one cell, DIM like the border, clamped off the corners,
 tracking the target center even when the box is pulled sideways.
-Hides the instant the pointer leaves, on any keypress, and while a modal
-is open. Tip targets are a per-frame rect registry parallel to the click
+Hides the instant the pointer leaves and on any keypress. A modal
+drops the base screen's tips with the rest of its rects — but the
+modal's own controls may carry tips (the close control's "Close — Esc"). Tip targets are a per-frame rect registry parallel to the click
 registry — a tip rect need not be clickable (the disabled-button
 exception), and a clickable need not have a tip. Rules: tooltips are
 mouse-only enhancement, so nothing may live ONLY in a tooltip (the tips

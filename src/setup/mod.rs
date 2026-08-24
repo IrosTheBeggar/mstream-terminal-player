@@ -191,6 +191,7 @@ enum Act {
     Toggle(usize),
     ContinueExtras,
     TableScroll(i8),
+    PathCancel,
     BrowseRow(usize),
     BrowseEnter,
     BrowseUp,
@@ -523,6 +524,7 @@ impl Wizard {
                     self.tscroll.saturating_add(1)
                 };
             }
+            Act::PathCancel => self.modal = Modal::None,
             Act::BrowseRow(i) => {
                 if let Modal::Browser(b) = &mut self.modal {
                     b.sel = i.min(b.dirs.len().saturating_sub(1));
@@ -1052,6 +1054,23 @@ pub fn run(args: SetupArgs) -> i32 {
     }
 }
 
+/// The modal's close control: `[X]` on the title row, right edge. Dim
+/// until hovered, then BRIGHT — dismissal is neutral, unlike the row
+/// remove's destructive red. Esc remains the keyboard path (the tip
+/// says so).
+fn modal_close(frame: &mut Frame, wizard: &mut Wizard, inner: Rect, act: Act) {
+    let rect = Rect { x: inner.right().saturating_sub(3), y: inner.y, width: 3, height: 1 };
+    let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
+    let style = if hovered {
+        Style::default().fg(th().bright).add_modifier(Modifier::BOLD)
+    } else {
+        dim()
+    };
+    frame.render_widget(Paragraph::new(Span::styled("[X]", style)), rect);
+    wizard.clicks.push((rect, act));
+    wizard.tips.push((rect, "Close — Esc"));
+}
+
 /// Restores the terminal's original default background (the exact value
 /// the OSC 11 query captured) on drop — including the unwind path, where
 /// ratatui's panic hook restores everything except our background claim.
@@ -1132,13 +1151,12 @@ fn event_loop(
 
         // Tooltip dwell: the timer survives while the pointer stays on the
         // same tip rect, restarts on a new one, and dies the moment the
-        // pointer leaves (or a modal takes the screen — no tips through it).
-        let tip = match (wizard.pointer, &wizard.modal) {
-            (Some(p), Modal::None) => {
-                wizard.tips.iter().find(|(rect, _)| rect.contains(p)).copied()
-            }
-            _ => None,
-        };
+        // pointer leaves. Tips can't leak through modals — render drops
+        // the base registries while one is up, so whatever is registered
+        // belongs to the surface on top.
+        let tip = wizard
+            .pointer
+            .and_then(|p| wizard.tips.iter().find(|(rect, _)| rect.contains(p)).copied());
         wizard.dwell = match (tip, wizard.dwell) {
             (Some((rect, text)), Some((prev, _, since))) if prev == rect => {
                 Some((rect, text, since))
@@ -2069,11 +2087,27 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 }
 
 fn modal_frame(frame: &mut Frame, area: Rect, width: u16, height: u16, title_color: Color) -> Rect {
+    modal_frame_anchored(frame, area, width, height, height, title_color)
+}
+
+/// Like [`modal_frame`], but vertically positioned as if the modal were
+/// `max_height` tall: a modal whose height varies (the path entry's
+/// suggestion list) keeps a FIXED top edge and grows downward — the
+/// input line never jumps as suggestions come and go.
+fn modal_frame_anchored(
+    frame: &mut Frame,
+    area: Rect,
+    width: u16,
+    height: u16,
+    max_height: u16,
+    title_color: Color,
+) -> Rect {
     let width = width.min(area.width.saturating_sub(4));
     let height = height.min(area.height.saturating_sub(2));
+    let max_height = max_height.max(height).min(area.height.saturating_sub(2));
     let rect = Rect {
         x: (area.width - width) / 2,
-        y: (area.height - height) / 2,
+        y: (area.height - max_height) / 2,
         width,
         height,
     };
@@ -2135,6 +2169,7 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
         Paragraph::new(Span::styled("Browse the server's folders", bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
+    modal_close(frame, wizard, inner, Act::BrowseCancel);
     frame.render_widget(
         Paragraph::new(Span::styled(browse.path.clone(), dim())),
         Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
@@ -2181,11 +2216,14 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
 fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &PathDraft) {
     let suggestions = draft.suggestions();
     let shown = suggestions.len().min(6) as u16;
-    let inner = modal_frame(frame, area, 62, 7 + shown, th().accent);
+    // Anchored as if always full: the title and input hold one spot and
+    // the suggestion list grows DOWNWARD beneath them.
+    let inner = modal_frame_anchored(frame, area, 62, 7 + shown, 13, th().accent);
     frame.render_widget(
         Paragraph::new(Span::styled("Type the full path of a music folder", bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
+    modal_close(frame, wizard, inner, Act::PathCancel);
     frame.render_widget(
         Paragraph::new(Span::raw(format!("{}▏", draft.text))),
         Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 },
