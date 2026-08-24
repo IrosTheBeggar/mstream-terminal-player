@@ -455,7 +455,13 @@ impl Wizard {
                 self.sel = i.min(self.folders.len().saturating_sub(1));
             }
             Act::RenameFolder(i) => {
-                self.sel = i.min(self.folders.len().saturating_sub(1));
+                let i = i.min(self.folders.len().saturating_sub(1));
+                // Clicking the chip that's already being edited must not
+                // clobber the draft.
+                if self.editing.is_some() && self.sel == i {
+                    return None;
+                }
+                self.sel = i;
                 if let Some(folder) = self.folders.get(self.sel) {
                     if folder.committed {
                         self.note = Some((
@@ -1165,6 +1171,18 @@ fn event_loop(
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             wizard.pointer = Some(at);
+                            // Blur commits an in-progress rename: a click
+                            // anywhere outside the active chip ends the
+                            // edit (Enter's semantics), then the click
+                            // proceeds as normal.
+                            if wizard.editing.is_some() {
+                                let on_chip = wizard.clicks.iter().any(|(rect, act)| {
+                                    *act == Act::RenameFolder(wizard.sel) && rect.contains(at)
+                                });
+                                if !on_chip {
+                                    wizard.finish_rename();
+                                }
+                            }
                             let hit = wizard
                                 .clicks
                                 .iter()
@@ -2359,6 +2377,23 @@ mod tests {
             matches!(&wizard.queued, Some(Op::Complete(dir)) if dir == "/home/anna/Music/"),
             "stepping into the dir must queue its listing"
         );
+    }
+
+    #[test]
+    fn re_clicking_the_edited_chip_keeps_the_draft_and_blur_commits_it() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.add_folder("/tmp/music".to_string());
+        wizard.act(Act::RenameFolder(0));
+        assert_eq!(wizard.editing.as_deref(), Some("media"));
+        // Mid-edit draft; clicking the same chip again must not clobber it.
+        wizard.editing = Some("vinyl".to_string());
+        wizard.act(Act::RenameFolder(0));
+        assert_eq!(wizard.editing.as_deref(), Some("vinyl"));
+        // The blur path: finish_rename commits, Enter's semantics.
+        wizard.finish_rename();
+        assert!(wizard.editing.is_none());
+        assert_eq!(wizard.folders[0].name, "vinyl");
     }
 
     #[test]
