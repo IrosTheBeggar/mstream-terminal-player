@@ -156,7 +156,8 @@ same-machine first-run tool, and its primary affordance (the native
 picker) already speaks the local filesystem, so every path affordance
 agrees: typed completion, the fallback TUI browser, and the picker all
 browse the wizard's machine, and `~` is the USER's home (expanded
-synchronously as typed). The server validates every folder at commit —
+synchronously as typed; a bare `~` gains its trailing separator, so
+the preview lands INSIDE the home, not in its parent). The server validates every folder at commit —
 the honest failure point for docker-from-host or remote-server setups,
 where local paths may not exist server-side (a caveat the native picker
 always had). Listings still run on the worker: a dead network mount can

@@ -730,7 +730,16 @@ impl Wizard {
             if starts_tilde {
                 if let Some(home) = local_home() {
                     let old = draft.text.value().to_string();
-                    let new_text = old.replacen('~', home.trim_end_matches(['/', '\\']), 1);
+                    let home = home.trim_end_matches(['/', '\\']).to_string();
+                    // A bare `~` gains its separator, so the preview lands
+                    // INSIDE the home instead of listing its parent.
+                    let replacement = if old == "~" {
+                        let sep = if home.contains('\\') { '\\' } else { '/' };
+                        format!("{home}{sep}")
+                    } else {
+                        home
+                    };
+                    let new_text = old.replacen('~', &replacement, 1);
                     let from_end = old.chars().count() - draft.text.cursor();
                     let cursor = new_text.chars().count().saturating_sub(from_end);
                     draft.text = Input::new(new_text).with_cursor(cursor);
@@ -3144,6 +3153,15 @@ mod tests {
             matches!(&wizard.queued, Some(Op::Complete(d)) if *d == format!("{home}/")),
             "the expanded dir is what gets listed"
         );
+
+        // A BARE ~ gains its separator: the preview lands INSIDE the
+        // home, not in its parent directory.
+        wizard.modal = Modal::PathEntry(PathDraft { text: "~".into(), ..PathDraft::default() });
+        wizard.refresh_completion();
+        let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
+        assert_eq!(draft.text.value(), format!("{home}/"));
+        assert_eq!(draft.listed_for, format!("{home}/"));
+        assert_eq!(draft.text.cursor(), draft.text.value().chars().count());
     }
 
     #[test]
