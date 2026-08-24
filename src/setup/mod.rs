@@ -133,6 +133,9 @@ pub(crate) struct PathDraft {
     pub entries: Vec<String>,
     /// Keyboard cursor within the CURRENT suggestion list, if any.
     pub sel: Option<usize>,
+    /// First visible suggestion row — the list windows like the folders
+    /// table, following the keyboard cursor past the fold.
+    pub scroll: usize,
     /// Why the current dir-part could not be listed — silence would read
     /// as "no autocomplete here", so the failure is said out loud.
     pub error: Option<String>,
@@ -146,6 +149,7 @@ impl PartialEq for PathDraft {
             && self.listed_path == other.listed_path
             && self.entries == other.entries
             && self.sel == other.sel
+            && self.scroll == other.scroll
             && self.error == other.error
     }
 }
@@ -255,6 +259,7 @@ enum Act {
     ContinueExtras,
     TableScroll(i8),
     PathCancel,
+    PathScroll(i8),
     BrowseRow(usize),
     BrowseEnter,
     BrowseUp,
@@ -636,6 +641,15 @@ impl Wizard {
                 };
             }
             Act::PathCancel => self.modal = Modal::None,
+            Act::PathScroll(delta) => {
+                if let Modal::PathEntry(draft) = &mut self.modal {
+                    draft.scroll = if delta < 0 {
+                        draft.scroll.saturating_sub(1)
+                    } else {
+                        draft.scroll.saturating_add(1)
+                    };
+                }
+            }
             Act::BrowseRow(i) => {
                 if let Modal::Browser(b) = &mut self.modal {
                     b.sel = i.min(b.dirs.len().saturating_sub(1));
@@ -675,6 +689,7 @@ impl Wizard {
     fn refresh_completion(&mut self) {
         if let Modal::PathEntry(draft) = &mut self.modal {
             draft.sel = None;
+            draft.scroll = 0;
             // An empty input suggests nothing: listing a default dir here
             // made bare Tab fill in entries of the home — the completion
             // starts once there is something to complete.
@@ -1481,10 +1496,17 @@ fn event_loop(
                         }
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                             wizard.pointer = Some(at);
-                            if wizard.screen == Screen::Folders
+                            let up = mouse.kind == MouseEventKind::ScrollUp;
+                            if let Modal::PathEntry(draft) = &mut wizard.modal {
+                                draft.scroll = if up {
+                                    draft.scroll.saturating_sub(1)
+                                } else {
+                                    draft.scroll.saturating_add(1)
+                                };
+                            } else if wizard.screen == Screen::Folders
                                 && matches!(wizard.modal, Modal::None)
                             {
-                                wizard.tscroll = if mouse.kind == MouseEventKind::ScrollUp {
+                                wizard.tscroll = if up {
                                     wizard.tscroll.saturating_sub(1)
                                 } else {
                                     wizard.tscroll.saturating_add(1)
@@ -2569,10 +2591,17 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
         ))),
         Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 },
     );
-    for (i, entry) in suggestions.iter().take(shown as usize).enumerate() {
+    let (first, visible) = table_view(suggestions.len(), draft.sel, draft.scroll, 6);
+    if let Modal::PathEntry(d) = &mut wizard.modal {
+        d.scroll = first;
+    }
+    let overflow = suggestions.len() > visible;
+    let row_width = if overflow { inner.width.saturating_sub(1) } else { inner.width };
+    for (row, i) in (first..first + visible).enumerate() {
+        let entry = &suggestions[i];
         let selected = draft.sel == Some(i);
         let rect =
-            Rect { x: inner.x, y: inner.y + 4 + i as u16, width: inner.width, height: 1 };
+            Rect { x: inner.x, y: inner.y + 4 + row as u16, width: row_width, height: 1 };
         let hovered = wizard.pointer.is_some_and(|p| rect.contains(p));
         let style = if selected {
             Style::default().fg(th().on_accent).bg(th().accent)
@@ -2587,14 +2616,35 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
         );
         wizard.clicks.push((rect, Act::PathSuggest(i)));
     }
-    if suggestions.len() > shown as usize {
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                format!("… and {} more", suggestions.len() - shown as usize),
-                dim(),
-            )),
-            Rect { x: inner.x, y: inner.y + 4 + shown, width: inner.width, height: 1 },
+    if overflow {
+        let mut state =
+            ScrollbarState::new(suggestions.len() - visible + 1).position(first);
+        let bar = Rect {
+            x: inner.x + inner.width.saturating_sub(1),
+            y: inner.y + 4,
+            width: 1,
+            height: visible as u16,
+        };
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .track_symbol(Some("│"))
+                .thumb_symbol("█")
+                .begin_symbol(Some("▲"))
+                .end_symbol(Some("▼"))
+                .track_style(dim())
+                .thumb_style(accent())
+                .begin_style(dim())
+                .end_style(dim()),
+            bar,
+            &mut state,
         );
+        wizard
+            .clicks
+            .push((Rect { x: bar.x, y: bar.y, width: 1, height: 1 }, Act::PathScroll(-1)));
+        wizard.clicks.push((
+            Rect { x: bar.x, y: bar.y + bar.height - 1, width: 1, height: 1 },
+            Act::PathScroll(1),
+        ));
     }
     // A listing failure for the current dir-part shows where suggestions
     // would be — kit error style, the server's words.

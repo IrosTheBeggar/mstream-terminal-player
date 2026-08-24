@@ -143,8 +143,11 @@ commits too — then the click proceeds as normal. Re-clicking the chip
 being edited never clobbers the draft.
 
 ### Path input + completion
-Suggestions under the input, max 6 + "… and N more". Rows: idle DarkGray,
-hover Cyan, keyboard-selected bg LightBlue fg Black. Tab completes
+Suggestions under the input, max 6 visible — the list WINDOWS around the
+keyboard cursor (the same viewport the folders table uses), with the
+kit's scrollbar on overflow (wheel and ▲▼ clicks scroll; typing resets
+the window). Rows: idle DarkGray, hover Cyan, keyboard-selected bg
+LightBlue fg Black — the selected row is always in view. Tab completes
 (longest common prefix, then cycles; Shift-Tab cycles back); ↑↓ pick;
 Enter submits the text as typed; suggestions are clickable. Listings
 are read locally (std::fs), loaded on the worker —
