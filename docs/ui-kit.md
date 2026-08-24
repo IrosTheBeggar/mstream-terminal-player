@@ -199,6 +199,14 @@ Black; hover row fg Cyan. At most one intent-colored cell per row.
 Overflow: `Scrollbar` right edge (track `│` DarkGray, thumb `█`
 LightBlue, `▲▼` endcaps DarkGray), only when rows overflow. Empty state:
 one DarkGray parenthesized line that says what to DO.
+**Every added folder is validated LOCALLY, on the worker** (a stat can
+hang on a dead mount): exists / is a folder / readable, plus
+canonicalization for truth-telling — another SPELLING of a chosen
+folder (trailing slash, symlink, case) is removed with a note, and a
+folder INSIDE another choice is marked (the server would scan it
+twice). Problems paint the row's path GOLD with a tooltip saying why
+and a one-time note — advisory only: warnings never block Continue,
+the server has final say at commit.
 **Selection is the KEYBOARD cursor, nothing more.** No row is selected
 by default and mouse actions never need one — every row action is
 directly clickable (the name chip, the [X]). Only ↑/↓ pick the cursor

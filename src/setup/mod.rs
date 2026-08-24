@@ -180,6 +180,53 @@ pub(crate) struct Folder {
     pub named_by_user: bool,
     /// Already PUT to the server (a failed batch retries only the rest).
     pub committed: bool,
+    /// What the LOCAL filesystem says about this path — advisory only:
+    /// warnings never block Continue (a remote server may still know a
+    /// path this machine does not), the server has final say at commit.
+    pub check: FolderCheck,
+    /// The canonical local path (symlinks resolved), once validated —
+    /// the basis for duplicate and nesting detection.
+    pub canonical: Option<String>,
+    /// The path of another chosen folder this one sits INSIDE (the
+    /// server would scan these files twice). Recomputed as folders come
+    /// and go.
+    pub nested_in: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum FolderCheck {
+    /// Validation still on the worker (or not applicable).
+    #[default]
+    Pending,
+    Ok,
+    Missing,
+    NotADir,
+    Unreadable,
+}
+
+/// What the LOCAL filesystem says about a path, plus its canonical form.
+/// Runs on the worker: a stat against a dead network mount can hang.
+fn validate_path(path: &str) -> (FolderCheck, Option<String>) {
+    match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (FolderCheck::Missing, None),
+        Err(_) => (FolderCheck::Unreadable, None),
+        Ok(meta) if !meta.is_dir() => (FolderCheck::NotADir, None),
+        Ok(_) => {
+            let canonical = std::fs::canonicalize(path)
+                .ok()
+                .map(|c| c.to_string_lossy().into_owned());
+            (FolderCheck::Ok, canonical)
+        }
+    }
+}
+
+/// Is `child` strictly inside `parent`? (Both canonical; the separator
+/// boundary keeps /ab from matching /a.)
+fn is_under(child: &str, parent: &str) -> bool {
+    child != parent
+        && child
+            .strip_prefix(parent)
+            .is_some_and(|rest| rest.starts_with(['/', '\\']))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,6 +276,7 @@ enum Op {
     /// List a directory for the type-a-path modal's suggestions. Quiet:
     /// no busy note, and a failure just leaves the list empty.
     Complete(String),
+    Validate(String),
     CommitFolders,
     CreateAdmin,
     CommitExtras,
@@ -242,6 +290,7 @@ enum Done {
     Picked(picker::Pick),
     Browsed(Result<crate::api::types::DirListing, String>),
     Completed { dir: String, listing: Result<crate::api::types::DirListing, String> },
+    Validated { path: String, check: FolderCheck, canonical: Option<String> },
     /// Which folder indexes were committed this attempt, and the first
     /// failure if one stopped the batch.
     FoldersCommitted { committed: Vec<usize>, error: Option<(String, ApiError)> },
@@ -278,6 +327,10 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Job)>, Receiver<Done>) {
                 Job::Plain(Op::Complete(dir)) => {
                     let listing = local_list(&dir);
                     Done::Completed { dir, listing }
+                }
+                Job::Plain(Op::Validate(path)) => {
+                    let (check, canonical) = validate_path(&path);
+                    Done::Validated { path, check, canonical }
                 }
                 Job::Plain(Op::LoadDone) => Done::Iroh(client.admin_iroh()),
                 Job::Plain(Op::PollProgress) => Done::Progress(client.scan_progress()),
@@ -353,6 +406,8 @@ pub(crate) struct Wizard {
     pub editing: Option<(usize, String)>,
     /// A row to scroll into view on the next draw (a fresh add).
     reveal: Option<usize>,
+    /// Paths waiting for their local validation to be sent to the worker.
+    pending_validate: Vec<String>,
 
     pub username: String,
     pub password: String,
@@ -408,6 +463,7 @@ impl Wizard {
             folders: Vec::new(),
             sel: None,
             reveal: None,
+            pending_validate: Vec::new(),
             editing: None,
             username: String::new(),
             password: String::new(),
@@ -449,13 +505,39 @@ impl Wizard {
         }
         self.folders.push(Folder {
             name: String::new(),
-            path,
+            path: path.clone(),
             named_by_user: false,
             committed: false,
+            check: FolderCheck::Pending,
+            canonical: None,
+            nested_in: None,
         });
+        self.pending_validate.push(path);
         self.reveal = Some(self.folders.len() - 1);
         self.note = None;
         sync_names(&mut self.folders);
+    }
+
+    /// Recompute which folders sit INSIDE another chosen folder, from
+    /// canonical paths — run whenever a validation lands or a row goes.
+    fn recheck_nesting(&mut self) {
+        let canon: Vec<Option<String>> = self.folders.iter().map(|f| f.canonical.clone()).collect();
+        for i in 0..self.folders.len() {
+            let mut nested = None;
+            if let Some(ci) = &canon[i] {
+                for (j, cj) in canon.iter().enumerate() {
+                    if i != j {
+                        if let Some(cj) = cj {
+                            if is_under(ci, cj) {
+                                nested = Some(self.folders[j].path.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            self.folders[i].nested_in = nested;
+        }
     }
 
     fn remove_at(&mut self, i: usize) {
@@ -482,6 +564,7 @@ impl Wizard {
             other => other,
         };
         sync_names(&mut self.folders);
+        self.recheck_nesting();
     }
 
     // ── Screen-level input ──────────────────────────────────────────────────
@@ -698,6 +781,9 @@ impl Wizard {
     /// in flight the UI shows its busy note and further queues are ignored
     /// (completion listings replace instead — typing outruns the network).
     fn dispatch_queued(&mut self, to_worker: &Sender<(Arc<Client>, Job)>) {
+        for path in self.pending_validate.drain(..) {
+            let _ = to_worker.send((self.client.clone(), Job::Plain(Op::Validate(path))));
+        }
         if self.in_flight {
             // A newer completion wish supersedes a stale one; anything else
             // waits its turn behind the running op.
@@ -791,6 +877,60 @@ impl Wizard {
                                 let shown = if dir.is_empty() { "that folder" } else { &dir };
                                 draft.error = Some(format!("could not list {shown}: {e}"));
                             }
+                        }
+                    }
+                }
+            }
+            Done::Validated { path, check, canonical } => {
+                let Some(i) = self.folders.iter().position(|f| f.path == path) else {
+                    return; // the row went away while the stat ran
+                };
+                // Another spelling of a folder already chosen (trailing
+                // slash, symlink, case): drop the newcomer, say why.
+                if let Some(c) = &canonical {
+                    if let Some(j) = self
+                        .folders
+                        .iter()
+                        .position(|f| f.canonical.as_deref() == Some(c.as_str()))
+                    {
+                        if j != i {
+                            let name = self.folders[j].name.clone();
+                            self.remove_at(i);
+                            self.note = Some((
+                                format!("removed {path} — the same folder as {name}"),
+                                false,
+                            ));
+                            return;
+                        }
+                    }
+                }
+                self.folders[i].check = check;
+                self.folders[i].canonical = canonical;
+                self.recheck_nesting();
+                let name = &self.folders[i].name;
+                match check {
+                    FolderCheck::Missing => {
+                        self.note = Some((
+                            format!("{name}: not found on this machine — the server has final say at commit"),
+                            true,
+                        ));
+                    }
+                    FolderCheck::NotADir => {
+                        self.note =
+                            Some((format!("{name}: that is a file, not a folder"), true));
+                    }
+                    FolderCheck::Unreadable => {
+                        self.note = Some((
+                            format!("{name}: no permission to read it"),
+                            true,
+                        ));
+                    }
+                    FolderCheck::Ok | FolderCheck::Pending => {
+                        if self.folders[i].nested_in.is_some() {
+                            self.note = Some((
+                                format!("{name} is inside another chosen folder — it would be scanned twice"),
+                                true,
+                            ));
                         }
                     }
                 }
@@ -2037,10 +2177,30 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
             wizard.tips.push((name_rect, "This folder's name in mStream — click to rename"));
         }
         let path_x = column.x + NAME_W;
-        frame.render_widget(
-            Paragraph::new(Span::styled(folder.path.clone(), row_bg)),
-            Rect { x: path_x, y, width: sel_width.saturating_sub(NAME_W), height: 1 },
-        );
+        let path_rect =
+            Rect { x: path_x, y, width: sel_width.saturating_sub(NAME_W), height: 1 };
+        // The LOCAL filesystem's verdict, worn by the row: problems paint
+        // the path gold, the tooltip says why. Advisory only — Continue
+        // still works, the server has final say at commit.
+        let problem: Option<&'static str> = match folder.check {
+            FolderCheck::Missing => {
+                Some("Not found on this machine — a remote server may still know it")
+            }
+            FolderCheck::NotADir => Some("This is a file, not a folder"),
+            FolderCheck::Unreadable => Some("No permission to read this folder"),
+            FolderCheck::Ok | FolderCheck::Pending => folder
+                .nested_in
+                .is_some()
+                .then_some("Inside another chosen folder — it would be scanned twice"),
+        };
+        let path_style = match problem {
+            Some(_) if !selected => Style::default().fg(th().gold),
+            _ => row_bg,
+        };
+        frame.render_widget(Paragraph::new(Span::styled(folder.path.clone(), path_style)), path_rect);
+        if let Some(tip) = problem {
+            wizard.tips.push((path_rect, tip));
+        }
         let x_rect = Rect { x: column.x + sel_width + 1, y, width: 3, height: 1 };
         let x_hover = wizard.pointer.is_some_and(|p| x_rect.contains(p));
         let x_style = if x_hover {
@@ -2453,7 +2613,15 @@ mod tests {
     use super::*;
 
     fn folder(path: &str) -> Folder {
-        Folder { path: path.to_string(), name: String::new(), named_by_user: false, committed: false }
+        Folder {
+            path: path.to_string(),
+            name: String::new(),
+            named_by_user: false,
+            committed: false,
+            check: FolderCheck::Pending,
+            canonical: None,
+            nested_in: None,
+        }
     }
 
     #[test]
@@ -2694,6 +2862,80 @@ mod tests {
             matches!(&wizard.queued, Some(Op::Complete(dir)) if dir == "/home/anna/Music/"),
             "stepping into the dir must queue its listing"
         );
+    }
+
+    #[test]
+    fn is_under_respects_separator_boundaries() {
+        assert!(is_under("/a/b", "/a"));
+        assert!(is_under("/a/b/c", "/a"));
+        assert!(!is_under("/ab", "/a"), "prefix without a boundary is not nesting");
+        assert!(!is_under("/a", "/a"), "equal is duplicate, not nested");
+        assert!(!is_under("/a", "/a/b"), "a parent is not under its child");
+        assert!(is_under(r"C:\\music\\rock", r"C:\\music"));
+    }
+
+    #[test]
+    fn validation_marks_problems_and_removes_other_spellings_of_the_same_folder() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.add_folder("/media/music".to_string());
+        wizard.add_folder("/media/music/rock".to_string());
+        wizard.add_folder("/media/music-link".to_string());
+        assert_eq!(wizard.pending_validate.len(), 3, "every add queues a validation");
+
+        // The parent and child land: the child gets the nested mark.
+        wizard.apply(Done::Validated {
+            path: "/media/music".to_string(),
+            check: FolderCheck::Ok,
+            canonical: Some("/media/music".to_string()),
+        });
+        wizard.apply(Done::Validated {
+            path: "/media/music/rock".to_string(),
+            check: FolderCheck::Ok,
+            canonical: Some("/media/music/rock".to_string()),
+        });
+        assert_eq!(wizard.folders[1].nested_in.as_deref(), Some("/media/music"));
+        assert!(wizard.note.as_ref().is_some_and(|(n, _)| n.contains("scanned twice")));
+
+        // A symlink spelling of the parent lands: removed, with the why.
+        wizard.apply(Done::Validated {
+            path: "/media/music-link".to_string(),
+            check: FolderCheck::Ok,
+            canonical: Some("/media/music".to_string()),
+        });
+        assert_eq!(wizard.folders.len(), 2, "the duplicate spelling is dropped");
+        assert!(wizard.note.as_ref().is_some_and(|(n, _)| n.contains("the same folder as")));
+
+        // Removing the parent clears the child's nested mark.
+        wizard.remove_at(0);
+        assert!(wizard.folders[0].nested_in.is_none());
+
+        // A missing path is marked and said, but never blocks the list.
+        wizard.add_folder("/definitely/not/real".to_string());
+        wizard.apply(Done::Validated {
+            path: "/definitely/not/real".to_string(),
+            check: FolderCheck::Missing,
+            canonical: None,
+        });
+        let bad = wizard.folders.iter().find(|f| f.path == "/definitely/not/real").unwrap();
+        assert_eq!(bad.check, FolderCheck::Missing);
+        assert!(wizard.note.as_ref().is_some_and(|(n, err)| *err && n.contains("not found")));
+    }
+
+    #[test]
+    fn validate_path_tells_dirs_from_files_from_nothing() {
+        let base = std::env::temp_dir().join(format!("wiz-vp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("real")).unwrap();
+        std::fs::write(base.join("song.mp3"), b"x").unwrap();
+        let (check, canonical) = validate_path(base.join("real").to_str().unwrap());
+        assert_eq!(check, FolderCheck::Ok);
+        assert!(canonical.is_some());
+        let (check, _) = validate_path(base.join("song.mp3").to_str().unwrap());
+        assert_eq!(check, FolderCheck::NotADir);
+        let (check, _) = validate_path(base.join("ghost").to_str().unwrap());
+        assert_eq!(check, FolderCheck::Missing);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
