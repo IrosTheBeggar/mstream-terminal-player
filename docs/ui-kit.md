@@ -212,8 +212,9 @@ DRAG (ridden on mouse-drag, released on mouse-up), the wheel scrolls,
 and the bar brightens under the pointer (thumb and endcaps → Cyan)
 like every clickable. **A bar interaction CAPTURES the pointer**:
 while an arrow is held or the thumb dragged, sub-cell hand tremor must
-not retarget hover onto whatever sits beside the 1-cell bar — hover
-resumes on release. Empty state:
+not retarget hover onto whatever sits beside the 1-cell bar — and
+terminals differ on whether mid-press motion arrives as Drag or plain
+Moved, so BOTH honor the capture. Hover resumes on release. Empty state:
 **Every added folder is validated LOCALLY, on the worker** (a stat can
 hang on a dead mount): exists / is a folder / readable, plus
 canonicalization for truth-telling — another SPELLING of a chosen

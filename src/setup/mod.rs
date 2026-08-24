@@ -1571,14 +1571,19 @@ fn event_loop(
                                 }
                             }
                         }
+                        // A scrollbar interaction CAPTURES the mouse:
+                        // while an arrow is held or the thumb dragged,
+                        // sub-cell hand tremor must not retarget hover
+                        // onto whatever sits beside the 1-cell bar —
+                        // and terminals differ on whether mid-press
+                        // motion arrives as Drag or plain Moved, so
+                        // BOTH honor the capture.
                         MouseEventKind::Moved => {
-                            wizard.pointer = Some(at);
+                            if wizard.drag.is_none() && wizard.arrow_hold.is_none() {
+                                wizard.pointer = Some(at);
+                            }
                         }
                         MouseEventKind::Drag(_) => {
-                            // A scrollbar interaction CAPTURES the mouse:
-                            // while an arrow is held or the thumb dragged,
-                            // sub-cell hand tremor must not retarget hover
-                            // onto whatever sits beside the 1-cell bar.
                             if wizard.drag.is_none() && wizard.arrow_hold.is_none() {
                                 wizard.pointer = Some(at);
                             }
@@ -1955,6 +1960,8 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         wizard.pointer = live_pointer;
         wizard.clicks.clear();
         wizard.tips.clear();
+        wizard.table_bar = None;
+        wizard.path_bar = None;
     }
     match wizard.modal.clone() {
         Modal::None => {}
