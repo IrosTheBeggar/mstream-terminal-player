@@ -49,6 +49,10 @@ const POLL: Duration = Duration::from_millis(100);
 const TIP_DELAY: Duration = Duration::from_millis(500);
 /// Tooltip text wraps at this many cells.
 const TIP_WRAP: usize = 40;
+/// Hold-to-repeat on scrollbar arrows: the pause before repeating, then
+/// the step cadence (clamped by the loop's 100ms tick).
+const ARROW_DELAY: Duration = Duration::from_millis(400);
+const ARROW_REPEAT: Duration = Duration::from_millis(60);
 /// How often the Done screen re-asks for scan progress.
 const PROGRESS_EVERY: Duration = Duration::from_millis(1500);
 /// The one vpath name a single folder gets without being asked.
@@ -423,6 +427,9 @@ pub(crate) struct Wizard {
     path_bar: Option<(Rect, usize)>,
     /// A scrollbar drag in progress (armed by a press inside a bar).
     drag: Option<BarKind>,
+    /// A held ▲/▼ endcap: (which bar, direction, when the next step
+    /// fires). Armed on press, repeats each tick, released on mouse-up.
+    arrow_hold: Option<(BarKind, i8, Instant)>,
 
     pub username: String,
     pub password: String,
@@ -482,6 +489,7 @@ impl Wizard {
             table_bar: None,
             path_bar: None,
             drag: None,
+            arrow_hold: None,
             editing: None,
             username: String::new(),
             password: String::new(),
@@ -1439,6 +1447,22 @@ fn event_loop(
             set_pointer_shape(hand, mouse_on);
         }
 
+        // A held scrollbar arrow keeps stepping until the button lifts.
+        if let Some((kind, delta, next)) = wizard.arrow_hold {
+            if Instant::now() >= next {
+                let step = |v: usize| if delta < 0 { v.saturating_sub(1) } else { v + 1 };
+                match kind {
+                    BarKind::Table => wizard.tscroll = step(wizard.tscroll),
+                    BarKind::Path => {
+                        if let Modal::PathEntry(draft) = &mut wizard.modal {
+                            draft.scroll = step(draft.scroll);
+                        }
+                    }
+                }
+                wizard.arrow_hold = Some((kind, delta, Instant::now() + ARROW_REPEAT));
+            }
+        }
+
         // Tooltip dwell: the timer survives while the pointer stays on the
         // same tip rect, restarts on a new one, and dies the moment the
         // pointer leaves. Tips can't leak through modals — render drops
@@ -1519,14 +1543,32 @@ fn event_loop(
                                     return Ok(outcome);
                                 }
                             }
-                            // A press anywhere on a scrollbar arms a
-                            // thumb drag (the press itself already
-                            // jumped via the cell's act).
-                            if wizard.table_bar.is_some_and(|(rect, _)| rect.contains(at)) {
-                                wizard.drag = Some(BarKind::Table);
-                            } else if wizard.path_bar.is_some_and(|(rect, _)| rect.contains(at))
-                            {
-                                wizard.drag = Some(BarKind::Path);
+                            // A press on a scrollbar: endcap rows arm
+                            // hold-to-repeat (the press already stepped
+                            // once via the act), track rows arm a thumb
+                            // drag.
+                            let bar_at = [
+                                (BarKind::Table, wizard.table_bar),
+                                (BarKind::Path, wizard.path_bar),
+                            ]
+                            .into_iter()
+                            .find_map(|(kind, bar)| {
+                                bar.filter(|(rect, _)| rect.contains(at)).map(|_| kind)
+                            });
+                            if let Some(kind) = bar_at {
+                                let (rect, _) = match kind {
+                                    BarKind::Table => wizard.table_bar.unwrap(),
+                                    BarKind::Path => wizard.path_bar.unwrap(),
+                                };
+                                if at.y == rect.y {
+                                    wizard.arrow_hold =
+                                        Some((kind, -1, Instant::now() + ARROW_DELAY));
+                                } else if at.y == rect.y + rect.height - 1 {
+                                    wizard.arrow_hold =
+                                        Some((kind, 1, Instant::now() + ARROW_DELAY));
+                                } else {
+                                    wizard.drag = Some(kind);
+                                }
                             }
                         }
                         MouseEventKind::Moved => {
@@ -1552,6 +1594,7 @@ fn event_loop(
                         }
                         MouseEventKind::Up(_) => {
                             wizard.drag = None;
+                            wizard.arrow_hold = None;
                         }
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                             wizard.pointer = Some(at);
@@ -2118,7 +2161,7 @@ fn card(frame: &mut Frame, at: Rect, focused: bool) -> Rect {
 const LOGO: [&str; 5] = [
     r"           ____  _",
     r" _ __ ___ / ___|| |_ _ __ ___  __ _ _ __ ___",
-    r"| '_ ` _ \___ \| __| '__/ _ \/ _` | '_ ` _ \",
+    r"| '_ ` _ \\___ \| __| '__/ _ \/ _` | '_ ` _ \",
     r"| | | | | |___) | |_| | |  __/ (_| | | | | | |",
     r"|_| |_| |_|____/ \__|_|  \___|\__,_|_| |_| |_|",
 ];
@@ -2192,7 +2235,7 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     frame.render_widget(block, add_rect);
     frame.render_widget(
         Paragraph::new(Span::styled(
-            "Click to open file picker",
+            "Add a music folder",
             Style::default().fg(add_color).add_modifier(Modifier::BOLD),
         ))
         .alignment(Alignment::Center),
@@ -2207,9 +2250,6 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     const NAME_W: u16 = 16;
     const REMOVE_W: u16 = 4; // ' [X]'
     let sel_width = column.width.saturating_sub(REMOVE_W);
-    if wizard.folders.is_empty() {
-        return;
-    }
     let header = Rect { x: column.x, y, width: sel_width, height: 1 };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -2226,6 +2266,15 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     );
     y += 1;
 
+    // The table frame is ALWAYS on screen; an empty list says so where
+    // the first row would be.
+    if wizard.folders.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled("(nothing added yet)", dim())),
+            Rect { x: column.x, y, width: sel_width, height: 1 },
+        );
+        return;
+    }
     // Rows live in whatever height remains; overflow scrolls. The view
     // yanks to a fresh add or a moved keyboard cursor, else the wheel
     // offset stands.
@@ -2921,7 +2970,7 @@ mod tests {
         assert_eq!(LOGO[0].trim(), "____  _");
         // The joins that line breaks once mangled: the S's back, the r's
         // stem, and the two-cell gap before the e.
-        assert!(LOGO[2].contains(r"_ \___ \|"));
+        assert!(LOGO[2].contains(r"_ \\___ \|"), "m's trailing and S's leading backslash are ADJACENT");
         assert!(LOGO[3].contains(r"| |_| | |  __/"));
         assert!(LOGO[4].contains(r"\__|_|  \___|"));
     }
