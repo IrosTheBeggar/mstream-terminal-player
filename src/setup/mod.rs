@@ -1575,7 +1575,13 @@ fn event_loop(
                             wizard.pointer = Some(at);
                         }
                         MouseEventKind::Drag(_) => {
-                            wizard.pointer = Some(at);
+                            // A scrollbar interaction CAPTURES the mouse:
+                            // while an arrow is held or the thumb dragged,
+                            // sub-cell hand tremor must not retarget hover
+                            // onto whatever sits beside the 1-cell bar.
+                            if wizard.drag.is_none() && wizard.arrow_hold.is_none() {
+                                wizard.pointer = Some(at);
+                            }
                             match wizard.drag {
                                 Some(BarKind::Table) => {
                                     if let Some((rect, max)) = wizard.table_bar {
