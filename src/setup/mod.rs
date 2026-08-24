@@ -1404,7 +1404,9 @@ fn event_loop(
                     let at = Position { x: mouse.column, y: mouse.row };
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
-                            wizard.ui.pointer = Some(at);
+                            if !wizard.ui.begin_press(at) {
+                                continue;
+                            }
                             // Blur commits an in-progress rename: a click
                             // anywhere outside the active chip ends the
                             // edit (Enter's semantics), then the click

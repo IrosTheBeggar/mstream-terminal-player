@@ -39,6 +39,15 @@ pub const TIP_WRAP: usize = 40;
 /// the step cadence (clamped by the consumer's event-loop tick).
 pub const ARROW_DELAY: Duration = Duration::from_millis(400);
 pub const ARROW_REPEAT: Duration = Duration::from_millis(60);
+/// A release this soon after a bar press is a PHANTOM: Apple Terminal
+/// reports every press as an instant click (press+release in the same
+/// millisecond), sends motion-while-held as plain Moved, and re-clicks
+/// at the physical release — holds are invisible to it. A phantom
+/// release downgrades the capture to a SOFT one instead of ending it.
+pub const PHANTOM_RELEASE: Duration = Duration::from_millis(150);
+/// The soft capture holds while motion stays within this many cells of
+/// the press; travelling beyond it resumes normal hover.
+pub const SOFT_RADIUS: u16 = 2;
 
 // ── Styles ───────────────────────────────────────────────────────────────────
 
@@ -85,6 +94,11 @@ pub struct Surface<A> {
     drag: Option<usize>,
     /// A held ▲/▼ endcap: (bar index, direction, when the next step fires).
     arrow_hold: Option<(usize, i8, Instant)>,
+    /// Where and when the current bar interaction was armed.
+    armed: Option<(Position, Instant)>,
+    /// A soft capture left behind by a phantom release: hover stays
+    /// suppressed near this press until the pointer genuinely leaves.
+    soft_origin: Option<Position>,
 }
 
 impl<A> Default for Surface<A> {
@@ -97,6 +111,8 @@ impl<A> Default for Surface<A> {
             bars: Vec::new(),
             drag: None,
             arrow_hold: None,
+            armed: None,
+            soft_origin: None,
         }
     }
 }
@@ -145,10 +161,40 @@ impl<A: Clone> Surface<A> {
     /// they send mid-press). A scrollbar interaction CAPTURES the mouse:
     /// while an arrow is held or the thumb dragged, sub-cell hand tremor
     /// must not retarget hover onto whatever sits beside the 1-cell bar.
+    /// A SOFT capture (after a phantom release) suppresses hover only
+    /// near the press, until the pointer genuinely travels away.
     pub fn motion(&mut self, at: Position) {
-        if self.drag.is_none() && self.arrow_hold.is_none() {
-            self.pointer = Some(at);
+        if self.drag.is_some() || self.arrow_hold.is_some() {
+            return;
         }
+        if let Some(origin) = self.soft_origin {
+            let near = at.x.abs_diff(origin.x) <= SOFT_RADIUS
+                && at.y.abs_diff(origin.y) <= SOFT_RADIUS;
+            if near {
+                return;
+            }
+            self.soft_origin = None;
+        }
+        self.pointer = Some(at);
+    }
+
+    /// A press begins. Returns `false` for the phantom RE-CLICK Apple
+    /// Terminal emits at the physical release of a hold: it lands near
+    /// the original press (inside the soft radius) but off every bar —
+    /// the screen must swallow it entirely. A press on a bar, or beyond
+    /// the radius, is a real interaction and ends the soft capture.
+    pub fn begin_press(&mut self, at: Position) -> bool {
+        if let Some(origin) = self.soft_origin {
+            let near = at.x.abs_diff(origin.x) <= SOFT_RADIUS
+                && at.y.abs_diff(origin.y) <= SOFT_RADIUS;
+            let on_bar = self.bars.iter().any(|b| b.rect.contains(at));
+            if near && !on_bar {
+                return false;
+            }
+            self.soft_origin = None;
+        }
+        self.pointer = Some(at);
+        true
     }
 
     /// A press on a scrollbar arms its interaction: endcap rows arm
@@ -157,6 +203,7 @@ impl<A: Clone> Surface<A> {
     /// was dispatched.
     pub fn arm_bars(&mut self, at: Position) {
         let Some(i) = self.bars.iter().position(|b| b.rect.contains(at)) else { return };
+        self.armed = Some((at, Instant::now()));
         let rect = self.bars[i].rect;
         if at.y == rect.y {
             self.arrow_hold = Some((i, -1, Instant::now() + ARROW_DELAY));
@@ -167,8 +214,17 @@ impl<A: Clone> Surface<A> {
         }
     }
 
-    /// The button lifted: every capture ends, hover resumes.
+    /// The button lifted: the hard capture ends. A release arriving
+    /// within [`PHANTOM_RELEASE`] of arming is Apple Terminal's instant
+    /// click — the physical hold is still going, so a SOFT capture keeps
+    /// hover pinned near the press (repeat and drag stay off: with holds
+    /// invisible, a repeat could never be stopped).
     pub fn release(&mut self) {
+        if let Some((origin, when)) = self.armed.take() {
+            if when.elapsed() < PHANTOM_RELEASE {
+                self.soft_origin = Some(origin);
+            }
+        }
         self.drag = None;
         self.arrow_hold = None;
     }
@@ -740,8 +796,53 @@ mod tests {
         s.motion(Position { x: 9, y: 10 });
         assert_eq!(s.pointer, Some(Position { x: 10, y: 10 }));
         s.release();
+        // The instant release is a PHANTOM (Apple Terminal's dialect):
+        // near-motion stays pinned, travel resumes hover.
         s.motion(Position { x: 9, y: 10 });
-        assert_eq!(s.pointer, Some(Position { x: 9, y: 10 }), "hover resumes on release");
+        assert_eq!(s.pointer, Some(Position { x: 10, y: 10 }), "soft capture pins tremor");
+        s.motion(Position { x: 20, y: 10 });
+        assert_eq!(s.pointer, Some(Position { x: 20, y: 10 }), "hover resumes on travel");
+    }
+
+    #[test]
+    fn a_phantom_release_leaves_a_soft_capture_and_an_honest_one_does_not() {
+        let mut s: Surface<i32> = Surface::new();
+        let bar = Rect { x: 10, y: 5, width: 1, height: 6 };
+        s.register_bar(bar, 9, -1, 1, Box::new(|p| p as i32));
+        // Apple Terminal's dialect: press + instant release.
+        s.begin_press(Position { x: 10, y: 5 });
+        s.arm_bars(Position { x: 10, y: 5 });
+        s.release();
+        // Tremor near the press: hover stays pinned.
+        s.motion(Position { x: 9, y: 6 });
+        assert_eq!(s.pointer, Some(Position { x: 10, y: 5 }), "soft capture pins hover");
+        // Travelling away resumes normal hover.
+        s.motion(Position { x: 20, y: 5 });
+        assert_eq!(s.pointer, Some(Position { x: 20, y: 5 }));
+        s.motion(Position { x: 11, y: 5 });
+        assert_eq!(s.pointer, Some(Position { x: 11, y: 5 }), "soft capture ended for good");
+
+        // The phantom RE-CLICK at the physical release: near the press,
+        // off the bar — swallowed whole.
+        s.arm_bars(Position { x: 10, y: 5 });
+        s.release();
+        assert!(!s.begin_press(Position { x: 9, y: 6 }), "the release re-click is swallowed");
+        // A press ON the bar inside the radius is a real step.
+        assert!(s.begin_press(Position { x: 10, y: 6 }));
+        // A press beyond the radius is a fresh interaction.
+        s.arm_bars(Position { x: 10, y: 5 });
+        s.release();
+        assert!(s.begin_press(Position { x: 20, y: 5 }));
+        s.motion(Position { x: 20, y: 6 });
+        assert_eq!(s.pointer, Some(Position { x: 20, y: 6 }));
+
+        // An HONEST hold (the release comes late) ends cleanly: no soft
+        // capture, hover free right away.
+        s.arm_bars(Position { x: 10, y: 5 });
+        std::thread::sleep(PHANTOM_RELEASE + Duration::from_millis(20));
+        s.release();
+        s.motion(Position { x: 9, y: 6 });
+        assert_eq!(s.pointer, Some(Position { x: 9, y: 6 }));
     }
 
     #[test]

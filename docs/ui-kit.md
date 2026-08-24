@@ -224,7 +224,17 @@ like every clickable. **A bar interaction CAPTURES the pointer**:
 while an arrow is held or the thumb dragged, sub-cell hand tremor must
 not retarget hover onto whatever sits beside the 1-cell bar — and
 terminals differ on whether mid-press motion arrives as Drag or plain
-Moved, so BOTH honor the capture. Hover resumes on release. Empty state:
+Moved, so BOTH honor the capture. Hover resumes on release.
+**The phantom-release dialect** (Apple Terminal, probed 470.2): a press
+reports as an INSTANT click pair, motion-while-held arrives as plain
+Moved, and the physical release emits a SECOND click pair at wherever
+the hand ended — holds are invisible, so hold-repeat and thumb-drag
+cannot exist there (endcap steps and track jumps still work). A release
+within 150ms of arming downgrades the capture to a SOFT one: hover
+stays pinned within 2 cells of the press until the pointer genuinely
+travels away or a real press lands, and an off-bar press inside that
+radius is swallowed as the release re-click. Honest terminals release
+late and never enter the soft path. Empty state:
 **Every added folder is validated LOCALLY, on the worker** (a stat can
 hang on a dead mount): exists / is a folder / readable, plus
 canonicalization for truth-telling — another SPELLING of a chosen
