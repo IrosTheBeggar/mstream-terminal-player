@@ -259,7 +259,11 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Job)>, Receiver<Done>) {
                     Done::Browsed(client.admin_file_explorer(&path))
                 }
                 Job::Plain(Op::Complete(dir)) => {
-                    let listing = client.admin_file_explorer(&dir);
+                    let listing = match tilde_request(&dir) {
+                        Some((base, Some(join))) => client.admin_file_explorer_join(&base, &join),
+                        Some((base, None)) => client.admin_file_explorer(&base),
+                        None => client.admin_file_explorer(&dir),
+                    };
                     Done::Completed { dir, listing }
                 }
                 Job::Plain(Op::LoadDone) => Done::Iroh(client.admin_iroh()),
@@ -575,6 +579,16 @@ impl Wizard {
     fn refresh_completion(&mut self) {
         if let Modal::PathEntry(draft) = &mut self.modal {
             draft.sel = None;
+            // An empty input suggests nothing: listing a default dir here
+            // made bare Tab fill in entries of the server's home — the
+            // completion starts once there is something to complete.
+            if draft.text.is_empty() {
+                draft.listed_for.clear();
+                draft.listed_path.clear();
+                draft.entries.clear();
+                draft.error = None;
+                return;
+            }
             let (dir, _) = split_input(&draft.text);
             if dir != draft.listed_for {
                 draft.listed_for = dir.clone();
@@ -727,6 +741,20 @@ impl Wizard {
                         match listing {
                             Ok(listing) => {
                                 draft.error = None;
+                                // A typed `~` becomes the server's real home
+                                // the moment we learn it (fish/zsh behavior)
+                                // — and what makes Enter submit an absolute
+                                // path the add API understands.
+                                if dir.starts_with('~') && draft.text.starts_with(&dir) {
+                                    let sep =
+                                        if listing.path.contains('\\') { '\\' } else { '/' };
+                                    let resolved = format!(
+                                        "{}{sep}",
+                                        listing.path.trim_end_matches(['/', '\\'])
+                                    );
+                                    draft.text = draft.text.replacen(&dir, &resolved, 1);
+                                    draft.listed_for = resolved;
+                                }
                                 draft.listed_path = listing.path;
                                 draft.entries =
                                     listing.directories.into_iter().map(|d| d.name).collect();
@@ -952,6 +980,15 @@ pub(crate) fn parent_server_path(path: &str) -> Option<String> {
 /// The dir-part keeps its trailing separator; an empty or separator-less
 /// draft completes against the server user's home ("~", which the admin
 /// file-explorer resolves).
+/// Maps a `~`-rooted dir-part onto the server's file-explorer contract:
+/// the server expands only the EXACT string "~", so deeper paths ride
+/// the joinDirectory parameter. Non-tilde dirs pass through (`None`).
+pub(crate) fn tilde_request(dir: &str) -> Option<(String, Option<String>)> {
+    let rest = dir.strip_prefix('~')?;
+    let join = rest.trim_matches(['/', '\\']).to_string();
+    Some(("~".to_string(), if join.is_empty() { None } else { Some(join) }))
+}
+
 pub(crate) fn split_input(text: &str) -> (String, String) {
     let cut = text.rfind(['/', '\\']);
     match cut {
@@ -2257,6 +2294,20 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
     button(frame, wizard, Rect { x: add.right() + 1, y, width: inner.width, height: 1 }, "close", false, Act::BrowseCancel);
 }
 
+/// The input line, caret included, tail-scrolled: a value wider than the
+/// field renders as `…<tail>` so the end being typed is always visible.
+fn input_display(text: &str, width: u16) -> String {
+    let full = format!("{text}▏");
+    let w = width as usize;
+    if full.chars().count() <= w {
+        return full;
+    }
+    let keep = w.saturating_sub(1);
+    let tail: String =
+        full.chars().rev().take(keep).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("…{tail}")
+}
+
 fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &PathDraft) {
     let suggestions = draft.suggestions();
     let shown = suggestions.len().min(6) as u16;
@@ -2269,7 +2320,7 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
     );
     modal_close(frame, wizard, inner, Act::PathCancel);
     frame.render_widget(
-        Paragraph::new(Span::raw(format!("{}▏", draft.text))),
+        Paragraph::new(Span::raw(input_display(&draft.text, inner.width))),
         Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 },
     );
     for (i, entry) in suggestions.iter().take(shown as usize).enumerate() {
@@ -2556,6 +2607,66 @@ mod tests {
             matches!(&wizard.queued, Some(Op::Complete(dir)) if dir == "/home/anna/Music/"),
             "stepping into the dir must queue its listing"
         );
+    }
+
+    #[test]
+    fn tilde_dirs_ride_the_join_parameter_and_absolute_dirs_pass_through() {
+        assert_eq!(tilde_request("~"), Some(("~".to_string(), None)));
+        assert_eq!(tilde_request("~/"), Some(("~".to_string(), None)));
+        assert_eq!(tilde_request("~/Music/"), Some(("~".to_string(), Some("Music".to_string()))));
+        assert_eq!(tilde_request("~/a/b/"), Some(("~".to_string(), Some("a/b".to_string()))));
+        assert_eq!(tilde_request("/x/"), None);
+        assert_eq!(tilde_request(""), None);
+    }
+
+    #[test]
+    fn a_typed_tilde_expands_to_the_servers_home_when_the_listing_answers() {
+        use crate::api::types::{DirEntry, DirListing};
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.modal = Modal::PathEntry(PathDraft {
+            text: "~/Mu".to_string(),
+            listed_for: "~/".to_string(),
+            ..PathDraft::default()
+        });
+        wizard.apply(Done::Completed {
+            dir: "~/".to_string(),
+            listing: Ok(DirListing {
+                path: "/home/anna".to_string(),
+                directories: vec![DirEntry { name: "Music".to_string() }],
+                files: Vec::new(),
+            }),
+        });
+        let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
+        assert_eq!(draft.text, "/home/anna/Mu");
+        assert_eq!(draft.listed_for, "/home/anna/");
+        assert_eq!(draft.suggestions(), vec!["Music".to_string()]);
+    }
+
+    #[test]
+    fn an_empty_input_suggests_nothing() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.modal = Modal::PathEntry(PathDraft {
+            listed_for: "~".to_string(),
+            entries: vec!["Music".to_string()],
+            ..PathDraft::default()
+        });
+        wizard.refresh_completion();
+        assert!(wizard.queued.is_none(), "no listing for an empty input");
+        let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
+        assert!(draft.entries.is_empty() && draft.suggestions().is_empty());
+    }
+
+    #[test]
+    fn a_long_input_scrolls_so_the_typed_end_stays_visible() {
+        assert_eq!(input_display("short", 20), "short▏");
+        let long = "/very/long/path/that/does/not/fit/anywhere/music";
+        let shown = input_display(long, 20);
+        assert_eq!(shown.chars().count(), 20);
+        assert!(shown.starts_with('…') && shown.ends_with("music▏"));
+        // Exactly at the width: untouched.
+        assert_eq!(input_display("123456789", 10), "123456789▏");
     }
 
     #[test]

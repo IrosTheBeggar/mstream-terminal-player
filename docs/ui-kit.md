@@ -148,7 +148,14 @@ hover Cyan, keyboard-selected bg LightBlue fg Black. Tab completes
 (longest common prefix, then cycles; Shift-Tab cycles back); ↑↓ pick;
 Enter submits the text as typed; suggestions are clickable. Listings
 come from the server (admin file-explorer), loaded on the worker —
-typing must never block. A listing failure for the CURRENT dir-part
+typing must never block. `~` means the SERVER's home: deeper tilde
+dirs ride the file-explorer's joinDirectory parameter, and the typed
+`~` rewrites to the server's real home the moment a listing answers
+(fish/zsh behavior — and what makes Enter submit an absolute path the
+add API understands). An EMPTY input suggests nothing (bare Tab must
+not fill in server-home entries). The input tail-scrolls: a value wider
+than the field renders as `…<tail>` so the typed end and caret stay
+visible. A listing failure for the CURRENT dir-part
 renders in the modal in error gold ("could not list <dir>: <the
 server's words>") — silent emptiness reads as "no autocomplete";
 failures for dirs already typed past stay quiet.
