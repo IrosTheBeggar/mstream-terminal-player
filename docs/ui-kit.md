@@ -148,7 +148,12 @@ hover Cyan, keyboard-selected bg LightBlue fg Black. Tab completes
 (longest common prefix, then cycles; Shift-Tab cycles back); ↑↓ pick;
 Enter submits the text as typed; suggestions are clickable. Listings
 come from the server (admin file-explorer), loaded on the worker —
-typing must never block. `~` means the SERVER's home: deeper tilde
+typing must never block. The input line is a REAL line editor
+(tui-input): ←/→ move the cursor, insertion is mid-line, Home/End and
+the ctrl word ops work; the display windows around the cursor (clipped
+edges render `…`). Tab always completes; Right completes only from the
+END of the line — anywhere else it is the editor's cursor key. `~`
+means the SERVER's home: deeper tilde
 dirs ride the file-explorer's joinDirectory parameter, and the typed
 `~` rewrites to the server's real home the moment a listing answers
 (fish/zsh behavior — and what makes Enter submit an absolute path the

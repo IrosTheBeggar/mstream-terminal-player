@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 use clap::Args;
 use ratatui::Frame;
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent,
+    KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Alignment, Position, Rect};
@@ -36,6 +36,9 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
     Wrap,
 };
+
+use tui_input::Input;
+use tui_input::backend::crossterm::EventHandler;
 
 use crate::api::{ApiError, Client};
 use crate::config;
@@ -119,9 +122,10 @@ pub(crate) enum Modal {
 
 /// The type-a-path modal's state: the text, plus a cached listing of the
 /// directory the text currently sits in, from which suggestions derive.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct PathDraft {
-    pub text: String,
+    /// The line editor (tui-input): value + cursor + the readline ops.
+    pub text: Input,
     /// The dir-part the cached entries belong to (as derived from the text).
     pub listed_for: String,
     /// The server-resolved absolute form of that dir (what accepts build on).
@@ -134,10 +138,23 @@ pub(crate) struct PathDraft {
     pub error: Option<String>,
 }
 
+impl PartialEq for PathDraft {
+    fn eq(&self, other: &Self) -> bool {
+        self.text.value() == other.text.value()
+            && self.text.cursor() == other.text.cursor()
+            && self.listed_for == other.listed_for
+            && self.listed_path == other.listed_path
+            && self.entries == other.entries
+            && self.sel == other.sel
+            && self.error == other.error
+    }
+}
+impl Eq for PathDraft {}
+
 impl PathDraft {
     /// The entries that match the current partial segment, in order.
     pub fn suggestions(&self) -> Vec<String> {
-        let (_, partial) = split_input(&self.text);
+        let (_, partial) = split_input(self.text.value());
         self.entries
             .iter()
             .filter(|e| starts_with_fold(e, &partial))
@@ -582,14 +599,14 @@ impl Wizard {
             // An empty input suggests nothing: listing a default dir here
             // made bare Tab fill in entries of the server's home — the
             // completion starts once there is something to complete.
-            if draft.text.is_empty() {
+            if draft.text.value().is_empty() {
                 draft.listed_for.clear();
                 draft.listed_path.clear();
                 draft.entries.clear();
                 draft.error = None;
                 return;
             }
-            let (dir, _) = split_input(&draft.text);
+            let (dir, _) = split_input(draft.text.value());
             if dir != draft.listed_for {
                 draft.listed_for = dir.clone();
                 draft.entries.clear();
@@ -611,13 +628,13 @@ impl Wizard {
                 None => return,
             };
             let base = if draft.listed_path.is_empty() {
-                split_input(&draft.text).0
+                split_input(draft.text.value()).0
             } else {
                 draft.listed_path.clone()
             };
             let joined = join_server_path(&base, &picked);
             let sep = if joined.contains('\\') { '\\' } else { '/' };
-            draft.text = format!("{joined}{sep}");
+            draft.text = Input::new(format!("{joined}{sep}"));
             self.refresh_completion();
         }
     }
@@ -745,14 +762,19 @@ impl Wizard {
                                 // the moment we learn it (fish/zsh behavior)
                                 // — and what makes Enter submit an absolute
                                 // path the add API understands.
-                                if dir.starts_with('~') && draft.text.starts_with(&dir) {
+                                let old = draft.text.value().to_string();
+                                if dir.starts_with('~') && old.starts_with(&dir) {
                                     let sep =
                                         if listing.path.contains('\\') { '\\' } else { '/' };
                                     let resolved = format!(
                                         "{}{sep}",
                                         listing.path.trim_end_matches(['/', '\\'])
                                     );
-                                    draft.text = draft.text.replacen(&dir, &resolved, 1);
+                                    let new_text = old.replacen(&dir, &resolved, 1);
+                                    let from_end = old.chars().count() - draft.text.cursor();
+                                    let cursor =
+                                        new_text.chars().count().saturating_sub(from_end);
+                                    draft.text = Input::new(new_text).with_cursor(cursor);
                                     draft.listed_for = resolved;
                                 }
                                 draft.listed_path = listing.path;
@@ -1244,7 +1266,7 @@ fn event_loop(
                     {
                         return Ok(Outcome::Quit);
                     }
-                    if let Some(outcome) = handle_key(wizard, key.code) {
+                    if let Some(outcome) = handle_key(wizard, key) {
                         return Ok(outcome);
                     }
                 }
@@ -1302,18 +1324,42 @@ fn event_loop(
     }
 }
 
-fn handle_key(wizard: &mut Wizard, code: KeyCode) -> Option<Outcome> {
+/// Tab (or Right from the end of the line): accept the picked suggestion,
+/// the single match, or extend to the longest common prefix — and when
+/// that gains nothing, start cycling.
+fn complete_path(wizard: &mut Wizard) {
+    let Modal::PathEntry(draft) = &mut wizard.modal else { return };
+    let suggestions = draft.suggestions();
+    if let Some(i) = draft.sel {
+        wizard.accept_suggestion(i);
+    } else if suggestions.len() == 1 {
+        wizard.accept_suggestion(0);
+    } else if !suggestions.is_empty() {
+        let (_, partial) = split_input(draft.text.value());
+        let lcp = common_prefix(&suggestions);
+        if lcp.chars().count() > partial.chars().count() {
+            let keep = draft.text.value().chars().count() - partial.chars().count();
+            let extended =
+                draft.text.value().chars().take(keep).collect::<String>() + &lcp;
+            draft.text = Input::new(extended);
+            // Same dir-part, narrower partial — no re-list.
+            draft.sel = None;
+        } else {
+            draft.sel = Some(0);
+        }
+    }
+}
+
+fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
+    let code = key.code;
     // Text entry captures everything printable first.
     match &mut wizard.modal {
         Modal::PathEntry(draft) => {
+            let at_end = draft.text.cursor() == draft.text.value().chars().count();
             match code {
                 KeyCode::Esc => wizard.modal = Modal::None,
-                KeyCode::Backspace => {
-                    draft.text.pop();
-                    wizard.refresh_completion();
-                }
                 KeyCode::Enter => {
-                    let path = draft.text.trim().to_string();
+                    let path = draft.text.value().trim().to_string();
                     wizard.modal = Modal::None;
                     if !path.is_empty() {
                         wizard.add_folder(path);
@@ -1331,32 +1377,21 @@ fn handle_key(wizard: &mut Wizard, code: KeyCode) -> Option<Outcome> {
                         draft.sel = Some(draft.sel.map_or(n - 1, |i| (i + n - 1) % n));
                     }
                 }
-                KeyCode::Tab | KeyCode::Right => {
-                    let suggestions = draft.suggestions();
-                    if let Some(i) = draft.sel {
-                        wizard.accept_suggestion(i);
-                    } else if suggestions.len() == 1 {
-                        wizard.accept_suggestion(0);
-                    } else if !suggestions.is_empty() {
-                        // Extend to the longest common prefix; if that gains
-                        // nothing, start cycling.
-                        let (_, partial) = split_input(&draft.text);
-                        let lcp = common_prefix(&suggestions);
-                        if lcp.chars().count() > partial.chars().count() {
-                            let keep = draft.text.chars().count() - partial.chars().count();
-                            draft.text = draft.text.chars().take(keep).collect::<String>() + &lcp;
-                            // Same dir-part, narrower partial — no re-list.
-                            draft.sel = None;
-                        } else {
-                            draft.sel = Some(0);
-                        }
+                KeyCode::Tab => complete_path(wizard),
+                // Right completes only from the END of the line (fish
+                // behavior) — anywhere else it is the editor's cursor key.
+                KeyCode::Right if at_end => complete_path(wizard),
+                _ => {
+                    // The line editor owns the rest: chars, Backspace,
+                    // Delete, ←/→, Home/End, the ctrl word ops.
+                    if draft
+                        .text
+                        .handle_event(&TermEvent::Key(key))
+                        .is_some_and(|change| change.value)
+                    {
+                        wizard.refresh_completion();
                     }
                 }
-                KeyCode::Char(c) => {
-                    draft.text.push(c);
-                    wizard.refresh_completion();
-                }
-                _ => {}
             }
             return None;
         }
@@ -2294,18 +2329,29 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
     button(frame, wizard, Rect { x: add.right() + 1, y, width: inner.width, height: 1 }, "close", false, Act::BrowseCancel);
 }
 
-/// The input line, caret included, tail-scrolled: a value wider than the
-/// field renders as `…<tail>` so the end being typed is always visible.
-fn input_display(text: &str, width: u16) -> String {
-    let full = format!("{text}▏");
+/// The input line with the caret at the CURSOR (mid-line edits are real
+/// now), windowed so the caret stays visible: clipped edges render `…`.
+fn input_display(value: &str, cursor: usize, width: u16) -> String {
     let w = width as usize;
-    if full.chars().count() <= w {
-        return full;
+    if w < 3 {
+        return "…".to_string();
     }
-    let keep = w.saturating_sub(1);
-    let tail: String =
-        full.chars().rev().take(keep).collect::<Vec<_>>().into_iter().rev().collect();
-    format!("…{tail}")
+    let mut chars: Vec<char> = value.chars().collect();
+    let cursor = cursor.min(chars.len());
+    chars.insert(cursor, '▏');
+    let total = chars.len();
+    if total <= w {
+        return chars.into_iter().collect();
+    }
+    let start = cursor.saturating_sub(w.saturating_sub(2)).min(total - w);
+    let mut out: Vec<char> = chars[start..start + w].to_vec();
+    if start > 0 {
+        out[0] = '…';
+    }
+    if start + w < total {
+        out[w - 1] = '…';
+    }
+    out.into_iter().collect()
 }
 
 fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &PathDraft) {
@@ -2320,7 +2366,11 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
     );
     modal_close(frame, wizard, inner, Act::PathCancel);
     frame.render_widget(
-        Paragraph::new(Span::raw(input_display(&draft.text, inner.width))),
+        Paragraph::new(Span::raw(input_display(
+            draft.text.value(),
+            draft.text.cursor(),
+            inner.width,
+        ))),
         Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 },
     );
     for (i, entry) in suggestions.iter().take(shown as usize).enumerate() {
@@ -2458,22 +2508,23 @@ mod tests {
         assert!(wizard.editing.as_ref().is_some_and(|(row, _)| *row == 0));
         assert_eq!(wizard.sel, None);
         wizard.finish_rename();
+        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
         // The keyboard picks the cursor up from either end…
-        handle_key(&mut wizard, KeyCode::Down);
+        handle_key(&mut wizard, key(KeyCode::Down));
         assert_eq!(wizard.sel, Some(0));
-        handle_key(&mut wizard, KeyCode::Down);
+        handle_key(&mut wizard, key(KeyCode::Down));
         assert_eq!(wizard.sel, Some(1));
         // …and Esc stows it again.
-        handle_key(&mut wizard, KeyCode::Esc);
+        handle_key(&mut wizard, key(KeyCode::Esc));
         assert_eq!(wizard.sel, None);
-        handle_key(&mut wizard, KeyCode::Up);
+        handle_key(&mut wizard, key(KeyCode::Up));
         assert_eq!(wizard.sel, Some(1), "up starts from the bottom");
         // r removes the row under the cursor; without one it's a no-op.
-        handle_key(&mut wizard, KeyCode::Esc);
-        handle_key(&mut wizard, KeyCode::Char('r'));
+        handle_key(&mut wizard, key(KeyCode::Esc));
+        handle_key(&mut wizard, key(KeyCode::Char('r')));
         assert_eq!(wizard.folders.len(), 2);
-        handle_key(&mut wizard, KeyCode::Down);
-        handle_key(&mut wizard, KeyCode::Char('r'));
+        handle_key(&mut wizard, key(KeyCode::Down));
+        handle_key(&mut wizard, key(KeyCode::Char('r')));
         assert_eq!(wizard.folders.len(), 1);
     }
 
@@ -2594,7 +2645,7 @@ mod tests {
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
         wizard.modal = Modal::PathEntry(PathDraft {
-            text: "Mus".to_string(),
+            text: "Mus".into(),
             listed_for: "~".to_string(),
             listed_path: "/home/anna".to_string(),
             entries: vec!["Music".to_string(), "Movies".to_string()],
@@ -2602,7 +2653,7 @@ mod tests {
         });
         wizard.accept_suggestion(0);
         let Modal::PathEntry(draft) = &wizard.modal else { panic!("modal closed") };
-        assert_eq!(draft.text, "/home/anna/Music/");
+        assert_eq!(draft.text.value(), "/home/anna/Music/");
         assert!(
             matches!(&wizard.queued, Some(Op::Complete(dir)) if dir == "/home/anna/Music/"),
             "stepping into the dir must queue its listing"
@@ -2625,7 +2676,7 @@ mod tests {
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
         wizard.modal = Modal::PathEntry(PathDraft {
-            text: "~/Mu".to_string(),
+            text: "~/Mu".into(),
             listed_for: "~/".to_string(),
             ..PathDraft::default()
         });
@@ -2638,7 +2689,8 @@ mod tests {
             }),
         });
         let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
-        assert_eq!(draft.text, "/home/anna/Mu");
+        assert_eq!(draft.text.value(), "/home/anna/Mu");
+        assert_eq!(draft.text.cursor(), draft.text.value().chars().count(), "cursor keeps its distance from the end");
         assert_eq!(draft.listed_for, "/home/anna/");
         assert_eq!(draft.suggestions(), vec!["Music".to_string()]);
     }
@@ -2659,14 +2711,22 @@ mod tests {
     }
 
     #[test]
-    fn a_long_input_scrolls_so_the_typed_end_stays_visible() {
-        assert_eq!(input_display("short", 20), "short▏");
+    fn a_long_input_windows_around_the_cursor() {
+        assert_eq!(input_display("short", 5, 20), "short▏");
         let long = "/very/long/path/that/does/not/fit/anywhere/music";
-        let shown = input_display(long, 20);
+        // Cursor at the end: the tail stays visible.
+        let shown = input_display(long, long.chars().count(), 20);
         assert_eq!(shown.chars().count(), 20);
         assert!(shown.starts_with('…') && shown.ends_with("music▏"));
-        // Exactly at the width: untouched.
-        assert_eq!(input_display("123456789", 10), "123456789▏");
+        // Cursor at the start: the head stays visible, the caret leads.
+        let shown = input_display(long, 0, 20);
+        assert!(shown.starts_with("▏/very") && shown.ends_with('…'));
+        // Cursor mid-string: both edges clip.
+        let shown = input_display(long, 24, 20);
+        assert_eq!(shown.chars().count(), 20);
+        assert!(shown.starts_with('…') && shown.ends_with('…') && shown.contains('▏'));
+        // Exactly at the width: untouched, caret mid-line where it sits.
+        assert_eq!(input_display("123456789", 4, 10), "1234▏56789");
     }
 
     #[test]
@@ -2674,7 +2734,7 @@ mod tests {
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
         wizard.modal = Modal::PathEntry(PathDraft {
-            text: "/music/x".to_string(),
+            text: "/music/x".into(),
             listed_for: "/music/".to_string(),
             ..PathDraft::default()
         });
