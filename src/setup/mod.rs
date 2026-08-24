@@ -3154,13 +3154,14 @@ mod tests {
             "the expanded dir is what gets listed"
         );
 
-        // A BARE ~ gains its separator: the preview lands INSIDE the
-        // home, not in its parent directory.
+        // A BARE ~ gains its separator (the platform's own): the preview
+        // lands INSIDE the home, not in its parent directory.
+        let sep = if home.contains('\\') { '\\' } else { '/' };
         wizard.modal = Modal::PathEntry(PathDraft { text: "~".into(), ..PathDraft::default() });
         wizard.refresh_completion();
         let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
-        assert_eq!(draft.text.value(), format!("{home}/"));
-        assert_eq!(draft.listed_for, format!("{home}/"));
+        assert_eq!(draft.text.value(), format!("{home}{sep}"));
+        assert_eq!(draft.listed_for, format!("{home}{sep}"));
         assert_eq!(draft.text.cursor(), draft.text.value().chars().count());
     }
 
