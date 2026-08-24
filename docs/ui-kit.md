@@ -135,7 +135,9 @@ Label above (fg DarkGray, UPPERCASE, small). 3-row Rounded card: idle
 border DarkGray; focused border LightBlue with the `▏` caret after the
 value (Cyan is reserved for hover and the active rename chip). Secrets
 render as `•` repeat. Click focuses; Tab/↓ cycle fields.
-Inline chip edits (the folder-name rename) commit on BLUR: Enter
+The name chip brightens under the pointer like every clickable —
+hover fg Cyan + BOLD (a selected row keeps its bg; only the fg
+brightens). Inline chip edits (the folder-name rename) commit on BLUR: Enter
 commits, Esc cancels, and a click anywhere outside the active chip
 commits too — then the click proceeds as normal. Re-clicking the chip
 being edited never clobbers the draft.

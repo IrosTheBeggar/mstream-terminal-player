@@ -1810,8 +1810,17 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         } else {
             Style::default()
         };
+        let name_rect = Rect { x: column.x, y, width: NAME_W.min(sel_width), height: 1 };
+        // The rename affordance lights up under the pointer — the same
+        // brightening every other clickable gets (a selected row keeps
+        // its bg; only the name's fg brightens).
+        let name_hover = !editing && wizard.pointer.is_some_and(|p| name_rect.contains(p));
         let name_style = if editing {
             Style::default().fg(th().bright)
+        } else if name_hover && selected {
+            Style::default().fg(th().bright).bg(th().accent).add_modifier(Modifier::BOLD)
+        } else if name_hover {
+            Style::default().fg(th().bright).add_modifier(Modifier::BOLD)
         } else if selected {
             Style::default().fg(th().on_accent).bg(th().accent).add_modifier(Modifier::BOLD)
         } else {
@@ -1821,7 +1830,6 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
             Paragraph::new(Span::styled(" ".repeat(sel_width as usize), row_bg)),
             rect,
         );
-        let name_rect = Rect { x: column.x, y, width: NAME_W.min(sel_width), height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(name, name_style)), name_rect);
         wizard.clicks.push((name_rect, Act::RenameFolder(i)));
         if !editing {
