@@ -183,6 +183,14 @@ Black; hover row fg Cyan. At most one intent-colored cell per row.
 Overflow: `Scrollbar` right edge (track `│` DarkGray, thumb `█`
 LightBlue, `▲▼` endcaps DarkGray), only when rows overflow. Empty state:
 one DarkGray parenthesized line that says what to DO.
+**Selection is the KEYBOARD cursor, nothing more.** No row is selected
+by default and mouse actions never need one — every row action is
+directly clickable (the name chip, the [X]). Only ↑/↓ pick the cursor
+up (↓ from the top, ↑ from the bottom); Esc stows it. A fresh add
+scrolls its row into view but does not select it.
+**The tips line names only what works right now**: no rows → just the
+add actions; rows with the cursor stowed → how to pick it up, plus
+continue; a row under the cursor → the full set.
 
 ### Modal
 Centered, `Clear` beneath (no scrim — terminals have no alpha; the

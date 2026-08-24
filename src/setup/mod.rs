@@ -176,7 +176,6 @@ pub(crate) enum LoginField {
 /// the last-drawn rect wins, which is what puts modals above screens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Act {
-    SelectFolder(usize),
     RenameFolder(usize),
     BrowseNative,
     TypePath,
@@ -328,9 +327,15 @@ pub(crate) struct Wizard {
     pub modal: Modal,
 
     pub folders: Vec<Folder>,
-    pub sel: usize,
-    /// A rename in progress on `folders[sel]`, holding the draft.
-    pub editing: Option<String>,
+    /// The KEYBOARD cursor — `None` until ↑/↓ is pressed. Mouse users
+    /// never need it: every row action is directly clickable, so no row
+    /// is highlighted by default.
+    pub sel: Option<usize>,
+    /// A rename in progress: the row and the draft. Independent of the
+    /// keyboard cursor — a mouse rename never selects.
+    pub editing: Option<(usize, String)>,
+    /// A row to scroll into view on the next draw (a fresh add).
+    reveal: Option<usize>,
 
     pub username: String,
     pub password: String,
@@ -364,7 +369,7 @@ pub(crate) struct Wizard {
     /// The folders table's first visible row (wheel-scrollable).
     tscroll: usize,
     /// Last frame's selection — a change yanks the view to the selection.
-    sel_anchor: usize,
+    sel_anchor: Option<usize>,
     clicks: Vec<(Rect, Act)>,
     /// Tooltip targets, rebuilt each frame like `clicks`. A rect here is
     /// NOT necessarily clickable — disabled controls register a tip
@@ -384,7 +389,8 @@ impl Wizard {
             screen: Screen::Folders,
             modal: Modal::None,
             folders: Vec::new(),
-            sel: 0,
+            sel: None,
+            reveal: None,
             editing: None,
             username: String::new(),
             password: String::new(),
@@ -404,7 +410,7 @@ impl Wizard {
             pending_complete: None,
             last_poll: Instant::now(),
             tscroll: 0,
-            sel_anchor: 0,
+            sel_anchor: None,
             clicks: Vec::new(),
             tips: Vec::new(),
             dwell: None,
@@ -430,23 +436,34 @@ impl Wizard {
             named_by_user: false,
             committed: false,
         });
-        self.sel = self.folders.len() - 1;
+        self.reveal = Some(self.folders.len() - 1);
         self.note = None;
         sync_names(&mut self.folders);
     }
 
-    fn remove_selected(&mut self) {
-        if self.folders.is_empty() {
+    fn remove_at(&mut self, i: usize) {
+        if i >= self.folders.len() {
             return;
         }
-        let removed = self.folders.remove(self.sel);
+        let removed = self.folders.remove(i);
         if removed.committed {
             self.note = Some((
                 format!("{} was already added to the server — remove it in the admin panel", removed.name),
                 false,
             ));
         }
-        self.sel = self.sel.min(self.folders.len().saturating_sub(1));
+        // The keyboard cursor and an in-progress rename follow the shift.
+        self.sel = match self.sel {
+            _ if self.folders.is_empty() => None,
+            Some(s) if s > i => Some(s - 1),
+            Some(s) => Some(s.min(self.folders.len() - 1)),
+            None => None,
+        };
+        self.editing = match self.editing.take() {
+            Some((row, _)) if row == i => None,
+            Some((row, draft)) if row > i => Some((row - 1, draft)),
+            other => other,
+        };
         sync_names(&mut self.folders);
     }
 
@@ -454,26 +471,21 @@ impl Wizard {
 
     fn act(&mut self, act: Act) -> Option<Outcome> {
         match act {
-            Act::SelectFolder(i) => {
-                self.finish_rename();
-                self.sel = i.min(self.folders.len().saturating_sub(1));
-            }
             Act::RenameFolder(i) => {
-                let i = i.min(self.folders.len().saturating_sub(1));
                 // Clicking the chip that's already being edited must not
                 // clobber the draft.
-                if self.editing.is_some() && self.sel == i {
+                if self.editing.as_ref().is_some_and(|(row, _)| *row == i) {
                     return None;
                 }
-                self.sel = i;
-                if let Some(folder) = self.folders.get(self.sel) {
+                self.finish_rename();
+                if let Some(folder) = self.folders.get(i) {
                     if folder.committed {
                         self.note = Some((
                             "already on the server — rename it in the admin panel".to_string(),
                             false,
                         ));
                     } else {
-                        self.editing = Some(folder.name.clone());
+                        self.editing = Some((i, folder.name.clone()));
                     }
                 }
             }
@@ -482,13 +494,12 @@ impl Wizard {
                 self.modal = Modal::PathEntry(PathDraft::default());
                 self.refresh_completion();
             }
-            Act::RemoveFolder => self.remove_selected(),
-            Act::RemoveAt(i) => {
-                if i < self.folders.len() {
-                    self.sel = i;
-                    self.remove_selected();
+            Act::RemoveFolder => {
+                if let Some(s) = self.sel {
+                    self.remove_at(s);
                 }
             }
+            Act::RemoveAt(i) => self.remove_at(i),
             Act::ContinueFolders => {
                 self.finish_rename();
                 if self.folders.is_empty() {
@@ -598,8 +609,8 @@ impl Wizard {
     }
 
     fn finish_rename(&mut self) {
-        if let Some(draft) = self.editing.take() {
-            if let Some(folder) = self.folders.get_mut(self.sel) {
+        if let Some((row, draft)) = self.editing.take() {
+            if let Some(folder) = self.folders.get_mut(row) {
                 let clean = sanitize_name(&draft);
                 if !clean.is_empty() {
                     folder.name = clean;
@@ -1209,9 +1220,10 @@ fn event_loop(
                             // anywhere outside the active chip ends the
                             // edit (Enter's semantics), then the click
                             // proceeds as normal.
-                            if wizard.editing.is_some() {
+                            if let Some((row, _)) = &wizard.editing {
+                                let row = *row;
                                 let on_chip = wizard.clicks.iter().any(|(rect, act)| {
-                                    *act == Act::RenameFolder(wizard.sel) && rect.contains(at)
+                                    *act == Act::RenameFolder(row) && rect.contains(at)
                                 });
                                 if !on_chip {
                                     wizard.finish_rename();
@@ -1338,7 +1350,7 @@ fn handle_key(wizard: &mut Wizard, code: KeyCode) -> Option<Outcome> {
         Modal::None => {}
     }
 
-    if let Some(draft) = &mut wizard.editing {
+    if let Some((_, draft)) = &mut wizard.editing {
         match code {
             KeyCode::Esc => {
                 wizard.editing = None;
@@ -1357,9 +1369,31 @@ fn handle_key(wizard: &mut Wizard, code: KeyCode) -> Option<Outcome> {
 
     match wizard.screen {
         Screen::Folders => match code {
-            KeyCode::Up => wizard.act(Act::SelectFolder(wizard.sel.saturating_sub(1))),
-            KeyCode::Down => wizard.act(Act::SelectFolder(wizard.sel + 1)),
-            KeyCode::Enter => wizard.act(Act::RenameFolder(wizard.sel)),
+            // ↑/↓ are the ONLY way a row gets highlighted: the first
+            // press picks up the cursor (↓ from the top, ↑ from the
+            // bottom), Esc puts it away again.
+            KeyCode::Up => {
+                let n = wizard.folders.len();
+                if n > 0 {
+                    wizard.sel = Some(wizard.sel.map_or(n - 1, |s| s.saturating_sub(1)));
+                }
+                None
+            }
+            KeyCode::Down => {
+                let n = wizard.folders.len();
+                if n > 0 {
+                    wizard.sel = Some(wizard.sel.map_or(0, |s| (s + 1).min(n - 1)));
+                }
+                None
+            }
+            KeyCode::Esc => {
+                wizard.sel = None;
+                None
+            }
+            KeyCode::Enter => match wizard.sel {
+                Some(s) => wizard.act(Act::RenameFolder(s)),
+                None => None,
+            },
             KeyCode::Char('b') => wizard.act(Act::BrowseNative),
             KeyCode::Char('t') => wizard.act(Act::TypePath),
             KeyCode::Char('r') | KeyCode::Delete => wizard.act(Act::RemoveFolder),
@@ -1654,7 +1688,16 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
         (Modal::Browser(_), _) => "↑ ↓ move · Enter open · a add this folder · Esc close",
         (Modal::PathEntry(_), _) => "Tab complete · ↑ ↓ pick · Enter add folder · Esc close",
         (Modal::SkipWarning, _) => "Enter go public · Esc back",
-        (_, Screen::Folders) => "↑ ↓ rows · Enter rename · r remove · b browse · t type a path · c continue",
+        (_, Screen::Folders) => match (wizard.folders.is_empty(), wizard.sel) {
+            // No rows: only the two ways to add one.
+            (true, _) => "b browse · t type a path",
+            // Rows, cursor stowed: how to pick one up, and continue.
+            (false, None) => "↑ ↓ select · b browse · t type a path · c continue",
+            // A row under the cursor: the full set.
+            (false, Some(_)) => {
+                "↑ ↓ rows · Enter rename · r remove · Esc deselect · b browse · t type a path · c continue"
+            }
+        },
         (_, Screen::Login) => "Tab next field · Enter create · Esc skip",
         (_, Screen::Extras) => "Space toggle · c continue",
         (_, Screen::Done) => "Enter open the player · f finish",
@@ -1752,21 +1795,21 @@ const LOGO: [&str; 5] = [
 /// this, so ragged line widths can't skew per-line centering.
 const LOGO_W: u16 = 46;
 
-/// The table viewport: given the row count, the selection (and whether it
-/// just moved), the wheel offset and the available height → (first
-/// visible index, visible count). The wheel scrolls freely; a moved
-/// selection yanks the view back to itself.
-fn table_view(len: usize, sel: usize, sel_moved: bool, scroll: usize, avail: usize) -> (usize, usize) {
+/// The table viewport: given the row count, a row to reveal (a moved
+/// keyboard cursor, or a fresh add), the wheel offset and the available
+/// height → (first visible index, visible count). The wheel scrolls
+/// freely; a reveal yanks the view to that row.
+fn table_view(len: usize, reveal: Option<usize>, scroll: usize, avail: usize) -> (usize, usize) {
     if len == 0 || avail == 0 {
         return (0, 0);
     }
     let visible = avail.min(len);
     let mut first = scroll.min(len - visible);
-    if sel_moved {
-        if sel < first {
-            first = sel;
-        } else if sel >= first + visible {
-            first = sel + 1 - visible;
+    if let Some(row) = reveal {
+        if row < first {
+            first = row;
+        } else if row >= first + visible {
+            first = row + 1 - visible;
         }
     }
     (first, visible)
@@ -1832,26 +1875,27 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     );
     y += 1;
 
-    // Rows live in whatever height remains; overflow scrolls.
+    // Rows live in whatever height remains; overflow scrolls. The view
+    // yanks to a fresh add or a moved keyboard cursor, else the wheel
+    // offset stands.
     let avail = (column.y + column.height).saturating_sub(y) as usize;
     let sel_moved = wizard.sel != wizard.sel_anchor;
     wizard.sel_anchor = wizard.sel;
-    let (first, visible) =
-        table_view(wizard.folders.len(), wizard.sel, sel_moved, wizard.tscroll, avail);
+    let reveal = wizard.reveal.take().or(if sel_moved { wizard.sel } else { None });
+    let (first, visible) = table_view(wizard.folders.len(), reveal, wizard.tscroll, avail);
     wizard.tscroll = first;
     if visible == 0 {
         return;
     }
     let rows_y = y;
     for i in first..first + visible {
-        let selected = i == wizard.sel;
+        let selected = wizard.sel == Some(i);
         let rect = Rect { x: column.x, y, width: sel_width, height: 1 };
-        wizard.clicks.push((rect, Act::SelectFolder(i)));
 
         let folder = &wizard.folders[i];
-        let editing = wizard.editing.is_some() && selected;
+        let editing = wizard.editing.as_ref().is_some_and(|(row, _)| *row == i);
         let name = match (&wizard.editing, editing) {
-            (Some(draft), true) => format!("[{draft}▏]"),
+            (Some((_, draft)), true) => format!("[{draft}▏]"),
             _ => folder.name.clone(),
         };
         let row_bg = if selected && !editing {
@@ -2331,22 +2375,72 @@ mod tests {
     }
 
     #[test]
-    fn the_table_view_scrolls_freely_but_follows_a_moved_selection() {
+    fn the_table_view_scrolls_freely_but_follows_a_reveal() {
         // Everything fits: no scrolling, whatever the wheel said.
-        assert_eq!(table_view(3, 0, false, 9, 10), (0, 3));
-        // Overflow: the wheel offset holds while the selection is still.
-        assert_eq!(table_view(20, 0, false, 5, 8), (5, 8));
+        assert_eq!(table_view(3, None, 9, 10), (0, 3));
+        // Overflow: the wheel offset holds while nothing asks to be seen.
+        assert_eq!(table_view(20, None, 5, 8), (5, 8));
         // The wheel offset clamps to the last full viewport.
-        assert_eq!(table_view(20, 0, false, 99, 8), (12, 8));
-        // A selection moved below the view yanks the view down to it…
-        assert_eq!(table_view(20, 15, true, 0, 8), (8, 8));
-        // …and one moved above yanks it back up.
-        assert_eq!(table_view(20, 2, true, 10, 8), (2, 8));
-        // A moved selection already in view leaves the view alone.
-        assert_eq!(table_view(20, 6, true, 5, 8), (5, 8));
+        assert_eq!(table_view(20, None, 99, 8), (12, 8));
+        // A reveal below the view yanks the view down to it…
+        assert_eq!(table_view(20, Some(15), 0, 8), (8, 8));
+        // …and one above yanks it back up.
+        assert_eq!(table_view(20, Some(2), 10, 8), (2, 8));
+        // A reveal already in view leaves the view alone.
+        assert_eq!(table_view(20, Some(6), 5, 8), (5, 8));
         // Degenerate: nothing to show.
-        assert_eq!(table_view(0, 0, false, 0, 8), (0, 0));
-        assert_eq!(table_view(5, 0, false, 0, 0), (0, 0));
+        assert_eq!(table_view(0, None, 0, 8), (0, 0));
+        assert_eq!(table_view(5, None, 0, 0), (0, 0));
+    }
+
+    #[test]
+    fn no_row_is_selected_until_the_arrows_say_so() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.add_folder("/tmp/a".to_string());
+        wizard.add_folder("/tmp/b".to_string());
+        // Adding reveals (scroll target) but never selects.
+        assert_eq!(wizard.sel, None);
+        assert_eq!(wizard.reveal, Some(1));
+        // A mouse rename never selects either.
+        wizard.act(Act::RenameFolder(0));
+        assert!(wizard.editing.as_ref().is_some_and(|(row, _)| *row == 0));
+        assert_eq!(wizard.sel, None);
+        wizard.finish_rename();
+        // The keyboard picks the cursor up from either end…
+        handle_key(&mut wizard, KeyCode::Down);
+        assert_eq!(wizard.sel, Some(0));
+        handle_key(&mut wizard, KeyCode::Down);
+        assert_eq!(wizard.sel, Some(1));
+        // …and Esc stows it again.
+        handle_key(&mut wizard, KeyCode::Esc);
+        assert_eq!(wizard.sel, None);
+        handle_key(&mut wizard, KeyCode::Up);
+        assert_eq!(wizard.sel, Some(1), "up starts from the bottom");
+        // r removes the row under the cursor; without one it's a no-op.
+        handle_key(&mut wizard, KeyCode::Esc);
+        handle_key(&mut wizard, KeyCode::Char('r'));
+        assert_eq!(wizard.folders.len(), 2);
+        handle_key(&mut wizard, KeyCode::Down);
+        handle_key(&mut wizard, KeyCode::Char('r'));
+        assert_eq!(wizard.folders.len(), 1);
+    }
+
+    #[test]
+    fn removing_shifts_the_cursor_and_a_rename_in_progress() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        for p in ["/tmp/a", "/tmp/b", "/tmp/c"] {
+            wizard.add_folder(p.to_string());
+        }
+        wizard.sel = Some(2);
+        wizard.editing = Some((2, "draft".to_string()));
+        wizard.remove_at(0);
+        assert_eq!(wizard.sel, Some(1), "cursor follows its row left");
+        assert_eq!(wizard.editing.as_ref().map(|(r, _)| *r), Some(1));
+        // Removing the edited row cancels the edit.
+        wizard.remove_at(1);
+        assert!(wizard.editing.is_none());
     }
 
     #[test]
@@ -2496,11 +2590,11 @@ mod tests {
         let mut wizard = Wizard::new(client);
         wizard.add_folder("/tmp/music".to_string());
         wizard.act(Act::RenameFolder(0));
-        assert_eq!(wizard.editing.as_deref(), Some("media"));
+        assert_eq!(wizard.editing.as_ref().map(|(_, d)| d.as_str()), Some("media"));
         // Mid-edit draft; clicking the same chip again must not clobber it.
-        wizard.editing = Some("vinyl".to_string());
+        wizard.editing = Some((0, "vinyl".to_string()));
         wizard.act(Act::RenameFolder(0));
-        assert_eq!(wizard.editing.as_deref(), Some("vinyl"));
+        assert_eq!(wizard.editing.as_ref().map(|(_, d)| d.as_str()), Some("vinyl"));
         // The blur path: finish_rename commits, Enter's semantics.
         wizard.finish_rename();
         assert!(wizard.editing.is_none());
