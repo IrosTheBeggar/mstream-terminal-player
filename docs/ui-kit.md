@@ -147,18 +147,22 @@ Suggestions under the input, max 6 + "… and N more". Rows: idle DarkGray,
 hover Cyan, keyboard-selected bg LightBlue fg Black. Tab completes
 (longest common prefix, then cycles; Shift-Tab cycles back); ↑↓ pick;
 Enter submits the text as typed; suggestions are clickable. Listings
-come from the server (admin file-explorer), loaded on the worker —
-typing must never block. The input line is a REAL line editor
+are read locally (std::fs), loaded on the worker —
+typing must never block. **Completion is LOCAL** — the wizard is a
+same-machine first-run tool, and its primary affordance (the native
+picker) already speaks the local filesystem, so every path affordance
+agrees: typed completion, the fallback TUI browser, and the picker all
+browse the wizard's machine, and `~` is the USER's home (expanded
+synchronously as typed). The server validates every folder at commit —
+the honest failure point for docker-from-host or remote-server setups,
+where local paths may not exist server-side (a caveat the native picker
+always had). Listings still run on the worker: a dead network mount can
+hang read_dir. The input line is a REAL line editor
 (tui-input): ←/→ move the cursor, insertion is mid-line, Home/End and
 the ctrl word ops work; the display windows around the cursor (clipped
 edges render `…`). Tab always completes; Right completes only from the
-END of the line — anywhere else it is the editor's cursor key. `~`
-means the SERVER's home: deeper tilde
-dirs ride the file-explorer's joinDirectory parameter, and the typed
-`~` rewrites to the server's real home the moment a listing answers
-(fish/zsh behavior — and what makes Enter submit an absolute path the
-add API understands). An EMPTY input suggests nothing (bare Tab must
-not fill in server-home entries). The input tail-scrolls: a value wider
+END of the line — anywhere else it is the editor's cursor key. An EMPTY
+input suggests nothing (bare Tab must not fill in home entries). The input tail-scrolls: a value wider
 than the field renders as `…<tail>` so the typed end and caret stay
 visible. A listing failure for the CURRENT dir-part
 renders in the modal in error gold ("could not list <dir>: <the
@@ -288,5 +292,5 @@ forward action as a tall primary on the right.
   the Job/Done pattern).
 - Native pickers: osascript `choose folder` on macOS (an in-process
   NSOpenPanel never fronts from a terminal process), rfd on Windows,
-  ashpd (default-features off) on Linux, with the in-TUI server-side
-  browser as the universal fallback.
+  ashpd (default-features off) on Linux, with the in-TUI LOCAL browser
+  as the universal fallback (same filesystem as the picker).

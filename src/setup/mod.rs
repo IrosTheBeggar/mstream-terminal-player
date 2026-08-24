@@ -240,8 +240,8 @@ enum Op {
 enum Done {
     Ping(Result<(), ApiError>),
     Picked(picker::Pick),
-    Browsed(Result<crate::api::types::DirListing, ApiError>),
-    Completed { dir: String, listing: Result<crate::api::types::DirListing, ApiError> },
+    Browsed(Result<crate::api::types::DirListing, String>),
+    Completed { dir: String, listing: Result<crate::api::types::DirListing, String> },
     /// Which folder indexes were committed this attempt, and the first
     /// failure if one stopped the batch.
     FoldersCommitted { committed: Vec<usize>, error: Option<(String, ApiError)> },
@@ -273,14 +273,10 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Job)>, Receiver<Done>) {
                 Job::Plain(Op::Ping) => Done::Ping(client.ping().map(|_| ())),
                 Job::Plain(Op::PickNative) => Done::Picked(picker::pick_folder()),
                 Job::Plain(Op::OpenBrowser(path)) | Job::Plain(Op::BrowseTo(path)) => {
-                    Done::Browsed(client.admin_file_explorer(&path))
+                    Done::Browsed(local_list(&path))
                 }
                 Job::Plain(Op::Complete(dir)) => {
-                    let listing = match tilde_request(&dir) {
-                        Some((base, Some(join))) => client.admin_file_explorer_join(&base, &join),
-                        Some((base, None)) => client.admin_file_explorer(&base),
-                        None => client.admin_file_explorer(&dir),
-                    };
+                    let listing = local_list(&dir);
                     Done::Completed { dir, listing }
                 }
                 Job::Plain(Op::LoadDone) => Done::Iroh(client.admin_iroh()),
@@ -597,8 +593,8 @@ impl Wizard {
         if let Modal::PathEntry(draft) = &mut self.modal {
             draft.sel = None;
             // An empty input suggests nothing: listing a default dir here
-            // made bare Tab fill in entries of the server's home — the
-            // completion starts once there is something to complete.
+            // made bare Tab fill in entries of the home — the completion
+            // starts once there is something to complete.
             if draft.text.value().is_empty() {
                 draft.listed_for.clear();
                 draft.listed_path.clear();
@@ -606,7 +602,32 @@ impl Wizard {
                 draft.error = None;
                 return;
             }
+            // A leading `~` expands to the local home the moment it is
+            // typed — synchronously, cursor keeping its distance from
+            // the end.
+            let starts_tilde = {
+                let v = draft.text.value();
+                v == "~" || v.starts_with("~/") || v.starts_with("~\\")
+            };
+            if starts_tilde {
+                if let Some(home) = local_home() {
+                    let old = draft.text.value().to_string();
+                    let new_text = old.replacen('~', home.trim_end_matches(['/', '\\']), 1);
+                    let from_end = old.chars().count() - draft.text.cursor();
+                    let cursor = new_text.chars().count().saturating_sub(from_end);
+                    draft.text = Input::new(new_text).with_cursor(cursor);
+                }
+            }
             let (dir, _) = split_input(draft.text.value());
+            // Bare text (no separator yet) completes against the home.
+            let dir = if dir == "~" {
+                match local_home() {
+                    Some(home) => format!("{}/", home.trim_end_matches(['/', '\\'])),
+                    None => return,
+                }
+            } else {
+                dir
+            };
             if dir != draft.listed_for {
                 draft.listed_for = dir.clone();
                 draft.entries.clear();
@@ -737,7 +758,8 @@ impl Wizard {
                     format!("no native picker here ({why}) — browsing on the server instead"),
                     false,
                 ));
-                self.queue(Op::OpenBrowser("~".to_string()), "listing…");
+                let start = local_home().unwrap_or_else(|| "/".to_string());
+                self.queue(Op::OpenBrowser(start), "listing…");
             }
             Done::Browsed(Ok(listing)) => {
                 self.modal = Modal::Browser(Browse {
@@ -746,7 +768,9 @@ impl Wizard {
                     sel: 0,
                 });
             }
-            Done::Browsed(Err(e)) => self.fail("could not browse there", e),
+            Done::Browsed(Err(e)) => {
+                self.note = Some((format!("could not browse there: {e}"), true));
+            }
             Done::Completed { dir, listing } => {
                 // The user may have typed on: only install the result if it
                 // still answers the draft's current dir-part. Mid-typing
@@ -758,25 +782,6 @@ impl Wizard {
                         match listing {
                             Ok(listing) => {
                                 draft.error = None;
-                                // A typed `~` becomes the server's real home
-                                // the moment we learn it (fish/zsh behavior)
-                                // — and what makes Enter submit an absolute
-                                // path the add API understands.
-                                let old = draft.text.value().to_string();
-                                if dir.starts_with('~') && old.starts_with(&dir) {
-                                    let sep =
-                                        if listing.path.contains('\\') { '\\' } else { '/' };
-                                    let resolved = format!(
-                                        "{}{sep}",
-                                        listing.path.trim_end_matches(['/', '\\'])
-                                    );
-                                    let new_text = old.replacen(&dir, &resolved, 1);
-                                    let from_end = old.chars().count() - draft.text.cursor();
-                                    let cursor =
-                                        new_text.chars().count().saturating_sub(from_end);
-                                    draft.text = Input::new(new_text).with_cursor(cursor);
-                                    draft.listed_for = resolved;
-                                }
                                 draft.listed_path = listing.path;
                                 draft.entries =
                                     listing.directories.into_iter().map(|d| d.name).collect();
@@ -1002,13 +1007,44 @@ pub(crate) fn parent_server_path(path: &str) -> Option<String> {
 /// The dir-part keeps its trailing separator; an empty or separator-less
 /// draft completes against the server user's home ("~", which the admin
 /// file-explorer resolves).
-/// Maps a `~`-rooted dir-part onto the server's file-explorer contract:
-/// the server expands only the EXACT string "~", so deeper paths ride
-/// the joinDirectory parameter. Non-tilde dirs pass through (`None`).
-pub(crate) fn tilde_request(dir: &str) -> Option<(String, Option<String>)> {
-    let rest = dir.strip_prefix('~')?;
-    let join = rest.trim_matches(['/', '\\']).to_string();
-    Some(("~".to_string(), if join.is_empty() { None } else { Some(join) }))
+/// The wizard user's home directory — the meaning of a typed `~`.
+/// (Completion is LOCAL: the wizard is a same-machine first-run tool,
+/// and its primary affordance — the native picker — already speaks the
+/// local filesystem. The server validates every folder at commit.)
+fn local_home() -> Option<String> {
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var("USERPROFILE").ok().filter(|h| !h.is_empty()))
+}
+
+/// List a LOCAL directory's subdirectories (symlinks resolved), sorted
+/// case-insensitively — run on the worker: a dead network mount can
+/// hang `read_dir`, and the UI never blocks.
+fn local_list(dir: &str) -> Result<crate::api::types::DirListing, String> {
+    use crate::api::types::{DirEntry, DirListing};
+    if dir.is_empty() {
+        return Err("nothing to list".to_string());
+    }
+    let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let kind = entry.file_type().ok()?;
+            let is_dir =
+                kind.is_dir() || (kind.is_symlink() && std::fs::metadata(entry.path()).ok()?.is_dir());
+            is_dir.then(|| entry.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    let trimmed = dir.trim_end_matches(['/', '\\']);
+    let path =
+        if trimmed.is_empty() || trimmed.ends_with(':') { dir.to_string() } else { trimmed.to_string() };
+    Ok(DirListing {
+        path,
+        directories: names.into_iter().map(|name| DirEntry { name }).collect(),
+        files: Vec::new(),
+    })
 }
 
 pub(crate) fn split_input(text: &str) -> (String, String) {
@@ -2661,38 +2697,40 @@ mod tests {
     }
 
     #[test]
-    fn tilde_dirs_ride_the_join_parameter_and_absolute_dirs_pass_through() {
-        assert_eq!(tilde_request("~"), Some(("~".to_string(), None)));
-        assert_eq!(tilde_request("~/"), Some(("~".to_string(), None)));
-        assert_eq!(tilde_request("~/Music/"), Some(("~".to_string(), Some("Music".to_string()))));
-        assert_eq!(tilde_request("~/a/b/"), Some(("~".to_string(), Some("a/b".to_string()))));
-        assert_eq!(tilde_request("/x/"), None);
-        assert_eq!(tilde_request(""), None);
+    fn local_listing_returns_sorted_dirs_and_says_why_it_cannot() {
+        let base = std::env::temp_dir().join(format!("wiz-ll-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("beta")).unwrap();
+        std::fs::create_dir_all(base.join("Alpha")).unwrap();
+        std::fs::write(base.join("a-file.txt"), b"x").unwrap();
+        let listing = local_list(base.to_str().unwrap()).expect("listing");
+        let names: Vec<_> = listing.directories.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha", "beta"], "dirs only, case-insensitive order");
+        assert!(local_list("").is_err());
+        assert!(local_list("/definitely/not/a/real/dir").is_err());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
-    fn a_typed_tilde_expands_to_the_servers_home_when_the_listing_answers() {
-        use crate::api::types::{DirEntry, DirListing};
+    fn a_typed_tilde_expands_to_the_local_home_immediately() {
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
-        wizard.modal = Modal::PathEntry(PathDraft {
-            text: "~/Mu".into(),
-            listed_for: "~/".to_string(),
-            ..PathDraft::default()
-        });
-        wizard.apply(Done::Completed {
-            dir: "~/".to_string(),
-            listing: Ok(DirListing {
-                path: "/home/anna".to_string(),
-                directories: vec![DirEntry { name: "Music".to_string() }],
-                files: Vec::new(),
-            }),
-        });
+        wizard.modal = Modal::PathEntry(PathDraft { text: "~/Mu".into(), ..PathDraft::default() });
+        wizard.refresh_completion();
+        let home = local_home().expect("test env has a home");
+        let home = home.trim_end_matches(['/', '\\']).to_string();
         let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
-        assert_eq!(draft.text.value(), "/home/anna/Mu");
-        assert_eq!(draft.text.cursor(), draft.text.value().chars().count(), "cursor keeps its distance from the end");
-        assert_eq!(draft.listed_for, "/home/anna/");
-        assert_eq!(draft.suggestions(), vec!["Music".to_string()]);
+        assert_eq!(draft.text.value(), format!("{home}/Mu"));
+        assert_eq!(
+            draft.text.cursor(),
+            draft.text.value().chars().count(),
+            "cursor keeps its distance from the end"
+        );
+        assert_eq!(draft.listed_for, format!("{home}/"));
+        assert!(
+            matches!(&wizard.queued, Some(Op::Complete(d)) if *d == format!("{home}/")),
+            "the expanded dir is what gets listed"
+        );
     }
 
     #[test]
@@ -2741,14 +2779,14 @@ mod tests {
         // A failure for a dir the user already typed past: quiet.
         wizard.apply(Done::Completed {
             dir: "/mus/".to_string(),
-            listing: Err(ApiError::Network("no route to host".to_string())),
+            listing: Err("no route to host".to_string()),
         });
         let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
         assert!(draft.error.is_none());
         // A failure for the CURRENT dir-part: said out loud.
         wizard.apply(Done::Completed {
             dir: "/music/".to_string(),
-            listing: Err(ApiError::Network("no route to host".to_string())),
+            listing: Err("no route to host".to_string()),
         });
         let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
         let said = draft.error.as_deref().expect("the failure must be visible");

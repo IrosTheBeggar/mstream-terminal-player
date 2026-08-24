@@ -769,27 +769,6 @@ impl Client {
         wait(self.admin_file_explorer_async(directory))
     }
 
-    /// The joinDirectory form: the server resolves `directory` (its `~`
-    /// expansion works only on the EXACT string "~") and joins `join`
-    /// onto it — how a client lists inside the server's home without
-    /// knowing where that is.
-    pub async fn admin_file_explorer_join_async(
-        &self,
-        directory: &str,
-        join: &str,
-    ) -> Result<DirListing, ApiError> {
-        self.post(
-            "api/v1/admin/file-explorer",
-            serde_json::json!({ "directory": directory, "joinDirectory": join }),
-        )
-        .await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_file_explorer_join(&self, directory: &str, join: &str) -> Result<DirListing, ApiError> {
-        wait(self.admin_file_explorer_join_async(directory, join))
-    }
-
     /// Add a library folder. `vpath` is the short name apps see
     /// (`^[a-zA-Z0-9-]+$` server-side); the server queues a scan on its own.
     pub async fn admin_add_directory_async(
