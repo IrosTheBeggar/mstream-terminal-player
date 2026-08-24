@@ -145,9 +145,13 @@ being edited never clobbers the draft.
 ### Path input + completion
 Suggestions under the input, max 6 + "… and N more". Rows: idle DarkGray,
 hover Cyan, keyboard-selected bg LightBlue fg Black. Tab completes
-(longest common prefix, then cycles); ↑↓ pick; Enter submits the text as
-typed; suggestions are clickable. Listings come from the server (admin
-file-explorer), loaded on the worker — typing must never block.
+(longest common prefix, then cycles; Shift-Tab cycles back); ↑↓ pick;
+Enter submits the text as typed; suggestions are clickable. Listings
+come from the server (admin file-explorer), loaded on the worker —
+typing must never block. A listing failure for the CURRENT dir-part
+renders in the modal in error gold ("could not list <dir>: <the
+server's words>") — silent emptiness reads as "no autocomplete";
+failures for dirs already typed past stay quiet.
 
 ### Links
 fg LightBlue + `Modifier::UNDERLINED`; hover fg Cyan + BOLD. Click opens
@@ -185,6 +189,10 @@ Centered, `Clear` beneath (no scrim — terminals have no alpha; the
 border carries the weight). Border = intent: LightBlue neutral, Yellow
 warning. First line: BOLD title in the intent color. Buttons bottom-right
 (1-row; the safe choice fg LightBlue BOLD). Esc always dismisses.
+**A modal makes the screen beneath INERT**: background clicks hit
+nothing, background hover and tooltips sleep, the hand cursor follows
+only the modal's own controls — the base draw sees no pointer and its
+rect registries are dropped before the modal draws.
 
 ### Tooltip
 A dwell of ~500ms on a tip target shows a floating box: a miniature of

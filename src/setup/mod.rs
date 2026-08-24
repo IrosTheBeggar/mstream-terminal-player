@@ -129,6 +129,9 @@ pub(crate) struct PathDraft {
     pub entries: Vec<String>,
     /// Keyboard cursor within the CURRENT suggestion list, if any.
     pub sel: Option<usize>,
+    /// Why the current dir-part could not be listed — silence would read
+    /// as "no autocomplete here", so the failure is said out loud.
+    pub error: Option<String>,
 }
 
 impl PathDraft {
@@ -563,6 +566,7 @@ impl Wizard {
             if dir != draft.listed_for {
                 draft.listed_for = dir.clone();
                 draft.entries.clear();
+                draft.error = None;
                 self.queued = Some(Op::Complete(dir));
                 // Quiet: no busy note for something that follows every
                 // keystroke.
@@ -700,14 +704,26 @@ impl Wizard {
             }
             Done::Browsed(Err(e)) => self.fail("could not browse there", e),
             Done::Completed { dir, listing } => {
-                // The user may have typed on: only install the listing if it
-                // still answers the draft's current dir-part. A failure is
-                // an empty list — mid-typing dirs are bogus half the time.
-                if let (Modal::PathEntry(draft), Ok(listing)) = (&mut self.modal, listing) {
+                // The user may have typed on: only install the result if it
+                // still answers the draft's current dir-part. Mid-typing
+                // dirs are bogus half the time, so their failures stay
+                // quiet — but a failure for the CURRENT dir is said in the
+                // modal (silent emptiness reads as "no autocomplete").
+                if let Modal::PathEntry(draft) = &mut self.modal {
                     if draft.listed_for == dir {
-                        draft.listed_path = listing.path;
-                        draft.entries =
-                            listing.directories.into_iter().map(|d| d.name).collect();
+                        match listing {
+                            Ok(listing) => {
+                                draft.error = None;
+                                draft.listed_path = listing.path;
+                                draft.entries =
+                                    listing.directories.into_iter().map(|d| d.name).collect();
+                            }
+                            Err(e) => {
+                                draft.entries.clear();
+                                let shown = if dir.is_empty() { "that folder" } else { &dir };
+                                draft.error = Some(format!("could not list {shown}: {e}"));
+                            }
+                        }
                     }
                 }
             }
@@ -1242,7 +1258,7 @@ fn handle_key(wizard: &mut Wizard, code: KeyCode) -> Option<Outcome> {
                         draft.sel = Some(draft.sel.map_or(0, |i| (i + 1) % n));
                     }
                 }
-                KeyCode::Up => {
+                KeyCode::Up | KeyCode::BackTab => {
                     let n = draft.suggestions().len();
                     if n > 0 {
                         draft.sel = Some(draft.sel.map_or(n - 1, |i| (i + n - 1) % n));
@@ -1427,6 +1443,16 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         height: area.height.saturating_sub(8),
     };
 
+    // A modal makes the screen beneath INERT: the base draw sees no
+    // pointer (so nothing under the modal hovers), and every rect it
+    // registered is dropped before the modal draws — only the modal's
+    // own controls exist while it is up.
+    let modal_open = !matches!(wizard.modal, Modal::None);
+    let live_pointer = wizard.pointer;
+    if modal_open {
+        wizard.pointer = None;
+    }
+
     match wizard.screen {
         Screen::Folders => draw_folders(frame, wizard, column),
         Screen::Login => draw_login(frame, wizard, column),
@@ -1493,6 +1519,11 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         }
     }
 
+    if modal_open {
+        wizard.pointer = live_pointer;
+        wizard.clicks.clear();
+        wizard.tips.clear();
+    }
     match wizard.modal.clone() {
         Modal::None => {}
         Modal::SkipWarning => draw_skip_warning(frame, wizard, area),
@@ -2186,6 +2217,14 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
             Rect { x: inner.x, y: inner.y + 4 + shown, width: inner.width, height: 1 },
         );
     }
+    // A listing failure for the current dir-part shows where suggestions
+    // would be — kit error style, the server's words.
+    if let Some(err) = &draft.error {
+        frame.render_widget(
+            Paragraph::new(Span::styled(err.clone(), Style::default().fg(th().gold))),
+            Rect { x: inner.x, y: inner.y + 4, width: inner.width, height: 1 },
+        );
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -2376,7 +2415,7 @@ mod tests {
             listed_for: "~".to_string(),
             listed_path: "/home/anna".to_string(),
             entries: vec!["Music".to_string(), "Movies".to_string()],
-            sel: None,
+            ..PathDraft::default()
         });
         wizard.accept_suggestion(0);
         let Modal::PathEntry(draft) = &wizard.modal else { panic!("modal closed") };
@@ -2385,6 +2424,32 @@ mod tests {
             matches!(&wizard.queued, Some(Op::Complete(dir)) if dir == "/home/anna/Music/"),
             "stepping into the dir must queue its listing"
         );
+    }
+
+    #[test]
+    fn a_failed_listing_for_the_current_dir_is_said_and_a_late_one_stays_quiet() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.modal = Modal::PathEntry(PathDraft {
+            text: "/music/x".to_string(),
+            listed_for: "/music/".to_string(),
+            ..PathDraft::default()
+        });
+        // A failure for a dir the user already typed past: quiet.
+        wizard.apply(Done::Completed {
+            dir: "/mus/".to_string(),
+            listing: Err(ApiError::Network("no route to host".to_string())),
+        });
+        let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
+        assert!(draft.error.is_none());
+        // A failure for the CURRENT dir-part: said out loud.
+        wizard.apply(Done::Completed {
+            dir: "/music/".to_string(),
+            listing: Err(ApiError::Network("no route to host".to_string())),
+        });
+        let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
+        let said = draft.error.as_deref().expect("the failure must be visible");
+        assert!(said.contains("/music/") && said.contains("no route to host"));
     }
 
     #[test]
