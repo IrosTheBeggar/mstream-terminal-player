@@ -32,7 +32,10 @@ use ratatui::crossterm::execute;
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Wrap,
+};
 
 use crate::api::{ApiError, Client};
 use crate::config;
@@ -184,6 +187,7 @@ enum Act {
     SkipCancel,
     Toggle(usize),
     ContinueExtras,
+    TableScroll(i8),
     BrowseRow(usize),
     BrowseEnter,
     BrowseUp,
@@ -353,6 +357,10 @@ pub(crate) struct Wizard {
     pending_complete: Option<String>,
     last_poll: Instant,
 
+    /// The folders table's first visible row (wheel-scrollable).
+    tscroll: usize,
+    /// Last frame's selection — a change yanks the view to the selection.
+    sel_anchor: usize,
     clicks: Vec<(Rect, Act)>,
     /// Tooltip targets, rebuilt each frame like `clicks`. A rect here is
     /// NOT necessarily clickable — disabled controls register a tip
@@ -391,6 +399,8 @@ impl Wizard {
             in_flight: false,
             pending_complete: None,
             last_poll: Instant::now(),
+            tscroll: 0,
+            sel_anchor: 0,
             clicks: Vec::new(),
             tips: Vec::new(),
             dwell: None,
@@ -497,6 +507,13 @@ impl Wizard {
                 }
             }
             Act::ContinueExtras => self.queue(Op::CommitExtras, "saving your choices…"),
+            Act::TableScroll(delta) => {
+                self.tscroll = if delta < 0 {
+                    self.tscroll.saturating_sub(1)
+                } else {
+                    self.tscroll.saturating_add(1)
+                };
+            }
             Act::BrowseRow(i) => {
                 if let Modal::Browser(b) = &mut self.modal {
                     b.sel = i.min(b.dirs.len().saturating_sub(1));
@@ -1163,6 +1180,18 @@ fn event_loop(
                         MouseEventKind::Moved | MouseEventKind::Drag(_) => {
                             wizard.pointer = Some(at);
                         }
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                            wizard.pointer = Some(at);
+                            if wizard.screen == Screen::Folders
+                                && matches!(wizard.modal, Modal::None)
+                            {
+                                wizard.tscroll = if mouse.kind == MouseEventKind::ScrollUp {
+                                    wizard.tscroll.saturating_sub(1)
+                                } else {
+                                    wizard.tscroll.saturating_add(1)
+                                };
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1644,24 +1673,72 @@ fn card(frame: &mut Frame, at: Rect, focused: bool) -> Rect {
     inner
 }
 
+// Figlet "mStream" — kept byte-identical to the server's boot banner.
 const LOGO: [&str; 5] = [
-    r"            ____  _                            ",
-    r"  _ __ ___ / ___|| |_ _ __ ___  __ _ _ __ ___  ",
-    r" | '_ ` _ \ ___ \| __| '__/ _ \/ _` | '_ ` _ \ ",
-    r" | | | | | |___) | |_| |  __/ (_| | | | | | |  ",
-    r" |_| |_| |_|____/ \__|_|\___|\__,_|_| |_| |_|  ",
+    r"           ____  _",
+    r" _ __ ___ / ___|| |_ _ __ ___  __ _ _ __ ___",
+    r"| '_ ` _ \___ \| __| '__/ _ \/ _` | '_ ` _ \",
+    r"| | | | | |___) | |_| | |  __/ (_| | | | | | |",
+    r"|_| |_| |_|____/ \__|_|  \___|\__,_|_| |_| |_|",
 ];
+/// The logo's widest line. Every line draws at one fixed x computed from
+/// this, so ragged line widths can't skew per-line centering.
+const LOGO_W: u16 = 46;
+
+/// The table viewport: given the row count, the selection (and whether it
+/// just moved), the wheel offset and the available height → (first
+/// visible index, visible count). The wheel scrolls freely; a moved
+/// selection yanks the view back to itself.
+fn table_view(len: usize, sel: usize, sel_moved: bool, scroll: usize, avail: usize) -> (usize, usize) {
+    if len == 0 || avail == 0 {
+        return (0, 0);
+    }
+    let visible = avail.min(len);
+    let mut first = scroll.min(len - visible);
+    if sel_moved {
+        if sel < first {
+            first = sel;
+        } else if sel >= first + visible {
+            first = sel + 1 - visible;
+        }
+    }
+    (first, visible)
+}
 
 fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let mut y = column.y;
+    let logo_x = column.x + column.width.saturating_sub(LOGO_W) / 2;
     for line in LOGO {
         frame.render_widget(
-            Paragraph::new(Span::styled(line, accent())).alignment(Alignment::Center),
-            Rect { x: column.x, y, width: column.width, height: 1 },
+            Paragraph::new(Span::styled(line, accent())),
+            Rect { x: logo_x, y, width: LOGO_W.min(column.width), height: 1 },
         );
         y += 1;
     }
     y += 2;
+
+    // The picker card — the screen's one add affordance (typing a path is
+    // the `t` shortcut, in the tips line) — sits ABOVE the table so it
+    // holds one spot as folders come and go. Green: the affirmative add.
+    let add_rect = Rect { x: column.x, y, width: column.width, height: 3 };
+    let add_hover = wizard.pointer.is_some_and(|p| add_rect.contains(p));
+    let add_color = if add_hover { th().bright } else { th().ok };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(add_color));
+    let inner = block.inner(add_rect);
+    frame.render_widget(block, add_rect);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "Click to open file picker",
+            Style::default().fg(add_color).add_modifier(Modifier::BOLD),
+        ))
+        .alignment(Alignment::Center),
+        inner,
+    );
+    wizard.clicks.push((add_rect, Act::BrowseNative));
+    y += 4;
 
     // The chosen folders as a table: NAME first — the vpath is the point.
     // The [X] remove control sits to the RIGHT of the selection area, not
@@ -1669,23 +1746,37 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     const NAME_W: u16 = 16;
     const REMOVE_W: u16 = 4; // ' [X]'
     let sel_width = column.width.saturating_sub(REMOVE_W);
-    if !wizard.folders.is_empty() {
-        let header = Rect { x: column.x, y, width: sel_width, height: 1 };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("{:<width$}", "NAME", width = NAME_W as usize), dim()),
-                Span::styled("FOLDER", dim()),
-            ])),
-            header,
-        );
-        y += 1;
-        frame.render_widget(
-            Paragraph::new(Span::styled("─".repeat(sel_width as usize), dim())),
-            Rect { x: column.x, y, width: sel_width, height: 1 },
-        );
-        y += 1;
+    if wizard.folders.is_empty() {
+        return;
     }
-    for i in 0..wizard.folders.len() {
+    let header = Rect { x: column.x, y, width: sel_width, height: 1 };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{:<width$}", "NAME", width = NAME_W as usize), dim()),
+            Span::styled("FOLDER", dim()),
+        ])),
+        header,
+    );
+    y += 1;
+    // The rule spans the FULL row — selection area and the [X] column.
+    frame.render_widget(
+        Paragraph::new(Span::styled("─".repeat(column.width as usize), dim())),
+        Rect { x: column.x, y, width: column.width, height: 1 },
+    );
+    y += 1;
+
+    // Rows live in whatever height remains; overflow scrolls.
+    let avail = (column.y + column.height).saturating_sub(y) as usize;
+    let sel_moved = wizard.sel != wizard.sel_anchor;
+    wizard.sel_anchor = wizard.sel;
+    let (first, visible) =
+        table_view(wizard.folders.len(), wizard.sel, sel_moved, wizard.tscroll, avail);
+    wizard.tscroll = first;
+    if visible == 0 {
+        return;
+    }
+    let rows_y = y;
+    for i in first..first + visible {
         let selected = i == wizard.sel;
         let rect = Rect { x: column.x, y, width: sel_width, height: 1 };
         wizard.clicks.push((rect, Act::SelectFolder(i)));
@@ -1735,26 +1826,32 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         wizard.tips.push((x_rect, "Remove this folder"));
         y += 1;
     }
-    if !wizard.folders.is_empty() {
-        y += 1;
-    }
 
-    // The picker card — the screen's one add affordance (typing a path is
-    // the `t` shortcut, in the tips line).
-    let add_rect = Rect { x: column.x, y, width: column.width, height: 3 };
-    let add_hover = wizard.pointer.is_some_and(|p| add_rect.contains(p));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(if add_hover { Style::default().fg(th().bright) } else { dim() });
-    let inner = block.inner(add_rect);
-    frame.render_widget(block, add_rect);
-    frame.render_widget(
-        Paragraph::new(Span::styled("Click to open file picker", accent()))
-            .alignment(Alignment::Center),
-        inner,
-    );
-    wizard.clicks.push((add_rect, Act::BrowseNative));
+    // Overflow → the kit's scrollbar, just right of the [X] column (the
+    // column is centered, so the margin cell is always there). Endcaps
+    // are click rects; the wheel scrolls too.
+    if wizard.folders.len() > visible {
+        let mut state = ScrollbarState::new(wizard.folders.len() - visible + 1).position(first);
+        let bar = Rect { x: column.x + column.width, y: rows_y, width: 1, height: visible as u16 };
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .track_symbol(Some("│"))
+                .thumb_symbol("█")
+                .begin_symbol(Some("▲"))
+                .end_symbol(Some("▼"))
+                .track_style(dim())
+                .thumb_style(accent())
+                .begin_style(dim())
+                .end_style(dim()),
+            bar,
+            &mut state,
+        );
+        wizard.clicks.push((Rect { x: bar.x, y: bar.y, width: 1, height: 1 }, Act::TableScroll(-1)));
+        wizard.clicks.push((
+            Rect { x: bar.x, y: bar.y + bar.height - 1, width: 1, height: 1 },
+            Act::TableScroll(1),
+        ));
+    }
 }
 
 fn field_row(
@@ -2128,6 +2225,36 @@ mod tests {
         assert!(x > r.x && x < r.right() - 1);
         // A box too narrow to keep its corners gets no stem.
         assert_eq!(caret_cell(Rect { x: 0, y: 5, width: 2, height: 3 }, mid), None);
+    }
+
+    #[test]
+    fn the_table_view_scrolls_freely_but_follows_a_moved_selection() {
+        // Everything fits: no scrolling, whatever the wheel said.
+        assert_eq!(table_view(3, 0, false, 9, 10), (0, 3));
+        // Overflow: the wheel offset holds while the selection is still.
+        assert_eq!(table_view(20, 0, false, 5, 8), (5, 8));
+        // The wheel offset clamps to the last full viewport.
+        assert_eq!(table_view(20, 0, false, 99, 8), (12, 8));
+        // A selection moved below the view yanks the view down to it…
+        assert_eq!(table_view(20, 15, true, 0, 8), (8, 8));
+        // …and one moved above yanks it back up.
+        assert_eq!(table_view(20, 2, true, 10, 8), (2, 8));
+        // A moved selection already in view leaves the view alone.
+        assert_eq!(table_view(20, 6, true, 5, 8), (5, 8));
+        // Degenerate: nothing to show.
+        assert_eq!(table_view(0, 0, false, 0, 8), (0, 0));
+        assert_eq!(table_view(5, 0, false, 0, 0), (0, 0));
+    }
+
+    #[test]
+    fn the_logo_is_the_server_banner_verbatim() {
+        assert!(LOGO.iter().all(|l| l.chars().count() <= LOGO_W as usize));
+        assert_eq!(LOGO[0].trim(), "____  _");
+        // The joins that line breaks once mangled: the S's back, the r's
+        // stem, and the two-cell gap before the e.
+        assert!(LOGO[2].contains(r"_ \___ \|"));
+        assert!(LOGO[3].contains(r"| |_| | |  __/"));
+        assert!(LOGO[4].contains(r"\__|_|  \___|"));
     }
 
     #[test]

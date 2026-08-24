@@ -112,6 +112,11 @@ banned.
 - **Alternatives** (sanctioned, deliberate, never a third style on one
   screen): the 1-row filled slab for dense contexts; the fat soft-corner
   fill for high-impact moments.
+- **Affirmative card** (the wizard's add-folder picker): a 3-row Rounded
+  card whose border AND BOLD centered label are fg Green — the add
+  action wears the affirmative color. Hover brightens both to Cyan like
+  everything else. It sits ABOVE the table it feeds, so it holds one
+  spot as rows come and go.
 - **Text**: 1 row, fg DarkGray. Hover: fg Cyan + BOLD.
 - **Modal primary**: 1 row, label fg LightBlue BOLD (no frame — modals
   are compact); the SAFE choice gets it.
@@ -160,7 +165,8 @@ toggling (clicking the chosen row does nothing). Radios for 2–4 options;
 
 ### Table
 ratatui's `Table`: header row fg DarkGray UPPERCASE over a single `─`
-rule row (no vertical separators, no zebra). 1-line rows, 2-cell column
+rule row (no vertical separators, no zebra). The rule spans the FULL
+row — the selection area and any trailing control column ([X]) alike. 1-line rows, 2-cell column
 gaps, text left / numbers right, `—` fg DarkGray for missing values, `…`
 truncation at the cell edge. Keyboard-selected row: bg LightBlue fg
 Black; hover row fg Cyan. At most one intent-colored cell per row.
