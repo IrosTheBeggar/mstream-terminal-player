@@ -1,0 +1,25 @@
+#!/usr/bin/expect -f
+# The standalone Quick Connect page: `mstream-player qr` against the saved
+# session. Graphics mode comes from the caller's env (MSTREAM_NO_GRAPHICS=1
+# for the half-block fallback, MSTREAM_GRAPHICS=iterm2 to force the pixel
+# path — its escape signature lands in the captured stream).
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(HOME) $::env(WIZHOME)
+proc drain {secs} { expect -timeout $secs timeout {} }
+spawn {*}$argv
+exec stty rows 40 columns 100 < $spawn_out(slave,name)
+expect {
+    "running!" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { puts "NO-PAGE"; exec kill -9 [exp_pid]; expect eof; exit 2 }
+}
+drain 4
+send "\x1b"
+expect {
+    eof {}
+    timeout { puts "NO-EXIT"; exec kill -9 [exp_pid]; expect eof; exit 3 }
+}
+catch wait result
+exit [lindex $result 3]

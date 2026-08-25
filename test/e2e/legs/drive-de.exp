@@ -1,0 +1,51 @@
+#!/usr/bin/expect -f
+# The full happy path, new order: folders -> extras -> admin -> done.
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) de
+# No pixel probe under expect: nothing answers, and the 2s stall is pure wait.
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(HOME) $::env(WIZHOME)
+proc drain {secs} { expect -timeout $secs timeout {} }
+spawn {*}$argv
+exec stty rows 40 columns 100 < $spawn_out(slave,name)
+expect {
+    "hinzufügen" {}
+    timeout { puts "SYNC-FAIL: first screen never painted"; exit 2 }
+}
+send "t"
+drain 1
+send "$::env(WIZMUSIC)\r"
+drain 1
+send "c"
+expect {
+    "änderbar" {}
+    eof { puts "DIED-BEFORE-EXTRAS"; exit 6 }
+    timeout { puts "NO-EXTRAS"; exec kill -9 [exp_pid]; expect eof; exit 4 }
+}
+drain 1
+send "c"
+expect {
+    "Admin-Benutzer" {}
+    eof { puts "DIED-BEFORE-LOGIN"; exit 6 }
+    timeout { puts "NO-LOGIN"; exec kill -9 [exp_pid]; expect eof; exit 5 }
+}
+drain 1
+send "anna\t"
+drain 1
+send "pw-secret\t"
+drain 1
+send "pw-secret\r"
+drain 6
+send "f"
+expect {
+    eof {}
+    timeout {
+        puts "NO-EXIT: wizard still alive after f; killing"
+        exec kill -9 [exp_pid]
+        expect eof
+        exit 3
+    }
+}
+catch wait result
+exit [lindex $result 3]

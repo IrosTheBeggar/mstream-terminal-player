@@ -50,3 +50,23 @@ jobs:
 
       - name: Check
         run: cargo check --target wasm32-unknown-unknown
+
+  e2e:
+    name: E2E (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install ALSA dev headers + expect (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev expect
+      - uses: Swatinem/rust-cache@v2
+      # The wizard's expect battery against the stateful fake server —
+      # fully self-contained (test/e2e/README.md). macOS runners ship
+      # expect; run.sh skips gracefully anywhere it is missing.
+      - name: E2E battery
+        run: bash test/e2e/run.sh

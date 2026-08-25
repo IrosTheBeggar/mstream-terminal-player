@@ -329,6 +329,18 @@ impl Client {
         .await
     }
 
+    /// Authenticate WITHOUT storing the token — for callers holding the
+    /// client behind an Arc (the setup wizard's worker), which rebuild a
+    /// token-carrying client from the response instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn login_shared(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<LoginResponse, ApiError> {
+        wait(self.login_async(username, password))
+    }
+
     /// Authenticate and store the returned token on this client.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn login(&mut self, username: &str, password: &str) -> Result<LoginResponse, ApiError> {
@@ -737,6 +749,187 @@ impl Client {
         urls::transcode_url(&self.server(), filepath, codec, bitrate, self.token.as_deref())
             .map_err(ApiError::Config)
     }
+
+    // ── Setup-wizard admin endpoints ────────────────────────────────────────
+    //
+    // All of these sit behind the admin guard. On a fresh install with zero
+    // accounts every request is authenticated as an implicit admin, which is
+    // exactly the window the setup wizard runs in; once it creates the first
+    // user it logs in and keeps going with the token.
+
+    /// The library folders the server already has, as vpath name → entry.
+    /// BTreeMap so a reopened wizard lists them in a stable order.
+    pub async fn admin_directories_async(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, crate::api::types::AdminDirEntry>, ApiError>
+    {
+        self.get("api/v1/admin/directories").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_directories(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, crate::api::types::AdminDirEntry>, ApiError>
+    {
+        wait(self.admin_directories_async())
+    }
+
+    /// Add a library folder. `vpath` is the short name apps see
+    /// (`^[a-zA-Z0-9-]+$` server-side); the server queues a scan on its own.
+    pub async fn admin_add_directory_async(
+        &self,
+        directory: &str,
+        vpath: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.send(
+            Method::PUT,
+            "api/v1/admin/directory",
+            Some(serde_json::json!({ "directory": directory, "vpath": vpath })),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_add_directory(
+        &self,
+        directory: &str,
+        vpath: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_add_directory_async(directory, vpath))
+    }
+
+    /// Create a user. The wizard's first user is `admin: true` with every
+    /// vpath — creating it is what closes the fresh install's open window.
+    pub async fn admin_create_user_async(
+        &self,
+        username: &str,
+        password: &str,
+        vpaths: &[String],
+        admin: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.send(
+            Method::PUT,
+            "api/v1/admin/users",
+            Some(serde_json::json!({
+                "username": username,
+                "password": password,
+                "vpaths": vpaths,
+                "admin": admin,
+            })),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_create_user(
+        &self,
+        username: &str,
+        password: &str,
+        vpaths: &[String],
+        admin: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_create_user_async(username, password, vpaths, admin))
+    }
+
+    /// Set the auto-update posture: `notify`, `stage` or `auto`.
+    pub async fn admin_update_mode_async(&self, mode: &str) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/update/settings", serde_json::json!({ "mode": mode })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_update_mode(&self, mode: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_update_mode_async(mode))
+    }
+
+    /// Toggle server-side audio (the jukebox this very binary provides).
+    pub async fn admin_auto_boot_audio_async(
+        &self,
+        enabled: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(
+            "api/v1/admin/config/auto-boot-server-audio",
+            serde_json::json!({ "autoBootServerAudio": enabled }),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_auto_boot_audio(&self, enabled: bool) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_auto_boot_audio_async(enabled))
+    }
+
+    /// Toggle the discovery network. Enabling may make the server download
+    /// its p2p sidecar before answering, so give it the decode ceiling
+    /// rather than the ordinary request timeout.
+    pub async fn admin_discovery_enabled_async(
+        &self,
+        enabled: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        let body = serde_json::json!({ "enabled": enabled });
+        #[cfg(not(target_arch = "wasm32"))]
+        return self
+            .send_within(
+                Method::POST,
+                "api/v1/admin/discovery/p2p/enabled",
+                Some(body),
+                Some(DECODE_TIMEOUT),
+            )
+            .await;
+        #[cfg(target_arch = "wasm32")]
+        return self.post("api/v1/admin/discovery/p2p/enabled", body).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_enabled(&self, enabled: bool) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_enabled_async(enabled))
+    }
+
+    /// Toggle federation — the invite system for sharing libraries with
+    /// paired servers.
+    pub async fn admin_federation_enabled_async(
+        &self,
+        enabled: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/federation", serde_json::json!({ "enabled": enabled })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_enabled(&self, enabled: bool) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_enabled_async(enabled))
+    }
+
+    /// Quick Connect state + pairing ticket (admin).
+    pub async fn admin_iroh_async(&self) -> Result<IrohStatus, ApiError> {
+        self.get("api/v1/admin/iroh").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_iroh(&self) -> Result<IrohStatus, ApiError> {
+        wait(self.admin_iroh_async())
+    }
+
+    /// Per-library scan progress (works for any signed-in user; on a fresh
+    /// zero-account server too).
+    pub async fn scan_progress_async(&self) -> Result<Vec<ScanProgressRow>, ApiError> {
+        self.get("api/v1/scan/progress").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn scan_progress(&self) -> Result<Vec<ScanProgressRow>, ApiError> {
+        wait(self.scan_progress_async())
+    }
+
+    /// The enrichment passes' live state — what runs AFTER the file
+    /// scan. Same auth tier as scan_progress.
+    pub async fn scan_status_async(&self) -> Result<crate::api::types::ScanStatus, ApiError> {
+        self.get("api/v1/scan/status").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn scan_status(&self) -> Result<crate::api::types::ScanStatus, ApiError> {
+        wait(self.scan_status_async())
+    }
+
 }
 
 /// Pull mStream's `{"error": "..."}` out of a failure body, falling back to a

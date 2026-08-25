@@ -30,6 +30,10 @@ mod replay;
 mod runtime;
 #[cfg(not(target_arch = "wasm32"))]
 mod serve;
+#[cfg(not(target_arch = "wasm32"))]
+mod kit;
+#[cfg(not(target_arch = "wasm32"))]
+mod setup;
 
 /// The browser build (see its module note). Everything below this line that
 /// swaps a module out for a hand-written stand-in exists so the App, the
@@ -122,6 +126,11 @@ mod quickconnect {
     }
 }
 
+// The wizard's locale table, embedded at compile time from locales/*.yml.
+// Crate root because t!() resolves crate::_rust_i18n_translate.
+#[cfg(not(target_arch = "wasm32"))]
+rust_i18n::i18n!("locales", fallback = "en");
+
 #[cfg(not(target_arch = "wasm32"))]
 use clap::{Args, Parser, Subcommand};
 
@@ -151,6 +160,10 @@ enum Command {
     Serve(ServeArgs),
     /// Play one source and exit — end-to-end streaming/seek smoke test
     Play(cmd_play::PlayArgs),
+    /// First-run setup for a fresh mStream server: folders, login, extras
+    Setup(setup::SetupArgs),
+    /// Show the server's Quick Connect code as a scannable QR page
+    Qr(setup::QrArgs),
     /// Authenticate against an mStream server and save the session
     Login(cmd_library::LoginArgs),
     /// Forget the saved session
@@ -289,6 +302,8 @@ fn main() {
             std::process::exit(tui::run(conn.server, conn.token));
         }
         (Some(Command::Play(args)), _) => std::process::exit(cmd_play::run(args)),
+        (Some(Command::Setup(args)), _) => std::process::exit(setup::run(args)),
+        (Some(Command::Qr(args)), _) => std::process::exit(setup::run_qr(args)),
         (Some(Command::Login(args)), _) => std::process::exit(cmd_library::login(args)),
         (Some(Command::Logout), _) => std::process::exit(cmd_library::logout()),
         (Some(Command::Info(conn)), _) => std::process::exit(cmd_library::info(conn)),

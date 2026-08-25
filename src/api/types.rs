@@ -261,6 +261,14 @@ pub struct DirEntry {
     pub name: String,
 }
 
+/// One value of `GET api/v1/admin/directories` — the response is a map of
+/// vpath name → this. `root` is the folder path as the SERVER sees it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AdminDirEntry {
+    pub root: String,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct FileEntry {
@@ -804,4 +812,56 @@ mod tests {
         assert_eq!(caps, Capabilities::default());
         assert!(caps.enabled_names().is_empty());
     }
+}
+
+// ── Setup-wizard shapes ──────────────────────────────────────────────────────
+
+/// `GET api/v1/admin/iroh` — Quick Connect's state and pairing ticket.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct IrohStatus {
+    pub enabled: bool,
+    pub available: bool,
+    pub running: bool,
+    pub online: bool,
+    /// The composite pairing ticket the mobile apps scan. Present once the
+    /// endpoint is up; the wizard renders it as a QR.
+    pub qr: Option<String>,
+}
+
+/// `GET api/v1/scan/status` — the enrichment passes that run AFTER the
+/// file scan (waveforms, album art, lyrics, discovery embeddings, audio
+/// analysis, AcoustID), each with its live state.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ScanStatus {
+    pub enrichment: Vec<EnrichmentPass>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct EnrichmentPass {
+    /// The pass kind: `waveform`, `albumart`, `lyrics`, `discovery`,
+    /// `audioanalysis` or `acoustid`.
+    pub pass: String,
+    /// `idle` | `queued` | `running` | `disabled`.
+    pub state: String,
+    pub progress: Option<EnrichmentProgress>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct EnrichmentProgress {
+    pub attempted: u64,
+    pub total: Option<u64>,
+}
+
+/// One row of `GET api/v1/scan/progress` — per-library scan state.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ScanProgressRow {
+    pub vpath: String,
+    /// Percent complete, when the server can estimate a total.
+    pub pct: Option<u32>,
+    pub scanned: u64,
 }

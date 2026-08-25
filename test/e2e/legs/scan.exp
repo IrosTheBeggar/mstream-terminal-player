@@ -1,0 +1,23 @@
+#!/usr/bin/expect -f
+# The scan widget against the scripted fake server: walk to extras and
+# let the poll (every 1.5s) play the whole choreography through the
+# bottom bar. ~18s covers the ten steps plus the completed state.
+set timeout 25
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(HOME) $::env(WIZHOME)
+proc drain {secs} { expect -timeout $secs timeout {} }
+spawn {*}$argv
+exec stty rows 40 columns 100 < $spawn_out(slave,name)
+expect { "Add a music folder" {} timeout { puts "SYNC-FAIL"; exit 2 } }
+send "t"
+drain 1
+send "/tmp\r"
+drain 1
+send "c"
+expect { "All optional" {} timeout { puts "NO-EXTRAS"; exec kill -9 [exp_pid]; expect eof; exit 4 } }
+drain 18
+send "\x03"
+expect eof
+exit 0
