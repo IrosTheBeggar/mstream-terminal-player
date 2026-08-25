@@ -1429,8 +1429,11 @@ fn spawn_player_terminal(exe: &str, server: &str) -> bool {
             // file is user-trusted (probed 2026-08-24). No shell layer:
             // Ghostty splits the command itself.
             let conf = std::env::temp_dir().join("mstream-player-window.conf");
+            // auto-update off: this window exists to run the player, and
+            // Sparkle's "Enable Automatic Updates?" banner (or a check
+            // against a version we may one day pin) has no place in it.
             let body = format!(
-                "command = {exe} tui --server {server}\ntitle = mStream Player\nconfirm-close-surface = false\n"
+                "command = {exe} tui --server {server}\ntitle = mStream Player\nconfirm-close-surface = false\nauto-update = off\n"
             );
             if std::fs::write(&conf, body).is_err() {
                 return false;
