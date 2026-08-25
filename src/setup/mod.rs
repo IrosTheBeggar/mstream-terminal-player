@@ -1486,24 +1486,39 @@ fn spawn_player_terminal(exe: &str, server: &str) -> bool {
             if std::fs::write(&conf, body).is_err() {
                 return false;
             }
-            std::process::Command::new("open")
-                .args(["-na", "Ghostty", "--args"])
-                .arg(format!("--config-file={}", conf.display()))
-                .spawn()
-                .is_ok()
+            let arg = format!("--config-file={}", conf.display());
+            // The RUNNING Ghostty first, found through its own env —
+            // LaunchServices only resolves the name for INSTALLED copies,
+            // and a bundled (or scratch) Ghostty is not one. Its resources
+            // dir sits at Ghostty.app/Contents/Resources/ghostty.
+            let running = std::env::var("GHOSTTY_RESOURCES_DIR").ok().and_then(|r| {
+                let bin = std::path::Path::new(&r).join("../../MacOS/ghostty").canonicalize().ok()?;
+                bin.is_file().then_some(bin)
+            });
+            match running {
+                Some(bin) => std::process::Command::new(bin).arg(&arg).spawn().is_ok(),
+                None => std::process::Command::new("open")
+                    .args(["-na", "Ghostty", "--args"])
+                    .arg(&arg)
+                    .status()
+                    .is_ok_and(|s| s.success()),
+            }
         }
+        // `status`, not `spawn`: these launchers exit fast, and their exit
+        // code is the only way to know a window actually opened — `open`
+        // for an app that is not installed fails AFTER a successful spawn.
         Ok("iTerm.app") => std::process::Command::new("osascript")
             .arg("-e")
             .arg(format!(
                 "tell application \"iTerm2\" to create window with default profile command \"{sh}\""
             ))
-            .spawn()
-            .is_ok(),
+            .status()
+            .is_ok_and(|s| s.success()),
         _ => std::process::Command::new("osascript")
             .arg("-e")
             .arg(format!("tell application \"Terminal\" to do script \"{sh}\""))
-            .spawn()
-            .is_ok(),
+            .status()
+            .is_ok_and(|s| s.success()),
     }
 }
 
