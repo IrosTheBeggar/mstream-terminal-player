@@ -1265,6 +1265,57 @@ Two entries left this list by other roads: album art was written down as "ratatu
 landed instead as the half-block canvas the Cover visualizer draws through (0.1.1), and
 brew/scoop shipped with Phase 5.
 
+### Phase 8 — One terminal everywhere (post PR #10)
+
+The setup wizard and QR page (PR #10) degrade gracefully, but the probes that built the
+ladder also mapped the ceiling: Apple's Terminal has NO pixel protocol (the kitty query is
+reflected into the screen as literal text, DA1 has no sixel bit), no OSC 22, tofu
+sextants/octants, and an invisible-hold mouse dialect — the weakest surface is also the mac
+default. The fix is not more degradation; it is controlling the terminal on the platforms
+where we ship a GUI at all. Feasibility is PROVEN, not projected: the unchanged
+`mstream-player qr` binary inside Ghostty 1.3.1 draws the pairing code as a real scaled
+pixel image (kitty graphics), live-demoed 2026-08-24.
+
+**macOS — bundle Ghostty.** MIT license, 33.8 MB dmg, mac-native, signed + notarized by its
+own team (TeamIdentifier 24VZTF6M5V), 60k stars and commits daily. Rivals disqualified:
+Alacritty has no image protocol at all, kitty is GPLv3 + a Python runtime, WezTerm is ~90 MB
+with slowed development.
+- Pin by version + sha256 in a committed manifest, fetched at build time — the mStream
+  repo's `bin/p2p-sidecar/manifest.json` pattern verbatim. Release host:
+  `https://release.files.ghostty.org/<ver>/Ghostty.dmg`.
+- Place `Ghostty.app` BESIDE `mStream.app` in the versioned bundle dir
+  (`mStream-<ver>/console/`), never nested inside it: both notarization seals stay
+  independent, and their app ships byte-identical (modifying it would void its ticket).
+- The tray launcher grows Setup / Terminal Player items that spawn the bundled
+  `Ghostty.app/Contents/MacOS/ghostty --config-file=<ours>`.
+- **The command MUST come from the shipped config file, never `-e`** (tested, 2026-08-24):
+  Ghostty confirms commands passed as launch arguments with an "Allow Ghostty to execute…"
+  dialog — its anti-injection guard against LaunchServices — but treats config-declared
+  commands as user-trusted and prompts for nothing. Shipped config: `command = <bundled
+  player path + args>`, `title = mStream`, `window-width/height`,
+  `confirm-close-surface = false`, and `auto-update = off` so the version stays ours (two
+  config files if Setup and Player want different commands).
+- Accepted first-run noise: macOS shows a one-time "Dock Tile Extension Added" notice for
+  Ghostty's dock-tile plugin. Not removable without modifying their bundle; the escalation
+  (strip + re-sign under our own identity, MIT permits) is documented, not v1.
+
+**Windows — no Ghostty exists (macOS + Linux only), and none is needed.** Windows Terminal,
+the default console on Win11, has shipped sixel since 1.22 — a protocol ratatui-image
+already speaks. Launch the player through `wt.exe` when present (always Win11, common Store
+install on Win10) from the installer's shortcuts and the tray; legacy conhost falls back to
+the character ladder. Validation item for the next Windows smoke: confirm the graphics
+probe lands on sixel there (DA1 advertisement).
+
+**Linux — never bundle.** The Ghostty team ships no official Linux binaries (package
+manager or source only), a build drags GTK4/libadwaita across distros, and Linux installs
+skew headless/docker/SSH where a bundled GUI terminal cannot reach. When launching from a
+GUI context, prefer a detected capable terminal (ghostty, kitty, wezterm, foot) and fall
+back to the ladder + `v`-picture everywhere else.
+
+Long game, noted not planned: `libghostty` — the embeddable zero-dependency terminal core —
+is what "a terminal inside our own binary" would actually mean one day: an mStream console
+app hosting the player directly, no third-party .app at all.
+
 ## Smoke testing
 
 `mstream-player replay "<script>"` drives the TUI from a script. Keys go through exactly the path
