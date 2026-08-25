@@ -437,6 +437,9 @@ pub(crate) struct Wizard {
     /// same machinery that draws the player's covers. Disabled everywhere
     /// a real terminal didn't answer — tests, pipes, expect harnesses.
     graphics: crate::tui::graphics::Graphics,
+    /// The wordmark as a picture, built once when the terminal can draw
+    /// pixels — see [`logo_art`]. `None` falls back to the figlet.
+    logo_art: Option<crate::tui::art::Art>,
     pub qr_note: String,
     pub progress: String,
 
@@ -486,6 +489,7 @@ impl Wizard {
             qr: None,
             qr_art: None,
             graphics: crate::tui::graphics::Graphics::disabled(),
+            logo_art: None,
             qr_note: String::new(),
             progress: String::new(),
             standalone: false,
@@ -1478,6 +1482,9 @@ fn run_tui(mut wizard: Wizard) -> i32 {
     // runs its own bounded raw-mode transaction, and ratatui::init below
     // re-asserts terminal state behind it (the player's own ordering).
     wizard.graphics = crate::tui::graphics::Graphics::probe();
+    if wizard.graphics.protocol().is_some() {
+        wizard.logo_art = theme::th().ground_rgb.and_then(logo_art);
+    }
 
     let mut terminal = ratatui::init();
     // A wizard whose buttons cannot be clicked is half a wizard; like the
@@ -2119,17 +2126,53 @@ const LOGO: [&str; 5] = [
 /// this, so ragged line widths can't skew per-line centering.
 const LOGO_W: u16 = 46;
 
+/// The real wordmark, for terminals that draw pixels: the webapp's vector
+/// logo recolored to this kit's palette (no official dark variant exists —
+/// the webapp's and the mobile app's marks are both navy, drawn for light
+/// grounds) and rasterized with alpha at build time. Flattened here onto
+/// the theme ground: the picture only ever draws on an OWNED ground, so
+/// the flatten color is exactly what sits behind it — and sixel, which
+/// has no alpha, gets correct pixels for free.
+fn logo_art(ground: (u8, u8, u8)) -> Option<crate::tui::art::Art> {
+    let png = include_bytes!("mstream-logo-dark.png");
+    let img = image::load_from_memory(png).ok()?.to_rgba8();
+    let (gr, gg, gb) = ground;
+    let mut flat = image::RgbImage::new(img.width(), img.height());
+    for (x, y, px) in img.enumerate_pixels() {
+        let [r, g, b, a] = px.0;
+        let a = a as u32;
+        let blend = |c: u8, g: u8| ((c as u32 * a + g as u32 * (255 - a)) / 255) as u8;
+        flat.put_pixel(x, y, image::Rgb([blend(r, gr), blend(g, gg), blend(b, gb)]));
+    }
+    let mut png_out = Vec::new();
+    image::DynamicImage::ImageRgb8(flat)
+        .write_to(&mut std::io::Cursor::new(&mut png_out), image::ImageFormat::Png)
+        .ok()?;
+    crate::tui::art::decode(&png_out)
+}
+
 fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let mut y = column.y;
-    let logo_x = column.x + column.width.saturating_sub(LOGO_W) / 2;
-    for line in LOGO {
-        frame.render_widget(
-            Paragraph::new(Span::styled(line, accent())),
-            Rect { x: logo_x, y, width: LOGO_W.min(column.width), height: 1 },
-        );
-        y += 1;
+    // The wordmark as pixels where the terminal can draw them and the
+    // ground is ours (the picture is flattened onto that ground, so on an
+    // unowned background the figlet is the honest rendering). Both paths
+    // occupy the same band, so the screen never reflows on capability.
+    let band = Rect { x: column.x, y, width: column.width, height: LOGO.len() as u16 };
+    let drew = theme::ground_owned()
+        && match &wizard.logo_art {
+            Some(art) => wizard.graphics.draw(frame, band, art),
+            None => false,
+        };
+    if !drew {
+        let logo_x = column.x + column.width.saturating_sub(LOGO_W) / 2;
+        for (i, line) in LOGO.iter().enumerate() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(*line, accent())),
+                Rect { x: logo_x, y: y + i as u16, width: LOGO_W.min(column.width), height: 1 },
+            );
+        }
     }
-    y += 2;
+    y += band.height + 2;
 
     // The picker card — the screen's one add affordance (typing a path is
     // the `t` shortcut, in the tips line) — sits ABOVE the table so it
@@ -2762,6 +2805,20 @@ mod tests {
         folders.remove(1);
         sync_names(&mut folders);
         assert_eq!(folders[0].name, "media");
+    }
+
+    #[test]
+    fn the_logo_picture_flattens_onto_the_ground() {
+        let art = logo_art((0x12, 0x13, 0x1c)).expect("a picture");
+        let img = image::load_from_memory(art.source()).expect("its source decodes");
+        assert_eq!((img.width(), img.height()), (1224, 306));
+        let rgb = img.to_rgb8();
+        // Transparent corners took the ground color EXACTLY — nothing
+        // else may show behind a flattened picture.
+        assert_eq!(rgb.get_pixel(0, 0).0, [0x12, 0x13, 0x1c]);
+        assert_eq!(rgb.get_pixel(1223, 305).0, [0x12, 0x13, 0x1c]);
+        // And the recolored wordmark is actually drawn on it.
+        assert!(rgb.pixels().any(|p| p.0[2] > 0xa0), "the wordmark is present");
     }
 
     #[test]

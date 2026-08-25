@@ -331,10 +331,18 @@ Done screen is also `mstream-player qr`. Standalone, it sheds the wizard
 chrome: no step counter, no scan-progress line, its own heading, Close in
 place of Finish, and Esc closes.
 
-**Pictures.** Anything image-shaped (the Quick Connect QR) draws as real
-pixels through the player's graphics probe (`tui::graphics` — kitty,
-sixel, iTerm2; probed once at startup, `MSTREAM_NO_GRAPHICS=1` kills it)
-and scales to the cells it is given. The character fallback is fixed-size,
+**Pictures.** Anything image-shaped — the Quick Connect QR, the mStream
+wordmark — draws as real pixels through the player's graphics probe
+(`tui::graphics` — kitty, sixel, iTerm2; probed once at startup,
+`MSTREAM_NO_GRAPHICS=1` kills it) and scales to the cells it is given.
+The wordmark is the webapp's vector logo recolored to this palette (no
+official dark variant exists; the brand marks are navy, drawn for light
+grounds), embedded with alpha and flattened at load onto the theme
+ground — pixel logos draw ONLY on an owned ground (`theme::ground_owned`),
+so the flatten color is exactly what sits behind them and sixel's lack of
+alpha costs nothing. On an unowned ground, or anywhere pixels don't
+exist, the figlet logo (byte-identical to the server's boot banner) is
+the rendering, in the same cell band — capability never reflows a screen. The character fallback is fixed-size,
 so it draws only when it fits WHOLE — a cropped QR scans as nothing — and
 otherwise one dim line says what to do: `(make the window taller — or
 press v …)`. The fallback renders NO quiet zone: an inverted code's quiet
