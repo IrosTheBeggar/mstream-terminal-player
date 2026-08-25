@@ -2996,7 +2996,8 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 }
 
 fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
-    let inner = kit::modal_frame(frame, area, 62, 13, th().gold);
+    let inner = kit::modal_frame(frame, area, 62, 15, th().gold);
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::SkipCancel, t!("path_modal.tip_close"));
     let lines = vec![
         Line::from(Span::styled(t!("skip_modal.title").to_string(), Style::default().fg(th().gold).add_modifier(Modifier::BOLD))),
         Line::from(""),
@@ -3009,7 +3010,17 @@ fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(t!("skip_modal.later").to_string(), dim())),
     ];
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // The body clips ABOVE the button row: wrapped lines must never
+    // share cells with the buttons (a longer translation once pushed
+    // "…later from the admin panel." under them, and the 2-cell button
+    // gap exposed the "ro" of "from" as a phantom typo).
+    let body = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: inner.height.saturating_sub(2),
+    };
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body);
     let y = inner.bottom().saturating_sub(1);
     let back = kit::button(
         frame,

@@ -59,8 +59,8 @@ folders:
   tip_continue_disabled: "请先添加一个文件夹"
 
 login:
-  title: "创建账户"
-  subtitle: "该账户管理服务器 — 请妥善保管密码。"
+  title: "创建管理员用户"
+  subtitle: "以后可以添加更多用户"
   field_username: "用户名"
   field_password: "密码"
   field_confirm: "确认密码"

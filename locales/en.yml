@@ -59,8 +59,8 @@ folders:
   tip_continue_disabled: "Add a folder first"
 
 login:
-  title: "Create your login"
-  subtitle: "This account manages the server — keep the password somewhere safe."
+  title: "Create Admin User"
+  subtitle: "You can add more users later"
   field_username: "USERNAME"
   field_password: "PASSWORD"
   field_confirm: "CONFIRM PASSWORD"

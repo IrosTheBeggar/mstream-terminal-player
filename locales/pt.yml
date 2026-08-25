@@ -59,8 +59,8 @@ folders:
   tip_continue_disabled: "Adicione uma pasta primeiro"
 
 login:
-  title: "Crie sua conta"
-  subtitle: "Esta conta administra o servidor — guarde a senha em lugar seguro."
+  title: "Criar usuário administrador"
+  subtitle: "Você pode adicionar mais usuários depois"
   field_username: "USUÁRIO"
   field_password: "SENHA"
   field_confirm: "CONFIRMAR SENHA"

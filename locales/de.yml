@@ -59,8 +59,8 @@ folders:
   tip_continue_disabled: "Zuerst einen Ordner hinzufügen"
 
 login:
-  title: "Zugang erstellen"
-  subtitle: "Dieses Konto verwaltet den Server — Passwort sicher aufbewahren."
+  title: "Admin-Benutzer erstellen"
+  subtitle: "Weitere Benutzer kannst du später hinzufügen"
   field_username: "BENUTZERNAME"
   field_password: "PASSWORT"
   field_confirm: "PASSWORT BESTÄTIGEN"

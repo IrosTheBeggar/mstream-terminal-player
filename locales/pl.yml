@@ -59,8 +59,8 @@ folders:
   tip_continue_disabled: "Najpierw dodaj folder"
 
 login:
-  title: "Utwórz konto"
-  subtitle: "To konto zarządza serwerem — przechowuj hasło w bezpiecznym miejscu."
+  title: "Utwórz użytkownika administratora"
+  subtitle: "Więcej użytkowników dodasz później"
   field_username: "NAZWA UŻYTKOWNIKA"
   field_password: "HASŁO"
   field_confirm: "POTWIERDŹ HASŁO"

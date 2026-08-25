@@ -59,8 +59,8 @@ folders:
   tip_continue_disabled: "まずフォルダーを追加してください"
 
 login:
-  title: "アカウントを作成"
-  subtitle: "このアカウントがサーバーを管理します — パスワードは安全な場所に。"
+  title: "管理者ユーザーを作成"
+  subtitle: "ユーザーは後から追加できます"
   field_username: "ユーザー名"
   field_password: "パスワード"
   field_confirm: "パスワード（確認）"

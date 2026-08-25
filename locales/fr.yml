@@ -59,8 +59,8 @@ folders:
   tip_continue_disabled: "Ajoutez d'abord un dossier"
 
 login:
-  title: "Créez votre compte"
-  subtitle: "Ce compte administre le serveur — gardez le mot de passe en lieu sûr."
+  title: "Créer l'utilisateur admin"
+  subtitle: "Vous pourrez ajouter d'autres utilisateurs plus tard"
   field_username: "UTILISATEUR"
   field_password: "MOT DE PASSE"
   field_confirm: "CONFIRMER LE MOT DE PASSE"
