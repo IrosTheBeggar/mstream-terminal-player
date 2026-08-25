@@ -1339,6 +1339,18 @@ pub(crate) fn sanitize_name(raw: &str) -> String {
     out
 }
 
+/// A path fitted into `width` cells with its TAIL kept — `…` plus the
+/// last `width − 1` characters when it overflows. Returns whether it
+/// clipped, so the caller can hang the full path on a tooltip.
+pub(crate) fn ellipsize_path_start(path: &str, width: usize) -> (String, bool) {
+    let count = path.chars().count();
+    if count <= width || width == 0 {
+        return (path.to_string(), false);
+    }
+    let tail: String = path.chars().skip(count - width.saturating_sub(1)).collect();
+    (format!("…{tail}"), true)
+}
+
 /// The default name for a folder: its basename, sanitized.
 pub(crate) fn derive_name(path: &str) -> String {
     let base = path
@@ -2530,9 +2542,17 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
             Some(_) if !selected => Style::default().fg(th().gold),
             _ => row_bg,
         };
-        frame.render_widget(Paragraph::new(Span::styled(folder.path.clone(), path_style)), path_rect);
-        if let Some(tip) = problem {
-            wizard.ui.tip(path_rect, tip);
+        // Long paths keep their LEAF visible: a leading … and the tail,
+        // fitted to the cell (a path's informative end is its end — the
+        // table rule's trailing … would show ten identical prefixes).
+        // The full path rides the tooltip whenever the cell clipped;
+        // a validation problem still outranks it.
+        let (shown, clipped) = ellipsize_path_start(&folder.path, path_rect.width as usize);
+        frame.render_widget(Paragraph::new(Span::styled(shown, path_style)), path_rect);
+        match problem {
+            Some(tip) => wizard.ui.tip(path_rect, tip),
+            None if clipped => wizard.ui.tip(path_rect, folder.path.clone()),
+            None => {}
         }
         let x_rect = Rect { x: column.x + sel_width + 1, y, width: 3, height: 1 };
         let x_hover = wizard.ui.pointer.is_some_and(|p| x_rect.contains(p));
@@ -3087,6 +3107,20 @@ mod tests {
         assert!(LOGO[2].contains(r"_ \\___ \|"), "m's trailing and S's leading backslash are ADJACENT");
         assert!(LOGO[3].contains(r"| |_| | |  __/"));
         assert!(LOGO[4].contains(r"\__|_|  \___|"));
+    }
+
+    #[test]
+    fn long_paths_keep_their_leaf_and_carry_the_full_path_in_the_tip() {
+        // Fits: untouched, no clip.
+        assert_eq!(ellipsize_path_start("/music", 10), ("/music".to_string(), false));
+        // Overflows: leading …, the tail survives, width is exact.
+        let (shown, clipped) = ellipsize_path_start("/home/anna/Music/Favorites", 12);
+        assert!(clipped);
+        assert_eq!(shown.chars().count(), 12);
+        assert!(shown.starts_with('…'));
+        assert!(shown.ends_with("c/Favorites"), "{shown}");
+        // Degenerate width never panics.
+        assert_eq!(ellipsize_path_start("/x", 0).0, "/x");
     }
 
     #[test]
