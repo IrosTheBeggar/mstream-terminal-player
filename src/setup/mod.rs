@@ -2521,7 +2521,15 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         frame.render_widget(Paragraph::new(Span::styled(name, name_style)), name_rect);
         wizard.ui.click(name_rect, Act::RenameFolder(i));
         if !editing {
-            wizard.ui.tip(name_rect, t!("folders.tip_name"));
+            // The tip tells the truth per row: a committed name cannot
+            // be renamed here (the server has no rename API — only the
+            // admin panel's remove-and-re-add), and promising "click to
+            // rename" on it reads as a broken click.
+            if folder.committed {
+                wizard.ui.tip(name_rect, t!("note.committed_rename"));
+            } else {
+                wizard.ui.tip(name_rect, t!("folders.tip_name"));
+            }
         }
         let path_x = column.x + NAME_W;
         let path_rect =
