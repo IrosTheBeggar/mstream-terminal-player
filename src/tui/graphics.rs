@@ -237,6 +237,18 @@ mod native {
             }
         }
 
+        /// A second `Graphics` on the same probed answer, with its own
+        /// empty cache. The cache holds ONE encoded picture, so two
+        /// surfaces alternating on one instance would re-encode both
+        /// every frame — a fork gives each its own slot.
+        pub fn fork(&self) -> Graphics {
+            Graphics {
+                picker: self.picker.clone(),
+                adaptive: self.adaptive,
+                ..Graphics::disabled()
+            }
+        }
+
         /// A `Graphics` that never draws. What every build that is not the
         /// real binary gets, and what `App` starts with.
         pub fn disabled() -> Graphics {
