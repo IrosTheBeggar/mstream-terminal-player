@@ -1323,17 +1323,17 @@ repo's binaries through a sha-pinned manifest (`bin/mstream-player/
 manifest.json`, currently `v0.3.0`), and that manifest only moves when a
 RELEASE exists — so it's merge, then tag, then integrate.
 
-**9a — Merge PR #10.**
-1. Move the e2e harness INTO the repo (`test/e2e/`): `fake_mstream.py`,
+**9a — Merge PR #10.** (1–3 ✅ 2026-08-25; merge = operator)
+1. ✅ Move the e2e harness INTO the repo (`test/e2e/`): `fake_mstream.py`,
    `replay.py`, `check_scan.py`, and the `.exp` legs (drive en/de,
    reopen, qr ×3, skip, rename, scan, spawn-stub) plus a runner script.
    Today they live only in the session scratchpad — the /tmp reaper
    already ate them once, and CI can't run what isn't committed.
-2. The whole branch was `[skip ci]` by design (fast-loop policy). Before
+2. ✅ (run 32873190145: test ubuntu+windows, wasm, e2e ubuntu+macos all green) The whole branch was `[skip ci]` by design (fast-loop policy). Before
    merging: full local battery (unit + wasm + clippy + every e2e leg),
    then one NON-skip push and watch every CI leg go green — the first
    real CI run this branch gets.
-3. Pre-merge once-over ritual (the Phase C/D precedent): PLAN.md phase
+3. ✅ Pre-merge once-over ritual (the Phase C/D precedent): PLAN.md phase
    statuses, docs/ui-kit.md ↔ canvas ↔ code agreement, kill dead code,
    read the diff top to bottom once.
 4. Merge (operator action). Prefer a merge commit — the branch's commits

@@ -757,18 +757,6 @@ impl Client {
     // exactly the window the setup wizard runs in; once it creates the first
     // user it logs in and keeps going with the token.
 
-    /// Browse the server machine's whole filesystem (admin) — the directory
-    /// picker for library folders. `"~"` starts at the server user's home.
-    pub async fn admin_file_explorer_async(&self, directory: &str) -> Result<DirListing, ApiError> {
-        self.post("api/v1/admin/file-explorer", serde_json::json!({ "directory": directory }))
-            .await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_file_explorer(&self, directory: &str) -> Result<DirListing, ApiError> {
-        wait(self.admin_file_explorer_async(directory))
-    }
-
     /// The library folders the server already has, as vpath name → entry.
     /// BTreeMap so a reopened wizard lists them in a stable order.
     pub async fn admin_directories_async(

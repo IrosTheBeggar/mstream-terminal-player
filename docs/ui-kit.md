@@ -222,7 +222,10 @@ ratatui's `Table`: header row fg DarkGray UPPERCASE over a single `─`
 rule row (no vertical separators, no zebra). The rule spans the FULL
 row — the selection area and any trailing control column ([X]) alike. 1-line rows, 2-cell column
 gaps, text left / numbers right, `—` fg DarkGray for missing values, `…`
-truncation at the cell edge. Keyboard-selected row: bg LightBlue fg
+truncation at the cell edge — except PATHS, which truncate with a
+LEADING `…` so the leaf stays visible (ten identical prefixes say
+nothing), and a clipped path hangs its full text on the row's tooltip
+(validation problems outrank it). Keyboard-selected row: bg LightBlue fg
 Black; hover row fg Cyan. At most one intent-colored cell per row.
 Overflow: `Scrollbar` right edge (track `│` DarkGray, thumb `█`
 LightBlue, `▲▼` endcaps DarkGray), only when rows overflow. Empty
@@ -287,7 +290,11 @@ at full height: title and input hold one spot, the list grows DOWNWARD.
 ### Tooltip
 A dwell of ~500ms on a tip target shows a floating box: a miniature of
 the neutral modal — `Clear` + ground repaint beneath, Rounded border
-DarkGray, 1-cell inline padding, text default fg, wrapped at 40 cells.
+DarkGray, 1-cell inline padding, text default fg, wrapped at 40 cells —
+words wider than the wrap (file paths) hard-break at the character
+level rather than clipping. The kit never caps line count; a caller
+with a policy (the path tip carries at most three lines behind its
+leading `…`) pre-fits its text.
 **Anchored to the TARGET, never the pointer**: centered under the
 target's rect (above it when below would leave the frame), pulled inside
 at the edges — one fixed spot however the pointer roams within the
@@ -311,9 +318,16 @@ space cells) — e2e syncs must match word by word, not the whole phrase.
 ### Status, progress, notes
 One status line above the keyboard tips. Busy: fg LightBlue,
 present-progressive with `…`. Errors: fg Yellow, `<what failed>: <the
-server's words>` — never a bare code. Progress: `▰` Green / `▱` DarkGray
-plus a DarkGray label. All server calls run on the worker thread; the
-busy line must be on screen the frame BEFORE the call.
+server's words>` — never a bare code. All server calls run on the worker
+thread; the busy line must be on screen the frame BEFORE the call.
+
+**The scan widget is THREE lines**: the step (default fg — `Scanning
+media`, `Generating waveforms`, `Library scan complete.`), the bar (ten
+cells, `▰` Green filled / `▱` DarkGray, the percentage beside it in
+DarkGray; all-dim cells when the step carries no estimate — never a fake
+0%), and the DarkGray detail counts (`210 of 300, more queued`). It
+narrates the file scan, then each enrichment pass from
+`/api/v1/scan/status`, and "complete" means everything is idle.
 
 ## Screen chrome
 
@@ -325,6 +339,18 @@ line, LEFT side) · the **gold rule** (`─` × width, fg Yellow — the one
 rule; screens have no top rule) · the **bottom bar** (3 rows): the scan
 widget on the left (empty until a scan is actually running), the screen's
 forward action as a tall primary on the right.
+
+**The Done page owns its frame**: no horizontal gold rule, no bottom
+bar — a full-height VERTICAL gold rule divides its two left-anchored
+columns, the note and key hints sit at the bottom edge, and the scan
+widget lives in the right column. Every other screen keeps the full
+chrome.
+
+**Toggle cards wear their state** (the extras screen): border Green when
+the toggle is on, ACCENT blue when off; the keyboard cursor turns the
+border DarkGray — the one grey card in a colored column — and hover
+brightens to Cyan as everywhere. The `[✓]`/`[ ]` glyph keeps carrying
+the state under cursor and hover.
 
 **Standalone pages.** A wizard screen may double as its own command — the
 Done screen is also `mstream-player qr`. Standalone, it sheds the wizard
