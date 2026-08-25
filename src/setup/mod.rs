@@ -251,11 +251,15 @@ enum Act {
     BrowseCancel,
     PathSuggest(usize),
     OpenPlayer,
-    /// The Quick Connect code as a real image in the OS viewer — the one
-    /// crisp QR a pixel-less terminal can offer.
-    ViewPicture,
+    /// The store pages for the mobile apps — what the QR is scanned WITH.
+    OpenAppStore,
+    OpenPlayStore,
     Finish,
 }
+
+/// The published store pages, verbatim from the webapp's own links.
+const APP_STORE_URL: &str = "https://apps.apple.com/us/app/mstream-player/id1605378892";
+const PLAY_STORE_URL: &str = "https://play.google.com/store/apps/details?id=mstream.music";
 
 /// A server call queued from input handling and run right after the next
 /// draw, so its "working…" note is actually visible while it blocks.
@@ -731,22 +735,31 @@ impl Wizard {
             Act::BrowseCancel => self.modal = Modal::None,
             Act::PathSuggest(i) => self.accept_suggestion(i),
             Act::OpenPlayer => return Some(Outcome::OpenPlayer),
-            Act::ViewPicture => {
-                if let Some(art) = &self.qr_art {
-                    self.note = Some(match write_qr_picture(art) {
-                        Ok(path) if open_picture(&path) => {
-                            ("the code is open in your image viewer".to_string(), false)
-                        }
-                        // No opener (headless, or the test seam): the path
-                        // is the deliverable.
-                        Ok(path) => (format!("picture saved to {}", path.display()), false),
-                        Err(e) => (format!("could not write the picture: {e}"), true),
-                    });
-                }
-            }
+            Act::OpenAppStore => self.open_link("App Store", APP_STORE_URL),
+            Act::OpenPlayStore => self.open_link("Google Play", PLAY_STORE_URL),
             Act::Finish => return Some(Outcome::Quit),
         }
         None
+    }
+
+    /// Whether the Done page lays out as two columns: only when the code
+    /// draws as pixels (which scale to half the width), never for the
+    /// fixed-size half-block fallback. The bar's scan line yields to the
+    /// right column exactly when this holds. No ground-ownership gate:
+    /// unlike the logo, the code's picture carries its own white quiet
+    /// zone and is correct on any background.
+    fn done_two_column(&self) -> bool {
+        self.qr.is_some() && self.qr_art.is_some() && self.graphics.protocol().is_some()
+    }
+
+    /// Open a store page in the browser; headless (or under the test
+    /// seam), the note carries the URL so it can be copied instead.
+    fn open_link(&mut self, label: &str, url: &str) {
+        self.note = Some(if open_url(url) {
+            (format!("{label} is open in your browser"), false)
+        } else {
+            (format!("{label}: {url}"), false)
+        });
     }
 
     /// Queue a listing for the dir-part of the draft, if it changed.
@@ -1385,32 +1398,24 @@ fn qr_lines(data: &str) -> Option<Vec<String>> {
     Some(rendered.lines().map(str::to_string).collect())
 }
 
-/// Write the code's PNG where an image viewer can have it. The picture is
-/// the one crisp, scannable QR a pixel-less terminal can offer — Apple's
-/// Terminal draws no protocol at all (probed; see tui::graphics).
-fn write_qr_picture(art: &crate::tui::art::Art) -> Result<std::path::PathBuf, String> {
-    let path = std::env::temp_dir().join("mstream-quick-connect.png");
-    std::fs::write(&path, art.source()).map_err(|e| e.to_string())?;
-    Ok(path)
-}
-
-/// Hand a file to the OS's opener, detached. `MSTREAM_NO_OPEN` is the test
-/// seam — harnesses assert the written file instead of popping viewers.
-/// Returns whether an opener was actually launched.
-fn open_picture(path: &std::path::Path) -> bool {
+/// Hand a URL to the OS's opener, detached. `MSTREAM_NO_OPEN` is the test
+/// seam — harnesses assert the note instead of popping browsers. Returns
+/// whether an opener was actually launched; headless callers put the URL
+/// itself in the note so it can be copied over SSH.
+fn open_url(url: &str) -> bool {
     if std::env::var("MSTREAM_NO_OPEN").is_ok_and(|v| !v.is_empty() && v != "0") {
         return false;
     }
     #[cfg(target_os = "macos")]
-    let launched = std::process::Command::new("open").arg(path).spawn().is_ok();
+    let launched = std::process::Command::new("open").arg(url).spawn().is_ok();
     #[cfg(target_os = "windows")]
     let launched = std::process::Command::new("cmd")
         .args(["/c", "start", ""])
-        .arg(path)
+        .arg(url)
         .spawn()
         .is_ok();
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let launched = std::process::Command::new("xdg-open").arg(path).spawn().is_ok();
+    let launched = std::process::Command::new("xdg-open").arg(url).spawn().is_ok();
     launched
 }
 
@@ -1888,7 +1893,8 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
         },
         Screen::Done => match code {
             KeyCode::Enter | KeyCode::Char('o') => wizard.act(Act::OpenPlayer),
-            KeyCode::Char('v') => wizard.act(Act::ViewPicture),
+            KeyCode::Char('a') => wizard.act(Act::OpenAppStore),
+            KeyCode::Char('g') => wizard.act(Act::OpenPlayStore),
             KeyCode::Char('f') | KeyCode::Char('q') | KeyCode::Esc => wizard.act(Act::Finish),
             _ => None,
         },
@@ -1983,7 +1989,10 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         rule,
     );
     let bar = Rect { x: 2, y: area.height.saturating_sub(3), width: area.width - 4, height: 3 };
-    if !wizard.progress.is_empty() {
+    // The two-column Done page carries the scan status in its right
+    // column; every other screen (and the stacked Done) keeps it here.
+    let status_in_column = wizard.screen == Screen::Done && wizard.done_two_column();
+    if !wizard.progress.is_empty() && !status_in_column {
         frame.render_widget(
             Paragraph::new(Span::styled(wizard.progress.clone(), Style::default().fg(th().ok))),
             Rect { x: bar.x, y: bar.y + 1, width: bar.width.saturating_sub(20), height: 1 },
@@ -2088,12 +2097,10 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
             None => "↑ ↓ select · c continue · Esc back",
             Some(_) => "↑ ↓ move · Space toggle · c continue · Esc back",
         },
-        (_, Screen::Done) => match (wizard.standalone, wizard.qr_art.is_some()) {
-            (true, true) => "Enter open the player · v picture · Esc close",
-            (true, false) => "Enter open the player · Esc close",
-            (false, true) => "Enter open the player · v picture · f finish",
-            (false, false) => "Enter open the player · f finish",
-        },
+        (_, Screen::Done) if wizard.standalone => {
+            "Enter open the player · a App Store · g Google Play · Esc close"
+        }
+        (_, Screen::Done) => "Enter open the player · a App Store · g Google Play · f finish",
     }
 }
 
@@ -2467,23 +2474,91 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     );
     y += 2;
 
+    // Two columns when the code draws as pixels (it scales to its box, so
+    // it fits half the width at any window). The fixed-size half-block
+    // fallback keeps the stacked layout below — it simply cannot fit a
+    // half column.
+    if wizard.done_two_column() {
+        let gap = 2;
+        let half = column.width.saturating_sub(gap) / 2;
+        let height = column.height.saturating_sub(y - column.y);
+        let left = Rect { x: column.x, y, width: half, height };
+        let right =
+            Rect { x: column.x + half + gap, y, width: column.width - half - gap, height };
+
+        // LEFT: the code, and under it the apps that scan it.
+        let band = Rect {
+            x: left.x,
+            y: left.y,
+            width: left.width,
+            height: left.height.saturating_sub(4).min(18),
+        };
+        if let Some(art) = &wizard.qr_art {
+            wizard.graphics.draw(frame, band, art);
+        }
+        let mut ly = band.bottom() + 1;
+        frame.render_widget(
+            Paragraph::new(Span::styled("Get the app:", dim())),
+            Rect { x: left.x, y: ly, width: left.width, height: 1 },
+        );
+        ly += 1;
+        for (label, act, tip) in [
+            ("▸ App Store", Act::OpenAppStore, "Open in your browser — a"),
+            ("▸ Google Play", Act::OpenPlayStore, "Open in your browser — g"),
+        ] {
+            let rect =
+                Rect { x: left.x + 2, y: ly, width: label.chars().count() as u16, height: 1 };
+            link(frame, wizard, rect, label, act, tip);
+            ly += 1;
+        }
+
+        // RIGHT: what the code is for, the scan's state, the way onward.
+        let mut ry = right.y + 1;
+        frame.render_widget(
+            Paragraph::new(Span::styled(wizard.qr_note.clone(), Style::default()))
+                .wrap(Wrap { trim: true }),
+            Rect { x: right.x, y: ry, width: right.width, height: 3 },
+        );
+        ry += 4;
+        if !wizard.progress.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    wizard.progress.clone(),
+                    Style::default().fg(th().ok),
+                ))
+                .wrap(Wrap { trim: true }),
+                Rect { x: right.x, y: ry, width: right.width, height: 2 },
+            );
+        }
+        ry += 3;
+        let open = kit::tall_button(
+            frame,
+            &mut wizard.ui,
+            Rect { x: right.x, y: ry, width: right.width, height: 3 },
+            "Open the Player ▸",
+            true,
+            Act::OpenPlayer,
+        );
+        kit::button(
+            frame,
+            &mut wizard.ui,
+            Rect { x: open.right() + 2, y: ry + 1, width: right.width, height: 1 },
+            if wizard.standalone { "Close" } else { "Finish" },
+            false,
+            Act::Finish,
+        );
+        return;
+    }
+
     if let Some(qr) = wizard.qr.clone() {
         let rows = qr.len() as u16;
         // The code gets whatever height the chrome below it does not
-        // need: a blank, the note (2 rows), and the button block (3).
-        let avail = column.height.saturating_sub(y - column.y).saturating_sub(6);
-        let band = Rect { x: column.x, y, width: column.width, height: rows.min(avail) };
-        // The picture path scales to fit the band, so it survives any
-        // window; the half-block fallback is fixed-size — drawn only
-        // when whole (a cropped QR scans as nothing), and otherwise
-        // replaced by the one honest line.
-        let drew = match &wizard.qr_art {
-            Some(art) => wizard.graphics.draw(frame, band, art),
-            None => false,
-        };
-        if drew {
-            y += band.height + 1;
-        } else if rows <= avail {
+        // need: a blank, the note (2), the links line (2), buttons (3).
+        let avail = column.height.saturating_sub(y - column.y).saturating_sub(8);
+        // The half-block code is fixed-size — drawn only when it fits
+        // WHOLE (a cropped QR scans as nothing), and otherwise replaced
+        // by the one honest line.
+        if rows <= avail {
             let qr_width = qr.first().map(|l| l.chars().count()).unwrap_or(0) as u16;
             let x = column.x + (column.width.saturating_sub(qr_width)) / 2;
             for line in &qr {
@@ -2497,7 +2572,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         } else {
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "(make the window taller — or press v for the code as a picture)",
+                    "(make the window taller to show the QR code here)",
                     dim(),
                 ))
                 .alignment(Alignment::Center),
@@ -2514,6 +2589,19 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     );
     y += 2;
 
+    // The store links as one centered line, each half its own link.
+    let apps = "Get the app:  ▸ App Store   ▸ Google Play";
+    let start = column.x + column.width.saturating_sub(apps.chars().count() as u16) / 2;
+    frame.render_widget(
+        Paragraph::new(Span::styled("Get the app:", dim())),
+        Rect { x: start, y, width: 12, height: 1 },
+    );
+    let a = Rect { x: start + 14, y, width: 11, height: 1 };
+    link(frame, wizard, a, "▸ App Store", Act::OpenAppStore, "Open in your browser — a");
+    let g = Rect { x: a.right() + 3, y, width: 13, height: 1 };
+    link(frame, wizard, g, "▸ Google Play", Act::OpenPlayStore, "Open in your browser — g");
+    y += 2;
+
     let open = kit::tall_button(
         frame,
         &mut wizard.ui,
@@ -2522,7 +2610,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         true,
         Act::OpenPlayer,
     );
-    let finish = kit::button(
+    kit::button(
         frame,
         &mut wizard.ui,
         Rect { x: open.right() + 2, y: y + 1, width: column.width, height: 1 },
@@ -2530,17 +2618,30 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         false,
         Act::Finish,
     );
-    if wizard.qr_art.is_some() {
-        let view = kit::button(
-            frame,
-            &mut wizard.ui,
-            Rect { x: finish.right() + 2, y: y + 1, width: column.width, height: 1 },
-            "View as a picture",
-            false,
-            Act::ViewPicture,
-        );
-        wizard.ui.tip(view, "Open the code in your image viewer — v");
-    }
+}
+
+/// A hyperlink: accent text that underlines its affordance, brightens on
+/// hover, and opens in the browser on click (or its key — the tip says
+/// which).
+fn link(
+    frame: &mut Frame,
+    wizard: &mut Wizard,
+    rect: Rect,
+    label: &str,
+    act: Act,
+    tip: &'static str,
+) {
+    let hovered = wizard.ui.pointer.is_some_and(|p| rect.contains(p));
+    let color = if hovered { th().bright } else { th().accent };
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            label.to_string(),
+            Style::default().fg(color).add_modifier(Modifier::UNDERLINED),
+        )),
+        rect,
+    );
+    wizard.ui.click(rect, act);
+    wizard.ui.tip(rect, tip);
 }
 
 fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
@@ -2849,16 +2950,19 @@ mod tests {
         assert!(wizard.qr.is_some());
         assert!(wizard.qr_art.is_some(), "the picture rides along with the half-blocks");
         assert_eq!(wizard.queued, None, "no scan-progress polling outside the wizard");
-        assert_eq!(footer_hint(&wizard), "Enter open the player · v picture · Esc close");
-        // v writes the PNG; the note carries the path (the test seam
-        // keeps the viewer closed).
+        assert_eq!(
+            footer_hint(&wizard),
+            "Enter open the player · a App Store · g Google Play · Esc close"
+        );
+        // The store links answer to their keys; under the test seam the
+        // note carries the URL instead of popping a browser.
         unsafe { std::env::set_var("MSTREAM_NO_OPEN", "1") };
-        handle_key(&mut wizard, KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        handle_key(&mut wizard, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         let note = wizard.note.clone().expect("a note").0;
-        assert!(note.starts_with("picture saved to "), "{note}");
-        let path = note.trim_start_matches("picture saved to ");
-        let png = std::fs::read(path).expect("the picture exists");
-        assert!(png.starts_with(b"\x89PNG"), "and is a PNG");
+        assert!(note.contains("apps.apple.com"), "{note}");
+        handle_key(&mut wizard, KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        let note = wizard.note.clone().expect("a note").0;
+        assert!(note.contains("play.google.com"), "{note}");
         // Esc closes the page (and the wizard's Done screen alike).
         let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         assert!(matches!(handle_key(&mut wizard, key), Some(Outcome::Quit)));
