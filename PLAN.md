@@ -1295,6 +1295,17 @@ with slowed development.
   player path + args>`, `title = mStream`, `window-width/height`,
   `confirm-close-surface = false`, and `auto-update = off` so the version stays ours (two
   config files if Setup and Player want different commands).
+- **Dock icon = the mStream logo, also config-only** (proven live 2026-08-25 on the pristine
+  signed app): `macos-icon = custom` + `macos-custom-icon = <abs path to our .icns>` sets
+  NSApplication.icon at runtime — Dock and app switcher show the mStream mark, no bundle
+  surgery, both notarization seals untouched. Ghostty's own caveats, both moot for us: the
+  Finder icon of Ghostty.app stays the ghost (hardcoded in the signed bundle — ours is
+  buried in `console/`, nobody browses it), and the Sparkle update dialog would show the
+  ghost (`auto-update = off` means it never appears). The menu-bar NAME still reads
+  "Ghostty"; if full naming ever matters, the rebrand tier (icns + CFBundleName + new
+  bundle id + re-sign with our Developer ID, MIT-permitted) was also demoed working —
+  note the icns swap alone is NOT enough, `CFBundleIconName`/Assets.car and the runtime
+  icon setting both override it, which is exactly why the config route wins.
 - Accepted first-run noise: macOS shows a one-time "Dock Tile Extension Added" notice for
   Ghostty's dock-tile plugin. Not removable without modifying their bundle; the escalation
   (strip + re-sign under our own identity, MIT permits) is documented, not v1.
