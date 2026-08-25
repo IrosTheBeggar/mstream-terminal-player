@@ -896,6 +896,20 @@ impl Client {
         wait(self.admin_discovery_enabled_async(enabled))
     }
 
+    /// Toggle federation — the invite system for sharing libraries with
+    /// paired servers.
+    pub async fn admin_federation_enabled_async(
+        &self,
+        enabled: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/federation", serde_json::json!({ "enabled": enabled })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_enabled(&self, enabled: bool) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_enabled_async(enabled))
+    }
+
     /// Quick Connect state + pairing ticket (admin).
     pub async fn admin_iroh_async(&self) -> Result<IrohStatus, ApiError> {
         self.get("api/v1/admin/iroh").await

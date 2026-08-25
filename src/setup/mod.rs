@@ -492,9 +492,10 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Job)>, Receiver<Done>) {
                     let mut error = None;
                     for (i, label, on) in batch {
                         let result = match i {
-                            0 => client.admin_update_mode(if on { "stage" } else { "notify" }).map(|_| ()),
-                            1 => client.admin_auto_boot_audio(on).map(|_| ()),
-                            2 => client.admin_discovery_enabled(on).map(|_| ()),
+                            0 => client.admin_update_mode(if on { "auto" } else { "notify" }).map(|_| ()),
+                            1 => client.admin_discovery_enabled(on).map(|_| ()),
+                            2 => client.admin_federation_enabled(on).map(|_| ()),
+                            3 => client.admin_auto_boot_audio(on).map(|_| ()),
                             _ => Ok(()),
                         };
                         match result {
@@ -547,13 +548,13 @@ pub(crate) struct Wizard {
     pub public: bool,
 
     /// Extras toggles: automatic updates (on), server audio, discovery.
-    pub extras: [bool; 3],
+    pub extras: [bool; 4],
     /// The KEYBOARD cursor over the opt-in cards — `None` until ↑/↓.
     pub extras_sel: Option<usize>,
     /// Which extras already reached the server (a failed batch retries the
     /// rest, and toggling one off after a failure just drops it).
     /// The value last APPLIED per extra — re-continue sends changes only.
-    extras_done: [Option<bool>; 3],
+    extras_done: [Option<bool>; 4],
 
     /// Quick Connect ticket, rendered; None while loading or when off.
     pub qr: Option<Vec<String>>,
@@ -621,9 +622,9 @@ impl Wizard {
             confirm: Input::default(),
             field: LoginField::Username,
             public: false,
-            extras: [true, false, false],
+            extras: [true, false, false, false],
             extras_sel: None,
-            extras_done: [None; 3],
+            extras_done: [None; 4],
             qr: None,
             qr_art: None,
             graphics: crate::tui::graphics::Graphics::disabled(),
@@ -1090,7 +1091,7 @@ impl Wizard {
                 vpaths: self.folders.iter().map(|f| f.name.clone()).collect(),
             },
             Op::CommitExtras => Job::Extras(
-                [(0usize, "updates"), (1, "server audio"), (2, "discovery")]
+                [(0usize, "updates"), (1, "discovery"), (2, "federation"), (3, "server audio")]
                     .into_iter()
                     .filter(|(i, _)| self.extras_done[*i] != Some(self.extras[*i]))
                     .map(|(i, label)| (i, label, self.extras[i]))
@@ -1256,6 +1257,7 @@ impl Wizard {
                         let label = match label {
                             l if l == "updates" => t!("extras_label.updates").to_string(),
                             l if l == "server audio" => t!("extras_label.audio").to_string(),
+                            l if l == "federation" => t!("extras_label.federation").to_string(),
                             _ => t!("extras_label.discovery").to_string(),
                         };
                         self.fail(&t!("note.extras_failed", label = label), e)
@@ -2803,16 +2805,32 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     );
     y += 2;
 
-    let rows: [(String, String); 3] = [
+    let rows: [(String, String); 4] = [
         (t!("extras.updates_label").to_string(), t!("extras.updates_desc").to_string()),
-        (t!("extras.audio_label").to_string(), t!("extras.audio_desc").to_string()),
         (t!("extras.discovery_label").to_string(), t!("extras.discovery_desc").to_string()),
+        (t!("extras.federation_label").to_string(), t!("extras.federation_desc").to_string()),
+        (t!("extras.audio_label").to_string(), t!("extras.audio_desc").to_string()),
     ];
     for (i, (label, desc)) in rows.into_iter().enumerate() {
         let selected = wizard.extras_sel == Some(i);
         let rect = Rect { x: column.x, y, width: column.width, height: 4 };
         let hovered = wizard.ui.pointer.is_some_and(|p| rect.contains(p));
-        let inner = card(frame, rect, selected, hovered);
+        // The border wears the TOGGLE: green when the extra is on, the
+        // accent blue when it is off. Hover and the keyboard cursor
+        // brighten over either, the kit's usual affordance.
+        let border = if hovered || selected {
+            th().bright
+        } else if wizard.extras[i] {
+            th().ok
+        } else {
+            th().accent
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(border));
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
         wizard.ui.click(rect, Act::Toggle(i));
         let box_span = if wizard.extras[i] {
             Span::styled("[✓] ", Style::default().fg(th().ok))
