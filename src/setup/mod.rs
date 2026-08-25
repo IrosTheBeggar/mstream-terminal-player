@@ -2816,10 +2816,13 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         let rect = Rect { x: column.x, y, width: column.width, height: 4 };
         let hovered = wizard.ui.pointer.is_some_and(|p| rect.contains(p));
         // The border wears the TOGGLE: green when the extra is on, the
-        // accent blue when it is off. Hover and the keyboard cursor
-        // brighten over either, the kit's usual affordance.
-        let border = if hovered || selected {
+        // accent blue when it is off. The keyboard cursor goes GREY —
+        // the one grey card in a colored column reads instantly, where
+        // cyan-on-blue barely registered. Hover keeps the kit brighten.
+        let border = if hovered {
             th().bright
+        } else if selected {
+            th().dim
         } else if wizard.extras[i] {
             th().ok
         } else {
