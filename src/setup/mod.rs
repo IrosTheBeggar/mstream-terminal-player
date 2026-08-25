@@ -233,6 +233,7 @@ enum Act {
     Focus(LoginField),
     CreateAdmin,
     BackToFolders,
+    BackToLogin,
     SkipLogin,
     SkipConfirm,
     SkipCancel,
@@ -406,7 +407,10 @@ pub(crate) struct Wizard {
 
     /// Extras toggles: automatic updates (on), server audio, discovery.
     pub extras: [bool; 3],
-    pub extras_sel: usize,
+    /// The KEYBOARD cursor over the opt-in cards — `None` until ↑/↓.
+    pub extras_sel: Option<usize>,
+    /// The first admin exists — Back to the login screen is a trap now.
+    pub admin_created: bool,
     /// Which extras already reached the server (a failed batch retries the
     /// rest, and toggling one off after a failure just drops it).
     extras_done: [bool; 3],
@@ -452,7 +456,8 @@ impl Wizard {
             field: LoginField::Username,
             public: false,
             extras: [true, false, false],
-            extras_sel: 0,
+            extras_sel: None,
+            admin_created: false,
             extras_done: [false; 3],
             qr: None,
             qr_note: String::new(),
@@ -610,8 +615,11 @@ impl Wizard {
             Act::Toggle(i) => {
                 if let Some(on) = self.extras.get_mut(i) {
                     *on = !*on;
-                    self.extras_sel = i;
                 }
+            }
+            Act::BackToLogin => {
+                self.screen = Screen::Login;
+                self.note = None;
             }
             Act::ContinueExtras => self.queue(Op::CommitExtras, "saving your choices…"),
             Act::TableScroll(delta) => {
@@ -981,6 +989,8 @@ impl Wizard {
                 }
             }
             Done::AdminCreated(Ok(token)) => {
+                self.admin_created = true;
+                self.public = false;
                 // Creating the first user closed the open-admin window; swap
                 // in a token-carrying client so the rest of the wizard (and
                 // any job the worker gets from now on) stays authorized.
@@ -1678,14 +1688,21 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
         },
         Screen::Extras => match code {
             KeyCode::Up => {
-                wizard.extras_sel = wizard.extras_sel.saturating_sub(1);
+                let n = wizard.extras.len();
+                wizard.extras_sel =
+                    Some(wizard.extras_sel.map_or(n - 1, |s| s.saturating_sub(1)));
                 None
             }
             KeyCode::Down => {
-                wizard.extras_sel = (wizard.extras_sel + 1).min(wizard.extras.len() - 1);
+                let n = wizard.extras.len();
+                wizard.extras_sel = Some(wizard.extras_sel.map_or(0, |s| (s + 1).min(n - 1)));
                 None
             }
-            KeyCode::Char(' ') | KeyCode::Enter => wizard.act(Act::Toggle(wizard.extras_sel)),
+            KeyCode::Char(' ') | KeyCode::Enter => match wizard.extras_sel {
+                Some(i) => wizard.act(Act::Toggle(i)),
+                None => None,
+            },
+            KeyCode::Esc => wizard.act(Act::BackToLogin),
             KeyCode::Char('c') => wizard.act(Act::ContinueExtras),
             KeyCode::Char('q') => Some(Outcome::Quit),
             _ => None,
@@ -1807,6 +1824,40 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
             wizard.ui.tip(rect, "Add a folder first");
         }
     }
+    if wizard.screen == Screen::Extras {
+        let label = "Continue ▸";
+        let x = bar.right().saturating_sub(label.chars().count() as u16 + 6);
+        let rect = kit::tall_button(
+            frame,
+            &mut wizard.ui,
+            Rect { x, y: bar.y, width: bar.width, height: 3 },
+            label,
+            true,
+            Act::ContinueExtras,
+        );
+        if wizard.admin_created {
+            let back_x = rect.x.saturating_sub("Back".chars().count() as u16 + 6 + 2);
+            let back = kit::tall_button(
+                frame,
+                &mut wizard.ui,
+                Rect { x: back_x, y: bar.y, width: bar.width, height: 3 },
+                "Back",
+                false,
+                Act::BackToLogin,
+            );
+            wizard.ui.tip(back, "The admin is created — manage accounts in the admin panel");
+        } else {
+            let back_x = rect.x.saturating_sub("◂ Back".chars().count() as u16 + 6 + 2);
+            let back = kit::tall_secondary(
+                frame,
+                &mut wizard.ui,
+                Rect { x: back_x, y: bar.y, width: bar.width, height: 3 },
+                "◂ Back",
+                Act::BackToLogin,
+            );
+            wizard.ui.tip(back, "Back to create the admin login");
+        }
+    }
     if wizard.screen == Screen::Login {
         let label = "Create Admin ▸";
         let x = bar.right().saturating_sub(label.chars().count() as u16 + 6);
@@ -1863,13 +1914,22 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
             }
         },
         (_, Screen::Login) => "Tab next field · Enter create · Esc back · Ctrl+S skip",
-        (_, Screen::Extras) => "Space toggle · c continue",
+        (_, Screen::Extras) => match wizard.extras_sel {
+            None => "↑ ↓ select · c continue · Esc back",
+            Some(_) => "↑ ↓ move · Space toggle · c continue · Esc back",
+        },
         (_, Screen::Done) => "Enter open the player · f finish",
     }
 }
 
-fn card(frame: &mut Frame, at: Rect, focused: bool) -> Rect {
-    let style = if focused { accent() } else { dim() };
+fn card(frame: &mut Frame, at: Rect, focused: bool, hovered: bool) -> Rect {
+    let style = if hovered {
+        Style::default().fg(th().bright)
+    } else if focused {
+        accent()
+    } else {
+        dim()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -2084,7 +2144,8 @@ fn field_row(
         Rect { x, y, width, height: 1 },
     );
     let rect = Rect { x, y: y + 1, width, height: 3 };
-    let inner = card(frame, rect, focused);
+    let hovered = wizard.ui.pointer.is_some_and(|p| rect.contains(p));
+    let inner = card(frame, rect, focused, hovered);
     let _ = focused; // the caller renders the caret via input_display
     frame.render_widget(Paragraph::new(Span::raw(value)), inner);
     wizard.ui.click(rect, Act::Focus(field));
@@ -2163,12 +2224,13 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         ("Discovery network", "find and share libraries with other mStream servers, peer to peer"),
     ];
     for (i, (label, desc)) in rows.iter().enumerate() {
-        let selected = i == wizard.extras_sel;
+        let selected = wizard.extras_sel == Some(i);
         let rect = Rect { x: column.x, y, width: column.width, height: 4 };
-        let inner = card(frame, rect, selected);
+        let hovered = wizard.ui.pointer.is_some_and(|p| rect.contains(p));
+        let inner = card(frame, rect, selected, hovered);
         wizard.ui.click(rect, Act::Toggle(i));
         let box_span = if wizard.extras[i] {
-            Span::styled("[x] ", Style::default().fg(th().ok))
+            Span::styled("[✓] ", Style::default().fg(th().ok))
         } else {
             Span::styled("[ ] ", dim())
         };
@@ -2182,11 +2244,6 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         );
         y += 4;
     }
-    y += 1;
-
-    let label = "Continue ▸";
-    let x = column.right().saturating_sub(label.chars().count() as u16 + 6);
-    kit::tall_button(frame, &mut wizard.ui, Rect { x, y, width: column.width, height: 3 }, label, true, Act::ContinueExtras);
 }
 
 fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
@@ -2748,6 +2805,35 @@ mod tests {
         let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
         let said = draft.error.as_deref().expect("the failure must be visible");
         assert!(said.contains("/music/") && said.contains("no route to host"));
+    }
+
+    #[test]
+    fn extras_cursor_is_keyboard_only_and_creating_the_admin_locks_back() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.screen = Screen::Extras;
+        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        // Click-toggle never selects; Space without a cursor is a no-op.
+        wizard.act(Act::Toggle(1));
+        assert!(wizard.extras[1] && wizard.extras_sel.is_none());
+        handle_key(&mut wizard, key(KeyCode::Char(' ')));
+        assert!(wizard.extras[1]);
+        // Arrows pick the cursor up; Space toggles under it.
+        handle_key(&mut wizard, key(KeyCode::Down));
+        assert_eq!(wizard.extras_sel, Some(0));
+        handle_key(&mut wizard, key(KeyCode::Char(' ')));
+        assert!(!wizard.extras[0], "the default-on updates card toggled off");
+        // Esc walks back to the login screen.
+        handle_key(&mut wizard, key(KeyCode::Esc));
+        assert_eq!(wizard.screen, Screen::Login);
+        // Skip goes public; creating the admin later reverses that and
+        // locks Back (an account now exists).
+        wizard.act(Act::SkipLogin);
+        wizard.act(Act::SkipConfirm);
+        assert!(wizard.public);
+        wizard.apply(Done::AdminCreated(Ok("tok".to_string())));
+        assert!(wizard.admin_created, "creation locks the back path");
+        assert!(!wizard.public, "an account ends public mode");
     }
 
     #[test]

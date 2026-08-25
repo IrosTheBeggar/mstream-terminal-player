@@ -151,7 +151,8 @@ border DarkGray; focused border LightBlue with the `▏` caret after the
 value (Cyan is reserved for hover and the active rename chip). Secrets
 render as `•` repeat (the mask maps 1:1, so the cursor shows truly).
 Fields run on the SAME line editor as the path field. Click focuses;
-Tab/↓ cycle fields (the editor never sees them).
+the card hovers (border → Cyan) before it focuses; Tab/↓ cycle fields
+(the editor never sees them).
 The name chip brightens under the pointer like every clickable —
 hover fg Cyan + BOLD (a selected row keeps its bg; only the fg
 brightens). Inline chip edits run on the SAME line editor as the path
@@ -203,8 +204,10 @@ standard — ratatui cells cannot carry them.
 
 ### Checkbox / opt-in row
 4-row card: `[✓]` fg Green / `[ ]` fg DarkGray · label BOLD ·
-description fg DarkGray indented 4 cells. Selected card border LightBlue.
-Space/Enter/click toggles. No tri-state.
+description fg DarkGray indented 4 cells. The card hovers like every
+clickable (border → Cyan); the LightBlue border marks the KEYBOARD
+cursor only — ↑/↓ pick it up, click toggles without selecting, Space
+and Enter toggle under the cursor. No tri-state.
 
 ### Radio group
 One card per group, DarkGray UPPERCASE group label, one row per option:
