@@ -426,8 +426,21 @@ pub(crate) struct Wizard {
 
     /// Quick Connect ticket, rendered; None while loading or when off.
     pub qr: Option<Vec<String>>,
+    /// The same ticket as a real picture, for terminals that draw pixels.
+    /// Built alongside `qr` — drawing tries this first and falls back to
+    /// the half-block lines, which occupy the identical cell band.
+    qr_art: Option<crate::tui::art::Art>,
+    /// The terminal's pixel-protocol answer, probed once at startup by the
+    /// same machinery that draws the player's covers. Disabled everywhere
+    /// a real terminal didn't answer — tests, pipes, expect harnesses.
+    graphics: crate::tui::graphics::Graphics,
     pub qr_note: String,
     pub progress: String,
+
+    /// The Done screen doubles as the `mstream-player qr` page. Standalone
+    /// it drops the wizard chrome: no step counter, no scan-progress
+    /// polling, a "Quick Connect" heading, and Close instead of Finish.
+    standalone: bool,
 
     /// One line of status under the card: (text, is_error).
     pub note: Option<(String, bool)>,
@@ -468,8 +481,11 @@ impl Wizard {
             extras_sel: None,
             extras_done: [None; 3],
             qr: None,
+            qr_art: None,
+            graphics: crate::tui::graphics::Graphics::disabled(),
             qr_note: String::new(),
             progress: String::new(),
+            standalone: false,
             note: None,
             busy: None,
             queued: None,
@@ -1057,6 +1073,7 @@ impl Wizard {
                         Some(ticket) if status.enabled => match qr_lines(ticket) {
                             Some(lines) => {
                                 self.qr = Some(lines);
+                                self.qr_art = qr_art(ticket);
                                 self.qr_note =
                                     "Scan with the mStream app to connect from anywhere — no port forwarding.".to_string();
                             }
@@ -1076,7 +1093,11 @@ impl Wizard {
                     },
                     Err(e) => self.fail("could not read Quick Connect state", e),
                 }
-                self.queue(Op::PollProgress, "");
+                // Scan progress is wizard chrome — the standalone QR page
+                // has no scan of its own to narrate.
+                if !self.standalone {
+                    self.queue(Op::PollProgress, "");
+                }
             }
             Done::Progress(rows) => {
                 self.last_poll = Instant::now();
@@ -1298,6 +1319,35 @@ pub(crate) fn common_prefix(items: &[String]) -> String {
     first.chars().take(len).collect()
 }
 
+/// The pairing ticket as a real picture — black modules on their own white
+/// quiet zone, PNG-encoded so [`tui::graphics`] can draw it through
+/// whatever pixel protocol the terminal answered. Rendered generously
+/// (8 px a module) so the protocol only ever scales it down.
+fn qr_art(data: &str) -> Option<crate::tui::art::Art> {
+    const SCALE: u32 = 8;
+    const QUIET: u32 = 4; // modules of quiet zone each side, per the QR spec
+    let code = qrcode::QrCode::new(data.as_bytes()).ok()?;
+    let modules = code.width() as u32;
+    let side = (modules + QUIET * 2) * SCALE;
+    let mut img = image::GrayImage::from_pixel(side, side, image::Luma([255u8]));
+    for (i, color) in code.to_colors().iter().enumerate() {
+        if *color == qrcode::Color::Dark {
+            let mx = (i as u32 % modules + QUIET) * SCALE;
+            let my = (i as u32 / modules + QUIET) * SCALE;
+            for dy in 0..SCALE {
+                for dx in 0..SCALE {
+                    img.put_pixel(mx + dx, my + dy, image::Luma([0u8]));
+                }
+            }
+        }
+    }
+    let mut png = Vec::new();
+    image::DynamicImage::ImageLuma8(img)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    crate::tui::art::decode(&png)
+}
+
 /// The pairing ticket as unicode half-blocks, light-on-dark so it scans off
 /// a dark terminal.
 fn qr_lines(data: &str) -> Option<Vec<String>> {
@@ -1332,7 +1382,40 @@ pub fn run(args: SetupArgs) -> i32 {
 
     let mut wizard = Wizard::new(client);
     wizard.queue(Op::Ping, "reaching the server…");
+    run_tui(wizard)
+}
 
+#[derive(Args)]
+pub struct QrArgs {
+    /// The server to ask — defaults to the saved session's server
+    #[arg(long)]
+    server: Option<String>,
+
+    /// Auth token override (default: the saved session's token)
+    #[arg(long, hide = true)]
+    token: Option<String>,
+}
+
+/// The Done screen alone, as its own command: the Quick Connect QR for
+/// whenever someone wants to point a phone at it again.
+pub fn run_qr(args: QrArgs) -> i32 {
+    let client = match Client::resolve(args.server.as_deref(), args.token.as_deref()) {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("mstream-player: {e}");
+            return 1;
+        }
+    };
+    let mut wizard = Wizard::new(client);
+    wizard.standalone = true;
+    wizard.screen = Screen::Done;
+    wizard.queue(Op::LoadDone, "fetching your Quick Connect code…");
+    run_tui(wizard)
+}
+
+/// The shared terminal session around both entries: ground lease, pixel
+/// probe, mouse capture, pointer contract, event loop, teardown.
+fn run_tui(mut wizard: Wizard) -> i32 {
     let (to_worker, from_worker) = spawn_worker();
 
     // Claim the window background BEFORE ratatui takes the terminal — the
@@ -1342,6 +1425,11 @@ pub fn run(args: SetupArgs) -> i32 {
     // fixed ground inside a border of the user's own background.
     let claim = theme::acquire_ground();
     let ground_guard = GroundGuard;
+
+    // Ask about pixels while nothing else is talking on stdio — the probe
+    // runs its own bounded raw-mode transaction, and ratatui::init below
+    // re-asserts terminal state behind it (the player's own ordering).
+    wizard.graphics = crate::tui::graphics::Graphics::probe();
 
     let mut terminal = ratatui::init();
     // A wizard whose buttons cannot be clicked is half a wizard; like the
@@ -1420,6 +1508,7 @@ fn event_loop(
         wizard.ui.dwell_tick();
 
         if wizard.screen != Screen::Folders
+            && !wizard.standalone
             && wizard.queued.is_none()
             && !wizard.in_flight
             && wizard.last_poll.elapsed() >= PROGRESS_EVERY
@@ -1744,7 +1833,7 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
         },
         Screen::Done => match code {
             KeyCode::Enter | KeyCode::Char('o') => wizard.act(Act::OpenPlayer),
-            KeyCode::Char('f') | KeyCode::Char('q') => wizard.act(Act::Finish),
+            KeyCode::Char('f') | KeyCode::Char('q') | KeyCode::Esc => wizard.act(Act::Finish),
             _ => None,
         },
     }
@@ -1801,12 +1890,15 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         Screen::Done => draw_done(frame, wizard, column),
     }
 
-    // Step counter, top-right — the chrome's only top element.
-    frame.render_widget(
-        Paragraph::new(Span::styled(format!("{} / 4", wizard.screen.step()), dim()))
-            .alignment(Alignment::Right),
-        Rect { x: 2, y: 0, width: area.width.saturating_sub(4), height: 1 },
-    );
+    // Step counter, top-right — the chrome's only top element. The
+    // standalone QR page is not a step of anything.
+    if !wizard.standalone {
+        frame.render_widget(
+            Paragraph::new(Span::styled(format!("{} / 4", wizard.screen.step()), dim()))
+                .alignment(Alignment::Right),
+            Rect { x: 2, y: 0, width: area.width.saturating_sub(4), height: 1 },
+        );
+    }
 
     // Status note (errors, busy) above the keyboard tips.
     if let Some((text, is_err)) = wizard.note.clone() {
@@ -1940,6 +2032,7 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
             None => "↑ ↓ select · c continue · Esc back",
             Some(_) => "↑ ↓ move · Space toggle · c continue · Esc back",
         },
+        (_, Screen::Done) if wizard.standalone => "Enter open the player · Esc close",
         (_, Screen::Done) => "Enter open the player · f finish",
     }
 }
@@ -2270,23 +2363,52 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 
 fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let mut y = column.y;
+    let heading =
+        if wizard.standalone { "Quick Connect" } else { "You are set. Take it with you." };
     frame.render_widget(
-        Paragraph::new(Span::styled("You are set. Take it with you.", bold())),
+        Paragraph::new(Span::styled(heading, bold())),
         Rect { x: column.x, y, width: column.width, height: 1 },
     );
     y += 2;
 
     if let Some(qr) = wizard.qr.clone() {
-        let qr_width = qr.first().map(|l| l.chars().count()).unwrap_or(0) as u16;
-        let x = column.x + (column.width.saturating_sub(qr_width)) / 2;
-        for line in &qr {
-            frame.render_widget(
-                Paragraph::new(Span::raw(line.clone())),
-                Rect { x, y, width: qr_width.min(column.width), height: 1 },
-            );
+        let rows = qr.len() as u16;
+        // The code gets whatever height the chrome below it does not
+        // need: a blank, the note (2 rows), and the button block (3).
+        let avail = column.height.saturating_sub(y - column.y).saturating_sub(6);
+        let band = Rect { x: column.x, y, width: column.width, height: rows.min(avail) };
+        // The picture path scales to fit the band, so it survives any
+        // window; the half-block fallback is fixed-size — drawn only
+        // when whole (a cropped QR scans as nothing), and otherwise
+        // replaced by the one honest line.
+        let drew = match &wizard.qr_art {
+            Some(art) => wizard.graphics.draw(frame, band, art),
+            None => false,
+        };
+        if drew {
+            y += band.height + 1;
+        } else if rows <= avail {
+            let qr_width = qr.first().map(|l| l.chars().count()).unwrap_or(0) as u16;
+            let x = column.x + (column.width.saturating_sub(qr_width)) / 2;
+            for line in &qr {
+                frame.render_widget(
+                    Paragraph::new(Span::raw(line.clone())),
+                    Rect { x, y, width: qr_width.min(column.width), height: 1 },
+                );
+                y += 1;
+            }
             y += 1;
+        } else {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "(make the window taller to show the QR code here)",
+                    dim(),
+                ))
+                .alignment(Alignment::Center),
+                Rect { x: column.x, y, width: column.width, height: 1 },
+            );
+            y += 2;
         }
-        y += 1;
     }
     frame.render_widget(
         Paragraph::new(Span::styled(wizard.qr_note.clone(), Style::default()))
@@ -2308,7 +2430,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         frame,
         &mut wizard.ui,
         Rect { x: open.right() + 2, y: y + 1, width: column.width, height: 1 },
-        "Finish",
+        if wizard.standalone { "Close" } else { "Finish" },
         false,
         Act::Finish,
     );
@@ -2576,6 +2698,45 @@ mod tests {
         folders.remove(1);
         sync_names(&mut folders);
         assert_eq!(folders[0].name, "media");
+    }
+
+    #[test]
+    fn the_qr_picture_is_a_square_png_with_a_quiet_zone() {
+        let art = qr_art("iroh-ticket-abc123").expect("a picture");
+        let img = image::load_from_memory(art.source()).expect("its source decodes");
+        assert_eq!(img.width(), img.height(), "QR pictures are square");
+        // 8 px a module and 4 quiet modules a side — the side length is
+        // (modules + 8) * 8 whatever version the ticket needed.
+        assert_eq!(img.width() % 8, 0);
+        assert!(img.width() >= (21 + 8) * 8, "at least a version-1 code plus quiet zone");
+        // Corners sit inside the quiet zone: white, or the scan fails.
+        assert_eq!(img.to_luma8().get_pixel(0, 0).0[0], 255);
+    }
+
+    #[test]
+    fn the_standalone_qr_page_drops_the_wizard_chrome() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.standalone = true;
+        wizard.screen = Screen::Done;
+        let status = crate::api::types::IrohStatus {
+            enabled: true,
+            qr: Some("ticket".to_string()),
+            ..Default::default()
+        };
+        wizard.apply(Done::Iroh(Ok(status.clone())));
+        assert!(wizard.qr.is_some());
+        assert!(wizard.qr_art.is_some(), "the picture rides along with the half-blocks");
+        assert_eq!(wizard.queued, None, "no scan-progress polling outside the wizard");
+        assert_eq!(footer_hint(&wizard), "Enter open the player · Esc close");
+        // Esc closes the page (and the wizard's Done screen alike).
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(matches!(handle_key(&mut wizard, key), Some(Outcome::Quit)));
+        // The wizard flavor still polls after the same answer.
+        let mut wizard = Wizard::new(Client::new("http://127.0.0.1:9").expect("client"));
+        wizard.screen = Screen::Done;
+        wizard.apply(Done::Iroh(Ok(status)));
+        assert_eq!(wizard.queued, Some(Op::PollProgress));
     }
 
     #[test]

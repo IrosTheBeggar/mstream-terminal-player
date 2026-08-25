@@ -326,6 +326,18 @@ rule; screens have no top rule) · the **bottom bar** (3 rows): the scan
 widget on the left (empty until a scan is actually running), the screen's
 forward action as a tall primary on the right.
 
+**Standalone pages.** A wizard screen may double as its own command — the
+Done screen is also `mstream-player qr`. Standalone, it sheds the wizard
+chrome: no step counter, no scan-progress line, its own heading, Close in
+place of Finish, and Esc closes.
+
+**Pictures.** Anything image-shaped (the Quick Connect QR) draws as real
+pixels through the player's graphics probe (`tui::graphics` — kitty,
+sixel, iTerm2; probed once at startup, `MSTREAM_NO_GRAPHICS=1` kills it)
+and scales to the cells it is given. The character fallback is fixed-size,
+so it draws only when it fits WHOLE — a cropped QR scans as nothing — and
+otherwise one dim line says what to do: `(make the window taller …)`.
+
 ## Behavioral rules
 
 - **Headless is first-class.** These screens are reached over SSH
