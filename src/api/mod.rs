@@ -917,6 +917,17 @@ impl Client {
         wait(self.scan_progress_async())
     }
 
+    /// The enrichment passes' live state — what runs AFTER the file
+    /// scan. Same auth tier as scan_progress.
+    pub async fn scan_status_async(&self) -> Result<crate::api::types::ScanStatus, ApiError> {
+        self.get("api/v1/scan/status").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn scan_status(&self) -> Result<crate::api::types::ScanStatus, ApiError> {
+        wait(self.scan_status_async())
+    }
+
 }
 
 /// Pull mStream's `{"error": "..."}` out of a failure body, falling back to a

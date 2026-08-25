@@ -829,6 +829,33 @@ pub struct IrohStatus {
     pub qr: Option<String>,
 }
 
+/// `GET api/v1/scan/status` — the enrichment passes that run AFTER the
+/// file scan (waveforms, album art, lyrics, discovery embeddings, audio
+/// analysis, AcoustID), each with its live state.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ScanStatus {
+    pub enrichment: Vec<EnrichmentPass>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct EnrichmentPass {
+    /// The pass kind: `waveform`, `albumart`, `lyrics`, `discovery`,
+    /// `audioanalysis` or `acoustid`.
+    pub pass: String,
+    /// `idle` | `queued` | `running` | `disabled`.
+    pub state: String,
+    pub progress: Option<EnrichmentProgress>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct EnrichmentProgress {
+    pub attempted: u64,
+    pub total: Option<u64>,
+}
+
 /// One row of `GET api/v1/scan/progress` — per-library scan state.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]

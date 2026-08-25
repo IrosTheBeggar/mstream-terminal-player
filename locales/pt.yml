@@ -110,8 +110,16 @@ qc:
 scan:
   complete: "Varredura da biblioteca concluída."
   more_queued: ", mais na fila"
-  progress_pct: "Escaneando %{vpath} — %{pct}% (%{scanned} faixas até agora%{more})"
-  progress: "Escaneando %{vpath} — %{scanned} faixas até agora%{more}"
+  pass_waveform: "Gerando formas de onda"
+  pass_albumart: "Baixando capas de álbum"
+  pass_lyrics: "Buscando letras"
+  pass_discovery: "Construindo embeddings de descoberta"
+  pass_audioanalysis: "Analisando áudio"
+  pass_acoustid: "Coletando impressões das faixas"
+  step_files: "Escaneando %{vpath}"
+  detail_tracks: "%{scanned} faixas até agora%{more}"
+  detail_of: "%{attempted} de %{total}%{more}"
+  detail_count: "%{attempted} até agora%{more}"
 
 skip_modal:
   title: "Rodar em modo público?"

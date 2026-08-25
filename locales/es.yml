@@ -110,8 +110,16 @@ qc:
 scan:
   complete: "Escaneo de la biblioteca completado."
   more_queued: ", más en cola"
-  progress_pct: "Escaneando %{vpath} — %{pct}% (%{scanned} pistas hasta ahora%{more})"
-  progress: "Escaneando %{vpath} — %{scanned} pistas hasta ahora%{more}"
+  pass_waveform: "Generando formas de onda"
+  pass_albumart: "Descargando carátulas"
+  pass_lyrics: "Obteniendo letras"
+  pass_discovery: "Creando embeddings de descubrimiento"
+  pass_audioanalysis: "Analizando audio"
+  pass_acoustid: "Tomando huellas de las pistas"
+  step_files: "Escaneando %{vpath}"
+  detail_tracks: "%{scanned} pistas hasta ahora%{more}"
+  detail_of: "%{attempted} de %{total}%{more}"
+  detail_count: "%{attempted} hasta ahora%{more}"
 
 skip_modal:
   title: "¿Ejecutar en modo público?"

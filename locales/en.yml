@@ -110,8 +110,16 @@ qc:
 scan:
   complete: "Library scan complete."
   more_queued: ", more queued"
-  progress_pct: "Scanning %{vpath} — %{pct}% (%{scanned} tracks so far%{more})"
-  progress: "Scanning %{vpath} — %{scanned} tracks so far%{more}"
+  pass_waveform: "Generating waveforms"
+  pass_albumart: "Downloading album art"
+  pass_lyrics: "Fetching lyrics"
+  pass_discovery: "Building discovery embeddings"
+  pass_audioanalysis: "Analyzing audio"
+  pass_acoustid: "Fingerprinting tracks"
+  step_files: "Scanning %{vpath}"
+  detail_tracks: "%{scanned} tracks so far%{more}"
+  detail_of: "%{attempted} of %{total}%{more}"
+  detail_count: "%{attempted} so far%{more}"
 
 skip_modal:
   title: "Run in Public Mode?"

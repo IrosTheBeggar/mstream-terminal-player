@@ -110,8 +110,16 @@ qc:
 scan:
   complete: "Сканирование библиотеки завершено."
   more_queued: ", ещё в очереди"
-  progress_pct: "Сканирую %{vpath} — %{pct}% (пока %{scanned} треков%{more})"
-  progress: "Сканирую %{vpath} — пока %{scanned} треков%{more}"
+  pass_waveform: "Создание волновых форм"
+  pass_albumart: "Загрузка обложек"
+  pass_lyrics: "Получение текстов песен"
+  pass_discovery: "Построение discovery-эмбеддингов"
+  pass_audioanalysis: "Анализ аудио"
+  pass_acoustid: "Снятие отпечатков треков"
+  step_files: "Сканирую %{vpath}"
+  detail_tracks: "пока %{scanned} треков%{more}"
+  detail_of: "%{attempted} из %{total}%{more}"
+  detail_count: "пока %{attempted}%{more}"
 
 skip_modal:
   title: "Запустить в публичном режиме?"

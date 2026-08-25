@@ -110,8 +110,16 @@ qc:
 scan:
   complete: "Analyse de la bibliothèque terminée."
   more_queued: ", d'autres en file"
-  progress_pct: "Analyse de %{vpath} — %{pct}% (%{scanned} pistes pour l'instant%{more})"
-  progress: "Analyse de %{vpath} — %{scanned} pistes pour l'instant%{more}"
+  pass_waveform: "Génération des formes d'onde"
+  pass_albumart: "Téléchargement des pochettes"
+  pass_lyrics: "Récupération des paroles"
+  pass_discovery: "Construction des embeddings de découverte"
+  pass_audioanalysis: "Analyse de l'audio"
+  pass_acoustid: "Prise d'empreintes des pistes"
+  step_files: "Analyse de %{vpath}"
+  detail_tracks: "%{scanned} pistes pour l'instant%{more}"
+  detail_of: "%{attempted} sur %{total}%{more}"
+  detail_count: "%{attempted} pour l'instant%{more}"
 
 skip_modal:
   title: "Lancer en mode public ?"

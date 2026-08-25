@@ -382,7 +382,26 @@ enum Done {
     AdminCreated(Result<String, ApiError>),
     ExtrasCommitted { applied: Vec<(usize, bool)>, error: Option<(String, ApiError)> },
     Iroh(Result<crate::api::types::IrohStatus, ApiError>),
-    Progress(Result<Vec<crate::api::types::ScanProgressRow>, ApiError>),
+    Progress(Result<ProgressReport, ApiError>),
+}
+
+/// The scan widget's three lines: WHAT is happening (the step), HOW FAR
+/// (the bar and its percentage, when an estimate exists), and the counts.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ScanWidget {
+    step: String,
+    pct: Option<u32>,
+    detail: String,
+}
+
+/// What one poll learned across BOTH scan endpoints: the file scan while
+/// it runs, then whichever enrichment pass (waveforms, album art, …) is
+/// working, then done.
+#[derive(Debug, Clone)]
+enum ProgressReport {
+    Files(Vec<crate::api::types::ScanProgressRow>),
+    Enrichment { pass: String, attempted: u64, total: Option<u64>, more: bool },
+    Idle,
 }
 
 /// Everything an op needs to run away from the UI state. Snapshotted at
@@ -421,7 +440,31 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Job)>, Receiver<Done>) {
                     Done::Validated { path, check, canonical }
                 }
                 Job::Plain(Op::LoadDone) => Done::Iroh(client.admin_iroh()),
-                Job::Plain(Op::PollProgress) => Done::Progress(client.scan_progress()),
+                Job::Plain(Op::PollProgress) => {
+                    // The file scan first; once it drains, the enrichment
+                    // passes carry the story until everything is idle.
+                    Done::Progress(client.scan_progress().and_then(|rows| {
+                        if !rows.is_empty() {
+                            return Ok(ProgressReport::Files(rows));
+                        }
+                        let status = client.scan_status()?;
+                        let active: Vec<_> = status
+                            .enrichment
+                            .iter()
+                            .filter(|p| p.state == "running" || p.state == "queued")
+                            .collect();
+                        Ok(match active.iter().find(|p| p.state == "running").or(active.first())
+                        {
+                            Some(p) => ProgressReport::Enrichment {
+                                pass: p.pass.clone(),
+                                attempted: p.progress.as_ref().map_or(0, |x| x.attempted),
+                                total: p.progress.as_ref().and_then(|x| x.total),
+                                more: active.len() > 1,
+                            },
+                            None => ProgressReport::Idle,
+                        })
+                    }))
+                }
                 // These three carry snapshots instead.
                 Job::Plain(Op::CommitFolders | Op::CreateAdmin | Op::CommitExtras) => continue,
                 Job::Folders(batch) => {
@@ -534,11 +577,9 @@ pub(crate) struct Wizard {
     /// Index into [`LANGS`] — what the top-left selector shows.
     lang: usize,
     pub qr_note: String,
-    pub progress: String,
-    /// The scan bar's fill — `Some(pct)` while the file scan can estimate
-    /// (100 at completion), `None` for estimate-less scans and before any
-    /// scan news. The ▰▱ glyphs render exactly when this is Some.
-    progress_pct: Option<u32>,
+    /// The scan widget, three lines: the step, the bar, the counts.
+    /// `None` until the first scan news.
+    scan: Option<ScanWidget>,
 
     /// The Done screen doubles as the `mstream-player qr` page. Standalone
     /// it drops the wizard chrome: no step counter, no scan-progress
@@ -591,8 +632,7 @@ impl Wizard {
             done_sel: None,
             lang: 0,
             qr_note: String::new(),
-            progress: String::new(),
-            progress_pct: None,
+            scan: None,
             standalone: false,
             note: None,
             busy: None,
@@ -1261,32 +1301,60 @@ impl Wizard {
             Done::Progress(rows) => {
                 self.last_poll = Instant::now();
                 match rows {
-                    Ok(rows) if rows.is_empty() => {
-                        self.progress = t!("scan.complete").to_string();
-                        self.progress_pct = Some(100);
+                    Ok(ProgressReport::Idle) => {
+                        self.scan = Some(ScanWidget {
+                            step: t!("scan.complete").to_string(),
+                            pct: Some(100),
+                            detail: String::new(),
+                        });
                     }
-                    Ok(rows) => {
+                    Ok(ProgressReport::Files(rows)) if rows.is_empty() => {
+                        self.scan = Some(ScanWidget {
+                            step: t!("scan.complete").to_string(),
+                            pct: Some(100),
+                            detail: String::new(),
+                        });
+                    }
+                    Ok(ProgressReport::Enrichment { pass, attempted, total, more }) => {
+                        let more = if more {
+                            t!("scan.more_queued").to_string()
+                        } else {
+                            String::new()
+                        };
+                        let (pct, detail) = match total {
+                            Some(total) if total > 0 => (
+                                Some(((attempted * 100) / total).min(100) as u32),
+                                t!(
+                                    "scan.detail_of",
+                                    attempted = attempted,
+                                    total = total,
+                                    more = more
+                                )
+                                .to_string(),
+                            ),
+                            _ => (
+                                None,
+                                t!("scan.detail_count", attempted = attempted, more = more)
+                                    .to_string(),
+                            ),
+                        };
+                        self.scan =
+                            Some(ScanWidget { step: enrichment_name(&pass), pct, detail });
+                    }
+                    Ok(ProgressReport::Files(rows)) => {
                         let row = &rows[0];
-                        self.progress_pct = row.pct;
                         let more =
                             if rows.len() > 1 { t!("scan.more_queued").to_string() } else { String::new() };
-                        self.progress = match row.pct {
-                            Some(pct) => t!(
-                                "scan.progress_pct",
-                                vpath = row.vpath,
-                                pct = pct,
+                        self.scan = Some(ScanWidget {
+                            step: t!("scan.step_files", vpath = row.vpath).to_string(),
+                            pct: row.pct,
+                            detail: t!(
+                                "scan.detail_tracks",
                                 scanned = row.scanned,
                                 more = more
                             )
                             .to_string(),
-                            None => t!(
-                                "scan.progress",
-                                vpath = row.vpath,
-                                scanned = row.scanned,
-                                more = more
-                            )
-                            .to_string(),
-                        };
+                        });
                     }
                     // Progress is garnish; a hiccup should never mark the
                     // Done screen with an error.
@@ -2193,10 +2261,10 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         rule,
     );
     let bar = Rect { x: 2, y: area.height.saturating_sub(3), width: area.width - 4, height: 3 };
-    if !wizard.progress.is_empty() {
+    if let Some(scan) = &wizard.scan {
         frame.render_widget(
-            Paragraph::new(scan_spans(wizard)),
-            Rect { x: bar.x, y: bar.y + 1, width: bar.width.saturating_sub(20), height: 1 },
+            Paragraph::new(scan_lines(scan)),
+            Rect { x: bar.x, y: bar.y, width: bar.width.saturating_sub(20), height: 3 },
         );
     }
     if wizard.screen == Screen::Folders {
@@ -2284,19 +2352,41 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     }
 }
 
-/// The scan widget: the kit's progress element — ▰ filled OK, ▱ DIM,
-/// ten cells — when the scan carries an estimate (full at completion),
-/// and the DIM label. Estimate-less scans show the label alone.
-fn scan_spans(wizard: &Wizard) -> Line<'static> {
-    let mut spans = Vec::new();
-    if let Some(pct) = wizard.progress_pct {
-        let filled = ((pct.min(100) as usize) + 5) / 10;
-        spans.push(Span::styled("▰".repeat(filled), Style::default().fg(th().ok)));
-        spans.push(Span::styled("▱".repeat(10 - filled), dim()));
-        spans.push(Span::raw(" "));
+/// An enrichment pass's display name, in the current language. Unknown
+/// kinds (a future server) show their wire name rather than nothing.
+fn enrichment_name(pass: &str) -> String {
+    match pass {
+        "waveform" => t!("scan.pass_waveform").to_string(),
+        "albumart" => t!("scan.pass_albumart").to_string(),
+        "lyrics" => t!("scan.pass_lyrics").to_string(),
+        "discovery" => t!("scan.pass_discovery").to_string(),
+        "audioanalysis" => t!("scan.pass_audioanalysis").to_string(),
+        "acoustid" => t!("scan.pass_acoustid").to_string(),
+        other => other.to_string(),
     }
-    spans.push(Span::styled(wizard.progress.clone(), dim()));
-    Line::from(spans)
+}
+
+/// The scan widget's three lines: the STEP (what is happening), the
+/// kit's ▰▱ bar with its percentage when the step carries an estimate
+/// (all-dim cells when it does not — activity reads from the other two
+/// lines), and the DIM detail counts.
+fn scan_lines(scan: &ScanWidget) -> Vec<Line<'static>> {
+    let bar = match scan.pct {
+        Some(pct) => {
+            let filled = ((pct.min(100) as usize) + 5) / 10;
+            Line::from(vec![
+                Span::styled("▰".repeat(filled), Style::default().fg(th().ok)),
+                Span::styled("▱".repeat(10 - filled), dim()),
+                Span::styled(format!(" {pct}%"), dim()),
+            ])
+        }
+        None => Line::from(Span::styled("▱".repeat(10), dim())),
+    };
+    vec![
+        Line::from(Span::raw(scan.step.clone())),
+        bar,
+        Line::from(Span::styled(scan.detail.clone(), dim())),
+    ]
 }
 
 fn footer_hint(wizard: &Wizard) -> String {
@@ -2804,13 +2894,13 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
             Rect { x: right.x, y: ry, width: right.width, height: 4 },
         );
         ry += 5;
-        if !wizard.progress.is_empty() {
+        if let Some(scan) = &wizard.scan {
             frame.render_widget(
-                Paragraph::new(scan_spans(wizard)).wrap(Wrap { trim: true }),
-                Rect { x: right.x, y: ry, width: right.width, height: 1 },
+                Paragraph::new(scan_lines(scan)),
+                Rect { x: right.x, y: ry, width: right.width, height: 3 },
             );
         }
-        ry += 2;
+        ry += 4;
         for (i, (label, tip)) in done_buttons().into_iter().enumerate() {
             let rect = Rect { x: right.x, y: ry, width: right.width.min(44), height: 3 };
             let selected = wizard.done_sel == Some(i);
@@ -2884,12 +2974,12 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     y += 3;
 
     // With no bottom bar on this page, the scan status lives here.
-    if !wizard.progress.is_empty() {
+    if let Some(scan) = &wizard.scan {
         frame.render_widget(
-            Paragraph::new(scan_spans(wizard)).alignment(Alignment::Center),
-            Rect { x: column.x, y, width: column.width, height: 1 },
+            Paragraph::new(scan_lines(scan)).alignment(Alignment::Center),
+            Rect { x: column.x, y, width: column.width, height: 3 },
         );
-        y += 2;
+        y += 4;
     }
 
     // The same button list, one row each, centered.
@@ -3153,33 +3243,69 @@ mod tests {
             pct,
             scanned,
         };
-        // A percentage estimate, one library.
-        wizard.apply(Done::Progress(Ok(vec![row("media", Some(44), 1204)])));
-        assert_eq!(wizard.progress, "Scanning media — 44% (1204 tracks so far)");
-        assert_eq!(wizard.progress_pct, Some(44));
-        // The bar: 44% rounds to four of ten cells.
-        let line = scan_spans(&wizard);
-        assert_eq!(line.spans[0].content, "▰".repeat(4));
-        assert_eq!(line.spans[1].content, "▱".repeat(6));
+        let widget = |w: &Wizard| w.scan.clone().expect("scan news");
+        // The file scan with an estimate: step, bar+pct, counts — three
+        // lines exactly, in that order.
+        wizard.apply(Done::Progress(Ok(ProgressReport::Files(vec![row("media", Some(44), 1204)]))));
+        let scan = widget(&wizard);
+        assert_eq!(scan.step, "Scanning media");
+        assert_eq!(scan.pct, Some(44));
+        assert_eq!(scan.detail, "1204 tracks so far");
+        let lines = scan_lines(&scan);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].spans[0].content, "Scanning media");
+        assert_eq!(lines[1].spans[0].content, "▰".repeat(4));
+        assert_eq!(lines[1].spans[1].content, "▱".repeat(6));
+        assert_eq!(lines[1].spans[2].content, " 44%");
+        assert_eq!(lines[2].spans[0].content, "1204 tracks so far");
         // A second library behind it earns the queued suffix.
-        wizard.apply(Done::Progress(Ok(vec![
+        wizard.apply(Done::Progress(Ok(ProgressReport::Files(vec![
             row("media", Some(76), 2261),
             row("audiobooks", None, 4),
-        ])));
-        assert_eq!(wizard.progress, "Scanning media — 76% (2261 tracks so far, more queued)");
-        // No estimate: the pct-less template, and no bar at all.
-        wizard.apply(Done::Progress(Ok(vec![row("audiobooks", None, 141)])));
-        assert_eq!(wizard.progress, "Scanning audiobooks — 141 tracks so far");
-        assert_eq!(wizard.progress_pct, None);
-        assert!(scan_spans(&wizard).spans[0].content.starts_with("Scanning"));
-        // Empty means done — and the bar stands full.
-        wizard.apply(Done::Progress(Ok(vec![])));
-        assert_eq!(wizard.progress, "Library scan complete.");
-        assert_eq!(wizard.progress_pct, Some(100));
-        assert_eq!(scan_spans(&wizard).spans[0].content, "▰".repeat(10));
+        ]))));
+        assert_eq!(widget(&wizard).detail, "2261 tracks so far, more queued");
+        // No estimate: an all-dim bar line, no percentage.
+        wizard.apply(Done::Progress(Ok(ProgressReport::Files(vec![row("audiobooks", None, 141)]))));
+        let scan = widget(&wizard);
+        assert_eq!(scan.step, "Scanning audiobooks");
+        assert_eq!(scan.pct, None);
+        let lines = scan_lines(&scan);
+        assert_eq!(lines[1].spans[0].content, "▱".repeat(10));
+        assert_eq!(lines[1].spans.len(), 1, "no percentage without an estimate");
+        // The file scan drains into the enrichment passes: the step line
+        // names the pass, the sibling earns the suffix…
+        wizard.apply(Done::Progress(Ok(ProgressReport::Enrichment {
+            pass: "waveform".to_string(),
+            attempted: 210,
+            total: Some(300),
+            more: true,
+        })));
+        let scan = widget(&wizard);
+        assert_eq!(scan.step, "Generating waveforms");
+        assert_eq!(scan.pct, Some(70));
+        assert_eq!(scan.detail, "210 of 300, more queued");
+        // …a total-less pass keeps its counts on line three…
+        wizard.apply(Done::Progress(Ok(ProgressReport::Enrichment {
+            pass: "albumart".to_string(),
+            attempted: 57,
+            total: None,
+            more: false,
+        })));
+        let scan = widget(&wizard);
+        assert_eq!(scan.step, "Downloading album art");
+        assert_eq!(scan.pct, None);
+        assert_eq!(scan.detail, "57 so far");
+        // …an unknown future pass shows its wire name rather than nothing.
+        assert_eq!(enrichment_name("essentia2"), "essentia2");
+        // Idle means done — full bar, empty detail.
+        wizard.apply(Done::Progress(Ok(ProgressReport::Idle)));
+        let scan = widget(&wizard);
+        assert_eq!(scan.step, "Library scan complete.");
+        assert_eq!(scan.pct, Some(100));
+        assert_eq!(scan_lines(&scan)[1].spans[0].content, "▰".repeat(10));
         // A poll hiccup never marks the page — the last state stands.
         wizard.apply(Done::Progress(Err(crate::api::ApiError::Config("net".into()))));
-        assert_eq!(wizard.progress, "Library scan complete.");
+        assert_eq!(widget(&wizard).step, "Library scan complete.");
     }
 
     #[test]

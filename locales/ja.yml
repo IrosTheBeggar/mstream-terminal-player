@@ -110,8 +110,16 @@ qc:
 scan:
   complete: "ライブラリのスキャンが完了しました。"
   more_queued: "、他も待機中"
-  progress_pct: "%{vpath} をスキャン中 — %{pct}%（これまでに %{scanned} 曲%{more}）"
-  progress: "%{vpath} をスキャン中 — これまでに %{scanned} 曲%{more}"
+  pass_waveform: "波形を生成中"
+  pass_albumart: "アルバムアートを取得中"
+  pass_lyrics: "歌詞を取得中"
+  pass_discovery: "ディスカバリー埋め込みを構築中"
+  pass_audioanalysis: "オーディオを解析中"
+  pass_acoustid: "楽曲の指紋を採取中"
+  step_files: "%{vpath} をスキャン中"
+  detail_tracks: "これまでに %{scanned} 曲%{more}"
+  detail_of: "%{attempted} / %{total}%{more}"
+  detail_count: "これまでに %{attempted}%{more}"
 
 skip_modal:
   title: "公開モードで開始しますか？"
