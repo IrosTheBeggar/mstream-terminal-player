@@ -2552,10 +2552,13 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         match problem {
             Some(tip) => wizard.ui.tip(path_rect, tip),
             None if clipped => {
-                // The tooltip carries at most TWO lines of path; anything
-                // longer keeps its tail behind the same leading ….
+                // The tooltip carries at most THREE lines of path;
+                // anything longer keeps its tail behind the same leading
+                // …. The cap is THIS caller's policy, not the kit's —
+                // wrap_tip itself has no line limit, so future tips may
+                // run as long as they need.
                 let (tip, _) =
-                    ellipsize_path_start(&folder.path, crate::kit::TIP_WRAP * 2);
+                    ellipsize_path_start(&folder.path, crate::kit::TIP_WRAP * 3);
                 wizard.ui.tip(path_rect, tip);
             }
             None => {}
@@ -3128,15 +3131,18 @@ mod tests {
         // Degenerate width never panics.
         assert_eq!(ellipsize_path_start("/x", 0).0, "/x");
         // The tooltip pairing: a spaceless path hard-wraps at the tip
-        // width instead of clipping, and the two-line cap holds however
-        // long the path gets.
-        let long = format!("/very{}/leaf", "/deep".repeat(40));
-        let (tip, clipped) = ellipsize_path_start(&long, crate::kit::TIP_WRAP * 2);
+        // width instead of clipping, and the THREE-line cap holds however
+        // long the path gets. The cap is the path tip's policy alone —
+        // wrap_tip itself is uncapped, so a longer text keeps all its
+        // lines (future tips may need them).
+        let long = format!("/very{}/leaf", "/deep".repeat(60));
+        let (tip, clipped) = ellipsize_path_start(&long, crate::kit::TIP_WRAP * 3);
         assert!(clipped);
         let lines = crate::kit::wrap_tip(&tip);
-        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines.len(), 3, "{lines:?}");
         assert!(lines.iter().all(|l| l.chars().count() <= crate::kit::TIP_WRAP));
-        assert!(lines[1].ends_with("/leaf"), "the leaf survives: {lines:?}");
+        assert!(lines[2].ends_with("/leaf"), "the leaf survives: {lines:?}");
+        assert_eq!(crate::kit::wrap_tip(&long).len(), 8, "the kit itself never caps");
         // And ordinary sentence tips still word-wrap as before.
         let prose = crate::kit::wrap_tip("Add or adjust folders — nothing is lost");
         assert_eq!(prose.len(), 1);
