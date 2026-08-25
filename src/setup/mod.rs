@@ -3160,6 +3160,13 @@ mod tests {
 
     #[test]
     fn extras_cursor_is_keyboard_only_and_creating_the_admin_locks_back() {
+        // AdminCreated(Ok) below runs remember_session, which LOADS AND
+        // SAVES the config file — without holding the config scratch this
+        // test wrote "127.0.0.1:9" into whichever directory the env var
+        // pointed at: another test's scratch when one was live (the
+        // observed parallel flake), and the developer's REAL config when
+        // none was. Every test that crosses config takes the same lock.
+        let scratch = crate::config::testing::Scratch::new("setup-admin-created");
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
         wizard.screen = Screen::Extras;
@@ -3187,6 +3194,11 @@ mod tests {
         wizard.apply(Done::AdminCreated(Ok("tok".to_string())));
         assert!(!wizard.public, "an account ends public mode");
         assert_eq!(wizard.screen, Screen::Done);
+        // The session write landed INSIDE the scratch — the tripwire for
+        // the guard above ever being removed.
+        let saved = std::fs::read_to_string(scratch.dir.join("config.toml"))
+            .expect("remember_session wrote into the scratch");
+        assert!(saved.contains("127.0.0.1:9"));
     }
 
     #[test]
