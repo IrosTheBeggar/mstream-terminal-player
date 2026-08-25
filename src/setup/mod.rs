@@ -734,7 +734,21 @@ impl Wizard {
             }
             Act::BrowseCancel => self.modal = Modal::None,
             Act::PathSuggest(i) => self.accept_suggestion(i),
-            Act::OpenPlayer => return Some(Outcome::OpenPlayer),
+            Act::OpenPlayer => {
+                // A new terminal window, so this page stays up; only when
+                // no window can be opened does the player take over this
+                // terminal (the seam, headless, an unknown platform).
+                let spawned = !std::env::var("MSTREAM_NO_OPEN")
+                    .is_ok_and(|v| !v.is_empty() && v != "0")
+                    && std::env::current_exe().is_ok_and(|exe| {
+                        spawn_player_terminal(&exe.display().to_string(), &self.client.server())
+                    });
+                if spawned {
+                    self.note = Some(("the player is open in a new window".to_string(), false));
+                } else {
+                    return Some(Outcome::OpenPlayer);
+                }
+            }
             Act::OpenAppStore => self.open_link("App Store", APP_STORE_URL),
             Act::OpenPlayStore => self.open_link("Google Play", PLAY_STORE_URL),
             Act::Finish => return Some(Outcome::Quit),
@@ -1398,6 +1412,90 @@ fn qr_lines(data: &str) -> Option<Vec<String>> {
     Some(rendered.lines().map(str::to_string).collect())
 }
 
+/// Open the player in a NEW terminal window, keeping this page up. The
+/// spawned player resolves the saved session for auth (setup saves it
+/// before the Done screen ever shows), so the command carries only the
+/// server URL. Returns false when no window could be opened — the caller
+/// falls back to taking over this terminal, the pre-window behavior.
+#[cfg(target_os = "macos")]
+fn spawn_player_terminal(exe: &str, server: &str) -> bool {
+    // Shell-quoted for the layers that run a shell; neither value can
+    // contain a single quote (an executable path from current_exe and a
+    // normalized http(s) URL).
+    let sh = format!("'{exe}' tui --server '{server}'");
+    match std::env::var("TERM_PROGRAM").as_deref() {
+        Ok("ghostty") => {
+            // -e would trip Ghostty's run-command confirmation; a config
+            // file is user-trusted (probed 2026-08-24). No shell layer:
+            // Ghostty splits the command itself.
+            let conf = std::env::temp_dir().join("mstream-player-window.conf");
+            let body = format!(
+                "command = {exe} tui --server {server}\ntitle = mStream Player\nconfirm-close-surface = false\n"
+            );
+            if std::fs::write(&conf, body).is_err() {
+                return false;
+            }
+            std::process::Command::new("open")
+                .args(["-na", "Ghostty", "--args"])
+                .arg(format!("--config-file={}", conf.display()))
+                .spawn()
+                .is_ok()
+        }
+        Ok("iTerm.app") => std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "tell application \"iTerm2\" to create window with default profile command \"{sh}\""
+            ))
+            .spawn()
+            .is_ok(),
+        _ => std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!("tell application \"Terminal\" to do script \"{sh}\""))
+            .spawn()
+            .is_ok(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_player_terminal(exe: &str, server: &str) -> bool {
+    // Windows Terminal when present (the Win11 default), else a fresh
+    // conhost via start.
+    std::process::Command::new("wt")
+        .args(["--", exe, "tui", "--server", server])
+        .spawn()
+        .is_ok()
+        || std::process::Command::new("cmd")
+            .args(["/c", "start", "", exe, "tui", "--server", server])
+            .spawn()
+            .is_ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn spawn_player_terminal(exe: &str, server: &str) -> bool {
+    // $TERMINAL first (the user's stated choice), then the usual suspects.
+    if let Ok(term) = std::env::var("TERMINAL") {
+        if std::process::Command::new(term)
+            .args(["-e", exe, "tui", "--server", server])
+            .spawn()
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    for (bin, sep) in
+        [("x-terminal-emulator", "-e"), ("gnome-terminal", "--"), ("konsole", "-e"), ("xterm", "-e")]
+    {
+        if std::process::Command::new(bin)
+            .args([sep, exe, "tui", "--server", server])
+            .spawn()
+            .is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Hand a URL to the OS's opener, detached. `MSTREAM_NO_OPEN` is the test
 /// seam — harnesses assert the note instead of popping browsers. Returns
 /// whether an opener was actually launched; headless callers put the URL
@@ -1926,13 +2024,14 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         return;
     }
 
-    // The centered column everything lives in.
-    let width = COLUMN.min(area.width.saturating_sub(4));
-    let column = Rect {
-        x: (area.width - width) / 2,
-        y: 2,
-        width,
-        height: area.height.saturating_sub(8),
+    // The centered column everything lives in — except the Done page,
+    // which owns the whole width (its columns anchor LEFT) and, having no
+    // rule or bottom bar, most of the height.
+    let column = if wizard.screen == Screen::Done {
+        Rect { x: 2, y: 2, width: area.width.saturating_sub(4), height: area.height.saturating_sub(6) }
+    } else {
+        let width = COLUMN.min(area.width.saturating_sub(4));
+        Rect { x: (area.width - width) / 2, y: 2, width, height: area.height.saturating_sub(8) }
     };
 
     // A modal makes the screen beneath INERT: the base draw sees no
@@ -1962,22 +2061,32 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         );
     }
 
-    // Status note (errors, busy) above the keyboard tips.
+    // Status note (errors, busy) above the keyboard tips. The Done page
+    // has no rule or bar, so its two lines sit at the bottom edge.
+    let (note_y, tips_y) = if wizard.screen == Screen::Done {
+        (area.height.saturating_sub(3), area.height.saturating_sub(2))
+    } else {
+        (area.height.saturating_sub(6), area.height.saturating_sub(5))
+    };
     if let Some((text, is_err)) = wizard.note.clone() {
         let style = if is_err { Style::default().fg(th().gold) } else { dim() };
-        let note_area =
-            Rect { x: 2, y: area.height.saturating_sub(6), width: area.width - 4, height: 1 };
+        let note_area = Rect { x: 2, y: note_y, width: area.width - 4, height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(text, style)), note_area);
     }
     if let Some(busy) = wizard.busy {
-        let busy_area =
-            Rect { x: 2, y: area.height.saturating_sub(6), width: area.width - 4, height: 1 };
+        let busy_area = Rect { x: 2, y: note_y, width: area.width - 4, height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(busy, accent())), busy_area);
     }
 
     // Keyboard tips, left, directly above the gold rule.
-    let tips = Rect { x: 2, y: area.height.saturating_sub(5), width: area.width - 4, height: 1 };
+    let tips = Rect { x: 2, y: tips_y, width: area.width - 4, height: 1 };
     frame.render_widget(Paragraph::new(Span::styled(footer_hint(wizard), dim())), tips);
+
+    // The Done page ends here: no horizontal rule, no bottom bar — its
+    // vertical rule and in-column scan status carry the structure.
+    if wizard.screen == Screen::Done {
+        return;
+    }
 
     // The one gold rule, with the 3-row bottom bar under it: scan widget on
     // the left (empty until a scan is actually running — folders commit on
@@ -1989,10 +2098,7 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         rule,
     );
     let bar = Rect { x: 2, y: area.height.saturating_sub(3), width: area.width - 4, height: 3 };
-    // The two-column Done page carries the scan status in its right
-    // column; every other screen (and the stacked Done) keeps it here.
-    let status_in_column = wizard.screen == Screen::Done && wizard.done_two_column();
-    if !wizard.progress.is_empty() && !status_in_column {
+    if !wizard.progress.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled(wizard.progress.clone(), Style::default().fg(th().ok))),
             Rect { x: bar.x, y: bar.y + 1, width: bar.width.saturating_sub(20), height: 1 },
@@ -2479,19 +2585,30 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     // fallback keeps the stacked layout below — it simply cannot fit a
     // half column.
     if wizard.done_two_column() {
-        let gap = 2;
-        let half = column.width.saturating_sub(gap) / 2;
+        // Left-anchored: the code column hugs the screen edge at a FIXED
+        // width (the picture scales to it — capped so the code never
+        // balloons on a wide window), a vertical gold rule divides, and
+        // the right column takes the rest.
         let height = column.height.saturating_sub(y - column.y);
-        let left = Rect { x: column.x, y, width: half, height };
+        let left_w = 30u16.min(column.width / 2);
+        let left = Rect { x: column.x, y, width: left_w, height };
+        let rule_x = left.right() + 2;
+        let right_x = rule_x + 3;
         let right =
-            Rect { x: column.x + half + gap, y, width: column.width - half - gap, height };
+            Rect { x: right_x, y, width: column.right().saturating_sub(right_x), height };
+        for row in y..column.bottom() {
+            frame.render_widget(
+                Paragraph::new(Span::styled("│", Style::default().fg(th().gold))),
+                Rect { x: rule_x, y: row, width: 1, height: 1 },
+            );
+        }
 
         // LEFT: the code, and under it the apps that scan it.
         let band = Rect {
             x: left.x,
             y: left.y,
             width: left.width,
-            height: left.height.saturating_sub(4).min(18),
+            height: left.height.saturating_sub(4).min(15),
         };
         if let Some(art) = &wizard.qr_art {
             wizard.graphics.draw(frame, band, art);
@@ -2601,6 +2718,16 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let g = Rect { x: a.right() + 3, y, width: 13, height: 1 };
     link(frame, wizard, g, "▸ Google Play", Act::OpenPlayStore, "Open in your browser — g");
     y += 2;
+
+    // With no bottom bar on this page, the scan status lives here.
+    if !wizard.progress.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled(wizard.progress.clone(), Style::default().fg(th().ok)))
+                .alignment(Alignment::Center),
+            Rect { x: column.x, y, width: column.width, height: 1 },
+        );
+        y += 2;
+    }
 
     let open = kit::tall_button(
         frame,
