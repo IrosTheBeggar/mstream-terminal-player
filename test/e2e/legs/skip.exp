@@ -1,0 +1,32 @@
+#!/usr/bin/expect -f
+# Public mode end to end: skip the login, land on Done, and the QR must
+# still appear (the admin window stays open, so the wizard reads Quick
+# Connect unauthenticated).
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(HOME) $::env(WIZHOME)
+proc drain {secs} { expect -timeout $secs timeout {} }
+spawn {*}$argv
+exec stty rows 56 columns 100 < $spawn_out(slave,name)
+expect { "Add a music folder" {} timeout { puts "SYNC-FAIL"; exit 2 } }
+send "t"
+drain 1
+send "$::env(WIZMUSIC)\r"
+drain 1
+send "c"
+expect { "All optional" {} timeout { puts "NO-EXTRAS"; exec kill -9 [exp_pid]; expect eof; exit 4 } }
+drain 1
+send "c"
+expect { "Admin User" {} timeout { puts "NO-LOGIN"; exec kill -9 [exp_pid]; expect eof; exit 5 } }
+drain 1
+send "\x13"
+expect { "Public" {} timeout { puts "NO-MODAL"; exec kill -9 [exp_pid]; expect eof; exit 6 } }
+drain 1
+send "\r"
+expect { "running!" {} timeout { puts "NO-DONE"; exec kill -9 [exp_pid]; expect eof; exit 7 } }
+drain 4
+send "\x03"
+expect eof
+exit 0
