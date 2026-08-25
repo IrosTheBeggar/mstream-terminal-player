@@ -1316,6 +1316,76 @@ Long game, noted not planned: `libghostty` — the embeddable zero-dependency te
 is what "a terminal inside our own binary" would actually mean one day: an mStream console
 app hosting the player directly, no third-party .app at all.
 
+### Phase 9 — Ship the wizard (merge PR #10 → release → mStream integration)
+
+The order is fixed by the machinery: the mStream server fetches this
+repo's binaries through a sha-pinned manifest (`bin/mstream-player/
+manifest.json`, currently `v0.3.0`), and that manifest only moves when a
+RELEASE exists — so it's merge, then tag, then integrate.
+
+**9a — Merge PR #10.**
+1. Move the e2e harness INTO the repo (`test/e2e/`): `fake_mstream.py`,
+   `replay.py`, `check_scan.py`, and the `.exp` legs (drive en/de,
+   reopen, qr ×3, skip, rename, scan, spawn-stub) plus a runner script.
+   Today they live only in the session scratchpad — the /tmp reaper
+   already ate them once, and CI can't run what isn't committed.
+2. The whole branch was `[skip ci]` by design (fast-loop policy). Before
+   merging: full local battery (unit + wasm + clippy + every e2e leg),
+   then one NON-skip push and watch every CI leg go green — the first
+   real CI run this branch gets.
+3. Pre-merge once-over ritual (the Phase C/D precedent): PLAN.md phase
+   statuses, docs/ui-kit.md ↔ canvas ↔ code agreement, kill dead code,
+   read the diff top to bottom once.
+4. Merge (operator action). Prefer a merge commit — the branch's commits
+   are structured and each carries its verification story.
+
+**9b — Release v0.4.0.**
+1. On master: bump `Cargo.toml` 0.3.0 → 0.4.0 (the wizard, the kit,
+   i18n, the QR pages — a feature release), note it in PLAN.md.
+2. Tag `v0.4.0` → `release.yml` (on `v*`) builds and attaches the
+   platform binaries, Developer-ID-signed darwin included.
+3. Before PUBLISHING the release: pull the darwin-arm64 asset and smoke
+   it on this Mac — `setup` against the demo server, `qr` standalone,
+   one language switch — the released-bytes sanity pass.
+4. Publish (non-draft, non-prerelease) — that's the trigger
+   `notify-mstream.yml` requires to signal the mStream repo, and
+   `update-tap.yml` refreshes the Homebrew tap.
+
+**9c — Integrate into the mStream binaries** (mStream repo).
+1. Manifest bump: `scripts/update-mstream-player-manifest.mjs` → pin
+   `v0.4.0`. Small reviewed text PR; the bootstrap
+   (`src/util/mstream-player-bootstrap.js`) then fetches, sha-verifies,
+   and installs the new player on demand. No musl build exists — musl
+   keys find no manifest entry and degrade exactly as today.
+2. First-run wiring — where the new UI actually meets users:
+   - **Tray launcher** (`rust-launcher/`, mac + windows): when the
+     server reports a fresh install (zero users — the open-admin
+     window), surface “Set up mStream” and launch the platform terminal
+     running `mstream-player setup` (Terminal.app / `wt.exe` now;
+     Phase 8's bundled Ghostty upgrades this later, config-file launch,
+     never `-e`).
+   - **Headless / docker / npm**: on boot with zero users, the server
+     log prints the one-line invitation with the exact
+     `mstream-player setup --server …` command — the wizard is
+     SSH-first by design, nothing else needed.
+   - The web wizard remains for browser-only users; the terminal wizard
+     is additive.
+3. Compatibility note, already handled but worth asserting in review:
+   against an older server without `/api/v1/scan/status`, the widget's
+   status fetch errors and the last state stands — the wizard degrades
+   to file-scan-only narration, no error surfaced.
+4. Bundle smoke matrix (the release-pipeline ritual, harnesses in
+   memory): darwin bundle (both arches via Rosetta), the Linux docker
+   harness, and a Windows pass — each walking installer → first boot →
+   tray/log invitation → wizard → folders + login + extras commit →
+   Done page. The Windows leg doubles as the Phase 8 validation item:
+   confirm the graphics probe lands on sixel under Windows Terminal.
+5. After the flip is proven, the deletions Phase 6 already lists
+   (rust-server-audio tree and its CI) proceed on their own schedule.
+
+Phase 8 (the bundled console) stays sequenced AFTER 9c: it upgrades the
+launcher's terminal choice, not the wizard itself.
+
 ## Smoke testing
 
 `mstream-player replay "<script>"` drives the TUI from a script. Keys go through exactly the path
