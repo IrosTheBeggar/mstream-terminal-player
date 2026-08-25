@@ -3127,6 +3127,36 @@ mod tests {
     }
 
     #[test]
+    fn the_scan_widget_renders_every_progress_shape() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        let row = |vpath: &str, pct: Option<u32>, scanned: u64| crate::api::types::ScanProgressRow {
+            vpath: vpath.to_string(),
+            pct,
+            scanned,
+        };
+        // A percentage estimate, one library.
+        wizard.apply(Done::Progress(Ok(vec![row("media", Some(44), 1204)])));
+        assert_eq!(wizard.progress, "Scanning media — 44% (1204 tracks so far)");
+        // A second library behind it earns the queued suffix.
+        wizard.apply(Done::Progress(Ok(vec![
+            row("media", Some(76), 2261),
+            row("audiobooks", None, 4),
+        ])));
+        assert_eq!(wizard.progress, "Scanning media — 76% (2261 tracks so far, more queued)");
+        // No estimate: the pct-less template.
+        wizard.apply(Done::Progress(Ok(vec![row("audiobooks", None, 141)])));
+        assert_eq!(wizard.progress, "Scanning audiobooks — 141 tracks so far");
+        // Empty means done.
+        wizard.apply(Done::Progress(Ok(vec![])));
+        assert_eq!(wizard.progress, "Library scan complete.");
+        // A poll hiccup never marks the page — the last state stands.
+        wizard.apply(Done::Progress(Err(crate::api::ApiError::Config("net".into()))));
+        assert_eq!(wizard.progress, "Library scan complete.");
+    }
+
+    #[test]
     fn long_paths_keep_their_leaf_and_carry_the_full_path_in_the_tip() {
         // Fits: untouched, no clip.
         assert_eq!(ellipsize_path_start("/music", 10), ("/music".to_string(), false));
