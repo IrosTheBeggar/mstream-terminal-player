@@ -535,6 +535,10 @@ pub(crate) struct Wizard {
     lang: usize,
     pub qr_note: String,
     pub progress: String,
+    /// The scan bar's fill — `Some(pct)` while the file scan can estimate
+    /// (100 at completion), `None` for estimate-less scans and before any
+    /// scan news. The ▰▱ glyphs render exactly when this is Some.
+    progress_pct: Option<u32>,
 
     /// The Done screen doubles as the `mstream-player qr` page. Standalone
     /// it drops the wizard chrome: no step counter, no scan-progress
@@ -588,6 +592,7 @@ impl Wizard {
             lang: 0,
             qr_note: String::new(),
             progress: String::new(),
+            progress_pct: None,
             standalone: false,
             note: None,
             busy: None,
@@ -1258,9 +1263,11 @@ impl Wizard {
                 match rows {
                     Ok(rows) if rows.is_empty() => {
                         self.progress = t!("scan.complete").to_string();
+                        self.progress_pct = Some(100);
                     }
                     Ok(rows) => {
                         let row = &rows[0];
+                        self.progress_pct = row.pct;
                         let more =
                             if rows.len() > 1 { t!("scan.more_queued").to_string() } else { String::new() };
                         self.progress = match row.pct {
@@ -2188,7 +2195,7 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     let bar = Rect { x: 2, y: area.height.saturating_sub(3), width: area.width - 4, height: 3 };
     if !wizard.progress.is_empty() {
         frame.render_widget(
-            Paragraph::new(Span::styled(wizard.progress.clone(), Style::default().fg(th().ok))),
+            Paragraph::new(scan_spans(wizard)),
             Rect { x: bar.x, y: bar.y + 1, width: bar.width.saturating_sub(20), height: 1 },
         );
     }
@@ -2275,6 +2282,21 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     if let Some((target, text)) = wizard.ui.ripe_tooltip() {
         kit::draw_tooltip(frame, area, target, text);
     }
+}
+
+/// The scan widget: the kit's progress element — ▰ filled OK, ▱ DIM,
+/// ten cells — when the scan carries an estimate (full at completion),
+/// and the DIM label. Estimate-less scans show the label alone.
+fn scan_spans(wizard: &Wizard) -> Line<'static> {
+    let mut spans = Vec::new();
+    if let Some(pct) = wizard.progress_pct {
+        let filled = ((pct.min(100) as usize) + 5) / 10;
+        spans.push(Span::styled("▰".repeat(filled), Style::default().fg(th().ok)));
+        spans.push(Span::styled("▱".repeat(10 - filled), dim()));
+        spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(wizard.progress.clone(), dim()));
+    Line::from(spans)
 }
 
 fn footer_hint(wizard: &Wizard) -> String {
@@ -2784,11 +2806,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         ry += 5;
         if !wizard.progress.is_empty() {
             frame.render_widget(
-                Paragraph::new(Span::styled(
-                    wizard.progress.clone(),
-                    Style::default().fg(th().ok),
-                ))
-                .wrap(Wrap { trim: true }),
+                Paragraph::new(scan_spans(wizard)).wrap(Wrap { trim: true }),
                 Rect { x: right.x, y: ry, width: right.width, height: 1 },
             );
         }
@@ -2868,8 +2886,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     // With no bottom bar on this page, the scan status lives here.
     if !wizard.progress.is_empty() {
         frame.render_widget(
-            Paragraph::new(Span::styled(wizard.progress.clone(), Style::default().fg(th().ok)))
-                .alignment(Alignment::Center),
+            Paragraph::new(scan_spans(wizard)).alignment(Alignment::Center),
             Rect { x: column.x, y, width: column.width, height: 1 },
         );
         y += 2;
@@ -3139,18 +3156,27 @@ mod tests {
         // A percentage estimate, one library.
         wizard.apply(Done::Progress(Ok(vec![row("media", Some(44), 1204)])));
         assert_eq!(wizard.progress, "Scanning media — 44% (1204 tracks so far)");
+        assert_eq!(wizard.progress_pct, Some(44));
+        // The bar: 44% rounds to four of ten cells.
+        let line = scan_spans(&wizard);
+        assert_eq!(line.spans[0].content, "▰".repeat(4));
+        assert_eq!(line.spans[1].content, "▱".repeat(6));
         // A second library behind it earns the queued suffix.
         wizard.apply(Done::Progress(Ok(vec![
             row("media", Some(76), 2261),
             row("audiobooks", None, 4),
         ])));
         assert_eq!(wizard.progress, "Scanning media — 76% (2261 tracks so far, more queued)");
-        // No estimate: the pct-less template.
+        // No estimate: the pct-less template, and no bar at all.
         wizard.apply(Done::Progress(Ok(vec![row("audiobooks", None, 141)])));
         assert_eq!(wizard.progress, "Scanning audiobooks — 141 tracks so far");
-        // Empty means done.
+        assert_eq!(wizard.progress_pct, None);
+        assert!(scan_spans(&wizard).spans[0].content.starts_with("Scanning"));
+        // Empty means done — and the bar stands full.
         wizard.apply(Done::Progress(Ok(vec![])));
         assert_eq!(wizard.progress, "Library scan complete.");
+        assert_eq!(wizard.progress_pct, Some(100));
+        assert_eq!(scan_spans(&wizard).spans[0].content, "▰".repeat(10));
         // A poll hiccup never marks the page — the last state stands.
         wizard.apply(Done::Progress(Err(crate::api::ApiError::Config("net".into()))));
         assert_eq!(wizard.progress, "Library scan complete.");
