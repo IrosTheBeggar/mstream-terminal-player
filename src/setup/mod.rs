@@ -390,7 +390,7 @@ pub(crate) struct Wizard {
     pub sel: Option<usize>,
     /// A rename in progress: the row and the draft. Independent of the
     /// keyboard cursor — a mouse rename never selects.
-    pub editing: Option<(usize, String)>,
+    pub editing: Option<(usize, Input)>,
     /// A row to scroll into view on the next draw (a fresh add).
     reveal: Option<usize>,
     /// Paths waiting for their local validation to be sent to the worker.
@@ -562,7 +562,7 @@ impl Wizard {
                             false,
                         ));
                     } else {
-                        self.editing = Some((i, folder.name.clone()));
+                        self.editing = Some((i, Input::new(folder.name.clone())));
                     }
                 }
             }
@@ -768,7 +768,7 @@ impl Wizard {
     fn finish_rename(&mut self) {
         if let Some((row, draft)) = self.editing.take() {
             if let Some(folder) = self.folders.get_mut(row) {
-                let clean = sanitize_name(&draft);
+                let clean = sanitize_name(draft.value());
                 if !clean.is_empty() {
                     folder.name = clean;
                     folder.named_by_user = true;
@@ -1579,14 +1579,22 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
             KeyCode::Esc => {
                 wizard.editing = None;
             }
-            KeyCode::Backspace => {
-                draft.pop();
-            }
             KeyCode::Enter => wizard.finish_rename(),
-            KeyCode::Char(c) if c.is_ascii_alphanumeric() || c == '-' => {
-                draft.push(c.to_ascii_lowercase());
+            // The vpath charset (a-z 0-9 dash) is enforced at the gate:
+            // legal characters fold to lowercase and reach the editor,
+            // everything else typed is dropped. Non-character keys —
+            // ←/→, Home/End, Backspace, Delete, the ctrl word ops —
+            // pass straight through.
+            KeyCode::Char(c) if !c.is_ascii_alphanumeric() && c != '-' => {}
+            _ => {
+                let key = match code {
+                    KeyCode::Char(c) => {
+                        KeyEvent::new(KeyCode::Char(c.to_ascii_lowercase()), key.modifiers)
+                    }
+                    _ => key,
+                };
+                draft.handle_event(&TermEvent::Key(key));
             }
-            _ => {}
         }
         return None;
     }
@@ -1941,7 +1949,10 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         let folder = &wizard.folders[i];
         let editing = wizard.editing.as_ref().is_some_and(|(row, _)| *row == i);
         let name = match (&wizard.editing, editing) {
-            (Some((_, draft)), true) => format!("[{draft}▏]"),
+            (Some((_, draft)), true) => format!(
+                "[{}]",
+                kit::input_display(draft.value(), draft.cursor(), NAME_W.saturating_sub(2))
+            ),
             _ => folder.name.clone(),
         };
         let row_bg = if selected && !editing {
@@ -2404,7 +2415,7 @@ mod tests {
             wizard.add_folder(p.to_string());
         }
         wizard.sel = Some(2);
-        wizard.editing = Some((2, "draft".to_string()));
+        wizard.editing = Some((2, "draft".into()));
         wizard.remove_at(0);
         assert_eq!(wizard.sel, Some(1), "cursor follows its row left");
         assert_eq!(wizard.editing.as_ref().map(|(r, _)| *r), Some(1));
@@ -2702,16 +2713,38 @@ mod tests {
     }
 
     #[test]
+    fn renames_run_on_the_line_editor_with_the_vpath_charset_gate() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.add_folder("/tmp/music".to_string());
+        wizard.act(Act::RenameFolder(0));
+        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        // Mid-line cursor editing; uppercase folds at the gate.
+        handle_key(&mut wizard, key(KeyCode::Left));
+        handle_key(&mut wizard, key(KeyCode::Left));
+        handle_key(&mut wizard, key(KeyCode::Char('Z')));
+        // Illegal characters are dropped whole.
+        handle_key(&mut wizard, key(KeyCode::Char(' ')));
+        handle_key(&mut wizard, key(KeyCode::Char('!')));
+        let (row, draft) = wizard.editing.as_ref().unwrap();
+        assert_eq!(*row, 0);
+        assert_eq!(draft.value(), "medzia");
+        assert_eq!(draft.cursor(), 4, "the cursor sits after the insert");
+        handle_key(&mut wizard, key(KeyCode::Enter));
+        assert_eq!(wizard.folders[0].name, "medzia");
+    }
+
+    #[test]
     fn re_clicking_the_edited_chip_keeps_the_draft_and_blur_commits_it() {
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
         wizard.add_folder("/tmp/music".to_string());
         wizard.act(Act::RenameFolder(0));
-        assert_eq!(wizard.editing.as_ref().map(|(_, d)| d.as_str()), Some("media"));
+        assert_eq!(wizard.editing.as_ref().map(|(_, d)| d.value()), Some("media"));
         // Mid-edit draft; clicking the same chip again must not clobber it.
-        wizard.editing = Some((0, "vinyl".to_string()));
+        wizard.editing = Some((0, "vinyl".into()));
         wizard.act(Act::RenameFolder(0));
-        assert_eq!(wizard.editing.as_ref().map(|(_, d)| d.as_str()), Some("vinyl"));
+        assert_eq!(wizard.editing.as_ref().map(|(_, d)| d.value()), Some("vinyl"));
         // The blur path: finish_rename commits, Enter's semantics.
         wizard.finish_rename();
         assert!(wizard.editing.is_none());
