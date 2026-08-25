@@ -856,14 +856,18 @@ impl Wizard {
         None
     }
 
-    /// Whether the Done page lays out as two columns: only when the code
-    /// draws as pixels (which scale to half the width), never for the
-    /// fixed-size half-block fallback. The bar's scan line yields to the
-    /// right column exactly when this holds. No ground-ownership gate:
-    /// unlike the logo, the code's picture carries its own white quiet
-    /// zone and is correct on any background.
+    /// Whether the Done page lays out as two columns. CAPABILITY decides
+    /// — a terminal that draws pixels gets the columns from the very
+    /// first frame (wordmark up, right column complete) and the code
+    /// pops into its slot when the ticket arrives. Deciding on the data
+    /// instead painted one stacked, unstyled frame and then reflowed the
+    /// whole page a beat later. The fixed-size half-block fallback keeps
+    /// the stacked layout — it cannot fit a half column. No
+    /// ground-ownership gate: unlike the logo, the code's picture
+    /// carries its own white quiet zone and is correct on any
+    /// background.
     fn done_two_column(&self) -> bool {
-        self.qr.is_some() && self.qr_art.is_some() && self.graphics.protocol().is_some()
+        self.graphics.protocol().is_some()
     }
 
     /// Switch the wizard's language. Everything re-renders through t!()
@@ -3320,6 +3324,20 @@ mod tests {
         assert_eq!(detect_lang(None, Some("ko-KR".into())), 0, "unsupported falls to English");
         assert_eq!(detect_lang(Some("ja".into()), Some("de-DE".into())), 5, "env outranks system");
         assert_eq!(detect_lang(Some("nope".into()), Some("ru".into())), 8, "bad env falls through");
+    }
+
+    #[test]
+    fn the_done_layout_is_decided_by_capability_not_data() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        assert!(!wizard.done_two_column(), "no pixels, no columns");
+        // Pixels mean columns from the FIRST frame, before any Quick
+        // Connect data arrives — deciding on the data painted one
+        // stacked, unstyled frame and then reflowed the page.
+        wizard.graphics =
+            crate::tui::graphics::Graphics::forced(ratatui_image::picker::ProtocolType::Kitty);
+        assert!(wizard.qr.is_none() && wizard.qr_art.is_none());
+        assert!(wizard.done_two_column());
     }
 
     #[test]
