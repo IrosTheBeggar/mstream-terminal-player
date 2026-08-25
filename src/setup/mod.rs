@@ -232,6 +232,7 @@ enum Act {
     ContinueFolders,
     Focus(LoginField),
     CreateAdmin,
+    BackToFolders,
     SkipLogin,
     SkipConfirm,
     SkipCancel,
@@ -396,9 +397,9 @@ pub(crate) struct Wizard {
     /// Paths waiting for their local validation to be sent to the worker.
     pending_validate: Vec<String>,
 
-    pub username: String,
-    pub password: String,
-    pub confirm: String,
+    pub username: Input,
+    pub password: Input,
+    pub confirm: Input,
     pub field: LoginField,
     /// Continue without an account — the public-mode path.
     pub public: bool,
@@ -445,9 +446,9 @@ impl Wizard {
             reveal: None,
             pending_validate: Vec::new(),
             editing: None,
-            username: String::new(),
-            password: String::new(),
-            confirm: String::new(),
+            username: Input::default(),
+            password: Input::default(),
+            confirm: Input::default(),
             field: LoginField::Username,
             public: false,
             extras: [true, false, false],
@@ -590,6 +591,14 @@ impl Wizard {
                 Some(problem) => self.note = Some((problem.to_string(), true)),
                 None => self.queue(Op::CreateAdmin, "creating your login…"),
             },
+            Act::BackToFolders => {
+                // Back to add or adjust folders. Already-committed rows
+                // stay put on the server; Continue re-commits only the
+                // NEW ones (the batch filters on `committed`), and the
+                // server queues its scan per added directory as always.
+                self.screen = Screen::Folders;
+                self.note = None;
+            }
             Act::SkipLogin => self.modal = Modal::SkipWarning,
             Act::SkipCancel => self.modal = Modal::None,
             Act::SkipConfirm => {
@@ -779,13 +788,13 @@ impl Wizard {
     }
 
     fn login_problem(&self) -> Option<&'static str> {
-        if self.username.trim().is_empty() {
+        if self.username.value().trim().is_empty() {
             return Some("pick a username");
         }
-        if self.password.is_empty() {
+        if self.password.value().is_empty() {
             return Some("pick a password");
         }
-        if self.password != self.confirm {
+        if self.password.value() != self.confirm.value() {
             return Some("the passwords do not match");
         }
         None
@@ -827,8 +836,8 @@ impl Wizard {
                     .collect(),
             ),
             Op::CreateAdmin => Job::Admin {
-                username: self.username.clone(),
-                password: self.password.clone(),
+                username: self.username.value().to_string(),
+                password: self.password.value().to_string(),
                 vpaths: self.folders.iter().map(|f| f.name.clone()).collect(),
             },
             Op::CommitExtras => Job::Extras(
@@ -1062,7 +1071,7 @@ impl Wizard {
         // overwritten with defaults — this run just doesn't get saved.
         match config::load() {
             Ok(mut cfg) => {
-                config::touch_server(&mut cfg, &server, Some(self.username.clone()));
+                config::touch_server(&mut cfg, &server, Some(self.username.value().to_string()));
                 if let Err(e) = config::save(&cfg) {
                     self.note = Some((format!("could not save settings: {e}"), false));
                 }
@@ -1651,24 +1660,21 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
                 None
             }
             KeyCode::Enter => wizard.act(Act::CreateAdmin),
-            KeyCode::Backspace => {
-                match wizard.field {
-                    LoginField::Username => wizard.username.pop(),
-                    LoginField::Password => wizard.password.pop(),
-                    LoginField::Confirm => wizard.confirm.pop(),
+            KeyCode::Esc => wizard.act(Act::BackToFolders),
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                wizard.act(Act::SkipLogin)
+            }
+            // The focused field's line editor takes everything else —
+            // chars, Backspace, Delete, ←/→, Home/End, the ctrl ops.
+            _ => {
+                let field = match wizard.field {
+                    LoginField::Username => &mut wizard.username,
+                    LoginField::Password => &mut wizard.password,
+                    LoginField::Confirm => &mut wizard.confirm,
                 };
+                field.handle_event(&TermEvent::Key(key));
                 None
             }
-            KeyCode::Char(c) => {
-                match wizard.field {
-                    LoginField::Username => wizard.username.push(c),
-                    LoginField::Password => wizard.password.push(c),
-                    LoginField::Confirm => wizard.confirm.push(c),
-                }
-                None
-            }
-            KeyCode::Esc => wizard.act(Act::SkipLogin),
-            _ => None,
         },
         Screen::Extras => match code {
             KeyCode::Up => {
@@ -1801,6 +1807,28 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
             wizard.ui.tip(rect, "Add a folder first");
         }
     }
+    if wizard.screen == Screen::Login {
+        let label = "Create Admin ▸";
+        let x = bar.right().saturating_sub(label.chars().count() as u16 + 6);
+        let rect = kit::tall_button(
+            frame,
+            &mut wizard.ui,
+            Rect { x, y: bar.y, width: bar.width, height: 3 },
+            label,
+            true,
+            Act::CreateAdmin,
+        );
+        let back_label = "◂ Back";
+        let back_x = rect.x.saturating_sub(back_label.chars().count() as u16 + 6 + 2);
+        let back = kit::tall_secondary(
+            frame,
+            &mut wizard.ui,
+            Rect { x: back_x, y: bar.y, width: bar.width, height: 3 },
+            back_label,
+            Act::BackToFolders,
+        );
+        wizard.ui.tip(back, "Add or adjust folders — nothing is lost");
+    }
 
     if modal_open {
         wizard.ui.pointer = live_pointer;
@@ -1834,7 +1862,7 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
                 "↑ ↓ rows · Enter rename · r remove · Esc deselect · b browse · t type a path · c continue"
             }
         },
-        (_, Screen::Login) => "Tab next field · Enter create · Esc skip",
+        (_, Screen::Login) => "Tab next field · Enter create · Esc back · Ctrl+S skip",
         (_, Screen::Extras) => "Space toggle · c continue",
         (_, Screen::Done) => "Enter open the player · f finish",
     }
@@ -2057,8 +2085,8 @@ fn field_row(
     );
     let rect = Rect { x, y: y + 1, width, height: 3 };
     let inner = card(frame, rect, focused);
-    let shown = if focused { format!("{value}▏") } else { value };
-    frame.render_widget(Paragraph::new(Span::raw(shown)), inner);
+    let _ = focused; // the caller renders the caret via input_display
+    frame.render_widget(Paragraph::new(Span::raw(value)), inner);
     wizard.ui.click(rect, Act::Focus(field));
     y + 4
 }
@@ -2081,20 +2109,30 @@ fn draw_login(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 
     let width = column.width.min(44);
     let x = column.x + (column.width - width) / 2;
-    let (username, password, confirm) =
-        (wizard.username.clone(), mask(&wizard.password), mask(&wizard.confirm));
     let focus = wizard.field;
+    let show = |input: &Input, secret: bool, focused: bool| -> String {
+        let value =
+            if secret { mask(input.value()) } else { input.value().to_string() };
+        if focused {
+            kit::input_display(&value, input.cursor(), width.saturating_sub(2))
+        } else {
+            value
+        }
+    };
+    let (username, password, confirm) = (
+        show(&wizard.username, false, focus == LoginField::Username),
+        show(&wizard.password, true, focus == LoginField::Password),
+        show(&wizard.confirm, true, focus == LoginField::Confirm),
+    );
     y = field_row(frame, wizard, x, y, width, "USERNAME", username, LoginField::Username, focus == LoginField::Username);
     y = field_row(frame, wizard, x, y, width, "PASSWORD", password, LoginField::Password, focus == LoginField::Password);
     y = field_row(frame, wizard, x, y, width, "CONFIRM PASSWORD", confirm, LoginField::Confirm, focus == LoginField::Confirm);
     y += 1;
 
-    let rect =
-        kit::tall_button(frame, &mut wizard.ui, Rect { x, y, width, height: 3 }, "Create Admin ▸", true, Act::CreateAdmin);
     let skip = kit::button(
         frame,
         &mut wizard.ui,
-        Rect { x: rect.right() + 2, y: y + 1, width, height: 1 },
+        Rect { x, y, width, height: 1 },
         "Skip for now",
         false,
         Act::SkipLogin,
@@ -2710,6 +2748,32 @@ mod tests {
         let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
         let said = draft.error.as_deref().expect("the failure must be visible");
         assert!(said.contains("/music/") && said.contains("no route to host"));
+    }
+
+    #[test]
+    fn going_back_and_continuing_recommits_only_the_new_folders() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.add_folder("/media/a".to_string());
+        wizard.folders[0].committed = true;
+        wizard.screen = Screen::Login;
+        wizard.act(Act::BackToFolders);
+        assert_eq!(wizard.screen, Screen::Folders);
+        wizard.add_folder("/media/b".to_string());
+        wizard.queued = Some(Op::CommitFolders);
+        let (tx, rx) = std::sync::mpsc::channel();
+        wizard.dispatch_queued(&tx);
+        let batches: Vec<_> = rx
+            .try_iter()
+            .filter_map(|(_, job)| match job {
+                Job::Folders(batch) => Some(batch),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        assert_eq!(batch.len(), 1, "only the NEW folder goes to the server");
+        assert_eq!(batch[0].1, "/media/b");
     }
 
     #[test]

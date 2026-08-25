@@ -335,6 +335,39 @@ pub fn tall_button<A: Clone>(
     rect
 }
 
+/// The tall SECONDARY: the backward/neutral action beside a primary —
+/// the same 3-row Rounded frame, everything DIM until hover brightens
+/// border and label to Cyan (label BOLD on hover, like text buttons).
+/// Never two primaries in a row group; a secondary is how the second
+/// tall control stays honest.
+pub fn tall_secondary<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    at: Rect,
+    label: &str,
+    act: A,
+) -> Rect {
+    let text = format!("  {label}  ");
+    let width = (text.chars().count() as u16 + 2).min(at.width);
+    let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
+    let hovered = s.pointer.is_some_and(|p| rect.contains(p));
+    let color = if hovered { th().bright } else { th().dim };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let label_style = if hovered {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(color)
+    };
+    frame.render_widget(Paragraph::new(Span::styled(text, label_style)), inner);
+    s.click(rect, act);
+    rect
+}
+
 /// A one-line clickable button: draws itself, registers its click, and
 /// lights up when the pointer is over it. Returns the rect it drew into.
 pub fn button<A: Clone>(

@@ -127,6 +127,11 @@ banned.
   action wears the affirmative color. Hover brightens both to Cyan like
   everything else. It sits ABOVE the table it feeds, so it holds one
   spot as rows come and go.
+- **Secondary (tall)**: the backward/neutral action beside a primary —
+  the same 3-row Rounded frame, border and label DarkGray; hover
+  brightens both to Cyan (label BOLD). "◂ Back" is the canonical use.
+  Never two primaries in a row group; this is how the second tall
+  control stays honest.
 - **Text**: 1 row, fg DarkGray. Hover: fg Cyan + BOLD.
 - **Modal primary**: 1 row, label fg LightBlue BOLD (no frame — modals
   are compact); the SAFE choice gets it.
@@ -144,7 +149,9 @@ banned.
 Label above (fg DarkGray, UPPERCASE, small). 3-row Rounded card: idle
 border DarkGray; focused border LightBlue with the `▏` caret after the
 value (Cyan is reserved for hover and the active rename chip). Secrets
-render as `•` repeat. Click focuses; Tab/↓ cycle fields.
+render as `•` repeat (the mask maps 1:1, so the cursor shows truly).
+Fields run on the SAME line editor as the path field. Click focuses;
+Tab/↓ cycle fields (the editor never sees them).
 The name chip brightens under the pointer like every clickable —
 hover fg Cyan + BOLD (a selected row keeps its bg; only the fg
 brightens). Inline chip edits run on the SAME line editor as the path
