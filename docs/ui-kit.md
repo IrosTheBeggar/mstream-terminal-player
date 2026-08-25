@@ -336,7 +336,22 @@ pixels through the player's graphics probe (`tui::graphics` — kitty,
 sixel, iTerm2; probed once at startup, `MSTREAM_NO_GRAPHICS=1` kills it)
 and scales to the cells it is given. The character fallback is fixed-size,
 so it draws only when it fits WHOLE — a cropped QR scans as nothing — and
-otherwise one dim line says what to do: `(make the window taller …)`.
+otherwise one dim line says what to do: `(make the window taller — or
+press v …)`. The fallback renders NO quiet zone: an inverted code's quiet
+zone must be dark, and the page's own empty ground around the block is
+already wider than the spec's four modules — layouts hosting a code keep
+one blank line above and below.
+
+Apple's Terminal (probed, macOS 26 / 470.2) draws NO pixel protocol — the
+kitty query is reflected into the screen as literal text, DA1 has no
+sixel bit — and renders sextants/octants as tofu (quadrants work but
+don't shrink a QR's height), so the probe skips the query there outright
+(`TERM_PROGRAM=Apple_Terminal`, local-only, `MSTREAM_GRAPHICS` overrides).
+Every terminal keeps the escape hatch instead: `v` / a "View as a
+picture" button writes the code's PNG to the temp dir and hands it to the
+OS viewer — the one crisp, scannable QR a pixel-less terminal can offer
+(`MSTREAM_NO_OPEN=1` is the harness seam; headless, the note carries the
+saved path).
 
 ## Behavioral rules
 

@@ -167,6 +167,11 @@ mod native {
                 }
             }
 
+            if skip_query_for_apple_terminal(|var| std::env::var(var).ok()) {
+                tracing::info!("terminal graphics: Apple Terminal — no pixel protocol, query skipped");
+                return Graphics { adaptive: true, ..Graphics::disabled() };
+            }
+
             let mut picker = Picker::from_query_stdio()
                 .ok()
                 .filter(|picker| picker.protocol_type() != ProtocolType::Halfblocks);
@@ -437,6 +442,20 @@ mod native {
     /// environment would pick a protocol the thing actually drawing may
     /// not speak (zellij answers DA1's sixel bit and draws no OSC 1337 at
     /// all).
+    /// Apple's Terminal has no pixel protocol to find — probed live on
+    /// macOS 26 (Terminal.app 470.2): the kitty query goes unanswered and
+    /// is REFLECTED into the screen as literal text (`Gi=31,s=1,...`),
+    /// DA1 carries no sixel bit, and there is no iTerm2 protocol — so
+    /// asking buys nothing and paints junk into scrollback. TERM_PROGRAM
+    /// is set locally by Terminal.app and not forwarded over ssh, and a
+    /// multiplexer overwrites it with its own name, so this never masks a
+    /// capable terminal on the far side of either. `MSTREAM_GRAPHICS`
+    /// still forces a protocol past this, should a future Terminal.app
+    /// learn to draw.
+    fn skip_query_for_apple_terminal(env: impl Fn(&str) -> Option<String>) -> bool {
+        env("TERM_PROGRAM").is_some_and(|v| v == "Apple_Terminal")
+    }
+
     fn demote_for_iterm2(
         protocol: ProtocolType,
         env: impl Fn(&str) -> Option<String>,
@@ -776,6 +795,26 @@ mod native {
                     .unwrap();
             }
             assert_eq!(graphics.decodes.get(), 3, "undecodable bytes are asked exactly once");
+        }
+
+        #[test]
+        fn the_query_is_skipped_only_for_a_local_apple_terminal() {
+            let apple = |var: &str| match var {
+                "TERM_PROGRAM" => Some("Apple_Terminal".to_string()),
+                _ => None,
+            };
+            assert!(skip_query_for_apple_terminal(apple));
+            // iTerm2 and tmux both claim TERM_PROGRAM as their own name,
+            // and over ssh the variable is simply absent — the skip fires
+            // for none of them.
+            for name in ["iTerm.app", "tmux", "WezTerm", "ghostty"] {
+                let other = |var: &str| match var {
+                    "TERM_PROGRAM" => Some(name.to_string()),
+                    _ => None,
+                };
+                assert!(!skip_query_for_apple_terminal(other), "{name}");
+            }
+            assert!(!skip_query_for_apple_terminal(|_| None), "ssh: no TERM_PROGRAM");
         }
 
         #[test]

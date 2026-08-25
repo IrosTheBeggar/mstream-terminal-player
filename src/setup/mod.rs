@@ -251,6 +251,9 @@ enum Act {
     BrowseCancel,
     PathSuggest(usize),
     OpenPlayer,
+    /// The Quick Connect code as a real image in the OS viewer — the one
+    /// crisp QR a pixel-less terminal can offer.
+    ViewPicture,
     Finish,
 }
 
@@ -724,6 +727,19 @@ impl Wizard {
             Act::BrowseCancel => self.modal = Modal::None,
             Act::PathSuggest(i) => self.accept_suggestion(i),
             Act::OpenPlayer => return Some(Outcome::OpenPlayer),
+            Act::ViewPicture => {
+                if let Some(art) = &self.qr_art {
+                    self.note = Some(match write_qr_picture(art) {
+                        Ok(path) if open_picture(&path) => {
+                            ("the code is open in your image viewer".to_string(), false)
+                        }
+                        // No opener (headless, or the test seam): the path
+                        // is the deliverable.
+                        Ok(path) => (format!("picture saved to {}", path.display()), false),
+                        Err(e) => (format!("could not write the picture: {e}"), true),
+                    });
+                }
+            }
             Act::Finish => return Some(Outcome::Quit),
         }
         None
@@ -1349,7 +1365,10 @@ fn qr_art(data: &str) -> Option<crate::tui::art::Art> {
 }
 
 /// The pairing ticket as unicode half-blocks, light-on-dark so it scans off
-/// a dark terminal.
+/// a dark terminal. No rendered quiet zone: an inverted code's quiet zone
+/// must be DARK, and the page already surrounds the block with empty dark
+/// cells wider than the spec's four modules — rendering it again only cost
+/// four rows and columns this render can't spare.
 fn qr_lines(data: &str) -> Option<Vec<String>> {
     use qrcode::render::unicode::Dense1x2;
     let code = qrcode::QrCode::new(data.as_bytes()).ok()?;
@@ -1357,9 +1376,38 @@ fn qr_lines(data: &str) -> Option<Vec<String>> {
         .render::<Dense1x2>()
         .dark_color(Dense1x2::Light)
         .light_color(Dense1x2::Dark)
-        .quiet_zone(true)
+        .quiet_zone(false)
         .build();
     Some(rendered.lines().map(str::to_string).collect())
+}
+
+/// Write the code's PNG where an image viewer can have it. The picture is
+/// the one crisp, scannable QR a pixel-less terminal can offer — Apple's
+/// Terminal draws no protocol at all (probed; see tui::graphics).
+fn write_qr_picture(art: &crate::tui::art::Art) -> Result<std::path::PathBuf, String> {
+    let path = std::env::temp_dir().join("mstream-quick-connect.png");
+    std::fs::write(&path, art.source()).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// Hand a file to the OS's opener, detached. `MSTREAM_NO_OPEN` is the test
+/// seam — harnesses assert the written file instead of popping viewers.
+/// Returns whether an opener was actually launched.
+fn open_picture(path: &std::path::Path) -> bool {
+    if std::env::var("MSTREAM_NO_OPEN").is_ok_and(|v| !v.is_empty() && v != "0") {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    let launched = std::process::Command::new("open").arg(path).spawn().is_ok();
+    #[cfg(target_os = "windows")]
+    let launched = std::process::Command::new("cmd")
+        .args(["/c", "start", ""])
+        .arg(path)
+        .spawn()
+        .is_ok();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let launched = std::process::Command::new("xdg-open").arg(path).spawn().is_ok();
+    launched
 }
 
 // ── Entry ────────────────────────────────────────────────────────────────────
@@ -1833,6 +1881,7 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
         },
         Screen::Done => match code {
             KeyCode::Enter | KeyCode::Char('o') => wizard.act(Act::OpenPlayer),
+            KeyCode::Char('v') => wizard.act(Act::ViewPicture),
             KeyCode::Char('f') | KeyCode::Char('q') | KeyCode::Esc => wizard.act(Act::Finish),
             _ => None,
         },
@@ -2032,8 +2081,12 @@ fn footer_hint(wizard: &Wizard) -> &'static str {
             None => "↑ ↓ select · c continue · Esc back",
             Some(_) => "↑ ↓ move · Space toggle · c continue · Esc back",
         },
-        (_, Screen::Done) if wizard.standalone => "Enter open the player · Esc close",
-        (_, Screen::Done) => "Enter open the player · f finish",
+        (_, Screen::Done) => match (wizard.standalone, wizard.qr_art.is_some()) {
+            (true, true) => "Enter open the player · v picture · Esc close",
+            (true, false) => "Enter open the player · Esc close",
+            (false, true) => "Enter open the player · v picture · f finish",
+            (false, false) => "Enter open the player · f finish",
+        },
     }
 }
 
@@ -2401,7 +2454,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         } else {
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "(make the window taller to show the QR code here)",
+                    "(make the window taller — or press v for the code as a picture)",
                     dim(),
                 ))
                 .alignment(Alignment::Center),
@@ -2426,7 +2479,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         true,
         Act::OpenPlayer,
     );
-    kit::button(
+    let finish = kit::button(
         frame,
         &mut wizard.ui,
         Rect { x: open.right() + 2, y: y + 1, width: column.width, height: 1 },
@@ -2434,6 +2487,17 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         false,
         Act::Finish,
     );
+    if wizard.qr_art.is_some() {
+        let view = kit::button(
+            frame,
+            &mut wizard.ui,
+            Rect { x: finish.right() + 2, y: y + 1, width: column.width, height: 1 },
+            "View as a picture",
+            false,
+            Act::ViewPicture,
+        );
+        wizard.ui.tip(view, "Open the code in your image viewer — v");
+    }
 }
 
 fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
@@ -2728,7 +2792,16 @@ mod tests {
         assert!(wizard.qr.is_some());
         assert!(wizard.qr_art.is_some(), "the picture rides along with the half-blocks");
         assert_eq!(wizard.queued, None, "no scan-progress polling outside the wizard");
-        assert_eq!(footer_hint(&wizard), "Enter open the player · Esc close");
+        assert_eq!(footer_hint(&wizard), "Enter open the player · v picture · Esc close");
+        // v writes the PNG; the note carries the path (the test seam
+        // keeps the viewer closed).
+        unsafe { std::env::set_var("MSTREAM_NO_OPEN", "1") };
+        handle_key(&mut wizard, KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        let note = wizard.note.clone().expect("a note").0;
+        assert!(note.starts_with("picture saved to "), "{note}");
+        let path = note.trim_start_matches("picture saved to ");
+        let png = std::fs::read(path).expect("the picture exists");
+        assert!(png.starts_with(b"\x89PNG"), "and is a PNG");
         // Esc closes the page (and the wizard's Done screen alike).
         let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         assert!(matches!(handle_key(&mut wizard, key), Some(Outcome::Quit)));
