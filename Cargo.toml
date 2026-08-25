@@ -60,6 +60,11 @@ ratatui = { version = "0.30.2", features = ["crossterm"] }
 # arrives regardless — icy_sixel quantises through quantette, which brings
 # it — so the trim's win is the codec and C-library weight, not rayon.
 ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
+# Wizard i18n: compile-time-embedded YAML locales (locales/*.yml), t!()
+# with interpolation and per-call locale; sys-locale answers "what
+# language is this machine?". Native-only — the wasm build has no wizard.
+rust-i18n = "3"
+sys-locale = "0.3"
 rodio = { version = "0.22", features = ["symphonia-all"] }
 tiny_http = "0.12"
 # Held at 0.5 on purpose: rodio 0.22 decodes through symphonia 0.5.x, and a
@@ -193,3 +198,7 @@ auto-req = "no"
 
 [package.metadata.generate-rpm.requires]
 alsa-lib = "*"
+
+[dev-dependencies]
+# The locale-completeness test parses locales/*.yml directly.
+serde_yaml = "0.9"

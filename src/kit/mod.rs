@@ -82,13 +82,13 @@ pub struct Surface<A> {
     /// Tooltip targets, rebuilt each frame like `clicks`. A rect here is
     /// NOT necessarily clickable (disabled controls register a tip — the
     /// reason they're disabled — without registering a click).
-    pub tips: Vec<(Rect, &'static str)>,
+    pub tips: Vec<(Rect, String)>,
     /// Where the mouse last was, for hover styling. None until it moves.
     /// Screens may stash-and-clear it to make a layer inert (the modal
     /// pattern), restoring afterwards.
     pub pointer: Option<Position>,
     /// The tip target the pointer is resting on, and since when.
-    dwell: Option<(Rect, &'static str, Instant)>,
+    dwell: Option<(Rect, String, Instant)>,
     bars: Vec<BarReg<A>>,
     /// An active thumb drag: index into this frame's `bars`.
     drag: Option<usize>,
@@ -142,8 +142,8 @@ impl<A: Clone> Surface<A> {
     }
 
     /// Register a tooltip target.
-    pub fn tip(&mut self, rect: Rect, text: &'static str) {
-        self.tips.push((rect, text));
+    pub fn tip(&mut self, rect: Rect, text: impl Into<String>) {
+        self.tips.push((rect, text.into()));
     }
 
     /// What a press at `at` hits — the last-drawn matching rect.
@@ -256,8 +256,8 @@ impl<A: Clone> Surface<A> {
     pub fn dwell_tick(&mut self) {
         let tip = self
             .pointer
-            .and_then(|p| self.tips.iter().find(|(rect, _)| rect.contains(p)).copied());
-        self.dwell = match (tip, self.dwell) {
+            .and_then(|p| self.tips.iter().find(|(rect, _)| rect.contains(p)).cloned());
+        self.dwell = match (tip, self.dwell.take()) {
             (Some((rect, text)), Some((prev, _, since))) if prev == rect => {
                 Some((rect, text, since))
             }
@@ -267,9 +267,9 @@ impl<A: Clone> Surface<A> {
     }
 
     /// The tooltip to draw this frame, if the dwell has matured.
-    pub fn ripe_tooltip(&self) -> Option<(Rect, &'static str)> {
-        let (rect, text, since) = self.dwell?;
-        (since.elapsed() >= TIP_DELAY).then_some((rect, text))
+    pub fn ripe_tooltip(&self) -> Option<(Rect, &str)> {
+        let (rect, text, since) = self.dwell.as_ref()?;
+        (since.elapsed() >= TIP_DELAY).then_some((*rect, text.as_str()))
     }
 
     /// Typing dismisses a tooltip (the dwell re-arms if the pointer just
@@ -448,7 +448,13 @@ pub fn modal_frame_anchored(
 /// until hovered, then BRIGHT — dismissal is neutral, unlike a row
 /// remove's destructive red. Esc remains the keyboard path (the tip
 /// says so).
-pub fn modal_close<A: Clone>(frame: &mut Frame, s: &mut Surface<A>, inner: Rect, act: A) {
+pub fn modal_close<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    inner: Rect,
+    act: A,
+    tip: impl Into<String>,
+) {
     let rect = Rect { x: inner.right().saturating_sub(3), y: inner.y, width: 3, height: 1 };
     let hovered = s.pointer.is_some_and(|p| rect.contains(p));
     let style = if hovered {
@@ -458,7 +464,7 @@ pub fn modal_close<A: Clone>(frame: &mut Frame, s: &mut Surface<A>, inner: Rect,
     };
     frame.render_widget(Paragraph::new(Span::styled("[X]", style)), rect);
     s.click(rect, act);
-    s.tip(rect, "Close — Esc");
+    s.tip(rect, tip);
 }
 
 // ── Scrolling ────────────────────────────────────────────────────────────────

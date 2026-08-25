@@ -1,0 +1,156 @@
+lang:
+  autonym: "中文"
+  chip_tip: "语言 — l"
+  modal_title: "语言"
+  machine_note: "此翻译由机器生成 — 可能有不通顺之处。"
+  hint: "↑ ↓ 选择 · Enter 确定 · Esc 关闭"
+
+busy:
+  reaching: "正在连接服务器…"
+  committing_folders: "正在把文件夹添加到服务器…"
+  creating_login: "正在创建账户…"
+  fetching_qc: "正在获取 Quick Connect 代码…"
+  saving_extras: "正在保存选择…"
+  listing: "正在读取…"
+
+note:
+  folder_dup: "该文件夹已在列表中"
+  committed_rename: "已在服务器上 — 请在管理面板中重命名"
+  committed_remove: "%{name} 已在服务器上 — 请在管理面板中移除"
+  need_folder: "请先添加至少一个文件夹"
+  worker_gone: "工作线程已丢失 — 请重启向导"
+  no_picker: "此处没有系统选择器（%{why}）— 改为在服务器上浏览"
+  browse_failed: "无法浏览该位置：%{err}"
+  removed_same: "已移除 %{path} — 与 %{name} 是同一个文件夹"
+  could_not_add: "无法添加 %{name}"
+  keep_session: "无法保持会话"
+  create_login_failed: "无法创建账户"
+  extras_failed: "无法设置 %{label}"
+  qc_state_failed: "无法读取 Quick Connect 状态"
+  settings_save_failed: "无法保存设置：%{err}"
+  settings_not_saved: "设置未保存 — %{err}"
+  session_save_failed: "无法保存会话：%{err}"
+  session_not_saved: "会话未保存 — %{err}"
+  player_window: "播放器已在新窗口打开"
+  link_opened: "%{label}已在浏览器中打开"
+  link_headless: "%{label}：%{url}"
+
+login_problem:
+  username: "请输入用户名"
+  password: "请输入密码"
+  mismatch: "两次密码不一致"
+
+extras_label:
+  updates: "更新"
+  audio: "服务器音频"
+  discovery: "发现网络"
+
+folders:
+  add_card: "添加音乐文件夹"
+  col_name: "名称"
+  col_folder: "文件夹"
+  nothing_yet: "（尚未添加）"
+  tip_name: "此文件夹在 mStream 中的名称 — 点击重命名"
+  warn_missing: "本机未找到 — 远程服务器可能认识它"
+  warn_nested: "位于另一个已选文件夹内 — 会被扫描两次"
+  warn_file: "这是文件，不是文件夹"
+  warn_unreadable: "没有读取此文件夹的权限"
+  continue_enabled: "继续 ▸"
+  continue_disabled: "继续"
+  tip_continue_disabled: "请先添加一个文件夹"
+
+login:
+  title: "创建账户"
+  subtitle: "该账户管理服务器 — 请妥善保管密码。"
+  field_username: "用户名"
+  field_password: "密码"
+  field_confirm: "确认密码"
+  skip: "暂时跳过"
+  tip_skip: "不创建账户继续 — 公开模式"
+  create: "创建管理员 ▸"
+  back: "◂ 返回"
+  tip_back: "返回附加设置 — 不会丢失任何内容"
+
+extras:
+  title: "附加设置"
+  subtitle: "全部可选，之后都能更改。"
+  updates_label: "自动更新"
+  updates_desc: "后台下载新版本，重启时应用"
+  audio_label: "服务器端音频"
+  audio_desc: "通过这台机器的扬声器播放音乐"
+  discovery_label: "发现网络"
+  discovery_desc: "与其他 mStream 服务器点对点发现并共享曲库"
+  continue: "继续 ▸"
+  back: "◂ 返回"
+  tip_back: "添加或调整文件夹 — 不会丢失任何内容"
+
+done:
+  running_port: "你的 mStream 服务器正在运行！可通过端口 %{port} 连接。"
+  running_at: "你的 mStream 服务器正在运行！可通过 %{server} 连接。"
+  scan_left: "或扫描左侧的 Quick Connect 二维码自动连接。"
+  scan_above: "或扫描上方的 Quick Connect 二维码自动连接。"
+  heading_qr: "Quick Connect"
+  heading_wizard: "一切就绪。随身带走。"
+  too_short: "（请把窗口拉高以显示二维码）"
+  btn_android: "获取 Android 应用"
+  btn_ios: "获取 iOS 应用"
+  btn_admin: "打开管理面板"
+  btn_player: "试试我们的极简桌面播放器"
+  tip_android: "Google Play，在浏览器中打开"
+  tip_ios: "App Store，在浏览器中打开"
+  tip_admin: "在浏览器中管理服务器"
+  tip_player: "在新的终端窗口中打开"
+  label_play: "Google Play"
+  label_appstore: "App Store"
+  label_admin: "管理面板"
+
+qc:
+  scan_app: "用 mStream 应用扫码，随处连接 — 无需端口映射。"
+  on_panel: "Quick Connect 已开启 — 代码在管理面板中。"
+  off_panel: "Quick Connect 已关闭 — 在管理面板中开启即可随处连接。"
+  starting: "Quick Connect 仍在启动 — 代码稍后会出现在管理面板。"
+
+scan:
+  complete: "曲库扫描完成。"
+  more_queued: "，还有更多排队中"
+  progress_pct: "正在扫描 %{vpath} — %{pct}%（已扫 %{scanned} 首%{more}）"
+  progress: "正在扫描 %{vpath} — 已扫 %{scanned} 首%{more}"
+
+skip_modal:
+  title: "以公开模式运行？"
+  body: "没有账户，任何能访问到的人都能使用此服务器。"
+  plus_access: "+ 家庭网络中的所有人即刻可用"
+  plus_tv: "+ 电视和共享设备上无需输入"
+  minus_control: "− 任何访问到服务器的人都有完全控制权"
+  minus_qc: "− 你的 Quick Connect 代码会成为万能钥匙"
+  later: "之后可以在管理面板中创建账户。"
+  back: "◂ 返回 — 创建账户"
+  confirm: "仍然公开"
+
+browse:
+  title: "浏览服务器的文件夹"
+  empty: "（这里没有文件夹）"
+  up: "◂ 上级"
+  open: "打开"
+  add: "添加此文件夹 ▸"
+  close: "关闭"
+
+path_modal:
+  title: "输入音乐文件夹的完整路径"
+  tip_close: "关闭 — Esc"
+  listing_empty: "（无建议）"
+
+hint:
+  browser: "↑ ↓ 移动 · Enter 打开 · a 添加此文件夹 · Esc 关闭"
+  path: "Tab 补全 · ↑ ↓ 选择 · Enter 添加 · Esc 关闭"
+  skip: "Enter 以公开模式开始 · Esc 返回"
+  folders_empty: "b 浏览 · t 输入路径 · l 语言"
+  folders_rows: "↑ ↓ 选择 · b 浏览 · t 输入路径 · c 继续"
+  folders_selected: "↑ ↓ 行 · Enter 重命名 · r 移除 · Esc 取消选择 · b 浏览 · t 路径 · c 继续"
+  login: "Tab 下一栏 · Enter 创建 · Esc 返回 · Ctrl+S 跳过"
+  extras: "↑ ↓ 选择 · c 继续 · Esc 返回"
+  extras_selected: "↑ ↓ 移动 · 空格 切换 · c 继续 · Esc 返回"
+  done_qr: "↑ ↓ 选择 · Enter 打开 · Esc 关闭"
+  done_wizard: "↑ ↓ 选择 · Enter 打开 · f 完成"
+
+resize: "请把终端稍微调大一些"

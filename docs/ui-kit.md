@@ -361,6 +361,29 @@ OS viewer — the one crisp, scannable QR a pixel-less terminal can offer
 (`MSTREAM_NO_OPEN=1` is the harness seam; headless, the note carries the
 saved path).
 
+## Language
+
+Every user-facing string renders through `t!()` (rust-i18n; the compile-
+time-embedded `locales/*.yml`, English as the source of truth and the
+fallback). The set is exactly the mobile app's ten languages — en, de,
+es, fr, it, ja, pl, pt, ru, zh — no RTL, so terminal bidi never arises.
+English is human-written; the rest are machine translations, and say so
+in their own words the moment they are chosen (`lang.machine_note`).
+
+The selector is a chip at the TOP-LEFT of the folders screen (`▾
+Deutsch`), the mirror of the step counter: click or `l` opens a kit
+modal listing autonyms — arrows + Enter, clicks act directly, the
+current language wears the `•`. Boot order: `MSTREAM_SETUP_LANG` (tests
+and explicit override) → the system locale's base language → English.
+
+Rules: key BINDINGS never translate (the letters are the interface —
+`b browse` becomes `b durchsuchen`); brand terms stay (mStream, Quick
+Connect — the mobile app's own convention); server-provided error text
+stays verbatim inside translated framing; technical identifiers (vpath
+names, `media`) never translate. A locale-completeness test pins every
+locale to the English key set, placeholder for placeholder. Kit tips are
+owned `String`s so they translate like everything else.
+
 ## Behavioral rules
 
 - **Headless is first-class.** These screens are reached over SSH

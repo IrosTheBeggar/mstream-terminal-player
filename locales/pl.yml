@@ -1,0 +1,156 @@
+lang:
+  autonym: "Polski"
+  chip_tip: "Język — l"
+  modal_title: "Język"
+  machine_note: "To tłumaczenie jest maszynowe — mogą zdarzyć się potknięcia."
+  hint: "↑ ↓ wybierz · Enter zatwierdź · Esc zamknij"
+
+busy:
+  reaching: "łączenie z serwerem…"
+  committing_folders: "dodawanie folderów do serwera…"
+  creating_login: "tworzenie konta…"
+  fetching_qc: "pobieranie kodu Quick Connect…"
+  saving_extras: "zapisywanie wyborów…"
+  listing: "wczytywanie…"
+
+note:
+  folder_dup: "ten folder już jest na liście"
+  committed_rename: "już na serwerze — zmień nazwę w panelu administracyjnym"
+  committed_remove: "%{name} był już na serwerze — usuń go w panelu administracyjnym"
+  need_folder: "najpierw dodaj przynajmniej jeden folder"
+  worker_gone: "wątek roboczy zniknął — uruchom kreatora ponownie"
+  no_picker: "brak natywnego okna wyboru (%{why}) — przeglądanie na serwerze"
+  browse_failed: "nie udało się tam przejrzeć: %{err}"
+  removed_same: "usunięto %{path} — to ten sam folder co %{name}"
+  could_not_add: "nie udało się dodać %{name}"
+  keep_session: "nie udało się zachować sesji"
+  create_login_failed: "nie udało się utworzyć konta"
+  extras_failed: "nie udało się skonfigurować %{label}"
+  qc_state_failed: "nie udało się odczytać stanu Quick Connect"
+  settings_save_failed: "nie udało się zapisać ustawień: %{err}"
+  settings_not_saved: "ustawienia niezapisane — %{err}"
+  session_save_failed: "nie udało się zapisać sesji: %{err}"
+  session_not_saved: "sesja niezapisana — %{err}"
+  player_window: "odtwarzacz otwarty w nowym oknie"
+  link_opened: "%{label} otwarto w przeglądarce"
+  link_headless: "%{label}: %{url}"
+
+login_problem:
+  username: "wybierz nazwę użytkownika"
+  password: "wybierz hasło"
+  mismatch: "hasła się nie zgadzają"
+
+extras_label:
+  updates: "aktualizacje"
+  audio: "dźwięk serwera"
+  discovery: "discovery"
+
+folders:
+  add_card: "Dodaj folder z muzyką"
+  col_name: "NAZWA"
+  col_folder: "FOLDER"
+  nothing_yet: "(jeszcze nic nie dodano)"
+  tip_name: "Nazwa tego folderu w mStream — kliknij, by zmienić"
+  warn_missing: "Nie znaleziono na tej maszynie — zdalny serwer może go znać"
+  warn_nested: "Wewnątrz innego wybranego folderu — byłby skanowany dwa razy"
+  warn_file: "To plik, nie folder"
+  warn_unreadable: "Brak uprawnień do odczytu tego folderu"
+  continue_enabled: "Dalej ▸"
+  continue_disabled: "Dalej"
+  tip_continue_disabled: "Najpierw dodaj folder"
+
+login:
+  title: "Utwórz konto"
+  subtitle: "To konto zarządza serwerem — przechowuj hasło w bezpiecznym miejscu."
+  field_username: "NAZWA UŻYTKOWNIKA"
+  field_password: "HASŁO"
+  field_confirm: "POTWIERDŹ HASŁO"
+  skip: "Na razie pomiń"
+  tip_skip: "Kontynuuj bez kont — tryb publiczny"
+  create: "Utwórz admina ▸"
+  back: "◂ Wstecz"
+  tip_back: "Wróć do dodatków — nic nie przepada"
+
+extras:
+  title: "Dodatki"
+  subtitle: "Wszystko opcjonalne, wszystko można zmienić później."
+  updates_label: "Automatyczne aktualizacje"
+  updates_desc: "pobiera nowe wersje w tle, stosuje przy ponownym uruchomieniu"
+  audio_label: "Dźwięk po stronie serwera"
+  audio_desc: "odtwarza muzykę z głośników tej maszyny"
+  discovery_label: "Sieć discovery"
+  discovery_desc: "znajduj i udostępniaj biblioteki z innymi serwerami mStream, peer-to-peer"
+  continue: "Dalej ▸"
+  back: "◂ Wstecz"
+  tip_back: "Dodaj lub popraw foldery — nic nie przepada"
+
+done:
+  running_port: "Twój serwer mStream działa! Połączysz się na porcie %{port}."
+  running_at: "Twój serwer mStream działa! Połączysz się pod %{server}."
+  scan_left: "Albo zeskanuj kod QR Quick Connect po lewej, aby połączyć się automatycznie."
+  scan_above: "Albo zeskanuj kod QR Quick Connect powyżej, aby połączyć się automatycznie."
+  heading_qr: "Quick Connect"
+  heading_wizard: "Gotowe. Zabierz go ze sobą."
+  too_short: "(powiększ okno, aby pokazać kod QR)"
+  btn_android: "Pobierz aplikację na Androida"
+  btn_ios: "Pobierz aplikację na iOS"
+  btn_admin: "Otwórz panel administracyjny"
+  btn_player: "Wypróbuj nasz minimalny odtwarzacz"
+  tip_android: "Google Play, w przeglądarce"
+  tip_ios: "App Store, w przeglądarce"
+  tip_admin: "Zarządzaj serwerem w przeglądarce"
+  tip_player: "Otwiera się w nowym oknie terminala"
+  label_play: "Google Play"
+  label_appstore: "App Store"
+  label_admin: "Panel administracyjny"
+
+qc:
+  scan_app: "Zeskanuj aplikacją mStream, aby łączyć się zewsząd — bez otwierania portów."
+  on_panel: "Quick Connect jest włączony — kod znajdziesz w panelu administracyjnym."
+  off_panel: "Quick Connect jest wyłączony — włącz go w panelu administracyjnym, aby łączyć się zewsząd."
+  starting: "Quick Connect wciąż startuje — kod pojawi się w panelu administracyjnym."
+
+scan:
+  complete: "Skanowanie biblioteki zakończone."
+  more_queued: ", kolejne czekają"
+  progress_pct: "Skanowanie %{vpath} — %{pct}% (dotąd %{scanned} utworów%{more})"
+  progress: "Skanowanie %{vpath} — dotąd %{scanned} utworów%{more}"
+
+skip_modal:
+  title: "Uruchomić w trybie publicznym?"
+  body: "Bez konta serwer stoi otworem dla każdego, kto go osiągnie."
+  plus_access: "+ Natychmiastowy dostęp dla wszystkich w sieci domowej"
+  plus_tv: "+ Nic do wpisywania na TV i wspólnych urządzeniach"
+  minus_control: "− Każdy, kto dotrze do serwera, ma pełną kontrolę"
+  minus_qc: "− Twój kod Quick Connect staje się kluczem do wszystkiego"
+  later: "Konto możesz założyć później w panelu administracyjnym."
+  back: "◂ Wstecz — utwórz konto"
+  confirm: "Mimo to publicznie"
+
+browse:
+  title: "Przeglądaj foldery serwera"
+  empty: "(brak folderów)"
+  up: "◂ wyżej"
+  open: "otwórz"
+  add: "Dodaj ten folder ▸"
+  close: "zamknij"
+
+path_modal:
+  title: "Wpisz pełną ścieżkę folderu z muzyką"
+  tip_close: "Zamknij — Esc"
+  listing_empty: "(brak podpowiedzi)"
+
+hint:
+  browser: "↑ ↓ ruch · Enter otwórz · a dodaj ten folder · Esc zamknij"
+  path: "Tab uzupełnij · ↑ ↓ wybierz · Enter dodaj · Esc zamknij"
+  skip: "Enter tryb publiczny · Esc wstecz"
+  folders_empty: "b przeglądaj · t wpisz ścieżkę · l język"
+  folders_rows: "↑ ↓ wybierz · b przeglądaj · t wpisz ścieżkę · c dalej"
+  folders_selected: "↑ ↓ wiersze · Enter zmień nazwę · r usuń · Esc puść · b przeglądaj · t ścieżka · c dalej"
+  login: "Tab następne pole · Enter utwórz · Esc wstecz · Ctrl+S pomiń"
+  extras: "↑ ↓ wybierz · c dalej · Esc wstecz"
+  extras_selected: "↑ ↓ ruch · Spacja przełącz · c dalej · Esc wstecz"
+  done_qr: "↑ ↓ wybierz · Enter otwórz · Esc zamknij"
+  done_wizard: "↑ ↓ wybierz · Enter otwórz · f koniec"
+
+resize: "proszę nieco powiększyć terminal"

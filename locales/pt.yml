@@ -1,0 +1,156 @@
+lang:
+  autonym: "Português"
+  chip_tip: "Idioma — l"
+  modal_title: "Idioma"
+  machine_note: "Esta tradução é automática — pode ter imperfeições."
+  hint: "↑ ↓ escolher · Enter confirmar · Esc fechar"
+
+busy:
+  reaching: "conectando ao servidor…"
+  committing_folders: "adicionando pastas ao servidor…"
+  creating_login: "criando sua conta…"
+  fetching_qc: "buscando seu código Quick Connect…"
+  saving_extras: "salvando suas escolhas…"
+  listing: "listando…"
+
+note:
+  folder_dup: "essa pasta já está na lista"
+  committed_rename: "já está no servidor — renomeie no painel de administração"
+  committed_remove: "%{name} já estava no servidor — remova no painel de administração"
+  need_folder: "adicione pelo menos uma pasta primeiro"
+  worker_gone: "a thread de trabalho sumiu — reinicie o assistente"
+  no_picker: "sem seletor nativo aqui (%{why}) — navegando no servidor"
+  browse_failed: "não foi possível navegar ali: %{err}"
+  removed_same: "%{path} removida — é a mesma pasta que %{name}"
+  could_not_add: "não foi possível adicionar %{name}"
+  keep_session: "não foi possível manter a sessão"
+  create_login_failed: "não foi possível criar a conta"
+  extras_failed: "não foi possível configurar %{label}"
+  qc_state_failed: "não foi possível ler o estado do Quick Connect"
+  settings_save_failed: "não foi possível salvar as configurações: %{err}"
+  settings_not_saved: "configurações não salvas — %{err}"
+  session_save_failed: "não foi possível salvar a sessão: %{err}"
+  session_not_saved: "sessão não salva — %{err}"
+  player_window: "o player está aberto em uma nova janela"
+  link_opened: "%{label} está aberto no seu navegador"
+  link_headless: "%{label}: %{url}"
+
+login_problem:
+  username: "escolha um nome de usuário"
+  password: "escolha uma senha"
+  mismatch: "as senhas não coincidem"
+
+extras_label:
+  updates: "atualizações"
+  audio: "áudio do servidor"
+  discovery: "descoberta"
+
+folders:
+  add_card: "Adicionar uma pasta de música"
+  col_name: "NOME"
+  col_folder: "PASTA"
+  nothing_yet: "(nada adicionado ainda)"
+  tip_name: "O nome desta pasta no mStream — clique para renomear"
+  warn_missing: "Não encontrada nesta máquina — um servidor remoto pode conhecê-la"
+  warn_nested: "Dentro de outra pasta escolhida — seria escaneada duas vezes"
+  warn_file: "Isto é um arquivo, não uma pasta"
+  warn_unreadable: "Sem permissão para ler esta pasta"
+  continue_enabled: "Continuar ▸"
+  continue_disabled: "Continuar"
+  tip_continue_disabled: "Adicione uma pasta primeiro"
+
+login:
+  title: "Crie sua conta"
+  subtitle: "Esta conta administra o servidor — guarde a senha em lugar seguro."
+  field_username: "USUÁRIO"
+  field_password: "SENHA"
+  field_confirm: "CONFIRMAR SENHA"
+  skip: "Pular por enquanto"
+  tip_skip: "Continuar sem contas — modo público"
+  create: "Criar admin ▸"
+  back: "◂ Voltar"
+  tip_back: "Voltar aos extras — nada se perde"
+
+extras:
+  title: "Extras"
+  subtitle: "Tudo opcional, tudo alterável depois."
+  updates_label: "Atualizações automáticas"
+  updates_desc: "baixa novas versões em segundo plano, aplica ao reiniciar"
+  audio_label: "Áudio do lado do servidor"
+  audio_desc: "toca música nos alto-falantes desta máquina"
+  discovery_label: "Rede de descoberta"
+  discovery_desc: "encontre e compartilhe bibliotecas com outros servidores mStream, ponto a ponto"
+  continue: "Continuar ▸"
+  back: "◂ Voltar"
+  tip_back: "Adicione ou ajuste pastas — nada se perde"
+
+done:
+  running_port: "Seu servidor mStream está rodando! Conecte-se pela porta %{port}."
+  running_at: "Seu servidor mStream está rodando! Conecte-se em %{server}."
+  scan_left: "Ou escaneie o código QR do Quick Connect à esquerda para conectar automaticamente."
+  scan_above: "Ou escaneie o código QR do Quick Connect acima para conectar automaticamente."
+  heading_qr: "Quick Connect"
+  heading_wizard: "Pronto. Leve com você."
+  too_short: "(aumente a janela para mostrar o código QR)"
+  btn_android: "Baixar o app Android"
+  btn_ios: "Baixar o app iOS"
+  btn_admin: "Abrir o painel de administração"
+  btn_player: "Testar nosso player de desktop minimalista"
+  tip_android: "Google Play, no seu navegador"
+  tip_ios: "A App Store, no seu navegador"
+  tip_admin: "Gerencie o servidor no seu navegador"
+  tip_player: "Abre em uma nova janela de terminal"
+  label_play: "Google Play"
+  label_appstore: "A App Store"
+  label_admin: "O painel de administração"
+
+qc:
+  scan_app: "Escaneie com o app mStream para conectar de qualquer lugar — sem abrir portas."
+  on_panel: "Quick Connect está ligado — o código está no painel de administração."
+  off_panel: "Quick Connect está desligado — ligue no painel de administração para conectar de qualquer lugar."
+  starting: "Quick Connect ainda está iniciando — o código aparecerá no painel de administração."
+
+scan:
+  complete: "Varredura da biblioteca concluída."
+  more_queued: ", mais na fila"
+  progress_pct: "Escaneando %{vpath} — %{pct}% (%{scanned} faixas até agora%{more})"
+  progress: "Escaneando %{vpath} — %{scanned} faixas até agora%{more}"
+
+skip_modal:
+  title: "Rodar em modo público?"
+  body: "Sem conta, o servidor fica aberto a qualquer um que o alcance."
+  plus_access: "+ Acesso imediato para todos na sua rede doméstica"
+  plus_tv: "+ Nada para digitar em TVs e aparelhos compartilhados"
+  minus_control: "− Qualquer um que alcance o servidor tem controle total"
+  minus_qc: "− Seu código Quick Connect vira a chave de tudo"
+  later: "Você pode criar uma conta depois no painel de administração."
+  back: "◂ Voltar — criar uma conta"
+  confirm: "Ir público mesmo assim"
+
+browse:
+  title: "Navegar pelas pastas do servidor"
+  empty: "(nenhuma pasta aqui)"
+  up: "◂ subir"
+  open: "abrir"
+  add: "Adicionar esta pasta ▸"
+  close: "fechar"
+
+path_modal:
+  title: "Digite o caminho completo de uma pasta de música"
+  tip_close: "Fechar — Esc"
+  listing_empty: "(nada a sugerir)"
+
+hint:
+  browser: "↑ ↓ mover · Enter abrir · a adicionar esta pasta · Esc fechar"
+  path: "Tab completar · ↑ ↓ escolher · Enter adicionar · Esc fechar"
+  skip: "Enter ir público · Esc voltar"
+  folders_empty: "b navegar · t digitar caminho · l idioma"
+  folders_rows: "↑ ↓ escolher · b navegar · t digitar caminho · c continuar"
+  folders_selected: "↑ ↓ linhas · Enter renomear · r remover · Esc soltar · b navegar · t caminho · c continuar"
+  login: "Tab próximo campo · Enter criar · Esc voltar · Ctrl+S pular"
+  extras: "↑ ↓ escolher · c continuar · Esc voltar"
+  extras_selected: "↑ ↓ mover · Espaço alternar · c continuar · Esc voltar"
+  done_qr: "↑ ↓ escolher · Enter abrir · Esc fechar"
+  done_wizard: "↑ ↓ escolher · Enter abrir · f concluir"
+
+resize: "aumente um pouco o terminal, por favor"

@@ -38,6 +38,8 @@ use tui_input::backend::crossterm::EventHandler;
 
 use crate::api::{ApiError, Client};
 use crate::config;
+use rust_i18n::t;
+
 use crate::kit::{
     self, GroundGuard, POINTER_RESET, Surface, accent, bold, dim, set_pointer_shape, theme,
 };
@@ -51,6 +53,42 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(1500);
 const SINGLE_NAME: &str = "media";
 /// The widest the content column grows, in cells.
 const COLUMN: u16 = 74;
+
+/// Every language the mobile app ships, as (locale code, autonym) — the
+/// wizard translates to exactly this set. English is index 0, the
+/// fallback and the one human-written entry; the rest are machine
+/// translations and say so when chosen.
+pub(crate) const LANGS: [(&str, &str); 10] = [
+    ("en", "English"),
+    ("de", "Deutsch"),
+    ("es", "Español"),
+    ("fr", "Français"),
+    ("it", "Italiano"),
+    ("ja", "日本語"),
+    ("pl", "Polski"),
+    ("pt", "Português"),
+    ("ru", "Русский"),
+    ("zh", "中文"),
+];
+
+/// Detect and APPLY the boot language — `MSTREAM_SETUP_LANG`, then the
+/// system locale, then English — returning its [`LANGS`] index.
+pub(crate) fn boot_language() -> usize {
+    let lang = detect_lang(std::env::var("MSTREAM_SETUP_LANG").ok(), sys_locale::get_locale());
+    rust_i18n::set_locale(LANGS[lang].0);
+    lang
+}
+
+/// The language to start in: `MSTREAM_SETUP_LANG` when set (tests, and an
+/// explicit user override), else the system locale's base language when
+/// the set covers it, else English.
+pub(crate) fn detect_lang(env: Option<String>, system: Option<String>) -> usize {
+    let pick = |code: &str| {
+        let base = code.split(['-', '_', '.']).next().unwrap_or(code).to_ascii_lowercase();
+        LANGS.iter().position(|(c, _)| *c == base)
+    };
+    env.and_then(|c| pick(&c)).or_else(|| system.and_then(|c| pick(&c))).unwrap_or(0)
+}
 
 #[derive(Args)]
 pub struct SetupArgs {
@@ -95,6 +133,9 @@ pub(crate) enum Modal {
     Browser(Browse),
     /// Typing an absolute path by hand, with server-fed tab completion.
     PathEntry(PathDraft),
+    /// The language picker, from the folders screen's top-left selector.
+    /// Carries its keyboard cursor.
+    Language(usize),
 }
 
 /// The type-a-path modal's state: the text, plus a cached listing of the
@@ -256,6 +297,9 @@ enum Act {
     OpenPlayStore,
     /// The server's admin panel, in the browser.
     OpenAdmin,
+    /// The language picker and its choice.
+    OpenLanguage,
+    SetLanguage(usize),
     Finish,
 }
 
@@ -263,13 +307,15 @@ enum Act {
 const APP_STORE_URL: &str = "https://apps.apple.com/us/app/mstream-player/id1605378892";
 const PLAY_STORE_URL: &str = "https://play.google.com/store/apps/details?id=mstream.music";
 
-/// The Done page's button list, top to bottom.
-const DONE_BUTTONS: [(&str, &str); DONE_ACTIONS] = [
-    ("Get the Android App", "Google Play, in your browser"),
-    ("Get the iOS App", "The App Store, in your browser"),
-    ("Open the Admin Panel", "Manage the server in your browser"),
-    ("Try our minimal desktop player", "Opens in a new terminal window"),
-];
+/// The Done page's button list, top to bottom: (label, tip).
+fn done_buttons() -> [(String, String); DONE_ACTIONS] {
+    [
+        (t!("done.btn_android").to_string(), t!("done.tip_android").to_string()),
+        (t!("done.btn_ios").to_string(), t!("done.tip_ios").to_string()),
+        (t!("done.btn_admin").to_string(), t!("done.tip_admin").to_string()),
+        (t!("done.btn_player").to_string(), t!("done.tip_player").to_string()),
+    ]
+}
 const DONE_ACTIONS: usize = 4;
 
 fn done_action(i: usize) -> Act {
@@ -486,6 +532,8 @@ pub(crate) struct Wizard {
     /// The Done page's keyboard cursor over its button list — `None`
     /// until ↑/↓, the kit's selection convention.
     done_sel: Option<usize>,
+    /// Index into [`LANGS`] — what the top-left selector shows.
+    lang: usize,
     pub qr_note: String,
     pub progress: String,
 
@@ -496,7 +544,7 @@ pub(crate) struct Wizard {
 
     /// One line of status under the card: (text, is_error).
     pub note: Option<(String, bool)>,
-    busy: Option<&'static str>,
+    busy: Option<String>,
     queued: Option<Op>,
     /// An op is running on the worker; further queues wait (completions
     /// supersede each other instead).
@@ -538,6 +586,7 @@ impl Wizard {
             logo_art: None,
             logo_gfx: crate::tui::graphics::Graphics::disabled(),
             done_sel: None,
+            lang: 0,
             qr_note: String::new(),
             progress: String::new(),
             standalone: false,
@@ -553,16 +602,16 @@ impl Wizard {
         }
     }
 
-    fn queue(&mut self, op: Op, busy: &'static str) {
+    fn queue(&mut self, op: Op, busy: impl Into<String>) {
         self.queued = Some(op);
-        self.busy = Some(busy);
+        self.busy = Some(busy.into());
     }
 
     // ── Folder naming rules ─────────────────────────────────────────────────
 
     fn add_folder(&mut self, path: String) {
         if self.folders.iter().any(|f| f.path == path) {
-            self.note = Some(("that folder is already in the list".to_string(), false));
+            self.note = Some((t!("note.folder_dup").to_string(), false));
             return;
         }
         self.folders.push(Folder {
@@ -633,7 +682,7 @@ impl Wizard {
         let removed = self.folders.remove(i);
         if removed.committed {
             self.note = Some((
-                format!("{} was already added to the server — remove it in the admin panel", removed.name),
+                t!("note.committed_remove", name = removed.name).to_string(),
                 false,
             ));
         }
@@ -667,7 +716,7 @@ impl Wizard {
                 if let Some(folder) = self.folders.get(i) {
                     if folder.committed {
                         self.note = Some((
-                            "already on the server — rename it in the admin panel".to_string(),
+                            t!("note.committed_rename").to_string(),
                             false,
                         ));
                     } else {
@@ -689,15 +738,15 @@ impl Wizard {
             Act::ContinueFolders => {
                 self.finish_rename();
                 if self.folders.is_empty() {
-                    self.note = Some(("add at least one folder first".to_string(), true));
+                    self.note = Some((t!("note.need_folder").to_string(), true));
                 } else {
-                    self.queue(Op::CommitFolders, "adding folders to the server…");
+                    self.queue(Op::CommitFolders, t!("busy.committing_folders"));
                 }
             }
             Act::Focus(field) => self.field = field,
             Act::CreateAdmin => match self.login_problem() {
                 Some(problem) => self.note = Some((problem.to_string(), true)),
-                None => self.queue(Op::CreateAdmin, "creating your login…"),
+                None => self.queue(Op::CreateAdmin, t!("busy.creating_login")),
             },
             Act::BackToFolders => {
                 // Back to add or adjust folders. Already-committed rows
@@ -714,7 +763,7 @@ impl Wizard {
                 self.public = true;
                 self.note = None;
                 self.screen = Screen::Done;
-                self.queue(Op::LoadDone, "fetching your Quick Connect code…");
+                self.queue(Op::LoadDone, t!("busy.fetching_qc"));
             }
             Act::Toggle(i) => {
                 if let Some(on) = self.extras.get_mut(i) {
@@ -725,7 +774,7 @@ impl Wizard {
                 self.screen = Screen::Extras;
                 self.note = None;
             }
-            Act::ContinueExtras => self.queue(Op::CommitExtras, "saving your choices…"),
+            Act::ContinueExtras => self.queue(Op::CommitExtras, t!("busy.saving_extras")),
             Act::TableScroll(delta) => {
                 self.tscroll = if delta < 0 {
                     self.tscroll.saturating_sub(1)
@@ -758,14 +807,14 @@ impl Wizard {
                 if let Modal::Browser(b) = &self.modal {
                     if let Some(dir) = b.dirs.get(b.sel) {
                         let to = join_server_path(&b.path, dir);
-                        self.queue(Op::BrowseTo(to), "listing…");
+                        self.queue(Op::BrowseTo(to), t!("busy.listing"));
                     }
                 }
             }
             Act::BrowseUp => {
                 if let Modal::Browser(b) = &self.modal {
                     if let Some(parent) = parent_server_path(&b.path) {
-                        self.queue(Op::BrowseTo(parent), "listing…");
+                        self.queue(Op::BrowseTo(parent), t!("busy.listing"));
                     }
                 }
             }
@@ -788,17 +837,20 @@ impl Wizard {
                         spawn_player_terminal(&exe.display().to_string(), &self.client.server())
                     });
                 if spawned {
-                    self.note = Some(("the player is open in a new window".to_string(), false));
+                    self.note = Some((t!("note.player_window").to_string(), false));
                 } else {
                     return Some(Outcome::OpenPlayer);
                 }
             }
-            Act::OpenAppStore => self.open_link("The App Store", APP_STORE_URL),
-            Act::OpenPlayStore => self.open_link("Google Play", PLAY_STORE_URL),
+            Act::OpenAppStore => self.open_link(&t!("done.label_appstore"), APP_STORE_URL),
+            Act::OpenPlayStore => self.open_link(&t!("done.label_play"), PLAY_STORE_URL),
             Act::OpenAdmin => {
                 let url = format!("{}/admin", self.client.server().trim_end_matches('/'));
-                self.open_link("The admin panel", &url);
+                let label = t!("done.label_admin").to_string();
+                self.open_link(&label, &url);
             }
+            Act::OpenLanguage => self.modal = Modal::Language(self.lang),
+            Act::SetLanguage(i) => self.set_language(i),
             Act::Finish => return Some(Outcome::Quit),
         }
         None
@@ -814,13 +866,25 @@ impl Wizard {
         self.qr.is_some() && self.qr_art.is_some() && self.graphics.protocol().is_some()
     }
 
+    /// Switch the wizard's language. Everything re-renders through t!()
+    /// next frame; every language but English is machine-translated and
+    /// says so — in its own words — the moment it is chosen.
+    fn set_language(&mut self, i: usize) {
+        let Some((code, _)) = LANGS.get(i) else { return };
+        rust_i18n::set_locale(code);
+        self.lang = i;
+        self.modal = Modal::None;
+        self.note =
+            (*code != "en").then(|| (t!("lang.machine_note").to_string(), false));
+    }
+
     /// Open a store page in the browser; headless (or under the test
     /// seam), the note carries the URL so it can be copied instead.
     fn open_link(&mut self, label: &str, url: &str) {
         self.note = Some(if open_url(url) {
-            (format!("{label} is open in your browser"), false)
+            (t!("note.link_opened", label = label).to_string(), false)
         } else {
-            (format!("{label}: {url}"), false)
+            (t!("note.link_headless", label = label, url = url).to_string(), false)
         });
     }
 
@@ -939,15 +1003,15 @@ impl Wizard {
         }
     }
 
-    fn login_problem(&self) -> Option<&'static str> {
+    fn login_problem(&self) -> Option<String> {
         if self.username.value().trim().is_empty() {
-            return Some("pick a username");
+            return Some(t!("login_problem.username").to_string());
         }
         if self.password.value().is_empty() {
-            return Some("pick a password");
+            return Some(t!("login_problem.password").to_string());
         }
         if self.password.value() != self.confirm.value() {
-            return Some("the passwords do not match");
+            return Some(t!("login_problem.mismatch").to_string());
         }
         None
     }
@@ -1004,7 +1068,7 @@ impl Wizard {
         self.in_flight = true;
         if to_worker.send((self.client.clone(), job)).is_err() {
             self.in_flight = false;
-            self.note = Some(("the worker thread is gone — restart the wizard".into(), true));
+            self.note = Some((t!("note.worker_gone").to_string(), true));
         }
     }
 
@@ -1027,11 +1091,11 @@ impl Wizard {
             Done::Picked(picker::Pick::Cancelled) => {}
             Done::Picked(picker::Pick::Unavailable(why)) => {
                 self.note = Some((
-                    format!("no native picker here ({why}) — browsing on the server instead"),
+                    t!("note.no_picker", why = why).to_string(),
                     false,
                 ));
                 let start = local_home().unwrap_or_else(|| "/".to_string());
-                self.queue(Op::OpenBrowser(start), "listing…");
+                self.queue(Op::OpenBrowser(start), t!("busy.listing"));
             }
             Done::Browsed(Ok(listing)) => {
                 self.modal = Modal::Browser(Browse {
@@ -1041,7 +1105,7 @@ impl Wizard {
                 });
             }
             Done::Browsed(Err(e)) => {
-                self.note = Some((format!("could not browse there: {e}"), true));
+                self.note = Some((t!("note.browse_failed", err = e).to_string(), true));
             }
             Done::Completed { dir, listing } => {
                 // The user may have typed on: only install the result if it
@@ -1083,7 +1147,7 @@ impl Wizard {
                             let name = self.folders[j].name.clone();
                             self.remove_at(i);
                             self.note = Some((
-                                format!("removed {path} — the same folder as {name}"),
+                                t!("note.removed_same", path = path, name = name).to_string(),
                                 false,
                             ));
                             return;
@@ -1128,7 +1192,7 @@ impl Wizard {
                     }
                 }
                 match error {
-                    Some((name, e)) => self.fail(&format!("could not add {name}"), e),
+                    Some((name, e)) => self.fail(&t!("note.could_not_add", name = name), e),
                     None => {
                         self.note = None;
                         self.screen = Screen::Extras;
@@ -1142,20 +1206,27 @@ impl Wizard {
                 // any job the worker gets from now on) stays authorized.
                 match Client::new(&self.client.server()) {
                     Ok(fresh) => self.client = Arc::new(fresh.with_token(Some(token))),
-                    Err(e) => return self.fail("could not keep the session", e),
+                    Err(e) => return self.fail(&t!("note.keep_session"), e),
                 }
                 self.remember_session();
                 self.note = None;
                 self.screen = Screen::Done;
-                self.queue(Op::LoadDone, "fetching your Quick Connect code…");
+                self.queue(Op::LoadDone, t!("busy.fetching_qc"));
             }
-            Done::AdminCreated(Err(e)) => self.fail("could not create the login", e),
+            Done::AdminCreated(Err(e)) => self.fail(&t!("note.create_login_failed"), e),
             Done::ExtrasCommitted { applied, error } => {
                 for (i, on) in applied {
                     self.extras_done[i] = Some(on);
                 }
                 match error {
-                    Some((label, e)) => self.fail(&format!("could not set up {label}"), e),
+                    Some((label, e)) => {
+                        let label = match label {
+                            l if l == "updates" => t!("extras_label.updates").to_string(),
+                            l if l == "server audio" => t!("extras_label.audio").to_string(),
+                            _ => t!("extras_label.discovery").to_string(),
+                        };
+                        self.fail(&t!("note.extras_failed", label = label), e)
+                    }
                     None => {
                         self.note = None;
                         self.screen = Screen::Login;
@@ -1170,23 +1241,23 @@ impl Wizard {
                                 self.qr = Some(lines);
                                 self.qr_art = qr_art(ticket);
                                 self.qr_note =
-                                    "Scan with the mStream app to connect from anywhere — no port forwarding.".to_string();
+                                    t!("qc.scan_app").to_string();
                             }
                             None => {
                                 self.qr_note =
-                                    "Quick Connect is on — the code is in the admin panel.".to_string();
+                                    t!("qc.on_panel").to_string();
                             }
                         },
                         _ if !status.enabled => {
                             self.qr_note =
-                                "Quick Connect is off — turn it on in the admin panel to connect from anywhere.".to_string();
+                                t!("qc.off_panel").to_string();
                         }
                         _ => {
                             self.qr_note =
-                                "Quick Connect is still starting — the code will be in the admin panel.".to_string();
+                                t!("qc.starting").to_string();
                         }
                     },
-                    Err(e) => self.fail("could not read Quick Connect state", e),
+                    Err(e) => self.fail(&t!("note.qc_state_failed"), e),
                 }
                 // Scan progress is wizard chrome — the standalone QR page
                 // has no scan of its own to narrate.
@@ -1198,20 +1269,28 @@ impl Wizard {
                 self.last_poll = Instant::now();
                 match rows {
                     Ok(rows) if rows.is_empty() => {
-                        self.progress = "Library scan complete.".to_string();
+                        self.progress = t!("scan.complete").to_string();
                     }
                     Ok(rows) => {
                         let row = &rows[0];
-                        let more = if rows.len() > 1 { ", more queued" } else { "" };
+                        let more =
+                            if rows.len() > 1 { t!("scan.more_queued").to_string() } else { String::new() };
                         self.progress = match row.pct {
-                            Some(pct) => format!(
-                                "Scanning {} — {}% ({} tracks so far{})",
-                                row.vpath, pct, row.scanned, more
-                            ),
-                            None => format!(
-                                "Scanning {} — {} tracks so far{}",
-                                row.vpath, row.scanned, more
-                            ),
+                            Some(pct) => t!(
+                                "scan.progress_pct",
+                                vpath = row.vpath,
+                                pct = pct,
+                                scanned = row.scanned,
+                                more = more
+                            )
+                            .to_string(),
+                            None => t!(
+                                "scan.progress",
+                                vpath = row.vpath,
+                                scanned = row.scanned,
+                                more = more
+                            )
+                            .to_string(),
                         };
                     }
                     // Progress is garnish; a hiccup should never mark the
@@ -1234,19 +1313,19 @@ impl Wizard {
             Ok(mut cfg) => {
                 config::touch_server(&mut cfg, &server, Some(self.username.value().to_string()));
                 if let Err(e) = config::save(&cfg) {
-                    self.note = Some((format!("could not save settings: {e}"), false));
+                    self.note = Some((t!("note.settings_save_failed", err = e).to_string(), false));
                 }
             }
-            Err(e) => self.note = Some((format!("settings not saved — {e}"), false)),
+            Err(e) => self.note = Some((t!("note.settings_not_saved", err = e).to_string(), false)),
         }
         match config::load_credentials() {
             Ok(mut creds) => {
                 config::store_token(&mut creds, &server, self.client.token().map(String::from));
                 if let Err(e) = config::save_credentials(&creds) {
-                    self.note = Some((format!("could not save the session: {e}"), false));
+                    self.note = Some((t!("note.session_save_failed", err = e).to_string(), false));
                 }
             }
-            Err(e) => self.note = Some((format!("session not saved — {e}"), false)),
+            Err(e) => self.note = Some((t!("note.session_not_saved", err = e).to_string(), false)),
         }
     }
 }
@@ -1602,7 +1681,8 @@ pub fn run(args: SetupArgs) -> i32 {
     };
 
     let mut wizard = Wizard::new(client);
-    wizard.queue(Op::Ping, "reaching the server…");
+    wizard.lang = boot_language();
+    wizard.queue(Op::Ping, t!("busy.reaching"));
     run_tui(wizard)
 }
 
@@ -1628,9 +1708,10 @@ pub fn run_qr(args: QrArgs) -> i32 {
         }
     };
     let mut wizard = Wizard::new(client);
+    wizard.lang = boot_language();
     wizard.standalone = true;
     wizard.screen = Screen::Done;
-    wizard.queue(Op::LoadDone, "fetching your Quick Connect code…");
+    wizard.queue(Op::LoadDone, t!("busy.fetching_qc"));
     run_tui(wizard)
 }
 
@@ -1707,7 +1788,7 @@ fn event_loop(
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     wizard.note =
-                        Some(("the worker thread is gone — restart the wizard".into(), true));
+                        Some((t!("note.worker_gone").to_string(), true));
                     break;
                 }
             }
@@ -1922,6 +2003,27 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
                 _ => None,
             };
         }
+        Modal::Language(sel) => {
+            return match code {
+                KeyCode::Esc => {
+                    wizard.modal = Modal::None;
+                    None
+                }
+                KeyCode::Up => {
+                    *sel = sel.saturating_sub(1);
+                    None
+                }
+                KeyCode::Down => {
+                    *sel = (*sel + 1).min(LANGS.len() - 1);
+                    None
+                }
+                KeyCode::Enter => {
+                    let choice = *sel;
+                    wizard.act(Act::SetLanguage(choice))
+                }
+                _ => None,
+            };
+        }
         Modal::Browser(b) => {
             return match code {
                 KeyCode::Esc => wizard.act(Act::BrowseCancel),
@@ -1996,6 +2098,7 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
             },
             KeyCode::Char('b') => wizard.act(Act::BrowseNative),
             KeyCode::Char('t') => wizard.act(Act::TypePath),
+            KeyCode::Char('l') => wizard.act(Act::OpenLanguage),
             KeyCode::Char('r') | KeyCode::Delete => wizard.act(Act::RemoveFolder),
             KeyCode::Char('c') => wizard.act(Act::ContinueFolders),
             KeyCode::Char('q') => Some(Outcome::Quit),
@@ -2096,7 +2199,7 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     }
     if area.width < 58 || area.height < 20 {
         frame.render_widget(
-            Paragraph::new("please make the terminal a little larger").style(dim()),
+            Paragraph::new(t!("resize").to_string()).style(dim()),
             area,
         );
         return;
@@ -2129,6 +2232,19 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         Screen::Done => draw_done(frame, wizard, column),
     }
 
+    // The language selector, top-left on the folders screen — the mirror
+    // of the step counter. Everything else re-renders through t!() the
+    // moment it changes.
+    if wizard.screen == Screen::Folders {
+        let label = format!("▾ {}", LANGS[wizard.lang].1);
+        let chip = Rect { x: 2, y: 0, width: label.chars().count() as u16, height: 1 };
+        let hovered = wizard.ui.pointer.is_some_and(|p| chip.contains(p));
+        let style = if hovered { Style::default().fg(th().bright) } else { dim() };
+        frame.render_widget(Paragraph::new(Span::styled(label, style)), chip);
+        wizard.ui.click(chip, Act::OpenLanguage);
+        wizard.ui.tip(chip, t!("lang.chip_tip"));
+    }
+
     // Step counter, top-right — the chrome's only top element. The
     // standalone QR page is not a step of anything.
     if !wizard.standalone {
@@ -2151,7 +2267,7 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         let note_area = Rect { x: 2, y: note_y, width: area.width - 4, height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(text, style)), note_area);
     }
-    if let Some(busy) = wizard.busy {
+    if let Some(busy) = wizard.busy.clone() {
         let busy_area = Rect { x: 2, y: note_y, width: area.width - 4, height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(busy, accent())), busy_area);
     }
@@ -2186,62 +2302,67 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         // Disabled until there is something to continue with; the tooltip
         // carries the why (the kit's one exception to disabled inertness).
         let enabled = !wizard.folders.is_empty();
-        let label = if enabled { "Continue ▸" } else { "Continue" };
+        let label = if enabled {
+            t!("folders.continue_enabled").to_string()
+        } else {
+            t!("folders.continue_disabled").to_string()
+        };
         let x = bar.right().saturating_sub(label.chars().count() as u16 + 6);
         let rect = kit::tall_button(
             frame,
             &mut wizard.ui,
             Rect { x, y: bar.y, width: bar.width, height: 3 },
-            label,
+            &label,
             enabled,
             Act::ContinueFolders,
         );
         if !enabled {
-            wizard.ui.tip(rect, "Add a folder first");
+            wizard.ui.tip(rect, t!("folders.tip_continue_disabled"));
         }
     }
     if wizard.screen == Screen::Extras {
-        let label = "Continue ▸";
+        let label = t!("extras.continue").to_string();
         let x = bar.right().saturating_sub(label.chars().count() as u16 + 6);
         let rect = kit::tall_button(
             frame,
             &mut wizard.ui,
             Rect { x, y: bar.y, width: bar.width, height: 3 },
-            label,
+            &label,
             true,
             Act::ContinueExtras,
         );
-        let back_x = rect.x.saturating_sub("◂ Back".chars().count() as u16 + 6 + 2);
-        let back = kit::tall_secondary(
-            frame,
-            &mut wizard.ui,
-            Rect { x: back_x, y: bar.y, width: bar.width, height: 3 },
-            "◂ Back",
-            Act::BackToFolders,
-        );
-        wizard.ui.tip(back, "Add or adjust folders — nothing is lost");
-    }
-    if wizard.screen == Screen::Login {
-        let label = "Create Admin ▸";
-        let x = bar.right().saturating_sub(label.chars().count() as u16 + 6);
-        let rect = kit::tall_button(
-            frame,
-            &mut wizard.ui,
-            Rect { x, y: bar.y, width: bar.width, height: 3 },
-            label,
-            true,
-            Act::CreateAdmin,
-        );
-        let back_label = "◂ Back";
+        let back_label = t!("extras.back").to_string();
         let back_x = rect.x.saturating_sub(back_label.chars().count() as u16 + 6 + 2);
         let back = kit::tall_secondary(
             frame,
             &mut wizard.ui,
             Rect { x: back_x, y: bar.y, width: bar.width, height: 3 },
-            back_label,
+            &back_label,
+            Act::BackToFolders,
+        );
+        wizard.ui.tip(back, t!("extras.tip_back"));
+    }
+    if wizard.screen == Screen::Login {
+        let label = t!("login.create").to_string();
+        let x = bar.right().saturating_sub(label.chars().count() as u16 + 6);
+        let rect = kit::tall_button(
+            frame,
+            &mut wizard.ui,
+            Rect { x, y: bar.y, width: bar.width, height: 3 },
+            &label,
+            true,
+            Act::CreateAdmin,
+        );
+        let back_label = t!("login.back").to_string();
+        let back_x = rect.x.saturating_sub(back_label.chars().count() as u16 + 6 + 2);
+        let back = kit::tall_secondary(
+            frame,
+            &mut wizard.ui,
+            Rect { x: back_x, y: bar.y, width: bar.width, height: 3 },
+            &back_label,
             Act::BackToExtras,
         );
-        wizard.ui.tip(back, "Back to the extras — nothing is lost");
+        wizard.ui.tip(back, t!("login.tip_back"));
     }
 
     if modal_open {
@@ -2253,6 +2374,7 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         Modal::SkipWarning => draw_skip_warning(frame, wizard, area),
         Modal::Browser(browse) => draw_browser(frame, wizard, area, &browse),
         Modal::PathEntry(draft) => draw_path_entry(frame, wizard, area, &draft),
+        Modal::Language(sel) => draw_language(frame, wizard, area, sel),
     }
 
     // The tooltip draws last — over everything, once the dwell matures.
@@ -2261,28 +2383,62 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     }
 }
 
-fn footer_hint(wizard: &Wizard) -> &'static str {
+fn footer_hint(wizard: &Wizard) -> String {
     match (&wizard.modal, wizard.screen) {
-        (Modal::Browser(_), _) => "↑ ↓ move · Enter open · a add this folder · Esc close",
-        (Modal::PathEntry(_), _) => "Tab complete · ↑ ↓ pick · Enter add folder · Esc close",
-        (Modal::SkipWarning, _) => "Enter go public · Esc back",
+        (Modal::Browser(_), _) => t!("hint.browser"),
+        (Modal::PathEntry(_), _) => t!("hint.path"),
+        (Modal::SkipWarning, _) => t!("hint.skip"),
+        (Modal::Language(_), _) => t!("lang.hint"),
         (_, Screen::Folders) => match (wizard.folders.is_empty(), wizard.sel) {
-            // No rows: only the two ways to add one.
-            (true, _) => "b browse · t type a path",
+            // No rows: only the ways to add one (and the language chip).
+            (true, _) => t!("hint.folders_empty"),
             // Rows, cursor stowed: how to pick one up, and continue.
-            (false, None) => "↑ ↓ select · b browse · t type a path · c continue",
+            (false, None) => t!("hint.folders_rows"),
             // A row under the cursor: the full set.
-            (false, Some(_)) => {
-                "↑ ↓ rows · Enter rename · r remove · Esc deselect · b browse · t type a path · c continue"
-            }
+            (false, Some(_)) => t!("hint.folders_selected"),
         },
-        (_, Screen::Login) => "Tab next field · Enter create · Esc back · Ctrl+S skip",
+        (_, Screen::Login) => t!("hint.login"),
         (_, Screen::Extras) => match wizard.extras_sel {
-            None => "↑ ↓ select · c continue · Esc back",
-            Some(_) => "↑ ↓ move · Space toggle · c continue · Esc back",
+            None => t!("hint.extras"),
+            Some(_) => t!("hint.extras_selected"),
         },
-        (_, Screen::Done) if wizard.standalone => "↑ ↓ select · Enter open · Esc close",
-        (_, Screen::Done) => "↑ ↓ select · Enter open · f finish",
+        (_, Screen::Done) if wizard.standalone => t!("hint.done_qr"),
+        (_, Screen::Done) => t!("hint.done_wizard"),
+    }
+    .to_string()
+}
+
+/// The language picker: one row a language, autonyms, the kit's modal
+/// conventions.
+fn draw_language(frame: &mut Frame, wizard: &mut Wizard, area: Rect, sel: usize) {
+    let inner =
+        kit::modal_frame(frame, area, 30, LANGS.len() as u16 + 4, th().accent);
+    frame.render_widget(
+        Paragraph::new(Span::styled(t!("lang.modal_title").to_string(), bold())),
+        Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
+    );
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::PathCancel, t!("path_modal.tip_close"));
+    for (i, (code, autonym)) in LANGS.iter().enumerate() {
+        let y = inner.y + 2 + i as u16;
+        let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
+        let hovered = wizard.ui.pointer.is_some_and(|p| rect.contains(p));
+        let current = wizard.lang == i;
+        let style = if sel == i {
+            Style::default().fg(th().on_accent).bg(th().accent)
+        } else if hovered {
+            Style::default().fg(th().bright)
+        } else if current {
+            accent()
+        } else {
+            Style::default()
+        };
+        let marker = if current { "• " } else { "  " };
+        frame.render_widget(
+            Paragraph::new(Span::styled(format!("{marker}{autonym}"), style)),
+            rect,
+        );
+        wizard.ui.click(rect, Act::SetLanguage(i));
+        let _ = code;
     }
 }
 
@@ -2377,7 +2533,7 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     frame.render_widget(block, add_rect);
     frame.render_widget(
         Paragraph::new(Span::styled(
-            "Add a music folder",
+            t!("folders.add_card").to_string(),
             Style::default().fg(add_color).add_modifier(Modifier::BOLD),
         ))
         .alignment(Alignment::Center),
@@ -2395,8 +2551,8 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let header = Rect { x: column.x, y, width: sel_width, height: 1 };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(format!("{:<width$}", "NAME", width = NAME_W as usize), dim()),
-            Span::styled("FOLDER", dim()),
+            Span::styled(format!("{:<width$}", t!("folders.col_name"), width = NAME_W as usize), dim()),
+            Span::styled(t!("folders.col_folder").to_string(), dim()),
         ])),
         header,
     );
@@ -2412,7 +2568,7 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     // the first row would be.
     if wizard.folders.is_empty() {
         frame.render_widget(
-            Paragraph::new(Span::styled("(nothing added yet)", dim())),
+            Paragraph::new(Span::styled(t!("folders.nothing_yet").to_string(), dim())),
             Rect { x: column.x, y, width: sel_width, height: 1 },
         );
         return;
@@ -2471,7 +2627,7 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         frame.render_widget(Paragraph::new(Span::styled(name, name_style)), name_rect);
         wizard.ui.click(name_rect, Act::RenameFolder(i));
         if !editing {
-            wizard.ui.tip(name_rect, "This folder's name in mStream — click to rename");
+            wizard.ui.tip(name_rect, t!("folders.tip_name"));
         }
         let path_x = column.x + NAME_W;
         let path_rect =
@@ -2479,16 +2635,14 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         // The LOCAL filesystem's verdict, worn by the row: problems paint
         // the path gold, the tooltip says why. Advisory only — Continue
         // still works, the server has final say at commit.
-        let problem: Option<&'static str> = match folder.check {
-            FolderCheck::Missing => {
-                Some("Not found on this machine — a remote server may still know it")
-            }
-            FolderCheck::NotADir => Some("This is a file, not a folder"),
-            FolderCheck::Unreadable => Some("No permission to read this folder"),
+        let problem: Option<String> = match folder.check {
+            FolderCheck::Missing => Some(t!("folders.warn_missing").to_string()),
+            FolderCheck::NotADir => Some(t!("folders.warn_file").to_string()),
+            FolderCheck::Unreadable => Some(t!("folders.warn_unreadable").to_string()),
             FolderCheck::Ok | FolderCheck::Pending => folder
                 .nested_in
                 .is_some()
-                .then_some("Inside another chosen folder — it would be scanned twice"),
+                .then(|| t!("folders.warn_nested").to_string()),
         };
         let path_style = match problem {
             Some(_) if !selected => Style::default().fg(th().gold),
@@ -2555,13 +2709,13 @@ fn field_row(
 fn draw_login(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let mut y = column.y;
     frame.render_widget(
-        Paragraph::new(Span::styled("Create your login", bold())),
+        Paragraph::new(Span::styled(t!("login.title").to_string(), bold())),
         Rect { x: column.x, y, width: column.width, height: 1 },
     );
     y += 1;
     frame.render_widget(
         Paragraph::new(Span::styled(
-            "This account manages the server — keep the password somewhere safe.",
+            t!("login.subtitle").to_string(),
             dim(),
         )),
         Rect { x: column.x, y, width: column.width, height: 1 },
@@ -2585,20 +2739,20 @@ fn draw_login(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         show(&wizard.password, true, focus == LoginField::Password),
         show(&wizard.confirm, true, focus == LoginField::Confirm),
     );
-    y = field_row(frame, wizard, x, y, width, "USERNAME", username, LoginField::Username, focus == LoginField::Username);
-    y = field_row(frame, wizard, x, y, width, "PASSWORD", password, LoginField::Password, focus == LoginField::Password);
-    y = field_row(frame, wizard, x, y, width, "CONFIRM PASSWORD", confirm, LoginField::Confirm, focus == LoginField::Confirm);
+    y = field_row(frame, wizard, x, y, width, &t!("login.field_username"), username, LoginField::Username, focus == LoginField::Username);
+    y = field_row(frame, wizard, x, y, width, &t!("login.field_password"), password, LoginField::Password, focus == LoginField::Password);
+    y = field_row(frame, wizard, x, y, width, &t!("login.field_confirm"), confirm, LoginField::Confirm, focus == LoginField::Confirm);
     y += 1;
 
     let skip = kit::button(
         frame,
         &mut wizard.ui,
         Rect { x, y, width, height: 1 },
-        "Skip for now",
+        &t!("login.skip"),
         false,
         Act::SkipLogin,
     );
-    wizard.ui.tip(skip, "Continue without accounts — public mode");
+    wizard.ui.tip(skip, t!("login.tip_skip"));
 }
 
 fn mask(secret: &str) -> String {
@@ -2608,22 +2762,22 @@ fn mask(secret: &str) -> String {
 fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let mut y = column.y;
     frame.render_widget(
-        Paragraph::new(Span::styled("Extras", bold())),
+        Paragraph::new(Span::styled(t!("extras.title").to_string(), bold())),
         Rect { x: column.x, y, width: column.width, height: 1 },
     );
     y += 1;
     frame.render_widget(
-        Paragraph::new(Span::styled("All optional, all changeable later.", dim())),
+        Paragraph::new(Span::styled(t!("extras.subtitle").to_string(), dim())),
         Rect { x: column.x, y, width: column.width, height: 1 },
     );
     y += 2;
 
-    let rows: [(&str, &str); 3] = [
-        ("Automatic updates", "download new versions in the background, apply when you restart"),
-        ("Server-side audio", "play music out of this machine's own speakers"),
-        ("Discovery network", "find and share libraries with other mStream servers, peer to peer"),
+    let rows: [(String, String); 3] = [
+        (t!("extras.updates_label").to_string(), t!("extras.updates_desc").to_string()),
+        (t!("extras.audio_label").to_string(), t!("extras.audio_desc").to_string()),
+        (t!("extras.discovery_label").to_string(), t!("extras.discovery_desc").to_string()),
     ];
-    for (i, (label, desc)) in rows.iter().enumerate() {
+    for (i, (label, desc)) in rows.into_iter().enumerate() {
         let selected = wizard.extras_sel == Some(i);
         let rect = Rect { x: column.x, y, width: column.width, height: 4 };
         let hovered = wizard.ui.pointer.is_some_and(|p| rect.contains(p));
@@ -2635,11 +2789,11 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
             Span::styled("[ ] ", dim())
         };
         frame.render_widget(
-            Paragraph::new(Line::from(vec![box_span, Span::styled(*label, bold())])),
+            Paragraph::new(Line::from(vec![box_span, Span::styled(label, bold())])),
             Rect { x: inner.x + 1, y: inner.y, width: inner.width, height: 1 },
         );
         frame.render_widget(
-            Paragraph::new(Span::styled(*desc, dim())),
+            Paragraph::new(Span::styled(desc, dim())),
             Rect { x: inner.x + 5, y: inner.y + 1, width: inner.width.saturating_sub(5), height: 1 },
         );
         y += 4;
@@ -2651,9 +2805,9 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     let server = wizard.client.server();
     let opening = match server_port(&server) {
         Some(port) => {
-            format!("Your mStream server is running! You can connect to it on port {port}.")
+            t!("done.running_port", port = port).to_string()
         }
-        None => format!("Your mStream server is running! You can connect to it at {server}."),
+        None => t!("done.running_at", server = server).to_string(),
     };
 
     // Two columns when the code draws as pixels (it scales to its box, so
@@ -2700,9 +2854,9 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         // RIGHT: the opening line, the scan's state, and the button list.
         let mut ry = right.y + 1;
         let scan_line = if wizard.qr.is_some() {
-            "Or scan the Quick Connect QR code on the left to connect automatically."
+            t!("done.scan_left").to_string()
         } else {
-            wizard.qr_note.as_str()
+            wizard.qr_note.clone()
         };
         frame.render_widget(
             Paragraph::new(format!("{opening} {scan_line}")).wrap(Wrap { trim: true }),
@@ -2720,13 +2874,13 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
             );
         }
         ry += 2;
-        for (i, (label, tip)) in DONE_BUTTONS.iter().enumerate() {
+        for (i, (label, tip)) in done_buttons().into_iter().enumerate() {
             let rect = Rect { x: right.x, y: ry, width: right.width.min(44), height: 3 };
             let selected = wizard.done_sel == Some(i);
             let hovered = wizard.ui.pointer.is_some_and(|p| rect.contains(p));
             let inner = card(frame, rect, selected, hovered);
             frame.render_widget(
-                Paragraph::new(Span::styled(*label, bold())),
+                Paragraph::new(Span::styled(label, bold())),
                 Rect { x: inner.x + 1, y: inner.y, width: inner.width, height: 1 },
             );
             wizard.ui.click(rect, done_action(i));
@@ -2737,7 +2891,11 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     }
 
     let heading =
-        if wizard.standalone { "Quick Connect" } else { "You are set. Take it with you." };
+        if wizard.standalone {
+            t!("done.heading_qr").to_string()
+        } else {
+            t!("done.heading_wizard").to_string()
+        };
     frame.render_widget(
         Paragraph::new(Span::styled(heading, bold())),
         Rect { x: column.x, y, width: column.width, height: 1 },
@@ -2766,7 +2924,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         } else {
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "(make the window taller to show the QR code here)",
+                    t!("done.too_short").to_string(),
                     dim(),
                 ))
                 .alignment(Alignment::Center),
@@ -2776,9 +2934,9 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         }
     }
     let scan_line = if wizard.qr.is_some() {
-        "Or scan the Quick Connect QR code above to connect automatically."
+        t!("done.scan_above").to_string()
     } else {
-        wizard.qr_note.as_str()
+        wizard.qr_note.clone()
     };
     frame.render_widget(
         Paragraph::new(format!("{opening} {scan_line}"))
@@ -2799,12 +2957,13 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
     }
 
     // The same button list, one row each, centered.
-    let widest = DONE_BUTTONS.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(0) as u16;
+    let buttons = done_buttons();
+    let widest = buttons.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(0) as u16;
     let bx = column.x + column.width.saturating_sub(widest + 4) / 2;
-    for (i, (label, tip)) in DONE_BUTTONS.iter().enumerate() {
+    for (i, (label, tip)) in buttons.into_iter().enumerate() {
         let rect = Rect { x: bx, y, width: widest + 4, height: 1 };
         let selected = wizard.done_sel == Some(i);
-        kit::button(frame, &mut wizard.ui, rect, label, selected, done_action(i));
+        kit::button(frame, &mut wizard.ui, rect, &label, selected, done_action(i));
         wizard.ui.tip(rect, tip);
         y += 1;
     }
@@ -2813,16 +2972,16 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
     let inner = kit::modal_frame(frame, area, 62, 13, th().gold);
     let lines = vec![
-        Line::from(Span::styled("Run in Public Mode?", Style::default().fg(th().gold).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(t!("skip_modal.title").to_string(), Style::default().fg(th().gold).add_modifier(Modifier::BOLD))),
         Line::from(""),
-        Line::from("No login means the server is open to everyone who can reach it."),
+        Line::from(t!("skip_modal.body").to_string()),
         Line::from(""),
-        Line::from(Span::styled("+ Instant access for everyone on your home network", Style::default().fg(th().ok))),
-        Line::from(Span::styled("+ Nothing to type on TVs and shared devices", Style::default().fg(th().ok))),
-        Line::from(Span::styled("− Anyone who reaches the server has full control", Style::default().fg(th().gold))),
-        Line::from(Span::styled("− Your Quick Connect code becomes a key to everything", Style::default().fg(th().gold))),
+        Line::from(Span::styled(t!("skip_modal.plus_access").to_string(), Style::default().fg(th().ok))),
+        Line::from(Span::styled(t!("skip_modal.plus_tv").to_string(), Style::default().fg(th().ok))),
+        Line::from(Span::styled(t!("skip_modal.minus_control").to_string(), Style::default().fg(th().gold))),
+        Line::from(Span::styled(t!("skip_modal.minus_qc").to_string(), Style::default().fg(th().gold))),
         Line::from(""),
-        Line::from(Span::styled("You can add a login later from the admin panel.", dim())),
+        Line::from(Span::styled(t!("skip_modal.later").to_string(), dim())),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     let y = inner.bottom().saturating_sub(1);
@@ -2830,7 +2989,7 @@ fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
         frame,
         &mut wizard.ui,
         Rect { x: inner.x, y, width: inner.width, height: 1 },
-        "◂ Back — create a login",
+        &t!("skip_modal.back"),
         true,
         Act::SkipCancel,
     );
@@ -2838,7 +2997,7 @@ fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
         frame,
         &mut wizard.ui,
         Rect { x: back.right() + 2, y, width: inner.width, height: 1 },
-        "Go public anyway",
+        &t!("skip_modal.confirm"),
         false,
         Act::SkipConfirm,
     );
@@ -2847,10 +3006,10 @@ fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
 fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Browse) {
     let inner = kit::modal_frame(frame, area, 66, 18, th().accent);
     frame.render_widget(
-        Paragraph::new(Span::styled("Browse the server's folders", bold())),
+        Paragraph::new(Span::styled(t!("browse.title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
-    kit::modal_close(frame, &mut wizard.ui, inner, Act::BrowseCancel);
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::BrowseCancel, t!("path_modal.tip_close"));
     frame.render_widget(
         Paragraph::new(Span::styled(browse.path.clone(), dim())),
         Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
@@ -2875,23 +3034,23 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
     }
     if browse.dirs.is_empty() {
         frame.render_widget(
-            Paragraph::new(Span::styled("(no folders in here)", dim())),
+            Paragraph::new(Span::styled(t!("browse.empty").to_string(), dim())),
             Rect { x: inner.x, y: list_top, width: inner.width, height: 1 },
         );
     }
 
     let y = inner.bottom().saturating_sub(1);
-    let up = kit::button(frame, &mut wizard.ui, Rect { x: inner.x, y, width: inner.width, height: 1 }, "◂ up", false, Act::BrowseUp);
-    let open = kit::button(frame, &mut wizard.ui, Rect { x: up.right() + 1, y, width: inner.width, height: 1 }, "open", false, Act::BrowseEnter);
+    let up = kit::button(frame, &mut wizard.ui, Rect { x: inner.x, y, width: inner.width, height: 1 }, &t!("browse.up"), false, Act::BrowseUp);
+    let open = kit::button(frame, &mut wizard.ui, Rect { x: up.right() + 1, y, width: inner.width, height: 1 }, &t!("browse.open"), false, Act::BrowseEnter);
     let add = kit::button(
         frame,
         &mut wizard.ui,
         Rect { x: open.right() + 1, y, width: inner.width, height: 1 },
-        "Add this folder ▸",
+        &t!("browse.add"),
         true,
         Act::BrowseAdd,
     );
-    kit::button(frame, &mut wizard.ui, Rect { x: add.right() + 1, y, width: inner.width, height: 1 }, "close", false, Act::BrowseCancel);
+    kit::button(frame, &mut wizard.ui, Rect { x: add.right() + 1, y, width: inner.width, height: 1 }, &t!("browse.close"), false, Act::BrowseCancel);
 }
 
 fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &PathDraft) {
@@ -2901,10 +3060,10 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
     // the suggestion list grows DOWNWARD beneath them.
     let inner = kit::modal_frame_anchored(frame, area, 62, 7 + shown, 13, th().accent);
     frame.render_widget(
-        Paragraph::new(Span::styled("Type the full path of a music folder", bold())),
+        Paragraph::new(Span::styled(t!("path_modal.title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
-    kit::modal_close(frame, &mut wizard.ui, inner, Act::PathCancel);
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::PathCancel, t!("path_modal.tip_close"));
     frame.render_widget(
         Paragraph::new(Span::raw(kit::input_display(
             draft.text.value(),
@@ -3074,6 +3233,123 @@ mod tests {
         assert_eq!(folders[0].name, "media");
     }
 
+    /// Serialises the one test that flips the process-global locale
+    /// against the tests that assert English strings — today's config
+    /// env-race lesson, applied before it flakes.
+    static LOCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn every_locale_mirrors_the_english_keys_and_placeholders() {
+        let files: [(&str, &str); 10] = [
+            ("en", include_str!("../../locales/en.yml")),
+            ("de", include_str!("../../locales/de.yml")),
+            ("es", include_str!("../../locales/es.yml")),
+            ("fr", include_str!("../../locales/fr.yml")),
+            ("it", include_str!("../../locales/it.yml")),
+            ("ja", include_str!("../../locales/ja.yml")),
+            ("pl", include_str!("../../locales/pl.yml")),
+            ("pt", include_str!("../../locales/pt.yml")),
+            ("ru", include_str!("../../locales/ru.yml")),
+            ("zh", include_str!("../../locales/zh.yml")),
+        ];
+        fn leaves(prefix: &str, v: &serde_yaml::Value, out: &mut Vec<(String, String)>) {
+            match v {
+                serde_yaml::Value::Mapping(m) => {
+                    for (k, v) in m {
+                        let k = k.as_str().expect("string keys");
+                        let key =
+                            if prefix.is_empty() { k.to_string() } else { format!("{prefix}.{k}") };
+                        leaves(&key, v, out);
+                    }
+                }
+                other => out.push((
+                    prefix.to_string(),
+                    other.as_str().expect("string leaves").to_string(),
+                )),
+            }
+        }
+        let mut sets = Vec::new();
+        for (code, body) in files {
+            let parsed: serde_yaml::Value = serde_yaml::from_str(body).expect(code);
+            let mut out = Vec::new();
+            leaves("", &parsed, &mut out);
+            for (key, text) in &out {
+                assert!(!text.trim().is_empty(), "{code}: {key} is empty");
+            }
+            sets.push((code, out));
+        }
+        let (_, en) = &sets[0];
+        let en_keys: std::collections::BTreeMap<&str, &str> =
+            en.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        // The languages the app offers are exactly the files on disk.
+        assert_eq!(LANGS.len(), sets.len());
+        for (code, entries) in &sets[1..] {
+            let keys: std::collections::BTreeSet<&str> =
+                entries.iter().map(|(k, _)| k.as_str()).collect();
+            let want: std::collections::BTreeSet<&str> = en_keys.keys().copied().collect();
+            assert_eq!(keys, want, "{code}: key set differs from en");
+            // Placeholders must survive translation, name for name.
+            for (key, text) in entries.iter() {
+                let holes = |s: &str| {
+                    let mut found: Vec<String> = Vec::new();
+                    let mut rest = s;
+                    while let Some(i) = rest.find("%{") {
+                        let tail = &rest[i + 2..];
+                        let end = tail.find('}').expect("closed placeholder");
+                        found.push(tail[..end].to_string());
+                        rest = &tail[end..];
+                    }
+                    found.sort();
+                    found
+                };
+                assert_eq!(
+                    holes(text),
+                    holes(en_keys[key.as_str()]),
+                    "{code}: {key} placeholder mismatch"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_boot_language_prefers_env_then_system_then_english() {
+        assert_eq!(detect_lang(None, None), 0);
+        assert_eq!(detect_lang(None, Some("de-DE".into())), 1);
+        assert_eq!(detect_lang(None, Some("pt_BR.UTF-8".into())), 7);
+        assert_eq!(detect_lang(None, Some("zh-Hans-CN".into())), 9);
+        assert_eq!(detect_lang(None, Some("ko-KR".into())), 0, "unsupported falls to English");
+        assert_eq!(detect_lang(Some("ja".into()), Some("de-DE".into())), 5, "env outranks system");
+        assert_eq!(detect_lang(Some("nope".into()), Some("ru".into())), 8, "bad env falls through");
+    }
+
+    #[test]
+    fn the_language_selector_lists_switches_and_confesses() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        // l opens the picker with the current language under the cursor.
+        handle_key(&mut wizard, key(KeyCode::Char('l')));
+        assert!(matches!(wizard.modal, Modal::Language(0)));
+        // Arrows move, Enter chooses; German is machine-translated and
+        // says so in German.
+        handle_key(&mut wizard, key(KeyCode::Down));
+        handle_key(&mut wizard, key(KeyCode::Enter));
+        assert!(matches!(wizard.modal, Modal::None));
+        assert_eq!(wizard.lang, 1);
+        let note = wizard.note.clone().expect("the machine-translation note").0;
+        assert!(note.contains("maschinell"), "{note}");
+        // Back to English: no confession needed.
+        wizard.set_language(0);
+        assert!(wizard.note.is_none());
+        assert_eq!(rust_i18n::locale().to_string(), "en");
+        // Spot checks without touching the global locale: every language
+        // renders the add-card in its own words.
+        assert_eq!(t!("folders.add_card", locale = "de"), "Musikordner hinzufügen");
+        assert_eq!(t!("folders.add_card", locale = "ja"), "音楽フォルダーを追加");
+        assert_ne!(t!("lang.machine_note", locale = "ru"), t!("lang.machine_note", locale = "en"));
+    }
+
     #[test]
     fn the_logo_picture_flattens_onto_the_ground() {
         let art = logo_art((0x12, 0x13, 0x1c)).expect("a picture");
@@ -3103,6 +3379,7 @@ mod tests {
 
     #[test]
     fn the_standalone_qr_page_drops_the_wizard_chrome() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
         wizard.standalone = true;
@@ -3274,6 +3551,7 @@ mod tests {
 
     #[test]
     fn validation_marks_problems_and_removes_other_spellings_of_the_same_folder() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let client = Client::new("http://127.0.0.1:9").expect("client");
         let mut wizard = Wizard::new(client);
         wizard.add_folder("/media/music".to_string());
