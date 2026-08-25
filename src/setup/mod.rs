@@ -291,7 +291,6 @@ enum Act {
     BrowseAdd,
     BrowseCancel,
     PathSuggest(usize),
-    OpenPlayer,
     /// The store pages for the mobile apps — what the QR is scanned WITH.
     OpenAppStore,
     OpenPlayStore,
@@ -313,17 +312,15 @@ fn done_buttons() -> [(String, String); DONE_ACTIONS] {
         (t!("done.btn_android").to_string(), t!("done.tip_android").to_string()),
         (t!("done.btn_ios").to_string(), t!("done.tip_ios").to_string()),
         (t!("done.btn_admin").to_string(), t!("done.tip_admin").to_string()),
-        (t!("done.btn_player").to_string(), t!("done.tip_player").to_string()),
     ]
 }
-const DONE_ACTIONS: usize = 4;
+const DONE_ACTIONS: usize = 3;
 
 fn done_action(i: usize) -> Act {
     match i {
         0 => Act::OpenPlayStore,
         1 => Act::OpenAppStore,
-        2 => Act::OpenAdmin,
-        _ => Act::OpenPlayer,
+        _ => Act::OpenAdmin,
     }
 }
 
@@ -476,7 +473,6 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Job)>, Receiver<Done>) {
 /// How the loop ended.
 enum Outcome {
     Quit,
-    OpenPlayer,
 }
 
 pub(crate) struct Wizard {
@@ -827,21 +823,6 @@ impl Wizard {
             }
             Act::BrowseCancel => self.modal = Modal::None,
             Act::PathSuggest(i) => self.accept_suggestion(i),
-            Act::OpenPlayer => {
-                // A new terminal window, so this page stays up; only when
-                // no window can be opened does the player take over this
-                // terminal (the seam, headless, an unknown platform).
-                let spawned = !std::env::var("MSTREAM_NO_OPEN")
-                    .is_ok_and(|v| !v.is_empty() && v != "0")
-                    && std::env::current_exe().is_ok_and(|exe| {
-                        spawn_player_terminal(&exe.display().to_string(), &self.client.server())
-                    });
-                if spawned {
-                    self.note = Some((t!("note.player_window").to_string(), false));
-                } else {
-                    return Some(Outcome::OpenPlayer);
-                }
-            }
             Act::OpenAppStore => self.open_link(&t!("done.label_appstore"), APP_STORE_URL),
             Act::OpenPlayStore => self.open_link(&t!("done.label_play"), PLAY_STORE_URL),
             Act::OpenAdmin => {
@@ -1543,108 +1524,6 @@ fn qr_lines(data: &str) -> Option<Vec<String>> {
     Some(rendered.lines().map(str::to_string).collect())
 }
 
-/// Open the player in a NEW terminal window, keeping this page up. The
-/// spawned player resolves the saved session for auth (setup saves it
-/// before the Done screen ever shows), so the command carries only the
-/// server URL. Returns false when no window could be opened — the caller
-/// falls back to taking over this terminal, the pre-window behavior.
-#[cfg(target_os = "macos")]
-fn spawn_player_terminal(exe: &str, server: &str) -> bool {
-    // Shell-quoted for the layers that run a shell; neither value can
-    // contain a single quote (an executable path from current_exe and a
-    // normalized http(s) URL).
-    let sh = format!("'{exe}' tui --server '{server}'");
-    match std::env::var("TERM_PROGRAM").as_deref() {
-        Ok("ghostty") => {
-            // -e would trip Ghostty's run-command confirmation; a config
-            // file is user-trusted (probed 2026-08-24). No shell layer:
-            // Ghostty splits the command itself.
-            let conf = std::env::temp_dir().join("mstream-player-window.conf");
-            // auto-update off: this window exists to run the player, and
-            // Sparkle's "Enable Automatic Updates?" banner (or a check
-            // against a version we may one day pin) has no place in it.
-            let body = format!(
-                "command = {exe} tui --server {server}\ntitle = mStream Player\nconfirm-close-surface = false\nauto-update = off\n"
-            );
-            if std::fs::write(&conf, body).is_err() {
-                return false;
-            }
-            let arg = format!("--config-file={}", conf.display());
-            // The RUNNING Ghostty first, found through its own env —
-            // LaunchServices only resolves the name for INSTALLED copies,
-            // and a bundled (or scratch) Ghostty is not one. Its resources
-            // dir sits at Ghostty.app/Contents/Resources/ghostty.
-            let running = std::env::var("GHOSTTY_RESOURCES_DIR").ok().and_then(|r| {
-                let bin = std::path::Path::new(&r).join("../../MacOS/ghostty").canonicalize().ok()?;
-                bin.is_file().then_some(bin)
-            });
-            match running {
-                Some(bin) => std::process::Command::new(bin).arg(&arg).spawn().is_ok(),
-                None => std::process::Command::new("open")
-                    .args(["-na", "Ghostty", "--args"])
-                    .arg(&arg)
-                    .status()
-                    .is_ok_and(|s| s.success()),
-            }
-        }
-        // `status`, not `spawn`: these launchers exit fast, and their exit
-        // code is the only way to know a window actually opened — `open`
-        // for an app that is not installed fails AFTER a successful spawn.
-        Ok("iTerm.app") => std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(format!(
-                "tell application \"iTerm2\" to create window with default profile command \"{sh}\""
-            ))
-            .status()
-            .is_ok_and(|s| s.success()),
-        _ => std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(format!("tell application \"Terminal\" to do script \"{sh}\""))
-            .status()
-            .is_ok_and(|s| s.success()),
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn spawn_player_terminal(exe: &str, server: &str) -> bool {
-    // Windows Terminal when present (the Win11 default), else a fresh
-    // conhost via start.
-    std::process::Command::new("wt")
-        .args(["--", exe, "tui", "--server", server])
-        .spawn()
-        .is_ok()
-        || std::process::Command::new("cmd")
-            .args(["/c", "start", "", exe, "tui", "--server", server])
-            .spawn()
-            .is_ok()
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn spawn_player_terminal(exe: &str, server: &str) -> bool {
-    // $TERMINAL first (the user's stated choice), then the usual suspects.
-    if let Ok(term) = std::env::var("TERMINAL") {
-        if std::process::Command::new(term)
-            .args(["-e", exe, "tui", "--server", server])
-            .spawn()
-            .is_ok()
-        {
-            return true;
-        }
-    }
-    for (bin, sep) in
-        [("x-terminal-emulator", "-e"), ("gnome-terminal", "--"), ("konsole", "-e"), ("xterm", "-e")]
-    {
-        if std::process::Command::new(bin)
-            .args([sep, exe, "tui", "--server", server])
-            .spawn()
-            .is_ok()
-        {
-            return true;
-        }
-    }
-    false
-}
-
 /// Hand a URL to the OS's opener, detached. `MSTREAM_NO_OPEN` is the test
 /// seam — harnesses assert the note instead of popping browsers. Returns
 /// whether an opener was actually launched; headless callers put the URL
@@ -1762,10 +1641,6 @@ fn run_tui(mut wizard: Wizard) -> i32 {
     drop(ground_guard);
 
     match outcome {
-        Ok(Outcome::OpenPlayer) => {
-            let token = wizard.client.token().map(String::from);
-            crate::tui::run(Some(wizard.client.server()), token)
-        }
         Ok(Outcome::Quit) => 0,
         Err(e) => {
             eprintln!("mstream-player: {e}");
