@@ -1323,6 +1323,35 @@ skew headless/docker/SSH where a bundled GUI terminal cannot reach. When launchi
 GUI context, prefer a detected capable terminal (ghostty, kitty, wezterm, foot) and fall
 back to the ladder + `v`-picture everywhere else.
 
+**Console branding — the icon matrix** (assessed 2026-08-25; the principle: the icon
+follows whoever owns the window, so brand what we own and don't fight what we don't).
+- **macOS**: solved config-only via the bundled Ghostty (the dock-icon bullet above);
+  Apple's Terminal.app on the pre-Phase-8 path keeps its own icon — not changeable, not
+  fought.
+- **Windows, player exe icon — do this regardless of terminals.** The player binary
+  carries no icon resource, so Explorer, shortcuts, pinned taskbar entries AND the conhost
+  fallback window (a classic console shows the launched exe's embedded icon) are all
+  generic today. Two-step fix: (1) upstream, THIS repo — embed `mstream-logo-cut.ico` at
+  link time via the `winresource` crate, so the released bytes carry the icon everywhere
+  (next release, 0.5.0); (2) immediately, mStream repo — extend the bundler's existing
+  resedit VersionInfo stamp (`scripts/win-versioninfo.mjs`, already runs post-sha-verify
+  by design) with an icon group, so v0.4.0-pin bundles get it now. Rides in the Phase 8
+  PR or its own tiny one.
+- **Windows Terminal taskbar: not possible, accepted.** WT is a packaged Microsoft app —
+  taskbar identity is its own, no custom-icon config (the Ghostty contrast). A profile
+  fragment could brand the TAB (icon + "mStream Setup" title) but means writing
+  persistent config into the user's WT (`Fragments/` dir) for tab-only branding —
+  declined unless someone feels strongly.
+- **Linux: no reliable per-window icon, accepted.** The dock icon follows the emulator's
+  desktop identity; the WM_CLASS + shipped-.desktop trick dies on the most common target
+  (modern gnome-terminal is a single factory process — every window is
+  `org.gnome.Terminal` no matter what's asked). Brand the LAUNCH POINT instead: the
+  deb/rpm desktop packaging ships a "Set up mStream" `.desktop` entry (`Icon=` ours,
+  `Terminal=true`) so the menu carries the logo even though the running window doesn't.
+- **All platforms, cheap universal win**: the wizard sets the terminal title to "mStream
+  Setup" via OSC 0/2 (this repo; the kit already does OSC ground-leasing, same pattern).
+  Every popped-up window is at least NAMED ours, whatever its icon.
+
 Long game, noted not planned: `libghostty` — the embeddable zero-dependency terminal core —
 is what "a terminal inside our own binary" would actually mean one day: an mStream console
 app hosting the player directly, no third-party .app at all.
