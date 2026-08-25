@@ -1339,7 +1339,7 @@ RELEASE exists — so it's merge, then tag, then integrate.
 4. Merge (operator action). Prefer a merge commit — the branch's commits
    are structured and each carries its verification story.
 
-**9b — Release v0.4.0.**
+**9b — Release v0.4.0.** (tagged 2026-08-25)
 1. On master: bump `Cargo.toml` 0.3.0 → 0.4.0 (the wizard, the kit,
    i18n, the QR pages — a feature release), note it in PLAN.md.
 2. Tag `v0.4.0` → `release.yml` (on `v*`) builds and attaches the
