@@ -261,6 +261,14 @@ pub struct DirEntry {
     pub name: String,
 }
 
+/// One value of `GET api/v1/admin/directories` — the response is a map of
+/// vpath name → this. `root` is the folder path as the SERVER sees it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AdminDirEntry {
+    pub root: String,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct FileEntry {

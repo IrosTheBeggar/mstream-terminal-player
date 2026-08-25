@@ -769,6 +769,23 @@ impl Client {
         wait(self.admin_file_explorer_async(directory))
     }
 
+    /// The library folders the server already has, as vpath name → entry.
+    /// BTreeMap so a reopened wizard lists them in a stable order.
+    pub async fn admin_directories_async(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, crate::api::types::AdminDirEntry>, ApiError>
+    {
+        self.get("api/v1/admin/directories").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_directories(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, crate::api::types::AdminDirEntry>, ApiError>
+    {
+        wait(self.admin_directories_async())
+    }
+
     /// Add a library folder. `vpath` is the short name apps see
     /// (`^[a-zA-Z0-9-]+$` server-side); the server queues a scan on its own.
     pub async fn admin_add_directory_async(

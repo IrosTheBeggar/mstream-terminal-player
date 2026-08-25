@@ -78,8 +78,8 @@ impl Screen {
     fn step(self) -> u8 {
         match self {
             Screen::Folders => 1,
-            Screen::Login => 2,
-            Screen::Extras => 3,
+            Screen::Extras => 2,
+            Screen::Login => 3,
             Screen::Done => 4,
         }
     }
@@ -233,7 +233,7 @@ enum Act {
     Focus(LoginField),
     CreateAdmin,
     BackToFolders,
-    BackToLogin,
+    BackToExtras,
     SkipLogin,
     SkipConfirm,
     SkipCancel,
@@ -275,7 +275,12 @@ enum Op {
 
 /// What the worker sends back for each [`Op`].
 enum Done {
-    Ping(Result<(), ApiError>),
+    /// Reachability, plus the folders the server ALREADY has (vpath name,
+    /// server path) so a reopened wizard shows reality instead of
+    /// re-deriving names that collide server-side. The list is
+    /// best-effort: an auth wall (server already set up) yields an empty
+    /// one and the wizard behaves as before.
+    Ping(Result<Vec<(String, String)>, ApiError>),
     Picked(picker::Pick),
     Browsed(Result<crate::api::types::DirListing, String>),
     Completed { dir: String, listing: Result<crate::api::types::DirListing, String> },
@@ -286,7 +291,7 @@ enum Done {
     /// The new admin's token — the main thread rebuilds its client around
     /// it so every later op runs authenticated.
     AdminCreated(Result<String, ApiError>),
-    ExtrasCommitted { applied: Vec<usize>, error: Option<(String, ApiError)> },
+    ExtrasCommitted { applied: Vec<(usize, bool)>, error: Option<(String, ApiError)> },
     Iroh(Result<crate::api::types::IrohStatus, ApiError>),
     Progress(Result<Vec<crate::api::types::ScanProgressRow>, ApiError>),
 }
@@ -308,7 +313,12 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Job)>, Receiver<Done>) {
     std::thread::spawn(move || {
         while let Ok((client, job)) = job_rx.recv() {
             let done = match job {
-                Job::Plain(Op::Ping) => Done::Ping(client.ping().map(|_| ())),
+                Job::Plain(Op::Ping) => Done::Ping(client.ping().map(|_| {
+                    client
+                        .admin_directories()
+                        .map(|dirs| dirs.into_iter().map(|(name, d)| (name, d.root)).collect())
+                        .unwrap_or_default()
+                })),
                 Job::Plain(Op::PickNative) => Done::Picked(picker::pick_folder()),
                 Job::Plain(Op::OpenBrowser(path)) | Job::Plain(Op::BrowseTo(path)) => {
                     Done::Browsed(local_list(&path))
@@ -351,12 +361,12 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Job)>, Receiver<Done>) {
                     for (i, label, on) in batch {
                         let result = match i {
                             0 => client.admin_update_mode(if on { "stage" } else { "notify" }).map(|_| ()),
-                            1 if on => client.admin_auto_boot_audio(true).map(|_| ()),
-                            2 if on => client.admin_discovery_enabled(true).map(|_| ()),
+                            1 => client.admin_auto_boot_audio(on).map(|_| ()),
+                            2 => client.admin_discovery_enabled(on).map(|_| ()),
                             _ => Ok(()),
                         };
                         match result {
-                            Ok(()) => applied.push(i),
+                            Ok(()) => applied.push((i, on)),
                             Err(e) => {
                                 error = Some((label.to_string(), e));
                                 break;
@@ -409,11 +419,10 @@ pub(crate) struct Wizard {
     pub extras: [bool; 3],
     /// The KEYBOARD cursor over the opt-in cards — `None` until ↑/↓.
     pub extras_sel: Option<usize>,
-    /// The first admin exists — Back to the login screen is a trap now.
-    pub admin_created: bool,
     /// Which extras already reached the server (a failed batch retries the
     /// rest, and toggling one off after a failure just drops it).
-    extras_done: [bool; 3],
+    /// The value last APPLIED per extra — re-continue sends changes only.
+    extras_done: [Option<bool>; 3],
 
     /// Quick Connect ticket, rendered; None while loading or when off.
     pub qr: Option<Vec<String>>,
@@ -457,8 +466,7 @@ impl Wizard {
             public: false,
             extras: [true, false, false],
             extras_sel: None,
-            admin_created: false,
-            extras_done: [false; 3],
+            extras_done: [None; 3],
             qr: None,
             qr_note: String::new(),
             progress: String::new(),
@@ -498,6 +506,30 @@ impl Wizard {
         self.pending_validate.push(path);
         self.reveal = Some(self.folders.len() - 1);
         self.note = None;
+        sync_names(&mut self.folders);
+    }
+
+    /// Rows for the folders the server ALREADY has, from the boot-time
+    /// ping. They arrive committed (Continue skips them, [X]/rename point
+    /// at the admin panel) and user-named (resyncs never touch a server
+    /// name), and their names join the dedup set so a new folder can
+    /// never re-derive a vpath the server would reject as a duplicate.
+    fn seed_folders(&mut self, existing: Vec<(String, String)>) {
+        for (name, path) in existing {
+            if self.folders.iter().any(|f| f.path == path || f.name == name) {
+                continue;
+            }
+            self.folders.push(Folder {
+                name,
+                path: path.clone(),
+                named_by_user: true,
+                committed: true,
+                check: FolderCheck::Pending,
+                canonical: None,
+                nested_in: None,
+            });
+            self.pending_validate.push(path);
+        }
         sync_names(&mut self.folders);
     }
 
@@ -610,15 +642,16 @@ impl Wizard {
                 self.modal = Modal::None;
                 self.public = true;
                 self.note = None;
-                self.screen = Screen::Extras;
+                self.screen = Screen::Done;
+                self.queue(Op::LoadDone, "fetching your Quick Connect code…");
             }
             Act::Toggle(i) => {
                 if let Some(on) = self.extras.get_mut(i) {
                     *on = !*on;
                 }
             }
-            Act::BackToLogin => {
-                self.screen = Screen::Login;
+            Act::BackToExtras => {
+                self.screen = Screen::Extras;
                 self.note = None;
             }
             Act::ContinueExtras => self.queue(Op::CommitExtras, "saving your choices…"),
@@ -851,7 +884,7 @@ impl Wizard {
             Op::CommitExtras => Job::Extras(
                 [(0usize, "updates"), (1, "server audio"), (2, "discovery")]
                     .into_iter()
-                    .filter(|(i, _)| !self.extras_done[*i])
+                    .filter(|(i, _)| self.extras_done[*i] != Some(self.extras[*i]))
                     .map(|(i, label)| (i, label, self.extras[i]))
                     .collect(),
             ),
@@ -872,7 +905,10 @@ impl Wizard {
             self.queue(Op::Complete(dir), "");
         }
         match done {
-            Done::Ping(Ok(())) => self.note = None,
+            Done::Ping(Ok(existing)) => {
+                self.note = None;
+                self.seed_folders(existing);
+            }
             Done::Ping(Err(e)) => self.fail("could not reach the server", e),
             Done::Picked(picker::Pick::Folder(path)) => {
                 self.add_folder(path.display().to_string());
@@ -984,12 +1020,11 @@ impl Wizard {
                     Some((name, e)) => self.fail(&format!("could not add {name}"), e),
                     None => {
                         self.note = None;
-                        self.screen = Screen::Login;
+                        self.screen = Screen::Extras;
                     }
                 }
             }
             Done::AdminCreated(Ok(token)) => {
-                self.admin_created = true;
                 self.public = false;
                 // Creating the first user closed the open-admin window; swap
                 // in a token-carrying client so the rest of the wizard (and
@@ -1000,19 +1035,19 @@ impl Wizard {
                 }
                 self.remember_session();
                 self.note = None;
-                self.screen = Screen::Extras;
+                self.screen = Screen::Done;
+                self.queue(Op::LoadDone, "fetching your Quick Connect code…");
             }
             Done::AdminCreated(Err(e)) => self.fail("could not create the login", e),
             Done::ExtrasCommitted { applied, error } => {
-                for i in applied {
-                    self.extras_done[i] = true;
+                for (i, on) in applied {
+                    self.extras_done[i] = Some(on);
                 }
                 match error {
                     Some((label, e)) => self.fail(&format!("could not set up {label}"), e),
                     None => {
                         self.note = None;
-                        self.screen = Screen::Done;
-                        self.queue(Op::LoadDone, "fetching your Quick Connect code…");
+                        self.screen = Screen::Login;
                     }
                 }
             }
@@ -1670,7 +1705,7 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
                 None
             }
             KeyCode::Enter => wizard.act(Act::CreateAdmin),
-            KeyCode::Esc => wizard.act(Act::BackToFolders),
+            KeyCode::Esc => wizard.act(Act::BackToExtras),
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 wizard.act(Act::SkipLogin)
             }
@@ -1702,7 +1737,7 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
                 Some(i) => wizard.act(Act::Toggle(i)),
                 None => None,
             },
-            KeyCode::Esc => wizard.act(Act::BackToLogin),
+            KeyCode::Esc => wizard.act(Act::BackToFolders),
             KeyCode::Char('c') => wizard.act(Act::ContinueExtras),
             KeyCode::Char('q') => Some(Outcome::Quit),
             _ => None,
@@ -1835,28 +1870,15 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
             true,
             Act::ContinueExtras,
         );
-        if wizard.admin_created {
-            let back_x = rect.x.saturating_sub("Back".chars().count() as u16 + 6 + 2);
-            let back = kit::tall_button(
-                frame,
-                &mut wizard.ui,
-                Rect { x: back_x, y: bar.y, width: bar.width, height: 3 },
-                "Back",
-                false,
-                Act::BackToLogin,
-            );
-            wizard.ui.tip(back, "The admin is created — manage accounts in the admin panel");
-        } else {
-            let back_x = rect.x.saturating_sub("◂ Back".chars().count() as u16 + 6 + 2);
-            let back = kit::tall_secondary(
-                frame,
-                &mut wizard.ui,
-                Rect { x: back_x, y: bar.y, width: bar.width, height: 3 },
-                "◂ Back",
-                Act::BackToLogin,
-            );
-            wizard.ui.tip(back, "Back to create the admin login");
-        }
+        let back_x = rect.x.saturating_sub("◂ Back".chars().count() as u16 + 6 + 2);
+        let back = kit::tall_secondary(
+            frame,
+            &mut wizard.ui,
+            Rect { x: back_x, y: bar.y, width: bar.width, height: 3 },
+            "◂ Back",
+            Act::BackToFolders,
+        );
+        wizard.ui.tip(back, "Add or adjust folders — nothing is lost");
     }
     if wizard.screen == Screen::Login {
         let label = "Create Admin ▸";
@@ -1876,9 +1898,9 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
             &mut wizard.ui,
             Rect { x: back_x, y: bar.y, width: bar.width, height: 3 },
             back_label,
-            Act::BackToFolders,
+            Act::BackToExtras,
         );
-        wizard.ui.tip(back, "Add or adjust folders — nothing is lost");
+        wizard.ui.tip(back, "Back to the extras — nothing is lost");
     }
 
     if modal_open {
@@ -2557,6 +2579,44 @@ mod tests {
     }
 
     #[test]
+    fn a_reopened_wizard_seeds_server_folders_and_dedups_against_them() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.apply(Done::Ping(Ok(vec![("media".to_string(), "/srv/music".to_string())])));
+        assert_eq!(wizard.folders.len(), 1);
+        assert!(wizard.folders[0].committed, "Continue must skip server rows");
+        assert!(wizard.folders[0].named_by_user, "resyncs never rename server rows");
+        assert_eq!(wizard.folders[0].name, "media");
+        assert_eq!(wizard.pending_validate, vec!["/srv/music".to_string()]);
+        assert_eq!(wizard.sel, None, "seeding never grabs the cursor");
+        // The reopen bug this guards: a fresh wizard's first new folder used
+        // to derive the single-folder name `media` and the server 500'd on
+        // the duplicate vpath. With a seeded row the list isn't single, and
+        // seeded names join the dedup set.
+        wizard.add_folder("/srv/media".to_string());
+        assert_eq!(wizard.folders[1].name, "media-2");
+        // Re-seeding (same vpath, or same path) never duplicates rows.
+        wizard.seed_folders(vec![
+            ("media".to_string(), "/srv/music".to_string()),
+            ("extra".to_string(), "/srv/extra".to_string()),
+        ]);
+        assert_eq!(wizard.folders.len(), 3);
+        // Continue sends ONLY the new folders to the server.
+        wizard.queued = Some(Op::CommitFolders);
+        let (tx, rx) = std::sync::mpsc::channel();
+        wizard.dispatch_queued(&tx);
+        let batch = rx
+            .try_iter()
+            .find_map(|(_, job)| match job {
+                Job::Folders(batch) => Some(batch),
+                _ => None,
+            })
+            .expect("a folders batch");
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].2, "media-2");
+    }
+
+    #[test]
     fn user_typed_names_survive_resync_and_join_dedup() {
         let mut folders = vec![folder("/a/Music"), folder("/b/Music")];
         sync_names(&mut folders);
@@ -2823,17 +2883,19 @@ mod tests {
         assert_eq!(wizard.extras_sel, Some(0));
         handle_key(&mut wizard, key(KeyCode::Char(' ')));
         assert!(!wizard.extras[0], "the default-on updates card toggled off");
-        // Esc walks back to the login screen.
+        // Esc walks back to the folders screen (extras is step 2 now).
         handle_key(&mut wizard, key(KeyCode::Esc));
-        assert_eq!(wizard.screen, Screen::Login);
-        // Skip goes public; creating the admin later reverses that and
-        // locks Back (an account now exists).
+        assert_eq!(wizard.screen, Screen::Folders);
+        // Skip completes setup as public mode…
+        wizard.screen = Screen::Login;
         wizard.act(Act::SkipLogin);
         wizard.act(Act::SkipConfirm);
         assert!(wizard.public);
+        assert_eq!(wizard.screen, Screen::Done, "skip finishes the flow");
+        // …and creating the admin instead would have ended public mode.
         wizard.apply(Done::AdminCreated(Ok("tok".to_string())));
-        assert!(wizard.admin_created, "creation locks the back path");
         assert!(!wizard.public, "an account ends public mode");
+        assert_eq!(wizard.screen, Screen::Done);
     }
 
     #[test]
@@ -2914,7 +2976,7 @@ mod tests {
         assert_eq!(wizard.screen, Screen::Login);
         wizard.act(Act::SkipLogin);
         wizard.act(Act::SkipConfirm);
-        assert_eq!(wizard.screen, Screen::Extras);
+        assert_eq!(wizard.screen, Screen::Done, "login is the last step — skip completes");
         assert!(wizard.public);
     }
 
