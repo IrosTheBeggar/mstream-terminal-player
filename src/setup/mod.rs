@@ -302,8 +302,11 @@ enum Act {
     Finish,
 }
 
-/// The published store pages, verbatim from the webapp's own links.
-const APP_STORE_URL: &str = "https://apps.apple.com/us/app/mstream-player/id1605378892";
+/// The OFFICIAL mobile apps' store pages — the server README's "Official
+/// Mobile Apps" section (the open-source mstream_music repo), not the
+/// third-party listings beneath it. The iOS URL drops the README's
+/// storefront pin so Apple geo-resolves it.
+const APP_STORE_URL: &str = "https://apps.apple.com/app/mstream-music/id1455309629";
 const PLAY_STORE_URL: &str = "https://play.google.com/store/apps/details?id=mstream.music";
 
 /// The Done page's button list, top to bottom: (label, tip).
