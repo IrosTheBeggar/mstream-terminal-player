@@ -2551,7 +2551,13 @@ fn draw_folders(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         frame.render_widget(Paragraph::new(Span::styled(shown, path_style)), path_rect);
         match problem {
             Some(tip) => wizard.ui.tip(path_rect, tip),
-            None if clipped => wizard.ui.tip(path_rect, folder.path.clone()),
+            None if clipped => {
+                // The tooltip carries at most TWO lines of path; anything
+                // longer keeps its tail behind the same leading ….
+                let (tip, _) =
+                    ellipsize_path_start(&folder.path, crate::kit::TIP_WRAP * 2);
+                wizard.ui.tip(path_rect, tip);
+            }
             None => {}
         }
         let x_rect = Rect { x: column.x + sel_width + 1, y, width: 3, height: 1 };
@@ -3121,6 +3127,19 @@ mod tests {
         assert!(shown.ends_with("c/Favorites"), "{shown}");
         // Degenerate width never panics.
         assert_eq!(ellipsize_path_start("/x", 0).0, "/x");
+        // The tooltip pairing: a spaceless path hard-wraps at the tip
+        // width instead of clipping, and the two-line cap holds however
+        // long the path gets.
+        let long = format!("/very{}/leaf", "/deep".repeat(40));
+        let (tip, clipped) = ellipsize_path_start(&long, crate::kit::TIP_WRAP * 2);
+        assert!(clipped);
+        let lines = crate::kit::wrap_tip(&tip);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines.iter().all(|l| l.chars().count() <= crate::kit::TIP_WRAP));
+        assert!(lines[1].ends_with("/leaf"), "the leaf survives: {lines:?}");
+        // And ordinary sentence tips still word-wrap as before.
+        let prose = crate::kit::wrap_tip("Add or adjust folders — nothing is lost");
+        assert_eq!(prose.len(), 1);
     }
 
     #[test]

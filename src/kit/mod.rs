@@ -563,6 +563,23 @@ pub fn wrap_tip(text: &str) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
+        // A word wider than the wrap (a file path) hard-breaks at the
+        // character level — the greedy wrap would emit it as one line
+        // wider than the box, which clips.
+        if word.chars().count() > TIP_WRAP {
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            let chars: Vec<char> = word.chars().collect();
+            for chunk in chars.chunks(TIP_WRAP) {
+                if chunk.len() == TIP_WRAP {
+                    lines.push(chunk.iter().collect());
+                } else {
+                    line = chunk.iter().collect();
+                }
+            }
+            continue;
+        }
         let need = if line.is_empty() { word.chars().count() } else { word.chars().count() + 1 };
         if !line.is_empty() && line.chars().count() + need > TIP_WRAP {
             lines.push(std::mem::take(&mut line));
