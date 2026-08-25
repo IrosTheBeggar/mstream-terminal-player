@@ -19,7 +19,7 @@ command -v expect >/dev/null || { echo "SKIP: expect(1) not installed"; exit 0; 
 command -v python3 >/dev/null || { echo "SKIP: python3 not installed"; exit 0; }
 
 if [ ! -x "$BIN" ]; then
-  echo "building $BIN…"
+  echo "building ${BIN}..."
   cargo build --quiet || exit 1
 fi
 
