@@ -3357,7 +3357,7 @@ mod tests {
         let (shown, clipped) = ellipsize_path_start("/home/anna/Music/Favorites", 12);
         assert!(clipped);
         assert_eq!(shown.chars().count(), 12);
-        assert!(shown.starts_with('…'));
+        assert!(shown.starts_with(g("…", "»")));
         assert!(shown.ends_with("c/Favorites"), "{shown}");
         // Degenerate width never panics.
         assert_eq!(ellipsize_path_start("/x", 0).0, "/x");

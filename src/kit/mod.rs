@@ -844,12 +844,12 @@ mod tests {
     fn a_long_input_windows_around_the_cursor() {
         assert_eq!(input_display_with_fancy("short", 5, 20), "short▏");
         let long = "/very/long/path/that/does/not/fit/anywhere/music";
-        let shown = input_display(long, long.chars().count(), 20);
+        let shown = input_display_with_fancy(long, long.chars().count(), 20);
         assert_eq!(shown.chars().count(), 20);
         assert!(shown.starts_with('…') && shown.ends_with("music▏"));
-        let shown = input_display(long, 0, 20);
+        let shown = input_display_with_fancy(long, 0, 20);
         assert!(shown.starts_with("▏/very") && shown.ends_with('…'));
-        let shown = input_display(long, 24, 20);
+        let shown = input_display_with_fancy(long, 24, 20);
         assert_eq!(shown.chars().count(), 20);
         assert!(shown.starts_with('…') && shown.ends_with('…') && shown.contains('▏'));
         assert_eq!(input_display_with_fancy("123456789", 4, 10), "1234▏56789");
