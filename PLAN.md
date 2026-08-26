@@ -1453,9 +1453,14 @@ RELEASE exists — so it's merge, then tag, then integrate.
    doubles as the Phase 8 validation item.
 5. ~~After the flip is proven, the deletions Phase 6 already lists
    (rust-server-audio tree and its CI) proceed on their own schedule.~~
-   **SKIPPED (operator decision 2026-08-25):** the stale tree stays put —
-   it costs nothing at rest, and deleting it buys nothing users see. Only
-   revive if it actively confuses someone or blocks a change.
+   **SKIPPED (operator decision 2026-08-25) — and on inspection, already
+   ~done:** the rust-server-audio tree, its bin/ folder, and its workflow
+   are ALREADY GONE from mStream master (the flip's deletions rode along
+   with the player-bootstrap work), the absoluteToVpath prefix bug is
+   fixed (isWithin guard), and cli-audio/ is kept as planned. What the
+   skip actually descopes is cosmetic residue only: the bootRustPlayer →
+   bootServerAudio rename, two stale comments, and the template-marker
+   "consider". Nothing to revive.
 
 Phase 8 (the bundled console) stays sequenced AFTER 9c: it upgrades the
 launcher's terminal choice, not the wizard itself.
