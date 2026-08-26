@@ -1267,6 +1267,18 @@ brew/scoop shipped with Phase 5.
 
 ### Phase 8 — One terminal everywhere (post PR #10)
 
+> **Status 2026-08-25: the macOS slice is implemented — mStream PR #911.**
+> Ghostty 1.3.1 pinned (bin/ghostty/manifest.json: dmg sha + TeamIdentifier
+> asserted), staged untouched at console/ beside mStream.app, launcher
+> prefers it via generated config (never `-e`; `command = shell:…` so
+> /bin/sh -c absorbs the "Application Support" spaces — a wrinkle the
+> original plan missed; `quit-after-last-window-closed` so no windowless
+> Dock ghost; `macos-icon = custom` → mStream.icns). Live-proven from the
+> staged bundle end to end. Known v1 limits: the .pkg payload ships only
+> mStream.app (pkg installs fall back to Terminal.app), and the win-icon /
+> linux-.desktop branding riders are a separate small PR. Below stands as
+> the design record.
+
 The setup wizard and QR page (PR #10) degrade gracefully, but the probes that built the
 ladder also mapped the ceiling: Apple's Terminal has NO pixel protocol (the kitty query is
 reflected into the screen as literal text, DA1 has no sixel bit), no OSC 22, tofu
