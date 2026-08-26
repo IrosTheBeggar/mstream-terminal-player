@@ -1690,10 +1690,24 @@ pub fn run_qr(args: QrArgs) -> i32 {
     run_tui(wizard)
 }
 
+/// The window title for each wizard-family surface. English on purpose —
+/// window chrome, not wizard copy, and stable for anyone scripting against
+/// window titles.
+fn session_title(standalone: bool) -> &'static str {
+    if standalone { "mStream Quick Connect" } else { "mStream Setup" }
+}
+
 /// The shared terminal session around both entries: ground lease, pixel
 /// probe, mouse capture, pointer contract, event loop, teardown.
 fn run_tui(mut wizard: Wizard) -> i32 {
     let (to_worker, from_worker) = spawn_worker();
+
+    // Name the window for the session; the drop restores whatever title the
+    // terminal had (XTWINOPS title stack — terminals without one ignore the
+    // push/pop and just keep the set title, which a closing window discards
+    // anyway). Every popped-up wizard window is NAMED ours even where its
+    // icon can't be.
+    let _title = crate::tui::WindowTitle::claim(session_title(wizard.standalone));
 
     // Claim the window background BEFORE ratatui takes the terminal — the
     // OSC 11 query runs its own raw-mode transaction on the tty. Owning
@@ -3210,6 +3224,14 @@ mod tests {
             canonical: None,
             nested_in: None,
         }
+    }
+
+    #[test]
+    fn each_surface_names_its_window() {
+        // Window chrome, not wizard copy: English on purpose, and stable
+        // for anyone scripting against window titles.
+        assert_eq!(session_title(false), "mStream Setup");
+        assert_eq!(session_title(true), "mStream Quick Connect");
     }
 
     #[test]
