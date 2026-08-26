@@ -1118,7 +1118,21 @@ impl Wizard {
                 self.note = None;
                 self.seed_folders(existing);
             }
-            Done::Ping(Err(e)) => self.fail("could not reach the server", e),
+            Done::Ping(Err(e)) => {
+                // 401 here means accounts exist — and the wizard is ONE-TIME
+                // onboarding by design: everything it does post-setup
+                // belongs to the admin panel. Say that, instead of the old
+                // behavior of reporting a 401 as "could not reach the
+                // server" and sending people chasing network ghosts.
+                if matches!(e, ApiError::Unauthorized) {
+                    self.note = Some((
+                        "this server is already set up — add folders, users and settings from the admin panel (the wizard runs once, for new installs)".to_string(),
+                        true,
+                    ));
+                } else {
+                    self.fail("could not reach the server", e);
+                }
+            }
             Done::Picked(picker::Pick::Folder(path)) => {
                 self.add_folder(path.display().to_string());
             }
@@ -1648,6 +1662,13 @@ pub fn run(args: SetupArgs) -> i32 {
         }
     };
     let client = match Client::new(&server) {
+        // Deliberately tokenless: the wizard is ONE-TIME onboarding. A
+        // server whose admin account exists answers the boot ping with 401,
+        // and that 401 IS the gate — the wizard parks on an "already set
+        // up" screen pointing at the admin panel (operator decision,
+        // mStream#915: post-setup management belongs to the admin surfaces,
+        // not a reopened wizard). The hidden --token seam stays for the
+        // harness legs that drive the wizard against configured servers.
         Ok(client) => client.with_token(args.token),
         Err(e) => {
             eprintln!("mstream-player: {e}");
@@ -3224,6 +3245,20 @@ mod tests {
             canonical: None,
             nested_in: None,
         }
+    }
+
+    #[test]
+    fn a_401_ping_parks_the_wizard_as_already_set_up() {
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.apply(Done::Ping(Err(ApiError::Unauthorized)));
+        let (note, _) = wizard.note.clone().expect("a note");
+        assert!(note.contains("already set up"), "{note}");
+        assert!(note.contains("admin panel"), "{note}");
+        // Anything else stays the connectivity story.
+        wizard.apply(Done::Ping(Err(ApiError::Network("refused".into()))));
+        let (note, _) = wizard.note.clone().expect("a note");
+        assert!(note.contains("could not reach the server"), "{note}");
     }
 
     #[test]
