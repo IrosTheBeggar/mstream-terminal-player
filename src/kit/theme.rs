@@ -228,6 +228,9 @@ mod tests {
         assert_eq!(tier_for(None, Some("truecolor"), Some("xterm"), false), Tier::Truecolor);
         assert_eq!(tier_for(None, Some("24bit"), None, false), Tier::Truecolor);
         assert_eq!(tier_for(None, None, Some("xterm-256color"), false), Tier::C256);
+        assert_eq!(tier_for(None, None, Some("screen-256color"), false), Tier::C256);
+        assert_eq!(tier_for(None, None, Some("xterm"), false), Tier::Ansi);
+        assert_eq!(tier_for(None, None, None, false), Tier::Ansi);
     }
 
     #[test]
@@ -240,10 +243,8 @@ mod tests {
         assert_eq!(tier_for(Some("256"), None, None, true), Tier::C256);
         // TERM=dumb stays dumb, even on Windows.
         assert_eq!(tier_for(None, None, Some("dumb"), true), Tier::Ansi);
-        // The unix floor is unchanged.
-        assert_eq!(tier_for(None, None, None, false), Tier::Ansi);
-        assert_eq!(tier_for(None, None, Some("screen-256color"), false), Tier::C256);
-        assert_eq!(tier_for(None, None, Some("xterm"), false), Tier::Ansi);
+        // windows_vt=false leaves the unix ladder byte-identical (pinned
+        // above in detection_ladders_truecolor_then_256_then_ansi).
         assert_eq!(tier_for(None, None, None, false), Tier::Ansi);
     }
 
