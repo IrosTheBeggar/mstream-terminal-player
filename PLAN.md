@@ -1345,10 +1345,11 @@ follows whoever owns the window, so brand what we own and don't fight what we do
   fallback window (a classic console shows the launched exe's embedded icon) are all
   generic today. Two-step fix: (1) upstream, THIS repo — embed `mstream-logo-cut.ico` at
   link time via the `winresource` crate, so the released bytes carry the icon everywhere
-  (next release, 0.5.0); (2) immediately, mStream repo — extend the bundler's existing
+  (next release, 0.5.0) — **SKIPPED with the rest of the 0.5.0 hopper (operator decision
+  2026-08-25)**; (2) immediately, mStream repo — extend the bundler's existing
   resedit VersionInfo stamp (`scripts/win-versioninfo.mjs`, already runs post-sha-verify
-  by design) with an icon group, so v0.4.0-pin bundles get it now. Rides in the Phase 8
-  PR or its own tiny one.
+  by design) with an icon group, so v0.4.x-pin bundles get it now. Rides in the branding
+  riders PR (the mStream-side stamp fully covers bundle users on its own).
 - **Windows Terminal taskbar: not possible, accepted.** WT is a packaged Microsoft app —
   taskbar identity is its own, no custom-icon config (the Ghostty contrast). A profile
   fragment could brand the TAB (icon + "mStream Setup" title) but means writing
@@ -1362,11 +1363,23 @@ follows whoever owns the window, so brand what we own and don't fight what we do
   `Terminal=true`) so the menu carries the logo even though the running window doesn't.
 - **All platforms, cheap universal win**: the wizard sets the terminal title to "mStream
   Setup" via OSC 0/2 (this repo; the kit already does OSC ground-leasing, same pattern).
-  Every popped-up window is at least NAMED ours, whatever its icon.
+  Every popped-up window is at least NAMED ours, whatever its icon. **SKIPPED with the
+  0.5.0 hopper (operator decision 2026-08-25)** — on macOS the bundled console already
+  sets `title = mStream Setup` from its config, which covers the platform that mattered.
 
 Long game, noted not planned: `libghostty` — the embeddable zero-dependency terminal core —
 is what "a terminal inside our own binary" would actually mean one day: an mStream console
-app hosting the player directly, no third-party .app at all.
+app hosting the player directly, no third-party .app at all. **Pinned (assessed
+2026-08-25):** works-in-principle on all three platforms (the core is toolkit-agnostic;
+their GTK app is just another embedder), but revisit only on a trigger — libghostty ships
+a stable versioned C API; the bundled-Ghostty approach starts hurting (size, upstream
+config churn, notarization friction); or the library gains Windows rendering (the biggest
+unlock — it would replace the wt.exe dependency). Linux is last in line either way:
+headless installs need no shell, and desktop users mostly hold capable terminals already —
+the only upgraded population is stock GNOME Terminal users, who still get a working
+character-art wizard today. Also pinned: the wizard's scrollbar-hold soft-capture
+refinement for Apple Terminal — mac users now get the bundled console instead, which
+mooted the surface it was polishing.
 
 ### Phase 9 — Ship the wizard (merge PR #10 → release → mStream integration)
 
@@ -1438,8 +1451,11 @@ RELEASE exists — so it's merge, then tag, then integrate.
    graphics probe lands on sixel) needs a real Windows machine after
    the PRs merge and CI rebuilds the committed launcher binaries — it
    doubles as the Phase 8 validation item.
-5. After the flip is proven, the deletions Phase 6 already lists
-   (rust-server-audio tree and its CI) proceed on their own schedule.
+5. ~~After the flip is proven, the deletions Phase 6 already lists
+   (rust-server-audio tree and its CI) proceed on their own schedule.~~
+   **SKIPPED (operator decision 2026-08-25):** the stale tree stays put —
+   it costs nothing at rest, and deleting it buys nothing users see. Only
+   revive if it actively confuses someone or blocks a change.
 
 Phase 8 (the bundled console) stays sequenced AFTER 9c: it upgrades the
 launcher's terminal choice, not the wizard itself.
