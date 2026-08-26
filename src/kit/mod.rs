@@ -670,15 +670,35 @@ pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) {
 // ── Text input display ───────────────────────────────────────────────────────
 
 /// The input line with the caret at the CURSOR (mid-line edits), windowed
-/// so the caret stays visible: clipped edges render `…`.
+/// so the caret stays visible: clipped edges render the clip mark. On bare
+/// conhost the fancy caret (U+258F) and ellipsis are not in the legacy
+/// fonts and draw as '?' - CP437's own `│` and `»` stand in, same single
+/// cell, so the windowing math is identical (found live: the rename and
+/// directory-modal carets rendered as question marks).
 pub fn input_display(value: &str, cursor: usize, width: u16) -> String {
+    let (caret, clip) = if crate::kit::theme::legacy_conhost() {
+        ('│', '»')
+    } else {
+        ('▏', '…')
+    };
+    input_display_with(value, cursor, width, caret, clip)
+}
+
+/// Pure core - unit-tested with explicit marks so the assertions hold on
+/// every OS and terminal the tests run under.
+#[cfg(test)]
+fn input_display_with_fancy(value: &str, cursor: usize, width: u16) -> String {
+    input_display_with(value, cursor, width, '▏', '…')
+}
+
+pub fn input_display_with(value: &str, cursor: usize, width: u16, caret: char, clip: char) -> String {
     let w = width as usize;
     if w < 3 {
-        return "…".to_string();
+        return clip.to_string();
     }
     let mut chars: Vec<char> = value.chars().collect();
     let cursor = cursor.min(chars.len());
-    chars.insert(cursor, '▏');
+    chars.insert(cursor, caret);
     let total = chars.len();
     if total <= w {
         return chars.into_iter().collect();
@@ -686,10 +706,10 @@ pub fn input_display(value: &str, cursor: usize, width: u16) -> String {
     let start = cursor.saturating_sub(w.saturating_sub(2)).min(total - w);
     let mut out: Vec<char> = chars[start..start + w].to_vec();
     if start > 0 {
-        out[0] = '…';
+        out[0] = clip;
     }
     if start + w < total {
-        out[w - 1] = '…';
+        out[w - 1] = clip;
     }
     out.into_iter().collect()
 }
@@ -822,7 +842,7 @@ mod tests {
 
     #[test]
     fn a_long_input_windows_around_the_cursor() {
-        assert_eq!(input_display("short", 5, 20), "short▏");
+        assert_eq!(input_display_with_fancy("short", 5, 20), "short▏");
         let long = "/very/long/path/that/does/not/fit/anywhere/music";
         let shown = input_display(long, long.chars().count(), 20);
         assert_eq!(shown.chars().count(), 20);
@@ -832,7 +852,7 @@ mod tests {
         let shown = input_display(long, 24, 20);
         assert_eq!(shown.chars().count(), 20);
         assert!(shown.starts_with('…') && shown.ends_with('…') && shown.contains('▏'));
-        assert_eq!(input_display("123456789", 4, 10), "1234▏56789");
+        assert_eq!(input_display_with_fancy("123456789", 4, 10), "1234▏56789");
     }
 
     #[test]

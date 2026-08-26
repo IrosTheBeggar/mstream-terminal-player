@@ -1425,7 +1425,7 @@ pub(crate) fn ellipsize_path_start(path: &str, width: usize) -> (String, bool) {
         return (path.to_string(), false);
     }
     let tail: String = path.chars().skip(count - width.saturating_sub(1)).collect();
-    (format!("…{tail}"), true)
+    (format!("{}{tail}", g("…", "»")), true)
 }
 
 /// The default name for a folder: its basename, sanitized.
@@ -2207,7 +2207,7 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
     // of the step counter. Everything else re-renders through t!() the
     // moment it changes.
     if wizard.screen == Screen::Folders {
-        let label = format!("▾ {}", LANGS[wizard.lang].1);
+        let label = format!("{} {}", g("▾", "▼"), LANGS[wizard.lang].1);
         let chip = Rect { x: 2, y: 0, width: label.chars().count() as u16, height: 1 };
         let hovered = wizard.ui.pointer.is_some_and(|p| chip.contains(p));
         let style = if hovered { Style::default().fg(th().bright) } else { dim() };
@@ -2372,17 +2372,26 @@ fn enrichment_name(pass: &str) -> String {
 /// kit's ▰▱ bar with its percentage when the step carries an estimate
 /// (all-dim cells when it does not — activity reads from the other two
 /// lines), and the DIM detail counts.
+/// A fancy glyph, or its CP437-safe stand-in on bare conhost - whose
+/// raster/legacy fonts draw the fancy set as '?' (found live: the row
+/// selector rendered as a question mark; mStream#908 smoke follow-up).
+/// The stand-ins keep the shape language: CP437 has its own triangles,
+/// squares, and dots. Every self-identifying terminal keeps the originals.
+fn g(fancy: &'static str, plain: &'static str) -> &'static str {
+    if crate::kit::theme::legacy_conhost() { plain } else { fancy }
+}
+
 fn scan_lines(scan: &ScanWidget) -> Vec<Line<'static>> {
     let bar = match scan.pct {
         Some(pct) => {
             let filled = ((pct.min(100) as usize) + 5) / 10;
             Line::from(vec![
-                Span::styled("▰".repeat(filled), Style::default().fg(th().ok)),
-                Span::styled("▱".repeat(10 - filled), dim()),
+                Span::styled(g("▰", "■").repeat(filled), Style::default().fg(th().ok)),
+                Span::styled(g("▱", "·").repeat(10 - filled), dim()),
                 Span::styled(format!(" {pct}%"), dim()),
             ])
         }
-        None => Line::from(Span::styled("▱".repeat(10), dim())),
+        None => Line::from(Span::styled(g("▱", "·").repeat(10), dim())),
     };
     vec![
         Line::from(Span::raw(scan.step.clone())),
@@ -2836,7 +2845,7 @@ fn draw_extras(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
         frame.render_widget(block, rect);
         wizard.ui.click(rect, Act::Toggle(i));
         let box_span = if wizard.extras[i] {
-            Span::styled("[✓] ", Style::default().fg(th().ok))
+            Span::styled(if crate::kit::theme::legacy_conhost() { "[x] " } else { "[✓] " }, Style::default().fg(th().ok))
         } else {
             Span::styled("[ ] ", dim())
         };
@@ -3085,7 +3094,7 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
         };
         let rect = Rect { x: inner.x, y: list_top + row as u16, width: inner.width, height: 1 };
         frame.render_widget(
-            Paragraph::new(Span::styled(format!("▸ {}", browse.dirs[i]), style)),
+            Paragraph::new(Span::styled(format!("{} {}", g("▸", "►"), browse.dirs[i]), style)),
             rect,
         );
         wizard.ui.click(rect, Act::BrowseRow(i));
@@ -3153,7 +3162,7 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
             dim()
         };
         frame.render_widget(
-            Paragraph::new(Span::styled(format!("▸ {entry}"), style)),
+            Paragraph::new(Span::styled(format!("{} {entry}", g("▸", "►")), style)),
             rect,
         );
         wizard.ui.click(rect, Act::PathSuggest(i));
@@ -3286,8 +3295,8 @@ mod tests {
         let lines = scan_lines(&scan);
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].spans[0].content, "Scanning media");
-        assert_eq!(lines[1].spans[0].content, "▰".repeat(4));
-        assert_eq!(lines[1].spans[1].content, "▱".repeat(6));
+        assert_eq!(lines[1].spans[0].content, g("▰", "■").repeat(4));
+        assert_eq!(lines[1].spans[1].content, g("▱", "·").repeat(6));
         assert_eq!(lines[1].spans[2].content, " 44%");
         assert_eq!(lines[2].spans[0].content, "1204 tracks so far");
         // A second library behind it earns the queued suffix.
@@ -3302,7 +3311,7 @@ mod tests {
         assert_eq!(scan.step, "Scanning audiobooks");
         assert_eq!(scan.pct, None);
         let lines = scan_lines(&scan);
-        assert_eq!(lines[1].spans[0].content, "▱".repeat(10));
+        assert_eq!(lines[1].spans[0].content, g("▱", "·").repeat(10));
         assert_eq!(lines[1].spans.len(), 1, "no percentage without an estimate");
         // The file scan drains into the enrichment passes: the step line
         // names the pass, the sibling earns the suffix…
@@ -3334,7 +3343,7 @@ mod tests {
         let scan = widget(&wizard);
         assert_eq!(scan.step, "Library scan complete.");
         assert_eq!(scan.pct, Some(100));
-        assert_eq!(scan_lines(&scan)[1].spans[0].content, "▰".repeat(10));
+        assert_eq!(scan_lines(&scan)[1].spans[0].content, g("▰", "■").repeat(10));
         // A poll hiccup never marks the page — the last state stands.
         wizard.apply(Done::Progress(Err(crate::api::ApiError::Config("net".into()))));
         assert_eq!(widget(&wizard).step, "Library scan complete.");
