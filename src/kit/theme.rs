@@ -81,6 +81,27 @@ pub enum Tier {
 /// Truecolor there — but only as the FLOOR: the override always wins, an
 /// explicit `COLORTERM`/`TERM` (MSYS and mintty shells set them) keeps
 /// meaning what it says, and `TERM=dumb` stays dumb.
+/// Bare classic conhost - a stock cmd/PowerShell console window. It
+/// exports none of the identifying variables every richer Windows
+/// terminal sets (Windows Terminal: WT_SESSION; WezTerm: TERM_PROGRAM;
+/// Alacritty: TERM; ConEmu: ConEmuANSI). Callers degrade gracefully
+/// there: graphics queries go unanswered - and leak a blocked stdin
+/// reader that eats all input (see tui::graphics) - and the legacy
+/// fonts draw many glyphs as '?'.
+pub(crate) fn legacy_conhost() -> bool {
+    static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ONCE.get_or_init(|| legacy_conhost_for(cfg!(windows), |var| std::env::var(var).ok()))
+}
+
+/// Pure form - unit-tested; the env reads live in [`legacy_conhost`].
+pub(crate) fn legacy_conhost_for(windows: bool, env: impl Fn(&str) -> Option<String>) -> bool {
+    windows
+        && env("WT_SESSION").is_none()
+        && env("TERM_PROGRAM").is_none()
+        && env("TERM").is_none()
+        && env("ConEmuANSI").is_none()
+}
+
 pub fn tier_for(
     override_var: Option<&str>,
     colorterm: Option<&str>,
@@ -231,6 +252,21 @@ mod tests {
         assert_eq!(tier_for(None, None, Some("screen-256color"), false), Tier::C256);
         assert_eq!(tier_for(None, None, Some("xterm"), false), Tier::Ansi);
         assert_eq!(tier_for(None, None, None, false), Tier::Ansi);
+    }
+
+    #[test]
+    fn bare_conhost_is_fingerprinted_only_when_nothing_identifies_the_terminal() {
+        let bare = |_: &str| None;
+        assert!(legacy_conhost_for(true, bare));
+        assert!(!legacy_conhost_for(false, bare), "unix is never conhost");
+        let wt = |v: &str| (v == "WT_SESSION").then(|| "guid".to_string());
+        assert!(!legacy_conhost_for(true, wt), "Windows Terminal identifies itself");
+        let wez = |v: &str| (v == "TERM_PROGRAM").then(|| "WezTerm".to_string());
+        assert!(!legacy_conhost_for(true, wez));
+        let ala = |v: &str| (v == "TERM").then(|| "alacritty".to_string());
+        assert!(!legacy_conhost_for(true, ala));
+        let conemu = |v: &str| (v == "ConEmuANSI").then(|| "ON".to_string());
+        assert!(!legacy_conhost_for(true, conemu));
     }
 
     #[test]
