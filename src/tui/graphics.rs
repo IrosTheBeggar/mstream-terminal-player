@@ -172,6 +172,11 @@ mod native {
                 return Graphics { adaptive: true, ..Graphics::disabled() };
             }
 
+            if crate::kit::theme::legacy_conhost() {
+                tracing::info!("terminal graphics: classic conhost — queries go unanswered, query skipped");
+                return Graphics { adaptive: true, ..Graphics::disabled() };
+            }
+
             let mut picker = Picker::from_query_stdio()
                 .ok()
                 .filter(|picker| picker.protocol_type() != ProtocolType::Halfblocks);
@@ -828,6 +833,7 @@ mod native {
             }
             assert!(!skip_query_for_apple_terminal(|_| None), "ssh: no TERM_PROGRAM");
         }
+
 
         #[test]
         fn the_demotion_knows_the_real_iterm2_from_its_leftover_environment() {
