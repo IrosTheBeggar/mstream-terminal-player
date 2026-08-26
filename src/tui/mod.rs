@@ -453,6 +453,30 @@ fn set_window_title(title: &str) {
     let _ = execute!(std::io::stdout(), SetTitle(title));
 }
 
+/// The push/set/pop title discipline as one droppable claim, for sessions
+/// with a single fixed title (the setup wizard, the QR page) — the player
+/// itself calls the pieces directly because its title tracks the playing
+/// song. Unwind-safe: a panicking session still restores the title through
+/// the drop, same posture as its ground lease.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct WindowTitle;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl WindowTitle {
+    pub(crate) fn claim(title: &str) -> Self {
+        push_window_title();
+        set_window_title(title);
+        WindowTitle
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for WindowTitle {
+    fn drop(&mut self) {
+        pop_window_title();
+    }
+}
+
 /// Save and restore the title the terminal had before us (XTWINOPS 22/23), so
 /// quitting doesn't leave the last track's name in the tab. Terminals that
 /// don't implement it ignore the sequence, which costs nothing.

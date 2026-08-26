@@ -202,3 +202,7 @@ alsa-lib = "*"
 [dev-dependencies]
 # The locale-completeness test parses locales/*.yml directly.
 serde_yaml = "0.9"
+
+[build-dependencies]
+# Windows icon + VersionInfo embedding (build.rs; no-op for other targets).
+winresource = "0.1"

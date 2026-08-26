@@ -1345,8 +1345,9 @@ follows whoever owns the window, so brand what we own and don't fight what we do
   fallback window (a classic console shows the launched exe's embedded icon) are all
   generic today. Two-step fix: (1) upstream, THIS repo — embed `mstream-logo-cut.ico` at
   link time via the `winresource` crate, so the released bytes carry the icon everywhere
-  (next release, 0.5.0) — **SKIPPED with the rest of the 0.5.0 hopper (operator decision
-  2026-08-25)**; (2) immediately, mStream repo — extend the bundler's existing
+  (next release, 0.5.0) — **REVIVED same day (operator decision): shipped via build.rs +
+  winresource in this repo**, which also makes the mStream-side icon stamp below
+  redundant for the player exe; (2) immediately, mStream repo — extend the bundler's existing
   resedit VersionInfo stamp (`scripts/win-versioninfo.mjs`, already runs post-sha-verify
   by design) with an icon group, so v0.4.x-pin bundles get it now. Rides in the branding
   riders PR (the mStream-side stamp fully covers bundle users on its own).
@@ -1363,9 +1364,11 @@ follows whoever owns the window, so brand what we own and don't fight what we do
   `Terminal=true`) so the menu carries the logo even though the running window doesn't.
 - **All platforms, cheap universal win**: the wizard sets the terminal title to "mStream
   Setup" via OSC 0/2 (this repo; the kit already does OSC ground-leasing, same pattern).
-  Every popped-up window is at least NAMED ours, whatever its icon. **SKIPPED with the
-  0.5.0 hopper (operator decision 2026-08-25)** — on macOS the bundled console already
-  sets `title = mStream Setup` from its config, which covers the platform that mattered.
+  Every popped-up window is at least NAMED ours, whatever its icon. **REVIVED same day
+  (operator decision) and shipped**: run_tui claims a WindowTitle guard (the player's
+  existing XTWINOPS 22/23 + OSC discipline, factored into tui::WindowTitle) — "mStream
+  Setup" for setup, "mStream Quick Connect" for the standalone qr page, restored on exit
+  and on panic.
 
 Long game, noted not planned: `libghostty` — the embeddable zero-dependency terminal core —
 is what "a terminal inside our own binary" would actually mean one day: an mStream console
