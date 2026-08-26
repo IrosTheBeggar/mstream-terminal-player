@@ -70,10 +70,22 @@ pub enum Tier {
 }
 
 /// Pure capability decision — unit-tested; the env reads live in [`tier`].
+///
+/// `windows_vt`: compiled for Windows. Windows 10+ consoles — Windows
+/// Terminal and classic conhost alike — speak 24-bit color once virtual
+/// terminal processing is on (the player enables it at startup), but none
+/// of them export `COLORTERM` or `TERM`, so the unix heuristics bottomed
+/// out at the Ansi floor for every Windows user: no truecolor palette, no
+/// `ground_rgb`, and therefore no pixel wordmark/QR even on sixel-capable
+/// terminals (mStream#908's Windows smoke; issue #11). The floor lifts to
+/// Truecolor there — but only as the FLOOR: the override always wins, an
+/// explicit `COLORTERM`/`TERM` (MSYS and mintty shells set them) keeps
+/// meaning what it says, and `TERM=dumb` stays dumb.
 pub fn tier_for(
     override_var: Option<&str>,
     colorterm: Option<&str>,
     term: Option<&str>,
+    windows_vt: bool,
 ) -> Tier {
     match override_var.map(str::trim) {
         Some("ansi") => return Tier::Ansi,
@@ -87,6 +99,9 @@ pub fn tier_for(
     if term.is_some_and(|v| v.contains("256color")) {
         return Tier::C256;
     }
+    if windows_vt && term.is_none_or(|v| v != "dumb") {
+        return Tier::Truecolor;
+    }
     Tier::Ansi
 }
 
@@ -95,6 +110,7 @@ fn tier() -> Tier {
         std::env::var("MSTREAM_SETUP_THEME").ok().as_deref(),
         std::env::var("COLORTERM").ok().as_deref(),
         std::env::var("TERM").ok().as_deref(),
+        cfg!(windows),
     )
 }
 
@@ -201,20 +217,34 @@ mod tests {
 
     #[test]
     fn the_override_beats_detection() {
-        assert_eq!(tier_for(Some("ansi"), Some("truecolor"), Some("xterm-256color")), Tier::Ansi);
-        assert_eq!(tier_for(Some("256"), Some("truecolor"), None), Tier::C256);
-        assert_eq!(tier_for(Some("truecolor"), None, Some("vt100")), Tier::Truecolor);
-        assert_eq!(tier_for(Some("garbage"), None, Some("xterm-256color")), Tier::C256);
+        assert_eq!(tier_for(Some("ansi"), Some("truecolor"), Some("xterm-256color"), false), Tier::Ansi);
+        assert_eq!(tier_for(Some("256"), Some("truecolor"), None, false), Tier::C256);
+        assert_eq!(tier_for(Some("truecolor"), None, Some("vt100"), false), Tier::Truecolor);
+        assert_eq!(tier_for(Some("garbage"), None, Some("xterm-256color"), false), Tier::C256);
     }
 
     #[test]
     fn detection_ladders_truecolor_then_256_then_ansi() {
-        assert_eq!(tier_for(None, Some("truecolor"), Some("xterm")), Tier::Truecolor);
-        assert_eq!(tier_for(None, Some("24bit"), None), Tier::Truecolor);
-        assert_eq!(tier_for(None, None, Some("xterm-256color")), Tier::C256);
-        assert_eq!(tier_for(None, None, Some("screen-256color")), Tier::C256);
-        assert_eq!(tier_for(None, None, Some("xterm")), Tier::Ansi);
-        assert_eq!(tier_for(None, None, None), Tier::Ansi);
+        assert_eq!(tier_for(None, Some("truecolor"), Some("xterm"), false), Tier::Truecolor);
+        assert_eq!(tier_for(None, Some("24bit"), None, false), Tier::Truecolor);
+        assert_eq!(tier_for(None, None, Some("xterm-256color"), false), Tier::C256);
+    }
+
+    #[test]
+    fn windows_vt_lifts_the_floor_but_never_beats_the_env() {
+        // The WT/conhost reality: no COLORTERM, no TERM — truecolor floor.
+        assert_eq!(tier_for(None, None, None, true), Tier::Truecolor);
+        // Explicit env still wins in both directions.
+        assert_eq!(tier_for(None, None, Some("xterm-256color"), true), Tier::C256);
+        assert_eq!(tier_for(Some("ansi"), None, None, true), Tier::Ansi);
+        assert_eq!(tier_for(Some("256"), None, None, true), Tier::C256);
+        // TERM=dumb stays dumb, even on Windows.
+        assert_eq!(tier_for(None, None, Some("dumb"), true), Tier::Ansi);
+        // The unix floor is unchanged.
+        assert_eq!(tier_for(None, None, None, false), Tier::Ansi);
+        assert_eq!(tier_for(None, None, Some("screen-256color"), false), Tier::C256);
+        assert_eq!(tier_for(None, None, Some("xterm"), false), Tier::Ansi);
+        assert_eq!(tier_for(None, None, None, false), Tier::Ansi);
     }
 
     #[test]
