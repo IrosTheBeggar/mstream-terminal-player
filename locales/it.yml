@@ -1026,6 +1026,7 @@ tor:
 
 gui:
   nav:
+    files: "File"
     library: "LIBRERIA"
     albums: "Album"
     artists: "Artisti"
@@ -1034,6 +1035,11 @@ gui:
     playlists: "Playlist"
     search: "Cerca"
     settings: "Impostazioni"
+  files:
+    empty: "(niente qui)"
+    items: "%{count} elementi"
+    queue_tip: "Aggiungi alla coda — a"
+  no_server: "nessun server salvato — esegui mstream-player setup, oppure: mstream-player gui --server <indirizzo>"
   coming: "%{name} arriva con la parte di navigazione — oggi Impostazioni è la stanza che funziona."
   nothing_playing: "(niente in riproduzione)"
   audio_failed: "audio: %{error}"
@@ -1069,5 +1075,6 @@ gui:
     dj: "Auto-DJ — A"
     volume: "Volume — - e +"
   tips:
-    rows: "↑ ↓ righe · ← → regola · Enter attiva · Esc fine · 1-7 sezioni · q esci"
-    base: "1-7 sezioni · Tab coda · Space riproduci · -/+ volume · q esci"
+    files: "↑ ↓ muovi · Enter apri/riproduci · h indietro · a in coda · Tab coda · Space riproduci · q esci"
+    rows: "↑ ↓ righe · ← → regola · Enter attiva · Esc fine · 1-8 sezioni · q esci"
+    base: "1-8 sezioni · Tab coda · Space riproduci · -/+ volume · q esci"
