@@ -36,9 +36,14 @@ use ratatui::widgets::Paragraph;
 use rust_i18n::t;
 
 use crate::config::{self, Config};
-use crate::kit::{GroundGuard, POINTER_RESET, Surface, dim, scroll_list, set_pointer_shape, table_view};
+use crate::kit::{
+    GroundGuard, POINTER_RESET, Surface, dim, input_display, scroll_list, set_pointer_shape,
+    table_view,
+};
 use crate::kit::theme::{self, legacy_conhost, th};
-use crate::tui::app::{Action, App, Effect, Entry, MessageKind, Tab};
+use crate::tui::app::{
+    Action, App, Effect, Entry, MessageKind, SEARCH_CLASSES, SearchClass, SearchNode, Tab,
+};
 use crate::tui::worker::{AudioCmd, AutoDjMode, Event};
 use crate::tui::{self, worker};
 
@@ -79,6 +84,17 @@ pub(crate) enum Act {
     /// The Files scrollbar (kit `scroll_list`): step and jump.
     FScrollBy(i32),
     FScrollTo(usize),
+    /// A Search pane row, by PANE index (clicks map through the class
+    /// filter): select and Activate — drill a class or an artist, or play
+    /// from a track.
+    SearchRow(usize),
+    SearchQueue(usize),
+    SScrollBy(i32),
+    SScrollTo(usize),
+    /// A class chip: put the chip cursor there and flip the class.
+    Chip(usize),
+    /// The query card: start (or resume) editing the search text.
+    EditQuery,
     /// A settings row, activated (click, Enter, Space).
     Row(usize),
     BlendDown,
@@ -129,7 +145,23 @@ impl NavId {
 }
 
 const FILES_NAV: usize = 0;
+const SEARCH_NAV: usize = 6;
 const SETTINGS_NAV: usize = 7;
+
+/// A class's slot in [`SEARCH_CLASSES`] — the chip order.
+fn class_idx(class: SearchClass) -> usize {
+    SEARCH_CLASSES.iter().position(|c| *c == class).unwrap_or(0)
+}
+
+fn class_label(class: SearchClass) -> String {
+    match class {
+        SearchClass::Artists => t!("gui.class.artists").to_string(),
+        SearchClass::Albums => t!("gui.class.albums").to_string(),
+        SearchClass::Titles => t!("gui.class.titles").to_string(),
+        SearchClass::Files => t!("gui.class.files").to_string(),
+        SearchClass::Lyrics => t!("gui.class.lyrics").to_string(),
+    }
+}
 
 // ── Settings rows ───────────────────────────────────────────────────────────
 
@@ -188,6 +220,14 @@ pub(crate) struct Gui {
     /// `table_view` contract).
     fscroll: usize,
     freveal: bool,
+    /// The Search pane's wheel offset and reveal flag, its own list.
+    sscroll: usize,
+    sreveal: bool,
+    /// The chip cursor among the five class chips, and which classes the
+    /// menu shows — the search params. The server answers every class in
+    /// one reply, so the choice is instant and free to change.
+    chip: usize,
+    classes_on: [bool; 5],
     /// The queue panel's wheel offset, and the playing index last seen —
     /// the panel reveals the playing row only when it CHANGES, so the
     /// wheel can roam freely in between (the kit's table contract).
@@ -216,6 +256,10 @@ impl Gui {
             demo_paused: false,
             fscroll: 0,
             freveal: false,
+            sscroll: 0,
+            sreveal: false,
+            chip: 0,
+            classes_on: [true; 5],
             qscroll: 0,
             last_current: None,
             last_width: MIN_W,
@@ -312,10 +356,19 @@ impl Gui {
         match act {
             Act::Nav(i) => {
                 self.active = i;
-                self.note = (!matches!(i, FILES_NAV | SETTINGS_NAV))
+                self.note = (!matches!(i, FILES_NAV | SEARCH_NAV | SETTINGS_NAV))
                     .then(|| (t!("gui.coming", name = NAV[i].label()).to_string(), false));
                 if i != SETTINGS_NAV {
                     self.cursor = None;
+                }
+                // A fresh visit to Search opens straight into the query box;
+                // coming back to results leaves them standing.
+                if i == SEARCH_NAV && self.app.connected {
+                    if self.app.search_hits.is_none() {
+                        self.forward(Action::StartSearch);
+                    } else {
+                        self.app.tab = Tab::Search;
+                    }
                 }
             }
             Act::ToggleQueue => self.queue_open = !self.queue_open,
@@ -359,6 +412,31 @@ impl Gui {
                     if delta < 0 { self.fscroll.saturating_sub(1) } else { self.fscroll + 1 };
             }
             Act::FScrollTo(first) => self.fscroll = first,
+            Act::SearchRow(i) => {
+                self.app.tab = Tab::Search;
+                self.app.search.state.select(Some(i));
+                self.sreveal = true;
+                self.forward(Action::Activate);
+            }
+            Act::SearchQueue(i) => {
+                self.app.tab = Tab::Search;
+                self.app.search.state.select(Some(i));
+                self.forward(Action::AddToQueue);
+            }
+            Act::SScrollBy(delta) => {
+                self.sscroll =
+                    if delta < 0 { self.sscroll.saturating_sub(1) } else { self.sscroll + 1 };
+            }
+            Act::SScrollTo(first) => self.sscroll = first,
+            Act::Chip(i) => {
+                self.chip = i;
+                self.classes_on[i] = !self.classes_on[i];
+            }
+            Act::EditQuery => {
+                if self.app.connected {
+                    self.forward(Action::StartSearch);
+                }
+            }
             // Activation is the TUI's Enter: toggles flip, the blend steps
             // up, radios choose.
             Act::Row(i) => self.adjust_row(i, 1),
@@ -485,6 +563,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     let content = Rect { x: 17, y: 2, width: right - 17, height: area.height - 10 };
     match gui.active {
         FILES_NAV => draw_files(frame, gui, content),
+        SEARCH_NAV => draw_search(frame, gui, content),
         SETTINGS_NAV => draw_settings(frame, gui, content),
         i => {
             put(frame, content.x, content.y, &NAV[i].label(), Style::default().add_modifier(Modifier::BOLD));
@@ -511,6 +590,8 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     let tips = match gui.active {
         SETTINGS_NAV if gui.cursor.is_some() => t!("gui.tips.rows"),
         FILES_NAV => t!("gui.tips.files"),
+        SEARCH_NAV if gui.app.editing_query => t!("gui.tips.search_edit"),
+        SEARCH_NAV => t!("gui.tips.search"),
         _ => t!("gui.tips.base"),
     };
     put(frame, 1, area.height - 1, &tips, dim());
@@ -648,11 +729,40 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let (first, visible) = table_view(entries.len(), reveal, gui.fscroll, list.height as usize);
     gui.fscroll = first;
 
-    let playing = gui.app.now_playing.as_ref().map(|t| t.filepath.clone());
+    let len = entries.len();
     let mut rows: Vec<(usize, Entry)> = Vec::with_capacity(visible);
     for (offset, entry) in entries.iter().enumerate().skip(first).take(visible) {
         rows.push((offset, entry.clone()));
     }
+    draw_pane_rows(frame, gui, &rows, list, selected, Act::FileRow, Act::FileQueue);
+    scroll_list(
+        frame,
+        &mut gui.ui,
+        Rect { x: content.right() - 1, y: list.y, width: 1, height: list.height },
+        len,
+        visible,
+        first,
+        Act::FScrollBy(-1),
+        Act::FScrollBy(1),
+        |first| Act::FScrollTo(first),
+    );
+}
+
+/// The shared list renderer for the App's browse panes: kit table rows —
+/// tracks with the playing marker, durations and the hover [+]; drill rows
+/// (folders, classes, artists…) with their dim detail column. `rows` pairs
+/// each drawn row with its PANE index, so a class filter upstream costs
+/// clicks nothing.
+fn draw_pane_rows(
+    frame: &mut Frame,
+    gui: &mut Gui,
+    rows: &[(usize, Entry)],
+    list: Rect,
+    selected: Option<usize>,
+    row_act: fn(usize) -> Act,
+    queue_act: fn(usize) -> Act,
+) {
+    let playing = gui.app.now_playing.as_ref().map(|t| t.filepath.clone());
     for (row, (index, entry)) in rows.iter().enumerate() {
         let y = list.y + row as u16;
         let rect = Rect { x: list.x, y, width: list.width, height: 1 };
@@ -679,14 +789,14 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 if hover && !is_sel {
                     let plus = Rect { x: rect.right() - 3, y, width: 3, height: 1 };
                     put(frame, plus.x, y, "[+]", dim());
-                    gui.ui.click(rect, Act::FileRow(*index));
-                    gui.ui.click(plus, Act::FileQueue(*index));
+                    gui.ui.click(rect, row_act(*index));
+                    gui.ui.click(plus, queue_act(*index));
                     gui.ui.tip(plus, t!("gui.files.queue_tip").to_string());
                 } else {
                     let time = track.metadata.duration.map(bar::fmt_time).unwrap_or_default();
                     let tstyle = if is_sel { sel() } else { dim() };
                     put(frame, rect.right() - 1 - time.chars().count() as u16, y, &time, tstyle);
-                    gui.ui.click(rect, Act::FileRow(*index));
+                    gui.ui.click(rect, row_act(*index));
                 }
             }
             other => {
@@ -697,20 +807,152 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                     (false, false) => Style::default(),
                 };
                 put(frame, list.x + 2, y, &bar::clip(other.label(), name_width), style);
-                gui.ui.click(rect, Act::FileRow(*index));
+                // Drill rows carry a dim right-hand column — a hit count,
+                // a closeness — the kit table's detail spot.
+                let detail = match other {
+                    Entry::Search { detail, .. }
+                    | Entry::Discover { detail, .. }
+                    | Entry::Setting { detail, .. }
+                    | Entry::Sonic { detail, .. } => Some(detail.clone()),
+                    _ => None,
+                };
+                if let Some(detail) = detail.filter(|d| !d.is_empty()) {
+                    let shown = bar::clip(&detail, 14);
+                    let dstyle = if is_sel { sel() } else { dim() };
+                    put(frame, rect.right() - 1 - shown.chars().count() as u16, y, &shown, dstyle);
+                }
+                gui.ui.click(rect, row_act(*index));
             }
         }
     }
+}
+
+/// Search: the query card, the five class chips (the search params — the
+/// server answers every class at once, so the choice is instant), and the
+/// App's Search pane beneath: the class menu with hit counts, then
+/// whatever a drill opened — artists into albums into tracks, all through
+/// the shared state machine.
+fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
+    if !gui.app.connected {
+        let text = if gui.app.connecting {
+            (t!("busy.reaching").to_string(), accent())
+        } else {
+            (t!("gui.no_server").to_string(), dim())
+        };
+        put(frame, content.x, content.y, &bar::clip(&text.0, content.width as usize), text.1);
+        return;
+    }
+
+    // The query card: a kit input — accent border and caret while it takes
+    // keys, dim at rest, one click to wake it.
+    let editing = gui.app.editing_query;
+    let card = Rect { x: content.x, y: content.y, width: content.width, height: 3 };
+    let card_hover = gui.ui.pointer.is_some_and(|p| card.contains(p));
+    let border = if editing {
+        Style::default().fg(th().accent)
+    } else if card_hover {
+        Style::default().fg(th().bright)
+    } else {
+        dim()
+    };
+    let block = ratatui::widgets::Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(border);
+    let inner = block.inner(card);
+    frame.render_widget(block, card);
+    let field = inner.width.saturating_sub(2) as usize;
+    if editing {
+        let cursor = gui.app.query.chars().count();
+        put(frame, inner.x + 1, inner.y, &input_display(&gui.app.query, cursor, field as u16), Style::default());
+    } else if gui.app.query.is_empty() {
+        put(frame, inner.x + 1, inner.y, &t!("gui.search.placeholder"), dim());
+    } else {
+        put(frame, inner.x + 1, inner.y, &bar::clip(&gui.app.query, field), Style::default());
+    }
+    gui.ui.click(card, Act::EditQuery);
+    gui.ui.tip(card, t!("gui.search.edit_tip").to_string());
+
+    // The class chips: toggle words wearing their state (the bar's toggle
+    // grammar), the chip cursor as the one selection bg.
+    let mut x = content.x;
+    let chips_y = content.y + 3;
+    for (i, class) in SEARCH_CLASSES.iter().enumerate() {
+        let label = class_label(*class);
+        let rect = Rect { x, y: chips_y, width: label.chars().count() as u16, height: 1 };
+        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let style = if gui.chip == i && gui.cursor.is_none() && !editing {
+            sel().add_modifier(Modifier::BOLD)
+        } else if hover {
+            bright_bold()
+        } else if gui.classes_on[i] {
+            Style::default().fg(th().ok).add_modifier(Modifier::BOLD)
+        } else {
+            dim()
+        };
+        put(frame, x, chips_y, &label, style);
+        gui.ui.click(rect, Act::Chip(i));
+        x += rect.width + 2;
+    }
+
+    // The summary (the App's own words) — or the busy line while the
+    // reply is out.
+    if let Some(summary) = gui.app.search_summary.clone() {
+        put(frame, content.x, chips_y + 1, &bar::clip(&summary, content.width as usize), dim());
+    }
+
+    if gui.app.search_hits.is_none() {
+        return;
+    }
+
+    // The pane, class-filtered at the MENU level only: a chip turned off
+    // hides its class row; inside a drill every row shows. Rows pair with
+    // their pane index, so clicks land on the right entry either way.
+    let entries = &gui.app.search.entries;
+    let at_menu = entries.iter().all(|e| matches!(e, Entry::Search { .. }));
+    let visible_rows: Vec<(usize, Entry)> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| match e {
+            Entry::Search { node: SearchNode::Class(c), .. } if at_menu => {
+                gui.classes_on[class_idx(*c)]
+            }
+            _ => true,
+        })
+        .map(|(i, e)| (i, e.clone()))
+        .collect();
+
+    let list = Rect {
+        x: content.x,
+        y: chips_y + 3,
+        width: content.width - 2,
+        height: content.height.saturating_sub(6 + 2),
+    };
+    if visible_rows.is_empty() {
+        put(frame, list.x, list.y, &t!("gui.files.empty"), dim());
+        return;
+    }
+    let selected = gui.app.search.state.selected();
+    let reveal_row = gui
+        .sreveal
+        .then_some(selected)
+        .flatten()
+        .and_then(|sel| visible_rows.iter().position(|(i, _)| *i == sel));
+    gui.sreveal = false;
+    let (first, visible) = table_view(visible_rows.len(), reveal_row, gui.sscroll, list.height as usize);
+    gui.sscroll = first;
+    let window: Vec<(usize, Entry)> = visible_rows[first..first + visible].to_vec();
+    draw_pane_rows(frame, gui, &window, list, selected, Act::SearchRow, Act::SearchQueue);
     scroll_list(
         frame,
         &mut gui.ui,
         Rect { x: content.right() - 1, y: list.y, width: 1, height: list.height },
-        entries.len(),
+        visible_rows.len(),
         visible,
         first,
-        Act::FScrollBy(-1),
-        Act::FScrollBy(1),
-        |first| Act::FScrollTo(first),
+        Act::SScrollBy(-1),
+        Act::SScrollBy(1),
+        |first| Act::SScrollTo(first),
     );
 }
 
@@ -861,11 +1103,34 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     }
     let settings = gui.active == SETTINGS_NAV;
     let files = gui.active == FILES_NAV;
+    let search = gui.active == SEARCH_NAV;
+    // The query box owns the keyboard while it is taking text — q, the
+    // digits and the transport letters are all just letters here.
+    if search && gui.app.editing_query {
+        match key.code {
+            KeyCode::Enter => {
+                gui.forward(Action::Submit);
+                gui.sreveal = true;
+            }
+            KeyCode::Esc => gui.forward(Action::Cancel),
+            KeyCode::Backspace => gui.forward(Action::Backspace),
+            KeyCode::Char(c) => gui.forward(Action::Input(c)),
+            _ => {}
+        }
+        return false;
+    }
     match key.code {
         KeyCode::Char('q') => return true,
         KeyCode::Tab => return gui.act(Act::ToggleQueue),
         KeyCode::Char(c @ '1'..='8') => {
             return gui.act(Act::Nav(c as usize - '1' as usize));
+        }
+        // `/` is the search key everywhere, the TUI's own habit: land on
+        // Search with the query box open.
+        KeyCode::Char('/') => {
+            gui.active = SEARCH_NAV;
+            gui.cursor = None;
+            return gui.act(Act::EditQuery);
         }
         KeyCode::Down if settings => {
             gui.cursor = Some(gui.cursor.map_or(0, |c| (c + 1).min(SET_ROWS - 1)));
@@ -894,6 +1159,25 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Enter if files => gui.forward(Action::Activate),
         KeyCode::Char('h') | KeyCode::Backspace if files => gui.forward(Action::Back),
         KeyCode::Char('a') if files => gui.forward(Action::AddToQueue),
+        // Search browsing: the same pane keys as Files, plus the chip
+        // cursor on ←/→ and `t` to flip the class under it.
+        KeyCode::Down if search => {
+            gui.sreveal = true;
+            gui.forward(Action::Down);
+        }
+        KeyCode::Up if search => {
+            gui.sreveal = true;
+            gui.forward(Action::Up);
+        }
+        KeyCode::Enter if search => gui.forward(Action::Activate),
+        KeyCode::Char('h') | KeyCode::Backspace if search => gui.forward(Action::Back),
+        KeyCode::Char('a') if search => gui.forward(Action::AddToQueue),
+        KeyCode::Left if search => gui.chip = gui.chip.saturating_sub(1),
+        KeyCode::Right if search => gui.chip = (gui.chip + 1).min(SEARCH_CLASSES.len() - 1),
+        KeyCode::Char('t') if search => {
+            let chip = gui.chip;
+            return gui.act(Act::Chip(chip));
+        }
         KeyCode::Esc => gui.cursor = None,
         KeyCode::Left => {
             if let Some(row) = gui.cursor.filter(|_| settings) {
@@ -1014,6 +1298,8 @@ fn event_loop(
                                 };
                             } else if gui.active == FILES_NAV && at.x >= 17 {
                                 gui.act(Act::FScrollBy(delta));
+                            } else if gui.active == SEARCH_NAV && at.x >= 17 {
+                                gui.act(Act::SScrollBy(delta));
                             }
                         }
                         _ => {}
@@ -1221,6 +1507,97 @@ mod tests {
         assert!(now.wave.is_some(), "the waveform came from the App's cache");
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("1:03") && all.contains("4:12"), "real timestamps on the bar");
+    }
+
+    /// A search driven end to end through the real App: open the box, type,
+    /// submit, and answer the wire with a two-class result set.
+    fn searched_gui() -> Gui {
+        use crate::api::types::{SearchGroup, SearchResults, SearchTrack};
+        let mut gui = test_gui();
+        gui.app.connected = true;
+        gui.act(Act::Nav(SEARCH_NAV));
+        assert!(gui.app.editing_query, "a fresh visit opens the query box");
+        for c in "moon".chars() {
+            handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let results = SearchResults {
+            artists: vec![SearchGroup { name: "Moon Parade".into(), album_art_file: None }],
+            albums: Vec::new(),
+            title: vec![SearchTrack {
+                name: "Moonstruck".into(),
+                filepath: "m/a.mp3".into(),
+                album_art_file: None,
+                metadata: TrackMetadata { duration: Some(224.0), ..TrackMetadata::default() },
+            }],
+            files: Vec::new(),
+            lyrics: Vec::new(),
+        };
+        let effects = gui
+            .app
+            .apply_event(Event::SearchResults { query: "moon".into(), results: Box::new(results) });
+        gui.pend(effects);
+        gui
+    }
+
+    #[test]
+    fn search_flows_through_the_shared_app() {
+        let mut gui = searched_gui();
+        assert_eq!(gui.app.query, "moon", "typed characters reached the App's box");
+        assert!(
+            gui.pending.iter().any(|e| matches!(e, Effect::Api(_))),
+            "Submit rode out as the App's own search effect"
+        );
+        assert!(gui.app.search_hits.is_some(), "the reply landed in the shared cache");
+        assert!(
+            gui.app.search.entries.iter().any(|e| matches!(e, Entry::Search { .. })),
+            "the class menu stands ready"
+        );
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("moon"), "the card shows the query");
+        for class in SEARCH_CLASSES {
+            assert!(all.contains(&class_label(class)), "every chip is on screen");
+        }
+    }
+
+    #[test]
+    fn the_query_box_owns_the_letters_while_it_is_open() {
+        let mut gui = test_gui();
+        gui.app.connected = true;
+        gui.act(Act::Nav(SEARCH_NAV));
+        let quit = handle_key(&mut gui, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(!quit, "q is a letter here, not the quit key");
+        assert_eq!(gui.app.query, "q");
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!gui.app.editing_query, "Esc hands the keyboard back");
+    }
+
+    #[test]
+    fn chips_filter_the_menu_and_clicks_still_land_on_the_pane() {
+        let mut gui = searched_gui();
+        // Turn Artists off: its menu row hides, and the first visible class
+        // row's PANE index still reaches the right entry.
+        gui.act(Act::Chip(0));
+        assert!(!gui.classes_on[0]);
+        let all = draw(&mut gui).join("\n");
+        let titles_row = gui
+            .app
+            .search
+            .entries
+            .iter()
+            .position(|e| matches!(e, Entry::Search { node: SearchNode::Class(SearchClass::Titles), .. }))
+            .expect("the Titles class is in the menu");
+        let _ = all;
+        gui.act(Act::SearchRow(titles_row));
+        assert!(
+            gui.app
+                .search
+                .entries
+                .iter()
+                .any(|e| matches!(e, Entry::Track { track, .. } if track.filepath == "m/a.mp3")),
+            "drilling the class listed its tracks ({} entries)",
+            gui.app.search.entries.len()
+        );
     }
 
     #[test]
