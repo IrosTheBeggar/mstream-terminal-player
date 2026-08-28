@@ -1,14 +1,16 @@
 //! The GUI player's bottom bar, in its two styles.
 //!
-//! Both draw into the same five bottom rows and share one contract: the
-//! now-playing summary is the click target that shows and hides the queue,
-//! the seek surface always agrees with the timestamps, and every control
-//! keeps a key named in the tips line. Style is a Settings choice:
+//! Both own the same six bottom rows (the last is the screen's tips line)
+//! and share one contract: the now-playing card sits right and is the click
+//! target that shows and hides the queue, the seek surface always agrees
+//! with its timestamps, and every control keeps a key named in the tips
+//! line. Style is a Settings choice:
 //!
-//! - **Wave**: the gold rule, then the track's waveform over its reflection,
-//!   then the compact 1-row transport/toggles/volume row.
-//! - **GoldLine**: the gold rule IS the seek bar, with the song info on the
-//!   left and the tall 3-row controls beneath it.
+//! - **Wave**: the compact transport/toggles/times/volume row ABOVE the
+//!   gold rule, then the track's waveform over its reflection running from
+//!   the left edge to the card.
+//! - **GoldLine**: the gold rule IS the seek bar, with the tall 3-row
+//!   controls beneath it and the volume on their center line.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -16,15 +18,15 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
-use crate::kit::{Surface, dim, tall_secondary};
+use crate::kit::{Surface, dim};
 use crate::kit::theme::{legacy_conhost, th};
 use rust_i18n::t;
 
 use super::Act;
 
-/// Rows the bar owns at the bottom of the screen (the tips line above it is
-/// the screen's, not the bar's).
-pub(super) const BAR_ROWS: u16 = 5;
+/// Rows the bar region owns at the bottom of the screen. The bar draws the
+/// first five; the sixth (the very last row) is the screen's tips line.
+pub(super) const BAR_ROWS: u16 = 6;
 
 /// Which bottom bar the player wears. Stored in `[gui] bar`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,34 +198,50 @@ fn toggle_button(
     width
 }
 
-/// The tall toggle for the GoldLine bar: the kit's 3-row Rounded frame
-/// wearing the toggle grammar — border and label DIM off, OK green on,
-/// BRIGHT under the pointer (the toggle-card colors, in button form).
-fn fat_toggle(
+/// What a tall control is, color-wise.
+enum TallKind {
+    /// The play/pause slot: ACCENT, always BOLD.
+    Primary,
+    /// Prev/next: DIM, BOLD only under the pointer.
+    Secondary,
+    /// A state-wearing toggle: DIM off, OK green on (the toggle-card
+    /// colors in button form).
+    Toggle(bool),
+}
+
+/// The GoldLine bar's 3-row control: the kit frame at ONE space of label
+/// padding — the bar's dense form, so six controls, the volume and the
+/// card share a hundred columns. Hover brightens frame and label together.
+#[allow(clippy::too_many_arguments)]
+fn tall_compact(
     frame: &mut Frame,
     s: &mut Surface<Act>,
     x: u16,
     y: u16,
     label: &str,
-    on: bool,
+    kind: TallKind,
     act: Act,
     tip: String,
 ) -> u16 {
-    let text = format!("  {label}  ");
+    let text = format!(" {label} ");
     let width = text.chars().count() as u16 + 2;
     let rect = Rect { x, y, width, height: 3 };
-    let color = match (on, hovered(s, rect)) {
+    let hover = hovered(s, rect);
+    let color = match (&kind, hover) {
         (_, true) => th().bright,
-        (true, false) => th().ok,
-        (false, false) => th().dim,
+        (TallKind::Primary, false) => th().accent,
+        (TallKind::Secondary, false) => th().dim,
+        (TallKind::Toggle(true), false) => th().ok,
+        (TallKind::Toggle(false), false) => th().dim,
     };
+    let bold = hover || matches!(kind, TallKind::Primary | TallKind::Toggle(true));
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(color));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    let style = if on || hovered(s, rect) {
+    let style = if bold {
         Style::default().fg(color).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(color)
@@ -247,49 +265,67 @@ fn cover_slot(frame: &mut Frame, x: u16, y: u16, width: u16, height: u16) {
 }
 
 /// The volume group: `-` and `+` step by 0.05, the ten cells set directly,
-/// the readout says where it stands. Returns nothing; registers everything.
-fn draw_volume(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, volume: f32) {
+/// the readout says where it stands. `with_label` prepends the `vol` word
+/// (the Wave bar's roomy row); without it the group is 19 cells (the
+/// GoldLine bar's center-line form).
+fn draw_volume(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, volume: f32, with_label: bool) {
     let legacy = legacy_conhost();
     let (full, empty) = if legacy { ('■', '·') } else { ('▰', '▱') };
-    put(frame, x, y, "vol", dim());
-    let minus = Rect { x: x + 4, y, width: 1, height: 1 };
-    put(frame, x + 4, y, "-", if hovered(s, minus) { bright_bold() } else { dim() });
+    let body = if with_label {
+        put(frame, x, y, "vol", dim());
+        x + 4
+    } else {
+        x
+    };
+    let minus = Rect { x: body, y, width: 1, height: 1 };
+    put(frame, body, y, "-", if hovered(s, minus) { bright_bold() } else { dim() });
     s.click(minus, Act::VolDown);
     let filled = volume_cells(volume);
     for i in 0..10u16 {
-        let cell = Rect { x: x + 6 + i, y, width: 1, height: 1 };
+        let cell = Rect { x: body + 2 + i, y, width: 1, height: 1 };
         let on = (i as usize) < filled;
         let style = if on { Style::default().fg(th().accent) } else { dim() };
         let glyph = if on { full } else { empty };
         put(frame, cell.x, y, &glyph.to_string(), style);
         s.click(cell, Act::VolSet(i as u8));
     }
-    let plus = Rect { x: x + 17, y, width: 1, height: 1 };
-    put(frame, x + 17, y, "+", if hovered(s, plus) { bright_bold() } else { dim() });
+    let plus = Rect { x: body + 13, y, width: 1, height: 1 };
+    put(frame, body + 13, y, "+", if hovered(s, plus) { bright_bold() } else { dim() });
     s.click(plus, Act::VolUp);
-    put(frame, x + 19, y, &format!("{:3}%", (volume * 100.0).round() as u32), dim());
-    s.tip(
-        Rect { x, y, width: 23, height: 1 },
-        t!("gui.tip.volume").to_string(),
-    );
+    put(frame, body + 15, y, &format!("{:3}%", (volume * 100.0).round() as u32), dim());
+    let width = if with_label { 23 } else { 19 };
+    s.tip(Rect { x, y, width, height: 1 }, t!("gui.tip.volume").to_string());
 }
 
 fn bright_bold() -> Style {
     Style::default().fg(th().bright).add_modifier(Modifier::BOLD)
 }
 
-/// The compact transport + toggles row (the Wave bar's control row).
-fn draw_compact_controls(frame: &mut Frame, s: &mut Surface<Act>, y: u16, left_end: u16, v: &BarView) {
+/// The play/pause slot glyphs: a fixed two cells, so ▮▮ swaps in place and
+/// next never moves between states.
+fn play_glyphs(paused: bool) -> (&'static str, &'static str, &'static str) {
+    if legacy_conhost() {
+        ("<<", if paused { "> " } else { "||" }, ">>")
+    } else {
+        ("◂◂", if paused { "▸ " } else { "▮▮" }, "▸▸")
+    }
+}
+
+/// The Wave bar's control row, full width above the gold rule: transport,
+/// toggles, the time readout, the volume at the right edge. `times` is
+/// (elapsed-or-preview, its style, total) — the elapsed half brightens to
+/// preview the would-land time while the pointer rides the wave, which is
+/// what lets the wave itself run to the card unbroken.
+fn draw_compact_controls(
+    frame: &mut Frame,
+    s: &mut Surface<Act>,
+    y: u16,
+    width: u16,
+    v: &BarView,
+    times: Option<(String, Style, String)>,
+) {
     let legacy = legacy_conhost();
-    let (prev, next) = if legacy { ("<<", ">>") } else { ("◂◂", "▸▸") };
-    // The play/pause slot is a fixed two cells, so ▮▮ swaps in place and
-    // next never moves between states.
-    let play = match (legacy, v.paused) {
-        (false, true) => "▸ ",
-        (false, false) => "▮▮",
-        (true, true) => "> ",
-        (true, false) => "||",
-    };
+    let (prev, play, next) = play_glyphs(v.paused);
     glyph_button(frame, s, 2, y, prev, false, Act::Prev, t!("gui.tip.prev").to_string());
     glyph_button(frame, s, 7, y, play, true, Act::PlayPause, t!("gui.tip.play").to_string());
     glyph_button(frame, s, 11, y, next, false, Act::Next, t!("gui.tip.next").to_string());
@@ -305,7 +341,12 @@ fn draw_compact_controls(frame: &mut Frame, s: &mut Surface<Act>, y: u16, left_e
         toggle_button(frame, s, 21, y, "↻", v.repeat, Act::Repeat, t!("gui.tip.repeat").to_string());
         toggle_button(frame, s, 24, y, "auto-dj", v.autodj, Act::AutoDj, t!("gui.tip.dj").to_string());
     }
-    draw_volume(frame, s, left_end.saturating_sub(22), y, v.volume);
+    if let Some((elapsed, elapsed_style, total)) = times {
+        put(frame, 40, y, &format!("{elapsed:>5}"), elapsed_style);
+        put(frame, 46, y, "/", dim());
+        put(frame, 48, y, &total, dim());
+    }
+    draw_volume(frame, s, width - 25, y, v.volume, true);
 }
 
 /// The seek surface: waveform (or the classic bar while it loads) across
@@ -375,7 +416,8 @@ fn draw_seek_cells(
 
 // ── The two bars ────────────────────────────────────────────────────────────
 
-/// Draw the bar into the bottom [`BAR_ROWS`] rows of `area`.
+/// Draw the bar into the bottom [`BAR_ROWS`] rows of `area` (minus the
+/// last row, which the screen keeps for the tips line).
 pub(super) fn draw(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, style: BarStyle, v: &BarView) {
     let top = area.height - BAR_ROWS;
     match style {
@@ -388,46 +430,50 @@ fn gold_rule(frame: &mut Frame, y: u16, width: u16) {
     put(frame, 0, y, &"─".repeat(width as usize), Style::default().fg(th().gold));
 }
 
-/// Wave style: rule · waveform+reflection · controls · (blank). The
-/// now-playing card sits right, exactly the queue's width, and toggles it.
+/// Wave style: controls · gold rule · waveform+reflection beside the card.
+/// The times live on the control row, which is what lets the wave run from
+/// the left edge to the card unbroken.
 fn draw_wave_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, v: &BarView) {
-    gold_rule(frame, top, area.width);
     let left_end = area.width - 35;
-    match v.now {
+    let cells = (left_end - 1) as usize;
+    // The wave draws before the control row so the pointer's would-land
+    // preview can ride the row's time readout.
+    let times = match v.now {
         Some(now) => {
-            put(frame, 1, top + 1, &fmt_time(now.elapsed), dim());
-            let cells = (left_end - 12) as usize;
-            let preview = draw_seek_cells(frame, s, 6, top + 1, 2, cells, now, false);
-            if let Some(time) = preview {
-                put(frame, 1, top + 1, &format!("{time:>4}"), bright_bold());
-            }
-            let total = fmt_time(now.duration);
-            put(frame, left_end - total.chars().count() as u16, top + 1, &total, dim());
+            let preview = draw_seek_cells(frame, s, 1, top + 2, 2, cells, now, false);
+            let (elapsed, style) = match preview {
+                Some(time) => (time, bright_bold()),
+                None => (fmt_time(now.elapsed), dim()),
+            };
+            Some((elapsed, style, fmt_time(now.duration)))
         }
         None => {
-            // Idle: a resting line where the wave will be, and honest silence
-            // for the times.
-            put(frame, 6, top + 1, &"─".repeat((left_end - 12) as usize), dim());
+            // Idle: a resting line where the wave will be, and honest
+            // silence for the times.
+            put(frame, 1, top + 2, &"─".repeat(cells), dim());
+            None
         }
-    }
-    draw_compact_controls(frame, s, top + 3, left_end, v);
-    draw_card(frame, s, area, top + 1, v);
+    };
+    draw_compact_controls(frame, s, top, area.width, v, times);
+    gold_rule(frame, top + 1, area.width);
+    draw_card(frame, s, area, top + 2, v);
 }
 
-/// The now-playing card (Wave bar): cover slot + title/artist + the ▾/▴
-/// chevron, spanning exactly the queue's column. One click target.
+/// The now-playing card, both bars: cover slot + title/artist + the ▾/▴
+/// chevron, spanning exactly the queue's column, three rows tall. One
+/// click target.
 fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &BarView) {
     let x = area.width - 32;
-    let rect = Rect { x, y, width: 31, height: 4 };
+    let rect = Rect { x, y, width: 31, height: 3 };
     let hover = hovered(s, rect);
-    cover_slot(frame, x, y, 8, 4);
+    cover_slot(frame, x, y, 6, 3);
     let (title_style, sub_style) = card_styles(hover, v.now.is_some());
     match v.now {
         Some(now) => {
-            put(frame, x + 9, y + 1, &clip(&now.title, 20), title_style);
-            put(frame, x + 9, y + 2, &clip(&now.artist, 20), sub_style);
+            put(frame, x + 8, y, &clip(&now.title, 20), title_style);
+            put(frame, x + 8, y + 1, &clip(&now.artist, 20), sub_style);
         }
-        None => put(frame, x + 9, y + 1, &t!("gui.nothing_playing"), sub_style),
+        None => put(frame, x + 8, y, &t!("gui.nothing_playing"), sub_style),
     }
     let chevron = chevron_glyph(v.queue_open);
     put(frame, area.width - 3, y, chevron, if hover { bright_bold() } else { dim() });
@@ -435,95 +481,48 @@ fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &Ba
     s.tip(rect, queue_tip(v.queue_open));
 }
 
-/// GoldLine style: the rule is the seek bar; song info left; tall controls.
+/// GoldLine style: the rule is the seek bar; the tall controls beneath it
+/// with the volume on their center line; the card on the right like the
+/// Wave bar's.
 fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, v: &BarView) {
+    // Row `top` stays blank — the two bars keep the same footprint, so
+    // toggling styles never reflows the screen above.
+    let line = top + 1;
     match v.now {
         Some(now) => {
-            put(frame, 1, top, &fmt_time(now.elapsed), dim());
+            put(frame, 1, line, &fmt_time(now.elapsed), dim());
             let cells = (area.width - 12) as usize;
-            let preview = draw_seek_cells(frame, s, 6, top, 1, cells, now, true);
+            let preview = draw_seek_cells(frame, s, 6, line, 1, cells, now, true);
             if let Some(time) = preview {
-                put(frame, 1, top, &format!("{time:>4}"), bright_bold());
+                put(frame, 1, line, &format!("{time:>4}"), bright_bold());
             }
             let total = fmt_time(now.duration);
-            put(frame, area.width - 1 - total.chars().count() as u16, top, &total, dim());
+            put(frame, area.width - 1 - total.chars().count() as u16, line, &total, dim());
         }
         // Idle, the line is exactly the wizard's gold rule.
-        None => gold_rule(frame, top, area.width),
+        None => gold_rule(frame, line, area.width),
     }
 
-    // Song info, left — the queue toggle, chevron on the title row.
-    let info = Rect { x: 1, y: top + 1, width: 28, height: 3 };
-    let hover = hovered(s, info);
-    cover_slot(frame, 1, top + 1, 6, 3);
-    let (title_style, sub_style) = card_styles(hover, v.now.is_some());
-    match v.now {
-        Some(now) => {
-            put(frame, 8, top + 1, &clip(&now.title, 18), title_style);
-            put(frame, 8, top + 2, &clip(&now.artist, 18), sub_style);
-        }
-        None => put(frame, 8, top + 1, &t!("gui.nothing_playing"), sub_style),
-    }
-    put(frame, 27, top + 1, chevron_glyph(v.queue_open), if hover { bright_bold() } else { dim() });
-    s.click(info, Act::ToggleQueue);
-    s.tip(info, queue_tip(v.queue_open));
-
-    // The fat controls: prev · play · next as kit tall buttons, then the
-    // toggles in the same 3-row form. The play slot's label is two cells
-    // both ways, so the row never re-seats between paused and playing.
-    let legacy = legacy_conhost();
-    let (prev, next) = if legacy { ("<<", ">>") } else { ("◂◂", "▸▸") };
-    let play = match (legacy, v.paused) {
-        (false, true) => "▸ ",
-        (false, false) => "▮▮",
-        (true, true) => "> ",
-        (true, false) => "||",
-    };
-    let y = top + 1;
-    let mut x = 30u16;
-    let r = tall_secondary(frame, s, Rect { x, y, width: 10, height: 3 }, prev, Act::Prev);
-    s.tip(r, t!("gui.tip.prev").to_string());
-    x += r.width + 1;
-    let r = play_tall(frame, s, x, y, play, Act::PlayPause);
-    s.tip(r, t!("gui.tip.play").to_string());
-    x += r.width + 1;
-    let r = tall_secondary(frame, s, Rect { x, y, width: 10, height: 3 }, next, Act::Next);
-    s.tip(r, t!("gui.tip.next").to_string());
-    x += r.width + 1;
-    if legacy {
-        x += fat_toggle(frame, s, x, y, &t!("gui.shuffle_word"), v.shuffle, Act::Shuffle, t!("gui.tip.shuffle").to_string()) + 1;
-        x += fat_toggle(frame, s, x, y, &t!("gui.repeat_word"), v.repeat, Act::Repeat, t!("gui.tip.repeat").to_string()) + 1;
+    // The tall controls, one compact frame each, with the volume centered
+    // on their middle row to their left. The play slot's label is two
+    // cells both ways, so the row never re-seats.
+    let (prev, play, next) = play_glyphs(v.paused);
+    let y = top + 2;
+    let mut x = 22u16;
+    x += tall_compact(frame, s, x, y, prev, TallKind::Secondary, Act::Prev, t!("gui.tip.prev").to_string()) + 1;
+    x += tall_compact(frame, s, x, y, play, TallKind::Primary, Act::PlayPause, t!("gui.tip.play").to_string()) + 1;
+    x += tall_compact(frame, s, x, y, next, TallKind::Secondary, Act::Next, t!("gui.tip.next").to_string()) + 1;
+    if legacy_conhost() {
+        x += tall_compact(frame, s, x, y, &t!("gui.shuffle_word"), TallKind::Toggle(v.shuffle), Act::Shuffle, t!("gui.tip.shuffle").to_string()) + 1;
+        x += tall_compact(frame, s, x, y, &t!("gui.repeat_word"), TallKind::Toggle(v.repeat), Act::Repeat, t!("gui.tip.repeat").to_string()) + 1;
     } else {
-        x += fat_toggle(frame, s, x, y, "⇄", v.shuffle, Act::Shuffle, t!("gui.tip.shuffle").to_string()) + 1;
-        x += fat_toggle(frame, s, x, y, "↻", v.repeat, Act::Repeat, t!("gui.tip.repeat").to_string()) + 1;
+        x += tall_compact(frame, s, x, y, "⇄", TallKind::Toggle(v.shuffle), Act::Shuffle, t!("gui.tip.shuffle").to_string()) + 1;
+        x += tall_compact(frame, s, x, y, "↻", TallKind::Toggle(v.repeat), Act::Repeat, t!("gui.tip.repeat").to_string()) + 1;
     }
-    fat_toggle(frame, s, x, y, "auto-dj", v.autodj, Act::AutoDj, t!("gui.tip.dj").to_string());
+    tall_compact(frame, s, x, y, "auto-dj", TallKind::Toggle(v.autodj), Act::AutoDj, t!("gui.tip.dj").to_string());
+    draw_volume(frame, s, 1, y + 1, v.volume, false);
 
-    // Volume rides the bar's last row, far right — the tall row keeps its
-    // room and auto-dj keeps its word.
-    draw_volume(frame, s, area.width - 25, top + 4, v.volume);
-}
-
-/// The play/pause tall button: the kit primary's geometry with a caller-set
-/// two-cell label (kit `tall_button` appends its own `▸`-less padding; the
-/// play glyph IS the label here).
-fn play_tall(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, label: &str, act: Act) -> Rect {
-    let text = format!("  {label}  ");
-    let width = text.chars().count() as u16 + 2;
-    let rect = Rect { x, y, width, height: 3 };
-    let color = if hovered(s, rect) { th().bright } else { th().accent };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(color));
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-    frame.render_widget(
-        Paragraph::new(Span::styled(text, Style::default().fg(color).add_modifier(Modifier::BOLD))),
-        inner,
-    );
-    s.click(rect, act);
-    rect
+    draw_card(frame, s, area, y, v);
 }
 
 fn card_styles(hover: bool, playing: bool) -> (Style, Style) {

@@ -394,7 +394,8 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         draw_queue(frame, area);
     }
 
-    // Note above the tips, tips above the bar — the wizard's chrome order.
+    // The note sits above the bar; the keyboard tips take the very bottom
+    // row, under it.
     if let Some((text, is_err)) = gui.note.clone() {
         let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         put(frame, 1, area.height - 7, &text, style);
@@ -404,7 +405,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     } else {
         t!("gui.tips.base")
     };
-    put(frame, 1, area.height - 6, &tips, dim());
+    put(frame, 1, area.height - 1, &tips, dim());
 
     let view = BarView {
         now: gui.now.as_ref(),
@@ -783,12 +784,17 @@ mod tests {
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(all.contains("mStream"), "the wordmark anchors the shell");
-        assert!(all.contains("0:47") && all.contains("5:02"), "times bracket the wave");
+        assert!(all.contains("0:47") && all.contains("5:02"), "the control row reads the times");
         assert!(all.contains('▁') || all.contains('▄'), "amplitude glyphs are on screen");
-        assert!(all.contains("auto-dj"), "the toggles row is drawn");
         assert!(all.contains("Cassini IV"), "the card names the track");
         assert!(all.contains('▾'), "the open queue wears the collapse chevron");
         assert!(all.contains(&t!("gui.queue.empty").to_string()), "the queue says it is empty");
+        // The cleanup-pass geometry: controls above the rule, the wave
+        // beneath it running from the left edge, tips on the last row.
+        assert!(rows[24].contains("◂◂") && rows[24].contains("auto-dj"), "controls sit above the rule");
+        assert!(rows[25].chars().filter(|c| *c == '─').count() >= 90, "the gold rule under them");
+        assert!(rows[26].trim_start().starts_with(|c| "▁▂▃▄▅▆▇█".contains(c)), "the wave starts at the left edge");
+        assert!(rows[29].contains("1-7"), "the tips line holds the bottom row");
     }
 
     #[test]
@@ -802,8 +808,15 @@ mod tests {
         assert!(all.contains("0:47") && all.contains("5:02"));
         let bar_rows = &rows[rows.len() - 5..];
         let frames = bar_rows.join("").matches('╭').count();
-        assert!(frames >= 6, "prev/play/next and three toggles draw tall: {frames} frames");
+        assert!(frames >= 7, "six tall controls plus the card's cover slot: {frames} frames");
         assert!(!bar_rows.join("").contains('▁'), "no waveform in the gold-line bar");
+        // The cleanup-pass geometry: the card on the right like the Wave
+        // bar's, the volume on the buttons' center line to their left.
+        let card_col = rows[26].find("Cassini IV").expect("the card names the track");
+        assert!(card_col > 60, "the card sits right, not left: col {card_col}");
+        let vol_col = rows[27].find('▰').expect("the volume cells are drawn");
+        assert!(vol_col < 22, "the volume sits left of the buttons: col {vol_col}");
+        assert!(rows[29].contains("1-7"), "the tips line holds the bottom row");
     }
 
     #[test]
