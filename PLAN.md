@@ -1468,6 +1468,32 @@ RELEASE exists — so it's merge, then tag, then integrate.
 Phase 8 (the bundled console) stays sequenced AFTER 9c: it upgrades the
 launcher's terminal choice, not the wizard itself.
 
+### Phase 10 — The GUI player (`mstream-player gui`)
+
+The mouse-first player surface the Win/macOS installers will launch in the
+Phase-8 branded window — an ALTERNATIVE interface beside the classic TUI,
+built on `src/kit/` the wizard's way (fixed palette, OSC 11 ground, every
+action clickable AND keyed). Design of record: the "mStream Player GUI"
+canvas, <https://claude.ai/code/artifact/e0a92aec-c63e-4156-84e2-15a05a6167f0>
+(cell-exact 100×30 mockups + normative widget/limit boards), plus
+docs/ui-kit.md. Direction approved 2026-08-27; the Jukebox sketch is kept as
+a LATER secondary screen (party view), Columns retired.
+
+- **Slice 1 — the shell ✅ 2026-08-27**: left nav (Settings live; the rest
+  named and honest about arriving with browse), the Settings room (bottom-bar
+  choice + the crossfade group, wired to the real audio worker and persisted
+  per change), and BOTH bottom bars behind `[gui] bar` — `wave` (waveform +
+  reflection over the compact control row; classic bar is the loading state
+  AND the conhost floor) and `gold-line` (the gold rule IS the seek bar; song
+  info left toggles the queue; tall 3-row controls). `src/gui/{mod,bar}.rs`,
+  ten-locale `gui.*` keys, 18 unit/render tests + the ignored `dump_frames`
+  eyeball. `MSTREAM_GUI_DEMO=1` seats a fixed track so the bars can be seen
+  and the seek ridden before playback exists.
+- Next slices, in rough order: connect/session reuse (`tui::startup`), browse
+  + queue on the real `App`/worker (extend `Action` with the mouse verbs —
+  the funnel in `handle_action` is load-bearing), now-playing with pixel
+  covers, then e2e legs (fake server needs player endpoints).
+
 ## Smoke testing
 
 `mstream-player replay "<script>"` drives the TUI from a script. Keys go through exactly the path
