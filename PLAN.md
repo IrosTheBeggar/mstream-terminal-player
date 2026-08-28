@@ -1489,10 +1489,25 @@ a LATER secondary screen (party view), Columns retired.
   ten-locale `gui.*` keys, 18 unit/render tests + the ignored `dump_frames`
   eyeball. `MSTREAM_GUI_DEMO=1` seats a fixed track so the bars can be seen
   and the seek ridden before playback exists.
-- Next slices, in rough order: connect/session reuse (`tui::startup`), browse
-  + queue on the real `App`/worker (extend `Action` with the mouse verbs —
-  the funnel in `handle_action` is load-bearing), now-playing with pixel
-  covers, then e2e legs (fake server needs player endpoints).
+- **Slice 2 — Files + playback ✅ 2026-08-28** (bar settled the same day:
+  controls above the rule, edge-to-card waveform, tips on the last row;
+  GoldLine card right + volume on the tall controls' line). The GUI now
+  embeds the REAL `App` + audio/api workers — the same state machine the
+  TUI, wasm shell and replay harness drive — so session restore
+  (`tui::startup`/`app_from`/`dispatch`/`remember`), queueing, crossfade
+  announcements, track-end advance and waveform prefetch are shared, not
+  re-implemented. Files leads the nav: browse the saved session's server
+  (`gui --server <url>` overrides), click a row = select + `Activate`
+  through the App's funnel, hover reveals [+] queue-add, kit scrollbar,
+  wheel scrolls the view; the queue panel shows the real queue; the bar
+  reads real timestamps/waveforms and seeks/pauses the engine. Settings'
+  crossfade group now reads/writes the App's own knobs. Mouse verbs that
+  have no honest keymap name (the volume cells) set the field and emit the
+  `Effect` directly — documented, funnel-free by design.
+- Next slices, in rough order: album art in the card/Now Playing (graphics
+  probe + the cache widening), queue clicks + Library/Search views, the
+  Connect screen for the no-session path, then e2e legs (fake server needs
+  player endpoints).
 
 ## Smoke testing
 

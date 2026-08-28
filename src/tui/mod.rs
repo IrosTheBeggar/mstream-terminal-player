@@ -434,7 +434,7 @@ pub(crate) fn window_title(app: &App) -> String {
 /// AudioFailed, so the hook stands back rather than tearing the terminal
 /// down under a UI that is still running (audit #32).
 #[cfg(not(target_arch = "wasm32"))]
-fn install_panic_hook() {
+pub(crate) fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         if worker::panics_are_caught(std::thread::current().name()) {

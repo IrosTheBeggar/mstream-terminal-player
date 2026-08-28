@@ -165,6 +165,7 @@ resize: "please make the terminal a little larger"
 
 gui:
   nav:
+    files: "Files"
     library: "LIBRARY"
     albums: "Albums"
     artists: "Artists"
@@ -173,6 +174,11 @@ gui:
     playlists: "Playlists"
     search: "Search"
     settings: "Settings"
+  files:
+    empty: "(nothing here)"
+    items: "%{count} items"
+    queue_tip: "Add to the queue — a"
+  no_server: "no server saved — run mstream-player setup, or: mstream-player gui --server <address>"
   coming: "%{name} arrives with the browse slice — Settings is the working room today."
   nothing_playing: "(nothing playing)"
   audio_failed: "audio: %{error}"
@@ -208,5 +214,6 @@ gui:
     dj: "Auto-DJ — A"
     volume: "Volume — - and +"
   tips:
-    rows: "↑ ↓ rows · ← → adjust · Enter toggle · Esc done · 1-7 sections · q quit"
-    base: "1-7 sections · Tab queue · Space play/pause · -/+ volume · q quit"
+    files: "↑ ↓ move · Enter open/play · h back · a queue · Tab queue panel · Space play/pause · q quit"
+    rows: "↑ ↓ rows · ← → adjust · Enter toggle · Esc done · 1-8 sections · q quit"
+    base: "1-8 sections · Tab queue · Space play/pause · -/+ volume · q quit"

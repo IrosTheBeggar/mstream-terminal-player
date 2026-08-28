@@ -165,6 +165,7 @@ resize: "agranda un poco el terminal, por favor"
 
 gui:
   nav:
+    files: "Archivos"
     library: "BIBLIOTECA"
     albums: "Álbumes"
     artists: "Artistas"
@@ -173,6 +174,11 @@ gui:
     playlists: "Listas"
     search: "Buscar"
     settings: "Ajustes"
+  files:
+    empty: "(nada aquí)"
+    items: "%{count} elementos"
+    queue_tip: "Añadir a la cola — a"
+  no_server: "sin servidor guardado — ejecuta mstream-player setup, o: mstream-player gui --server <dirección>"
   coming: "%{name} llega con la parte de navegación — hoy Ajustes es la sala que funciona."
   nothing_playing: "(nada sonando)"
   audio_failed: "audio: %{error}"
@@ -208,5 +214,6 @@ gui:
     dj: "Auto-DJ — A"
     volume: "Volumen — - y +"
   tips:
-    rows: "↑ ↓ filas · ← → ajustar · Enter alternar · Esc listo · 1-7 secciones · q salir"
-    base: "1-7 secciones · Tab cola · Space reproducir · -/+ volumen · q salir"
+    files: "↑ ↓ mover · Enter abrir/reproducir · h atrás · a a la cola · Tab cola · Space reproducir · q salir"
+    rows: "↑ ↓ filas · ← → ajustar · Enter alternar · Esc listo · 1-8 secciones · q salir"
+    base: "1-8 secciones · Tab cola · Space reproducir · -/+ volumen · q salir"

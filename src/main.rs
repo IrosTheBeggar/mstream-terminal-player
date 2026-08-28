@@ -159,8 +159,8 @@ enum Command {
     /// Launch the interactive terminal player (the default)
     Tui(cmd_library::ConnArgs),
     /// Launch the GUI player — the mouse-first surface the installers open
-    /// (preview: the shell — nav, the bottom bar, Settings)
-    Gui,
+    /// (preview: Files browsing and playback, the bottom bar, Settings)
+    Gui(cmd_library::ConnArgs),
     /// Run the headless server-audio engine (jukebox mode)
     Serve(ServeArgs),
     /// Play one source and exit — end-to-end streaming/seek smoke test
@@ -285,7 +285,7 @@ fn main() {
     // A one-shot subcommand keeps its hands off the default location: see
     // logging::init.
     let run = match &cli.command {
-        None | Some(Command::Tui(_)) | Some(Command::Gui) | Some(Command::Serve(_)) => {
+        None | Some(Command::Tui(_)) | Some(Command::Gui(_)) | Some(Command::Serve(_)) => {
             logging::Run::Session
         }
         Some(_) => logging::Run::OneShot,
@@ -308,7 +308,7 @@ fn main() {
         (Some(Command::Tui(conn)), _) => {
             std::process::exit(tui::run(conn.server, conn.token));
         }
-        (Some(Command::Gui), _) => std::process::exit(gui::run()),
+        (Some(Command::Gui(conn)), _) => std::process::exit(gui::run(conn.server, conn.token)),
         (Some(Command::Play(args)), _) => std::process::exit(cmd_play::run(args)),
         (Some(Command::Setup(args)), _) => std::process::exit(setup::run(args)),
         (Some(Command::Qr(args)), _) => std::process::exit(setup::run_qr(args)),

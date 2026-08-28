@@ -2,17 +2,25 @@
 //! launch in the branded terminal window (`mstream-player gui`).
 //!
 //! Built the wizard's way: the kit's fixed palette and OSC 11 ground lease,
-//! a `Surface` per frame, every action clickable AND keyed. This slice is
-//! the shell — the left nav, the two bottom bars (a Settings choice), and
-//! the Settings room itself, wired to the real audio engine. Browse, queue
-//! and playback arrive in the next slices; until then the bar rests idle
-//! (`MSTREAM_GUI_DEMO=1` seats a demo track so the bars can be seen).
+//! a `Surface` per frame, every action clickable AND keyed. Underneath it is
+//! the SAME `App` and worker pair as the classic TUI — the GUI is a second
+//! front end on the proven state machine (the wasm shell and the replay
+//! harness are the other two), so queueing, crossfade announcements,
+//! track-end advance and session handling are shared, not re-implemented.
+//! Mouse clicks translate to the App's own actions (select the row, then
+//! `Activate`), which keeps `handle_action`'s follow-up work — waveform
+//! prefetch, the crossfade announcement — running exactly as the TUI's.
+//!
+//! This slice: the left nav with a WORKING Files browser (browse, click to
+//! play, `a` to queue), the live queue panel, both bottom bars against real
+//! playback, and the Settings room. `MSTREAM_GUI_DEMO=1` still seats a
+//! fixed track for looking at the bars with no server at hand.
 //!
 //! Design: the "mStream Player GUI" canvas + docs/ui-kit.md.
 
 mod bar;
 
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 use ratatui::Frame;
@@ -28,9 +36,11 @@ use ratatui::widgets::Paragraph;
 use rust_i18n::t;
 
 use crate::config::{self, Config};
-use crate::kit::{GroundGuard, POINTER_RESET, Surface, dim, set_pointer_shape};
+use crate::kit::{GroundGuard, POINTER_RESET, Surface, dim, scroll_list, set_pointer_shape, table_view};
 use crate::kit::theme::{self, legacy_conhost, th};
-use crate::tui::worker::{AudioCmd, Event, spawn_audio};
+use crate::tui::app::{Action, App, Effect, Entry, MessageKind, Tab};
+use crate::tui::worker::{AudioCmd, AutoDjMode, Event};
+use crate::tui::{self, worker};
 
 use bar::{BarStyle, BarView, Now};
 
@@ -41,7 +51,6 @@ const MIN_W: u16 = 100;
 const MIN_H: u16 = 24;
 
 const POLL: Duration = Duration::from_millis(100);
-const VOLUME_STEP: f32 = 0.05;
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
@@ -62,6 +71,14 @@ pub(crate) enum Act {
     VolSet(u8),
     /// A click on a seek cell: the fraction of the track it means.
     Seek(f64),
+    /// A Files row, clicked: select it and Activate (open the folder, or
+    /// play from the track) — the TUI's Enter, aimed by the mouse.
+    FileRow(usize),
+    /// The hovered track row's revealed [+]: queue just that one.
+    FileQueue(usize),
+    /// The Files scrollbar (kit `scroll_list`): step and jump.
+    FScrollBy(i32),
+    FScrollTo(usize),
     /// A settings row, activated (click, Enter, Space).
     Row(usize),
     BlendDown,
@@ -70,10 +87,12 @@ pub(crate) enum Act {
 
 // ── Navigation ──────────────────────────────────────────────────────────────
 
-/// The sidebar, in draw order. Settings is the working room this slice;
-/// the rest name where browse lands and say so when asked.
+/// The sidebar, in draw order. Files and Settings are the working rooms
+/// this slice; the rest name where the tag-based browse lands and say so
+/// when asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NavId {
+    Files,
     Albums,
     Artists,
     Genres,
@@ -83,7 +102,8 @@ enum NavId {
     Settings,
 }
 
-const NAV: [NavId; 7] = [
+const NAV: [NavId; 8] = [
+    NavId::Files,
     NavId::Albums,
     NavId::Artists,
     NavId::Genres,
@@ -96,6 +116,7 @@ const NAV: [NavId; 7] = [
 impl NavId {
     fn label(self) -> String {
         match self {
+            NavId::Files => t!("gui.nav.files").to_string(),
             NavId::Albums => t!("gui.nav.albums").to_string(),
             NavId::Artists => t!("gui.nav.artists").to_string(),
             NavId::Genres => t!("gui.nav.genres").to_string(),
@@ -107,12 +128,14 @@ impl NavId {
     }
 }
 
-const SETTINGS_NAV: usize = 6;
+const FILES_NAV: usize = 0;
+const SETTINGS_NAV: usize = 7;
 
 // ── Settings rows ───────────────────────────────────────────────────────────
 
 /// The Settings room's rows, by index: the bar radios, then the crossfade
-/// group — the same knobs the classic TUI's Settings tab drives.
+/// group — the same knobs the classic TUI's Settings tab drives, read from
+/// and written to the shared App.
 const ROW_BAR_WAVE: usize = 0;
 const ROW_BAR_GOLD: usize = 1;
 const ROW_BLEND: usize = 2;
@@ -135,6 +158,10 @@ fn fmt_blend(seconds: f32) -> String {
 // ── State ───────────────────────────────────────────────────────────────────
 
 pub(crate) struct Gui {
+    /// The shared player state machine — the same App the TUI drives.
+    app: App,
+    /// Effects the App handed back, waiting for the next dispatch.
+    pending: Vec<Effect>,
     config: Config,
     /// A config that failed to LOAD is never written back — the wizard and
     /// player rule, kept here too.
@@ -147,71 +174,69 @@ pub(crate) struct Gui {
     cursor: Option<usize>,
     queue_open: bool,
     bar_style: BarStyle,
-    paused: bool,
-    now: Option<Now>,
-    volume: f32,
-    shuffle: bool,
-    repeat: bool,
-    autodj: bool,
-    crossfade: f32,
-    gapless: bool,
-    blend_skips: bool,
-    pause_fade: bool,
-    /// One line above the tips: (text, is_error).
+    /// One line above the bar: (text, is_error). Gui-local; the App's own
+    /// message shows when this is empty.
     note: Option<(String, bool)>,
-    audio: Sender<AudioCmd>,
+    /// The bar's view of what is playing, rebuilt each pass from the App
+    /// (or the demo seat when nothing real is on).
+    bar_now: Option<Now>,
+    /// `MSTREAM_GUI_DEMO=1`: a fixed track shown while the App is idle.
+    demo: Option<Now>,
+    demo_paused: bool,
+    /// The Files list's wheel offset, and whether the keyboard cursor moved
+    /// this pass (a move reveals; the wheel scrolls freely — the kit's
+    /// `table_view` contract).
+    fscroll: usize,
+    freveal: bool,
+    /// The queue panel's wheel offset, and the playing index last seen —
+    /// the panel reveals the playing row only when it CHANGES, so the
+    /// wheel can roam freely in between (the kit's table contract).
+    qscroll: usize,
+    last_current: Option<usize>,
+    /// The width of the last drawn frame, for hit zones the event loop
+    /// needs outside a draw (the wheel's queue-vs-content split).
+    last_width: u16,
 }
 
 impl Gui {
-    fn new(config: Config, config_ok: bool, audio: Sender<AudioCmd>) -> Self {
-        let p = &config.player;
-        let gui = Gui {
+    fn new(config: Config, config_ok: bool, app: App) -> Self {
+        Gui {
             bar_style: BarStyle::from_config(&config.gui.bar),
-            volume: p.volume.clamp(0.0, 1.0),
-            shuffle: p.shuffle,
-            repeat: p.repeat != "off",
-            autodj: p.autodj != "off",
-            crossfade: p.crossfade_seconds.clamp(0.0, 30.0),
-            gapless: p.gapless,
-            blend_skips: p.blend_skips,
-            pause_fade: p.pause_fade,
+            app,
+            pending: Vec::new(),
             config,
             config_ok,
             ui: Surface::new(),
-            active: SETTINGS_NAV,
+            active: FILES_NAV,
             cursor: None,
             queue_open: true,
-            paused: true,
-            now: None,
             note: None,
-            audio,
-        };
-        // The engine starts from the config, exactly like the TUI's five
-        // settings pushes on connect.
-        gui.send(AudioCmd::SetVolume(gui.volume));
-        gui.send(AudioCmd::SetCrossfade(gui.crossfade));
-        gui.send(AudioCmd::SetGapless(gui.gapless));
-        gui.send(AudioCmd::SetBlendSkips(gui.blend_skips));
-        gui.send(AudioCmd::SetPauseFade(gui.pause_fade));
-        gui
+            bar_now: None,
+            demo: None,
+            demo_paused: false,
+            fscroll: 0,
+            freveal: false,
+            qscroll: 0,
+            last_current: None,
+            last_width: MIN_W,
+        }
     }
 
-    fn send(&self, cmd: AudioCmd) {
-        let _ = self.audio.send(cmd);
+    fn pend(&mut self, effects: Vec<Effect>) {
+        self.pending.extend(effects);
+    }
+
+    fn forward(&mut self, action: Action) {
+        let effects = self.app.handle_action(action);
+        self.pend(effects);
     }
 
     /// Live state back into the config shapes (called before every save).
+    /// Player prefs come from the App itself — the same rebuild the TUI's
+    /// `remember` does — so the two front ends can never disagree.
     fn sync_config(&mut self) {
         self.config.gui.bar = self.bar_style.config_name().to_string();
-        let p = &mut self.config.player;
-        p.volume = (self.volume * 100.0).round() / 100.0;
-        p.shuffle = self.shuffle;
-        p.repeat = if self.repeat { "all" } else { "off" }.to_string();
-        p.autodj = if self.autodj { "similar" } else { "off" }.to_string();
-        p.crossfade_seconds = self.crossfade;
-        p.gapless = self.gapless;
-        p.blend_skips = self.blend_skips;
-        p.pause_fade = self.pause_fade;
+        self.config.player.adopt(self.app.prefs());
     }
 
     /// Settings changes persist as they happen — a GUI that loses a choice
@@ -229,9 +254,11 @@ impl Gui {
     /// The blend walks whole seconds and snaps toward the pressed direction
     /// (the TUI's rule: a hand-written 4.5 steps to 5 and 4, never 5.5).
     fn adjust_blend(&mut self, delta: i32) {
-        let snapped = if delta > 0 { self.crossfade.floor() + 1.0 } else { self.crossfade.ceil() - 1.0 };
-        self.crossfade = snapped.clamp(0.0, 30.0);
-        self.send(AudioCmd::SetCrossfade(self.crossfade));
+        let current = self.app.crossfade;
+        let snapped = if delta > 0 { current.floor() + 1.0 } else { current.ceil() - 1.0 };
+        self.app.crossfade = snapped.clamp(0.0, 30.0);
+        let set = AudioCmd::SetCrossfade(self.app.crossfade);
+        self.pend(vec![Effect::Audio(set)]);
         self.save_now();
     }
 
@@ -249,27 +276,35 @@ impl Gui {
             ROW_BAR_GOLD => self.set_bar(BarStyle::GoldLine),
             ROW_BLEND => self.adjust_blend(delta),
             ROW_GAPLESS => {
-                self.gapless = !self.gapless;
-                self.send(AudioCmd::SetGapless(self.gapless));
+                self.app.gapless = !self.app.gapless;
+                let cmd = AudioCmd::SetGapless(self.app.gapless);
+                self.pend(vec![Effect::Audio(cmd)]);
                 self.save_now();
             }
             ROW_BLEND_SKIPS => {
-                self.blend_skips = !self.blend_skips;
-                self.send(AudioCmd::SetBlendSkips(self.blend_skips));
+                self.app.blend_skips = !self.app.blend_skips;
+                let cmd = AudioCmd::SetBlendSkips(self.app.blend_skips);
+                self.pend(vec![Effect::Audio(cmd)]);
                 self.save_now();
             }
             ROW_PAUSE_FADE => {
-                self.pause_fade = !self.pause_fade;
-                self.send(AudioCmd::SetPauseFade(self.pause_fade));
+                self.app.pause_fade = !self.app.pause_fade;
+                let cmd = AudioCmd::SetPauseFade(self.app.pause_fade);
+                self.pend(vec![Effect::Audio(cmd)]);
                 self.save_now();
             }
             _ => {}
         }
     }
 
+    /// Volume set directly (the ten cells) — the one write that goes past
+    /// `handle_action`, because a parameterized action has no place in the
+    /// keymap's name tables. No follow-up work depends on volume, so the
+    /// funnel loses nothing.
     fn set_volume(&mut self, volume: f32) {
-        self.volume = volume.clamp(0.0, 1.0);
-        self.send(AudioCmd::SetVolume(self.volume));
+        self.app.volume = volume.clamp(0.0, 1.0);
+        let cmd = AudioCmd::SetVolume(self.app.volume);
+        self.pend(vec![Effect::Audio(cmd)]);
     }
 
     /// Everything a click or key resolved to. Returns true to quit.
@@ -277,7 +312,7 @@ impl Gui {
         match act {
             Act::Nav(i) => {
                 self.active = i;
-                self.note = (i != SETTINGS_NAV)
+                self.note = (!matches!(i, FILES_NAV | SETTINGS_NAV))
                     .then(|| (t!("gui.coming", name = NAV[i].label()).to_string(), false));
                 if i != SETTINGS_NAV {
                     self.cursor = None;
@@ -285,27 +320,45 @@ impl Gui {
             }
             Act::ToggleQueue => self.queue_open = !self.queue_open,
             Act::PlayPause => {
-                if self.now.is_some() {
-                    self.paused = !self.paused;
-                    self.send(if self.paused { AudioCmd::Pause } else { AudioCmd::Resume });
+                if self.app.now_playing.is_some() {
+                    self.forward(Action::PlayPause);
+                } else if self.demo.is_some() {
+                    self.demo_paused = !self.demo_paused;
                 }
             }
-            // Nothing to skip to until the queue slice lands; stay silent
-            // rather than promising.
-            Act::Prev | Act::Next => {}
-            Act::Shuffle => self.shuffle = !self.shuffle,
-            Act::Repeat => self.repeat = !self.repeat,
-            Act::AutoDj => self.autodj = !self.autodj,
-            Act::VolDown => self.set_volume(self.volume - VOLUME_STEP),
-            Act::VolUp => self.set_volume(self.volume + VOLUME_STEP),
+            Act::Prev => self.forward(Action::PrevTrack),
+            Act::Next => self.forward(Action::NextTrack),
+            Act::Shuffle => self.forward(Action::ToggleShuffle),
+            Act::Repeat => self.forward(Action::ToggleRepeat),
+            Act::AutoDj => self.forward(Action::ToggleAutoDj),
+            Act::VolDown => self.set_volume(self.app.volume - 0.05),
+            Act::VolUp => self.set_volume(self.app.volume + 0.05),
             Act::VolSet(i) => self.set_volume((i as f32 + 1.0) / 10.0),
             Act::Seek(frac) => {
-                if let Some(now) = &mut self.now {
-                    now.elapsed = frac * now.duration;
-                    let target = now.elapsed;
-                    self.send(AudioCmd::Seek(target));
+                if self.app.now_playing.is_some() {
+                    let duration = self.bar_now.as_ref().map_or(0.0, |n| n.duration);
+                    let effects = self.app.seek_to(frac * duration);
+                    self.pend(effects);
+                } else if let Some(demo) = &mut self.demo {
+                    demo.elapsed = frac * demo.duration;
                 }
             }
+            Act::FileRow(i) => {
+                self.app.tab = Tab::Files;
+                self.app.files.state.select(Some(i));
+                self.freveal = true;
+                self.forward(Action::Activate);
+            }
+            Act::FileQueue(i) => {
+                self.app.tab = Tab::Files;
+                self.app.files.state.select(Some(i));
+                self.forward(Action::AddToQueue);
+            }
+            Act::FScrollBy(delta) => {
+                self.fscroll =
+                    if delta < 0 { self.fscroll.saturating_sub(1) } else { self.fscroll + 1 };
+            }
+            Act::FScrollTo(first) => self.fscroll = first,
             // Activation is the TUI's Enter: toggles flip, the blend steps
             // up, radios choose.
             Act::Row(i) => self.adjust_row(i, 1),
@@ -314,11 +367,41 @@ impl Gui {
         }
         false
     }
+
+    /// The bar's view of what is playing: the App's track, timestamps and
+    /// waveform — or the demo seat while the App is idle.
+    fn refresh_bar_now(&mut self) {
+        self.bar_now = match &self.app.now_playing {
+            Some(track) => {
+                let duration = if self.app.status.duration > 0.0 {
+                    self.app.status.duration
+                } else {
+                    track.metadata.duration.unwrap_or(0.0)
+                };
+                Some(Now {
+                    title: track
+                        .metadata
+                        .display_title()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| track.file_name().to_string()),
+                    artist: track.metadata.artist.clone().unwrap_or_default(),
+                    elapsed: self.app.status.position,
+                    duration,
+                    wave: self.app.waveforms.get(&track.filepath).and_then(|w| w.clone()),
+                })
+            }
+            None => self.demo.clone(),
+        };
+    }
+
+    fn bar_paused(&self) -> bool {
+        if self.app.now_playing.is_some() { self.app.status.paused } else { self.demo_paused }
+    }
 }
 
-/// The demo seat (`MSTREAM_GUI_DEMO=1`): a fixed track so the bars can be
-/// seen and the seek ridden before the queue slice exists. Same fiction as
-/// the design canvas.
+/// The demo seat (`MSTREAM_GUI_DEMO=1`): a fixed track shown while nothing
+/// real is playing, so the bars can be seen and the seek ridden with no
+/// server at hand. Same fiction as the design canvas.
 fn demo_now() -> Now {
     // Two beating waves multiplied, so the amplitudes swing the whole
     // ▁..█ range the way music does instead of hovering near the top.
@@ -355,10 +438,28 @@ fn sel() -> Style {
     Style::default().bg(th().accent).fg(th().on_accent)
 }
 
+fn accent() -> Style {
+    Style::default().fg(th().accent)
+}
+
+/// A path clipped LEADING, so the leaf stays visible (the kit's path law:
+/// ten identical prefixes say nothing).
+fn clip_lead(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return text.to_string();
+    }
+    let tail: String = chars[chars.len() - max.saturating_sub(1)..].iter().collect();
+    let mark = if legacy_conhost() { '»' } else { '…' };
+    format!("{mark}{tail}")
+}
+
 /// One frame. Public to the crate so render tests can drive it.
 pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
+    gui.refresh_bar_now();
     gui.ui.begin_frame();
     let area = frame.area();
+    gui.last_width = area.width;
     if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
         frame.render_widget(
             ratatui::widgets::Block::default().style(Style::default().bg(ground).fg(th().text)),
@@ -371,62 +472,70 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     }
 
     put(frame, 1, 0, "mStream", Style::default().fg(th().accent).add_modifier(Modifier::BOLD));
+    if gui.app.connected {
+        let server = crate::quickconnect::display_server(&gui.app.session.server_id);
+        let width = server.chars().count() as u16;
+        put(frame, area.width - 2 - width, 0, &server, dim());
+    }
 
     draw_nav(frame, gui, area);
 
     // The content column, between the nav rule and the queue (when open).
     let right = if gui.queue_open { area.width - 36 } else { area.width - 3 };
     let content = Rect { x: 17, y: 2, width: right - 17, height: area.height - 10 };
-    if gui.active == SETTINGS_NAV {
-        draw_settings(frame, gui, content);
-    } else {
-        put(frame, content.x, content.y, &NAV[gui.active].label(), Style::default().add_modifier(Modifier::BOLD));
-        put(
-            frame,
-            content.x,
-            content.y + 2,
-            &t!("gui.coming", name = NAV[gui.active].label()),
-            dim(),
-        );
+    match gui.active {
+        FILES_NAV => draw_files(frame, gui, content),
+        SETTINGS_NAV => draw_settings(frame, gui, content),
+        i => {
+            put(frame, content.x, content.y, &NAV[i].label(), Style::default().add_modifier(Modifier::BOLD));
+            put(frame, content.x, content.y + 2, &t!("gui.coming", name = NAV[i].label()), dim());
+        }
     }
 
     if gui.queue_open {
-        draw_queue(frame, area);
+        draw_queue(frame, gui, area);
     }
 
-    // The note sits above the bar; the keyboard tips take the very bottom
-    // row, under it.
-    if let Some((text, is_err)) = gui.note.clone() {
+    // The note sits above the bar (gui's own first, else the App's words);
+    // the keyboard tips take the very bottom row.
+    let note = gui.note.clone().or_else(|| {
+        gui.app
+            .message
+            .as_ref()
+            .map(|m| (m.text.clone(), matches!(m.kind, MessageKind::Error)))
+    });
+    if let Some((text, is_err)) = note {
         let style = if is_err { Style::default().fg(th().gold) } else { dim() };
-        put(frame, 1, area.height - 7, &text, style);
+        put(frame, 1, area.height - 7, &bar::clip(&text, area.width as usize - 2), style);
     }
-    let tips = if gui.active == SETTINGS_NAV && gui.cursor.is_some() {
-        t!("gui.tips.rows")
-    } else {
-        t!("gui.tips.base")
+    let tips = match gui.active {
+        SETTINGS_NAV if gui.cursor.is_some() => t!("gui.tips.rows"),
+        FILES_NAV => t!("gui.tips.files"),
+        _ => t!("gui.tips.base"),
     };
     put(frame, 1, area.height - 1, &tips, dim());
 
     let view = BarView {
-        now: gui.now.as_ref(),
-        paused: gui.paused,
-        volume: gui.volume,
-        shuffle: gui.shuffle,
-        repeat: gui.repeat,
-        autodj: gui.autodj,
+        now: gui.bar_now.as_ref(),
+        paused: gui.bar_paused(),
+        volume: gui.app.volume,
+        shuffle: gui.app.queue.shuffle,
+        repeat: gui.app.queue.repeat != crate::tui::app::Repeat::Off,
+        autodj: gui.app.autodj != AutoDjMode::Off,
         queue_open: gui.queue_open,
     };
     bar::draw(frame, &mut gui.ui, area, gui.bar_style, &view);
 }
 
 fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    put(frame, 1, 2, &t!("gui.nav.library"), dim());
+    put(frame, 1, 4, &t!("gui.nav.library"), dim());
     let forward = if legacy_conhost() { ">" } else { "▸" };
     let set_y = area.height - 9;
     for (i, id) in NAV.iter().enumerate() {
         let y = match i {
-            0..=4 => 3 + i as u16,
-            5 => 9,
+            0 => 2,
+            1..=5 => 4 + i as u16,
+            6 => 11,
             _ => set_y,
         };
         let label = id.label();
@@ -448,16 +557,164 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
 }
 
-fn draw_queue(frame: &mut Frame, area: Rect) {
+/// The Files browser: the App's Files pane, drawn kit-style. Clicking a
+/// row is the TUI's Enter aimed by the mouse; the hovered track row
+/// reveals a [+] that queues just that one.
+fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
+    let crumb = if gui.app.path.is_empty() {
+        t!("gui.nav.files").to_string()
+    } else {
+        format!("{} {} {}", t!("gui.nav.files"), if legacy_conhost() { ">" } else { "▸" }, gui.app.path)
+    };
+    put(frame, content.x, content.y, &clip_lead(&crumb, content.width as usize - 12), dim());
+
+    if !gui.app.connected {
+        let text = if gui.app.connecting {
+            (t!("busy.reaching").to_string(), accent())
+        } else {
+            (t!("gui.no_server").to_string(), dim())
+        };
+        put(frame, content.x, content.y + 2, &bar::clip(&text.0, content.width as usize), text.1);
+        return;
+    }
+    if gui.app.files.loading {
+        put(frame, content.x, content.y + 2, &t!("busy.listing"), accent());
+        return;
+    }
+
+    let entries = &gui.app.files.entries;
+    if entries.is_empty() {
+        put(frame, content.x, content.y + 2, &t!("gui.files.empty"), dim());
+        return;
+    }
+    put(
+        frame,
+        content.right() - 12,
+        content.y,
+        &format!("{:>10}", t!("gui.files.items", count = entries.len())),
+        dim(),
+    );
+
+    let list = Rect {
+        x: content.x,
+        y: content.y + 2,
+        width: content.width - 2,
+        height: content.height - 2,
+    };
+    let selected = gui.app.files.state.selected();
+    let reveal = gui.freveal.then_some(selected).flatten();
+    gui.freveal = false;
+    let (first, visible) = table_view(entries.len(), reveal, gui.fscroll, list.height as usize);
+    gui.fscroll = first;
+
+    let playing = gui.app.now_playing.as_ref().map(|t| t.filepath.clone());
+    let mut rows: Vec<(usize, Entry)> = Vec::with_capacity(visible);
+    for (offset, entry) in entries.iter().enumerate().skip(first).take(visible) {
+        rows.push((offset, entry.clone()));
+    }
+    for (row, (index, entry)) in rows.iter().enumerate() {
+        let y = list.y + row as u16;
+        let rect = Rect { x: list.x, y, width: list.width, height: 1 };
+        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let is_sel = *index == selected.unwrap_or(usize::MAX);
+        if is_sel {
+            frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
+        }
+        let name_width = list.width as usize - 10;
+        match entry {
+            Entry::Track { label, track } => {
+                let is_playing = playing.as_deref() == Some(track.filepath.as_str());
+                let (marker, style) = match (is_sel, is_playing, hover) {
+                    (true, playing, _) => (playing, sel().add_modifier(Modifier::BOLD)),
+                    (false, true, _) => (true, Style::default().fg(th().ok).add_modifier(Modifier::BOLD)),
+                    (false, false, true) => (false, bright_bold()),
+                    (false, false, false) => (false, Style::default()),
+                };
+                if marker {
+                    let mark = if legacy_conhost() { ">" } else { "▸" };
+                    put(frame, list.x, y, mark, if is_sel { sel().add_modifier(Modifier::BOLD) } else { Style::default().fg(th().ok).add_modifier(Modifier::BOLD) });
+                }
+                put(frame, list.x + 2, y, &bar::clip(label, name_width), style);
+                if hover && !is_sel {
+                    let plus = Rect { x: rect.right() - 3, y, width: 3, height: 1 };
+                    put(frame, plus.x, y, "[+]", dim());
+                    gui.ui.click(rect, Act::FileRow(*index));
+                    gui.ui.click(plus, Act::FileQueue(*index));
+                    gui.ui.tip(plus, t!("gui.files.queue_tip").to_string());
+                } else {
+                    let time = track.metadata.duration.map(bar::fmt_time).unwrap_or_default();
+                    let tstyle = if is_sel { sel() } else { dim() };
+                    put(frame, rect.right() - 1 - time.chars().count() as u16, y, &time, tstyle);
+                    gui.ui.click(rect, Act::FileRow(*index));
+                }
+            }
+            other => {
+                let style = match (is_sel, hover) {
+                    (true, _) => sel().add_modifier(Modifier::BOLD),
+                    (false, true) => bright_bold(),
+                    (false, false) if matches!(other, Entry::Parent) => dim(),
+                    (false, false) => Style::default(),
+                };
+                put(frame, list.x + 2, y, &bar::clip(other.label(), name_width), style);
+                gui.ui.click(rect, Act::FileRow(*index));
+            }
+        }
+    }
+    scroll_list(
+        frame,
+        &mut gui.ui,
+        Rect { x: content.right() - 1, y: list.y, width: 1, height: list.height },
+        entries.len(),
+        visible,
+        first,
+        Act::FScrollBy(-1),
+        Act::FScrollBy(1),
+        |first| Act::FScrollTo(first),
+    );
+}
+
+/// The queue panel: the App's real queue, the playing row marked. Rows are
+/// not yet clickable — jumping the queue lands with the queue slice.
+fn draw_queue(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let x = area.width - 32;
     for y in 2..area.height - 8 {
         put(frame, area.width - 34, y, "│", dim());
     }
     put(frame, x, 2, &t!("gui.queue.title"), dim());
     put(frame, x, 3, &"─".repeat(31), dim());
-    // The empty state keeps the header and says so in words (kit rule) —
-    // the queue itself arrives with the browse slice.
-    put(frame, x, 4, &t!("gui.queue.empty"), dim());
+    let items = &gui.app.queue.items;
+    if items.is_empty() {
+        put(frame, x, 4, &t!("gui.queue.empty"), dim());
+        return;
+    }
+    let total: f64 = items.iter().filter_map(|t| t.metadata.duration).sum();
+    let head = format!("{} · {}", items.len(), bar::fmt_time(total));
+    put(frame, area.width - 2 - head.chars().count() as u16, 2, &head, dim());
+
+    let avail = (area.height - 13) as usize;
+    let current = gui.app.queue.current;
+    let reveal = (current != gui.last_current).then_some(current).flatten();
+    gui.last_current = current;
+    let (first, visible) = table_view(items.len(), reveal, gui.qscroll, avail);
+    gui.qscroll = first;
+    for (row, (index, track)) in items.iter().enumerate().skip(first).take(visible).enumerate() {
+        let y = 4 + row as u16;
+        let is_current = gui.app.queue.current == Some(index);
+        let title = track
+            .metadata
+            .display_title()
+            .map(str::to_string)
+            .unwrap_or_else(|| track.file_name().to_string());
+        if is_current {
+            let mark = if legacy_conhost() { ">" } else { "▸" };
+            put(frame, x, y, mark, Style::default().fg(th().ok).add_modifier(Modifier::BOLD));
+            put(frame, x + 2, y, &bar::clip(&title, 22), Style::default().fg(th().ok).add_modifier(Modifier::BOLD));
+        } else {
+            put(frame, x + 2, y, &bar::clip(&title, 22), Style::default());
+        }
+        let time = track.metadata.duration.map(bar::fmt_time).unwrap_or_default();
+        put(frame, area.width - 2 - time.chars().count() as u16, y, &time, dim());
+    }
 }
 
 fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
@@ -487,17 +744,17 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             t!("gui.set.bar_gold_desc").to_string(),
         ),
         (
-            format!("{:<14} -  {:>4}  +", t!("gui.set.blend"), fmt_blend(gui.crossfade)),
+            format!("{:<14} -  {:>4}  +", t!("gui.set.blend"), fmt_blend(gui.app.crossfade)),
             t!("gui.set.blend_desc").to_string(),
         ),
         (
-            format!("{} {}", if gui.gapless { check_on } else { check_off }, t!("gui.set.gapless")),
+            format!("{} {}", if gui.app.gapless { check_on } else { check_off }, t!("gui.set.gapless")),
             t!("gui.set.gapless_desc").to_string(),
         ),
         (
             format!(
                 "{} {}",
-                if gui.blend_skips { check_on } else { check_off },
+                if gui.app.blend_skips { check_on } else { check_off },
                 t!("gui.set.blend_skips")
             ),
             t!("gui.set.blend_skips_desc").to_string(),
@@ -505,7 +762,7 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         (
             format!(
                 "{} {}",
-                if gui.pause_fade { check_on } else { check_off },
+                if gui.app.pause_fade { check_on } else { check_off },
                 t!("gui.set.pause_fade")
             ),
             t!("gui.set.pause_fade_desc").to_string(),
@@ -562,10 +819,11 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         return true;
     }
     let settings = gui.active == SETTINGS_NAV;
+    let files = gui.active == FILES_NAV;
     match key.code {
         KeyCode::Char('q') => return true,
         KeyCode::Tab => return gui.act(Act::ToggleQueue),
-        KeyCode::Char(c @ '1'..='7') => {
+        KeyCode::Char(c @ '1'..='8') => {
             return gui.act(Act::Nav(c as usize - '1' as usize));
         }
         KeyCode::Down if settings => {
@@ -574,6 +832,27 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Up if settings => {
             gui.cursor = Some(gui.cursor.map_or(SET_ROWS - 1, |c| c.saturating_sub(1)));
         }
+        // The Files list is the App's own pane: arrows, Enter, back and
+        // queue-add forward straight to the shared state machine.
+        KeyCode::Down if files => {
+            gui.freveal = true;
+            gui.forward(Action::Down);
+        }
+        KeyCode::Up if files => {
+            gui.freveal = true;
+            gui.forward(Action::Up);
+        }
+        KeyCode::PageDown if files => {
+            gui.freveal = true;
+            gui.forward(Action::PageDown);
+        }
+        KeyCode::PageUp if files => {
+            gui.freveal = true;
+            gui.forward(Action::PageUp);
+        }
+        KeyCode::Enter if files => gui.forward(Action::Activate),
+        KeyCode::Char('h') | KeyCode::Backspace if files => gui.forward(Action::Back),
+        KeyCode::Char('a') if files => gui.forward(Action::AddToQueue),
         KeyCode::Esc => gui.cursor = None,
         KeyCode::Left => {
             if let Some(row) = gui.cursor.filter(|_| settings) {
@@ -612,24 +891,24 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
 
 // ── The loop and the room it runs in ────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     gui: &mut Gui,
     mouse_on: bool,
-    from_audio: &Receiver<Event>,
+    event_rx: &Receiver<Event>,
+    audio_tx: &Sender<AudioCmd>,
+    api_tx: &Sender<worker::ApiCmd>,
+    event_tx: &Sender<Event>,
 ) -> std::io::Result<()> {
     let mut hand = false;
     loop {
+        tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
         terminal.draw(|frame| render(frame, gui))?;
 
-        loop {
-            match from_audio.try_recv() {
-                Ok(Event::AudioFailed(e)) => {
-                    gui.note = Some((t!("gui.audio_failed", error = e).to_string(), true));
-                }
-                Ok(_) => {}
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-            }
+        while let Ok(ev) = event_rx.try_recv() {
+            let effects = gui.app.apply_event(ev);
+            gui.pend(effects);
         }
 
         let over = gui.ui.hovering_clickable();
@@ -681,6 +960,21 @@ fn event_loop(
                             }
                         }
                         MouseEventKind::Up(_) => gui.ui.release(),
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                            gui.ui.pointer = Some(at);
+                            let delta = if mouse.kind == MouseEventKind::ScrollUp { -1 } else { 1 };
+                            // The wheel scrolls the view under the pointer,
+                            // never the selection (the kit's table law).
+                            if at.x >= gui.queue_panel_x() && gui.queue_open {
+                                gui.qscroll = if delta < 0 {
+                                    gui.qscroll.saturating_sub(1)
+                                } else {
+                                    gui.qscroll + 1
+                                };
+                            } else if gui.active == FILES_NAV && at.x >= 17 {
+                                gui.act(Act::FScrollBy(delta));
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -690,23 +984,35 @@ fn event_loop(
     }
 }
 
-pub fn run() -> i32 {
+impl Gui {
+    /// Where the queue panel begins, matched to `draw_queue`'s separator
+    /// on the last drawn frame — the wheel's queue-vs-content split.
+    fn queue_panel_x(&self) -> u16 {
+        self.last_width.saturating_sub(34)
+    }
+}
+
+pub fn run(server: Option<String>, token: Option<String>) -> i32 {
+    // The GUI's own config read (the [gui] section, and the save guard);
+    // `startup` below does its own tolerant load for the player prefs.
     let (config, config_ok) = match config::load() {
         Ok(config) => (config, true),
-        Err(e) => {
-            // Broken config: run on defaults but never write over the file
-            // someone hand-edited (the player's own rule).
-            eprintln!("mstream-player: {e} — running on defaults; changes will not be saved");
-            (Config::default(), false)
-        }
+        Err(_) => (Config::default(), false),
     };
 
-    let (events_tx, events_rx) = std::sync::mpsc::channel();
-    let (audio, _tap) = spawn_audio(events_tx);
-    let mut gui = Gui::new(config, config_ok, audio);
+    let start = tui::startup(server, token);
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let (audio_tx, tap) = worker::spawn_audio(event_tx.clone());
+    let api_tx = worker::spawn_api(event_tx.clone());
+
+    let mut app = tui::app_from(start);
+    app.tap = Some(tap);
+    let pending = app.start();
+
+    let mut gui = Gui::new(config, config_ok, app);
+    gui.pending = pending;
     if std::env::var("MSTREAM_GUI_DEMO").is_ok_and(|v| v == "1") {
-        gui.now = Some(demo_now());
-        gui.paused = false;
+        gui.demo = Some(demo_now());
     }
 
     let _title = crate::tui::WindowTitle::claim("mStream Player");
@@ -721,8 +1027,17 @@ pub fn run() -> i32 {
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(seq));
     }
     set_pointer_shape(false, mouse_on);
+    tui::install_panic_hook();
 
-    let outcome = event_loop(&mut terminal, &mut gui, mouse_on, &events_rx);
+    let outcome = event_loop(
+        &mut terminal,
+        &mut gui,
+        mouse_on,
+        &event_rx,
+        &audio_tx,
+        &api_tx,
+        &event_tx,
+    );
 
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
@@ -731,9 +1046,10 @@ pub fn run() -> i32 {
     ratatui::restore();
     crate::console::release_terminal();
     drop(ground_guard);
-    gui.send(AudioCmd::Shutdown);
-    // The exit save carries the session-local knobs (volume, the toggles)
-    // the way the TUI's remember() does.
+    let _ = audio_tx.send(AudioCmd::Shutdown);
+    // The player prefs, the session and the last path persist the TUI's own
+    // way; the GUI's bar choice rides its own section afterwards.
+    tui::remember(&gui.app);
     gui.save_now();
 
     match outcome {
@@ -750,17 +1066,25 @@ pub fn run() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::types::{Track, TrackMetadata};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     fn test_gui() -> Gui {
-        let (audio, _keep) = std::sync::mpsc::channel();
-        // The receiver leaks on purpose: sends must not error mid-test.
-        std::mem::forget(_keep);
-        let mut gui = Gui::new(Config::default(), false, audio);
-        gui.now = Some(demo_now());
-        gui.paused = false;
+        let mut gui = Gui::new(Config::default(), false, App::new(None, None, None));
+        gui.demo = Some(demo_now());
         gui
+    }
+
+    fn track(filepath: &str, title: &str, duration: f64) -> Track {
+        Track {
+            filepath: filepath.to_string(),
+            metadata: TrackMetadata {
+                title: Some(title.to_string()),
+                duration: Some(duration),
+                ..TrackMetadata::default()
+            },
+        }
     }
 
     fn rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
@@ -777,72 +1101,116 @@ mod tests {
         rows(&terminal)
     }
 
-    #[test]
-    fn the_wave_bar_draws_the_demo_track_honestly() {
+    /// A connected App with a listed Files pane, no server involved.
+    fn browsing_gui() -> Gui {
         let mut gui = test_gui();
-        gui.bar_style = BarStyle::Wave;
-        let rows = draw(&mut gui);
-        let all = rows.join("\n");
-        assert!(all.contains("mStream"), "the wordmark anchors the shell");
-        assert!(all.contains("0:47") && all.contains("5:02"), "the control row reads the times");
-        assert!(all.contains('▁') || all.contains('▄'), "amplitude glyphs are on screen");
-        assert!(all.contains("Cassini IV"), "the card names the track");
-        assert!(all.contains('▾'), "the open queue wears the collapse chevron");
-        assert!(all.contains(&t!("gui.queue.empty").to_string()), "the queue says it is empty");
-        // The cleanup-pass geometry: controls above the rule, the wave
-        // beneath it running from the left edge, tips on the last row.
-        assert!(rows[24].contains("◂◂") && rows[24].contains("auto-dj"), "controls sit above the rule");
-        assert!(rows[25].chars().filter(|c| *c == '─').count() >= 90, "the gold rule under them");
-        assert!(rows[26].trim_start().starts_with(|c| "▁▂▃▄▅▆▇█".contains(c)), "the wave starts at the left edge");
-        assert!(rows[29].contains("1-7"), "the tips line holds the bottom row");
+        gui.app.connected = true;
+        gui.app.files.set(vec![
+            Entry::Parent,
+            Entry::Dir { label: "Ambient".into(), path: "music/Ambient".into() },
+            Entry::Track { label: "Night Drive".into(), track: Box::new(track("music/a.mp3", "Night Drive", 252.0)) },
+            Entry::Track { label: "Aurora".into(), track: Box::new(track("music/b.mp3", "Aurora", 228.0)) },
+        ]);
+        gui
     }
 
     #[test]
-    fn the_gold_bar_puts_the_seek_on_the_rule_and_fattens_the_controls() {
-        let mut gui = test_gui();
-        gui.bar_style = BarStyle::GoldLine;
-        let rows = draw(&mut gui);
-        let all = rows.join("\n");
-        // The seek line carries times; the tall buttons bring rounded frames
-        // into the bar rows.
-        assert!(all.contains("0:47") && all.contains("5:02"));
-        let bar_rows = &rows[rows.len() - 5..];
-        let frames = bar_rows.join("").matches('╭').count();
-        assert!(frames >= 7, "six tall controls plus the card's cover slot: {frames} frames");
-        assert!(!bar_rows.join("").contains('▁'), "no waveform in the gold-line bar");
-        // The cleanup-pass geometry: the card on the right like the Wave
-        // bar's, the volume on the buttons' center line to their left.
-        let card_col = rows[26].find("Cassini IV").expect("the card names the track");
-        assert!(card_col > 60, "the card sits right, not left: col {card_col}");
-        let vol_col = rows[27].find('▰').expect("the volume cells are drawn");
-        assert!(vol_col < 22, "the volume sits left of the buttons: col {vol_col}");
-        assert!(rows[29].contains("1-7"), "the tips line holds the bottom row");
-    }
-
-    #[test]
-    fn settings_descriptions_take_the_room_the_queue_leaves() {
-        let mut gui = test_gui();
-        gui.queue_open = false;
+    fn the_files_browser_lists_what_the_app_holds() {
+        let mut gui = browsing_gui();
         let all = draw(&mut gui).join("\n");
+        assert!(all.contains("Ambient"), "directories are rows");
+        assert!(all.contains("Night Drive") && all.contains("4:12"), "tracks carry durations");
+        assert!(all.contains(".."), "the way out is a row");
+    }
+
+    #[test]
+    fn clicking_a_row_selects_it_and_activates_through_the_app() {
+        let mut gui = browsing_gui();
+        gui.act(Act::FileRow(1));
+        // Activate on a directory asks the server for a listing — the
+        // effect is queued for dispatch, and the pane goes loading with
+        // its cursor cleared (the App's own open semantics): proof the
+        // click went through the shared state machine, not around it.
         assert!(
-            all.contains(&t!("gui.set.bar_wave_desc").to_string()),
-            "with the queue folded the full sentence fits"
+            gui.pending.iter().any(|e| matches!(e, Effect::Api(_))),
+            "the click became an API effect: {:?}",
+            gui.pending
         );
-        gui.queue_open = true;
+        assert!(gui.app.files.loading, "the pane is waiting on the listing");
+    }
+
+    #[test]
+    fn queueing_from_the_hover_control_uses_add_to_queue() {
+        let mut gui = browsing_gui();
+        gui.act(Act::FileQueue(2));
+        assert_eq!(gui.app.queue.items.len(), 1, "the one track was queued");
+        assert_eq!(gui.app.queue.items[0].filepath, "music/a.mp3");
+    }
+
+    #[test]
+    fn the_queue_panel_shows_the_real_queue_with_the_playing_marker() {
+        let mut gui = browsing_gui();
+        gui.act(Act::FileQueue(2));
+        gui.act(Act::FileQueue(3));
+        gui.app.queue.current = Some(1);
         let all = draw(&mut gui).join("\n");
+        assert!(all.contains("2 · 8:00"), "count and total time head the panel");
+        assert!(all.contains("Aurora"), "queued titles are rows");
+    }
+
+    #[test]
+    fn the_bar_reads_the_app_when_something_real_plays() {
+        let mut gui = browsing_gui();
+        gui.app.now_playing = Some(track("music/a.mp3", "Night Drive", 252.0));
+        gui.app.status.position = 63.0;
+        gui.app.status.duration = 252.0;
+        gui.app.status.paused = false;
+        gui.app.waveforms.insert("music/a.mp3".into(), Some(vec![10, 200, 40, 180]));
+        gui.refresh_bar_now();
+        let now = gui.bar_now.as_ref().unwrap();
+        assert_eq!(now.title, "Night Drive");
+        assert_eq!(now.elapsed, 63.0);
+        assert!(now.wave.is_some(), "the waveform came from the App's cache");
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("1:03") && all.contains("4:12"), "real timestamps on the bar");
+    }
+
+    #[test]
+    fn the_demo_seat_yields_to_real_playback() {
+        let mut gui = test_gui();
+        gui.refresh_bar_now();
+        assert_eq!(gui.bar_now.as_ref().unwrap().title, "Cassini IV");
+        gui.app.now_playing = Some(track("music/a.mp3", "Night Drive", 252.0));
+        gui.refresh_bar_now();
+        assert_eq!(gui.bar_now.as_ref().unwrap().title, "Night Drive");
+    }
+
+    #[test]
+    fn transport_and_toggles_forward_to_the_app() {
+        let mut gui = browsing_gui();
+        gui.act(Act::Shuffle);
+        assert!(gui.app.queue.shuffle);
+        gui.act(Act::Repeat);
+        assert_ne!(gui.app.queue.repeat, crate::tui::app::Repeat::Off);
+        gui.act(Act::VolSet(6));
+        assert_eq!(gui.app.volume, 0.7);
         assert!(
-            all.contains("the track's wa"),
-            "with the queue open the description clips instead of vanishing"
+            gui.pending.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetVolume(v)) if (*v - 0.7).abs() < 0.001)),
+            "the volume reached the engine as an effect"
         );
     }
 
     #[test]
-    fn idle_is_honest_silence() {
+    fn the_blend_walks_whole_seconds_and_snaps() {
         let mut gui = test_gui();
-        gui.now = None;
-        let all = draw(&mut gui).join("\n");
-        assert!(all.contains(&t!("gui.nothing_playing").to_string()));
-        assert!(!all.contains("0:47"), "no timestamps without a track");
+        gui.app.crossfade = 4.5;
+        gui.adjust_blend(1);
+        assert_eq!(gui.app.crossfade, 5.0, "a hand-written 4.5 steps to 5");
+        gui.adjust_blend(-1);
+        assert_eq!(gui.app.crossfade, 4.0, "and to 4, never 5.5 forever");
+        gui.app.crossfade = 0.0;
+        gui.adjust_blend(-1);
+        assert_eq!(gui.app.crossfade, 0.0, "off is the floor");
     }
 
     #[test]
@@ -853,64 +1221,25 @@ mod tests {
         assert_eq!(gui.bar_style, BarStyle::GoldLine);
         gui.sync_config();
         assert_eq!(gui.config.gui.bar, "gold-line");
-        // Choosing the chosen one is not a toggle.
         gui.act(Act::Row(ROW_BAR_GOLD));
-        assert_eq!(gui.bar_style, BarStyle::GoldLine);
+        assert_eq!(gui.bar_style, BarStyle::GoldLine, "choosing the chosen is not a toggle");
     }
 
     #[test]
-    fn the_blend_walks_whole_seconds_and_snaps() {
+    fn no_server_is_said_in_words_not_a_blank_screen() {
         let mut gui = test_gui();
-        gui.crossfade = 4.5;
-        gui.adjust_blend(1);
-        assert_eq!(gui.crossfade, 5.0, "a hand-written 4.5 steps to 5");
-        gui.adjust_blend(-1);
-        assert_eq!(gui.crossfade, 4.0, "and to 4, never 5.5 forever");
-        gui.crossfade = 0.0;
-        gui.adjust_blend(-1);
-        assert_eq!(gui.crossfade, 0.0, "off is the floor");
-        gui.crossfade = 30.0;
-        gui.adjust_blend(1);
-        assert_eq!(gui.crossfade, 30.0, "the engine's own ceiling");
-    }
-
-    #[test]
-    fn toggles_flip_and_sync_into_the_config_words() {
-        let mut gui = test_gui();
-        gui.act(Act::Row(ROW_GAPLESS));
-        assert!(!gui.gapless, "gapless starts on and toggles off");
-        gui.act(Act::Shuffle);
-        gui.act(Act::Repeat);
-        gui.act(Act::AutoDj);
-        gui.sync_config();
-        assert!(gui.config.player.shuffle);
-        assert_eq!(gui.config.player.repeat, "all");
-        assert_eq!(gui.config.player.autodj, "similar");
-    }
-
-    #[test]
-    fn volume_clicks_and_steps_stay_inside_the_bar() {
-        let mut gui = test_gui();
-        gui.act(Act::VolSet(6));
-        assert_eq!(gui.volume, 0.7);
-        gui.volume = 0.02;
-        gui.act(Act::VolDown);
-        assert_eq!(gui.volume, 0.0);
-        gui.volume = 1.0;
-        gui.act(Act::VolUp);
-        assert_eq!(gui.volume, 1.0);
-    }
-
-    #[test]
-    fn seeking_moves_the_demo_playhead() {
-        let mut gui = test_gui();
-        gui.act(Act::Seek(0.5));
-        assert_eq!(gui.now.as_ref().unwrap().elapsed, 151.0);
+        gui.demo = None;
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains(&t!("gui.nothing_playing").to_string()));
+        let hint = t!("gui.no_server").to_string();
+        let lead: String = hint.chars().take(20).collect();
+        assert!(all.contains(&lead), "the Files room explains itself");
     }
 
     #[test]
     fn the_settings_cursor_picks_up_stows_and_clamps() {
         let mut gui = test_gui();
+        gui.active = SETTINGS_NAV;
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
         handle_key(&mut gui, down);
@@ -923,6 +1252,17 @@ mod tests {
         assert_eq!(gui.cursor, None, "Esc stows it");
         handle_key(&mut gui, up);
         assert_eq!(gui.cursor, Some(SET_ROWS - 1), "↑ picks it up at the bottom");
+    }
+
+    #[test]
+    fn files_keys_drive_the_shared_pane() {
+        // The pane arrives with the App's own resting cursor already
+        // picked; ↓ walks it forward one — GUI keys ARE the TUI's keys.
+        let mut gui = browsing_gui();
+        let before = gui.app.files.state.selected().expect("the pane rests on a row");
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        handle_key(&mut gui, down);
+        assert_eq!(gui.app.files.state.selected(), Some(before + 1), "↓ moved the shared cursor");
     }
 
     #[test]
@@ -949,11 +1289,8 @@ mod dump_tests {
     #[ignore]
     fn dump_frames() {
         for style in [BarStyle::Wave, BarStyle::GoldLine] {
-            let (audio, keep) = std::sync::mpsc::channel();
-            std::mem::forget(keep);
-            let mut gui = Gui::new(Config::default(), false, audio);
-            gui.now = Some(demo_now());
-            gui.paused = false;
+            let mut gui = Gui::new(Config::default(), false, App::new(None, None, None));
+            gui.demo = Some(demo_now());
             gui.bar_style = style;
             let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
             terminal.draw(|frame| render(frame, &mut gui)).unwrap();

@@ -165,6 +165,7 @@ resize: "ターミナルをもう少し大きくしてください"
 
 gui:
   nav:
+    files: "ファイル"
     library: "ライブラリ"
     albums: "アルバム"
     artists: "アーティスト"
@@ -173,6 +174,11 @@ gui:
     playlists: "プレイリスト"
     search: "検索"
     settings: "設定"
+  files:
+    empty: "(ここには何もありません)"
+    items: "%{count} 件"
+    queue_tip: "キューに追加 — a"
+  no_server: "サーバーが未保存です — mstream-player setup を実行するか、mstream-player gui --server <アドレス>"
   coming: "%{name} はブラウズ編で登場 — 今日は設定だけが動きます。"
   nothing_playing: "(再生していません)"
   audio_failed: "オーディオ: %{error}"
@@ -208,5 +214,6 @@ gui:
     dj: "Auto-DJ — A"
     volume: "音量 — - と +"
   tips:
-    rows: "↑ ↓ 行 · ← → 調整 · Enter 切替 · Esc 完了 · 1-7 セクション · q 終了"
-    base: "1-7 セクション · Tab キュー · Space 再生/停止 · -/+ 音量 · q 終了"
+    files: "↑ ↓ 移動 · Enter 開く/再生 · h 戻る · a キューへ · Tab キュー · Space 再生/停止 · q 終了"
+    rows: "↑ ↓ 行 · ← → 調整 · Enter 切替 · Esc 完了 · 1-8 セクション · q 終了"
+    base: "1-8 セクション · Tab キュー · Space 再生/停止 · -/+ 音量 · q 終了"
