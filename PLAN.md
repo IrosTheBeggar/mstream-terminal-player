@@ -1504,10 +1504,17 @@ a LATER secondary screen (party view), Columns retired.
   crossfade group now reads/writes the App's own knobs. Mouse verbs that
   have no honest keymap name (the volume cells) set the field and emit the
   `Effect` directly — documented, funnel-free by design.
-- Next slices, in rough order: album art in the card/Now Playing (graphics
-  probe + the cache widening), queue clicks + Library/Search views, the
-  Connect screen for the no-session path, then e2e legs (fake server needs
-  player endpoints).
+- **Album art in the card ✅ 2026-08-28**: the graphics probe runs on boot
+  (after init, the player's ordering; Resize refreshes the encode cache);
+  the card paints real pixels where the terminal can and the ▀-mosaic
+  elsewhere, the empty slot frame yielding once the art is decoded. The
+  fetch was already free — `fetch_art` rides the App funnel. One cover per
+  frame, so the single-slot encode cache holds; widening it comes with the
+  Now Playing screen.
+- Next slices, in rough order: the Now Playing screen (big art; widen the
+  graphics cache), queue clicks + Library/Search views, the Connect screen
+  for the no-session path, then e2e legs (fake server needs player
+  endpoints).
 
 ## Smoke testing
 

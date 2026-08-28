@@ -515,6 +515,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     };
     put(frame, 1, area.height - 1, &tips, dim());
 
+    let has_art = playing_cover_ready(&gui.app);
     let view = BarView {
         now: gui.bar_now.as_ref(),
         paused: gui.bar_paused(),
@@ -523,8 +524,48 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         repeat: gui.app.queue.repeat != crate::tui::app::Repeat::Off,
         autodj: gui.app.autodj != AutoDjMode::Off,
         queue_open: gui.queue_open,
+        has_art,
     };
     bar::draw(frame, &mut gui.ui, area, gui.bar_style, &view);
+    if has_art {
+        draw_card_cover(frame, bar::cover_rect(area), &mut gui.app);
+    }
+}
+
+/// Whether the playing track's cover is decoded and waiting in the cache.
+fn playing_cover_ready(app: &App) -> bool {
+    app.now_playing
+        .as_ref()
+        .and_then(|track| track.metadata.album_art.as_deref())
+        .and_then(|file| app.art.get(file))
+        .is_some_and(|art| art.is_some())
+}
+
+/// The card's album art: real pixels through the graphics probe where the
+/// terminal can (kitty · sixel · iTerm2), the ▀-mosaic everywhere else —
+/// the same two paths the TUI's facts column walks. The kit's rule holds:
+/// pixels are for album art only, never chrome.
+fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App) {
+    // Field by field, the way the TUI spells it: the art cache's borrow
+    // must be visibly disjoint from the graphics and cover-pane fields
+    // taken mutably below.
+    let cover = app
+        .now_playing
+        .as_ref()
+        .and_then(|track| track.metadata.album_art.as_deref())
+        .and_then(|file| app.art.get(file))
+        .and_then(|art| art.as_ref());
+    let Some(cover) = cover else {
+        return;
+    };
+    if app.graphics.draw(frame, rect, cover) {
+        return;
+    }
+    let mut canvas = crate::tui::canvas::Canvas::new(rect);
+    if !canvas.is_empty() {
+        app.cover_pane.draw(&mut canvas, cover);
+        frame.render_widget(Paragraph::new(canvas.into_lines()), rect);
+    }
 }
 
 fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
@@ -978,6 +1019,9 @@ fn event_loop(
                         _ => {}
                     }
                 }
+                // A resized window changes the cell-to-pixel mapping the
+                // cover encodes against.
+                TermEvent::Resize(..) => gui.app.graphics.refresh(),
                 _ => {}
             }
         }
@@ -1021,6 +1065,10 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     let claim = theme::acquire_ground();
     let ground_guard = GroundGuard;
     let mut terminal = ratatui::init();
+    // After init, like the player: a terminal that answers the pixel probe
+    // strangely makes its mess on the alternate screen, which restore
+    // throws away.
+    gui.app.graphics = crate::tui::graphics::Graphics::probe();
     crate::console::claim_terminal();
     let mouse_on = execute!(std::io::stdout(), EnableMouseCapture).is_ok();
     if let Some(seq) = claim {
@@ -1173,6 +1221,36 @@ mod tests {
         assert!(now.wave.is_some(), "the waveform came from the App's cache");
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("1:03") && all.contains("4:12"), "real timestamps on the bar");
+    }
+
+    #[test]
+    fn the_card_wears_the_cover_once_it_is_decoded() {
+        let mut gui = browsing_gui();
+        let mut playing = track("music/a.mp3", "Night Drive", 252.0);
+        playing.metadata.album_art = Some("aa.jpeg".into());
+        gui.app.now_playing = Some(playing);
+
+        // Nothing fetched yet: the empty slot frame holds the cells.
+        let rows = draw(&mut gui);
+        let slot_row: String = rows[26].chars().skip(68).take(6).collect();
+        assert!(slot_row.contains('╭'), "the slot frame waits for the art: {slot_row:?}");
+
+        // A real decode, so the art carries what both draw paths want; the
+        // TestBackend has no pixel protocol, so the ▀-mosaic is the path.
+        let png = image::RgbImage::from_pixel(64, 64, image::Rgb([200, 40, 40]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        png.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let art = crate::tui::art::decode(&bytes.into_inner()).unwrap();
+        gui.app.art.insert("aa.jpeg".into(), Some(art));
+
+        let rows = draw(&mut gui);
+        let cover_row: String = rows[26].chars().skip(68).take(6).collect();
+        assert!(!cover_row.contains('╭'), "the frame yields to the picture: {cover_row:?}");
+        // A solid test image mosaics as full blocks; a busy one mixes ▀.
+        assert!(
+            cover_row.chars().all(|c| "█▀▄".contains(c)),
+            "the mosaic holds the cells: {cover_row:?}"
+        );
     }
 
     #[test]
