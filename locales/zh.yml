@@ -179,6 +179,15 @@ gui:
     items: "%{count} 项"
     queue_tip: "加入队列 — a"
   no_server: "未保存服务器 — 请运行 mstream-player setup，或：mstream-player gui --server <地址>"
+  class:
+    artists: "艺术家"
+    albums: "专辑"
+    titles: "标题"
+    files: "文件"
+    lyrics: "歌词"
+  search:
+    placeholder: "(输入以搜索)"
+    edit_tip: "编辑搜索 — /"
   coming: "%{name} 将随浏览部分一起到来 — 今天可用的是设置。"
   nothing_playing: "(没有播放内容)"
   audio_failed: "音频：%{error}"
@@ -214,6 +223,8 @@ gui:
     dj: "Auto-DJ — A"
     volume: "音量 — - 和 +"
   tips:
+    search_edit: "输入 · Enter 搜索 · Esc 完成"
+    search: "↑ ↓ 移动 · Enter 打开/播放 · h 返回 · ← → 类别 · t 切换 · / 编辑 · a 入队 · q 退出"
     files: "↑ ↓ 移动 · Enter 打开/播放 · h 返回 · a 入队 · Tab 队列 · Space 播放/暂停 · q 退出"
     rows: "↑ ↓ 行 · ← → 调整 · Enter 切换 · Esc 完成 · 1-8 版块 · q 退出"
     base: "1-8 版块 · Tab 队列 · Space 播放/暂停 · -/+ 音量 · q 退出"

@@ -179,6 +179,15 @@ gui:
     items: "%{count} 件"
     queue_tip: "キューに追加 — a"
   no_server: "サーバーが未保存です — mstream-player setup を実行するか、mstream-player gui --server <アドレス>"
+  class:
+    artists: "アーティスト"
+    albums: "アルバム"
+    titles: "タイトル"
+    files: "ファイル"
+    lyrics: "歌詞"
+  search:
+    placeholder: "(入力して検索)"
+    edit_tip: "検索を編集 — /"
   coming: "%{name} はブラウズ編で登場 — 今日は設定だけが動きます。"
   nothing_playing: "(再生していません)"
   audio_failed: "オーディオ: %{error}"
@@ -214,6 +223,8 @@ gui:
     dj: "Auto-DJ — A"
     volume: "音量 — - と +"
   tips:
+    search_edit: "入力 · Enter 検索 · Esc 完了"
+    search: "↑ ↓ 移動 · Enter 開く/再生 · h 戻る · ← → 分類 · t 切替 · / 編集 · a キューへ · q 終了"
     files: "↑ ↓ 移動 · Enter 開く/再生 · h 戻る · a キューへ · Tab キュー · Space 再生/停止 · q 終了"
     rows: "↑ ↓ 行 · ← → 調整 · Enter 切替 · Esc 完了 · 1-8 セクション · q 終了"
     base: "1-8 セクション · Tab キュー · Space 再生/停止 · -/+ 音量 · q 終了"

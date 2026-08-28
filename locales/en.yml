@@ -179,6 +179,15 @@ gui:
     items: "%{count} items"
     queue_tip: "Add to the queue — a"
   no_server: "no server saved — run mstream-player setup, or: mstream-player gui --server <address>"
+  class:
+    artists: "Artists"
+    albums: "Albums"
+    titles: "Titles"
+    files: "Files"
+    lyrics: "Lyrics"
+  search:
+    placeholder: "(type to search)"
+    edit_tip: "Edit the search — /"
   coming: "%{name} arrives with the browse slice — Settings is the working room today."
   nothing_playing: "(nothing playing)"
   audio_failed: "audio: %{error}"
@@ -214,6 +223,8 @@ gui:
     dj: "Auto-DJ — A"
     volume: "Volume — - and +"
   tips:
+    search_edit: "type · Enter search · Esc done"
+    search: "↑ ↓ move · Enter open/play · h back · ← → class · t toggle · / edit · a queue · q quit"
     files: "↑ ↓ move · Enter open/play · h back · a queue · Tab queue panel · Space play/pause · q quit"
     rows: "↑ ↓ rows · ← → adjust · Enter toggle · Esc done · 1-8 sections · q quit"
     base: "1-8 sections · Tab queue · Space play/pause · -/+ volume · q quit"

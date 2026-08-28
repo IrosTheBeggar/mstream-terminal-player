@@ -1511,10 +1511,21 @@ a LATER secondary screen (party view), Columns retired.
   fetch was already free — `fetch_art` rides the App funnel. One cover per
   frame, so the single-slot encode cache holds; widening it comes with the
   Now Playing screen.
+- **Search ✅ 2026-08-28**: `/` (or the nav item) opens the kit query card,
+  which owns the keyboard while it takes text and drives the App's own
+  query via `StartSearch`/`Input`/`Submit` — so `search_submitted`'s
+  stale-reply guard keeps working. Five class chips (Artists · Albums ·
+  Titles · Files · Lyrics) are the search params: state-colored toggle
+  words filtering the class MENU (the API answers every class in one
+  reply, so the choice is instant); ←/→ + `t` is the keyboard path. The
+  results are the App's Search pane rendered by the same row renderer as
+  Files (`draw_pane_rows`, with the dim detail column for drill rows) —
+  class → listing → artist → albums all drill through the shared funnel,
+  and clicks map through the filter to true pane indexes.
 - Next slices, in rough order: the Now Playing screen (big art; widen the
-  graphics cache), queue clicks + Library/Search views, the Connect screen
-  for the no-session path, then e2e legs (fake server needs player
-  endpoints).
+  graphics cache), queue clicks + the Library tab views (Albums/Artists/
+  Genres/Recent/Playlists), the Connect screen for the no-session path,
+  then e2e legs (fake server needs player endpoints).
 
 ## Smoke testing
 

@@ -179,6 +179,15 @@ gui:
     items: "%{count} éléments"
     queue_tip: "Ajouter à la file — a"
   no_server: "aucun serveur enregistré — lancez mstream-player setup, ou : mstream-player gui --server <adresse>"
+  class:
+    artists: "Artistes"
+    albums: "Albums"
+    titles: "Titres"
+    files: "Fichiers"
+    lyrics: "Paroles"
+  search:
+    placeholder: "(tapez pour chercher)"
+    edit_tip: "Modifier la recherche — /"
   coming: "%{name} arrive avec la partie navigation — aujourd'hui, Réglages est la pièce qui fonctionne."
   nothing_playing: "(rien en lecture)"
   audio_failed: "audio : %{error}"
@@ -214,6 +223,8 @@ gui:
     dj: "Auto-DJ — A"
     volume: "Volume — - et +"
   tips:
+    search_edit: "tapez · Enter chercher · Esc fini"
+    search: "↑ ↓ déplacer · Enter ouvrir/lire · h retour · ← → classe · t basculer · / modifier · a en file · q quitter"
     files: "↑ ↓ déplacer · Enter ouvrir/lire · h retour · a en file · Tab file · Space lecture · q quitter"
     rows: "↑ ↓ lignes · ← → régler · Enter basculer · Esc fini · 1-8 sections · q quitter"
     base: "1-8 sections · Tab file · Space lecture · -/+ volume · q quitter"

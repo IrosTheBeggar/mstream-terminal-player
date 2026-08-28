@@ -179,6 +179,15 @@ gui:
     items: "%{count} itens"
     queue_tip: "Adicionar à fila — a"
   no_server: "nenhum servidor salvo — rode mstream-player setup, ou: mstream-player gui --server <endereço>"
+  class:
+    artists: "Artistas"
+    albums: "Álbuns"
+    titles: "Títulos"
+    files: "Arquivos"
+    lyrics: "Letras"
+  search:
+    placeholder: "(digite para buscar)"
+    edit_tip: "Editar a busca — /"
   coming: "%{name} chega com a parte de navegação — hoje Ajustes é a sala que funciona."
   nothing_playing: "(nada tocando)"
   audio_failed: "áudio: %{error}"
@@ -214,6 +223,8 @@ gui:
     dj: "Auto-DJ — A"
     volume: "Volume — - e +"
   tips:
+    search_edit: "digite · Enter buscar · Esc pronto"
+    search: "↑ ↓ mover · Enter abrir/tocar · h voltar · ← → classe · t alternar · / editar · a para a fila · q sair"
     files: "↑ ↓ mover · Enter abrir/tocar · h voltar · a para a fila · Tab fila · Space reproduzir · q sair"
     rows: "↑ ↓ linhas · ← → ajustar · Enter alternar · Esc pronto · 1-8 seções · q sair"
     base: "1-8 seções · Tab fila · Space reproduzir · -/+ volume · q sair"

@@ -179,6 +179,15 @@ gui:
     items: "%{count} элементов"
     queue_tip: "В очередь — a"
   no_server: "сервер не сохранён — запустите mstream-player setup, или: mstream-player gui --server <адрес>"
+  class:
+    artists: "Артисты"
+    albums: "Альбомы"
+    titles: "Названия"
+    files: "Файлы"
+    lyrics: "Тексты"
+  search:
+    placeholder: "(введите запрос)"
+    edit_tip: "Изменить поиск — /"
   coming: "%{name} появится с частью обзора — сегодня работает комната Настройки."
   nothing_playing: "(ничего не играет)"
   audio_failed: "аудио: %{error}"
@@ -214,6 +223,8 @@ gui:
     dj: "Auto-DJ — A"
     volume: "Громкость — - и +"
   tips:
+    search_edit: "ввод · Enter искать · Esc готово"
+    search: "↑ ↓ перемещение · Enter открыть/играть · h назад · ← → класс · t переключить · / изменить · a в очередь · q выход"
     files: "↑ ↓ перемещение · Enter открыть/играть · h назад · a в очередь · Tab очередь · Space пуск/пауза · q выход"
     rows: "↑ ↓ строки · ← → изменить · Enter переключить · Esc готово · 1-8 разделы · q выход"
     base: "1-8 разделы · Tab очередь · Space пуск/пауза · -/+ громкость · q выход"
