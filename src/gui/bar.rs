@@ -78,6 +78,10 @@ pub(super) struct BarView<'a> {
     pub repeat: bool,
     pub autodj: bool,
     pub queue_open: bool,
+    /// The playing track's cover is decoded and ready: the card skips its
+    /// empty slot frame and the screen paints the art over those cells
+    /// after the bar (pixels where the terminal can, the mosaic elsewhere).
+    pub has_art: bool,
 }
 
 // ── Pure geometry ───────────────────────────────────────────────────────────
@@ -426,6 +430,12 @@ pub(super) fn draw(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, style: B
     }
 }
 
+/// The card's cover cells — where the screen paints the album art after
+/// the bar. Identical in both styles.
+pub(super) fn cover_rect(area: Rect) -> Rect {
+    Rect { x: area.width - 32, y: area.height - BAR_ROWS + 2, width: 6, height: 3 }
+}
+
 fn gold_rule(frame: &mut Frame, y: u16, width: u16) {
     put(frame, 0, y, &"─".repeat(width as usize), Style::default().fg(th().gold));
 }
@@ -466,7 +476,11 @@ fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &Ba
     let x = area.width - 32;
     let rect = Rect { x, y, width: 31, height: 3 };
     let hover = hovered(s, rect);
-    cover_slot(frame, x, y, 6, 3);
+    // With art in hand the frame would only bleed around the picture's
+    // edges — the screen paints the cover over these cells after the bar.
+    if !v.has_art {
+        cover_slot(frame, x, y, 6, 3);
+    }
     let (title_style, sub_style) = card_styles(hover, v.now.is_some());
     match v.now {
         Some(now) => {
