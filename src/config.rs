@@ -78,6 +78,9 @@ pub struct Config {
     /// `[mouse]` — the wheel and clicking the progress bar.
     #[serde(default, skip_serializing_if = "MousePrefs::is_default")]
     pub mouse: MousePrefs,
+    /// `[gui]` — the GUI player surface's own choices (`mstream-player gui`).
+    #[serde(default, skip_serializing_if = "GuiPrefs::is_default")]
+    pub gui: GuiPrefs,
     /// `[keys]` — action name to the keys that should fire it. Empty means
     /// the built-in bindings, and only the actions named here are changed.
     /// See `mstream-player keys` for the full list in this format.
@@ -104,6 +107,7 @@ impl Default for Config {
             theme: ThemePrefs::default(),
             display: DisplayPrefs::default(),
             mouse: MousePrefs::default(),
+            gui: GuiPrefs::default(),
             keys: std::collections::BTreeMap::new(),
             servers: Vec::new(),
             extra: Keep::new(),
@@ -394,6 +398,31 @@ impl Default for MousePrefs {
 impl MousePrefs {
     fn is_default(&self) -> bool {
         *self == MousePrefs::default()
+    }
+}
+
+/// `[gui]`. The GUI player surface (`mstream-player gui`) keeps its own
+/// choices here, apart from the classic TUI's — the two are different rooms.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuiPrefs {
+    /// Which bottom bar the player wears: `wave` (the waveform with the
+    /// controls beneath it) or `gold-line` (the gold rule is the seek bar,
+    /// tall controls under it). Anything unrecognized falls back to `wave`.
+    pub bar: String,
+    #[serde(flatten)]
+    pub extra: Keep,
+}
+
+impl Default for GuiPrefs {
+    fn default() -> Self {
+        GuiPrefs { bar: "wave".to_string(), extra: Keep::new() }
+    }
+}
+
+impl GuiPrefs {
+    fn is_default(&self) -> bool {
+        *self == GuiPrefs::default()
     }
 }
 
