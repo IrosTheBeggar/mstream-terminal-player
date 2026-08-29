@@ -18,7 +18,7 @@
 //! opens outputs and answers whether the one in hand is still the right one.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
 use rodio::mixer::Mixer;
@@ -102,6 +102,17 @@ fn default_identity() -> Option<String> {
     identity(&cpal::default_host().default_output_device()?)
 }
 
+/// How many backend-specific stream errors one stream may report before
+/// they count as the device dying. The variant has no single meaning —
+/// ALSA reports a vanished raw hw device this way (`DeviceNotAvailable`
+/// is not in its vocabulary; the desktop path never needs it because
+/// PipeWire and PulseAudio move streams themselves), and every host uses
+/// it for recoverable hiccups too. One is noise; a run of them is a
+/// stream that is not coming back, and the rebuild that answers is
+/// self-limiting either way — it reopens in place and the count starts
+/// over with the fresh stream.
+const BACKEND_ERROR_LIMIT: u32 = 5;
+
 /// Open an output on the current default device, walking the other
 /// devices if the default is missing or will not open — the same walk
 /// rodio's `open_default_sink` makes, rebuilt here because that
@@ -140,6 +151,7 @@ pub(crate) fn open() -> Result<Output, String> {
         let name = name_of(&device);
         let gone = Arc::new(AtomicBool::new(false));
         let flag = gone.clone();
+        let errors = Arc::new(AtomicU32::new(0));
         let heard_on = name.clone();
         let opened = DeviceSinkBuilder::from_device(device)
             .map_err(|e| e.to_string())
@@ -154,11 +166,18 @@ pub(crate) fn open() -> Result<Output, String> {
                             | cpal::StreamError::StreamInvalidated => {
                                 flag.store(true, Ordering::Relaxed);
                             }
-                            // An underrun hurts the ear once and heals; the
-                            // backend grab-bag is not actionable from here.
-                            // Both are on the record above.
-                            cpal::StreamError::BufferUnderrun
-                            | cpal::StreamError::BackendSpecific { .. } => {}
+                            // An underrun hurts the ear once and heals.
+                            cpal::StreamError::BufferUnderrun => {}
+                            // The grab-bag: log-only until the run of them
+                            // says the stream is gone (raw-ALSA unplug's
+                            // shape — see BACKEND_ERROR_LIMIT).
+                            cpal::StreamError::BackendSpecific { .. } => {
+                                if errors.fetch_add(1, Ordering::Relaxed) + 1
+                                    >= BACKEND_ERROR_LIMIT
+                                {
+                                    flag.store(true, Ordering::Relaxed);
+                                }
+                            }
                         }
                     })
                     .open_sink_or_fallback()
