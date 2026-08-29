@@ -1557,9 +1557,47 @@ a LATER secondary screen (party view), Columns retired.
   Sign-in-needed answers (switch, expired session, fresh tunnel) open
   the same form in its funnel-riding flavour. The GUI now also renders
   the kit's dwell tooltips it had only been registering.
-- Next slices, in rough order: the Now Playing screen (big art; widen the
-  graphics cache), queue clicks + the Library tab views (Albums/Artists/
-  Genres/Recent/Playlists), then e2e legs (fake server needs player
+- **Albums wall ✅ 2026-08-29**: every album's cover, name and year in a
+  grid, paged with ◂ ▸ arrows (and ←/→, PgUp/PgDn, the wheel) instead of
+  scrolling — the webapp's album wall. Feasibility was measured first
+  (the tests at the bottom of `gui/albums.rs` keep the numbers honest):
+  a page of mosaic covers costs ~10 ms a frame with a `CoverPane` per
+  slot, and the pixel path forks `Graphics` per slot with encodes PACED
+  — each frame spends at most 40 ms starting encodes, the mosaic stands
+  in, and a page upgrades over a few frames (debug-build sixel: worst
+  frame 137 ms where the unpaced page cost two full seconds). Covers
+  ride the App's own art claim (`fetch_art_file`, the playing cover's
+  discipline — page-at-a-time, so the wholesale cap wipe self-heals);
+  the list itself is the Library drill's Albums node, kept whole on
+  `App.albums` beside the pane rows (the GUI door is
+  `open_library_node`, seating the drill so the stale-reply guard keeps
+  working). Clicking an album drills through the same funnel to its
+  track list — `draw_pane_rows`, durations, hover [+], play on Enter —
+  and the Parent row or `h` walks back, refetching the wall the drill's
+  own way. Cell-exact: cover 12×6 (square at 10×20), name, `year ·
+  artist` dim beneath.
+  Performance pass (same day): `draw_pane_rows` takes BORROWED rows (the
+  per-frame clone of every visible entry — and Search cloned its whole
+  pane twice a frame — was drawing time spent on nothing); the wall
+  draws through split field borrows instead of cloning a page of albums
+  and their decoded covers (~50 KB of pixels apiece, ten times a
+  second); the art-fetch scan allocates only for files still missing;
+  `Graphics::refresh_font` re-reads the window-size ioctl at most every
+  500 ms (one cover a frame was its design point — the wall made it
+  fifteen syscalls a frame); and a frame whose encode budget turned
+  slots away marks the Gui HOT, shortening the event loop's idle wait to
+  10 ms so a page turn finishes upgrading in real tens of milliseconds
+  instead of one encode per 100 ms poll tick.
+- **Bar focused ✅ 2026-08-29**: the waveform bar is retired — the gold
+  line is THE bar. With it went the `[gui] bar` config key (a leftover
+  rides `GuiPrefs.extra` harmlessly), the Settings radio pair (PLAYBACK
+  leads the room now), `Now.wave` and the wave/reflection renderer. The
+  bar's dwell tooltips went too: the tips line already names every key,
+  and a bar is hovered too often for tooltips to earn their draw.
+- Next slices, in rough order: the Now Playing screen (big art; the
+  per-slot fork pattern from the wall applies), queue clicks + the rest
+  of the Library tab views (Artists/Genres/Recent/Playlists — the wall's
+  drill door generalizes), then e2e legs (fake server needs player
   endpoints).
 
 ## Smoke testing

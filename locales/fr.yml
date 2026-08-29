@@ -196,8 +196,10 @@ gui:
   queue:
     title: "FILE"
     empty: "(rien dans la file)"
-    hide_tip: "Masquer la file — Tab"
-    show_tip: "Afficher la file — Tab"
+  alb:
+    loading: "chargement des albums…"
+    empty: "(aucun album dans la bibliothèque)"
+    count: "%{count} albums"
   srv:
     add: "Ajouter un serveur"
     title: "SERVEURS"
@@ -255,11 +257,6 @@ gui:
     qr_note: "Scannez avec l'app mStream pour vous connecter de partout."
     qr_enlarge: "agrandissez la fenêtre pour afficher le code — ou copiez-le dessous"
   set:
-    bar_group: "BARRE DU BAS"
-    bar_wave: "Forme d'onde"
-    bar_wave_desc: "l'onde du morceau, commandes dessous"
-    bar_gold: "Ligne dorée"
-    bar_gold_desc: "la ligne est la barre de lecture, gros boutons"
     playback: "LECTURE"
     blend: "Fondu"
     blend_off: "non"
@@ -271,14 +268,6 @@ gui:
     pause_fade: "Fondu de pause"
     pause_fade_desc: "pause et reprise en rampe courte"
     servers_group: "SERVEURS"
-  tip:
-    play: "Lecture/pause — Space"
-    prev: "Précédent — p"
-    next: "Suivant — n"
-    shuffle: "Aléatoire — s"
-    repeat: "Répéter — r"
-    dj: "Auto-DJ — A"
-    volume: "Volume — - et +"
   tips:
     search_edit: "tapez · Enter chercher · Esc fini"
     search: "↑ ↓ déplacer · Enter ouvrir/lire · h retour · ← → classe · t basculer · / modifier · a en file · q quitter"
@@ -287,3 +276,5 @@ gui:
     base: "1-8 sections · Tab file · Space lecture · -/+ volume · q quitter"
     servers: "↑ ↓ lignes · Enter changer · e modifier · d défaut · p appairer · x retirer · Esc retour"
     form: "Tab champs · Space cocher · Enter connecter · Esc retour"
+    albums: "← → page · ↑ ↓ choisir · Enter ouvrir · Tab file · q quitter"
+    album_tracks: "↑ ↓ déplacer · Enter lire · h retour · a en file · Tab file · q quitter"

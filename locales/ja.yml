@@ -196,8 +196,10 @@ gui:
   queue:
     title: "キュー"
     empty: "(まだ何もありません)"
-    hide_tip: "キューを隠す — Tab"
-    show_tip: "キューを表示 — Tab"
+  alb:
+    loading: "アルバムを読み込み中…"
+    empty: "（ライブラリにアルバムがありません）"
+    count: "%{count} 枚のアルバム"
   srv:
     add: "サーバーを追加"
     title: "サーバー"
@@ -255,11 +257,6 @@ gui:
     qr_note: "mStream アプリでスキャンすると、どこからでも接続できます。"
     qr_enlarge: "コードが収まるようウィンドウを広げてください — 下のコードのコピーでも可"
   set:
-    bar_group: "下部バー"
-    bar_wave: "波形"
-    bar_wave_desc: "曲の波形、下に操作"
-    bar_gold: "ゴールドライン"
-    bar_gold_desc: "金の線がシークバー、大きなボタン"
     playback: "再生"
     blend: "クロスフェード"
     blend_off: "オフ"
@@ -271,14 +268,6 @@ gui:
     pause_fade: "ポーズフェード"
     pause_fade_desc: "一時停止と再開を短くフェード"
     servers_group: "サーバー"
-  tip:
-    play: "再生/一時停止 — Space"
-    prev: "前へ — p"
-    next: "次へ — n"
-    shuffle: "シャッフル — s"
-    repeat: "リピート — r"
-    dj: "Auto-DJ — A"
-    volume: "音量 — - と +"
   tips:
     search_edit: "入力 · Enter 検索 · Esc 完了"
     search: "↑ ↓ 移動 · Enter 開く/再生 · h 戻る · ← → 分類 · t 切替 · / 編集 · a キューへ · q 終了"
@@ -287,3 +276,5 @@ gui:
     base: "1-8 セクション · Tab キュー · Space 再生/停止 · -/+ 音量 · q 終了"
     servers: "↑ ↓ 行 · Enter 切替 · e 編集 · d 既定 · p 連携 · x 削除 · Esc 戻る"
     form: "Tab 項目 · Space 切替 · Enter 接続 · Esc 戻る"
+    albums: "← → ページ · ↑ ↓ 選択 · Enter 開く · Tab キュー · q 終了"
+    album_tracks: "↑ ↓ 移動 · Enter 再生 · h 戻る · a キューへ · Tab キュー · q 終了"

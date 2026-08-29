@@ -196,8 +196,10 @@ gui:
   queue:
     title: "队列"
     empty: "(队列为空)"
-    hide_tip: "隐藏队列 — Tab"
-    show_tip: "显示队列 — Tab"
+  alb:
+    loading: "正在加载专辑…"
+    empty: "（曲库中没有专辑）"
+    count: "%{count} 张专辑"
   srv:
     add: "添加服务器"
     title: "服务器"
@@ -255,11 +257,6 @@ gui:
     qr_note: "用 mStream 应用扫码，即可随时随地连接。"
     qr_enlarge: "请放大窗口以容纳二维码 — 或复制下方代码"
   set:
-    bar_group: "底栏"
-    bar_wave: "波形"
-    bar_wave_desc: "曲目波形，控件在下方"
-    bar_gold: "金线"
-    bar_gold_desc: "金线即进度条，大按钮"
     playback: "播放"
     blend: "淡入淡出"
     blend_off: "关"
@@ -271,14 +268,6 @@ gui:
     pause_fade: "暂停淡出"
     pause_fade_desc: "暂停与恢复走短渐变"
     servers_group: "服务器"
-  tip:
-    play: "播放/暂停 — Space"
-    prev: "上一首 — p"
-    next: "下一首 — n"
-    shuffle: "随机 — s"
-    repeat: "循环 — r"
-    dj: "Auto-DJ — A"
-    volume: "音量 — - 和 +"
   tips:
     search_edit: "输入 · Enter 搜索 · Esc 完成"
     search: "↑ ↓ 移动 · Enter 打开/播放 · h 返回 · ← → 类别 · t 切换 · / 编辑 · a 入队 · q 退出"
@@ -287,3 +276,5 @@ gui:
     base: "1-8 版块 · Tab 队列 · Space 播放/暂停 · -/+ 音量 · q 退出"
     servers: "↑ ↓ 行 · Enter 切换 · e 编辑 · d 默认 · p 配对 · x 移除 · Esc 返回"
     form: "Tab 字段 · Space 勾选 · Enter 连接 · Esc 返回"
+    albums: "← → 翻页 · ↑ ↓ 选择 · Enter 打开 · Tab 队列 · q 退出"
+    album_tracks: "↑ ↓ 移动 · Enter 播放 · h 返回 · a 入队 · Tab 队列 · q 退出"

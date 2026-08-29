@@ -1071,6 +1071,11 @@ pub struct App {
     /// Breadcrumb through the tag hierarchy; the last element is the view on
     /// screen. Always non-empty once the Library tab has been opened.
     pub library_stack: Drill<LibraryNode>,
+    /// The albums reply, kept whole beside the pane's rows: the GUI's grid
+    /// wants each album's art file and year, which the row labels flatten
+    /// away. Same bargain as `search_hits`. Cleared with the session — the
+    /// list belongs to one server.
+    pub albums: Option<Vec<crate::api::types::Album>>,
     /// The whole search reply, kept rather than flattened. Every class comes
     /// back in one response, so moving between them costs nothing.
     pub search_hits: Option<Box<crate::api::types::SearchResults>>,
@@ -1298,6 +1303,7 @@ impl App {
             files: Pane::default(),
             library: Pane::default(),
             library_stack: Drill::new(LibraryNode::Root),
+            albums: None,
             search_hits: None,
             search_stack: Drill::new(SearchNode::Root),
             queue_column: false,
@@ -3247,14 +3253,38 @@ impl App {
     /// skipping n-n-n through one album costs one request, not five.
     fn fetch_art(&mut self) -> Option<Effect> {
         let file = self.now_playing.as_ref()?.metadata.album_art.clone()?;
-        if self.art.contains_key(&file) {
+        self.fetch_art_file(&file)
+    }
+
+    /// Ask for one cover by the art file that names it, unless the cache
+    /// already holds it — or the placeholder a previous ask left, which is
+    /// what stops the same cover being asked for twice. The GUI's album
+    /// grid asks through here so a page of covers rides the same claim
+    /// discipline as the playing track's.
+    pub(crate) fn fetch_art_file(&mut self, file: &str) -> Option<Effect> {
+        if self.art.contains_key(file) {
             return None;
         }
         if self.art.len() >= ART_CACHE_CAP {
             self.art.clear();
         }
-        self.art.insert(file.clone(), None);
-        Some(Effect::Api(ApiCmd::AlbumArt { file }))
+        self.art.insert(file.to_string(), None);
+        Some(Effect::Api(ApiCmd::AlbumArt { file: file.to_string() }))
+    }
+
+    /// Aim the Library drill at `node` and ask for it — the GUI's direct
+    /// door to a library view its nav names outright (the TUI reaches the
+    /// same nodes by drilling from the mode menu). `fresh` restarts the
+    /// trail from the root: a nav click means "the Albums view", not one
+    /// more level on whatever walk came before.
+    pub(crate) fn open_library_node(&mut self, node: LibraryNode, fresh: bool) -> Vec<Effect> {
+        self.tab = Tab::Library;
+        if fresh {
+            self.library_stack = Drill::new(LibraryNode::Root);
+        }
+        self.library_stack.enter(node.clone());
+        self.library.set(Vec::new());
+        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Library })]
     }
 
     /// Ask for a track's shape, unless the cache already holds it — or the
@@ -3559,11 +3589,17 @@ impl App {
                 // Which drill answers depends on who asked — the Search tab
                 // files library nodes under its own trail.
                 let fresh = match dest {
-                    Tab::Search => self.search_stack.wants(&SearchNode::Library(node)),
+                    Tab::Search => self.search_stack.wants(&SearchNode::Library(node.clone())),
                     _ => self.library_stack.wants(&node),
                 };
                 if !fresh {
                     return Vec::new();
+                }
+                // The grid's copy, kept whole — see the field's note.
+                if let (LibraryNode::Albums, Tab::Library, LibraryData::Albums(albums)) =
+                    (&node, dest, &data)
+                {
+                    self.albums = Some(albums.clone());
                 }
                 self.pane_for_mut(dest).set(entries_from_library(data));
                 self.message = None;

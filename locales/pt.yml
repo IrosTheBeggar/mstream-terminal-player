@@ -196,8 +196,10 @@ gui:
   queue:
     title: "FILA"
     empty: "(nada na fila)"
-    hide_tip: "Ocultar a fila — Tab"
-    show_tip: "Mostrar a fila — Tab"
+  alb:
+    loading: "carregando álbuns…"
+    empty: "(nenhum álbum na biblioteca)"
+    count: "%{count} álbuns"
   srv:
     add: "Adicionar um servidor"
     title: "SERVIDORES"
@@ -255,11 +257,6 @@ gui:
     qr_note: "Escaneie no app do mStream para conectar de qualquer lugar."
     qr_enlarge: "aumente a janela para caber o código — ou copie-o abaixo"
   set:
-    bar_group: "BARRA INFERIOR"
-    bar_wave: "Forma de onda"
-    bar_wave_desc: "a onda da faixa, controles abaixo"
-    bar_gold: "Linha dourada"
-    bar_gold_desc: "a linha é a barra de progresso, botões grandes"
     playback: "REPRODUÇÃO"
     blend: "Transição"
     blend_off: "não"
@@ -271,14 +268,6 @@ gui:
     pause_fade: "Fade de pausa"
     pause_fade_desc: "pausar e retomar em rampa curta"
     servers_group: "SERVIDORES"
-  tip:
-    play: "Reproduzir/pausar — Space"
-    prev: "Anterior — p"
-    next: "Próxima — n"
-    shuffle: "Aleatório — s"
-    repeat: "Repetir — r"
-    dj: "Auto-DJ — A"
-    volume: "Volume — - e +"
   tips:
     search_edit: "digite · Enter buscar · Esc pronto"
     search: "↑ ↓ mover · Enter abrir/tocar · h voltar · ← → classe · t alternar · / editar · a para a fila · q sair"
@@ -287,3 +276,5 @@ gui:
     base: "1-8 seções · Tab fila · Space reproduzir · -/+ volume · q sair"
     servers: "↑ ↓ linhas · Enter trocar · e editar · d padrão · p parear · x remover · Esc voltar"
     form: "Tab campos · Space alternar · Enter conectar · Esc voltar"
+    albums: "← → página · ↑ ↓ escolher · Enter abrir · Tab fila · q sair"
+    album_tracks: "↑ ↓ mover · Enter tocar · h voltar · a para a fila · Tab fila · q sair"

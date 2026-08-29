@@ -185,6 +185,10 @@ impl App {
         self.search.set(Vec::new());
         self.files.set(Vec::new());
         self.files.loading = true;
+        // The album wall was the old server's too.
+        self.albums = None;
+        self.library.set(Vec::new());
+        self.library_stack = super::nav::Drill::new(crate::tui::worker::LibraryNode::Root);
     }
 
     pub(super) fn handle_connect_action(&mut self, action: Action) -> Vec<Effect> {

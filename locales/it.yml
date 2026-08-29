@@ -196,8 +196,10 @@ gui:
   queue:
     title: "CODA"
     empty: "(niente in coda)"
-    hide_tip: "Nascondi la coda — Tab"
-    show_tip: "Mostra la coda — Tab"
+  alb:
+    loading: "caricamento album…"
+    empty: "(nessun album nella libreria)"
+    count: "%{count} album"
   srv:
     add: "Aggiungi un server"
     title: "SERVER"
@@ -255,11 +257,6 @@ gui:
     qr_note: "Scansiona con l'app mStream per connetterti ovunque."
     qr_enlarge: "allarga la finestra per far entrare il codice — o copialo qui sotto"
   set:
-    bar_group: "BARRA INFERIORE"
-    bar_wave: "Forma d'onda"
-    bar_wave_desc: "l'onda del brano, controlli sotto"
-    bar_gold: "Linea dorata"
-    bar_gold_desc: "la linea è la barra di avanzamento, tasti grandi"
     playback: "RIPRODUZIONE"
     blend: "Dissolvenza"
     blend_off: "no"
@@ -271,14 +268,6 @@ gui:
     pause_fade: "Dissolvenza pausa"
     pause_fade_desc: "pausa e ripresa su rampa breve"
     servers_group: "SERVER"
-  tip:
-    play: "Riproduci/pausa — Space"
-    prev: "Precedente — p"
-    next: "Successivo — n"
-    shuffle: "Casuale — s"
-    repeat: "Ripeti — r"
-    dj: "Auto-DJ — A"
-    volume: "Volume — - e +"
   tips:
     search_edit: "scrivi · Enter cerca · Esc fine"
     search: "↑ ↓ muovi · Enter apri/riproduci · h indietro · ← → classe · t attiva · / modifica · a in coda · q esci"
@@ -287,3 +276,5 @@ gui:
     base: "1-8 sezioni · Tab coda · Space riproduci · -/+ volume · q esci"
     servers: "↑ ↓ righe · Enter cambia · e modifica · d predefinito · p associa · x rimuovi · Esc indietro"
     form: "Tab campi · Space attiva · Enter connetti · Esc indietro"
+    albums: "← → pagina · ↑ ↓ scegli · Enter apri · Tab coda · q esci"
+    album_tracks: "↑ ↓ muovi · Enter riproduci · h indietro · a in coda · Tab coda · q esci"

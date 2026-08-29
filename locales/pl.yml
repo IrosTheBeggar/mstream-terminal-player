@@ -196,8 +196,10 @@ gui:
   queue:
     title: "KOLEJKA"
     empty: "(nic w kolejce)"
-    hide_tip: "Ukryj kolejkę — Tab"
-    show_tip: "Pokaż kolejkę — Tab"
+  alb:
+    loading: "wczytywanie albumów…"
+    empty: "(brak albumów w bibliotece)"
+    count: "%{count} albumów"
   srv:
     add: "Dodaj serwer"
     title: "SERWERY"
@@ -255,11 +257,6 @@ gui:
     qr_note: "Zeskanuj w aplikacji mStream, aby łączyć się skądkolwiek."
     qr_enlarge: "powiększ okno, aby zmieścić kod — albo skopiuj go poniżej"
   set:
-    bar_group: "DOLNY PASEK"
-    bar_wave: "Fala"
-    bar_wave_desc: "fala utworu, sterowanie poniżej"
-    bar_gold: "Złota linia"
-    bar_gold_desc: "linia jest paskiem postępu, duże przyciski"
     playback: "ODTWARZANIE"
     blend: "Przenikanie"
     blend_off: "nie"
@@ -271,14 +268,6 @@ gui:
     pause_fade: "Wyciszanie pauzy"
     pause_fade_desc: "pauza i wznowienie po krótkiej rampie"
     servers_group: "SERWERY"
-  tip:
-    play: "Odtwórz/pauza — Space"
-    prev: "Poprzedni — p"
-    next: "Następny — n"
-    shuffle: "Losowo — s"
-    repeat: "Powtórz — r"
-    dj: "Auto-DJ — A"
-    volume: "Głośność — - i +"
   tips:
     search_edit: "pisz · Enter szukaj · Esc gotowe"
     search: "↑ ↓ ruch · Enter otwórz/odtwórz · h wstecz · ← → klasa · t przełącz · / edytuj · a do kolejki · q wyjdź"
@@ -287,3 +276,5 @@ gui:
     base: "1-8 sekcje · Tab kolejka · Space odtwarzaj · -/+ głośność · q wyjdź"
     servers: "↑ ↓ wiersze · Enter przełącz · e edytuj · d domyślny · p paruj · x usuń · Esc wstecz"
     form: "Tab pola · Space przełącz · Enter połącz · Esc wstecz"
+    albums: "← → strona · ↑ ↓ wybierz · Enter otwórz · Tab kolejka · q wyjdź"
+    album_tracks: "↑ ↓ ruch · Enter odtwórz · h wstecz · a do kolejki · Tab kolejka · q wyjdź"

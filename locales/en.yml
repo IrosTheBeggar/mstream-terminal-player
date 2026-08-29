@@ -196,8 +196,10 @@ gui:
   queue:
     title: "QUEUE"
     empty: "(nothing queued yet)"
-    hide_tip: "Hide the queue — Tab"
-    show_tip: "Show the queue — Tab"
+  alb:
+    loading: "loading albums…"
+    empty: "(no albums in the library)"
+    count: "%{count} albums"
   srv:
     add: "Add a server"
     title: "SERVERS"
@@ -255,11 +257,6 @@ gui:
     qr_note: "Scan with the mStream app to connect from anywhere."
     qr_enlarge: "enlarge the window to fit the code — or copy it below"
   set:
-    bar_group: "BOTTOM BAR"
-    bar_wave: "Waveform"
-    bar_wave_desc: "the track's waveform, controls beneath"
-    bar_gold: "Gold line"
-    bar_gold_desc: "the rule is the seek bar, tall controls"
     playback: "PLAYBACK"
     blend: "Blend length"
     blend_off: "off"
@@ -271,14 +268,6 @@ gui:
     pause_fade: "Pause fade"
     pause_fade_desc: "pause and resume ride a short ramp"
     servers_group: "SERVERS"
-  tip:
-    play: "Play/pause — Space"
-    prev: "Previous — p"
-    next: "Next — n"
-    shuffle: "Shuffle — s"
-    repeat: "Repeat — r"
-    dj: "Auto-DJ — A"
-    volume: "Volume — - and +"
   tips:
     search_edit: "type · Enter search · Esc done"
     search: "↑ ↓ move · Enter open/play · h back · ← → class · t toggle · / edit · a queue · q quit"
@@ -287,3 +276,5 @@ gui:
     base: "1-8 sections · Tab queue · Space play/pause · -/+ volume · q quit"
     servers: "↑ ↓ rows · Enter switch · e edit · d default · p pair · x remove · Esc back"
     form: "Tab fields · Space toggles · Enter connect · Esc back"
+    albums: "← → page · ↑ ↓ pick · Enter open · Tab queue · q quit"
+    album_tracks: "↑ ↓ move · Enter play · h back · a queue · Tab queue panel · q quit"

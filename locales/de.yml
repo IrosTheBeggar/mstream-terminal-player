@@ -196,8 +196,10 @@ gui:
   queue:
     title: "WARTESCHLANGE"
     empty: "(noch nichts eingereiht)"
-    hide_tip: "Warteschlange ausblenden — Tab"
-    show_tip: "Warteschlange einblenden — Tab"
+  alb:
+    loading: "lade Alben…"
+    empty: "(keine Alben in der Bibliothek)"
+    count: "%{count} Alben"
   srv:
     add: "Server hinzufügen"
     title: "SERVER"
@@ -255,11 +257,6 @@ gui:
     qr_note: "Mit der mStream-App scannen und von überall verbinden."
     qr_enlarge: "Fenster vergrößern, damit der Code passt — oder unten kopieren"
   set:
-    bar_group: "UNTERE LEISTE"
-    bar_wave: "Wellenform"
-    bar_wave_desc: "die Wellenform des Titels, Regler darunter"
-    bar_gold: "Goldlinie"
-    bar_gold_desc: "die Linie ist der Fortschrittsbalken, große Tasten"
     playback: "WIEDERGABE"
     blend: "Überblendung"
     blend_off: "aus"
@@ -271,14 +268,6 @@ gui:
     pause_fade: "Pausen-Fade"
     pause_fade_desc: "Pause und Weiter laufen über eine kurze Rampe"
     servers_group: "SERVER"
-  tip:
-    play: "Wiedergabe/Pause — Space"
-    prev: "Zurück — p"
-    next: "Weiter — n"
-    shuffle: "Zufall — s"
-    repeat: "Wiederholen — r"
-    dj: "Auto-DJ — A"
-    volume: "Lautstärke — - und +"
   tips:
     search_edit: "tippen · Enter suchen · Esc fertig"
     search: "↑ ↓ bewegen · Enter öffnen/abspielen · h zurück · ← → Klasse · t umschalten · / bearbeiten · a einreihen · q beenden"
@@ -287,3 +276,5 @@ gui:
     base: "1-8 Bereiche · Tab Warteschlange · Space Wiedergabe · -/+ Lautstärke · q beenden"
     servers: "↑ ↓ Zeilen · Enter wechseln · e bearbeiten · d Standard · p koppeln · x entfernen · Esc zurück"
     form: "Tab Felder · Space umschalten · Enter verbinden · Esc zurück"
+    albums: "← → Seite · ↑ ↓ wählen · Enter öffnen · Tab Warteschlange · q beenden"
+    album_tracks: "↑ ↓ bewegen · Enter abspielen · h zurück · a einreihen · Tab Warteschlange · q beenden"
