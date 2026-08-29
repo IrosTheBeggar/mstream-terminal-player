@@ -1286,6 +1286,7 @@ impl App {
                 tunnel_code: None,
                 token,
                 username,
+                self_signed: false,
             },
             connected: false,
             connecting: false,
