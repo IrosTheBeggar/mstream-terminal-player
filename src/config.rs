@@ -410,22 +410,16 @@ impl MousePrefs {
 }
 
 /// `[gui]`. The GUI player surface (`mstream-player gui`) keeps its own
-/// choices here, apart from the classic TUI's — the two are different rooms.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// choices here, apart from the classic TUI's — the two are different
+/// rooms. Currently holds nothing of this build's own: the bottom-bar
+/// choice lived here until 2026-08-29, when the waveform bar was retired
+/// and the gold line became THE bar (a leftover `bar` key rides `extra`
+/// harmlessly).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GuiPrefs {
-    /// Which bottom bar the player wears: `wave` (the waveform with the
-    /// controls beneath it) or `gold-line` (the gold rule is the seek bar,
-    /// tall controls under it). Anything unrecognized falls back to `wave`.
-    pub bar: String,
     #[serde(flatten)]
     pub extra: Keep,
-}
-
-impl Default for GuiPrefs {
-    fn default() -> Self {
-        GuiPrefs { bar: "wave".to_string(), extra: Keep::new() }
-    }
 }
 
 impl GuiPrefs {

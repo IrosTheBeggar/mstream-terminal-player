@@ -61,6 +61,12 @@ mod native {
         /// 10x20 must not drift toward whatever terminal happens to be
         /// running the suite.
         adaptive: bool,
+        /// When the window-size ioctl was last consulted. One cover per
+        /// frame was this module's design point; the GUI's album wall
+        /// draws fifteen, and re-asking for every one of them was
+        /// hundreds of syscalls a second for an answer that changes on
+        /// the scale of someone adjusting their font.
+        font_checked: std::time::Instant,
         /// How many render-time decodes have run, for the tests that pin
         /// the caching above — a cache that silently stopped caching would
         /// otherwise still pass every drawing assertion.
@@ -262,6 +268,7 @@ mod native {
                 cached: None,
                 refused: None,
                 adaptive: false,
+                font_checked: std::time::Instant::now(),
                 #[cfg(test)]
                 decodes: std::cell::Cell::new(0),
             }
@@ -332,6 +339,13 @@ mod native {
             if !self.adaptive {
                 return;
             }
+            // Half a second is soon enough to catch a font change; asking
+            // on every draw was fine with one cover a frame and is not
+            // with a wall of them.
+            if self.font_checked.elapsed() < std::time::Duration::from_millis(500) {
+                return;
+            }
+            self.font_checked = std::time::Instant::now();
             let Some(picker) = self.picker.as_ref() else {
                 return;
             };
