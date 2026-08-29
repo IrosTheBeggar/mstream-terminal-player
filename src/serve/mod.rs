@@ -340,6 +340,11 @@ pub fn run(opts: ServeOptions) -> Result<(), String> {
     loop {
         // Auto-advance: check if the sink emptied and move to the next track.
         engine.advance_tick();
+        // The tick also watches the output device (headphones plugged in,
+        // a Bluetooth speaker dropping); what it did about it prints here.
+        for notice in engine.take_device_notices() {
+            eprintln!("[serve] {}", notice.text);
+        }
 
         let request = server.recv_timeout(Duration::from_millis(250));
         let request = match request {

@@ -294,6 +294,12 @@ pub enum Event {
     HandedOver { from: String, to: String },
     /// The audio device could not be opened; playback is unavailable.
     AudioFailed(String),
+    /// News about the output device itself: playback moved to a new
+    /// device on its own, lost the device, or got one back. Its own
+    /// event so the app can pick a tone — losing the only device is an
+    /// error, a successful move is one line of info. Either way the
+    /// engine has already acted; this is narration, not a request.
+    AudioDevice(crate::player::DeviceNotice),
     /// How the Quick Connect tunnel is reaching the server right now —
     /// direct, through a relay, or between tunnels. Sent on change by a
     /// sampler that lives exactly as long as the bridge does.
@@ -575,6 +581,11 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
         }
 
         player.tick();
+        // Device news before the status shaped by it, same ordering rule
+        // as the end-of-track events below.
+        for notice in player.take_device_notices() {
+            let _ = events.send(Event::AudioDevice(notice));
+        }
         let status = player.status();
         // Sent before the status that reports the transition, and down the
         // same channel, so the UI always learns which track ended — or which
