@@ -3,8 +3,9 @@
 //! The TUI talks to playback only through this trait. Today the sole
 //! implementation is the in-process rodio engine; keeping the boundary here
 //! means an external backend (an mpv subprocess over JSON IPC, say) could be
-//! dropped in if the engine ever runs into something it can't do — gapless,
-//! device hotplug, exotic codecs. Every terminal player surveyed for PLAN.md
+//! dropped in if the engine ever runs into something it can't do — an
+//! exotic codec, say (gapless and device hotplug, the original examples
+//! here, it has since learned). Every terminal player surveyed for PLAN.md
 //! skipped this abstraction and wished it hadn't.
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -19,6 +20,18 @@ pub struct PlayerStatus {
     pub volume: f32,
     /// The source currently loaded — a URL or path. Empty when idle.
     pub source: String,
+}
+
+/// News from the backend about the output device itself — playback moved
+/// to a new default, lost its device, got one back. Carried as data so
+/// each driver picks its own surface: the TUI's message line, serve's
+/// stderr.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceNotice {
+    pub text: String,
+    /// True while playback is impossible (no usable output device at
+    /// all); false when the notice reports a successful move or recovery.
+    pub lost: bool,
 }
 
 impl PlayerStatus {
@@ -60,6 +73,11 @@ pub trait PlayerCtl {
     /// Drive any background bookkeeping (end-of-track handling). Called on a
     /// timer by the audio thread.
     fn tick(&self);
+    /// Device news since the last call, oldest first. Backends that
+    /// cannot lose an output device (the browser's) have none.
+    fn take_device_notices(&self) -> Vec<DeviceNotice> {
+        Vec::new()
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -126,6 +144,10 @@ impl PlayerCtl for Engine {
 
     fn tick(&self) {
         self.advance_tick();
+    }
+
+    fn take_device_notices(&self) -> Vec<DeviceNotice> {
+        Engine::take_device_notices(self)
     }
 }
 

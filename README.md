@@ -236,6 +236,17 @@ you set there is what config.toml remembers. The tab's other room is
 `mstream-player serve --crossfade 6` / `--gapless`; the legacy spawn contract
 keeps all of it off.
 
+### Output devices
+
+Playback follows the machine. Plug in headphones, pair a Bluetooth speaker,
+and the player moves to the new default within a second or so, picking the
+track back up at the position it stood — paused stays paused, the volume
+stays yours. Pull the device it was playing on and it hops to whatever the
+system falls back to; when there is nothing to fall back to (the only
+headset switched off), it holds the moment and resumes as soon as any
+output returns. Each move is one line in the message bar, or on stderr in
+`serve` mode.
+
 ## The progress bar
 
 On a server that can draw them, the bar *is* the track — its shape under the

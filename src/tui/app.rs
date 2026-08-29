@@ -3490,6 +3490,16 @@ impl App {
                 self.error(format!("audio unavailable: {e}"));
                 Vec::new()
             }
+            Event::AudioDevice(notice) => {
+                // The engine has already moved playback (or is holding it
+                // for a device to return); this is news, not a request.
+                if notice.lost {
+                    self.error(notice.text);
+                } else {
+                    self.info(notice.text);
+                }
+                Vec::new()
+            }
             Event::PlaybackFailed { source, error } => {
                 // Same rule, and this is where it earns its keep: an open can
                 // take as long as the network does to give up, so a failure

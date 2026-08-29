@@ -13,6 +13,7 @@
 
 pub(crate) mod fade;
 pub(crate) mod http;
+pub(crate) mod output;
 pub(crate) mod tap;
 pub(crate) mod trace;
 
@@ -26,8 +27,10 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use rodio::mixer::Mixer;
-use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
+use rodio::{Decoder, Player, Source};
 use serde::Serialize;
+
+use crate::player::DeviceNotice;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
@@ -948,18 +951,55 @@ impl State {
     }
 }
 
+/// How often the system default output is compared with the one the
+/// stream opened on. Plugging in headphones (or a Bluetooth speaker
+/// connecting) moves the default without touching the running stream —
+/// the OS leaves it playing on the old endpoint — so the only way to
+/// hear about it is to ask.
+const DEVICE_POLL: Duration = Duration::from_secs(1);
+
+/// How long a failed output rebuild rests before the next try: the
+/// outage where nothing will open at all (the lone Bluetooth headset
+/// switched off, say). The engine holds its state and knocks until a
+/// device answers.
+const REBUILD_RETRY: Duration = Duration::from_secs(2);
+
+/// The output device under watch, and the watch's own bookkeeping.
+struct OutputWatch {
+    out: output::Output,
+    /// When the default-device identity was last polled.
+    polled: Instant,
+    /// When a rebuild last failed outright, so the retries pace
+    /// themselves instead of hammering the host every tick.
+    failed_at: Option<Instant>,
+    /// Whether the current outage has been announced — once, not once
+    /// per retry.
+    outage_told: bool,
+}
+
+impl OutputWatch {
+    fn mixer(&self) -> &Mixer {
+        self.out.mixer()
+    }
+}
+
 pub struct Engine {
     // Field order matters: `state` (and the Players inside it) must drop
-    // before the device sink that owns the output stream.
+    // before the output that owns the device stream.
     state: Arc<Mutex<State>>,
-    device: MixerDeviceSink,
+    /// Behind a lock because a dead device is replaced mid-session — see
+    /// [`Engine::ensure_output`]. Where both locks are held, the order is
+    /// state first, output second, always.
+    output: Mutex<OutputWatch>,
+    /// Device news waiting for whoever drives this engine (the TUI's
+    /// audio worker, serve's loop). Bounded by [`Engine::push_notice`];
+    /// drained by [`Engine::take_device_notices`].
+    notices: Mutex<Vec<DeviceNotice>>,
 }
 
 impl Engine {
     pub fn new() -> Result<Self, EngineError> {
-        let mut device = DeviceSinkBuilder::open_default_sink()
-            .map_err(|e| EngineError::NoDevice(e.to_string()))?;
-        device.log_on_drop(false);
+        let device = output::open().map_err(EngineError::NoDevice)?;
         let sink = Player::connect_new(device.mixer());
 
         let state = Arc::new(Mutex::new(State {
@@ -991,7 +1031,223 @@ impl Engine {
             },
         }));
 
-        Ok(Engine { state, device })
+        Ok(Engine {
+            state,
+            output: Mutex::new(OutputWatch {
+                out: device,
+                polled: Instant::now(),
+                failed_at: None,
+                outage_told: false,
+            }),
+            notices: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Keep the output stream on the device the system says it should be
+    /// on. Two tripwires (see [`output`]): the stream's error callback —
+    /// the device died under us — and a poll of the system default — a
+    /// new device became the default while the old stream plays on
+    /// unaware. Either way the cure is the same rebuild. Called from the
+    /// tick and from every mutator about to lean on the sink; the healthy
+    /// path costs an atomic load, plus one identity poll a second.
+    fn ensure_output(&self) {
+        let why = {
+            let mut w = self.output.lock().unwrap();
+            if let Some(at) = w.failed_at {
+                if at.elapsed() < REBUILD_RETRY {
+                    return;
+                }
+            }
+            if w.out.is_dead() {
+                "the device was lost"
+            } else {
+                if w.polled.elapsed() < DEVICE_POLL {
+                    return;
+                }
+                w.polled = Instant::now();
+                if !w.out.default_moved() {
+                    return;
+                }
+                "the default output changed"
+            }
+        };
+        etrace!("output rebuild: {why}");
+        self.rebuild_output();
+    }
+
+    /// Move playback onto a freshly-opened output, keeping as much of the
+    /// moment as can be kept: the track, its position, its pause state,
+    /// the volume. The sinks themselves are past saving — every Player
+    /// feeds the old stream's mixer, whose consuming half died with the
+    /// stream — so the current source is reopened and seeked back to
+    /// where it stood.
+    fn rebuild_output(&self) {
+        // The replacement first, before anything is torn down: while
+        // nothing will open, the engine keeps the old output and its
+        // state exactly as they are and knocks again in REBUILD_RETRY.
+        let fresh = match output::open() {
+            Ok(out) => out,
+            Err(e) => {
+                let mut w = self.output.lock().unwrap();
+                w.failed_at = Some(Instant::now());
+                let first = !w.outage_told;
+                w.outage_told = true;
+                drop(w);
+                if first {
+                    etrace!("output rebuild failed: {e}");
+                    self.push_notice(
+                        "audio device lost — playback resumes when one comes back".to_string(),
+                        true,
+                    );
+                }
+                return;
+            }
+        };
+        let name = fresh.name().to_string();
+
+        let mut s = self.state.lock().unwrap();
+        // A gapless boundary that crossed before the device died decides
+        // WHICH track the rebuild resumes; promote it before the snapshot.
+        s.promote_if_crossed();
+        let position = s.sink.get_pos();
+        let was_paused = s.sink.is_paused() || s.pausing.is_some();
+        let resume = (!s.stopped && !s.current_file.is_empty()).then(|| s.current_file.clone());
+
+        // Everything attached to the old mixer is unrecoverable. Blends
+        // and breaths mid-drain simply end; a source appended for a
+        // gapless seam died inside the old sink, so its slot clears and
+        // the transition machinery re-prepares against the new one. A
+        // prepared-but-unattached next (Opening/Ready) survives on
+        // purpose: its decoder belongs to no sink yet.
+        for out in s.outgoing.drain(..) {
+            out.sink.stop();
+        }
+        s.appended = None;
+        s.orphaned_tail = false;
+        s.pausing = None;
+        s.sink.stop();
+
+        // The swap. The old output drops here — after its players
+        // stopped, the same order Engine's own drop keeps.
+        let was_outage = {
+            let mut w = self.output.lock().unwrap();
+            let old = std::mem::replace(&mut w.out, fresh);
+            w.polled = Instant::now();
+            w.failed_at = None;
+            let was = w.outage_told;
+            w.outage_told = false;
+            drop(old);
+            was
+        };
+
+        // A fresh sink either way, so the engine never holds a sink wired
+        // to a mixer that no longer plays.
+        let sink = Player::connect_new(self.output.lock().unwrap().mixer());
+        sink.set_volume(s.volume);
+        let restore = match resume {
+            None => {
+                s.sink = Arc::new(sink);
+                s.fade = fade::FadeHandle::new(1.0);
+                s.tap_live = Arc::new(AtomicBool::new(true));
+                None
+            }
+            Some(file) => {
+                // The queue entry when it still names the playing file
+                // (serve keeps a real queue; the TUI mirrors one entry),
+                // else a synthesized one carrying the duration we know.
+                let entry = s
+                    .q
+                    .queue
+                    .get(s.q.index)
+                    .filter(|e| e.path == file)
+                    .cloned()
+                    .unwrap_or_else(|| QueueEntry {
+                        path: file.clone(),
+                        duration_hint: (s.duration > 0.0).then_some(s.duration),
+                    });
+                match open_entry_bounded(&entry) {
+                    Ok(prepared) => {
+                        // Zero gain: the seek back to position lands under
+                        // silence and the gain snaps up after it — the
+                        // seek dip's trick, stretched over a device swap.
+                        let (fade, live) = attach(&sink, prepared.opened, s.tap.clone(), 0.0);
+                        s.fade = fade;
+                        s.tap_live = live;
+                        s.duration = prepared.duration;
+                        s.sink = Arc::new(sink);
+                        Some((s.sink.clone(), s.fade.clone()))
+                    }
+                    Err(e) => {
+                        // The source would not reopen — gone with the wifi,
+                        // say. An empty sink under a live current_file is
+                        // exactly what a track running out looks like, and
+                        // the ordinary advance machinery takes it from here.
+                        etrace!("rebuild could not reopen {}: {e}", http::redact_source(&file));
+                        s.sink = Arc::new(sink);
+                        s.fade = fade::FadeHandle::new(1.0);
+                        s.tap_live = Arc::new(AtomicBool::new(true));
+                        None
+                    }
+                }
+            }
+        };
+        drop(s);
+
+        // The seek waits on the new device's callback reaching the data,
+        // and past the spooled range that is the network's schedule — the
+        // state lock must not wait with it (the lesson of audit #48).
+        if let Some((sink, fade)) = restore {
+            if position > Duration::from_millis(250) {
+                let sought = sink.try_seek(position);
+                etrace!(
+                    "rebuild seek to {:.2}: {}",
+                    position.as_secs_f64(),
+                    if sought.is_ok() { "ok" } else { "FAILED" }
+                );
+            }
+            if was_paused {
+                sink.pause();
+            }
+            // Same resurrection guard as Engine::seek: only the handle
+            // that is still current gets its gain back.
+            let s = self.state.lock().unwrap();
+            if Arc::ptr_eq(&s.fade, &fade) && !s.stopped {
+                fade.snap(1.0);
+            }
+        }
+
+        etrace!("output rebuilt on {name}");
+        let text = if was_outage {
+            format!("audio is back on {name}")
+        } else {
+            format!("audio moved to {name}")
+        };
+        self.push_notice(text, false);
+    }
+
+    /// Queue a line of device news for the driver to surface. Bounded:
+    /// serve drains on its loop and the TUI worker every tick, but
+    /// nothing REQUIRES a driver to drain, and a player left alone for a
+    /// weekend must not grow a vector.
+    fn push_notice(&self, text: String, lost: bool) {
+        let mut notes = self.notices.lock().unwrap();
+        if notes.len() >= 8 {
+            notes.remove(0);
+        }
+        notes.push(DeviceNotice { text, lost });
+    }
+
+    /// Device news since the last call, oldest first.
+    pub fn take_device_notices(&self) -> Vec<DeviceNotice> {
+        std::mem::take(&mut *self.notices.lock().unwrap())
+    }
+
+    /// Pretend the device died under the stream, exactly as the error
+    /// callback would report it — the recovery path from here on is the
+    /// one a real unplug takes.
+    #[cfg(test)]
+    fn pretend_device_lost(&self) {
+        self.output.lock().unwrap().out.pretend_dead();
     }
 
     /// Send a copy of everything played from here on to `tap`. Takes effect
@@ -1003,6 +1259,10 @@ impl Engine {
     /// Clear the queue, add one source (path or URL), play it.
     pub fn play_source(&self, source: String, duration_hint: Option<f64>) -> Result<(), EngineError> {
         etrace!("play {} hint={:?}", http::redact_source(&source), duration_hint);
+        // Before the state lock, here and in every mutator below: the
+        // rebuild takes that lock itself, and this Mutex does not forgive
+        // a second lock from the same thread.
+        self.ensure_output();
         let mut s = self.state.lock().unwrap();
         // Boundary first, staging second — every mutator's discipline now:
         // promotion writes the index and queue, and must never overwrite
@@ -1020,7 +1280,7 @@ impl Engine {
         // the failed-jump review finding, caught by its verifier).
         s.pending_next = None;
         s.invalidate_next();
-        s.start_current(self.device.mixer())
+        s.start_current(self.output.lock().unwrap().mixer())
     }
 
     /// Announce what should play after the current track, so a blend can
@@ -1123,6 +1383,14 @@ impl Engine {
 
     pub fn seek(&self, position: f64) -> Result<(), EngineError> {
         let mut target = seek_target(position)?;
+        // A seek against a dead device would never return: try_seek waits
+        // on a feedback the dead callback can never send. Rebuild first —
+        // and when no device would open at all, refuse rather than wedge
+        // this thread until one comes back.
+        self.ensure_output();
+        if self.output.lock().unwrap().out.is_dead() {
+            return Err(EngineError::NoDevice("no output device".to_string()));
+        }
         // Take a handle and let the state go before asking. try_seek blocks
         // on rodio's feedback channel until the device callback performs
         // the seek, and past the downloaded range that callback is waiting
@@ -1267,12 +1535,13 @@ impl Engine {
     }
 
     pub fn next_manual(&self) -> Result<(), EngineError> {
+        self.ensure_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         match pick_next(&s.q, true) {
             Some(idx) => {
                 s.q.index = idx;
-                let started = s.start_current(self.device.mixer());
+                let started = s.start_current(self.output.lock().unwrap().mixer());
                 if started.is_err() {
                     // The index moved even though the start failed, so a
                     // pick committed against the old position is now a lie
@@ -1287,12 +1556,15 @@ impl Engine {
     }
 
     pub fn previous_manual(&self) -> Result<(), EngineError> {
+        // The restart branch below seeks, and a seek against a dead
+        // device never returns — same reasoning as Engine::seek.
+        self.ensure_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         if s.q.index == 0 {
             if s.q.loop_mode == LoopMode::All && !s.q.queue.is_empty() {
                 s.q.index = s.q.queue.len() - 1;
-                let started = s.start_current(self.device.mixer());
+                let started = s.start_current(self.output.lock().unwrap().mixer());
                 if started.is_err() {
                     // Same as next_manual: the index moved, the start did
                     // not, and the committed pick answers for neither.
@@ -1302,8 +1574,12 @@ impl Engine {
             } else {
                 // The restart is a seek like any other — same discipline as
                 // [`Engine::seek`], even though the start of the track has
-                // almost always downloaded by now. Same blend policy and
-                // the same dip, too.
+                // almost always downloaded by now. Same blend policy, the
+                // same dip — and the same refusal while no device exists,
+                // since try_seek against a dead sink waits forever.
+                if self.output.lock().unwrap().out.is_dead() {
+                    return Err(EngineError::NoDevice("no output device".to_string()));
+                }
                 s.snap_out_of_blend();
                 let sink = s.sink.clone();
                 let fade = s.fade.clone();
@@ -1323,7 +1599,7 @@ impl Engine {
             }
         } else {
             s.q.index -= 1;
-            let started = s.start_current(self.device.mixer());
+            let started = s.start_current(self.output.lock().unwrap().mixer());
             if started.is_err() {
                 s.invalidate_next();
             }
@@ -1354,6 +1630,7 @@ impl Engine {
     /// (finding #68). Hints still reach the player that has them, through
     /// [`Engine::play_source`].
     pub fn queue_add(&self, file: String) {
+        self.ensure_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         let was_empty = s.q.queue.is_empty();
@@ -1366,11 +1643,12 @@ impl Engine {
         // beat and never started (C4 review, critic).
         if was_empty && (s.stopped || s.sink.empty()) {
             s.q.index = 0;
-            let _ = s.start_current(self.device.mixer());
+            let _ = s.start_current(self.output.lock().unwrap().mixer());
         }
     }
 
     pub fn queue_add_many(&self, files: Vec<String>) {
+        self.ensure_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         let was_empty = s.q.queue.is_empty();
@@ -1378,18 +1656,19 @@ impl Engine {
         s.invalidate_next();
         if was_empty && (s.stopped || s.sink.empty()) && !s.q.queue.is_empty() {
             s.q.index = 0;
-            let _ = s.start_current(self.device.mixer());
+            let _ = s.start_current(self.output.lock().unwrap().mixer());
         }
     }
 
     pub fn queue_play_index(&self, index: usize) -> Result<(), EngineError> {
+        self.ensure_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         if index >= s.q.queue.len() {
             return Err(EngineError::OutOfBounds);
         }
         s.q.index = index;
-        let started = s.start_current(self.device.mixer());
+        let started = s.start_current(self.output.lock().unwrap().mixer());
         if started.is_err() {
             s.invalidate_next();
         }
@@ -1397,6 +1676,7 @@ impl Engine {
     }
 
     pub fn queue_remove(&self, index: usize) -> Result<(), EngineError> {
+        self.ensure_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         if index >= s.q.queue.len() {
@@ -1439,7 +1719,7 @@ impl Engine {
                 // playing; the original started audio as a side effect of
                 // removing a track while stopped.
                 if !s.stopped {
-                    let _ = s.start_current(self.device.mixer());
+                    let _ = s.start_current(self.output.lock().unwrap().mixer());
                 }
             }
             RemoveOutcome::RemovedBeforeCurrent | RemoveOutcome::RemovedAfterCurrent => {
@@ -1478,6 +1758,10 @@ impl Engine {
     /// tracks, so the ordinary advance below never fires; when preparation
     /// failed or came too late, it fires exactly as it always has.
     pub fn advance_tick(&self) {
+        // The periodic leg of the device watch: commands guard themselves
+        // on entry, and this covers the stretches where nobody is pressing
+        // anything — the exact stretch an unplug usually lands in.
+        self.ensure_output();
         let mut s = self.state.lock().unwrap();
         Self::land_pause(&mut s);
         s.retire_outgoing();
@@ -1505,10 +1789,10 @@ impl Engine {
                     else {
                         unreachable!("matched Ready above, under the same lock");
                     };
-                    s.install(self.device.mixer(), prepared);
+                    s.install(self.output.lock().unwrap().mixer(), prepared);
                     return;
                 }
-                if s.start_current(self.device.mixer()).is_ok() {
+                if s.start_current(self.output.lock().unwrap().mixer()).is_ok() {
                     return;
                 }
                 // The index moved and the start did not — the same rule as
@@ -1705,7 +1989,7 @@ impl Engine {
             deadline: Instant::now() + fade_dur + OUTGOING_SLACK,
         });
 
-        let sink = Player::connect_new(self.device.mixer());
+        let sink = Player::connect_new(self.output.lock().unwrap().mixer());
         sink.set_volume(s.volume);
         s.attach_fresh(&sink, prepared.opened, 0.0);
         s.fade.ramp_to(1.0, fade_dur);
@@ -3843,5 +4127,93 @@ mod tests {
         assert_eq!(apply_remove(&mut state, 0), RemoveOutcome::EmptiedQueue);
         assert_eq!(state.index, 0);
         assert!(state.queue.is_empty());
+    }
+
+    /// `cargo test a_lost_device -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_lost_device_is_rebuilt_where_the_music_stood() {
+        // Nobody can unplug hardware from a test, but the tripwire the
+        // stream's error callback pulls is ours to pull by hand — from
+        // there the recovery is the path a real unplug takes: reopen,
+        // reattach, seek back to where the music stood.
+        let tiny = std::env::temp_dir().join("mstream-device-rebuild.wav");
+        std::fs::write(&tiny, wav_bytes(30)).unwrap();
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.play_source(tiny.to_string_lossy().into_owned(), None).unwrap();
+        std::thread::sleep(Duration::from_millis(1200));
+        let before = engine.status();
+        assert!(before.playing && before.position > 0.5, "the test needs a track underway");
+
+        engine.pretend_device_lost();
+        engine.advance_tick();
+
+        let after = engine.status();
+        assert_eq!(after.file, before.file, "the rebuild must resume the same track");
+        assert!(after.playing, "the rebuild must leave the track playing");
+        assert!(
+            after.position >= before.position - 0.75,
+            "resumed at {:.2}s but the music stood at {:.2}s",
+            after.position,
+            before.position
+        );
+        let notices = engine.take_device_notices();
+        assert!(
+            notices.iter().any(|n| !n.lost),
+            "a successful move must be announced: {notices:?}"
+        );
+
+        // And it is genuinely sounding again: the position advances.
+        std::thread::sleep(Duration::from_millis(800));
+        let later = engine.status();
+        assert!(
+            later.position > after.position + 0.3,
+            "position froze after the rebuild ({:.2}s then {:.2}s)",
+            after.position,
+            later.position
+        );
+        engine.stop();
+    }
+
+    /// `cargo test a_paused_player_survives -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_paused_player_survives_the_device_swap_paused() {
+        let tiny = std::env::temp_dir().join("mstream-device-rebuild-paused.wav");
+        std::fs::write(&tiny, wav_bytes(30)).unwrap();
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.play_source(tiny.to_string_lossy().into_owned(), None).unwrap();
+        std::thread::sleep(Duration::from_millis(800));
+        engine.pause();
+        let held = engine.status();
+        assert!(held.paused);
+
+        engine.pretend_device_lost();
+        engine.advance_tick();
+
+        let after = engine.status();
+        assert!(after.paused, "a paused player must come back paused");
+        assert_eq!(after.file, held.file);
+        assert!(
+            (after.position - held.position).abs() < 0.75,
+            "the pause held at {:.2}s but the rebuild reports {:.2}s",
+            held.position,
+            after.position
+        );
+
+        // The resume is an ordinary resume: the new sink plays on.
+        engine.resume();
+        std::thread::sleep(Duration::from_millis(800));
+        let later = engine.status();
+        assert!(later.playing);
+        assert!(
+            later.position > after.position + 0.3,
+            "position froze after resume ({:.2}s then {:.2}s)",
+            after.position,
+            later.position
+        );
+        engine.stop();
     }
 }
