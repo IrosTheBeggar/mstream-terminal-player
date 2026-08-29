@@ -1310,6 +1310,7 @@ fn choosing_a_discovered_server_connects_to_it_directly() {
         vec![Effect::Api(ApiCmd::Connect {
             server: "http://192.168.1.71:3999".into(),
             token: None,
+            self_signed: false,
         })]
     );
 }
@@ -1522,6 +1523,7 @@ fn an_expired_tunnel_session_signs_back_in_over_the_open_bridge() {
             server: "http://127.0.0.1:51234".into(),
             username: "alice".into(),
             password: "pw".into(),
+            self_signed: false,
         })]
     );
 }
@@ -1614,8 +1616,69 @@ fn connecting_without_a_username_uses_public_mode() {
     let effects = app.handle_action(Action::Submit);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::Connect { server: "http://host:3000".into(), token: None })]
+        vec![Effect::Api(ApiCmd::Connect {
+            server: "http://host:3000".into(),
+            token: None,
+            self_signed: false,
+        })]
     );
+}
+
+#[test]
+fn a_self_signed_session_carries_its_trust_into_every_connect() {
+    // The flag rides the entry → the session → the command, so the worker
+    // builds the one lenient client for the one server that opted in.
+    let mut app = App::new(Some("https://attic.local:3000".into()), None, None);
+    app.session.self_signed = true;
+    let effects = app.start();
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Api(ApiCmd::Connect { self_signed: true, .. }))),
+        "begin() carries the flag: {effects:?}"
+    );
+
+    // And a switch seats it fresh for the next server.
+    let effects = app.adopt_server(
+        "http://office.local:3000".into(),
+        "http://office.local:3000".into(),
+        None,
+        None,
+        None,
+        false,
+        Some("music/Ambient".into()),
+    );
+    assert!(!app.session.self_signed, "trust never leaks across servers");
+    assert_eq!(app.path, "music/Ambient", "the entry's last path comes along");
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Api(ApiCmd::Connect { self_signed: false, .. })))
+    );
+}
+
+#[test]
+fn adopting_a_server_keeps_the_music_but_not_the_queue() {
+    let mut app = App::new(Some("http://attic.local:3000".into()), None, None);
+    app.connected = true;
+    app.queue.items.push(track("music/a.mp3"));
+    app.queue.items.push(track("music/b.mp3"));
+    app.queue.current = Some(0);
+    app.now_playing = Some(track("music/a.mp3"));
+
+    app.adopt_server(
+        "http://office.local:3000".into(),
+        "http://office.local:3000".into(),
+        None,
+        None,
+        None,
+        false,
+        None,
+    );
+    assert!(app.now_playing.is_some(), "what is streaming already has its URL");
+    assert!(app.queue.items.is_empty(), "queued filepaths mean nothing to the new server");
+    assert_eq!(app.queue.current, None);
+    assert!(!app.connected, "connected again only when the new server answers");
 }
 
 #[test]
@@ -1657,6 +1720,7 @@ fn login_effect_carries_credentials_and_clears_the_password() {
             server: "http://host:3000".into(),
             username: "alice".into(),
             password: "secret".into(),
+            self_signed: false,
         })]
     );
     assert!(app.connect.password.is_empty(), "password is not kept in memory after use");
@@ -1678,7 +1742,11 @@ fn a_typed_address_is_completed_before_it_is_used() {
     let effects = app.handle_action(Action::Submit);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::Connect { server: "http://nas:3000".into(), token: None })]
+        vec![Effect::Api(ApiCmd::Connect {
+            server: "http://nas:3000".into(),
+            token: None,
+            self_signed: false,
+        })]
     );
     assert_eq!(app.connect.server, "http://nas:3000", "the field shows what was assumed");
 
@@ -1731,6 +1799,7 @@ fn sending_a_password_over_plain_http_asks_first() {
             server: "http://music.example.com".into(),
             username: "alice".into(),
             password: "secret".into(),
+            self_signed: false,
         })]
     );
 }

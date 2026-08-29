@@ -1522,10 +1522,45 @@ a LATER secondary screen (party view), Columns retired.
   Files (`draw_pane_rows`, with the dim detail column for drill rows) —
   class → listing → artist → albums all drill through the shared funnel,
   and clicks map through the filter to true pane indexes.
+- **Servers ✅ 2026-08-29** (the Connect-screen slice, grown into
+  multi-server): the header's server label becomes a dropdown once a
+  second server is saved (current marked, default starred, "+ add" last);
+  the [+] beside it — and the no-session screen's button — opens the add
+  flow, a chooser first (2026-08-29 pass two): "Standard connect" is the
+  SERVER/USERNAME/PASSWORD cards plus two checkboxes, "Accept a
+  self-signed certificate" (a per-entry `danger_accept_invalid_certs`
+  client, never process-wide) and "Public server" (stands the credential
+  fields down; connect verifies with the auth-free ping); "Quick
+  Connect" is where the design board's "ON THIS NETWORK" list moved —
+  mDNS rows that carry their address to the standard page — plus the
+  pairing-code paste, dialled through the funnel with the code held
+  GUI-side until the tunnel answers (a bad code costs an error line,
+  never the session that was playing; on Connected the code is seated
+  for the save and the old server's state shed). The board's "Sign in
+  once" line is dropped, and so is the switcher label's dwell tooltip —
+  it matured exactly where the dropdown opens. Settings grew
+  a SERVERS group whose row opens the Manage Servers room: every saved
+  entry with username, live version (probed over the public `GET /api/`
+  — ping carries no version; `Ping` still reads one tolerantly if it
+  ever grows one) and the default star; per-row actions switch · edit ·
+  make default (`default_server` config key, outranks MRU at startup) ·
+  pair phone (the wizard's own QR renderers, pixels or half-blocks, over
+  the stored pairing code — card cover stands down while it shows, the
+  one-slot encode cache's rule) · remove (confirm modal; removal is the
+  ONE flow that drops a pairing code). Adding/editing validates on a
+  one-shot client so the live session is never touched until the server
+  answers; switching goes through the App's own funnel
+  (`App::adopt_server` → `begin()`), keeps what is already streaming,
+  and clears the queue — queued tracks are filepaths resolved against
+  the session's server at play time, so they cannot follow (true
+  multi-server queues need tracks to carry their origin; deferred).
+  Sign-in-needed answers (switch, expired session, fresh tunnel) open
+  the same form in its funnel-riding flavour. The GUI now also renders
+  the kit's dwell tooltips it had only been registering.
 - Next slices, in rough order: the Now Playing screen (big art; widen the
   graphics cache), queue clicks + the Library tab views (Albums/Artists/
-  Genres/Recent/Playlists), the Connect screen for the no-session path,
-  then e2e legs (fake server needs player endpoints).
+  Genres/Recent/Playlists), then e2e legs (fake server needs player
+  endpoints).
 
 ## Smoke testing
 

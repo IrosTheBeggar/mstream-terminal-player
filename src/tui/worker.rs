@@ -69,8 +69,11 @@ pub enum AudioCmd {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApiCmd {
     /// Use an existing token (or none, for public-mode servers).
-    Connect { server: String, token: Option<String> },
-    Login { server: String, username: String, password: String },
+    /// `self_signed` trusts the server's own TLS certificate — carried per
+    /// command because the client is built here, from the one entry that
+    /// opted in.
+    Connect { server: String, token: Option<String>, self_signed: bool },
+    Login { server: String, username: String, password: String, self_signed: bool },
     /// Dial a Quick Connect pairing code, then treat the resulting loopback
     /// address as an ordinary server. A token is carried when reconnecting to
     /// a tunnel server we have already signed in to.
@@ -756,16 +759,16 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
         let result = match cmd {
             ApiCmd::Shutdown => break,
 
-            ApiCmd::Connect { server, token } => {
-                connect(&mut client, &server, &server.clone(), token)
+            ApiCmd::Connect { server, token, self_signed } => {
+                connect(&mut client, &server, &server.clone(), token, self_signed)
             }
 
-            ApiCmd::Login { server, username, password } => {
+            ApiCmd::Login { server, username, password, self_signed } => {
                 // Signing in to a tunnel server goes over the open bridge, but
                 // is filed under the endpoint id — the loopback port is gone
                 // by the next run.
                 let (endpoint, id) = resolve_target(&server, tunnel.as_ref());
-                login(&mut client, &endpoint, &id, &username, &password)
+                login(&mut client, &endpoint, &id, &username, &password, self_signed)
             }
 
             ApiCmd::QuickConnect { code, token } => match quick_connect(&code) {
@@ -777,7 +780,9 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                     // is streaming through — so a code that opens but doesn't
                     // answer used to leave the UI on a session whose port had
                     // just been pulled out from under it (finding #20).
-                    let answer = connect(&mut client, &url, &id, token);
+                    // The bridge is plain http on loopback — TLS trust never
+                    // comes up.
+                    let answer = connect(&mut client, &url, &id, token, false);
                     if !tunnel_answered(&answer) {
                         // `opened` drops here, closing the tunnel that just
                         // failed and only that one. `client`, `bridge` and
@@ -1006,8 +1011,9 @@ fn connect(
     server: &str,
     id: &str,
     token: Option<String>,
+    self_signed: bool,
 ) -> Option<Event> {
-    let c = match Client::new(server) {
+    let c = match Client::new_with(server, self_signed) {
         Ok(c) => c.with_token(token.clone()),
         Err(e) => return Some(Event::Error(e.to_string())),
     };
@@ -1030,8 +1036,9 @@ fn login(
     id: &str,
     username: &str,
     password: &str,
+    self_signed: bool,
 ) -> Option<Event> {
-    let mut c = match Client::new(server) {
+    let mut c = match Client::new_with(server, self_signed) {
         Ok(c) => c,
         Err(e) => return Some(Event::Error(e.to_string())),
     };

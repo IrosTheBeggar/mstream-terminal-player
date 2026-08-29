@@ -19,6 +19,7 @@
 //! Design: the "mStream Player GUI" canvas + docs/ui-kit.md.
 
 mod bar;
+mod servers;
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
@@ -99,6 +100,38 @@ pub(crate) enum Act {
     Row(usize),
     BlendDown,
     BlendUp,
+    // ── Servers (see gui::servers) ──────────────────────────────────────
+    /// The header's server label: toggle the switcher dropdown.
+    SrvMenu,
+    /// A dropdown row: switch the session to saved server `i`.
+    SrvDrop(usize),
+    /// Open the add-server form (the header [+], the dropdown's last row,
+    /// the room's add row, the no-server screen's button).
+    SrvAdd,
+    SrvCloseDrop,
+    /// Room rows: select, and the selected row's action words.
+    SrvRow(usize),
+    SrvSwitch(usize),
+    SrvEdit(usize),
+    SrvDefault(usize),
+    SrvQr(usize),
+    /// Opens the remove confirmation; the bool answers it.
+    SrvRemove(usize),
+    SrvConfirm(bool),
+    /// The form's fields, checkboxes and buttons.
+    FormFocus(usize),
+    FormToggle(usize),
+    /// The chooser page's two ways in: 0 standard, 1 Quick Connect.
+    FormMethod(usize),
+    /// A discovered server's row: carry it to the standard page.
+    FormPick(usize),
+    /// One page back (closing from the chooser).
+    FormBack,
+    FormSubmit,
+    FormCancel,
+    QrClose,
+    /// A modal's whole-screen backdrop: swallow the click.
+    Guard,
 }
 
 // ── Navigation ──────────────────────────────────────────────────────────────
@@ -174,7 +207,8 @@ const ROW_BLEND: usize = 2;
 const ROW_GAPLESS: usize = 3;
 const ROW_BLEND_SKIPS: usize = 4;
 const ROW_PAUSE_FADE: usize = 5;
-const SET_ROWS: usize = 6;
+const ROW_MANAGE: usize = 6;
+const SET_ROWS: usize = 7;
 
 /// Seconds of blend as a person reads them (the TUI's own spelling).
 fn fmt_blend(seconds: f32) -> String {
@@ -236,6 +270,8 @@ pub(crate) struct Gui {
     /// The width of the last drawn frame, for hit zones the event loop
     /// needs outside a draw (the wheel's queue-vs-content split).
     last_width: u16,
+    /// The saved-server surfaces: dropdown, form, room, pairing QR.
+    servers: servers::ServersUi,
 }
 
 impl Gui {
@@ -263,6 +299,7 @@ impl Gui {
             qscroll: 0,
             last_current: None,
             last_width: MIN_W,
+            servers: servers::ServersUi::new(),
         }
     }
 
@@ -275,23 +312,30 @@ impl Gui {
         self.pend(effects);
     }
 
-    /// Live state back into the config shapes (called before every save).
-    /// Player prefs come from the App itself — the same rebuild the TUI's
-    /// `remember` does — so the two front ends can never disagree.
-    fn sync_config(&mut self) {
-        self.config.gui.bar = self.bar_style.config_name().to_string();
-        self.config.player.adopt(self.app.prefs());
-    }
-
     /// Settings changes persist as they happen — a GUI that loses a choice
     /// to a crash feels broken in a way a TUI never quite does.
+    ///
+    /// Loads fresh before writing: other flows save behind this copy's back
+    /// (a connect's SaveSession touches the server list, the servers room
+    /// edits it), and writing the boot-time copy wholesale would undo them.
     fn save_now(&mut self) {
         if !self.config_ok {
             return;
         }
-        self.sync_config();
-        if let Err(e) = config::save(&self.config) {
-            self.note = Some((t!("note.settings_save_failed", err = e).to_string(), true));
+        let mut config = match config::load() {
+            Ok(config) => config,
+            Err(e) => {
+                self.note = Some((t!("note.settings_save_failed", err = e).to_string(), true));
+                return;
+            }
+        };
+        config.gui.bar = self.bar_style.config_name().to_string();
+        config.player.adopt(self.app.prefs());
+        match config::save(&config) {
+            Ok(()) => self.config = config,
+            Err(e) => {
+                self.note = Some((t!("note.settings_save_failed", err = e).to_string(), true));
+            }
         }
     }
 
@@ -318,6 +362,9 @@ impl Gui {
         match row {
             ROW_BAR_WAVE => self.set_bar(BarStyle::Wave),
             ROW_BAR_GOLD => self.set_bar(BarStyle::GoldLine),
+            // ← on a doorway row would "adjust" into the room; only an
+            // activation (Enter, click, →) opens it.
+            ROW_MANAGE if delta > 0 => servers::open_room(self),
             ROW_BLEND => self.adjust_blend(delta),
             ROW_GAPLESS => {
                 self.app.gapless = !self.app.gapless;
@@ -353,9 +400,16 @@ impl Gui {
 
     /// Everything a click or key resolved to. Returns true to quit.
     fn act(&mut self, act: Act) -> bool {
+        if servers::act(self, &act) {
+            return false;
+        }
         match act {
             Act::Nav(i) => {
                 self.active = i;
+                // Leaving for a section stows every servers surface; the
+                // room is a Settings sub-view, not a place to come back to.
+                self.servers.drop_open = false;
+                self.servers.room = false;
                 self.note = (!matches!(i, FILES_NAV | SEARCH_NAV | SETTINGS_NAV))
                     .then(|| (t!("gui.coming", name = NAV[i].label()).to_string(), false));
                 if i != SETTINGS_NAV {
@@ -442,6 +496,8 @@ impl Gui {
             Act::Row(i) => self.adjust_row(i, 1),
             Act::BlendDown => self.adjust_blend(-1),
             Act::BlendUp => self.adjust_blend(1),
+            // The servers acts were consumed by servers::act above.
+            _ => {}
         }
         false
     }
@@ -550,11 +606,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     }
 
     put(frame, 1, 0, "mStream", Style::default().fg(th().accent).add_modifier(Modifier::BOLD));
-    if gui.app.connected {
-        let server = crate::quickconnect::display_server(&gui.app.session.server_id);
-        let width = server.chars().count() as u16;
-        put(frame, area.width - 2 - width, 0, &server, dim());
-    }
+    servers::draw_header(frame, gui, area);
 
     draw_nav(frame, gui, area);
 
@@ -587,16 +639,24 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         put(frame, 1, area.height - 7, &bar::clip(&text, area.width as usize - 2), style);
     }
-    let tips = match gui.active {
-        SETTINGS_NAV if gui.cursor.is_some() => t!("gui.tips.rows"),
-        FILES_NAV => t!("gui.tips.files"),
-        SEARCH_NAV if gui.app.editing_query => t!("gui.tips.search_edit"),
-        SEARCH_NAV => t!("gui.tips.search"),
-        _ => t!("gui.tips.base"),
+    let tips = if gui.servers.modal_open() {
+        t!("gui.tips.form")
+    } else if gui.servers.room && gui.active == SETTINGS_NAV {
+        t!("gui.tips.servers")
+    } else {
+        match gui.active {
+            SETTINGS_NAV if gui.cursor.is_some() => t!("gui.tips.rows"),
+            FILES_NAV => t!("gui.tips.files"),
+            SEARCH_NAV if gui.app.editing_query => t!("gui.tips.search_edit"),
+            SEARCH_NAV => t!("gui.tips.search"),
+            _ => t!("gui.tips.base"),
+        }
     };
     put(frame, 1, area.height - 1, &tips, dim());
 
-    let has_art = playing_cover_ready(&gui.app);
+    // While the pairing QR is up, the card cover stands down: the graphics
+    // encode cache holds ONE image, and two per frame thrash it.
+    let has_art = playing_cover_ready(&gui.app) && gui.servers.qr.is_none();
     let view = BarView {
         now: gui.bar_now.as_ref(),
         paused: gui.bar_paused(),
@@ -610,6 +670,16 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     bar::draw(frame, &mut gui.ui, area, gui.bar_style, &view);
     if has_art {
         draw_card_cover(frame, bar::cover_rect(area), &mut gui.app);
+    }
+
+    // Overlays draw (and register) last, so their rects win the pointer.
+    servers::draw_dropdown(frame, gui, area);
+    servers::draw_modals(frame, gui, area);
+
+    // The tooltip draws over everything, once the dwell matures — the
+    // wizard's order.
+    if let Some((target, text)) = gui.ui.ripe_tooltip() {
+        crate::kit::draw_tooltip(frame, area, target, text);
     }
 }
 
@@ -697,6 +767,11 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             (t!("gui.no_server").to_string(), dim())
         };
         put(frame, content.x, content.y + 2, &bar::clip(&text.0, content.width as usize), text.1);
+        if !gui.app.connecting {
+            // The way in, right where the absence is explained.
+            let at = Rect { x: content.x, y: content.y + 4, width: content.width, height: 3 };
+            crate::kit::tall_button(frame, &mut gui.ui, at, &t!("gui.srv.add"), true, Act::SrvAdd);
+        }
         return;
     }
     if gui.app.files.loading {
@@ -1001,6 +1076,9 @@ fn draw_queue(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 }
 
 fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
+    if gui.servers.room {
+        return servers::draw_room(frame, gui, content);
+    }
     let (radio_on, radio_off, check_on, check_off) = if legacy_conhost() {
         ("(*)", "( )", "[x]", "[ ]")
     } else {
@@ -1008,6 +1086,7 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     };
     put(frame, content.x, content.y, &t!("gui.set.bar_group"), dim());
     put(frame, content.x, content.y + 4, &t!("gui.set.playback"), dim());
+    put(frame, content.x, content.y + 9, &t!("gui.set.servers_group"), dim());
 
     let rows: [(String, String); SET_ROWS] = [
         (
@@ -1050,6 +1129,10 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             ),
             t!("gui.set.pause_fade_desc").to_string(),
         ),
+        (
+            format!("{} {}", t!("gui.srv.manage"), if legacy_conhost() { ">" } else { "▸" }),
+            t!("gui.srv.manage_desc").to_string(),
+        ),
     ];
 
     for (i, (label, desc)) in rows.iter().enumerate() {
@@ -1090,7 +1173,13 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 
 /// Where settings row `i` draws, under its section label.
 fn row_y(top: u16, i: usize) -> u16 {
-    if i < 2 { top + 1 + i as u16 } else { top + 5 + (i as u16 - 2) }
+    if i < 2 {
+        top + 1 + i as u16
+    } else if i < ROW_MANAGE {
+        top + 5 + (i as u16 - 2)
+    } else {
+        top + 10
+    }
 }
 
 // ── Input ───────────────────────────────────────────────────────────────────
@@ -1100,6 +1189,12 @@ fn row_y(top: u16, i: usize) -> u16 {
 fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return true;
+    }
+    // The servers surfaces answer first: an open modal owns the keyboard
+    // outright, the room takes its row keys, and everything else falls
+    // through untouched.
+    if let Some(quit) = servers::handle_key(gui, key) {
+        return quit;
     }
     let settings = gui.active == SETTINGS_NAV;
     let files = gui.active == FILES_NAV;
@@ -1228,13 +1323,24 @@ fn event_loop(
 ) -> std::io::Result<()> {
     let mut hand = false;
     loop {
+        // A SaveSession about to be dispatched writes the config behind
+        // this copy's back — a Quick Connect add mints a whole new entry
+        // there. Reload after, so the dropdown and the room list it.
+        let saving = gui.pending.iter().any(|e| matches!(e, Effect::SaveSession));
         tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
+        if saving && let Ok(fresh) = config::load() {
+            gui.config = fresh;
+        }
         terminal.draw(|frame| render(frame, gui))?;
 
         while let Ok(ev) = event_rx.try_recv() {
+            // The servers layer looks first: session answers that would
+            // land on the TUI's connect screen open the GUI's form instead.
+            servers::observe(gui, &ev);
             let effects = gui.app.apply_event(ev);
             gui.pend(effects);
         }
+        servers::poll(gui);
 
         let over = gui.ui.hovering_clickable();
         if over != hand {
@@ -1674,8 +1780,7 @@ mod tests {
         assert_eq!(gui.bar_style, BarStyle::Wave);
         gui.act(Act::Row(ROW_BAR_GOLD));
         assert_eq!(gui.bar_style, BarStyle::GoldLine);
-        gui.sync_config();
-        assert_eq!(gui.config.gui.bar, "gold-line");
+        assert_eq!(gui.bar_style.config_name(), "gold-line", "what save_now would write");
         gui.act(Act::Row(ROW_BAR_GOLD));
         assert_eq!(gui.bar_style, BarStyle::GoldLine, "choosing the chosen is not a toggle");
     }
@@ -1739,6 +1844,66 @@ mod dump_tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    /// The servers surfaces, same eyeball:
+    /// `cargo test dump_server_frames -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn dump_server_frames() {
+        let mut config = Config::default();
+        config.servers = vec![
+            config::ServerEntry {
+                url: "http://attic.local:3000".into(),
+                username: Some("paul".into()),
+                ..Default::default()
+            },
+            config::ServerEntry { url: "http://office.local:3000".into(), ..Default::default() },
+        ];
+        config.default_server = Some("http://attic.local:3000".into());
+        let mut gui = Gui::new(
+            config,
+            false,
+            App::new(Some("http://attic.local:3000".into()), None, None),
+        );
+        gui.app.connected = true;
+        gui.demo = Some(demo_now());
+        gui.active = SETTINGS_NAV;
+
+        let dump = |gui: &mut Gui, title: &str| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|frame| render(frame, gui)).unwrap();
+            let buffer = terminal.backend().buffer();
+            println!("==== {title} ====");
+            for y in 0..30u16 {
+                let row: String = (0..100u16).map(|x| buffer[(x, y)].symbol()).collect();
+                println!("|{row}|");
+            }
+        };
+
+        dump(&mut gui, "settings + manage row");
+        gui.act(Act::SrvMenu);
+        dump(&mut gui, "header dropdown");
+        gui.act(Act::SrvCloseDrop);
+        gui.act(Act::Row(ROW_MANAGE));
+        dump(&mut gui, "manage servers room");
+        gui.act(Act::SrvAdd);
+        dump(&mut gui, "add chooser");
+        gui.act(Act::FormMethod(1));
+        servers::observe(
+            &mut gui,
+            &Event::ServersDiscovered(vec![crate::discovery::DiscoveredServer {
+                name: "attic".into(),
+                base_url: "http://attic.local:3000".into(),
+                version: Some("5.13.2".into()),
+                quick_connect: true,
+            }]),
+        );
+        dump(&mut gui, "quick connect page");
+        gui.act(Act::FormBack);
+        gui.act(Act::FormMethod(0));
+        gui.act(Act::FormToggle(4));
+        dump(&mut gui, "standard page, public checked");
+    }
 
     #[test]
     #[ignore]

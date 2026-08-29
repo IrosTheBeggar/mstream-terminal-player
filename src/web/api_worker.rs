@@ -59,9 +59,12 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
     match cmd {
         ApiCmd::Shutdown => None,
 
-        ApiCmd::Connect { server, token } => Some(connect(session, &server, token).await),
+        // `self_signed` has no meaning here: the browser owns TLS trust.
+        ApiCmd::Connect { server, token, self_signed: _ } => {
+            Some(connect(session, &server, token).await)
+        }
 
-        ApiCmd::Login { server, username, password } => {
+        ApiCmd::Login { server, username, password, self_signed: _ } => {
             Some(login(session, &server, &username, &password).await)
         }
 
