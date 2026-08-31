@@ -997,21 +997,21 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         return;
     }
     if gui.app.files.loading {
-        put(frame, content.x, content.y + 2, &t!("busy.listing"), accent());
+        put(frame, content.x, content.y + 3, &t!("busy.listing"), accent());
         return;
     }
 
     let entries = &gui.app.files.entries;
     if entries.is_empty() {
-        put(frame, content.x, content.y + 2, &t!("gui.files.empty"), dim());
+        put(frame, content.x, content.y + 3, &t!("gui.files.empty"), dim());
         return;
     }
 
     let list = Rect {
         x: content.x,
-        y: content.y + 2,
+        y: content.y + 3,
         width: content.width - 2,
-        height: content.height - 2,
+        height: content.height - 3,
     };
     let selected = gui.app.files.state.selected();
     let reveal = gui.freveal.then_some(selected).flatten();
@@ -1047,17 +1047,21 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     );
 }
 
-/// The browser bar (docs/ux-contracts/browser-top-bar.md): back and the
-/// crumb on the left, the whole-list verbs and the honest count on the
-/// right. With the filter prompt open the bar IS the field; with a filter
-/// standing it wears the query as a chip — and the verbs then act on the
-/// narrowed view, because what you see is what plays (clause 13).
+/// The browser bar (docs/ux-contracts/browser-top-bar.md), two lines:
+/// the first is the crumb row it always was — back ◂, the path, the
+/// honest count — and the second carries the controls: the whole-list
+/// verbs (gated on the list holding playable rows, clause 2), the filter
+/// affordance, and — while a filter is taking text or standing — the
+/// field or its chip. The verbs act on the narrowed view, because what
+/// you see is what plays (clause 13).
 fn draw_files_bar(frame: &mut Frame, gui: &mut Gui, content: Rect) {
-    let y = content.y;
     let (shown, total) = gui.app.files.counts();
     let filtering = gui.app.filtering && gui.active == FILES_NAV;
     let filter = gui.app.files.filter.clone();
     let filtered = filtering || !filter.is_empty();
+
+    // ── Line 1: back, the crumb, the count — the row that stays put. ────
+    let y = content.y;
     let count = if filtered {
         t!("gui.bar.of", shown = shown, total = total).to_string()
     } else {
@@ -1065,6 +1069,27 @@ fn draw_files_bar(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     };
     let count_x = content.right().saturating_sub(count.chars().count() as u16);
     put(frame, count_x, y, &count, dim());
+
+    let forward_glyph = if legacy_conhost() { ">" } else { "▸" };
+    let mut x = content.x;
+    if !gui.app.path.is_empty() {
+        let back = Rect { x, y, width: 1, height: 1 };
+        let hover = gui.ui.pointer.is_some_and(|p| back.contains(p));
+        let glyph = if legacy_conhost() { "<" } else { "◂" };
+        put(frame, x, y, glyph, if hover { bright_bold() } else { dim() });
+        gui.ui.click(back, Act::FBarBack);
+        gui.ui.tip(back, t!("gui.bar.back_tip").to_string());
+        x += 2;
+    }
+    let crumb = if gui.app.path.is_empty() {
+        t!("gui.nav.files").to_string()
+    } else {
+        format!("{} {} {}", t!("gui.nav.files"), forward_glyph, gui.app.path)
+    };
+    put(frame, x, y, &clip_lead(&crumb, count_x.saturating_sub(x + 2) as usize), dim());
+
+    // ── Line 2: the controls. ───────────────────────────────────────────
+    let y = content.y + 1;
 
     // The [X] that clears the filter, shared by the field and the chip.
     let close = |frame: &mut Frame, gui: &mut Gui, x: u16| {
@@ -1076,10 +1101,10 @@ fn draw_files_bar(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     };
 
     if filtering {
-        // The bar is the field (clause 20): live narrowing, nothing to
+        // The line is the field (clause 20): live narrowing, nothing to
         // submit — Enter keeps the narrowed list, Esc lets go of it.
         put(frame, content.x, y, "/", accent().add_modifier(Modifier::BOLD));
-        let close_x = count_x.saturating_sub(5);
+        let close_x = content.right().saturating_sub(4);
         close(frame, gui, close_x);
         let width = close_x.saturating_sub(content.x + 3);
         put(
@@ -1092,11 +1117,21 @@ fn draw_files_bar(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         return;
     }
 
-    // Resting. The verbs sit before the count, dropped right-to-left when
-    // the room is squeezed — playability gates them (clause 2), never the
-    // filter, which is as real for folders as for tracks.
+    let mut x = content.x;
+    if filtered {
+        // The standing filter, worn as a chip the verbs sit beside.
+        put(frame, x, y, "/", accent().add_modifier(Modifier::BOLD));
+        let chip = bar::clip(&filter, 24);
+        put(frame, x + 2, y, &chip, accent().add_modifier(Modifier::BOLD));
+        x += 2 + chip.chars().count() as u16 + 1;
+        close(frame, gui, x);
+        x += 4;
+    }
+
+    // The verbs, right-aligned as the record ranks them, dropped from the
+    // tail when the room is squeezed (shuffle first, then queue all, then
+    // play — the filter keeps its one-tap spot, the record's own rule).
     let playable = !gui.app.files.tracks_with_offset().0.is_empty();
-    let forward_glyph = if legacy_conhost() { ">" } else { "▸" };
     let mut verbs: Vec<(String, Act, bool)> = Vec::new();
     if playable {
         verbs.push((format!("{forward_glyph} {}", t!("gui.bar.play")), Act::FBarPlay, true));
@@ -1110,53 +1145,17 @@ fn draw_files_bar(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
     verbs.push((format!("/ {}", t!("gui.bar.filter")), Act::FBarFilter, false));
 
-    // Left edge: the chip (an active filter) or the back ◂ + crumb.
-    let mut x = content.x;
-    if filtered {
-        put(frame, x, y, "/", accent().add_modifier(Modifier::BOLD));
-        let chip = bar::clip(&filter, 24);
-        put(frame, x + 2, y, &chip, accent().add_modifier(Modifier::BOLD));
-        x += 2 + chip.chars().count() as u16 + 1;
-        close(frame, gui, x);
-        x += 4;
-    } else if !gui.app.path.is_empty() {
-        let back = Rect { x, y, width: 1, height: 1 };
-        let hover = gui.ui.pointer.is_some_and(|p| back.contains(p));
-        let glyph = if legacy_conhost() { "<" } else { "◂" };
-        put(frame, x, y, glyph, if hover { bright_bold() } else { dim() });
-        gui.ui.click(back, Act::FBarBack);
-        gui.ui.tip(back, t!("gui.bar.back_tip").to_string());
-        x += 2;
-    }
-
-    // Fit the verbs, keeping at least a sliver of crumb: drop from the
-    // tail (shuffle first, then queue all, then play — the filter stays,
-    // the record's own one-tap rule).
     let sep = " · ";
     let width_of = |verbs: &[(String, Act, bool)]| -> u16 {
         let labels: u16 = verbs.iter().map(|(l, _, _)| l.chars().count() as u16).sum();
         labels + sep.chars().count() as u16 * verbs.len().saturating_sub(1) as u16
     };
-    let avail = count_x.saturating_sub(x + 2);
-    let crumb_min = 12u16.min(avail);
-    while verbs.len() > 1 && width_of(&verbs) + crumb_min + 2 > avail {
+    let avail = content.right().saturating_sub(x + 1);
+    while verbs.len() > 1 && width_of(&verbs) > avail {
         let drop = verbs.len() - 2; // the row before the filter
         verbs.remove(drop);
     }
-    let verbs_w = width_of(&verbs);
-    let verbs_x = count_x.saturating_sub(verbs_w + 2);
-
-    if !filtered {
-        let crumb = if gui.app.path.is_empty() {
-            t!("gui.nav.files").to_string()
-        } else {
-            format!("{} {} {}", t!("gui.nav.files"), forward_glyph, gui.app.path)
-        };
-        let room = verbs_x.saturating_sub(x + 1) as usize;
-        put(frame, x, y, &clip_lead(&crumb, room), dim());
-    }
-
-    let mut vx = verbs_x;
+    let mut vx = content.right().saturating_sub(width_of(&verbs) + 1);
     for (i, (label, act, is_accent)) in verbs.iter().enumerate() {
         if i > 0 {
             put(frame, vx, y, sep, dim());
@@ -2331,6 +2330,35 @@ mod tests {
         gui.pending.clear();
         let lines = draw(&mut gui);
         assert!(!lines[2].contains("◂"), "at the root there is nowhere to go: {:?}", lines[2]);
+    }
+
+    #[test]
+    fn a_drill_lets_go_of_the_filter() {
+        // Clause 24: a filter describes the list it was typed against.
+        let mut gui = browsing_gui();
+        gui.queue_open = false;
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        for c in "amb".chars() {
+            handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(gui.app.files.filter, "amb");
+        // The narrowed list holds the one folder; Enter opens it.
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let effects = gui.app.apply_event(Event::Listing(Box::new(
+            crate::api::types::DirListing {
+                path: "/music/Ambient".into(),
+                directories: vec![],
+                files: vec![],
+                ..Default::default()
+            },
+        )));
+        gui.pend(effects);
+        assert!(
+            gui.app.files.filter.is_empty(),
+            "the drill let go of the filter: {:?}",
+            gui.app.files.filter
+        );
     }
 
     // ── The sonic path room ─────────────────────────────────────────────
