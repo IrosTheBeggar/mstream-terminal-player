@@ -1548,25 +1548,8 @@ fn event_loop(
                         }
                         MouseEventKind::Up(_) => gui.ui.release(),
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                            gui.ui.pointer = Some(at);
                             let delta = if mouse.kind == MouseEventKind::ScrollUp { -1 } else { 1 };
-                            // The wheel scrolls the view under the pointer,
-                            // never the selection (the kit's table law).
-                            if at.x >= gui.queue_panel_x() && gui.queue_open {
-                                gui.qscroll = if delta < 0 {
-                                    gui.qscroll.saturating_sub(1)
-                                } else {
-                                    gui.qscroll + 1
-                                };
-                            } else if gui.active == FILES_NAV && at.x >= 17 {
-                                gui.act(Act::FScrollBy(delta));
-                            } else if gui.active == ALBUMS_NAV && at.x >= 17 {
-                                albums::wheel(gui, delta);
-                            } else if gui.active == SEARCH_NAV && at.x >= 17 {
-                                gui.act(Act::SScrollBy(delta));
-                            } else if gui.active == SONIC_NAV && at.x >= 17 {
-                                gui.act(Act::SonScrollBy(delta));
-                            }
+                            gui.wheel(at, delta);
                         }
                         _ => {}
                     }
@@ -1589,6 +1572,39 @@ impl Gui {
     /// on the last drawn frame — the wheel's queue-vs-content split.
     fn queue_panel_x(&self) -> u16 {
         self.last_width.saturating_sub(34)
+    }
+
+    /// The wheel scrolls the view under the pointer, never the selection
+    /// (the kit's table law). The open queue outranks the rooms at its own
+    /// columns; inside the content column every room answers for itself —
+    /// and the match is exhaustive over [`NavId`], so a room cannot ship
+    /// without deciding what its wheel does (the sonic room did exactly
+    /// that, and swipes silently went nowhere).
+    fn wheel(&mut self, at: Position, delta: i32) {
+        self.ui.pointer = Some(at);
+        if self.queue_open && at.x >= self.queue_panel_x() {
+            self.qscroll =
+                if delta < 0 { self.qscroll.saturating_sub(1) } else { self.qscroll + 1 };
+            return;
+        }
+        // The nav column scrolls nothing.
+        if at.x < 17 {
+            return;
+        }
+        match NAV[self.active] {
+            NavId::Files => {
+                self.act(Act::FScrollBy(delta));
+            }
+            NavId::Albums => albums::wheel(self, delta),
+            NavId::Search => {
+                self.act(Act::SScrollBy(delta));
+            }
+            NavId::Sonic => sonic::wheel(self, delta),
+            // Nothing scrollable in these rooms — said here, on the
+            // record, rather than by falling through a router.
+            NavId::Artists | NavId::Genres | NavId::Recent | NavId::Playlists
+            | NavId::Settings => {}
+        }
     }
 }
 
@@ -2237,6 +2253,35 @@ mod tests {
         }
         let text = draw(&mut gui).join("\n");
         assert!(text.contains("Stop 00"), "scrolled home:\n{text}");
+    }
+
+    #[test]
+    fn the_wheel_router_splits_queue_nav_and_room() {
+        // The refactor's dividend: the router is a method, so the split is
+        // testable instead of living inline in the event loop.
+        let mut gui = sonic_gui();
+        gui.app.sonic.view = crate::tui::app::SonicView::Results;
+        gui.app.sonic.fetched = true;
+        gui.app.sonic.stops = (0..20)
+            .map(|i| stop(&format!("lib/{i}.mp3"), "A", &format!("S{i}"), 0.5, 0.8))
+            .collect();
+        draw(&mut gui); // seats last_width for the queue split
+
+        // Over the content column, the active room answers.
+        gui.wheel(Position { x: 40, y: 10 }, 1);
+        assert_eq!(gui.sonic.scroll, 1, "the room's wheel");
+        // Over the open queue, the queue answers — the room stands still.
+        gui.wheel(Position { x: 90, y: 10 }, 1);
+        assert_eq!(gui.qscroll, 1, "the queue's wheel");
+        assert_eq!(gui.sonic.scroll, 1, "the room did not move");
+        // Over the nav column, nothing scrolls.
+        gui.wheel(Position { x: 5, y: 10 }, 1);
+        assert_eq!((gui.sonic.scroll, gui.qscroll), (1, 1), "the nav scrolls nothing");
+        // With the queue folded, its columns belong to the room again.
+        gui.queue_open = false;
+        gui.wheel(Position { x: 90, y: 10 }, 1);
+        assert_eq!(gui.sonic.scroll, 2, "the split follows the fold");
+        assert_eq!(gui.qscroll, 1);
     }
 
     #[test]
