@@ -106,6 +106,13 @@ pub enum ApiCmd {
     /// Write a whole track list to a playlist, creating it or replacing what
     /// was there. Sonic Path's "save as playlist" is the only caller.
     SavePlaylist { name: String, files: Vec<String> },
+    /// Create an EMPTY playlist — the Playlists room's New. (The bulk
+    /// create-or-overwrite above is a different act with a different name.)
+    CreatePlaylist { name: String },
+    /// Rename a playlist. The route arrived in mStream 5.16.0; an older
+    /// server 404s, and the arm words that as the server's age.
+    RenamePlaylist { from: String, to: String },
+    DeletePlaylist { name: String },
     Search(String),
     /// Fetch and decode one cover, named by the art file a track's metadata
     /// carries. The app caches the answer under that name.
@@ -376,6 +383,12 @@ pub enum Event {
     /// A playlist was written. Carries the name so the confirmation can say
     /// which one, and how many tracks went into it.
     PlaylistSaved { name: String, count: usize },
+    /// The management verbs landed. They carry nothing: no message rides
+    /// them — the row appearing, renaming or vanishing is the confirmation
+    /// — so the one thing to do is re-ask for an open Playlists view.
+    PlaylistCreated,
+    PlaylistRenamed,
+    PlaylistDeleted,
     /// `query` is the search these results answer — replies can pass each
     /// other now, and the box's contents name the one still wanted.
     SearchResults { query: String, results: Box<SearchResults> },
@@ -921,6 +934,29 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
             let count = files.len();
             c.playlist_save(&name, &files).map(|()| Event::PlaylistSaved { name, count })
         }
+        // The management verbs word their own failures — `<what failed>:
+        // <the server's words>` — so the generic fallthrough never has to
+        // guess what the user was doing (contract clause 50).
+        ApiCmd::CreatePlaylist { name } => match c.playlist_new(&name) {
+            Ok(()) => Ok(Event::PlaylistCreated),
+            Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+            Err(e) => Ok(Event::Error(format!("couldn't create {name}: {e}"))),
+        },
+        ApiCmd::RenamePlaylist { from, to } => match c.playlist_rename(&from, &to) {
+            Ok(()) => Ok(Event::PlaylistRenamed),
+            Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+            // The route is 5.16.0+: a 404 is the server's age, not a
+            // missing playlist — worded so it reads as old, not broken.
+            Err(ApiError::NotFound(_)) => Ok(Event::Error(
+                "this server can't rename playlists — it needs mStream 5.16".into(),
+            )),
+            Err(e) => Ok(Event::Error(format!("couldn't rename {from}: {e}"))),
+        },
+        ApiCmd::DeletePlaylist { name } => match c.playlist_delete(&name) {
+            Ok(()) => Ok(Event::PlaylistDeleted),
+            Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+            Err(e) => Ok(Event::Error(format!("couldn't delete {name}: {e}"))),
+        },
         ApiCmd::Search(query) => {
             c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r) })
         }

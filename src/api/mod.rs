@@ -668,6 +668,48 @@ impl Client {
         wait(self.playlist_save_async(title, files))
     }
 
+    /// Create an EMPTY playlist. The server answers 400 when the name is
+    /// already taken; the error carries its words.
+    pub async fn playlist_new_async(&self, title: &str) -> Result<(), ApiError> {
+        let _: serde_json::Value =
+            self.post("api/v1/playlist/new", serde_json::json!({ "title": title })).await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn playlist_new(&self, title: &str) -> Result<(), ApiError> {
+        wait(self.playlist_new_async(title))
+    }
+
+    /// Rename a playlist. The route arrived in mStream 5.16.0 — an older
+    /// server 404s, which callers word as the missing feature it is.
+    pub async fn playlist_rename_async(&self, from: &str, to: &str) -> Result<(), ApiError> {
+        let _: serde_json::Value = self
+            .post(
+                "api/v1/playlist/rename",
+                serde_json::json!({ "oldName": from, "newName": to }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn playlist_rename(&self, from: &str, to: &str) -> Result<(), ApiError> {
+        wait(self.playlist_rename_async(from, to))
+    }
+
+    pub async fn playlist_delete_async(&self, name: &str) -> Result<(), ApiError> {
+        let _: serde_json::Value = self
+            .post("api/v1/playlist/delete", serde_json::json!({ "playlistname": name }))
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn playlist_delete(&self, name: &str) -> Result<(), ApiError> {
+        wait(self.playlist_delete_async(name))
+    }
+
     /// The shape of a track, for drawing under the progress bar.
     ///
     /// `None` is every flavour of "there isn't one", and none of them is an

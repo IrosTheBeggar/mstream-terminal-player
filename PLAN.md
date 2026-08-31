@@ -1613,12 +1613,33 @@ a LATER secondary screen (party view), Columns retired.
   pick), and Esc/answer both return to the room. 18 new tests; smoked
   end-to-end against demo.mstream.io (random ends → build → meters on
   screen).
+- **Playlists room ✅ 2026-08-31** — contract-first again
+  (`docs/ux-contracts/playlists.md`; the record is the mobile browser
+  tab's SERVER-playlists view, not its local-playlists screen), and the
+  first feature to skip the canvas deliberately: every element maps to
+  an idiom already drawn (the albums drill, the kit affirmative card,
+  the servers-room hover verbs, the sonic name modal, the kit warning
+  modal), so the contract's translation table is the whole design. The
+  list rides `LibraryNode::Playlists` with the New card above it;
+  hover (or `e`/`x` on the cursor row) reveals rename and the [X];
+  create/rename share one name dialog with the record's no-op contract;
+  delete confirms through a warning gate where `x` answers and Enter
+  stays the safe way out. Activation drills to the shared track rows.
+  New plumbing both surfaces share: `playlist_new/rename/delete` on the
+  client and their ApiCmds — silent on success (the row changing IS the
+  confirmation; an open Playlists view re-asks), worded per failure,
+  with rename's 404 named as the server's age (the route is 5.16.0+;
+  the session carries no version, so the record's hide-the-item gate
+  became honest wording — see the contract's deviations). 7 new tests;
+  read-only smoke against demo.mstream.io (list · drill · wheel · back
+  — no writes to a shared public server).
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
-  of the Library tab views (Artists/Genres/Recent/Playlists — the wall's
-  drill door generalizes), Discover's "Play a path to…" entry (revisits
-  the contract's §5 search-skip), then e2e legs (fake server needs
-  player endpoints).
+  of the Library tab views (Artists/Genres/Recent — the wall's drill
+  door generalizes), Discover's "Play a path to…" entry (revisits the
+  sonic contract's §5 search-skip), track-level add-to-playlist (its
+  own contract; `playlist/add-song` awaits), then e2e legs (fake server
+  needs player endpoints).
 
 ## Smoke testing
 

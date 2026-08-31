@@ -3742,6 +3742,9 @@ impl App {
                 Vec::new()
             }
             Event::PlaylistSaved { name, count } => self.consume_playlist_saved(name, count),
+            Event::PlaylistCreated | Event::PlaylistRenamed | Event::PlaylistDeleted => {
+                self.consume_playlist_changed()
+            }
             Event::SearchResults { query, results } => {
                 // Replies can pass each other now that each answers on its
                 // own thread; only the search still standing in the box is
