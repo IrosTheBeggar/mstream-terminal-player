@@ -5,8 +5,8 @@
 | **Design of record** | `mstream_music` @ `137dd27` — `lib/widgets/browser_toolbar.dart` (the context-aware AppBar-bottom bar) and `lib/widgets/local_search_bar.dart` (the live list filter); action gating and demotion rules from the toolbar's own comments |
 | **Server API** | none — every verb here acts on the list already fetched |
 | **Already in this repo** | the whole filter machinery: `Action::StartFilter`, `App.filtering`, `Pane::apply_filter`/`clear_filter` with live narrowing, Submit-keeps / Cancel-clears / backspace-past-empty-leaves, and `Pane::counts()` = (shown, total); `Pane::tracks_with_offset` for the playable rows; `play_index`; the queue |
-| **Target surface** | the GUI player's **Files room** — its crumb row grows into the bar |
-| **Status** | implemented in the GUI, 2026-08-31 |
+| **Target surface** | the GUI player's browse rooms: **Files**, **Albums** (wall and drilled album), **Playlists** (list and drilled playlist) |
+| **Status** | implemented in the GUI, 2026-08-31; extended to all four browse pages the same day |
 
 ## Intent
 
@@ -17,28 +17,35 @@ list has something playable, never as dead chrome.
 
 ## Scope
 
-The record's bar serves five contexts. Two port here — the **normal list**
-and the **open filter** — because the GUI splits the record's other
-contexts into rooms of their own: album detail is the Albums room, an open
-playlist is the Playlists room, and the home "search the whole server"
-field (with its category picker) is the Search room. The bar's one law —
-*verbs appear only when they would do something* — is written to travel to
-those rooms' headers later.
+The record's bar serves five contexts; four of them port here as the
+browse rooms' shared header — the normal list (Files), album detail (the
+drilled album), the open playlist, and the open filter — with the albums
+WALL added as this surface's own context (the record has no grid). The
+home "search the whole server" field (with its category picker) stays the
+Search room's. One law travels with the bar everywhere: *verbs appear only
+when they would do something*.
 
 ## Behavior contract
 
-### The bar (resting)
+### The bar (resting) — two lines
 
-1. Left: **back** (`◂`, clickable) when there is somewhere to go — above
-   the listing's root it disappears, not dims — then the crumb
-   (`Files ▸ path`), leading-clipped so the leaf survives.
-2. Right: the verbs, then the count. **Play, Queue all and Shuffle appear
-   only while the list holds playable rows** (the record's rule: lists of
-   containers keep a clean bar, and there is never a play button with
-   nothing to play). The **filter** affordance is always there — finding a
-   folder by name is as real as finding a track.
-3. The count reads `n items`; under an active filter it reads
-   **`n of m`** — the narrowed view never impersonates the whole.
+1. **Line one is the room's own header, unchanged**: back (`◂`,
+   clickable) when there is somewhere to go — above the root it
+   disappears, not dims — the crumb or title, leading-clipped so the leaf
+   survives, and the count at the right edge.
+2. **Line two carries the controls.** The **filter** affordance leads it
+   on the left — always there; finding a folder or an album by name is as
+   real as finding a track. The verbs sit right: **Play, Queue all and
+   Shuffle appear only while the list holds playable rows** (the record's
+   rule: lists of containers — the albums wall, the playlists — keep a
+   clean line, and there is never a play button with nothing to play).
+3. The count reads `n items` (the wall keeps its `n albums`); under an
+   active filter it reads **`n of m`** — the narrowed view never
+   impersonates the whole.
+4. On the **albums wall** the filter narrows the grid itself: pages,
+   cells, the keyboard cursor and the cover prefetch all follow the
+   narrowed view, and a click on a filtered cell opens the album it
+   shows, never what lived at that index unfiltered.
 
 ### The verbs
 
@@ -94,9 +101,6 @@ English reference:
 - **Download all**: this player has no downloads subsystem.
 - **The home whole-server search + category picker**: the Search room's
   contract when its top bar is revisited.
-- **Album-detail and playlist bars**: those rooms already carry their
-  verbs; aligning their headers to this bar's law is future work, noted in
-  PLAN.
 
 ## Translation notes (terminal GUI)
 
@@ -130,3 +134,12 @@ drawing, the keys, and the three verbs composed from public App pieces
 - **2026-08-31 — No design canvas**: one bar row of existing kit
   vocabulary — text buttons, the line input, dim counts. The translation
   table is the design.
+- **2026-08-31 — Two lines, filter left** (review): one line was messy —
+  the crumb, four verbs and the count elbowing each other. The header row
+  stays what each room always drew; the controls line beneath leads with
+  the filter and right-aligns the verbs.
+- **2026-08-31 — Extended to Albums and Playlists**: the drilled views
+  reuse the pane machinery wholesale; the wall needed an index map so the
+  grid, its paging and its clicks follow the filter. The grid keeps its
+  row count by spending the last row's trailing blank on the controls
+  line.

@@ -156,8 +156,11 @@ struct GridShape {
 impl GridShape {
     fn for_content(content: Rect) -> GridShape {
         let cols = ((content.width + 2) / STRIDE_X).max(1) as usize;
+        // Rows keep the pre-bar sum: the last row spends its trailing
+        // blank on the controls line, and the per-cell bottom guard
+        // clips anything that genuinely would not fit.
         let rows = (content.height.saturating_sub(2) / STRIDE_Y).max(1) as usize;
-        GridShape { cols, rows, origin: (content.x, content.y + 2) }
+        GridShape { cols, rows, origin: (content.x, content.y + 3) }
     }
 
     fn capacity(&self) -> usize {
@@ -190,6 +193,29 @@ fn page_count(albums: usize, capacity: usize) -> usize {
     albums.div_ceil(capacity).max(1)
 }
 
+/// The wall's view of the album list: every index — or, while the pane's
+/// filter stands, the indices whose label matches it, the same match the
+/// pane's own rows use (the bar contract's clause 13: what you see is
+/// what the wall shows).
+fn visible_albums(gui: &Gui) -> Option<Vec<usize>> {
+    let albums = gui.app.albums.as_ref()?;
+    let needle = gui.app.library.filter.trim().to_lowercase();
+    Some(if needle.is_empty() {
+        (0..albums.len()).collect()
+    } else {
+        albums
+            .iter()
+            .enumerate()
+            .filter(|(_, album)| {
+                crate::tui::app::entries::album_label(album)
+                    .to_lowercase()
+                    .contains(&needle)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    })
+}
+
 /// The grid geometry the last frame drew with — recomputed from the same
 /// inputs, so key handling agrees with the pointer about where cells are.
 fn shape(gui: &Gui) -> GridShape {
@@ -197,8 +223,8 @@ fn shape(gui: &Gui) -> GridShape {
 }
 
 fn turn_page(gui: &mut Gui, delta: i32) {
-    let Some(albums) = gui.app.albums.as_ref() else { return };
-    let pages = page_count(albums.len(), shape(gui).capacity());
+    let Some(visible) = visible_albums(gui) else { return };
+    let pages = page_count(visible.len(), shape(gui).capacity());
     let page = gui.albums.page as i32 + delta;
     gui.albums.page = page.clamp(0, pages as i32 - 1) as usize;
     gui.albums.cursor = 0;
@@ -207,7 +233,14 @@ fn turn_page(gui: &mut Gui, delta: i32) {
 fn open_album(gui: &mut Gui, index_on_page: usize) {
     let capacity = shape(gui).capacity();
     let at = gui.albums.page * capacity + index_on_page;
-    let Some(album) = gui.app.albums.as_ref().and_then(|a| a.get(at)).cloned() else { return };
+    let Some(album) = visible_albums(gui)
+        .as_deref()
+        .and_then(|v| v.get(at))
+        .and_then(|&i| gui.app.albums.as_ref().and_then(|a| a.get(i)))
+        .cloned()
+    else {
+        return;
+    };
     gui.albums.cursor = index_on_page;
     gui.albums.tscroll = 0;
     gui.albums.treveal = false;
@@ -316,7 +349,7 @@ pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
 
 /// How many albums the current page actually shows.
 fn page_len(gui: &Gui, capacity: usize) -> usize {
-    let total = gui.app.albums.as_ref().map_or(0, Vec::len);
+    let total = visible_albums(gui).map_or(0, |v| v.len());
     total.saturating_sub(gui.albums.page * capacity).min(capacity)
 }
 
@@ -343,12 +376,29 @@ fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let heading = t!("gui.nav.albums").to_string();
     put(frame, content.x, content.y, &heading, Style::default().add_modifier(Modifier::BOLD));
 
-    let Some(total) = gui.app.albums.as_ref().map(Vec::len) else {
-        put(frame, content.x, content.y + 2, &t!("gui.alb.loading"), accent());
+    let Some(visible) = visible_albums(gui) else {
+        put(frame, content.x, content.y + 3, &t!("gui.alb.loading"), accent());
         return;
     };
+    let all = gui.app.albums.as_ref().map_or(0, Vec::len);
+    super::draw_bar_controls(frame, gui, content, content.y + 1);
+    if all == 0 {
+        put(frame, content.x, content.y + 3, &t!("gui.alb.empty"), dim());
+        return;
+    }
+    let total = visible.len();
     if total == 0 {
-        put(frame, content.x, content.y + 2, &t!("gui.alb.empty"), dim());
+        // The filter matched nothing; the way back is one key (clause 30).
+        put(frame, content.x, content.y + 3, &t!("gui.files.empty"), dim());
+        put(
+            frame,
+            content.right().saturating_sub(
+                super::bar_count(gui, String::new()).chars().count() as u16,
+            ),
+            content.y,
+            &super::bar_count(gui, String::new()),
+            dim(),
+        );
         return;
     }
 
@@ -365,7 +415,7 @@ fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         frame,
         content.x + heading.chars().count() as u16 + 2,
         content.y,
-        &t!("gui.alb.count", count = total),
+        &super::bar_count(gui, t!("gui.alb.count", count = all).to_string()),
         dim(),
     );
 
@@ -399,10 +449,11 @@ fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     // the first frame of a page this whole scan is hashmap lookups.
     let missing: Vec<String> = {
         let Some(albums) = gui.app.albums.as_ref() else { return };
-        albums
+        visible
             .iter()
             .skip(start)
             .take(shown)
+            .filter_map(|&at| albums.get(at))
             .filter_map(|album| album.album_art_file.as_deref())
             .filter(|file| !gui.app.art.contains_key(*file))
             .map(str::to_string)
@@ -432,7 +483,9 @@ fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     {
         let Gui { app, albums: wall, ui, .. } = &mut *gui;
         let Some(albums) = app.albums.as_ref() else { return };
-        for (i, album) in albums.iter().skip(start).take(shown).enumerate() {
+        for (i, album) in
+            visible.iter().skip(start).take(shown).filter_map(|&at| albums.get(at)).enumerate()
+        {
             let cell = shape.cell(i);
             if cell.bottom() > content.bottom() {
                 break;
@@ -516,25 +569,30 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str, arti
         Some(artist) => format!("{name} — {artist}"),
         None => name.to_string(),
     };
+    let count =
+        super::bar_count(gui, t!("gui.files.items", count = gui.app.library.counts().1).to_string());
+    let count_x = content.right().saturating_sub(count.chars().count() as u16);
+    put(frame, count_x, content.y, &count, dim());
     put(
         frame,
         title_x,
         content.y,
-        &super::bar::clip(&title, content.right().saturating_sub(title_x) as usize - 1),
+        &super::bar::clip(&title, count_x.saturating_sub(title_x + 2) as usize),
         Style::default().add_modifier(Modifier::BOLD),
     );
+    super::draw_bar_controls(frame, gui, content, content.y + 1);
 
     let entries = &gui.app.library.entries;
     if entries.len() <= 1 {
-        put(frame, content.x, content.y + 2, &t!("busy.listing"), accent());
+        put(frame, content.x, content.y + 3, &t!("busy.listing"), accent());
         return;
     }
 
     let list = Rect {
         x: content.x,
-        y: content.y + 2,
+        y: content.y + 3,
         width: content.width - 2,
-        height: content.height - 2,
+        height: content.height - 3,
     };
     let selected = gui.app.library.state.selected();
     let reveal = gui.albums.treveal.then_some(selected).flatten();
@@ -627,6 +685,53 @@ mod tests {
         (0..area.height)
             .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
             .collect()
+    }
+
+    #[test]
+    fn the_bar_filters_the_wall_and_gates_its_verbs() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut gui = wall_gui(25);
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("/ filter"), "the bar reaches the wall:\n{text}");
+        assert!(!text.contains("▸ play"), "albums are containers — no play verb:\n{text}");
+
+        // f opens the App's own prompt; typing narrows the wall live.
+        super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(gui.app.filtering, "f reaches the bar in this room too");
+        for c in "album 07".chars() {
+            super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("Album 07"), "the match stands:\n{text}");
+        assert!(!text.contains("Album 01"), "the rest of the wall folded:\n{text}");
+        assert!(text.contains("1 of 25"), "the honest count:\n{text}");
+
+        // Enter keeps it; the one visible cell opens the matching album,
+        // not whatever lived at that grid index unfiltered.
+        super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        gui.pending.clear();
+        gui.act(Act::AlbCell(0));
+        assert!(
+            gui.pending.iter().any(|e| matches!(
+                e,
+                Effect::Api(ApiCmd::Library { node: LibraryNode::Album { name, .. }, .. })
+                    if name == "Album 07"
+            )),
+            "the filtered cell maps home: {:?}",
+            gui.pending
+        );
+    }
+
+    #[test]
+    fn typing_a_filter_never_queues_a_row() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // The letter-steal guard: the filter gate outranks the room's own
+        // keys, so an 'a' typed into the prompt must not queue-add.
+        let mut gui = wall_gui(3);
+        super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(gui.app.library.filter, "a", "the letter reached the prompt");
+        assert!(gui.app.queue.items.is_empty(), "and queued nothing");
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub(super) fn library_root_entries() -> Vec<Entry> {
     .collect()
 }
 
-pub(super) fn album_label(album: &Album) -> String {
+pub(crate) fn album_label(album: &Album) -> String {
     let name = album.name.as_deref().unwrap_or("(untitled album)");
     let year = album.year.map(|y| format!(" ({y})")).unwrap_or_default();
     match album.artist.as_deref() {

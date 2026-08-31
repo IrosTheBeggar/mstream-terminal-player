@@ -1653,6 +1653,15 @@ a LATER secondary screen (party view), Columns retired.
   4 new tests; read-only smoke against demo.mstream.io proved the
   gating live (folders-only root: no verbs; drilled into tracks: verbs
   appear; filter narrows with the `of` count).
+  Same-day follow-ups from review: the bar became TWO lines (the header
+  row each room always drew, the controls beneath — filter leading on
+  the left, verbs right), and it now serves every browse page — Files,
+  the albums wall and drilled album, the playlists list and drilled
+  playlist. The drilled views reuse the pane machinery wholesale; the
+  wall filters through an index map (pages, cells, cursor and cover
+  prefetch all follow the narrowed view, and a filtered cell opens the
+  album it shows). The keys ride one shared gate that outranks the room
+  handlers, so a typed letter can never queue a row.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
   of the Library tab views (Artists/Genres/Recent — the wall's drill
