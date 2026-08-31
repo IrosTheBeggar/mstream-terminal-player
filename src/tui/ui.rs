@@ -4457,6 +4457,7 @@ mod tests {
             ],
             note: None,
             length: app.sonic.length,
+            issue: crate::tui::worker::JourneyIssue::None,
         });
 
         let text = draw_sized(&mut app, 100, 30);
@@ -4493,6 +4494,7 @@ mod tests {
                 .collect(),
             note: None,
             length: app.sonic.length,
+            issue: crate::tui::worker::JourneyIssue::None,
         });
         // A 32-stop path in a short terminal scrolls like any other list.
         draw_sized(&mut app, 60, 20);

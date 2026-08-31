@@ -2840,6 +2840,76 @@ fn on_sonic_row(app: &mut App, row: SonicRow) {
 }
 
 #[test]
+fn a_disabled_journey_probes_before_naming_a_reason() {
+    use crate::tui::worker::JourneyIssue;
+    // The route's 403 reads the same for "switched off" and "nothing
+    // scanned yet" — so the answer is a re-ping, not a guess, and the user
+    // never reads an explanation that then gets retracted.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("from")]);
+    app.play_index(0);
+    browsing(&mut app, &["to"], 0);
+    app.handle_action(Action::StartJourney);
+
+    let effects =
+        app.consume_journey(Vec::new(), None, app.sonic.length, JourneyIssue::Disabled);
+    assert!(app.sonic.probe, "the reason is still being asked for");
+    assert!(app.sonic.note.is_none(), "nothing is claimed yet");
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::DiscoveryProbe))),
+        "the ping was asked for: {effects:?}"
+    );
+
+    // The flag still on: the scan simply hasn't run — worth retrying.
+    app.apply_event(Event::DiscoveryProbe { available: true });
+    assert!(!app.sonic.probe);
+    assert_eq!(app.sonic.empty, SonicEmpty::ScanPending);
+    assert!(
+        app.sonic.note.as_deref().unwrap_or("").contains("hasn't analyzed"),
+        "got: {:?}",
+        app.sonic.note
+    );
+
+    // And the flag gone: the feature was switched off under us.
+    app.sonic.probe = true;
+    app.apply_event(Event::DiscoveryProbe { available: false });
+    assert_eq!(app.sonic.empty, SonicEmpty::TurnedOff);
+    assert!(
+        app.sonic.note.as_deref().unwrap_or("").contains("switched off"),
+        "got: {:?}",
+        app.sonic.note
+    );
+
+    // A probe nobody is waiting for changes nothing.
+    let note = app.sonic.note.clone();
+    app.apply_event(Event::DiscoveryProbe { available: true });
+    assert_eq!(app.sonic.note, note, "an unasked probe is ignored");
+}
+
+#[test]
+fn a_random_pick_lands_on_the_side_that_asked() {
+    let mut app = connected_app();
+    app.apply_event(Event::SonicRandom {
+        side: SonicSide::End,
+        track: Some(Box::new(track("lib/lucky.mp3"))),
+    });
+    assert_eq!(
+        app.sonic.end.as_ref().map(|t| t.filepath.as_str()),
+        Some("lib/lucky.mp3"),
+        "the pick filled the end that asked"
+    );
+
+    // An empty library answers with words, not silence.
+    app.apply_event(Event::SonicRandom { side: SonicSide::Start, track: None });
+    assert!(app.sonic.start.is_none());
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text.contains("couldn't fetch")),
+        "got: {:?}",
+        app.message
+    );
+}
+
+#[test]
 fn changing_the_length_asks_for_a_different_arc() {
     // The stops aren't a list to trim — a shorter path is a different set
     // of waypoints, so it has to be replotted. Sliding the length does not
@@ -2852,7 +2922,7 @@ fn changing_the_length_asks_for_a_different_arc() {
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
     assert!(!app.sonic.pending);
 
@@ -2888,7 +2958,7 @@ fn playing_a_sonic_path_replaces_the_queue_and_starts_it() {
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     on_sonic_row(&mut app, SonicRow::Play);
@@ -2916,7 +2986,7 @@ fn queueing_a_sonic_path_adds_to_what_is_already_there() {
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     on_sonic_row(&mut app, SonicRow::QueueAll);
@@ -2941,7 +3011,7 @@ fn a_stop_row_is_an_ordinary_track_row() {
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     let mid = app
@@ -3057,7 +3127,7 @@ fn saving_a_path_as_a_playlist_asks_for_a_name_first() {
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     on_sonic_row(&mut app, SonicRow::SavePlaylist);
@@ -3109,7 +3179,7 @@ fn the_path_says_what_it_is_doing_and_why_it_came_back_empty() {
     app.apply_event(Event::Journey {
         stops: Vec::new(),
         note: Some("the destination hasn't been analysed yet".into()),
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
     assert_eq!(status(&app).as_deref(), Some("the destination hasn't been analysed yet"));
 
@@ -3147,7 +3217,7 @@ fn start_over_clears_both_ends_and_the_path() {
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     on_sonic_row(&mut app, SonicRow::StartOver);
@@ -3211,7 +3281,7 @@ fn a_path_reply_for_a_length_since_changed_keeps_waiting() {
     app.apply_event(Event::Journey {
         stops: vec![stop("stale", 0.0)],
         note: None,
-        length: first,
+        length: first, issue: crate::tui::worker::JourneyIssue::None
     });
     assert!(app.sonic.stops.is_empty(), "an arc of the wrong length is not this arc");
     assert!(app.sonic.pending, "still waiting on the length actually asked for");
@@ -3219,7 +3289,7 @@ fn a_path_reply_for_a_length_since_changed_keeps_waiting() {
     app.apply_event(Event::Journey {
         stops: vec![stop("fresh", 0.0)],
         note: None,
-        length: first + 1,
+        length: first + 1, issue: crate::tui::worker::JourneyIssue::None
     });
     assert_eq!(app.sonic.stops.len(), 1);
     assert!(!app.sonic.pending);
@@ -3257,7 +3327,7 @@ fn a_path_reply_that_arrives_after_start_over_is_dropped() {
     app.handle_action(Action::StartJourney);
     app.reset_sonic_path();
 
-    app.apply_event(Event::Journey { stops: vec![stop("late", 0.0)], note: None, length: 14 });
+    app.apply_event(Event::Journey { stops: vec![stop("late", 0.0)], note: None, length: 14, issue: crate::tui::worker::JourneyIssue::None });
     assert!(app.sonic.stops.is_empty(), "a path nobody is waiting for is not drawn");
     assert_eq!(app.queue.items.len(), 1, "and nothing is queued behind the user's back");
 }
@@ -3767,7 +3837,7 @@ fn changing_the_length_stops_waiting_for_a_path_of_the_old_one() {
 
     // And the reply plotted for the old length is still ignored when it
     // lands — clearing the wait must not have opened a door for it.
-    app.consume_journey(Vec::new(), None, was);
+    app.consume_journey(Vec::new(), None, was, crate::tui::worker::JourneyIssue::None);
     assert!(!app.sonic.fetched, "a path of the wrong length is not this panel's answer");
 }
 
