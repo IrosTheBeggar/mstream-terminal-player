@@ -21,6 +21,7 @@
 mod albums;
 mod bar;
 mod servers;
+mod sonic;
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
@@ -112,6 +113,34 @@ pub(crate) enum Act {
     AlbTrackQueue(usize),
     AlbScrollBy(i32),
     AlbScrollTo(usize),
+    // ── Sonic path (see gui::sonic) ─────────────────────────────────────
+    /// A setup card's body or a results chip: open the pick-methods menu.
+    SonMenu(crate::tui::app::SonicSide),
+    /// The menu's rows — the three ways an end gets its song.
+    SonUse(crate::tui::app::SonicSide),
+    SonRandom(crate::tui::app::SonicSide),
+    SonBrowse(crate::tui::app::SonicSide),
+    /// The filled card's [X].
+    SonClear(crate::tui::app::SonicSide),
+    SonMenuClose,
+    /// A length-bar cell, clicked: the stop count it means.
+    SonLen(u32),
+    SonBuild,
+    SonRegen,
+    /// The failure states' Retry — Build by another name.
+    SonRetry,
+    SonStartOver,
+    /// A stop row: play the journey from there. The hover [+] queues it.
+    SonRow(usize),
+    SonQueueStop(usize),
+    SonScrollBy(i32),
+    SonScrollTo(usize),
+    SonPlay,
+    SonQueueAll,
+    SonSave,
+    /// The save prompt's button pair; typing forwards to the App's line.
+    SonSaveOk,
+    SonSaveCancel,
     // ── Servers (see gui::servers) ──────────────────────────────────────
     /// The header's server label: toggle the switcher dropdown.
     SrvMenu,
@@ -161,9 +190,13 @@ enum NavId {
     Playlists,
     Search,
     Settings,
+    /// Capability-gated, drawn under Search but LAST in the array: digits
+    /// assign by index, and a room that comes and goes with the server
+    /// must never renumber the rooms that don't (contract §1).
+    Sonic,
 }
 
-const NAV: [NavId; 8] = [
+const NAV: [NavId; 9] = [
     NavId::Files,
     NavId::Albums,
     NavId::Artists,
@@ -172,6 +205,7 @@ const NAV: [NavId; 8] = [
     NavId::Playlists,
     NavId::Search,
     NavId::Settings,
+    NavId::Sonic,
 ];
 
 impl NavId {
@@ -185,6 +219,7 @@ impl NavId {
             NavId::Playlists => t!("gui.nav.playlists").to_string(),
             NavId::Search => t!("gui.nav.search").to_string(),
             NavId::Settings => t!("gui.nav.settings").to_string(),
+            NavId::Sonic => t!("gui.nav.sonic").to_string(),
         }
     }
 }
@@ -193,6 +228,7 @@ const FILES_NAV: usize = 0;
 const ALBUMS_NAV: usize = 1;
 const SEARCH_NAV: usize = 6;
 const SETTINGS_NAV: usize = 7;
+const SONIC_NAV: usize = 8;
 
 /// A class's slot in [`SEARCH_CLASSES`] — the chip order.
 fn class_idx(class: SearchClass) -> usize {
@@ -286,6 +322,8 @@ pub(crate) struct Gui {
     servers: servers::ServersUi,
     /// The album wall: its page, cell cursor, and per-slot cover caches.
     albums: albums::AlbumsUi,
+    /// The sonic path room: its menu, setup cursor and results wheel.
+    sonic: sonic::SonicUi,
     /// The last frame left paced work unfinished (covers still waiting to
     /// upgrade to pixels): the event loop shortens its idle wait so the
     /// next frame comes promptly instead of a poll tick later.
@@ -319,6 +357,7 @@ impl Gui {
             last_height: MIN_H,
             servers: servers::ServersUi::new(),
             albums: albums::AlbumsUi::new(),
+            sonic: sonic::SonicUi::new(),
             hot: false,
         }
     }
@@ -330,6 +369,18 @@ impl Gui {
     fn forward(&mut self, action: Action) {
         let effects = self.app.handle_action(action);
         self.pend(effects);
+    }
+
+    /// Forward an Activate that may answer an armed sonic pick — and when
+    /// it does, follow the answer home to the room that asked (clause 12;
+    /// the record re-pushes its screen the same way).
+    fn forward_capturing(&mut self, action: Action) {
+        let was_armed = matches!(self.app.capture, Some(crate::tui::app::Capture::Sonic(_)));
+        self.forward(action);
+        if was_armed && self.app.capture.is_none() {
+            self.active = SONIC_NAV;
+            self.app.tab = Tab::SonicPath;
+        }
     }
 
     /// Settings changes persist as they happen — a GUI that loses a choice
@@ -415,15 +466,26 @@ impl Gui {
         if albums::act(self, &act) {
             return false;
         }
+        if sonic::act(self, &act) {
+            return false;
+        }
         match act {
             Act::Nav(i) => {
+                // The gated room: with the flag gone the row isn't drawn,
+                // and its digit must be as dead as the row (contract §1).
+                if i == SONIC_NAV && !self.app.capabilities.discovery_path {
+                    return false;
+                }
                 self.active = i;
                 // Leaving for a section stows every servers surface; the
                 // room is a Settings sub-view, not a place to come back to.
                 self.servers.drop_open = false;
                 self.servers.room = false;
-                self.note = (!matches!(i, FILES_NAV | ALBUMS_NAV | SEARCH_NAV | SETTINGS_NAV))
-                    .then(|| (t!("gui.coming", name = NAV[i].label()).to_string(), false));
+                self.note = (!matches!(
+                    i,
+                    FILES_NAV | ALBUMS_NAV | SEARCH_NAV | SETTINGS_NAV | SONIC_NAV
+                ))
+                .then(|| (t!("gui.coming", name = NAV[i].label()).to_string(), false));
                 if i != SETTINGS_NAV {
                     self.cursor = None;
                 }
@@ -449,6 +511,11 @@ impl Gui {
                     } else {
                         self.app.tab = Tab::Search;
                     }
+                }
+                // The sonic room keeps the App's tab honest for the shared
+                // machinery (capture answers check the pane in focus).
+                if i == SONIC_NAV {
+                    self.app.tab = Tab::SonicPath;
                 }
             }
             Act::ToggleQueue => self.queue_open = !self.queue_open,
@@ -480,7 +547,7 @@ impl Gui {
                 self.app.tab = Tab::Files;
                 self.app.files.state.select(Some(i));
                 self.freveal = true;
-                self.forward(Action::Activate);
+                self.forward_capturing(Action::Activate);
             }
             Act::FileQueue(i) => {
                 self.app.tab = Tab::Files;
@@ -496,7 +563,7 @@ impl Gui {
                 self.app.tab = Tab::Search;
                 self.app.search.state.select(Some(i));
                 self.sreveal = true;
-                self.forward(Action::Activate);
+                self.forward_capturing(Action::Activate);
             }
             Act::SearchQueue(i) => {
                 self.app.tab = Tab::Search;
@@ -643,6 +710,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         ALBUMS_NAV => albums::draw(frame, gui, content),
         SEARCH_NAV => draw_search(frame, gui, content),
         SETTINGS_NAV => draw_settings(frame, gui, content),
+        SONIC_NAV => sonic::draw(frame, gui, content),
         i => {
             put(frame, content.x, content.y, &NAV[i].label(), Style::default().add_modifier(Modifier::BOLD));
             put(frame, content.x, content.y + 2, &t!("gui.coming", name = NAV[i].label()), dim());
@@ -654,19 +722,35 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     }
 
     // The note sits above the bar (gui's own first, else the App's words);
-    // the keyboard tips take the very bottom row.
-    let note = gui.note.clone().or_else(|| {
+    // the keyboard tips take the very bottom row. An armed pick outranks
+    // both: the banner is the mode, not news (clauses 4, 10–13).
+    if let Some(crate::tui::app::Capture::Sonic(side)) = gui.app.capture {
+        let banner = match side {
+            crate::tui::app::SonicSide::Start => t!("gui.sonic.pick_banner_start"),
+            crate::tui::app::SonicSide::End => t!("gui.sonic.pick_banner_end"),
+        };
+        put(
+            frame,
+            1,
+            area.height - 7,
+            &bar::clip(&banner, area.width as usize - 2),
+            Style::default().fg(th().accent).add_modifier(Modifier::BOLD),
+        );
+    } else if let Some((text, is_err)) = gui.note.clone().or_else(|| {
         gui.app
             .message
             .as_ref()
             .map(|m| (m.text.clone(), matches!(m.kind, MessageKind::Error)))
-    });
-    if let Some((text, is_err)) = note {
+    }) {
         let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         put(frame, 1, area.height - 7, &bar::clip(&text, area.width as usize - 2), style);
     }
     let tips = if gui.servers.modal_open() {
         t!("gui.tips.form")
+    } else if sonic::modal_open(gui) {
+        std::borrow::Cow::from(sonic::tips(gui))
+    } else if matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_))) {
+        t!("gui.tips.sonic_pick")
     } else if gui.servers.room && gui.active == SETTINGS_NAV {
         t!("gui.tips.servers")
     } else {
@@ -685,6 +769,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             }
             SEARCH_NAV if gui.app.editing_query => t!("gui.tips.search_edit"),
             SEARCH_NAV => t!("gui.tips.search"),
+            SONIC_NAV => std::borrow::Cow::from(sonic::tips(gui)),
             _ => t!("gui.tips.base"),
         }
     };
@@ -709,6 +794,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     }
 
     // Overlays draw (and register) last, so their rects win the pointer.
+    sonic::draw_modals(frame, gui, area);
     servers::draw_dropdown(frame, gui, area);
     servers::draw_modals(frame, gui, area);
 
@@ -760,10 +846,16 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let forward = if legacy_conhost() { ">" } else { "▸" };
     let set_y = area.height - 9;
     for (i, id) in NAV.iter().enumerate() {
+        // The sonic room rides the ping's flag: absent is absent — no
+        // placeholder row, and digit 9 goes dead with it (contract §1).
+        if i == SONIC_NAV && !gui.app.capabilities.discovery_path {
+            continue;
+        }
         let y = match i {
             0 => 2,
             1..=5 => 4 + i as u16,
             6 => 11,
+            SONIC_NAV => 12,
             _ => set_y,
         };
         let label = id.label();
@@ -844,7 +936,17 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let rows: Vec<(usize, &Entry)> =
         entries.iter().enumerate().skip(first).take(visible).collect();
     let playing = gui.app.now_playing.as_ref().map(|t| t.filepath.as_str());
-    draw_pane_rows(frame, &mut gui.ui, playing, &rows, list, selected, Act::FileRow, Act::FileQueue);
+    draw_pane_rows(
+        frame,
+        &mut gui.ui,
+        playing,
+        &rows,
+        list,
+        selected,
+        Act::FileRow,
+        Act::FileQueue,
+        gui.app.capture.is_none(),
+    );
     scroll_list(
         frame,
         &mut gui.ui,
@@ -868,6 +970,7 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 /// callers can hand it BORROWED entries: this runs every frame, and the
 /// per-frame clone of every visible row it used to require was measurable
 /// drawing time spent on nothing.
+#[allow(clippy::too_many_arguments)]
 fn draw_pane_rows(
     frame: &mut Frame,
     ui: &mut Surface<Act>,
@@ -877,6 +980,9 @@ fn draw_pane_rows(
     selected: Option<usize>,
     row_act: fn(usize) -> Act,
     queue_act: fn(usize) -> Act,
+    // An armed pick consumes the next activation outright (clause 10) —
+    // the hover [+] must not offer to queue what a click would capture.
+    queue_plus: bool,
 ) {
     for (row, (index, entry)) in rows.iter().enumerate() {
         let y = list.y + row as u16;
@@ -901,7 +1007,7 @@ fn draw_pane_rows(
                     put(frame, list.x, y, mark, if is_sel { sel().add_modifier(Modifier::BOLD) } else { Style::default().fg(th().ok).add_modifier(Modifier::BOLD) });
                 }
                 put(frame, list.x + 2, y, &bar::clip(label, name_width), style);
-                if hover && !is_sel {
+                if hover && !is_sel && queue_plus {
                     let plus = Rect { x: rect.right() - 3, y, width: 3, height: 1 };
                     put(frame, plus.x, y, "[+]", dim());
                     ui.click(rect, row_act(*index));
@@ -1065,6 +1171,7 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         selected,
         Act::SearchRow,
         Act::SearchQueue,
+        gui.app.capture.is_none(),
     );
     scroll_list(
         frame,
@@ -1219,6 +1326,20 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     {
         return quit;
     }
+    if let Some(quit) = sonic::handle_key(gui, key) {
+        return quit;
+    }
+    // An armed pick is the loudest thing on screen: Esc stops picking
+    // before it means anything else, and goes home to the room that asked
+    // — the App's own Cancel contract, followed on this surface too.
+    if key.code == KeyCode::Esc
+        && matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_)))
+    {
+        gui.forward(Action::Cancel);
+        gui.active = SONIC_NAV;
+        gui.app.tab = Tab::SonicPath;
+        return false;
+    }
     let settings = gui.active == SETTINGS_NAV;
     let files = gui.active == FILES_NAV;
     let search = gui.active == SEARCH_NAV;
@@ -1240,7 +1361,7 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     match key.code {
         KeyCode::Char('q') => return true,
         KeyCode::Tab => return gui.act(Act::ToggleQueue),
-        KeyCode::Char(c @ '1'..='8') => {
+        KeyCode::Char(c @ '1'..='9') => {
             return gui.act(Act::Nav(c as usize - '1' as usize));
         }
         // `/` is the search key everywhere, the TUI's own habit: land on
@@ -1274,7 +1395,7 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             gui.freveal = true;
             gui.forward(Action::PageUp);
         }
-        KeyCode::Enter if files => gui.forward(Action::Activate),
+        KeyCode::Enter if files => gui.forward_capturing(Action::Activate),
         KeyCode::Char('h') | KeyCode::Backspace if files => gui.forward(Action::Back),
         KeyCode::Char('a') if files => gui.forward(Action::AddToQueue),
         // Search browsing: the same pane keys as Files, plus the chip
@@ -1287,7 +1408,7 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             gui.sreveal = true;
             gui.forward(Action::Up);
         }
-        KeyCode::Enter if search => gui.forward(Action::Activate),
+        KeyCode::Enter if search => gui.forward_capturing(Action::Activate),
         KeyCode::Char('h') | KeyCode::Backspace if search => gui.forward(Action::Back),
         KeyCode::Char('a') if search => gui.forward(Action::AddToQueue),
         KeyCode::Left if search => gui.chip = gui.chip.saturating_sub(1),
@@ -1360,8 +1481,16 @@ fn event_loop(
             // The servers layer looks first: session answers that would
             // land on the TUI's connect screen open the GUI's form instead.
             servers::observe(gui, &ev);
+            // A random pick that lands while results are up owes them a
+            // rebuild — clause 22's promise, kept here because the App
+            // consumes the pick into the setup view first.
+            let sonic_random = matches!(ev, Event::SonicRandom { .. });
+            let was_results = gui.app.sonic.view == crate::tui::app::SonicView::Results;
             let effects = gui.app.apply_event(ev);
             gui.pend(effects);
+            if sonic_random {
+                sonic::random_landed(gui, was_results);
+            }
         }
         servers::poll(gui);
 
@@ -1854,6 +1983,248 @@ mod tests {
         assert!(all.contains(&t!("resize").to_string()));
         assert!(!all.contains("auto-dj"), "no bar in a window this small");
     }
+    // ── The sonic path room ─────────────────────────────────────────────
+
+    /// A connected App that can plot paths, standing in the sonic room.
+    fn sonic_gui() -> Gui {
+        let mut gui = test_gui();
+        gui.app.connected = true;
+        gui.app.capabilities.discovery_path = true;
+        gui.active = SONIC_NAV;
+        gui.app.tab = Tab::SonicPath;
+        gui
+    }
+
+    fn stop(path: &str, artist: &str, title: &str, t: f64, similarity: f64) -> crate::api::types::JourneyStop {
+        crate::api::types::JourneyStop {
+            filepath: path.to_string(),
+            t,
+            similarity,
+            metadata: TrackMetadata {
+                artist: Some(artist.to_string()),
+                title: Some(title.to_string()),
+                ..TrackMetadata::default()
+            },
+        }
+    }
+
+    #[test]
+    fn the_sonic_room_rides_the_pings_flag() {
+        // Without the capability the row is absent and its digit is dead —
+        // and the rooms that don't come and go keep their digits.
+        let mut gui = test_gui();
+        gui.app.connected = true;
+        let text = draw(&mut gui).join("\n");
+        assert!(!text.contains("Sonic path"), "got:\n{text}");
+        gui.act(Act::Nav(SONIC_NAV));
+        assert_ne!(gui.active, SONIC_NAV, "a dead digit goes nowhere");
+
+        gui.app.capabilities.discovery_path = true;
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("Sonic path"), "got:\n{text}");
+        gui.act(Act::Nav(SONIC_NAV));
+        assert_eq!(gui.active, SONIC_NAV);
+    }
+
+    #[test]
+    fn the_setup_cards_offer_the_ways_in_and_build_waits_for_both() {
+        let mut gui = sonic_gui();
+        // At full width (queue folded) the methods sit inline on the card.
+        gui.queue_open = false;
+        let text = draw(&mut gui).join("\n");
+        for needed in ["(not set)", "Use playing song", "Random song", "Browse library…"] {
+            assert!(text.contains(needed), "missing {needed:?}:\n{text}");
+        }
+        assert!(text.contains("Build the journey"), "got:\n{text}");
+        assert!(!text.contains("Build the journey ▸"), "not ready yet:\n{text}");
+
+        gui.app.sonic.start = Some(track("lib/a.mp3", "Departure", 200.0));
+        gui.app.sonic.end = Some(track("lib/b.mp3", "Arrival", 210.0));
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("Build the journey ▸"), "ready wears the arrow:\n{text}");
+        // A filled card hides its methods and wears the clear instead.
+        assert!(text.contains("[X]"), "got:\n{text}");
+        assert!(!text.contains("Use playing song"), "filled cards hide the methods:\n{text}");
+
+        // Squeezed by the open queue, an empty card offers the menu
+        // instead of clipping the method row mid-word.
+        gui.queue_open = true;
+        gui.app.sonic.start = None;
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("click or Enter to choose…"), "got:\n{text}");
+        assert!(!text.contains("Use playing song"), "no clipped inline row:\n{text}");
+    }
+
+    #[test]
+    fn the_results_wear_seed_tags_meters_and_the_verbs() {
+        let mut gui = sonic_gui();
+        gui.app.sonic.start = Some(track("lib/a.mp3", "A", 200.0));
+        gui.app.sonic.end = Some(track("lib/b.mp3", "B", 210.0));
+        gui.app.sonic.view = crate::tui::app::SonicView::Results;
+        gui.app.sonic.fetched = true;
+        gui.app.sonic.stops = vec![
+            stop("lib/a.mp3", "Vela", "Cassini IV", 0.0, 1.0),
+            stop("lib/m.mp3", "Nadir", "Aphelion", 0.5, 0.84),
+            stop("lib/b.mp3", "Boukman", "6AM", 1.0, 1.0),
+        ];
+        let text = draw(&mut gui).join("\n");
+        for needed in [
+            "(start)", "(end)", "▇  84", "Play ▸", "Queue all", "Save as playlist…",
+            "Regenerate", "Start over", "TRACK", "MATCH",
+        ] {
+            assert!(text.contains(needed), "missing {needed:?}:\n{text}");
+        }
+        assert!(text.contains("Vela - Cassini IV"), "got:\n{text}");
+    }
+
+    #[test]
+    fn the_failure_states_name_themselves_and_retry_where_it_helps() {
+        let mut gui = sonic_gui();
+        gui.app.sonic.start = Some(track("lib/a.mp3", "A", 200.0));
+        gui.app.sonic.end = Some(track("lib/b.mp3", "B", 210.0));
+        gui.app.sonic.view = crate::tui::app::SonicView::Results;
+
+        gui.app.sonic.probe = true;
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("Asking the server why…"), "got:\n{text}");
+        assert!(!text.contains("Retry"), "no promises while probing:\n{text}");
+
+        gui.app.sonic.probe = false;
+        gui.app.sonic.fetched = true;
+        gui.app.sonic.empty = crate::tui::app::SonicEmpty::ScanPending;
+        gui.app.sonic.note =
+            Some("the server hasn't analyzed any music yet — a path needs the discovery scan to have run".into());
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("hasn't analyzed any music"), "got:\n{text}");
+        assert!(text.contains("Retry"), "scan-pending is worth retrying:\n{text}");
+
+        gui.app.sonic.empty = crate::tui::app::SonicEmpty::TurnedOff;
+        gui.app.sonic.note = Some("sonic discovery has been switched off on this server".into());
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("switched off"), "got:\n{text}");
+        assert!(!text.contains("Retry"), "nothing to retry when the feature is gone:\n{text}");
+    }
+
+    #[test]
+    fn an_armed_pick_banners_the_browse_and_stows_the_queue_add() {
+        let mut gui = browsing_gui();
+        gui.app.capabilities.discovery_path = true;
+        gui.app.capture = Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::Start));
+        // Hover the Aurora row: without an armed pick this reveals the [+].
+        gui.ui.pointer = Some(Position { x: 30, y: 7 });
+        let lines = draw(&mut gui);
+        assert!(lines.join("\n").contains("Pick the start song"), "the banner is the mode");
+        assert!(
+            !lines[7].contains("[+]"),
+            "an armed pick must not offer to queue: {:?}",
+            lines[7]
+        );
+
+        gui.app.capture = None;
+        let lines = draw(&mut gui);
+        assert!(
+            lines[7].contains("[+]"),
+            "the hover [+] returns with the pick disarmed: {:?}",
+            lines[7]
+        );
+    }
+
+    #[test]
+    fn a_browse_pick_lands_on_the_card_and_returns_home() {
+        let mut gui = browsing_gui();
+        gui.app.capabilities.discovery_path = true;
+        gui.active = SONIC_NAV;
+        gui.app.tab = Tab::SonicPath;
+        gui.act(Act::SonBrowse(crate::tui::app::SonicSide::Start));
+        assert_eq!(gui.active, FILES_NAV, "arming drops into the browser");
+        assert!(gui.app.capture.is_some());
+
+        // Clicking the Aurora track row answers the pick and goes home.
+        gui.act(Act::FileRow(3));
+        assert!(gui.app.capture.is_none(), "the pick was consumed");
+        assert_eq!(gui.active, SONIC_NAV, "the answer returns to the room that asked");
+        assert_eq!(
+            gui.app.sonic.start.as_ref().map(|t| t.filepath.as_str()),
+            Some("music/b.mp3")
+        );
+    }
+
+    #[test]
+    fn esc_cancels_a_pick_and_goes_home_too() {
+        let mut gui = browsing_gui();
+        gui.app.capabilities.discovery_path = true;
+        gui.active = SONIC_NAV;
+        gui.app.tab = Tab::SonicPath;
+        gui.act(Act::SonBrowse(crate::tui::app::SonicSide::End));
+        assert_eq!(gui.active, FILES_NAV);
+        let quit = handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!quit);
+        assert!(gui.app.capture.is_none(), "Esc disarms");
+        assert_eq!(gui.active, SONIC_NAV, "and follows the cancel home");
+        assert!(gui.app.sonic.end.is_none(), "nothing landed");
+    }
+
+    #[test]
+    fn an_in_place_edit_in_results_rebuilds_immediately() {
+        // Clause 22: the old journey is wrong the moment its anchor moved.
+        let mut gui = sonic_gui();
+        gui.app.sonic.start = Some(track("lib/a.mp3", "A", 200.0));
+        gui.app.sonic.end = Some(track("lib/b.mp3", "B", 210.0));
+        gui.app.sonic.view = crate::tui::app::SonicView::Results;
+        gui.app.sonic.fetched = true;
+        gui.app.now_playing = Some(track("lib/n.mp3", "Now", 190.0));
+        gui.act(Act::SonUse(crate::tui::app::SonicSide::Start));
+        assert_eq!(gui.app.sonic.view, crate::tui::app::SonicView::Results, "rebuilt in place");
+        assert!(gui.app.sonic.pending, "a fresh build is on the wire");
+        assert!(
+            gui.pending.iter().any(|e| matches!(
+                e,
+                Effect::Api(crate::tui::worker::ApiCmd::Journey { .. })
+            )),
+            "the rebuild was asked for"
+        );
+    }
+
+    #[test]
+    fn the_menu_opens_from_a_chip_and_the_keyboard_walks_it() {
+        let mut gui = sonic_gui();
+        gui.act(Act::SonMenu(crate::tui::app::SonicSide::End));
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("End song"), "the menu names its side:\n{text}");
+        assert!(text.contains("Random song"), "got:\n{text}");
+        // ↓ ↓ Enter picks Browse library — the third row.
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(gui.sonic.menu.is_none(), "the choice closes the menu");
+        assert!(
+            matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::End))),
+            "browse arms the capture for the side that asked"
+        );
+    }
+
+    #[test]
+    fn the_save_prompt_rides_the_apps_line() {
+        let mut gui = sonic_gui();
+        gui.app.sonic.start = Some(track("lib/a.mp3", "Departure", 200.0));
+        gui.app.sonic.end = Some(track("lib/b.mp3", "Arrival", 210.0));
+        gui.app.sonic.view = crate::tui::app::SonicView::Results;
+        gui.app.sonic.fetched = true;
+        gui.app.sonic.stops = vec![
+            stop("lib/a.mp3", "V", "Departure", 0.0, 1.0),
+            stop("lib/b.mp3", "B", "Arrival", 1.0, 1.0),
+        ];
+        gui.act(Act::SonSave);
+        assert!(gui.app.sonic_playlist_name.is_some(), "the prompt opened, pre-filled");
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("Save as playlist"), "got:\n{text}");
+        assert!(
+            text.contains("Departure → Arrival"),
+            "the suggested name is the journey's own:\n{text}"
+        );
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(gui.app.sonic_playlist_name.is_none(), "Esc closes it");
+    }
 }
 
 /// A developer's eyeball: `cargo test dump_frames -- --ignored --nocapture`
@@ -2036,4 +2407,5 @@ mod dump_tests {
             println!("|{row}|");
         }
     }
+
 }

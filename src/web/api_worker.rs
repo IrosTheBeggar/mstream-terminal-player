@@ -120,6 +120,29 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
+        ApiCmd::SonicRandom { side } => {
+            with_session(session, async |s| {
+                s.client
+                    .random_song_async(&crate::api::types::RandomSongRequest::default())
+                    .await
+                    .map(|r| Event::SonicRandom {
+                        side,
+                        track: r.songs.into_iter().next().map(Box::new),
+                    })
+            })
+            .await
+        }
+
+        ApiCmd::DiscoveryProbe => {
+            with_session(session, async |s| {
+                s.client
+                    .ping_async()
+                    .await
+                    .map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+            })
+            .await
+        }
+
         ApiCmd::Discover { node, seed, dest } => {
             with_session(session, async |s| {
                 worker::discover(&s.client, &node, &seed, dest).await

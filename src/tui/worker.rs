@@ -93,6 +93,14 @@ pub enum ApiCmd {
     Genres,
     /// Walk from one track to another through the embedding space.
     Journey { start: String, end: String, length: u32 },
+    /// One random library track for a Sonic Path end. The side travels with
+    /// the command and comes back on the event, the `Library { dest }`
+    /// pattern.
+    SonicRandom { side: crate::tui::app::SonicSide },
+    /// Re-read the ping after a discovery route answered 403: the flag says
+    /// whether the feature is switched off or merely not yet scanned — the
+    /// route itself deliberately answers both the same way.
+    DiscoveryProbe,
     /// Fill a Discover view. `seed` is the track it all hangs off.
     Discover { node: DiscoverNode, seed: Box<Track>, dest: DiscoverDest },
     /// Write a whole track list to a playlist, creating it or replacing what
@@ -348,7 +356,12 @@ pub enum Event {
     /// both are answers the server gives deliberately rather than failures.
     /// `length` names the request this answers, since asking for a longer
     /// arc while one is still in flight is a race the UI can lose.
-    Journey { stops: Vec<JourneyStop>, note: Option<String>, length: u32 },
+    Journey { stops: Vec<JourneyStop>, note: Option<String>, length: u32, issue: JourneyIssue },
+    /// The random pick for one Sonic Path end — `None` when the library
+    /// answered empty.
+    SonicRandom { side: crate::tui::app::SonicSide, track: Option<Box<Track>> },
+    /// The ping's discovery-path flag, fetched to explain a 403.
+    DiscoveryProbe { available: bool },
     /// A Discover view's contents, tagged with the node they belong to.
     /// `seed` is the filepath it was asked about. The browser tab tells a
     /// stale reply by its node; the now-playing panel follows the speakers,
@@ -388,6 +401,22 @@ pub enum Event {
     /// connect screen.
     Unauthorized,
     Error(String),
+}
+
+/// What kept a journey from being an ordinary list of stops. Typed rather
+/// than read back out of the note's wording: the UIs branch on it — a
+/// retry makes sense for an empty arc but not for a feature that is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JourneyIssue {
+    /// Nothing structural — the stops (or their absence) are the answer.
+    #[default]
+    None,
+    /// The route answered 403. Deliberately ambiguous server-side; the
+    /// app follows up with [`ApiCmd::DiscoveryProbe`] to name the reason.
+    Disabled,
+    /// An end has no embedding yet; the note names which. The fix is
+    /// editing or waiting for the scan, so no retry is offered.
+    NotAnalyzed,
 }
 
 // ── Audio thread ────────────────────────────────────────────────────────────
@@ -879,6 +908,12 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         ApiCmd::Journey { start, end, length } => {
             crate::api::wait(journey(c, &start, &end, length))
         }
+        ApiCmd::SonicRandom { side } => c
+            .random_song(&crate::api::types::RandomSongRequest::default())
+            .map(|r| Event::SonicRandom { side, track: r.songs.into_iter().next().map(Box::new) }),
+        ApiCmd::DiscoveryProbe => {
+            c.ping().map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+        }
         ApiCmd::Discover { node, seed, dest } => {
             crate::api::wait(discover(c, &node, &seed, dest))
         }
@@ -1367,19 +1402,27 @@ pub(crate) async fn journey(
 ) -> Result<Event, ApiError> {
     let Some(response) = client.journey_async(start, end, length).await? else {
         // Gated on `discoveryPath`, so this only happens if the server was
-        // reconfigured since the ping.
+        // reconfigured since the ping. The 403 deliberately reads the same
+        // for "switched off" and "nothing scanned yet"; the app follows up
+        // with [`ApiCmd::DiscoveryProbe`] before naming a reason.
         return Ok(Event::Journey {
             stops: Vec::new(),
-            note: Some("discovery is switched off on this server".into()),
+            note: None,
             length,
+            issue: JourneyIssue::Disabled,
         });
     };
 
     let note = journey_note(&response, length);
     // An arc that couldn't be plotted has no stops worth showing; the note
     // carries the whole answer.
+    let issue = if response.not_analyzed.any() {
+        JourneyIssue::NotAnalyzed
+    } else {
+        JourneyIssue::None
+    };
     let stops = if response.not_analyzed.any() { Vec::new() } else { response.results };
-    Ok(Event::Journey { stops, note, length })
+    Ok(Event::Journey { stops, note, length, issue })
 }
 
 /// What, if anything, needs saying about a journey the server returned.

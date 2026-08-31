@@ -939,6 +939,32 @@ pub struct SonicPath {
     /// the panel straight back in — the one thing the seeding promises not
     /// to do. Cleared by "Start over", which is a pristine panel again.
     pub touched: bool,
+    /// A build answered 403 and the ping is being re-read to find out why —
+    /// the route deliberately says "switched off" and "nothing scanned yet"
+    /// the same way, so no reason is named until the probe comes back. The
+    /// user is never shown an explanation that then has to be retracted.
+    pub probe: bool,
+    /// Why the stops list is empty, when it is — what separates "worth a
+    /// retry" from "the feature is gone" and "pick another song". The note
+    /// carries the sentence; this carries the branch.
+    pub empty: SonicEmpty,
+}
+
+/// The typed half of an empty journey answer (the note is the worded half).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SonicEmpty {
+    /// Nothing structural: the server looked and found no arc. Retryable.
+    #[default]
+    Plain,
+    /// The feature is on but nothing is scanned yet — a retry resolves
+    /// once the discovery scan has run.
+    ScanPending,
+    /// The feature was switched off under us. Nothing to retry; the next
+    /// real ping takes the entry point with it.
+    TurnedOff,
+    /// An end has no embedding yet; the note names which. The fix is
+    /// editing or waiting, so no retry is offered.
+    NotAnalyzed,
 }
 
 impl Default for SonicPath {
@@ -953,6 +979,8 @@ impl Default for SonicPath {
             fetched: false,
             note: None,
             touched: false,
+            probe: false,
+            empty: SonicEmpty::Plain,
         }
     }
 }
@@ -965,7 +993,7 @@ impl SonicPath {
         }
     }
 
-    fn set_side(&mut self, side: SonicSide, track: Option<Track>) {
+    pub(crate) fn set_side(&mut self, side: SonicSide, track: Option<Track>) {
         self.touched = true;
         match side {
             SonicSide::Start => self.start = track,
@@ -3673,6 +3701,16 @@ impl App {
             | Event::Journey { .. }
             | Event::Genres(_)
             | Event::AutoDjPick { .. }) => self.consume_dj(event),
+            // A random pick lands on the sonic end that asked for it, the
+            // same road a browsed or playing track takes.
+            Event::SonicRandom { side, track } => match track {
+                Some(track) => self.capture_sonic_side(side, *track),
+                None => {
+                    self.error("couldn't fetch a song from the server");
+                    Vec::new()
+                }
+            },
+            Event::DiscoveryProbe { available } => self.consume_discovery_probe(available),
             Event::AlbumArt { file, art, settled } => {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just

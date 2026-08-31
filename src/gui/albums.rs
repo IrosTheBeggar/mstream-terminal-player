@@ -228,7 +228,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             gui.app.tab = Tab::Library;
             gui.app.library.state.select(Some(*i));
             gui.albums.treveal = true;
-            gui.forward(Action::Activate);
+            gui.forward_capturing(Action::Activate);
         }
         Act::AlbTrackQueue(i) => {
             gui.app.tab = Tab::Library;
@@ -272,7 +272,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
                 gui.albums.treveal = true;
                 gui.forward(Action::PageUp);
             }
-            KeyCode::Enter => gui.forward(Action::Activate),
+            KeyCode::Enter => gui.forward_capturing(Action::Activate),
             KeyCode::Char('h') | KeyCode::Backspace | KeyCode::Esc => {
                 gui.forward(Action::Back);
             }
@@ -555,6 +555,7 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str, arti
         selected,
         Act::AlbTrackRow,
         Act::AlbTrackQueue,
+        gui.app.capture.is_none(),
     );
     scroll_list(
         frame,

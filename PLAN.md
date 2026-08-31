@@ -1594,11 +1594,31 @@ a LATER secondary screen (party view), Columns retired.
   leads the room now), `Now.wave` and the wave/reflection renderer. The
   bar's dwell tooltips went too: the tips line already names every key,
   and a bar is hovered too often for tooltips to earn their draw.
+- **Sonic path room ✅ 2026-08-31** — the first feature built the
+  contract-first way: `docs/ux-contracts/sonic-path.md` extracted from
+  the mobile app (the design of record, `mstream_music @ 137dd27`), the
+  "Sonic Path Room" canvas drawn from the contract, then `gui/sonic.rs`
+  implemented against both. The room rides the App's OWN sonic state
+  machine (the TUI tab's) — setup cards with the three pick methods
+  (playing · random · browse-capture), the ten-cell length bar, Build as
+  the kit primary, results with seed tags + one-cell eighth-block match
+  meters + Play/Queue all/Save as playlist, the save prompt on the App's
+  line. Nav row is capability-gated on `discoveryPath` and takes digit 9
+  (existing digits never renumber; absent is absent). New App plumbing
+  both surfaces share: `ApiCmd::SonicRandom` (the record's random pick),
+  and the clause-40 probe — a 403'd build re-pings before naming a
+  reason (`JourneyIssue`/`SonicEmpty` carry the taxonomy typed, so Retry
+  appears exactly where a retry can change the answer). Armed picks
+  banner the note line, suppress the hover [+] (an armed click must only
+  pick), and Esc/answer both return to the room. 18 new tests; smoked
+  end-to-end against demo.mstream.io (random ends → build → meters on
+  screen).
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
   of the Library tab views (Artists/Genres/Recent/Playlists — the wall's
-  drill door generalizes), then e2e legs (fake server needs player
-  endpoints).
+  drill door generalizes), Discover's "Play a path to…" entry (revisits
+  the contract's §5 search-skip), then e2e legs (fake server needs
+  player endpoints).
 
 ## Smoke testing
 
