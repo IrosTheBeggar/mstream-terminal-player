@@ -3238,6 +3238,43 @@ impl App {
         }
     }
 
+    /// The browser bar's Play and Shuffle (contract: browser-top-bar,
+    /// clauses 10 and 12): replace the queue with the pane's playable rows
+    /// — the FILTERED view when a filter is on, what you see is what plays
+    /// — and start from the top. `shuffle` reorders once, the record's own
+    /// semantic; the shuffle MODE is not touched.
+    pub(crate) fn play_listing(&mut self, shuffle: bool) -> Vec<Effect> {
+        let (mut tracks, _) = self.pane().tracks_with_offset();
+        if tracks.is_empty() {
+            return Vec::new();
+        }
+        if shuffle {
+            fastrand::shuffle(&mut tracks);
+        }
+        self.queue.replace(tracks);
+        self.play_index(0)
+    }
+
+    /// The browser bar's Queue all (clause 11): append the pane's playable
+    /// rows, say how many, and — the house rule every queue-add follows —
+    /// start playing when the queue was empty and nothing was on.
+    pub(crate) fn queue_listing(&mut self) -> Vec<Effect> {
+        let (tracks, _) = self.pane().tracks_with_offset();
+        if tracks.is_empty() {
+            return Vec::new();
+        }
+        let count = tracks.len();
+        let was_empty = self.queue.items.is_empty();
+        for track in tracks {
+            self.queue.push(track);
+        }
+        self.info(format!("queued {count}"));
+        if was_empty && self.status.is_idle() {
+            return self.play_index(0);
+        }
+        Vec::new()
+    }
+
     pub fn play_index(&mut self, index: usize) -> Vec<Effect> {
         let Some(track) = self.queue.items.get(index).cloned() else {
             return Vec::new();

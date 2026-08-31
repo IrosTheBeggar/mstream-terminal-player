@@ -114,6 +114,17 @@ pub(crate) enum Act {
     AlbTrackQueue(usize),
     AlbScrollBy(i32),
     AlbScrollTo(usize),
+    // ── The browser bar (docs/ux-contracts/browser-top-bar.md) ──────────
+    /// The bar's back ◂ — the crumb's way out, h's clickable twin.
+    FBarBack,
+    /// Open the live list filter (the App's own prompt).
+    FBarFilter,
+    /// Clear the filter — the [X], and Esc once typing is done.
+    FBarClear,
+    /// The whole-list verbs, gated on the list holding playable rows.
+    FBarPlay,
+    FBarQueueAll,
+    FBarShuffle,
     // ── Playlists (see gui::playlists) ──────────────────────────────────
     /// The affirmative card: open the New-playlist name dialog.
     PlNew,
@@ -588,6 +599,37 @@ impl Gui {
                     demo.elapsed = frac * demo.duration;
                 }
             }
+            Act::FBarBack => {
+                self.app.tab = Tab::Files;
+                self.forward(Action::Back);
+            }
+            Act::FBarFilter => {
+                self.app.tab = Tab::Files;
+                self.forward(Action::StartFilter);
+            }
+            Act::FBarClear => {
+                self.app.tab = Tab::Files;
+                if self.app.filtering {
+                    self.forward(Action::Cancel);
+                } else {
+                    self.app.files.clear_filter();
+                }
+            }
+            Act::FBarPlay => {
+                self.app.tab = Tab::Files;
+                let effects = self.app.play_listing(false);
+                self.pend(effects);
+            }
+            Act::FBarShuffle => {
+                self.app.tab = Tab::Files;
+                let effects = self.app.play_listing(true);
+                self.pend(effects);
+            }
+            Act::FBarQueueAll => {
+                self.app.tab = Tab::Files;
+                let effects = self.app.queue_listing();
+                self.pend(effects);
+            }
             Act::FileRow(i) => {
                 self.app.tab = Tab::Files;
                 self.app.files.state.select(Some(i));
@@ -804,6 +846,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     } else {
         match gui.active {
             SETTINGS_NAV if gui.cursor.is_some() => t!("gui.tips.rows"),
+            FILES_NAV if gui.app.filtering => t!("gui.tips.filter"),
             FILES_NAV => t!("gui.tips.files"),
             ALBUMS_NAV if gui.app.connected => {
                 if matches!(
@@ -933,12 +976,11 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 /// row is the TUI's Enter aimed by the mouse; the hovered track row
 /// reveals a [+] that queues just that one.
 fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
-    let crumb = if gui.app.path.is_empty() {
-        t!("gui.nav.files").to_string()
+    if gui.app.connected {
+        draw_files_bar(frame, gui, content);
     } else {
-        format!("{} {} {}", t!("gui.nav.files"), if legacy_conhost() { ">" } else { "▸" }, gui.app.path)
-    };
-    put(frame, content.x, content.y, &clip_lead(&crumb, content.width as usize - 12), dim());
+        put(frame, content.x, content.y, &t!("gui.nav.files"), dim());
+    }
 
     if !gui.app.connected {
         let text = if gui.app.connecting {
@@ -964,13 +1006,6 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         put(frame, content.x, content.y + 2, &t!("gui.files.empty"), dim());
         return;
     }
-    put(
-        frame,
-        content.right() - 12,
-        content.y,
-        &format!("{:>10}", t!("gui.files.items", count = entries.len())),
-        dim(),
-    );
 
     let list = Rect {
         x: content.x,
@@ -1010,6 +1045,143 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         Act::FScrollBy(1),
         |first| Act::FScrollTo(first),
     );
+}
+
+/// The browser bar (docs/ux-contracts/browser-top-bar.md): back and the
+/// crumb on the left, the whole-list verbs and the honest count on the
+/// right. With the filter prompt open the bar IS the field; with a filter
+/// standing it wears the query as a chip — and the verbs then act on the
+/// narrowed view, because what you see is what plays (clause 13).
+fn draw_files_bar(frame: &mut Frame, gui: &mut Gui, content: Rect) {
+    let y = content.y;
+    let (shown, total) = gui.app.files.counts();
+    let filtering = gui.app.filtering && gui.active == FILES_NAV;
+    let filter = gui.app.files.filter.clone();
+    let filtered = filtering || !filter.is_empty();
+    let count = if filtered {
+        t!("gui.bar.of", shown = shown, total = total).to_string()
+    } else {
+        t!("gui.files.items", count = total).to_string()
+    };
+    let count_x = content.right().saturating_sub(count.chars().count() as u16);
+    put(frame, count_x, y, &count, dim());
+
+    // The [X] that clears the filter, shared by the field and the chip.
+    let close = |frame: &mut Frame, gui: &mut Gui, x: u16| {
+        let rect = Rect { x, y, width: 3, height: 1 };
+        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        put(frame, x, y, "[X]", if hover { bright_bold() } else { dim() });
+        gui.ui.click(rect, Act::FBarClear);
+        gui.ui.tip(rect, t!("gui.bar.clear_tip").to_string());
+    };
+
+    if filtering {
+        // The bar is the field (clause 20): live narrowing, nothing to
+        // submit — Enter keeps the narrowed list, Esc lets go of it.
+        put(frame, content.x, y, "/", accent().add_modifier(Modifier::BOLD));
+        let close_x = count_x.saturating_sub(5);
+        close(frame, gui, close_x);
+        let width = close_x.saturating_sub(content.x + 3);
+        put(
+            frame,
+            content.x + 2,
+            y,
+            &input_display(&filter, filter.chars().count(), width),
+            Style::default(),
+        );
+        return;
+    }
+
+    // Resting. The verbs sit before the count, dropped right-to-left when
+    // the room is squeezed — playability gates them (clause 2), never the
+    // filter, which is as real for folders as for tracks.
+    let playable = !gui.app.files.tracks_with_offset().0.is_empty();
+    let forward_glyph = if legacy_conhost() { ">" } else { "▸" };
+    let mut verbs: Vec<(String, Act, bool)> = Vec::new();
+    if playable {
+        verbs.push((format!("{forward_glyph} {}", t!("gui.bar.play")), Act::FBarPlay, true));
+        verbs.push((format!("+ {}", t!("gui.bar.queue")), Act::FBarQueueAll, false));
+        let shuffle_glyph = if legacy_conhost() { "" } else { "⇄ " };
+        verbs.push((
+            format!("{shuffle_glyph}{}", t!("gui.shuffle_word")),
+            Act::FBarShuffle,
+            false,
+        ));
+    }
+    verbs.push((format!("/ {}", t!("gui.bar.filter")), Act::FBarFilter, false));
+
+    // Left edge: the chip (an active filter) or the back ◂ + crumb.
+    let mut x = content.x;
+    if filtered {
+        put(frame, x, y, "/", accent().add_modifier(Modifier::BOLD));
+        let chip = bar::clip(&filter, 24);
+        put(frame, x + 2, y, &chip, accent().add_modifier(Modifier::BOLD));
+        x += 2 + chip.chars().count() as u16 + 1;
+        close(frame, gui, x);
+        x += 4;
+    } else if !gui.app.path.is_empty() {
+        let back = Rect { x, y, width: 1, height: 1 };
+        let hover = gui.ui.pointer.is_some_and(|p| back.contains(p));
+        let glyph = if legacy_conhost() { "<" } else { "◂" };
+        put(frame, x, y, glyph, if hover { bright_bold() } else { dim() });
+        gui.ui.click(back, Act::FBarBack);
+        gui.ui.tip(back, t!("gui.bar.back_tip").to_string());
+        x += 2;
+    }
+
+    // Fit the verbs, keeping at least a sliver of crumb: drop from the
+    // tail (shuffle first, then queue all, then play — the filter stays,
+    // the record's own one-tap rule).
+    let sep = " · ";
+    let width_of = |verbs: &[(String, Act, bool)]| -> u16 {
+        let labels: u16 = verbs.iter().map(|(l, _, _)| l.chars().count() as u16).sum();
+        labels + sep.chars().count() as u16 * verbs.len().saturating_sub(1) as u16
+    };
+    let avail = count_x.saturating_sub(x + 2);
+    let crumb_min = 12u16.min(avail);
+    while verbs.len() > 1 && width_of(&verbs) + crumb_min + 2 > avail {
+        let drop = verbs.len() - 2; // the row before the filter
+        verbs.remove(drop);
+    }
+    let verbs_w = width_of(&verbs);
+    let verbs_x = count_x.saturating_sub(verbs_w + 2);
+
+    if !filtered {
+        let crumb = if gui.app.path.is_empty() {
+            t!("gui.nav.files").to_string()
+        } else {
+            format!("{} {} {}", t!("gui.nav.files"), forward_glyph, gui.app.path)
+        };
+        let room = verbs_x.saturating_sub(x + 1) as usize;
+        put(frame, x, y, &clip_lead(&crumb, room), dim());
+    }
+
+    let mut vx = verbs_x;
+    for (i, (label, act, is_accent)) in verbs.iter().enumerate() {
+        if i > 0 {
+            put(frame, vx, y, sep, dim());
+            vx += sep.chars().count() as u16;
+        }
+        let rect = Rect { x: vx, y, width: label.chars().count() as u16, height: 1 };
+        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let style = match (hover, is_accent) {
+            (true, _) => bright_bold(),
+            (false, true) => accent(),
+            (false, false) => dim(),
+        };
+        put(frame, vx, y, label, style);
+        gui.ui.click(rect, act.clone());
+        // The key rides the tooltip, the close-control's own pattern —
+        // the tips line has no room for four more entries.
+        let key = match act {
+            Act::FBarPlay => "p",
+            Act::FBarQueueAll => "A",
+            Act::FBarShuffle => "S",
+            _ => "f",
+        };
+        gui.ui.tip(rect, format!("{label} — {key}"));
+        vx += rect.width;
+    }
 }
 
 /// The shared list renderer for the App's browse panes: kit table rows —
@@ -1398,6 +1570,27 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     let settings = gui.active == SETTINGS_NAV;
     let files = gui.active == FILES_NAV;
     let search = gui.active == SEARCH_NAV;
+    // The browser bar's filter owns the keyboard while it is taking text
+    // (the App's prompt claims the editing keys; the arrows fall through
+    // so the narrowed list can be walked mid-thought).
+    if files && gui.app.filtering {
+        match key.code {
+            KeyCode::Enter => gui.forward(Action::Submit),
+            KeyCode::Esc => gui.forward(Action::Cancel),
+            KeyCode::Backspace => gui.forward(Action::Backspace),
+            KeyCode::Down => {
+                gui.freveal = true;
+                gui.forward(Action::Down);
+            }
+            KeyCode::Up => {
+                gui.freveal = true;
+                gui.forward(Action::Up);
+            }
+            KeyCode::Char(c) => gui.forward(Action::Input(c)),
+            _ => {}
+        }
+        return false;
+    }
     // The query box owns the keyboard while it is taking text — q, the
     // digits and the transport letters are all just letters here.
     if search && gui.app.editing_query {
@@ -1451,6 +1644,13 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             gui.forward(Action::PageUp);
         }
         KeyCode::Enter if files => gui.forward_capturing(Action::Activate),
+        KeyCode::Char('f') if files => return gui.act(Act::FBarFilter),
+        KeyCode::Char('p') if files => return gui.act(Act::FBarPlay),
+        KeyCode::Char('A') if files => return gui.act(Act::FBarQueueAll),
+        KeyCode::Char('S') if files => return gui.act(Act::FBarShuffle),
+        KeyCode::Esc if files && !gui.app.files.filter.is_empty() => {
+            return gui.act(Act::FBarClear);
+        }
         KeyCode::Char('h') | KeyCode::Backspace if files => gui.forward(Action::Back),
         KeyCode::Char('a') if files => gui.forward(Action::AddToQueue),
         // Search browsing: the same pane keys as Files, plus the chip
@@ -2056,6 +2256,83 @@ mod tests {
         assert!(all.contains(&t!("resize").to_string()));
         assert!(!all.contains("auto-dj"), "no bar in a window this small");
     }
+    // ── The browser bar ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_bar_gates_its_verbs_on_playable_rows() {
+        let mut gui = browsing_gui();
+        gui.queue_open = false;
+        let text = draw(&mut gui).join("\n");
+        for verb in ["▸ play", "+ queue all", "⇄ shuffle", "/ filter"] {
+            assert!(text.contains(verb), "missing {verb:?}:\n{text}");
+        }
+        assert!(text.contains("3 items"), "the count skips the parent row:\n{text}");
+
+        // A listing of containers keeps a clean bar — no play button with
+        // nothing to play; the filter stays, folders are findable too.
+        gui.app.files.set(vec![
+            Entry::Parent,
+            Entry::Dir { label: "Ambient".into(), path: "music/Ambient".into() },
+            Entry::Dir { label: "Jazz".into(), path: "music/Jazz".into() },
+        ]);
+        let text = draw(&mut gui).join("\n");
+        assert!(!text.contains("▸ play"), "nothing playable, no play:\n{text}");
+        assert!(!text.contains("+ queue all"), "got:\n{text}");
+        assert!(text.contains("/ filter"), "the filter is always real:\n{text}");
+    }
+
+    #[test]
+    fn the_filter_narrows_live_and_enter_keeps_it() {
+        let mut gui = browsing_gui();
+        gui.queue_open = false;
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(gui.app.filtering, "f opens the App's own prompt");
+        for c in "au".chars() {
+            handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("1 of 3"), "the narrowed view never impersonates the whole:\n{text}");
+        assert!(text.contains("Aurora"), "got:\n{text}");
+        assert!(!text.contains("Night Drive"), "narrowed out:\n{text}");
+
+        // Enter keeps the narrowed list; the bar wears the query as a chip
+        // and the verbs act on what you see (clause 13).
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!gui.app.filtering, "typing is done");
+        assert_eq!(gui.app.files.filter, "au", "the filter stands");
+        gui.act(Act::FBarPlay);
+        assert_eq!(gui.app.queue.items.len(), 1, "what you see is what plays");
+        assert_eq!(gui.app.queue.items[0].filepath, "music/b.mp3");
+
+        // Esc clears the standing filter and the whole list returns.
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(gui.app.files.filter.is_empty(), "Esc lets go of it");
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("Night Drive"), "the whole list is back:\n{text}");
+    }
+
+    #[test]
+    fn the_bar_back_walks_up_and_the_crumb_leads() {
+        let mut gui = browsing_gui();
+        gui.queue_open = false;
+        gui.app.path = "music".into();
+        let lines = draw(&mut gui);
+        assert!(lines[2].contains("◂"), "somewhere to go, so the way out shows: {:?}", lines[2]);
+        assert!(lines[2].contains("Files ▸ music"), "got: {:?}", lines[2]);
+        gui.act(Act::FBarBack);
+        assert!(
+            gui.pending.iter().any(|e| matches!(e, Effect::Api(worker::ApiCmd::Browse(_)))),
+            "back asks for the parent listing: {:?}",
+            gui.pending
+        );
+
+        gui.app.path = String::new();
+        gui.app.files.loading = false;
+        gui.pending.clear();
+        let lines = draw(&mut gui);
+        assert!(!lines[2].contains("◂"), "at the root there is nowhere to go: {:?}", lines[2]);
+    }
+
     // ── The sonic path room ─────────────────────────────────────────────
 
     /// A connected App that can plot paths, standing in the sonic room.
