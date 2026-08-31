@@ -1636,8 +1636,9 @@ a LATER secondary screen (party view), Columns retired.
 - **Browser top bar ✅ 2026-08-31** — contract-first
   (`docs/ux-contracts/browser-top-bar.md`; the record is the mobile
   toolbar's context-aware AppBar bottom slot), canvas skipped again: one
-  bar row of existing kit vocabulary. The Files room's crumb row grew
-  into the bar: back ◂ when there's somewhere to go, the crumb, then —
+  bar row of existing kit vocabulary. The bar is two lines: the
+  crumb row stays what it was (back ◂ when there's somewhere to go, the
+  path, the count), and the controls line beneath carries —
   gated on the list holding playable rows, the record's no-dead-chrome
   law — play / queue all / shuffle as text verbs, the filter affordance
   always, and the honest count (`n items`, `n of m` under a filter).
