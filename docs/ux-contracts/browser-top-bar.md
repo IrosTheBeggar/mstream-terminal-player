@@ -77,7 +77,9 @@ when they would do something*.
 23. **Esc (or the close affordance) clears and closes**; backspacing past
     an empty query also leaves — the way out when nothing was meant.
 24. Navigation clears the filter: a filter describes the list it was typed
-    against (the App already enforces this on drill and back).
+    against. The App enforces this on drill and back; the GUI's nav does
+    it on a room change too — the prompt closes and the value goes
+    *(added 2026-08-31: switching rooms had left the field standing)*.
 
 ### Empty results
 

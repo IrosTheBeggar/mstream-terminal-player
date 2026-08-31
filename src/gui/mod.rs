@@ -514,6 +514,14 @@ impl Gui {
                 if i == SONIC_NAV && !self.app.capabilities.discovery_path {
                     return false;
                 }
+                // A filter describes the list it was typed against —
+                // leaving the room closes the prompt and lets the value
+                // go (browser-top-bar clause 24, the nav half).
+                if i != self.active {
+                    self.app.filtering = false;
+                    self.app.files.clear_filter();
+                    self.app.library.clear_filter();
+                }
                 self.active = i;
                 // Leaving for a section stows every servers surface; the
                 // room is a Settings sub-view, not a place to come back to.
@@ -2365,6 +2373,32 @@ mod tests {
         assert!(gui.app.files.filter.is_empty(), "Esc lets go of it");
         let text = draw(&mut gui).join("\n");
         assert!(text.contains("Night Drive"), "the whole list is back:\n{text}");
+    }
+
+    #[test]
+    fn leaving_the_room_lets_go_of_the_filter() {
+        // Changing screens with the prompt open (or a filter standing)
+        // closes it and clears the value — a filter describes the list it
+        // was typed against, and that list just left the screen.
+        let mut gui = browsing_gui();
+        gui.queue_open = false;
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        for c in "au".chars() {
+            handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert!(gui.app.filtering);
+        gui.act(Act::Nav(SETTINGS_NAV));
+        assert!(!gui.app.filtering, "the prompt closed with the room");
+        assert!(gui.app.files.filter.is_empty(), "and the value went with it");
+
+        // A standing (submitted) filter goes the same way.
+        gui.act(Act::Nav(FILES_NAV));
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(gui.app.files.filter, "a");
+        gui.act(Act::Nav(ALBUMS_NAV));
+        assert!(gui.app.files.filter.is_empty(), "the standing filter cleared too");
     }
 
     #[test]
