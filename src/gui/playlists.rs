@@ -96,8 +96,21 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 /// kit's own words for it), then the playlists — hover reveals rename and
 /// the [X] remove, the servers room's idiom (clauses 1–4).
 fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
+    let count = super::bar_count(
+        gui,
+        t!("gui.files.items", count = gui.app.library.counts().1).to_string(),
+    );
+    put(
+        frame,
+        content.right().saturating_sub(count.chars().count() as u16),
+        content.y,
+        &count,
+        dim(),
+    );
+    super::draw_bar_controls(frame, gui, content, content.y + 1);
+
     let card_w = content.width.min(60);
-    let card = Rect { x: content.x, y: content.y + 2, width: card_w, height: 3 };
+    let card = Rect { x: content.x, y: content.y + 3, width: card_w, height: 3 };
     let hover = gui.ui.pointer.is_some_and(|p| card.contains(p));
     let color = if hover { th().bright } else { th().ok };
     let block = ratatui::widgets::Block::default()
@@ -128,11 +141,15 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         x: content.x,
         y: card.y + 4,
         width: content.width.saturating_sub(2),
-        height: content.height.saturating_sub(7),
+        height: content.height.saturating_sub(8),
     };
     if names.is_empty() {
         let words = if gui.app.library.loading {
             t!("busy.listing").to_string()
+        } else if !gui.app.library.filter.is_empty() {
+            // The filter matched nothing — different words from "none
+            // exist", and the way back is one key (clause 30).
+            t!("gui.files.empty").to_string()
         } else {
             t!("gui.pl.empty").to_string()
         };
@@ -219,24 +236,33 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str) {
         if legacy_conhost() { ">" } else { "▸" },
         name
     );
+    let count = super::bar_count(
+        gui,
+        t!("gui.files.items", count = gui.app.library.counts().1).to_string(),
+    );
+    let count_x = content.right().saturating_sub(count.chars().count() as u16);
+    put(frame, count_x, content.y, &count, dim());
+    let mut x = content.x;
+    x += super::draw_bar_back(frame, gui, x, content.y);
     put(
         frame,
-        content.x,
+        x,
         content.y,
-        &super::bar::clip(&crumb, content.width as usize),
+        &super::bar::clip(&crumb, count_x.saturating_sub(x + 2) as usize),
         dim(),
     );
+    super::draw_bar_controls(frame, gui, content, content.y + 1);
 
     let entries = &gui.app.library.entries;
     if entries.len() <= 1 && gui.app.library.loading {
-        put(frame, content.x, content.y + 2, &t!("busy.listing"), accent());
+        put(frame, content.x, content.y + 3, &t!("busy.listing"), accent());
         return;
     }
     let list = Rect {
         x: content.x,
-        y: content.y + 2,
+        y: content.y + 3,
         width: content.width.saturating_sub(2),
-        height: content.height.saturating_sub(2),
+        height: content.height.saturating_sub(3),
     };
     let selected = gui.app.library.state.selected();
     let reveal = gui.playlists.treveal.then_some(selected).flatten();
@@ -743,6 +769,50 @@ mod tests {
         assert!(text.contains("Playlists ▸ Morning"), "the crumb names the walk:\n{text}");
         assert!(text.contains("First Light"), "got:\n{text}");
         assert!(text.contains("3:20"), "durations ride the rows:\n{text}");
+    }
+
+    #[test]
+    fn the_bar_reaches_both_playlist_levels() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut gui = pl_gui(&["Morning", "Road Trip", "Rainy Days"]);
+        gui.queue_open = false;
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("/ filter"), "the list level wears the bar:\n{text}");
+        assert!(!text.contains("▸ play"), "names are containers:\n{text}");
+
+        // The filter narrows the names.
+        super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        for c in "rain".chars() {
+            super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("Rainy Days"), "got:\n{text}");
+        assert!(!text.contains("Morning"), "narrowed out:\n{text}");
+        assert!(text.contains("1 of 3"), "got:\n{text}");
+        super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        // Drilled: the tracks make the verbs real; A queues them all.
+        gui.act(Act::PlRow(1));
+        gui.pending.clear();
+        let effects = gui.app.apply_event(Event::Library {
+            node: LibraryNode::Playlist("Morning".into()),
+            dest: Tab::Library,
+            data: LibraryData::Tracks(vec![
+                Track {
+                    filepath: "lib/one.mp3".into(),
+                    metadata: TrackMetadata::default(),
+                },
+                Track {
+                    filepath: "lib/two.mp3".into(),
+                    metadata: TrackMetadata::default(),
+                },
+            ]),
+        });
+        gui.pend(effects);
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("▸ play"), "tracks make the verbs real:\n{text}");
+        super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
+        assert_eq!(gui.app.queue.items.len(), 2, "A queues the playlist");
     }
 
     #[test]

@@ -1551,7 +1551,7 @@ impl App {
         self.pane_for(self.tab)
     }
 
-    fn pane_mut(&mut self) -> &mut Pane {
+    pub(crate) fn pane_mut(&mut self) -> &mut Pane {
         let tab = self.tab;
         self.pane_for_mut(tab)
     }
