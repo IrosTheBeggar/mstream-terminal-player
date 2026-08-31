@@ -2887,6 +2887,28 @@ fn a_disabled_journey_probes_before_naming_a_reason() {
 }
 
 #[test]
+fn a_playlist_change_reasks_an_open_playlists_view() {
+    // Create, rename and delete are silent — the row changing is the
+    // confirmation — but a Playlists view on screen is looking at a list
+    // that just changed, so it re-asks. Anywhere else: nothing.
+    let mut app = connected_app();
+    app.open_library_node(LibraryNode::Playlists, true);
+    let effects = app.apply_event(Event::PlaylistCreated);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Api(ApiCmd::Library { node: LibraryNode::Playlists, .. })
+        )),
+        "the open view re-asks: {effects:?}"
+    );
+    assert!(app.message.is_none(), "the new row is the confirmation, not a toast");
+
+    app.open_library_node(LibraryNode::Albums, true);
+    let effects = app.apply_event(Event::PlaylistDeleted);
+    assert!(effects.is_empty(), "no refresh for a view not on screen: {effects:?}");
+}
+
+#[test]
 fn a_random_pick_lands_on_the_side_that_asked() {
     let mut app = connected_app();
     app.apply_event(Event::SonicRandom {

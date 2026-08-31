@@ -691,6 +691,18 @@ impl App {
     /// that view — is asked for again.
     pub(super) fn consume_playlist_saved(&mut self, name: String, count: usize) -> Vec<Effect> {
         self.info(format!("saved {name} — {count} tracks"));
+        self.refresh_playlists_view()
+    }
+
+    /// A management verb landed (create, rename, delete). No message — the
+    /// row appearing, renaming or vanishing IS the confirmation (the
+    /// playlists contract, clauses 12 and 31) — but an open Playlists view
+    /// is looking at a list that just changed, so it re-asks.
+    pub(crate) fn consume_playlist_changed(&mut self) -> Vec<Effect> {
+        self.refresh_playlists_view()
+    }
+
+    fn refresh_playlists_view(&mut self) -> Vec<Effect> {
         if *self.library_node() == LibraryNode::Playlists {
             return vec![Effect::Api(ApiCmd::Library {
                 node: LibraryNode::Playlists,

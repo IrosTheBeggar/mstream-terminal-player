@@ -161,6 +161,42 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
+        ApiCmd::CreatePlaylist { name } => {
+            with_session(session, async |s| {
+                match s.client.playlist_new_async(&name).await {
+                    Ok(()) => Ok(Event::PlaylistCreated),
+                    Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+                    Err(e) => Ok(Event::Error(format!("couldn't create {name}: {e}"))),
+                }
+            })
+            .await
+        }
+
+        ApiCmd::RenamePlaylist { from, to } => {
+            with_session(session, async |s| {
+                match s.client.playlist_rename_async(&from, &to).await {
+                    Ok(()) => Ok(Event::PlaylistRenamed),
+                    Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+                    Err(ApiError::NotFound(_)) => Ok(Event::Error(
+                        "this server can't rename playlists — it needs mStream 5.16".into(),
+                    )),
+                    Err(e) => Ok(Event::Error(format!("couldn't rename {from}: {e}"))),
+                }
+            })
+            .await
+        }
+
+        ApiCmd::DeletePlaylist { name } => {
+            with_session(session, async |s| {
+                match s.client.playlist_delete_async(&name).await {
+                    Ok(()) => Ok(Event::PlaylistDeleted),
+                    Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+                    Err(e) => Ok(Event::Error(format!("couldn't delete {name}: {e}"))),
+                }
+            })
+            .await
+        }
+
         ApiCmd::Search(query) => {
             with_session(session, async |s| {
                 s.client.search_async(&query).await.map(|r| Event::SearchResults {

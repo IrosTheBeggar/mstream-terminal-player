@@ -20,6 +20,7 @@
 
 mod albums;
 mod bar;
+mod playlists;
 mod servers;
 mod sonic;
 
@@ -113,6 +114,25 @@ pub(crate) enum Act {
     AlbTrackQueue(usize),
     AlbScrollBy(i32),
     AlbScrollTo(usize),
+    // ── Playlists (see gui::playlists) ──────────────────────────────────
+    /// The affirmative card: open the New-playlist name dialog.
+    PlNew,
+    /// A playlist row: select and drill into its tracks.
+    PlRow(usize),
+    /// The row's hover verbs — the record's ⋮ menu, worn inline.
+    PlRename(usize),
+    PlDelete(usize),
+    /// The name dialog's action and the modals' way out.
+    PlOk,
+    PlCancel,
+    /// The delete gate's destructive yes.
+    PlConfirm,
+    /// A drilled track row, and its hover [+].
+    PlTrackRow(usize),
+    PlTrackQueue(usize),
+    /// Whichever level is on screen scrolls.
+    PlScrollBy(i32),
+    PlScrollTo(usize),
     // ── Sonic path (see gui::sonic) ─────────────────────────────────────
     /// A setup card's body or a results chip: open the pick-methods menu.
     SonMenu(crate::tui::app::SonicSide),
@@ -227,6 +247,7 @@ impl NavId {
 const FILES_NAV: usize = 0;
 const ALBUMS_NAV: usize = 1;
 const SEARCH_NAV: usize = 6;
+const PLAYLISTS_NAV: usize = 5;
 const SETTINGS_NAV: usize = 7;
 const SONIC_NAV: usize = 8;
 
@@ -324,6 +345,8 @@ pub(crate) struct Gui {
     albums: albums::AlbumsUi,
     /// The sonic path room: its menu, setup cursor and results wheel.
     sonic: sonic::SonicUi,
+    /// The playlists room: its dialogs and the two levels' wheels.
+    playlists: playlists::PlaylistsUi,
     /// The last frame left paced work unfinished (covers still waiting to
     /// upgrade to pixels): the event loop shortens its idle wait so the
     /// next frame comes promptly instead of a poll tick later.
@@ -358,6 +381,7 @@ impl Gui {
             servers: servers::ServersUi::new(),
             albums: albums::AlbumsUi::new(),
             sonic: sonic::SonicUi::new(),
+            playlists: playlists::PlaylistsUi::new(),
             hot: false,
         }
     }
@@ -469,6 +493,9 @@ impl Gui {
         if sonic::act(self, &act) {
             return false;
         }
+        if playlists::act(self, &act) {
+            return false;
+        }
         match act {
             Act::Nav(i) => {
                 // The gated room: with the flag gone the row isn't drawn,
@@ -484,6 +511,7 @@ impl Gui {
                 self.note = (!matches!(
                     i,
                     FILES_NAV | ALBUMS_NAV | SEARCH_NAV | SETTINGS_NAV | SONIC_NAV
+                        | PLAYLISTS_NAV
                 ))
                 .then(|| (t!("gui.coming", name = NAV[i].label()).to_string(), false));
                 if i != SETTINGS_NAV {
@@ -516,6 +544,23 @@ impl Gui {
                 // machinery (capture answers check the pane in focus).
                 if i == SONIC_NAV {
                     self.app.tab = Tab::SonicPath;
+                }
+                // Playlists: a fresh visit fetches the list; a return finds
+                // it (or a drilled playlist) standing — the albums pattern.
+                if i == PLAYLISTS_NAV && self.app.connected {
+                    let holding = matches!(
+                        self.app.library_node(),
+                        crate::tui::worker::LibraryNode::Playlists
+                            | crate::tui::worker::LibraryNode::Playlist(_)
+                    );
+                    if holding {
+                        self.app.tab = Tab::Library;
+                    } else {
+                        let effects = self
+                            .app
+                            .open_library_node(crate::tui::worker::LibraryNode::Playlists, true);
+                        self.pend(effects);
+                    }
                 }
             }
             Act::ToggleQueue => self.queue_open = !self.queue_open,
@@ -711,6 +756,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         SEARCH_NAV => draw_search(frame, gui, content),
         SETTINGS_NAV => draw_settings(frame, gui, content),
         SONIC_NAV => sonic::draw(frame, gui, content),
+        PLAYLISTS_NAV => playlists::draw(frame, gui, content),
         i => {
             put(frame, content.x, content.y, &NAV[i].label(), Style::default().add_modifier(Modifier::BOLD));
             put(frame, content.x, content.y + 2, &t!("gui.coming", name = NAV[i].label()), dim());
@@ -749,6 +795,8 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         t!("gui.tips.form")
     } else if sonic::modal_open(gui) {
         std::borrow::Cow::from(sonic::tips(gui))
+    } else if playlists::modal_open(gui) {
+        std::borrow::Cow::from(playlists::tips(gui))
     } else if matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_))) {
         t!("gui.tips.sonic_pick")
     } else if gui.servers.room && gui.active == SETTINGS_NAV {
@@ -770,6 +818,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             SEARCH_NAV if gui.app.editing_query => t!("gui.tips.search_edit"),
             SEARCH_NAV => t!("gui.tips.search"),
             SONIC_NAV => std::borrow::Cow::from(sonic::tips(gui)),
+            PLAYLISTS_NAV if gui.app.connected => {
+                std::borrow::Cow::from(playlists::tips(gui))
+            }
             _ => t!("gui.tips.base"),
         }
     };
@@ -794,6 +845,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     }
 
     // Overlays draw (and register) last, so their rects win the pointer.
+    playlists::draw_modals(frame, gui, area);
     sonic::draw_modals(frame, gui, area);
     servers::draw_dropdown(frame, gui, area);
     servers::draw_modals(frame, gui, area);
@@ -1329,6 +1381,9 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if let Some(quit) = sonic::handle_key(gui, key) {
         return quit;
     }
+    if let Some(quit) = playlists::handle_key(gui, key) {
+        return quit;
+    }
     // An armed pick is the loudest thing on screen: Esc stops picking
     // before it means anything else, and goes home to the room that asked
     // — the App's own Cancel contract, followed on this surface too.
@@ -1600,10 +1655,10 @@ impl Gui {
                 self.act(Act::SScrollBy(delta));
             }
             NavId::Sonic => sonic::wheel(self, delta),
+            NavId::Playlists => playlists::wheel(self, delta),
             // Nothing scrollable in these rooms — said here, on the
             // record, rather than by falling through a router.
-            NavId::Artists | NavId::Genres | NavId::Recent | NavId::Playlists
-            | NavId::Settings => {}
+            NavId::Artists | NavId::Genres | NavId::Recent | NavId::Settings => {}
         }
     }
 }
