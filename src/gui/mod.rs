@@ -1564,6 +1564,8 @@ fn event_loop(
                                 albums::wheel(gui, delta);
                             } else if gui.active == SEARCH_NAV && at.x >= 17 {
                                 gui.act(Act::SScrollBy(delta));
+                            } else if gui.active == SONIC_NAV && at.x >= 17 {
+                                gui.act(Act::SonScrollBy(delta));
                             }
                         }
                         _ => {}
@@ -2201,6 +2203,40 @@ mod tests {
             matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::End))),
             "browse arms the capture for the side that asked"
         );
+    }
+
+    #[test]
+    fn the_results_list_scrolls_under_the_wheel() {
+        // The wheel scrolls the view, never the selection (the kit's table
+        // law) — and the sonic list is one of the wheel's rooms, exactly
+        // like Files. Regression: the room shipped without its arm in the
+        // wheel router, so trackpad swipes did nothing here.
+        let mut gui = sonic_gui();
+        gui.app.sonic.start = Some(track("lib/a.mp3", "A", 200.0));
+        gui.app.sonic.end = Some(track("lib/b.mp3", "B", 210.0));
+        gui.app.sonic.view = crate::tui::app::SonicView::Results;
+        gui.app.sonic.fetched = true;
+        gui.app.sonic.stops = (0..20)
+            .map(|i| stop(&format!("lib/{i}.mp3"), "Artist", &format!("Stop {i:02}"), f64::from(i) / 19.0, 0.8))
+            .collect();
+
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("Stop 00"), "the top of the list first:\n{text}");
+
+        for _ in 0..6 {
+            gui.act(Act::SonScrollBy(1));
+        }
+        let text = draw(&mut gui).join("\n");
+        assert!(!text.contains("Stop 00"), "the wheel moved the window:\n{text}");
+        assert!(text.contains("Stop 07"), "later stops rolled into view:\n{text}");
+        assert!(gui.sonic.rcursor.is_none(), "the wheel never touches the selection");
+
+        // And back up past the top clamps instead of wrapping.
+        for _ in 0..30 {
+            gui.act(Act::SonScrollBy(-1));
+        }
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("Stop 00"), "scrolled home:\n{text}");
     }
 
     #[test]
