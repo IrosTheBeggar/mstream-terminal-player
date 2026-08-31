@@ -69,8 +69,11 @@ pub enum AudioCmd {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApiCmd {
     /// Use an existing token (or none, for public-mode servers).
-    Connect { server: String, token: Option<String> },
-    Login { server: String, username: String, password: String },
+    /// `self_signed` trusts the server's own TLS certificate — carried per
+    /// command because the client is built here, from the one entry that
+    /// opted in.
+    Connect { server: String, token: Option<String>, self_signed: bool },
+    Login { server: String, username: String, password: String, self_signed: bool },
     /// Dial a Quick Connect pairing code, then treat the resulting loopback
     /// address as an ordinary server. A token is carried when reconnecting to
     /// a tunnel server we have already signed in to.
@@ -90,11 +93,26 @@ pub enum ApiCmd {
     Genres,
     /// Walk from one track to another through the embedding space.
     Journey { start: String, end: String, length: u32 },
+    /// One random library track for a Sonic Path end. The side travels with
+    /// the command and comes back on the event, the `Library { dest }`
+    /// pattern.
+    SonicRandom { side: crate::tui::app::SonicSide },
+    /// Re-read the ping after a discovery route answered 403: the flag says
+    /// whether the feature is switched off or merely not yet scanned — the
+    /// route itself deliberately answers both the same way.
+    DiscoveryProbe,
     /// Fill a Discover view. `seed` is the track it all hangs off.
     Discover { node: DiscoverNode, seed: Box<Track>, dest: DiscoverDest },
     /// Write a whole track list to a playlist, creating it or replacing what
     /// was there. Sonic Path's "save as playlist" is the only caller.
     SavePlaylist { name: String, files: Vec<String> },
+    /// Create an EMPTY playlist — the Playlists room's New. (The bulk
+    /// create-or-overwrite above is a different act with a different name.)
+    CreatePlaylist { name: String },
+    /// Rename a playlist. The route arrived in mStream 5.16.0; an older
+    /// server 404s, and the arm words that as the server's age.
+    RenamePlaylist { from: String, to: String },
+    DeletePlaylist { name: String },
     Search(String),
     /// Fetch and decode one cover, named by the art file a track's metadata
     /// carries. The app caches the answer under that name.
@@ -351,7 +369,12 @@ pub enum Event {
     /// both are answers the server gives deliberately rather than failures.
     /// `length` names the request this answers, since asking for a longer
     /// arc while one is still in flight is a race the UI can lose.
-    Journey { stops: Vec<JourneyStop>, note: Option<String>, length: u32 },
+    Journey { stops: Vec<JourneyStop>, note: Option<String>, length: u32, issue: JourneyIssue },
+    /// The random pick for one Sonic Path end — `None` when the library
+    /// answered empty.
+    SonicRandom { side: crate::tui::app::SonicSide, track: Option<Box<Track>> },
+    /// The ping's discovery-path flag, fetched to explain a 403.
+    DiscoveryProbe { available: bool },
     /// A Discover view's contents, tagged with the node they belong to.
     /// `seed` is the filepath it was asked about. The browser tab tells a
     /// stale reply by its node; the now-playing panel follows the speakers,
@@ -366,6 +389,12 @@ pub enum Event {
     /// A playlist was written. Carries the name so the confirmation can say
     /// which one, and how many tracks went into it.
     PlaylistSaved { name: String, count: usize },
+    /// The management verbs landed. They carry nothing: no message rides
+    /// them — the row appearing, renaming or vanishing is the confirmation
+    /// — so the one thing to do is re-ask for an open Playlists view.
+    PlaylistCreated,
+    PlaylistRenamed,
+    PlaylistDeleted,
     /// `query` is the search these results answer — replies can pass each
     /// other now, and the box's contents name the one still wanted.
     SearchResults { query: String, results: Box<SearchResults> },
@@ -391,6 +420,22 @@ pub enum Event {
     /// connect screen.
     Unauthorized,
     Error(String),
+}
+
+/// What kept a journey from being an ordinary list of stops. Typed rather
+/// than read back out of the note's wording: the UIs branch on it — a
+/// retry makes sense for an empty arc but not for a feature that is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JourneyIssue {
+    /// Nothing structural — the stops (or their absence) are the answer.
+    #[default]
+    None,
+    /// The route answered 403. Deliberately ambiguous server-side; the
+    /// app follows up with [`ApiCmd::DiscoveryProbe`] to name the reason.
+    Disabled,
+    /// An end has no embedding yet; the note names which. The fix is
+    /// editing or waiting for the scan, so no retry is offered.
+    NotAnalyzed,
 }
 
 // ── Audio thread ────────────────────────────────────────────────────────────
@@ -767,16 +812,16 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
         let result = match cmd {
             ApiCmd::Shutdown => break,
 
-            ApiCmd::Connect { server, token } => {
-                connect(&mut client, &server, &server.clone(), token)
+            ApiCmd::Connect { server, token, self_signed } => {
+                connect(&mut client, &server, &server.clone(), token, self_signed)
             }
 
-            ApiCmd::Login { server, username, password } => {
+            ApiCmd::Login { server, username, password, self_signed } => {
                 // Signing in to a tunnel server goes over the open bridge, but
                 // is filed under the endpoint id — the loopback port is gone
                 // by the next run.
                 let (endpoint, id) = resolve_target(&server, tunnel.as_ref());
-                login(&mut client, &endpoint, &id, &username, &password)
+                login(&mut client, &endpoint, &id, &username, &password, self_signed)
             }
 
             ApiCmd::QuickConnect { code, token } => match quick_connect(&code) {
@@ -788,7 +833,9 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                     // is streaming through — so a code that opens but doesn't
                     // answer used to leave the UI on a session whose port had
                     // just been pulled out from under it (finding #20).
-                    let answer = connect(&mut client, &url, &id, token);
+                    // The bridge is plain http on loopback — TLS trust never
+                    // comes up.
+                    let answer = connect(&mut client, &url, &id, token, false);
                     if !tunnel_answered(&answer) {
                         // `opened` drops here, closing the tunnel that just
                         // failed and only that one. `client`, `bridge` and
@@ -885,6 +932,12 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         ApiCmd::Journey { start, end, length } => {
             crate::api::wait(journey(c, &start, &end, length))
         }
+        ApiCmd::SonicRandom { side } => c
+            .random_song(&crate::api::types::RandomSongRequest::default())
+            .map(|r| Event::SonicRandom { side, track: r.songs.into_iter().next().map(Box::new) }),
+        ApiCmd::DiscoveryProbe => {
+            c.ping().map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+        }
         ApiCmd::Discover { node, seed, dest } => {
             crate::api::wait(discover(c, &node, &seed, dest))
         }
@@ -892,6 +945,29 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
             let count = files.len();
             c.playlist_save(&name, &files).map(|()| Event::PlaylistSaved { name, count })
         }
+        // The management verbs word their own failures — `<what failed>:
+        // <the server's words>` — so the generic fallthrough never has to
+        // guess what the user was doing (contract clause 50).
+        ApiCmd::CreatePlaylist { name } => match c.playlist_new(&name) {
+            Ok(()) => Ok(Event::PlaylistCreated),
+            Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+            Err(e) => Ok(Event::Error(format!("couldn't create {name}: {e}"))),
+        },
+        ApiCmd::RenamePlaylist { from, to } => match c.playlist_rename(&from, &to) {
+            Ok(()) => Ok(Event::PlaylistRenamed),
+            Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+            // The route is 5.16.0+: a 404 is the server's age, not a
+            // missing playlist — worded so it reads as old, not broken.
+            Err(ApiError::NotFound(_)) => Ok(Event::Error(
+                "this server can't rename playlists — it needs mStream 5.16".into(),
+            )),
+            Err(e) => Ok(Event::Error(format!("couldn't rename {from}: {e}"))),
+        },
+        ApiCmd::DeletePlaylist { name } => match c.playlist_delete(&name) {
+            Ok(()) => Ok(Event::PlaylistDeleted),
+            Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+            Err(e) => Ok(Event::Error(format!("couldn't delete {name}: {e}"))),
+        },
         ApiCmd::Search(query) => {
             c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r) })
         }
@@ -1017,8 +1093,9 @@ fn connect(
     server: &str,
     id: &str,
     token: Option<String>,
+    self_signed: bool,
 ) -> Option<Event> {
-    let c = match Client::new(server) {
+    let c = match Client::new_with(server, self_signed) {
         Ok(c) => c.with_token(token.clone()),
         Err(e) => return Some(Event::Error(e.to_string())),
     };
@@ -1041,8 +1118,9 @@ fn login(
     id: &str,
     username: &str,
     password: &str,
+    self_signed: bool,
 ) -> Option<Event> {
-    let mut c = match Client::new(server) {
+    let mut c = match Client::new_with(server, self_signed) {
         Ok(c) => c,
         Err(e) => return Some(Event::Error(e.to_string())),
     };
@@ -1371,19 +1449,27 @@ pub(crate) async fn journey(
 ) -> Result<Event, ApiError> {
     let Some(response) = client.journey_async(start, end, length).await? else {
         // Gated on `discoveryPath`, so this only happens if the server was
-        // reconfigured since the ping.
+        // reconfigured since the ping. The 403 deliberately reads the same
+        // for "switched off" and "nothing scanned yet"; the app follows up
+        // with [`ApiCmd::DiscoveryProbe`] before naming a reason.
         return Ok(Event::Journey {
             stops: Vec::new(),
-            note: Some("discovery is switched off on this server".into()),
+            note: None,
             length,
+            issue: JourneyIssue::Disabled,
         });
     };
 
     let note = journey_note(&response, length);
     // An arc that couldn't be plotted has no stops worth showing; the note
     // carries the whole answer.
+    let issue = if response.not_analyzed.any() {
+        JourneyIssue::NotAnalyzed
+    } else {
+        JourneyIssue::None
+    };
     let stops = if response.not_analyzed.any() { Vec::new() } else { response.results };
-    Ok(Event::Journey { stops, note, length })
+    Ok(Event::Journey { stops, note, length, issue })
 }
 
 /// What, if anything, needs saying about a journey the server returned.

@@ -27,6 +27,18 @@ pub struct LoginResponse {
     pub vpaths: Vec<String>,
 }
 
+/// `GET /api/` — public server identification: no auth required, which the
+/// route promises in so many words. `server` is the mStream version.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ServerInfo {
+    /// The server's own version, e.g. `"5.13.2"`.
+    #[serde(rename = "server")]
+    pub version: Option<String>,
+    #[serde(rename = "apiVersions")]
+    pub api_versions: Vec<String>,
+}
+
 /// `GET /api/v1/ping` — the one-shot capability bootstrap.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]

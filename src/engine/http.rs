@@ -126,6 +126,45 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const OPEN_TIMEOUT: Duration = Duration::from_millis(400);
 
+/// Hosts allowed to present a certificate the OS won't vouch for — written
+/// when a session whose saved entry opted in connects (`tui::dispatch`
+/// sees the flag ride past on the Connect/Login command), read per open.
+/// Host-scoped, never process-wide: every other server's streams stay on
+/// the verified client below.
+static TRUSTED: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+pub(crate) fn trust_server(server_url: &str) {
+    let Ok(url) = server_url.parse::<Url>() else { return };
+    let Some(host) = url.host_str() else { return };
+    let set = TRUSTED.get_or_init(Default::default);
+    set.lock().unwrap_or_else(|e| e.into_inner()).insert(host.to_ascii_lowercase());
+}
+
+fn trusted(url: &Url) -> bool {
+    let Some(host) = url.host_str() else { return false };
+    TRUSTED.get().is_some_and(|set| {
+        set.lock().unwrap_or_else(|e| e.into_inner()).contains(&host.to_ascii_lowercase())
+    })
+}
+
+/// The verified client's twin for trusted hosts, kept apart so a
+/// self-signed server never loosens anyone else's TLS. Same pool rule —
+/// see the comment below for why streams never reuse a connection.
+fn insecure_client() -> Result<&'static Client, String> {
+    static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .pool_max_idle_per_host(0)
+                .danger_accept_invalid_certs(true)
+                .build()
+                .map_err(|e| format!("failed to build http client: {e}"))
+        })
+        .as_ref()
+        .map_err(|e| e.clone())
+}
+
 fn client() -> Result<&'static Client, String> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     CLIENT
@@ -157,7 +196,8 @@ fn client() -> Result<&'static Client, String> {
 /// mStream's `/transcode` does on a cache miss).
 pub(crate) fn open(url_str: &str) -> Result<(HttpReader, Option<u64>), String> {
     let url: Url = url_str.parse().map_err(|e| format!("invalid URL: {e}"))?;
-    let client = client()?.clone();
+    let client =
+        if trusted(&url) { insecure_client()?.clone() } else { client()?.clone() };
     runtime::block_on(async move {
         let open = async {
             let stream = HttpStream::new(client, url)
@@ -236,6 +276,19 @@ mod tests {
         assert!(!is_http_url("C:\\Music\\y.mp3"));
         assert!(!is_http_url("/srv/music/y.mp3"));
         assert!(!is_http_url("ht"));
+    }
+
+    #[test]
+    fn trust_is_scoped_to_the_one_host_that_opted_in() {
+        trust_server("https://Attic.local:3000");
+        let at = |u: &str| trusted(&u.parse::<Url>().unwrap());
+        assert!(at("https://attic.local:3000/media/a.mp3?token=t"), "case-folded");
+        assert!(at("https://attic.local:8443/x"), "trust names the host, not the port");
+        assert!(!at("https://office.local:3000/media/a.mp3"), "no one else loosens");
+
+        // Junk registers nothing — and breaks nothing.
+        trust_server("not a url");
+        assert!(!at("https://office.local:3000/media/a.mp3"));
     }
 
     #[test]

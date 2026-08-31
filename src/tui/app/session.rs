@@ -31,6 +31,10 @@ pub struct Session {
     pub tunnel_code: Option<String>,
     pub token: Option<String>,
     pub username: Option<String>,
+    /// Trust this server's own TLS certificate. Seated from the saved
+    /// entry's flag; every client the workers build for this session
+    /// carries it.
+    pub self_signed: bool,
 }
 
 /// Which step of the connect screen is showing.
@@ -125,7 +129,66 @@ impl App {
         vec![Effect::Api(ApiCmd::Connect {
             server: self.session.server.clone(),
             token: self.session.token.clone(),
+            self_signed: self.session.self_signed,
         })]
+    }
+
+    /// Point the session at another saved server and reconnect — the GUI's
+    /// server switch. The same door as [`App::begin`], with the teardown a
+    /// mid-session change needs first.
+    ///
+    /// What is already streaming keeps playing: its URL was resolved when it
+    /// started and the engine holds it. The REST of the queue cannot come
+    /// along — queued tracks are filepaths resolved against the session's
+    /// server at play time ([`App::play_index`]), so on another server they
+    /// would be wrong songs or dead URLs. Clearing them is the honest move,
+    /// and the caller says so in a note.
+    pub(crate) fn adopt_server(
+        &mut self,
+        server: String,
+        server_id: String,
+        username: Option<String>,
+        token: Option<String>,
+        tunnel_code: Option<String>,
+        self_signed: bool,
+        last_path: Option<String>,
+    ) -> Vec<Effect> {
+        self.connected = false;
+        self.connect = ConnectForm::default();
+        self.session = Session {
+            server,
+            server_id,
+            tunnel_code,
+            token,
+            username,
+            self_signed,
+        };
+        self.shed_server_state();
+        self.path = last_path.unwrap_or_default();
+        self.begin()
+    }
+
+    /// Drop everything that belonged to the server being left: the queue
+    /// (its filepaths resolve against the session's server at play time),
+    /// the announced next, and the search. What is already streaming keeps
+    /// playing — its URL was resolved when it started. Shared by
+    /// [`App::adopt_server`] and the GUI's pairing-code dial, which can
+    /// only shed once the new tunnel has actually answered.
+    pub(crate) fn shed_server_state(&mut self) {
+        self.queue.items.clear();
+        self.queue.current = None;
+        self.queue.state.select(None);
+        // The Connected handler rebuilds capabilities, libraries and panes.
+        self.announced = None;
+        self.search_hits = None;
+        self.query.clear();
+        self.search.set(Vec::new());
+        self.files.set(Vec::new());
+        self.files.loading = true;
+        // The album wall was the old server's too.
+        self.albums = None;
+        self.library.set(Vec::new());
+        self.library_stack = super::nav::Drill::new(crate::tui::worker::LibraryNode::Root);
     }
 
     pub(super) fn handle_connect_action(&mut self, action: Action) -> Vec<Effect> {
@@ -238,6 +301,7 @@ impl App {
                         return vec![Effect::Api(ApiCmd::Connect {
                             server: server.base_url,
                             token: None,
+                            self_signed: false,
                         })];
                     }
                     self.submit_quick_connect()
@@ -286,7 +350,11 @@ impl App {
             self.connect.submitting = true;
             self.message = None;
             self.session.server = server.clone();
-            return vec![Effect::Api(ApiCmd::Connect { server, token: None })];
+            return vec![Effect::Api(ApiCmd::Connect {
+                server,
+                token: None,
+                self_signed: self.session.self_signed,
+            })];
         }
 
         if self.connect.password.is_empty() {
@@ -314,6 +382,7 @@ impl App {
             server,
             username,
             password: std::mem::take(&mut self.connect.password),
+            self_signed: self.session.self_signed,
         })]
     }
 

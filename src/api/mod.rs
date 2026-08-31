@@ -121,6 +121,14 @@ pub struct Client {
 
 impl Client {
     pub fn new(server: &str) -> Result<Self, ApiError> {
+        Self::new_with(server, false)
+    }
+
+    /// [`Client::new`], with the per-server trust knob: `self_signed` skips
+    /// TLS verification, for a server presenting its own certificate. Only
+    /// callers holding that server's saved entry pass true — the flag lives
+    /// on [`crate::config::ServerEntry`], never process-wide.
+    pub fn new_with(server: &str, self_signed: bool) -> Result<Self, ApiError> {
         let mut base = Url::parse(server)
             .map_err(|e| ApiError::Config(format!("invalid server URL '{server}': {e}")))?;
         if !matches!(base.scheme(), "http" | "https") {
@@ -138,12 +146,17 @@ impl Client {
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
+            .danger_accept_invalid_certs(self_signed)
             .build()
             .map_err(|e| ApiError::Config(format!("could not build http client: {e}")))?;
         // The fetch backend has no connect timeout to set; the browser owns
-        // the socket and applies its own.
+        // the socket and applies its own — TLS trust included, so the flag
+        // cannot mean anything there.
         #[cfg(target_arch = "wasm32")]
-        let http = reqwest::Client::new();
+        let http = {
+            let _ = self_signed;
+            reqwest::Client::new()
+        };
 
         Ok(Client {
             http,
@@ -191,7 +204,7 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     fn remembered_server() -> Result<String, ApiError> {
         let config = crate::config::load().map_err(ApiError::Config)?;
-        match crate::config::most_recent_server(&config) {
+        match crate::config::preferred_server(&config) {
             // A tunnel server is remembered by identity, not address, and
             // reaching it means dialling its pairing code — which only the
             // player does. Say so rather than failing on a parse.
@@ -357,6 +370,18 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn ping(&self) -> Result<Ping, ApiError> {
         wait(self.ping_async())
+    }
+
+    /// `GET /api/` — the server's version and API generations. The one
+    /// endpoint that answers without auth, which is what lets the Manage
+    /// Servers screen show a version for servers it holds no token for.
+    pub async fn server_info_async(&self) -> Result<ServerInfo, ApiError> {
+        self.get("api/").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn server_info(&self) -> Result<ServerInfo, ApiError> {
+        wait(self.server_info_async())
     }
 
     /// Browse a directory.
@@ -641,6 +666,48 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn playlist_save(&self, title: &str, files: &[String]) -> Result<(), ApiError> {
         wait(self.playlist_save_async(title, files))
+    }
+
+    /// Create an EMPTY playlist. The server answers 400 when the name is
+    /// already taken; the error carries its words.
+    pub async fn playlist_new_async(&self, title: &str) -> Result<(), ApiError> {
+        let _: serde_json::Value =
+            self.post("api/v1/playlist/new", serde_json::json!({ "title": title })).await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn playlist_new(&self, title: &str) -> Result<(), ApiError> {
+        wait(self.playlist_new_async(title))
+    }
+
+    /// Rename a playlist. The route arrived in mStream 5.16.0 — an older
+    /// server 404s, which callers word as the missing feature it is.
+    pub async fn playlist_rename_async(&self, from: &str, to: &str) -> Result<(), ApiError> {
+        let _: serde_json::Value = self
+            .post(
+                "api/v1/playlist/rename",
+                serde_json::json!({ "oldName": from, "newName": to }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn playlist_rename(&self, from: &str, to: &str) -> Result<(), ApiError> {
+        wait(self.playlist_rename_async(from, to))
+    }
+
+    pub async fn playlist_delete_async(&self, name: &str) -> Result<(), ApiError> {
+        let _: serde_json::Value = self
+            .post("api/v1/playlist/delete", serde_json::json!({ "playlistname": name }))
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn playlist_delete(&self, name: &str) -> Result<(), ApiError> {
+        wait(self.playlist_delete_async(name))
     }
 
     /// The shape of a track, for drawing under the progress bar.
@@ -998,6 +1065,30 @@ mod tests {
     fn rejects_non_http_schemes() {
         assert!(Client::new("ftp://host").is_err());
         assert!(Client::new("not a url").is_err());
+    }
+
+    #[test]
+    fn server_info_reads_the_version_and_tolerates_its_absence() {
+        // `GET /api/` — "server" is the mStream version; a future shape
+        // that drops or adds fields must not break the read.
+        let info: ServerInfo = serde_json::from_str(
+            r#"{"server":"5.13.2","apiVersions":["1"],"features":{"subsonic":false}}"#,
+        )
+        .unwrap();
+        assert_eq!(info.version.as_deref(), Some("5.13.2"));
+        assert_eq!(info.api_versions, vec!["1"]);
+
+        let bare: ServerInfo = serde_json::from_str("{}").unwrap();
+        assert_eq!(bare.version, None);
+    }
+
+    #[test]
+    fn a_self_signed_client_still_builds_on_the_verified_path() {
+        // The flag only loosens TLS verification; everything else about the
+        // client — base URL handling above all — is the same construction.
+        let c = Client::new_with("https://attic.local:3000", true).unwrap();
+        assert_eq!(c.server(), "https://attic.local:3000");
+        assert!(Client::new_with("not a url", true).is_err());
     }
 
     #[test]

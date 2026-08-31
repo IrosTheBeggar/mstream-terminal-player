@@ -57,6 +57,13 @@ const LEGACY_SESSION_FILE: &str = "session.json";
 pub struct Config {
     #[serde(default = "current_version")]
     pub version: u32,
+    /// The server the player opens with, when set — outranking the
+    /// most-recently-used order below. Holds the entry's identity (its URL,
+    /// or a tunnel id); a value naming no saved server is ignored rather
+    /// than repaired, so a hand-edit is never silently deleted.
+    /// Top-level scalar, so it must serialize before the first table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_server: Option<String>,
     #[serde(default)]
     pub player: PlayerPrefs,
     #[serde(default, skip_serializing_if = "CachePrefs::is_unset")]
@@ -78,6 +85,9 @@ pub struct Config {
     /// `[mouse]` — the wheel and clicking the progress bar.
     #[serde(default, skip_serializing_if = "MousePrefs::is_default")]
     pub mouse: MousePrefs,
+    /// `[gui]` — the GUI player surface's own choices (`mstream-player gui`).
+    #[serde(default, skip_serializing_if = "GuiPrefs::is_default")]
+    pub gui: GuiPrefs,
     /// `[keys]` — action name to the keys that should fire it. Empty means
     /// the built-in bindings, and only the actions named here are changed.
     /// See `mstream-player keys` for the full list in this format.
@@ -98,12 +108,14 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             version: SCHEMA_VERSION,
+            default_server: None,
             player: PlayerPrefs::default(),
             cache: CachePrefs::default(),
             log: LogPrefs::default(),
             theme: ThemePrefs::default(),
             display: DisplayPrefs::default(),
             mouse: MousePrefs::default(),
+            gui: GuiPrefs::default(),
             keys: std::collections::BTreeMap::new(),
             servers: Vec::new(),
             extra: Keep::new(),
@@ -397,6 +409,25 @@ impl MousePrefs {
     }
 }
 
+/// `[gui]`. The GUI player surface (`mstream-player gui`) keeps its own
+/// choices here, apart from the classic TUI's — the two are different
+/// rooms. Currently holds nothing of this build's own: the bottom-bar
+/// choice lived here until 2026-08-29, when the waveform bar was retired
+/// and the gold line became THE bar (a leftover `bar` key rides `extra`
+/// harmlessly).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuiPrefs {
+    #[serde(flatten)]
+    pub extra: Keep,
+}
+
+impl GuiPrefs {
+    fn is_default(&self) -> bool {
+        *self == GuiPrefs::default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ServerEntry {
     pub url: String,
@@ -406,8 +437,19 @@ pub struct ServerEntry {
     /// Where you were last browsing on this server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_path: Option<String>,
+    /// Trust this server's own TLS certificate (self-signed, or an internal
+    /// CA the OS doesn't know). Scoped to the one entry: every client built
+    /// for this server skips verification, and no other server's does.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub self_signed: bool,
     #[serde(flatten)]
     pub extra: Keep,
+}
+
+/// serde's `skip_serializing_if` for a bool that is only worth writing when
+/// set — an absent key and `false` read back the same.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -715,10 +757,38 @@ pub fn same_server(a: &str, b: &str) -> bool {
     a.trim_end_matches('/') == b.trim_end_matches('/')
 }
 
-/// The server to reconnect to, if any.
-pub fn most_recent_server(config: &Config) -> Option<&ServerEntry> {
-    config.servers.first()
+/// The server to reconnect to, if any: the chosen default when one is set
+/// and still saved, otherwise the most recently used.
+///
+/// A `default_server` naming no saved entry falls through to the MRU order
+/// rather than failing — the pointer may outlive the entry it named.
+pub fn preferred_server(config: &Config) -> Option<&ServerEntry> {
+    config
+        .default_server
+        .as_deref()
+        .and_then(|wanted| config.servers.iter().find(|s| same_server(&s.url, wanted)))
+        .or_else(|| config.servers.first())
 }
+
+/// Make `url` the server the player opens with, or clear the choice with
+/// `None` — the MRU order takes over again.
+pub fn set_default_server(config: &mut Config, url: Option<&str>) {
+    config.default_server = url.map(str::to_string);
+}
+
+/// Forget a server: its entry, its token, and — the irreversible part — its
+/// pairing code. A code can only be re-fetched over a live connection by an
+/// admin, which is why removal is the ONE flow allowed to drop it (see
+/// [`forget_all_tokens`]); callers confirm with the user first.
+pub fn remove_server(config: &mut Config, credentials: &mut Credentials, url: &str) {
+    config.servers.retain(|s| !same_server(&s.url, url));
+    if config.default_server.as_deref().is_some_and(|d| same_server(d, url)) {
+        config.default_server = None;
+    }
+    credentials.tokens.retain(|entry| !same_server(&entry.server, url));
+    credentials.pairings.retain(|entry| !same_server(&entry.server, url));
+}
+
 
 pub fn token_for(credentials: &Credentials, server: &str) -> Option<String> {
     credentials
@@ -1139,8 +1209,64 @@ mod tests {
         touch_server(&mut config, "http://one:3000", Some("alice".into()));
 
         assert_eq!(config.servers.len(), 2, "revisiting doesn't duplicate");
-        assert_eq!(most_recent_server(&config).unwrap().url, "http://one:3000");
+        assert_eq!(preferred_server(&config).unwrap().url, "http://one:3000");
         assert_eq!(config.servers[0].username.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn a_default_server_outranks_the_mru_order() {
+        let mut config = Config::default();
+        touch_server(&mut config, "http://one:3000", None);
+        touch_server(&mut config, "http://two:3000", None);
+        assert_eq!(preferred_server(&config).unwrap().url, "http://two:3000");
+
+        set_default_server(&mut config, Some("http://one:3000"));
+        assert_eq!(preferred_server(&config).unwrap().url, "http://one:3000");
+
+        // A default pointing at nothing saved falls back rather than failing.
+        set_default_server(&mut config, Some("http://gone:3000"));
+        assert_eq!(preferred_server(&config).unwrap().url, "http://two:3000");
+    }
+
+    #[test]
+    fn removing_a_server_forgets_its_secrets_and_its_default_slot() {
+        let mut config = Config::default();
+        let mut credentials = Credentials::default();
+        touch_server(&mut config, "http://one:3000", Some("alice".into()));
+        touch_server(&mut config, "mstream+iroh://endpointabc", None);
+        set_default_server(&mut config, Some("http://one:3000"));
+        store_token(&mut credentials, "http://one:3000", Some("jwt".into()));
+        store_pairing(&mut credentials, "mstream+iroh://endpointabc", Some("mstr1:code".into()));
+
+        remove_server(&mut config, &mut credentials, "http://one:3000");
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.default_server, None, "the default slot doesn't dangle");
+        assert_eq!(token_for(&credentials, "http://one:3000"), None);
+
+        remove_server(&mut config, &mut credentials, "mstream+iroh://endpointabc");
+        assert!(config.servers.is_empty());
+        assert_eq!(pairing_for(&credentials, "mstream+iroh://endpointabc"), None);
+    }
+
+    #[test]
+    fn self_signed_rides_the_entry_and_round_trips() {
+        let scratch = Scratch::new("self-signed");
+        let _ = &scratch;
+        let mut config = Config::default();
+        touch_server(&mut config, "https://attic.local:3000", None);
+        config.servers[0].self_signed = true;
+        touch_server(&mut config, "https://office.local:3000", None);
+        save(&config).unwrap();
+
+        let reloaded = load().unwrap();
+        let flag = |url: &str| {
+            reloaded.servers.iter().any(|s| same_server(&s.url, url) && s.self_signed)
+        };
+        assert!(flag("https://attic.local:3000/"));
+        assert!(!flag("https://office.local:3000"));
+        // Only the entry that opted in carries the key at all.
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert_eq!(text.matches("self_signed").count(), 1);
     }
 
     #[test]
@@ -1186,7 +1312,7 @@ mod tests {
         // Next launch: the identity is remembered, and both secrets come back
         // with it — the token to stay signed in, the code to get there at all.
         let reloaded = load().unwrap();
-        assert_eq!(most_recent_server(&reloaded).unwrap().url, id);
+        assert_eq!(preferred_server(&reloaded).unwrap().url, id);
         assert_eq!(reloaded.servers[0].last_path.as_deref(), Some("music/Artist"));
         let credentials = load_credentials().unwrap();
         assert_eq!(token_for(&credentials, id), Some("jwt-token".into()));

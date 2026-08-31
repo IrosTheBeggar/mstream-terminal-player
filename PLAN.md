@@ -1468,6 +1468,208 @@ RELEASE exists — so it's merge, then tag, then integrate.
 Phase 8 (the bundled console) stays sequenced AFTER 9c: it upgrades the
 launcher's terminal choice, not the wizard itself.
 
+### Phase 10 — The GUI player (`mstream-player gui`)
+
+The mouse-first player surface the Win/macOS installers will launch in the
+Phase-8 branded window — an ALTERNATIVE interface beside the classic TUI,
+built on `src/kit/` the wizard's way (fixed palette, OSC 11 ground, every
+action clickable AND keyed). Design of record: the "mStream Player GUI"
+canvas, <https://claude.ai/code/artifact/e0a92aec-c63e-4156-84e2-15a05a6167f0>
+(cell-exact 100×30 mockups + normative widget/limit boards), plus
+docs/ui-kit.md. Direction approved 2026-08-27; the Jukebox sketch is kept as
+a LATER secondary screen (party view), Columns retired.
+
+- **Slice 1 — the shell ✅ 2026-08-27**: left nav (Settings live; the rest
+  named and honest about arriving with browse), the Settings room (bottom-bar
+  choice + the crossfade group, wired to the real audio worker and persisted
+  per change), and BOTH bottom bars behind `[gui] bar` — `wave` (waveform +
+  reflection over the compact control row; classic bar is the loading state
+  AND the conhost floor) and `gold-line` (the gold rule IS the seek bar; song
+  info left toggles the queue; tall 3-row controls). `src/gui/{mod,bar}.rs`,
+  ten-locale `gui.*` keys, 18 unit/render tests + the ignored `dump_frames`
+  eyeball. `MSTREAM_GUI_DEMO=1` seats a fixed track so the bars can be seen
+  and the seek ridden before playback exists.
+- **Slice 2 — Files + playback ✅ 2026-08-28** (bar settled the same day:
+  controls above the rule, edge-to-card waveform, tips on the last row;
+  GoldLine card right + volume on the tall controls' line). The GUI now
+  embeds the REAL `App` + audio/api workers — the same state machine the
+  TUI, wasm shell and replay harness drive — so session restore
+  (`tui::startup`/`app_from`/`dispatch`/`remember`), queueing, crossfade
+  announcements, track-end advance and waveform prefetch are shared, not
+  re-implemented. Files leads the nav: browse the saved session's server
+  (`gui --server <url>` overrides), click a row = select + `Activate`
+  through the App's funnel, hover reveals [+] queue-add, kit scrollbar,
+  wheel scrolls the view; the queue panel shows the real queue; the bar
+  reads real timestamps/waveforms and seeks/pauses the engine. Settings'
+  crossfade group now reads/writes the App's own knobs. Mouse verbs that
+  have no honest keymap name (the volume cells) set the field and emit the
+  `Effect` directly — documented, funnel-free by design.
+- **Album art in the card ✅ 2026-08-28**: the graphics probe runs on boot
+  (after init, the player's ordering; Resize refreshes the encode cache);
+  the card paints real pixels where the terminal can and the ▀-mosaic
+  elsewhere, the empty slot frame yielding once the art is decoded. The
+  fetch was already free — `fetch_art` rides the App funnel. One cover per
+  frame, so the single-slot encode cache holds; widening it comes with the
+  Now Playing screen.
+- **Search ✅ 2026-08-28**: `/` (or the nav item) opens the kit query card,
+  which owns the keyboard while it takes text and drives the App's own
+  query via `StartSearch`/`Input`/`Submit` — so `search_submitted`'s
+  stale-reply guard keeps working. Five class chips (Artists · Albums ·
+  Titles · Files · Lyrics) are the search params: state-colored toggle
+  words filtering the class MENU (the API answers every class in one
+  reply, so the choice is instant); ←/→ + `t` is the keyboard path. The
+  results are the App's Search pane rendered by the same row renderer as
+  Files (`draw_pane_rows`, with the dim detail column for drill rows) —
+  class → listing → artist → albums all drill through the shared funnel,
+  and clicks map through the filter to true pane indexes.
+- **Servers ✅ 2026-08-29** (the Connect-screen slice, grown into
+  multi-server): the header's server label becomes a dropdown once a
+  second server is saved (current marked, default starred, "+ add" last);
+  the [+] beside it — and the no-session screen's button — opens the add
+  flow, a chooser first (2026-08-29 pass two): "Standard connect" is the
+  SERVER/USERNAME/PASSWORD cards plus two checkboxes, "Accept a
+  self-signed certificate" (a per-entry `danger_accept_invalid_certs`
+  client, never process-wide) and "Public server" (stands the credential
+  fields down; connect verifies with the auth-free ping); "Quick
+  Connect" is where the design board's "ON THIS NETWORK" list moved —
+  mDNS rows that carry their address to the standard page — plus the
+  pairing-code paste, dialled through the funnel with the code held
+  GUI-side until the tunnel answers (a bad code costs an error line,
+  never the session that was playing; on Connected the code is seated
+  for the save and the old server's state shed). The board's "Sign in
+  once" line is dropped, and so is the switcher label's dwell tooltip —
+  it matured exactly where the dropdown opens. Settings grew
+  a SERVERS group whose row opens the Manage Servers room: every saved
+  entry with username, live version (probed over the public `GET /api/`
+  — ping carries no version; `Ping` still reads one tolerantly if it
+  ever grows one) and the default star; per-row actions switch · edit ·
+  make default (`default_server` config key, outranks MRU at startup) ·
+  pair phone (the wizard's own QR renderers, pixels or half-blocks, over
+  the stored pairing code — card cover stands down while it shows, the
+  one-slot encode cache's rule) · remove (confirm modal; removal is the
+  ONE flow that drops a pairing code). Adding/editing validates on a
+  one-shot client so the live session is never touched until the server
+  answers; switching goes through the App's own funnel
+  (`App::adopt_server` → `begin()`), keeps what is already streaming,
+  and clears the queue — queued tracks are filepaths resolved against
+  the session's server at play time, so they cannot follow (true
+  multi-server queues need tracks to carry their origin; deferred).
+  Sign-in-needed answers (switch, expired session, fresh tunnel) open
+  the same form in its funnel-riding flavour. The GUI now also renders
+  the kit's dwell tooltips it had only been registering.
+- **Albums wall ✅ 2026-08-29**: every album's cover, name and year in a
+  grid, paged with ◂ ▸ arrows (and ←/→, PgUp/PgDn, the wheel) instead of
+  scrolling — the webapp's album wall. Feasibility was measured first
+  (the tests at the bottom of `gui/albums.rs` keep the numbers honest):
+  a page of mosaic covers costs ~10 ms a frame with a `CoverPane` per
+  slot, and the pixel path forks `Graphics` per slot with encodes PACED
+  — each frame spends at most 40 ms starting encodes, the mosaic stands
+  in, and a page upgrades over a few frames (debug-build sixel: worst
+  frame 137 ms where the unpaced page cost two full seconds). Covers
+  ride the App's own art claim (`fetch_art_file`, the playing cover's
+  discipline — page-at-a-time, so the wholesale cap wipe self-heals);
+  the list itself is the Library drill's Albums node, kept whole on
+  `App.albums` beside the pane rows (the GUI door is
+  `open_library_node`, seating the drill so the stale-reply guard keeps
+  working). Clicking an album drills through the same funnel to its
+  track list — `draw_pane_rows`, durations, hover [+], play on Enter —
+  and the Parent row or `h` walks back, refetching the wall the drill's
+  own way. Cell-exact: cover 12×6 (square at 10×20), name, `year ·
+  artist` dim beneath.
+  Performance pass (same day): `draw_pane_rows` takes BORROWED rows (the
+  per-frame clone of every visible entry — and Search cloned its whole
+  pane twice a frame — was drawing time spent on nothing); the wall
+  draws through split field borrows instead of cloning a page of albums
+  and their decoded covers (~50 KB of pixels apiece, ten times a
+  second); the art-fetch scan allocates only for files still missing;
+  `Graphics::refresh_font` re-reads the window-size ioctl at most every
+  500 ms (one cover a frame was its design point — the wall made it
+  fifteen syscalls a frame); and a frame whose encode budget turned
+  slots away marks the Gui HOT, shortening the event loop's idle wait to
+  10 ms so a page turn finishes upgrading in real tens of milliseconds
+  instead of one encode per 100 ms poll tick.
+- **Bar focused ✅ 2026-08-29**: the waveform bar is retired — the gold
+  line is THE bar. With it went the `[gui] bar` config key (a leftover
+  rides `GuiPrefs.extra` harmlessly), the Settings radio pair (PLAYBACK
+  leads the room now), `Now.wave` and the wave/reflection renderer. The
+  bar's dwell tooltips went too: the tips line already names every key,
+  and a bar is hovered too often for tooltips to earn their draw.
+- **Sonic path room ✅ 2026-08-31** — the first feature built the
+  contract-first way: `docs/ux-contracts/sonic-path.md` extracted from
+  the mobile app (the design of record, `mstream_music @ 137dd27`), the
+  "Sonic Path Room" canvas drawn from the contract, then `gui/sonic.rs`
+  implemented against both. The room rides the App's OWN sonic state
+  machine (the TUI tab's) — setup cards with the three pick methods
+  (playing · random · browse-capture), the ten-cell length bar, Build as
+  the kit primary, results with seed tags + one-cell eighth-block match
+  meters + Play/Queue all/Save as playlist, the save prompt on the App's
+  line. Nav row is capability-gated on `discoveryPath` and takes digit 9
+  (existing digits never renumber; absent is absent). New App plumbing
+  both surfaces share: `ApiCmd::SonicRandom` (the record's random pick),
+  and the clause-40 probe — a 403'd build re-pings before naming a
+  reason (`JourneyIssue`/`SonicEmpty` carry the taxonomy typed, so Retry
+  appears exactly where a retry can change the answer). Armed picks
+  banner the note line, suppress the hover [+] (an armed click must only
+  pick), and Esc/answer both return to the room. 18 new tests; smoked
+  end-to-end against demo.mstream.io (random ends → build → meters on
+  screen).
+- **Playlists room ✅ 2026-08-31** — contract-first again
+  (`docs/ux-contracts/playlists.md`; the record is the mobile browser
+  tab's SERVER-playlists view, not its local-playlists screen), and the
+  first feature to skip the canvas deliberately: every element maps to
+  an idiom already drawn (the albums drill, the kit affirmative card,
+  the servers-room hover verbs, the sonic name modal, the kit warning
+  modal), so the contract's translation table is the whole design. The
+  list rides `LibraryNode::Playlists` with the New card above it;
+  hover (or `e`/`x` on the cursor row) reveals rename and the [X];
+  create/rename share one name dialog with the record's no-op contract;
+  delete confirms through a warning gate where `x` answers and Enter
+  stays the safe way out. Activation drills to the shared track rows.
+  New plumbing both surfaces share: `playlist_new/rename/delete` on the
+  client and their ApiCmds — silent on success (the row changing IS the
+  confirmation; an open Playlists view re-asks), worded per failure,
+  with rename's 404 named as the server's age (the route is 5.16.0+;
+  the session carries no version, so the record's hide-the-item gate
+  became honest wording — see the contract's deviations). 7 new tests;
+  read-only smoke against demo.mstream.io (list · drill · wheel · back
+  — no writes to a shared public server).
+- **Browser top bar ✅ 2026-08-31** — contract-first
+  (`docs/ux-contracts/browser-top-bar.md`; the record is the mobile
+  toolbar's context-aware AppBar bottom slot), canvas skipped again: one
+  bar row of existing kit vocabulary. The bar is two lines: the
+  crumb row stays what it was (back ◂ when there's somewhere to go, the
+  path, the count), and the controls line beneath carries —
+  gated on the list holding playable rows, the record's no-dead-chrome
+  law — play / queue all / shuffle as text verbs, the filter affordance
+  always, and the honest count (`n items`, `n of m` under a filter).
+  The filter IS the App's own prompt (StartFilter/filtering/apply_filter
+  — live narrowing, Enter keeps, Esc clears, backspace-past-empty
+  leaves, all pre-existing and TUI-shared); the three verbs are new App
+  helpers on the pane (`play_listing`/`queue_listing`) both surfaces
+  share — shuffle reorders ONCE, the record's semantic, mode untouched;
+  verbs act on the narrowed view (what you see is what plays — a logged
+  deviation from the record, which reads the unfiltered list). Keys
+  f/p/A/S; verb keys ride dwell tooltips, the close-control's pattern.
+  4 new tests; read-only smoke against demo.mstream.io proved the
+  gating live (folders-only root: no verbs; drilled into tracks: verbs
+  appear; filter narrows with the `of` count).
+  Same-day follow-ups from review: the bar became TWO lines (the header
+  row each room always drew, the controls beneath — filter leading on
+  the left, verbs right), and it now serves every browse page — Files,
+  the albums wall and drilled album, the playlists list and drilled
+  playlist. The drilled views reuse the pane machinery wholesale; the
+  wall filters through an index map (pages, cells, cursor and cover
+  prefetch all follow the narrowed view, and a filtered cell opens the
+  album it shows). The keys ride one shared gate that outranks the room
+  handlers, so a typed letter can never queue a row.
+- Next slices, in rough order: the Now Playing screen (big art; the
+  per-slot fork pattern from the wall applies), queue clicks + the rest
+  of the Library tab views (Artists/Genres/Recent — the wall's drill
+  door generalizes), Discover's "Play a path to…" entry (revisits the
+  sonic contract's §5 search-skip), track-level add-to-playlist (its
+  own contract; `playlist/add-song` awaits), then e2e legs (fake server
+  needs player endpoints).
+
 ## Smoke testing
 
 `mstream-player replay "<script>"` drives the TUI from a script. Keys go through exactly the path

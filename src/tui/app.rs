@@ -939,6 +939,32 @@ pub struct SonicPath {
     /// the panel straight back in — the one thing the seeding promises not
     /// to do. Cleared by "Start over", which is a pristine panel again.
     pub touched: bool,
+    /// A build answered 403 and the ping is being re-read to find out why —
+    /// the route deliberately says "switched off" and "nothing scanned yet"
+    /// the same way, so no reason is named until the probe comes back. The
+    /// user is never shown an explanation that then has to be retracted.
+    pub probe: bool,
+    /// Why the stops list is empty, when it is — what separates "worth a
+    /// retry" from "the feature is gone" and "pick another song". The note
+    /// carries the sentence; this carries the branch.
+    pub empty: SonicEmpty,
+}
+
+/// The typed half of an empty journey answer (the note is the worded half).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SonicEmpty {
+    /// Nothing structural: the server looked and found no arc. Retryable.
+    #[default]
+    Plain,
+    /// The feature is on but nothing is scanned yet — a retry resolves
+    /// once the discovery scan has run.
+    ScanPending,
+    /// The feature was switched off under us. Nothing to retry; the next
+    /// real ping takes the entry point with it.
+    TurnedOff,
+    /// An end has no embedding yet; the note names which. The fix is
+    /// editing or waiting, so no retry is offered.
+    NotAnalyzed,
 }
 
 impl Default for SonicPath {
@@ -953,6 +979,8 @@ impl Default for SonicPath {
             fetched: false,
             note: None,
             touched: false,
+            probe: false,
+            empty: SonicEmpty::Plain,
         }
     }
 }
@@ -965,7 +993,7 @@ impl SonicPath {
         }
     }
 
-    fn set_side(&mut self, side: SonicSide, track: Option<Track>) {
+    pub(crate) fn set_side(&mut self, side: SonicSide, track: Option<Track>) {
         self.touched = true;
         match side {
             SonicSide::Start => self.start = track,
@@ -1071,6 +1099,11 @@ pub struct App {
     /// Breadcrumb through the tag hierarchy; the last element is the view on
     /// screen. Always non-empty once the Library tab has been opened.
     pub library_stack: Drill<LibraryNode>,
+    /// The albums reply, kept whole beside the pane's rows: the GUI's grid
+    /// wants each album's art file and year, which the row labels flatten
+    /// away. Same bargain as `search_hits`. Cleared with the session — the
+    /// list belongs to one server.
+    pub albums: Option<Vec<crate::api::types::Album>>,
     /// The whole search reply, kept rather than flattened. Every class comes
     /// back in one response, so moving between them costs nothing.
     pub search_hits: Option<Box<crate::api::types::SearchResults>>,
@@ -1286,6 +1319,7 @@ impl App {
                 tunnel_code: None,
                 token,
                 username,
+                self_signed: false,
             },
             connected: false,
             connecting: false,
@@ -1297,6 +1331,7 @@ impl App {
             files: Pane::default(),
             library: Pane::default(),
             library_stack: Drill::new(LibraryNode::Root),
+            albums: None,
             search_hits: None,
             search_stack: Drill::new(SearchNode::Root),
             queue_column: false,
@@ -1516,7 +1551,7 @@ impl App {
         self.pane_for(self.tab)
     }
 
-    fn pane_mut(&mut self) -> &mut Pane {
+    pub(crate) fn pane_mut(&mut self) -> &mut Pane {
         let tab = self.tab;
         self.pane_for_mut(tab)
     }
@@ -3203,6 +3238,43 @@ impl App {
         }
     }
 
+    /// The browser bar's Play and Shuffle (contract: browser-top-bar,
+    /// clauses 10 and 12): replace the queue with the pane's playable rows
+    /// — the FILTERED view when a filter is on, what you see is what plays
+    /// — and start from the top. `shuffle` reorders once, the record's own
+    /// semantic; the shuffle MODE is not touched.
+    pub(crate) fn play_listing(&mut self, shuffle: bool) -> Vec<Effect> {
+        let (mut tracks, _) = self.pane().tracks_with_offset();
+        if tracks.is_empty() {
+            return Vec::new();
+        }
+        if shuffle {
+            fastrand::shuffle(&mut tracks);
+        }
+        self.queue.replace(tracks);
+        self.play_index(0)
+    }
+
+    /// The browser bar's Queue all (clause 11): append the pane's playable
+    /// rows, say how many, and — the house rule every queue-add follows —
+    /// start playing when the queue was empty and nothing was on.
+    pub(crate) fn queue_listing(&mut self) -> Vec<Effect> {
+        let (tracks, _) = self.pane().tracks_with_offset();
+        if tracks.is_empty() {
+            return Vec::new();
+        }
+        let count = tracks.len();
+        let was_empty = self.queue.items.is_empty();
+        for track in tracks {
+            self.queue.push(track);
+        }
+        self.info(format!("queued {count}"));
+        if was_empty && self.status.is_idle() {
+            return self.play_index(0);
+        }
+        Vec::new()
+    }
+
     pub fn play_index(&mut self, index: usize) -> Vec<Effect> {
         let Some(track) = self.queue.items.get(index).cloned() else {
             return Vec::new();
@@ -3246,14 +3318,38 @@ impl App {
     /// skipping n-n-n through one album costs one request, not five.
     fn fetch_art(&mut self) -> Option<Effect> {
         let file = self.now_playing.as_ref()?.metadata.album_art.clone()?;
-        if self.art.contains_key(&file) {
+        self.fetch_art_file(&file)
+    }
+
+    /// Ask for one cover by the art file that names it, unless the cache
+    /// already holds it — or the placeholder a previous ask left, which is
+    /// what stops the same cover being asked for twice. The GUI's album
+    /// grid asks through here so a page of covers rides the same claim
+    /// discipline as the playing track's.
+    pub(crate) fn fetch_art_file(&mut self, file: &str) -> Option<Effect> {
+        if self.art.contains_key(file) {
             return None;
         }
         if self.art.len() >= ART_CACHE_CAP {
             self.art.clear();
         }
-        self.art.insert(file.clone(), None);
-        Some(Effect::Api(ApiCmd::AlbumArt { file }))
+        self.art.insert(file.to_string(), None);
+        Some(Effect::Api(ApiCmd::AlbumArt { file: file.to_string() }))
+    }
+
+    /// Aim the Library drill at `node` and ask for it — the GUI's direct
+    /// door to a library view its nav names outright (the TUI reaches the
+    /// same nodes by drilling from the mode menu). `fresh` restarts the
+    /// trail from the root: a nav click means "the Albums view", not one
+    /// more level on whatever walk came before.
+    pub(crate) fn open_library_node(&mut self, node: LibraryNode, fresh: bool) -> Vec<Effect> {
+        self.tab = Tab::Library;
+        if fresh {
+            self.library_stack = Drill::new(LibraryNode::Root);
+        }
+        self.library_stack.enter(node.clone());
+        self.library.set(Vec::new());
+        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Library })]
     }
 
     /// Ask for a track's shape, unless the cache already holds it — or the
@@ -3568,11 +3664,17 @@ impl App {
                 // Which drill answers depends on who asked — the Search tab
                 // files library nodes under its own trail.
                 let fresh = match dest {
-                    Tab::Search => self.search_stack.wants(&SearchNode::Library(node)),
+                    Tab::Search => self.search_stack.wants(&SearchNode::Library(node.clone())),
                     _ => self.library_stack.wants(&node),
                 };
                 if !fresh {
                     return Vec::new();
+                }
+                // The grid's copy, kept whole — see the field's note.
+                if let (LibraryNode::Albums, Tab::Library, LibraryData::Albums(albums)) =
+                    (&node, dest, &data)
+                {
+                    self.albums = Some(albums.clone());
                 }
                 self.pane_for_mut(dest).set(entries_from_library(data));
                 self.message = None;
@@ -3646,6 +3748,16 @@ impl App {
             | Event::Journey { .. }
             | Event::Genres(_)
             | Event::AutoDjPick { .. }) => self.consume_dj(event),
+            // A random pick lands on the sonic end that asked for it, the
+            // same road a browsed or playing track takes.
+            Event::SonicRandom { side, track } => match track {
+                Some(track) => self.capture_sonic_side(side, *track),
+                None => {
+                    self.error("couldn't fetch a song from the server");
+                    Vec::new()
+                }
+            },
+            Event::DiscoveryProbe { available } => self.consume_discovery_probe(available),
             Event::AlbumArt { file, art, settled } => {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just
@@ -3677,6 +3789,9 @@ impl App {
                 Vec::new()
             }
             Event::PlaylistSaved { name, count } => self.consume_playlist_saved(name, count),
+            Event::PlaylistCreated | Event::PlaylistRenamed | Event::PlaylistDeleted => {
+                self.consume_playlist_changed()
+            }
             Event::SearchResults { query, results } => {
                 // Replies can pass each other now that each answers on its
                 // own thread; only the search still standing in the box is

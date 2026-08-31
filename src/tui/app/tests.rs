@@ -1310,6 +1310,7 @@ fn choosing_a_discovered_server_connects_to_it_directly() {
         vec![Effect::Api(ApiCmd::Connect {
             server: "http://192.168.1.71:3999".into(),
             token: None,
+            self_signed: false,
         })]
     );
 }
@@ -1522,6 +1523,7 @@ fn an_expired_tunnel_session_signs_back_in_over_the_open_bridge() {
             server: "http://127.0.0.1:51234".into(),
             username: "alice".into(),
             password: "pw".into(),
+            self_signed: false,
         })]
     );
 }
@@ -1614,8 +1616,69 @@ fn connecting_without_a_username_uses_public_mode() {
     let effects = app.handle_action(Action::Submit);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::Connect { server: "http://host:3000".into(), token: None })]
+        vec![Effect::Api(ApiCmd::Connect {
+            server: "http://host:3000".into(),
+            token: None,
+            self_signed: false,
+        })]
     );
+}
+
+#[test]
+fn a_self_signed_session_carries_its_trust_into_every_connect() {
+    // The flag rides the entry → the session → the command, so the worker
+    // builds the one lenient client for the one server that opted in.
+    let mut app = App::new(Some("https://attic.local:3000".into()), None, None);
+    app.session.self_signed = true;
+    let effects = app.start();
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Api(ApiCmd::Connect { self_signed: true, .. }))),
+        "begin() carries the flag: {effects:?}"
+    );
+
+    // And a switch seats it fresh for the next server.
+    let effects = app.adopt_server(
+        "http://office.local:3000".into(),
+        "http://office.local:3000".into(),
+        None,
+        None,
+        None,
+        false,
+        Some("music/Ambient".into()),
+    );
+    assert!(!app.session.self_signed, "trust never leaks across servers");
+    assert_eq!(app.path, "music/Ambient", "the entry's last path comes along");
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Api(ApiCmd::Connect { self_signed: false, .. })))
+    );
+}
+
+#[test]
+fn adopting_a_server_keeps_the_music_but_not_the_queue() {
+    let mut app = App::new(Some("http://attic.local:3000".into()), None, None);
+    app.connected = true;
+    app.queue.items.push(track("music/a.mp3"));
+    app.queue.items.push(track("music/b.mp3"));
+    app.queue.current = Some(0);
+    app.now_playing = Some(track("music/a.mp3"));
+
+    app.adopt_server(
+        "http://office.local:3000".into(),
+        "http://office.local:3000".into(),
+        None,
+        None,
+        None,
+        false,
+        None,
+    );
+    assert!(app.now_playing.is_some(), "what is streaming already has its URL");
+    assert!(app.queue.items.is_empty(), "queued filepaths mean nothing to the new server");
+    assert_eq!(app.queue.current, None);
+    assert!(!app.connected, "connected again only when the new server answers");
 }
 
 #[test]
@@ -1657,6 +1720,7 @@ fn login_effect_carries_credentials_and_clears_the_password() {
             server: "http://host:3000".into(),
             username: "alice".into(),
             password: "secret".into(),
+            self_signed: false,
         })]
     );
     assert!(app.connect.password.is_empty(), "password is not kept in memory after use");
@@ -1678,7 +1742,11 @@ fn a_typed_address_is_completed_before_it_is_used() {
     let effects = app.handle_action(Action::Submit);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::Connect { server: "http://nas:3000".into(), token: None })]
+        vec![Effect::Api(ApiCmd::Connect {
+            server: "http://nas:3000".into(),
+            token: None,
+            self_signed: false,
+        })]
     );
     assert_eq!(app.connect.server, "http://nas:3000", "the field shows what was assumed");
 
@@ -1731,6 +1799,7 @@ fn sending_a_password_over_plain_http_asks_first() {
             server: "http://music.example.com".into(),
             username: "alice".into(),
             password: "secret".into(),
+            self_signed: false,
         })]
     );
 }
@@ -2771,6 +2840,133 @@ fn on_sonic_row(app: &mut App, row: SonicRow) {
 }
 
 #[test]
+fn a_disabled_journey_probes_before_naming_a_reason() {
+    use crate::tui::worker::JourneyIssue;
+    // The route's 403 reads the same for "switched off" and "nothing
+    // scanned yet" — so the answer is a re-ping, not a guess, and the user
+    // never reads an explanation that then gets retracted.
+    let mut app = connected_app();
+    app.queue.replace(vec![track("from")]);
+    app.play_index(0);
+    browsing(&mut app, &["to"], 0);
+    app.handle_action(Action::StartJourney);
+
+    let effects =
+        app.consume_journey(Vec::new(), None, app.sonic.length, JourneyIssue::Disabled);
+    assert!(app.sonic.probe, "the reason is still being asked for");
+    assert!(app.sonic.note.is_none(), "nothing is claimed yet");
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::DiscoveryProbe))),
+        "the ping was asked for: {effects:?}"
+    );
+
+    // The flag still on: the scan simply hasn't run — worth retrying.
+    app.apply_event(Event::DiscoveryProbe { available: true });
+    assert!(!app.sonic.probe);
+    assert_eq!(app.sonic.empty, SonicEmpty::ScanPending);
+    assert!(
+        app.sonic.note.as_deref().unwrap_or("").contains("hasn't analyzed"),
+        "got: {:?}",
+        app.sonic.note
+    );
+
+    // And the flag gone: the feature was switched off under us.
+    app.sonic.probe = true;
+    app.apply_event(Event::DiscoveryProbe { available: false });
+    assert_eq!(app.sonic.empty, SonicEmpty::TurnedOff);
+    assert!(
+        app.sonic.note.as_deref().unwrap_or("").contains("switched off"),
+        "got: {:?}",
+        app.sonic.note
+    );
+
+    // A probe nobody is waiting for changes nothing.
+    let note = app.sonic.note.clone();
+    app.apply_event(Event::DiscoveryProbe { available: true });
+    assert_eq!(app.sonic.note, note, "an unasked probe is ignored");
+}
+
+#[test]
+fn the_listing_verbs_play_queue_and_shuffle_once() {
+    // The browser bar's three verbs (contract: browser-top-bar 10–12).
+    let mut app = connected_app();
+    browsing(&mut app, &["one", "two", "three"], 0);
+
+    let effects = app.play_listing(false);
+    assert!(!effects.is_empty(), "play starts the engine");
+    assert_eq!(
+        app.queue.items.iter().map(|t| t.filepath.as_str()).collect::<Vec<_>>(),
+        vec!["one", "two", "three"],
+        "play keeps the listing's order"
+    );
+
+    // Queue all appends and says how many; already playing, so no restart.
+    let effects = app.queue_listing();
+    assert!(effects.is_empty(), "already playing — nothing restarts");
+    assert_eq!(app.queue.items.len(), 6, "the listing was appended");
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text.contains("queued 3")),
+        "got: {:?}",
+        app.message
+    );
+
+    // Shuffle reorders ONCE — the record's semantic: the mode is not
+    // touched, and the same songs are all still there.
+    fastrand::seed(7);
+    let shuffled_mode_before = app.queue.shuffle;
+    app.play_listing(true);
+    assert_eq!(app.queue.shuffle, shuffled_mode_before, "the shuffle MODE is untouched");
+    let mut played: Vec<_> = app.queue.items.iter().map(|t| t.filepath.clone()).collect();
+    played.sort();
+    assert_eq!(played, vec!["one", "three", "two"], "a permutation, nothing lost");
+}
+
+#[test]
+fn a_playlist_change_reasks_an_open_playlists_view() {
+    // Create, rename and delete are silent — the row changing is the
+    // confirmation — but a Playlists view on screen is looking at a list
+    // that just changed, so it re-asks. Anywhere else: nothing.
+    let mut app = connected_app();
+    app.open_library_node(LibraryNode::Playlists, true);
+    let effects = app.apply_event(Event::PlaylistCreated);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Api(ApiCmd::Library { node: LibraryNode::Playlists, .. })
+        )),
+        "the open view re-asks: {effects:?}"
+    );
+    assert!(app.message.is_none(), "the new row is the confirmation, not a toast");
+
+    app.open_library_node(LibraryNode::Albums, true);
+    let effects = app.apply_event(Event::PlaylistDeleted);
+    assert!(effects.is_empty(), "no refresh for a view not on screen: {effects:?}");
+}
+
+#[test]
+fn a_random_pick_lands_on_the_side_that_asked() {
+    let mut app = connected_app();
+    app.apply_event(Event::SonicRandom {
+        side: SonicSide::End,
+        track: Some(Box::new(track("lib/lucky.mp3"))),
+    });
+    assert_eq!(
+        app.sonic.end.as_ref().map(|t| t.filepath.as_str()),
+        Some("lib/lucky.mp3"),
+        "the pick filled the end that asked"
+    );
+
+    // An empty library answers with words, not silence.
+    app.apply_event(Event::SonicRandom { side: SonicSide::Start, track: None });
+    assert!(app.sonic.start.is_none());
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text.contains("couldn't fetch")),
+        "got: {:?}",
+        app.message
+    );
+}
+
+#[test]
 fn changing_the_length_asks_for_a_different_arc() {
     // The stops aren't a list to trim — a shorter path is a different set
     // of waypoints, so it has to be replotted. Sliding the length does not
@@ -2783,7 +2979,7 @@ fn changing_the_length_asks_for_a_different_arc() {
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
     assert!(!app.sonic.pending);
 
@@ -2819,7 +3015,7 @@ fn playing_a_sonic_path_replaces_the_queue_and_starts_it() {
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     on_sonic_row(&mut app, SonicRow::Play);
@@ -2847,7 +3043,7 @@ fn queueing_a_sonic_path_adds_to_what_is_already_there() {
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     on_sonic_row(&mut app, SonicRow::QueueAll);
@@ -2872,7 +3068,7 @@ fn a_stop_row_is_an_ordinary_track_row() {
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     let mid = app
@@ -2988,7 +3184,7 @@ fn saving_a_path_as_a_playlist_asks_for_a_name_first() {
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     on_sonic_row(&mut app, SonicRow::SavePlaylist);
@@ -3040,7 +3236,7 @@ fn the_path_says_what_it_is_doing_and_why_it_came_back_empty() {
     app.apply_event(Event::Journey {
         stops: Vec::new(),
         note: Some("the destination hasn't been analysed yet".into()),
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
     assert_eq!(status(&app).as_deref(), Some("the destination hasn't been analysed yet"));
 
@@ -3078,7 +3274,7 @@ fn start_over_clears_both_ends_and_the_path() {
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     on_sonic_row(&mut app, SonicRow::StartOver);
@@ -3142,7 +3338,7 @@ fn a_path_reply_for_a_length_since_changed_keeps_waiting() {
     app.apply_event(Event::Journey {
         stops: vec![stop("stale", 0.0)],
         note: None,
-        length: first,
+        length: first, issue: crate::tui::worker::JourneyIssue::None
     });
     assert!(app.sonic.stops.is_empty(), "an arc of the wrong length is not this arc");
     assert!(app.sonic.pending, "still waiting on the length actually asked for");
@@ -3150,7 +3346,7 @@ fn a_path_reply_for_a_length_since_changed_keeps_waiting() {
     app.apply_event(Event::Journey {
         stops: vec![stop("fresh", 0.0)],
         note: None,
-        length: first + 1,
+        length: first + 1, issue: crate::tui::worker::JourneyIssue::None
     });
     assert_eq!(app.sonic.stops.len(), 1);
     assert!(!app.sonic.pending);
@@ -3188,7 +3384,7 @@ fn a_path_reply_that_arrives_after_start_over_is_dropped() {
     app.handle_action(Action::StartJourney);
     app.reset_sonic_path();
 
-    app.apply_event(Event::Journey { stops: vec![stop("late", 0.0)], note: None, length: 14 });
+    app.apply_event(Event::Journey { stops: vec![stop("late", 0.0)], note: None, length: 14, issue: crate::tui::worker::JourneyIssue::None });
     assert!(app.sonic.stops.is_empty(), "a path nobody is waiting for is not drawn");
     assert_eq!(app.queue.items.len(), 1, "and nothing is queued behind the user's back");
 }
@@ -3698,7 +3894,7 @@ fn changing_the_length_stops_waiting_for_a_path_of_the_old_one() {
 
     // And the reply plotted for the old length is still ignored when it
     // lands — clearing the wait must not have opened a door for it.
-    app.consume_journey(Vec::new(), None, was);
+    app.consume_journey(Vec::new(), None, was, crate::tui::worker::JourneyIssue::None);
     assert!(!app.sonic.fetched, "a path of the wrong length is not this panel's answer");
 }
 
