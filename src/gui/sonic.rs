@@ -815,6 +815,15 @@ pub(crate) fn random_landed(gui: &mut Gui, was_results: bool) {
     }
 }
 
+/// The room's wheel: the results list is the one thing here that scrolls.
+/// (The albums room's shape — each room owns its wheel, and the router's
+/// exhaustive match makes sure none ships without one.)
+pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
+    if gui.app.sonic.view == SonicView::Results {
+        gui.act(Act::SonScrollBy(delta));
+    }
+}
+
 // ── Keys ────────────────────────────────────────────────────────────────────
 
 /// The room's keys (and its modals', which outrank everything). Returns
