@@ -1633,6 +1633,25 @@ a LATER secondary screen (party view), Columns retired.
   became honest wording — see the contract's deviations). 7 new tests;
   read-only smoke against demo.mstream.io (list · drill · wheel · back
   — no writes to a shared public server).
+- **Browser top bar ✅ 2026-08-31** — contract-first
+  (`docs/ux-contracts/browser-top-bar.md`; the record is the mobile
+  toolbar's context-aware AppBar bottom slot), canvas skipped again: one
+  bar row of existing kit vocabulary. The Files room's crumb row grew
+  into the bar: back ◂ when there's somewhere to go, the crumb, then —
+  gated on the list holding playable rows, the record's no-dead-chrome
+  law — play / queue all / shuffle as text verbs, the filter affordance
+  always, and the honest count (`n items`, `n of m` under a filter).
+  The filter IS the App's own prompt (StartFilter/filtering/apply_filter
+  — live narrowing, Enter keeps, Esc clears, backspace-past-empty
+  leaves, all pre-existing and TUI-shared); the three verbs are new App
+  helpers on the pane (`play_listing`/`queue_listing`) both surfaces
+  share — shuffle reorders ONCE, the record's semantic, mode untouched;
+  verbs act on the narrowed view (what you see is what plays — a logged
+  deviation from the record, which reads the unfiltered list). Keys
+  f/p/A/S; verb keys ride dwell tooltips, the close-control's pattern.
+  4 new tests; read-only smoke against demo.mstream.io proved the
+  gating live (folders-only root: no verbs; drilled into tracks: verbs
+  appear; filter narrows with the `of` count).
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
   of the Library tab views (Artists/Genres/Recent — the wall's drill

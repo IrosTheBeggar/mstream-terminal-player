@@ -175,6 +175,13 @@ gui:
     search: "Buscar"
     settings: "Ajustes"
     sonic: "Caminho sonoro"
+  bar:
+    play: "tocar"
+    queue: "enfileirar tudo"
+    filter: "filtrar"
+    of: "%{shown} de %{total}"
+    back_tip: "Voltar — h"
+    clear_tip: "Limpar — Esc"
   files:
     empty: "(nada aqui)"
     items: "%{count} itens"
@@ -316,7 +323,7 @@ gui:
   tips:
     search_edit: "digite · Enter buscar · Esc pronto"
     search: "↑ ↓ mover · Enter abrir/tocar · h voltar · ← → classe · t alternar · / editar · a para a fila · q sair"
-    files: "↑ ↓ mover · Enter abrir/tocar · h voltar · a para a fila · Tab fila · Space reproduzir · q sair"
+    files: "↑ ↓ mover · Enter abrir/tocar · h voltar · a para a fila · Tab fila · Space reproduzir · q sair · f filtrar"
     rows: "↑ ↓ linhas · ← → ajustar · Enter alternar · Esc pronto · 1-8 seções · q sair"
     base: "1-8 seções · Tab fila · Space reproduzir · -/+ volume · q sair"
     servers: "↑ ↓ linhas · Enter trocar · e editar · d padrão · p parear · x remover · Esc voltar"
@@ -332,3 +339,4 @@ gui:
     pl_tracks: "↑ ↓ linhas · Enter tocar · h voltar · a enfileirar · Tab fila · q sair"
     pl_dialog: "digite um nome · Enter confirma · Esc cancela"
     pl_confirm: "x exclui · Enter ou Esc mantém"
+    filter: "digite para filtrar · Enter mantém · Esc limpa · ↑ ↓ continuam movendo"

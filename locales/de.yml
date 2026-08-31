@@ -175,6 +175,13 @@ gui:
     search: "Suche"
     settings: "Einstellungen"
     sonic: "Sonic-Pfad"
+  bar:
+    play: "abspielen"
+    queue: "alle einreihen"
+    filter: "filtern"
+    of: "%{shown} von %{total}"
+    back_tip: "Zurück — h"
+    clear_tip: "Leeren — Esc"
   files:
     empty: "(hier ist nichts)"
     items: "%{count} Einträge"
@@ -316,7 +323,7 @@ gui:
   tips:
     search_edit: "tippen · Enter suchen · Esc fertig"
     search: "↑ ↓ bewegen · Enter öffnen/abspielen · h zurück · ← → Klasse · t umschalten · / bearbeiten · a einreihen · q beenden"
-    files: "↑ ↓ bewegen · Enter öffnen/abspielen · h zurück · a einreihen · Tab Warteschlange · Space Wiedergabe · q beenden"
+    files: "↑ ↓ bewegen · Enter öffnen/abspielen · h zurück · a einreihen · Tab Warteschlange · Space Wiedergabe · q beenden · f filtern"
     rows: "↑ ↓ Zeilen · ← → ändern · Enter umschalten · Esc fertig · 1-8 Bereiche · q beenden"
     base: "1-8 Bereiche · Tab Warteschlange · Space Wiedergabe · -/+ Lautstärke · q beenden"
     servers: "↑ ↓ Zeilen · Enter wechseln · e bearbeiten · d Standard · p koppeln · x entfernen · Esc zurück"
@@ -332,3 +339,4 @@ gui:
     pl_tracks: "↑ ↓ Zeilen · Enter abspielen · h zurück · a einreihen · Tab Warteschlange · q beenden"
     pl_dialog: "Namen tippen · Enter bestätigt · Esc bricht ab"
     pl_confirm: "x löscht · Enter oder Esc behält sie"
+    filter: "tippen zum Eingrenzen · Enter behält · Esc leert · ↑ ↓ bewegen weiter"

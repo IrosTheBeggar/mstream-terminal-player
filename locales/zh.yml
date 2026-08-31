@@ -175,6 +175,13 @@ gui:
     search: "搜索"
     settings: "设置"
     sonic: "声音路径"
+  bar:
+    play: "播放"
+    queue: "全部入队"
+    filter: "筛选"
+    of: "%{shown} / %{total}"
+    back_tip: "返回 — h"
+    clear_tip: "清除 — Esc"
   files:
     empty: "(这里没有内容)"
     items: "%{count} 项"
@@ -316,7 +323,7 @@ gui:
   tips:
     search_edit: "输入 · Enter 搜索 · Esc 完成"
     search: "↑ ↓ 移动 · Enter 打开/播放 · h 返回 · ← → 类别 · t 切换 · / 编辑 · a 入队 · q 退出"
-    files: "↑ ↓ 移动 · Enter 打开/播放 · h 返回 · a 入队 · Tab 队列 · Space 播放/暂停 · q 退出"
+    files: "↑ ↓ 移动 · Enter 打开/播放 · h 返回 · a 入队 · Tab 队列 · Space 播放/暂停 · q 退出 · f 筛选"
     rows: "↑ ↓ 行 · ← → 调整 · Enter 切换 · Esc 完成 · 1-8 版块 · q 退出"
     base: "1-8 版块 · Tab 队列 · Space 播放/暂停 · -/+ 音量 · q 退出"
     servers: "↑ ↓ 行 · Enter 切换 · e 编辑 · d 默认 · p 配对 · x 移除 · Esc 返回"
@@ -332,3 +339,4 @@ gui:
     pl_tracks: "↑ ↓ 行 · Enter 播放 · h 返回 · a 加入队列 · Tab 队列 · q 退出"
     pl_dialog: "输入名称 · Enter 确认 · Esc 取消"
     pl_confirm: "x 删除 · Enter 或 Esc 保留"
+    filter: "输入以筛选 · Enter 保留 · Esc 清除 · ↑ ↓ 仍可移动"

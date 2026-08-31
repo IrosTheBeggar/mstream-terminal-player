@@ -175,6 +175,13 @@ gui:
     search: "Buscar"
     settings: "Ajustes"
     sonic: "Camino sonoro"
+  bar:
+    play: "reproducir"
+    queue: "encolar todo"
+    filter: "filtrar"
+    of: "%{shown} de %{total}"
+    back_tip: "Atrás — h"
+    clear_tip: "Borrar — Esc"
   files:
     empty: "(nada aquí)"
     items: "%{count} elementos"
@@ -316,7 +323,7 @@ gui:
   tips:
     search_edit: "escribe · Enter buscar · Esc listo"
     search: "↑ ↓ mover · Enter abrir/reproducir · h atrás · ← → clase · t alternar · / editar · a a la cola · q salir"
-    files: "↑ ↓ mover · Enter abrir/reproducir · h atrás · a a la cola · Tab cola · Space reproducir · q salir"
+    files: "↑ ↓ mover · Enter abrir/reproducir · h atrás · a a la cola · Tab cola · Space reproducir · q salir · f filtrar"
     rows: "↑ ↓ filas · ← → ajustar · Enter alternar · Esc listo · 1-8 secciones · q salir"
     base: "1-8 secciones · Tab cola · Space reproducir · -/+ volumen · q salir"
     servers: "↑ ↓ filas · Enter cambiar · e editar · d predeterminado · p emparejar · x quitar · Esc volver"
@@ -332,3 +339,4 @@ gui:
     pl_tracks: "↑ ↓ filas · Enter reproducir · h atrás · a encolar · Tab cola · q salir"
     pl_dialog: "escribe un nombre · Enter confirma · Esc cancela"
     pl_confirm: "x la borra · Enter o Esc la conserva"
+    filter: "escribe para filtrar · Enter conserva · Esc borra · ↑ ↓ siguen moviendo"

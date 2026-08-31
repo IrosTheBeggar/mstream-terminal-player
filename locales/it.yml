@@ -175,6 +175,13 @@ gui:
     search: "Cerca"
     settings: "Impostazioni"
     sonic: "Percorso sonoro"
+  bar:
+    play: "riproduci"
+    queue: "accoda tutto"
+    filter: "filtra"
+    of: "%{shown} di %{total}"
+    back_tip: "Indietro — h"
+    clear_tip: "Svuota — Esc"
   files:
     empty: "(niente qui)"
     items: "%{count} elementi"
@@ -316,7 +323,7 @@ gui:
   tips:
     search_edit: "scrivi · Enter cerca · Esc fine"
     search: "↑ ↓ muovi · Enter apri/riproduci · h indietro · ← → classe · t attiva · / modifica · a in coda · q esci"
-    files: "↑ ↓ muovi · Enter apri/riproduci · h indietro · a in coda · Tab coda · Space riproduci · q esci"
+    files: "↑ ↓ muovi · Enter apri/riproduci · h indietro · a in coda · Tab coda · Space riproduci · q esci · f filtra"
     rows: "↑ ↓ righe · ← → regola · Enter attiva · Esc fine · 1-8 sezioni · q esci"
     base: "1-8 sezioni · Tab coda · Space riproduci · -/+ volume · q esci"
     servers: "↑ ↓ righe · Enter cambia · e modifica · d predefinito · p associa · x rimuovi · Esc indietro"
@@ -332,3 +339,4 @@ gui:
     pl_tracks: "↑ ↓ righe · Invio riproduci · h indietro · a accoda · Tab coda · q esci"
     pl_dialog: "scrivi un nome · Invio conferma · Esc annulla"
     pl_confirm: "x la elimina · Invio o Esc la conserva"
+    filter: "scrivi per filtrare · Invio conserva · Esc svuota · ↑ ↓ muovono ancora"

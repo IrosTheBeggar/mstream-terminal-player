@@ -175,6 +175,13 @@ gui:
     search: "Search"
     settings: "Settings"
     sonic: "Sonic path"
+  bar:
+    play: "play"
+    queue: "queue all"
+    filter: "filter"
+    of: "%{shown} of %{total}"
+    back_tip: "Back — h"
+    clear_tip: "Clear — Esc"
   files:
     empty: "(nothing here)"
     items: "%{count} items"
@@ -316,7 +323,7 @@ gui:
   tips:
     search_edit: "type · Enter search · Esc done"
     search: "↑ ↓ move · Enter open/play · h back · ← → class · t toggle · / edit · a queue · q quit"
-    files: "↑ ↓ move · Enter open/play · h back · a queue · Tab queue panel · Space play/pause · q quit"
+    files: "↑ ↓ move · Enter open/play · h back · a queue · Tab queue panel · Space play/pause · q quit · f filter"
     rows: "↑ ↓ rows · ← → adjust · Enter toggle · Esc done · 1-8 sections · q quit"
     base: "1-8 sections · Tab queue · Space play/pause · -/+ volume · q quit"
     servers: "↑ ↓ rows · Enter switch · e edit · d default · p pair · x remove · Esc back"
@@ -332,3 +339,4 @@ gui:
     pl_tracks: "↑ ↓ rows · Enter play · h back · a queue · Tab queue · q quit"
     pl_dialog: "type a name · Enter confirms · Esc cancels"
     pl_confirm: "x deletes it · Enter or Esc keeps it"
+    filter: "type to narrow · Enter keeps it · Esc clears · ↑ ↓ still move"

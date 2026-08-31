@@ -175,6 +175,13 @@ gui:
     search: "Szukaj"
     settings: "Ustawienia"
     sonic: "Ścieżka dźwiękowa"
+  bar:
+    play: "odtwórz"
+    queue: "wszystko do kolejki"
+    filter: "filtruj"
+    of: "%{shown} z %{total}"
+    back_tip: "Wstecz — h"
+    clear_tip: "Wyczyść — Esc"
   files:
     empty: "(nic tu nie ma)"
     items: "%{count} pozycji"
@@ -316,7 +323,7 @@ gui:
   tips:
     search_edit: "pisz · Enter szukaj · Esc gotowe"
     search: "↑ ↓ ruch · Enter otwórz/odtwórz · h wstecz · ← → klasa · t przełącz · / edytuj · a do kolejki · q wyjdź"
-    files: "↑ ↓ ruch · Enter otwórz/odtwórz · h wstecz · a do kolejki · Tab kolejka · Space odtwarzaj · q wyjdź"
+    files: "↑ ↓ ruch · Enter otwórz/odtwórz · h wstecz · a do kolejki · Tab kolejka · Space odtwarzaj · q wyjdź · f filtruj"
     rows: "↑ ↓ wiersze · ← → zmień · Enter przełącz · Esc gotowe · 1-8 sekcje · q wyjdź"
     base: "1-8 sekcje · Tab kolejka · Space odtwarzaj · -/+ głośność · q wyjdź"
     servers: "↑ ↓ wiersze · Enter przełącz · e edytuj · d domyślny · p paruj · x usuń · Esc wstecz"
@@ -332,3 +339,4 @@ gui:
     pl_tracks: "↑ ↓ wiersze · Enter odtwórz · h wstecz · a do kolejki · Tab kolejka · q wyjdź"
     pl_dialog: "wpisz nazwę · Enter zatwierdza · Esc anuluje"
     pl_confirm: "x usuwa · Enter lub Esc zachowuje"
+    filter: "pisz, aby zawęzić · Enter zachowuje · Esc czyści · ↑ ↓ nadal działają"

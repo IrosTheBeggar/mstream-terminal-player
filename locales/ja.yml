@@ -175,6 +175,13 @@ gui:
     search: "検索"
     settings: "設定"
     sonic: "ソニックパス"
+  bar:
+    play: "再生"
+    queue: "すべてキューへ"
+    filter: "絞り込み"
+    of: "%{total} 件中 %{shown} 件"
+    back_tip: "戻る — h"
+    clear_tip: "クリア — Esc"
   files:
     empty: "(ここには何もありません)"
     items: "%{count} 件"
@@ -316,7 +323,7 @@ gui:
   tips:
     search_edit: "入力 · Enter 検索 · Esc 完了"
     search: "↑ ↓ 移動 · Enter 開く/再生 · h 戻る · ← → 分類 · t 切替 · / 編集 · a キューへ · q 終了"
-    files: "↑ ↓ 移動 · Enter 開く/再生 · h 戻る · a キューへ · Tab キュー · Space 再生/停止 · q 終了"
+    files: "↑ ↓ 移動 · Enter 開く/再生 · h 戻る · a キューへ · Tab キュー · Space 再生/停止 · q 終了 · f 絞り込み"
     rows: "↑ ↓ 行 · ← → 調整 · Enter 切替 · Esc 完了 · 1-8 セクション · q 終了"
     base: "1-8 セクション · Tab キュー · Space 再生/停止 · -/+ 音量 · q 終了"
     servers: "↑ ↓ 行 · Enter 切替 · e 編集 · d 既定 · p 連携 · x 削除 · Esc 戻る"
@@ -332,3 +339,4 @@ gui:
     pl_tracks: "↑ ↓ 行 · Enter 再生 · h 戻る · a キューへ · Tab キュー · q 終了"
     pl_dialog: "名前を入力 · Enter 確定 · Esc 取消"
     pl_confirm: "x で削除 · Enter / Esc で維持"
+    filter: "入力で絞り込み · Enter 維持 · Esc クリア · ↑ ↓ 移動可"

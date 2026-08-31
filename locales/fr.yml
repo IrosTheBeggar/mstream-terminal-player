@@ -175,6 +175,13 @@ gui:
     search: "Recherche"
     settings: "Réglages"
     sonic: "Chemin sonore"
+  bar:
+    play: "lire"
+    queue: "tout en file"
+    filter: "filtrer"
+    of: "%{shown} sur %{total}"
+    back_tip: "Retour — h"
+    clear_tip: "Effacer — Échap"
   files:
     empty: "(rien ici)"
     items: "%{count} éléments"
@@ -316,7 +323,7 @@ gui:
   tips:
     search_edit: "tapez · Enter chercher · Esc fini"
     search: "↑ ↓ déplacer · Enter ouvrir/lire · h retour · ← → classe · t basculer · / modifier · a en file · q quitter"
-    files: "↑ ↓ déplacer · Enter ouvrir/lire · h retour · a en file · Tab file · Space lecture · q quitter"
+    files: "↑ ↓ déplacer · Enter ouvrir/lire · h retour · a en file · Tab file · Space lecture · q quitter · f filtrer"
     rows: "↑ ↓ lignes · ← → régler · Enter basculer · Esc fini · 1-8 sections · q quitter"
     base: "1-8 sections · Tab file · Space lecture · -/+ volume · q quitter"
     servers: "↑ ↓ lignes · Enter changer · e modifier · d défaut · p appairer · x retirer · Esc retour"
@@ -332,3 +339,4 @@ gui:
     pl_tracks: "↑ ↓ lignes · Entrée lire · h retour · a en file · Tab file · q quitter"
     pl_dialog: "tape un nom · Entrée valide · Échap annule"
     pl_confirm: "x la supprime · Entrée ou Échap la garde"
+    filter: "tape pour filtrer · Entrée garde · Échap efface · ↑ ↓ bougent toujours"

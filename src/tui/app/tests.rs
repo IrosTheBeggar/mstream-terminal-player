@@ -2887,6 +2887,41 @@ fn a_disabled_journey_probes_before_naming_a_reason() {
 }
 
 #[test]
+fn the_listing_verbs_play_queue_and_shuffle_once() {
+    // The browser bar's three verbs (contract: browser-top-bar 10–12).
+    let mut app = connected_app();
+    browsing(&mut app, &["one", "two", "three"], 0);
+
+    let effects = app.play_listing(false);
+    assert!(!effects.is_empty(), "play starts the engine");
+    assert_eq!(
+        app.queue.items.iter().map(|t| t.filepath.as_str()).collect::<Vec<_>>(),
+        vec!["one", "two", "three"],
+        "play keeps the listing's order"
+    );
+
+    // Queue all appends and says how many; already playing, so no restart.
+    let effects = app.queue_listing();
+    assert!(effects.is_empty(), "already playing — nothing restarts");
+    assert_eq!(app.queue.items.len(), 6, "the listing was appended");
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text.contains("queued 3")),
+        "got: {:?}",
+        app.message
+    );
+
+    // Shuffle reorders ONCE — the record's semantic: the mode is not
+    // touched, and the same songs are all still there.
+    fastrand::seed(7);
+    let shuffled_mode_before = app.queue.shuffle;
+    app.play_listing(true);
+    assert_eq!(app.queue.shuffle, shuffled_mode_before, "the shuffle MODE is untouched");
+    let mut played: Vec<_> = app.queue.items.iter().map(|t| t.filepath.clone()).collect();
+    played.sort();
+    assert_eq!(played, vec!["one", "three", "two"], "a permutation, nothing lost");
+}
+
+#[test]
 fn a_playlist_change_reasks_an_open_playlists_view() {
     // Create, rename and delete are silent — the row changing is the
     // confirmation — but a Playlists view on screen is looking at a list
