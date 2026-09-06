@@ -153,15 +153,12 @@ validator wordings above quote the record's English.
   per-vpath templates authoring) — the webapp admin page's own feature.
 - **The `/torrent` mobile-web page** — the reduced sibling, not the
   record.
-- **A native file dialog** — the wizard's osascript / rfd / ashpd pickers
-  choose folders; a file-typed sibling is a later nicety. The typed
-  picker below is the same filesystem either way.
 
 ## Translation notes (terminal GUI)
 
 | Record | Here |
 |---|---|
-| System file picker, typed, starting in Downloads | The kit's **path modal for files** (`src/gui/torrent.rs`, the wizard's typed completion re-drawn): the line editor starts in `~/Downloads/`, suggestions are that folder's sub-folders and `.torrent` files only, Tab completes, Enter descends or loads; the structural gate stays (clause 3). Terminal bonus: dropping a file on the window types its path into the same line (escaped spaces and quotes are undone). Listings and reads run on threads. |
+| System file picker, typed, starting in Downloads | The **native file dialog** first — the wizard's own backends (`src/setup/picker.rs`) grown a file-typed sibling: osascript `choose file of type {"torrent"}` on macOS (an NSOpenPanel from a terminal process never fronts), rfd's IFileOpenDialog on Windows, the XDG portal through ashpd on Linux — each filtered to `.torrent` / `application/x-bittorrent` and started in `~/Downloads`, run on a thread so the loop stays live. Where no dialog can open (SSH, no session bus, a refused osascript) the room says so and falls back to the kit's **path modal for files** (the wizard's typed completion re-drawn): the line editor starts in `~/Downloads/`, suggestions are that folder's sub-folders and `.torrent` files only, Tab completes, Enter descends or loads — also reachable on purpose (`t`, "type a path"), and the place a dropped file's path lands. The structural gate stays (clause 3) whichever road the file took. |
 | Magnet TextField | The kit line input as a 1-row field; live infohash mark at the row's right edge (clause 4) |
 | Opened-with (intents) | The **CLI seam**: `mstream-player gui --torrent <file-or-magnet>` as the `IncomingTorrent` equivalent — the chooser / ask-me flow rides it unchanged, and the arrival is logged |
 | OS registration (manifest) | The **Phase-8 installers'** job: macOS document types + `magnet:` URL scheme on the .app, Windows file association, Linux `.desktop` MimeType — all launching the seam above. The app ships the seam; the installers ship the claim. |
@@ -208,6 +205,10 @@ validator wordings above quote the record's English.
   the installers register us. An arrival from the staging folder is
   named ("mStream is the default app for torrents — choose another app
   in your system settings") and taken, never bounced again.
+- **2026-09-01 — A typed path beside the native picker** (review): the
+  record has only the system picker; this surface keeps the typed
+  modal as a named second road, because the dialog cannot exist over
+  SSH and a terminal is where paths get pasted and dropped.
 - **2026-09-01 — Done resets the form in place**: the record pops its
   screen; the room has nowhere to pop to, so a success (added, seeded,
   already there) clears the source and keeps the library and toggles

@@ -111,6 +111,8 @@ impl Gate {
 /// `_submitting` / `_detecting` / `_passingOff` split.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Busy {
+    /// The native file dialog is up.
+    Picking,
     Detecting,
     Checking,
     Adding,
@@ -192,6 +194,8 @@ enum HandOff {
 
 /// What the threads send home.
 enum Reply {
+    /// The native file dialog's answer.
+    Picked(crate::setup::picker::Pick),
     Preflight {
         server: String,
         gate: Result<TorrentPreflight, String>,
@@ -932,6 +936,29 @@ fn hand_off(gui: &mut Gui, incoming: Option<Incoming>) {
 
 // ── The picker ──────────────────────────────────────────────────────────────
 
+/// Choose a file the platform's way (clause 2): the native dialog, typed
+/// to `.torrent` and started in Downloads, on a thread so the loop stays
+/// live. Where no dialog can open — SSH, no session bus, a refused
+/// osascript — the reply says so and the typed picker takes over.
+fn native_pick(gui: &mut Gui) {
+    if gui.torrent.busy.is_some() {
+        return;
+    }
+    gui.torrent.busy = Some(Busy::Picking);
+    note(gui, t!("gui.tor.picking"), false);
+    let start = {
+        let dir = picker_start();
+        let trimmed = dir.trim_end_matches(['/', '\\']);
+        (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+    };
+    let tx = gui.torrent.tx.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(Reply::Picked(crate::setup::picker::pick_torrent(start.as_deref())));
+    });
+}
+
+/// The typed picker — the fallback, and its own road (`t`): a terminal is
+/// where paths get pasted and dropped.
 fn open_picker(gui: &mut Gui) {
     gui.torrent.picker = Some(Picker { text: Input::new(picker_start()), ..Picker::default() });
     picker_refresh(gui);
@@ -1072,6 +1099,24 @@ pub(crate) fn poll(gui: &mut Gui) {
 
 fn apply_reply(gui: &mut Gui, reply: Reply) {
     match reply {
+        Reply::Picked(pick) => {
+            use crate::setup::picker::Pick;
+            gui.torrent.busy = None;
+            match pick {
+                Pick::File(path) => {
+                    gui.note = None;
+                    picker_load(gui, path.to_string_lossy().into_owned());
+                }
+                Pick::Cancelled => gui.note = None,
+                // A folder from a file dialog cannot happen; said rather
+                // than assumed.
+                Pick::Folder(_) => gui.note = None,
+                Pick::Unavailable(why) => {
+                    note(gui, t!("gui.tor.no_picker", why = why), false);
+                    open_picker(gui);
+                }
+            }
+        }
         Reply::Preflight { server, gate, templates } => {
             // A switch since the ask: the answer describes another server.
             if server != gui.torrent.gate_for || server != gui.app.session.server {
@@ -1360,9 +1405,26 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                     None => {
                         // The one way in for a file: a text button, the
                         // accent so the empty form has a lead.
-                        let label = format!("{} {forward}", t!("gui.tor.choose_file"));
-                        let w = text_button(frame, gui, content.x + lw, y, &label, true, Act::TorPick);
-                        gui.ui.tip(Rect { x: content.x + lw, y, width: w, height: 1 }, format!("{} — b", t!("gui.tor.choose_file")));
+                        let picking = gui.torrent.busy == Some(Busy::Picking);
+                        let mut x = content.x + lw;
+                        if picking {
+                            let label = t!("gui.tor.picking").to_string();
+                            put(frame, x, y, &label, accent());
+                            x += label.chars().count() as u16;
+                        } else {
+                            let label = format!("{} {forward}", t!("gui.tor.choose_file"));
+                            let w = text_button(frame, gui, x, y, &label, true, Act::TorPick);
+                            gui.ui.tip(Rect { x, y, width: w, height: 1 }, format!("{} — b", t!("gui.tor.choose_file")));
+                            x += w;
+                        }
+                        // The typed road beside the dialog: paths get
+                        // pasted and dropped in a terminal, and SSH has
+                        // no dialog at all.
+                        put(frame, x, y, " · ", dim());
+                        x += 3;
+                        let typed = t!("gui.tor.type_path").to_string();
+                        let w = text_button(frame, gui, x, y, &typed, false, Act::TorType);
+                        gui.ui.tip(Rect { x, y, width: w, height: 1 }, format!("{typed} — t"));
                     }
                     Some(file) => {
                         // The chip (clause 5): the name, its [X], and on
@@ -1732,7 +1794,8 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         }
         Act::TorRow(row) => gui.torrent.cursor = Some(row),
         Act::TorLib(delta) => step_library(gui, delta),
-        Act::TorPick => open_picker(gui),
+        Act::TorPick => native_pick(gui),
+        Act::TorType => open_picker(gui),
         Act::TorUnload => {
             gui.torrent.file = None;
             gui.torrent.force_fresh = false;
@@ -1893,6 +1956,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
             KeyCode::Down | KeyCode::Tab => move_cursor(gui, 1),
             KeyCode::Esc => gui.torrent.cursor = None,
             KeyCode::Enter | KeyCode::Char('b') => return Some(gui.act(Act::TorPick)),
+            KeyCode::Char('t') => return Some(gui.act(Act::TorType)),
             KeyCode::Char('x') if gui.torrent.file.is_some() => return Some(gui.act(Act::TorUnload)),
             KeyCode::Char('o') if gui.torrent.file.is_some() => return Some(gui.act(Act::TorHandOff)),
             KeyCode::Char('d') if gui.torrent.file.is_some() => return Some(gui.act(Act::TorDetect)),
@@ -1927,6 +1991,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
             KeyCode::Down => move_cursor(gui, 1),
             KeyCode::Up => move_cursor(gui, -1),
             KeyCode::Char('b') => return Some(gui.act(Act::TorPick)),
+            KeyCode::Char('t') => return Some(gui.act(Act::TorType)),
             KeyCode::Esc => return Some(gui.act(Act::TorBack)),
             _ => return None,
         },
@@ -2330,6 +2395,37 @@ mod tests {
         key(&mut gui, KeyCode::Esc);
         assert!(gui.torrent.picker.is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_native_dialog_falls_back_to_the_typed_picker_and_t_is_its_own_road() {
+        use crate::setup::picker::Pick;
+        let mut gui = ready_gui(&["music"]);
+        // No dialog could open: the room says so and the typed picker
+        // takes over, starting where the dialog would have.
+        gui.torrent.busy = Some(Busy::Picking);
+        apply_reply(&mut gui, Reply::Picked(Pick::Unavailable("no session bus".into())));
+        assert!(gui.torrent.busy.is_none());
+        assert!(gui.torrent.picker.is_some(), "the fallback opened");
+        let (words, is_err) = gui.note.clone().unwrap();
+        assert!(words.contains("no session bus"), "{words}");
+        assert!(!is_err, "a fallback is news, not a failure");
+        key(&mut gui, KeyCode::Esc);
+
+        // A declined dialog costs nothing.
+        gui.torrent.busy = Some(Busy::Picking);
+        note(&mut gui, "opening…", false);
+        apply_reply(&mut gui, Reply::Picked(Pick::Cancelled));
+        assert!(gui.torrent.busy.is_none() && gui.note.is_none() && gui.torrent.picker.is_none());
+
+        // `t` is the typed road on purpose, dialog or not.
+        key(&mut gui, KeyCode::Char('t'));
+        assert!(gui.torrent.picker.is_some());
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("Choose a .torrent file"), "got:\n{text}");
+        key(&mut gui, KeyCode::Esc);
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("type a path"), "the typed road is named beside the dialog:\n{text}");
     }
 
     #[test]

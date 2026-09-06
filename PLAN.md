@@ -1688,9 +1688,11 @@ a LATER secondary screen (party view), Columns retired.
   plus the `mstream-player gui --torrent <file-or-magnet>` seam that
   stands in for the OS hand-off. `gui/torrent.rs` is the room: the
   `/torrent/preflight` gate as a gold banner with the server's own
-  reason (no ping flag exists), a typed `.torrent` picker starting in
-  `~/Downloads/` (the wizard's completion re-drawn for files; listings
-  and reads on threads), a live-validated magnet row, metadata pre-filled
+  reason (no ping flag exists), the native file dialog (the
+  wizard's picker backends grown a file-typed sibling, filtered to
+  `.torrent`, started in Downloads, on a thread) with a typed `.torrent`
+  picker as the fallback and the `t` road (the wizard's completion
+  re-drawn for files; listings and reads on threads), a live-validated magnet row, metadata pre-filled
   from `info.name` / the magnet's `dn` through `torrent_meta.rs` (a
   port of the record's parser and the server's sanitizer, `regex` now a
   direct dep), the library's path template resolved with sticky hand
