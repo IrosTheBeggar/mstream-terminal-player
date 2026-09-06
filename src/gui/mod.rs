@@ -211,8 +211,10 @@ pub(crate) enum Act {
     TorRow(torrent::Row),
     /// The library picker's arrows (and the name, which cycles).
     TorLib(i32),
-    /// Open the file picker; drop the loaded file; the chip's two verbs.
+    /// The native file dialog (falls back to the typed picker), the typed
+    /// picker on purpose, drop the loaded file, the chip's two verbs.
     TorPick,
+    TorType,
     TorUnload,
     TorHandOff,
     TorDetect,

@@ -1136,7 +1136,9 @@ impl Wizard {
             Done::Picked(picker::Pick::Folder(path)) => {
                 self.add_folder(path.display().to_string());
             }
-            Done::Picked(picker::Pick::Cancelled) => {}
+            // A file answer belongs to the GUI's torrent picker, never to
+            // a folder dialog; matched so the enum stays exhaustive.
+            Done::Picked(picker::Pick::Cancelled | picker::Pick::File(_)) => {}
             Done::Picked(picker::Pick::Unavailable(why)) => {
                 self.note = Some((
                     t!("note.no_picker", why = why).to_string(),

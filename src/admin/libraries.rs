@@ -519,7 +519,7 @@ impl Room {
             Done::Picked(picker::Pick::Folder(path)) => {
                 self.open_name(path.display().to_string());
             }
-            Done::Picked(picker::Pick::Cancelled) => {}
+            Done::Picked(picker::Pick::Cancelled | picker::Pick::File(_)) => {}
             Done::Picked(picker::Pick::Unavailable(why)) => {
                 self.note = Some((t!("note.no_picker", why = why).to_string(), false));
                 self.queue(Op::OpenBrowser(SERVER_HOME.to_string()), t!("busy.listing"));
