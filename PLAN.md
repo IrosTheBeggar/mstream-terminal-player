@@ -1384,6 +1384,20 @@ character-art wizard today. Also pinned: the wizard's scrollbar-hold soft-captur
 refinement for Apple Terminal — mac users now get the bundled console instead, which
 mooted the surface it was polishing.
 
+**File associations — the Add-torrent seam (2026-09-01).** The GUI's
+Add-torrent room (Phase 10) ships `mstream-player gui --torrent
+<file-or-magnet>`: the OS-hand-off entry point of the mobile app's
+feature, waiting on a claim. Each installer registers the app for
+`.torrent` files and the `magnet:` scheme and launches that seam — macOS
+document types + URL scheme on the .app (through the bundled Ghostty's
+config command), a Windows file association, a Linux `.desktop`
+`MimeType=application/x-bittorrent;x-scheme-handler/magnet;`. Two riders
+come with the claim: the Settings "default app for torrents" row the
+contract dropped for now (clause 52), and a hand-off that must not loop —
+the room already recognizes its own staged file coming back and says so,
+but a registered app should offer "open in another app" the way the OS
+does it (a chooser, not `open`).
+
 ### Phase 9 — Ship the wizard (merge PR #10 → release → mStream integration)
 
 The order is fixed by the machinery: the mStream server fetches this
@@ -1662,6 +1676,36 @@ a LATER secondary screen (party view), Columns retired.
   prefetch all follow the narrowed view, and a filtered cell opens the
   album it shows). The keys ride one shared gate that outranks the room
   handlers, so a typed letter can never queue a row.
+- **Add torrent ✅ 2026-09-01** — contract-first
+  (`docs/ux-contracts/add-torrent.md`; the record is the mobile app's
+  smart Add Torrent panel, itself a port of the webapp's, plus both
+  directions of its OS hand-off). The contract went to discussion with
+  five open questions and came back with five decisions, all logged:
+  the webapp's fuller `match_unmapped` / `pad_files_missing` wordings,
+  a second instance for a second `--torrent`, no OS-defaults row until
+  the installers exist, the hand-off kept as one verb on the file chip,
+  and the room housed as a Settings doorway (the Manage-servers shape)
+  plus the `mstream-player gui --torrent <file-or-magnet>` seam that
+  stands in for the OS hand-off. `gui/torrent.rs` is the room: the
+  `/torrent/preflight` gate as a gold banner with the server's own
+  reason (no ping flag exists), a typed `.torrent` picker starting in
+  `~/Downloads/` (the wizard's completion re-drawn for files; listings
+  and reads on threads), a live-validated magnet row, metadata pre-filled
+  from `info.name` / the magnet's `dn` through `torrent_meta.rs` (a
+  port of the record's parser and the server's sanitizer, `regex` now a
+  direct dep), the library's path template resolved with sticky hand
+  edits, rename-root on by default, the seed-existing check before any
+  add with every outcome worded and the partial-match picker as a kit
+  modal, the arrival chooser with its don't-ask box persisted under
+  `[torrent] ask`, and a hand-off that stages the file into the player's
+  temp folder — which doubles as the loop guard once an installer makes
+  us the default app. `api/mod.rs` grew a hand-rolled multipart body
+  (the API's only multipart; no reqwest feature) and the five calls,
+  shared by the wasm build. 1-row fields rather than the kit's 3-row
+  cards, so the whole form fits the 100×24 floor. 12 new room tests + 10
+  parser tests + 2 multipart tests; smoked read-only against
+  demo.mstream.io (the gate answers "No torrent client is selected" and
+  the primary stays disabled with that reason on its tip).
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
   of the Library tab views (Artists/Genres/Recent — the wall's drill

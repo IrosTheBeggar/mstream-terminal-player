@@ -609,6 +609,157 @@ pub struct PlaylistSummary {
     pub name: String,
 }
 
+// ── Torrents (the Add-torrent room; docs/ux-contracts/add-torrent.md) ───────
+
+/// `GET /api/v1/torrent/preflight` — whether this server takes a torrent
+/// from this user at all, and why not when it doesn't. There is no ping
+/// flag for torrents: this answer is the gate.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct TorrentPreflight {
+    pub active: bool,
+    #[serde(rename = "clientType")]
+    pub client_type: Option<String>,
+    /// The torrent client's name as people say it ("Transmission").
+    #[serde(rename = "displayName")]
+    pub display_name: Option<String>,
+    #[serde(rename = "noUpload")]
+    pub no_upload: bool,
+    #[serde(rename = "userAllowed")]
+    pub user_allowed: bool,
+    /// The server's own words for what stands in the way, when something does.
+    pub reason: Option<String>,
+}
+
+impl TorrentPreflight {
+    /// The three global gates the record's screen checks: a client is
+    /// selected, uploads are on, this user may. (Per-library mapping is
+    /// enforced by `/torrent/add` itself.)
+    pub fn ok(&self) -> bool {
+        self.active && self.user_allowed && !self.no_upload
+    }
+}
+
+/// `GET /api/v1/torrent/path-templates` — per-library destination
+/// templates, `{{ARTIST}}/{{ALBUM}}` and friends.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentTemplates {
+    pub vpaths: std::collections::HashMap<String, TorrentTemplateEntry>,
+    #[serde(rename = "suggestedTemplate")]
+    pub suggested_template: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentTemplateEntry {
+    pub template: Option<String>,
+}
+
+/// `POST /api/v1/torrent/auto-detect` — the server's own guess at the
+/// metadata. `confidence` is "high" or "low"; `ok: false` carries the
+/// reason in `message`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentDetect {
+    pub ok: bool,
+    pub confidence: Option<String>,
+    pub metadata: Option<TorrentDetectMeta>,
+    pub message: Option<String>,
+}
+
+/// The detected fields. Numbers arrive as numbers (a year), so each is a
+/// raw JSON value read through [`TorrentDetectMeta::text`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentDetectMeta {
+    pub artist: Option<serde_json::Value>,
+    pub album: Option<serde_json::Value>,
+    pub year: Option<serde_json::Value>,
+}
+
+impl TorrentDetectMeta {
+    /// A field as text — a string as itself, a number spelled out, nothing
+    /// for null or absent.
+    pub fn text(value: &Option<serde_json::Value>) -> String {
+        match value {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            _ => String::new(),
+        }
+    }
+}
+
+/// `POST /api/v1/torrent/seed-existing` — are the torrent's files already
+/// on disk? `outcome` is one of `seeded`, `already_in_daemon`,
+/// `partial_match`, `no_match`, `match_unmapped`, `pad_files_missing`,
+/// `invalid_torrent`, `daemon_error`; the other fields ride whichever
+/// outcome needs them.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SeedCheck {
+    pub ok: bool,
+    pub outcome: String,
+    /// The torrent's own name, when the server could read it.
+    pub name: Option<String>,
+    /// `invalid_torrent` / `daemon_error`: the server's words.
+    pub error: Option<String>,
+    /// `seeded` / `match_unmapped` / `pad_files_missing`: which library.
+    pub vpath: Option<String>,
+    /// `pad_files_missing`: which client type cannot recreate the pads.
+    #[serde(rename = "clientType")]
+    pub client_type: Option<String>,
+    /// `partial_match`: where some of the files already live.
+    pub matches: Vec<SeedMatch>,
+}
+
+/// One place a partial match found files: a library-relative path, and
+/// how much of the torrent is there.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct SeedMatch {
+    pub vpath: String,
+    #[serde(rename = "relativePath")]
+    pub relative_path: String,
+    pub matched: Option<u64>,
+    pub total: Option<u64>,
+    pub missing: Option<u64>,
+}
+
+/// `POST /api/v1/torrent/add` — the torrent is with the client.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentAdded {
+    pub ok: bool,
+    pub name: Option<String>,
+    #[serde(rename = "downloadPath")]
+    pub download_path: Option<String>,
+    /// The client already had it — its own wording, not a failure.
+    #[serde(rename = "isDuplicate")]
+    pub is_duplicate: bool,
+    /// The add succeeded but the root-folder rename did not: a warning.
+    #[serde(rename = "renameWarning")]
+    pub rename_warning: Option<String>,
+}
+
+/// What a torrent submission carries: exactly one source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TorrentSource {
+    File { name: String, bytes: Vec<u8> },
+    Magnet(String),
+}
+
+/// The `/torrent/add` request, as the room assembles it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TorrentAddRequest {
+    pub vpath: String,
+    /// Folders above the destination folder, `/`-joined; empty for none.
+    pub sub_path: String,
+    pub directory_name: String,
+    pub rename_root: bool,
+    pub source: TorrentSource,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

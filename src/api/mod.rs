@@ -43,6 +43,14 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(not(target_arch = "wasm32"))]
 const DECODE_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// The torrent routes' ceiling: a seed check hashes the torrent's files
+/// on the server's disk and auto-detect may reach for tags, both slower
+/// than any listing. The record waits 45 seconds too.
+/// Spelled out rather than gated: the browser build passes it through
+/// [`Client::post_multipart`], which drops it there (the fetch backend
+/// owns its own ceiling).
+const DETECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
 /// The directory to ask [`Client::file_explorer`] for when what you want is
 /// "wherever it makes sense to start".
 ///
@@ -284,20 +292,28 @@ impl Client {
                     .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?,
             );
         }
+        self.finish(req, path, extract_error).await
+    }
 
+    /// Send a built request and map the answer: only 401 is a session
+    /// problem, the other failures carry the server's words as `words`
+    /// reads them out of the body.
+    async fn finish<T: DeserializeOwned>(
+        &self,
+        req: reqwest::RequestBuilder,
+        path: &str,
+        words: fn(&str) -> String,
+    ) -> Result<T, ApiError> {
         let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
         let status = resp.status();
         let text = resp.text().await.map_err(|e| ApiError::Network(e.to_string()))?;
 
         match status {
             StatusCode::UNAUTHORIZED => return Err(ApiError::Unauthorized),
-            StatusCode::FORBIDDEN => return Err(ApiError::Forbidden(extract_error(&text))),
+            StatusCode::FORBIDDEN => return Err(ApiError::Forbidden(words(&text))),
             StatusCode::NOT_FOUND => return Err(ApiError::NotFound(path.to_string())),
             s if !s.is_success() => {
-                return Err(ApiError::Server {
-                    status: s.as_u16(),
-                    message: extract_error(&text),
-                });
+                return Err(ApiError::Server { status: s.as_u16(), message: words(&text) });
             }
             _ => {}
         }
@@ -306,6 +322,31 @@ impl Client {
             endpoint: path.to_string(),
             message: e.to_string(),
         })
+    }
+
+    /// A multipart POST — the torrent routes' shape. `longest` is the
+    /// request's own ceiling: a seed check hashes files on the server.
+    async fn post_multipart<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        form: Multipart,
+        longest: Option<std::time::Duration>,
+    ) -> Result<T, ApiError> {
+        let url = self.endpoint(path)?;
+        let (content_type, body) = form.finish();
+        #[allow(unused_mut)]
+        let mut req = self.http.request(Method::POST, url);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(longest) = longest {
+            req = req.timeout(longest);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = longest;
+        if let Some(token) = &self.token {
+            req = req.header("x-access-token", token);
+        }
+        req = req.header("Content-Type", content_type).body(body);
+        self.finish(req, path, extract_message).await
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
@@ -710,6 +751,103 @@ impl Client {
         wait(self.playlist_delete_async(name))
     }
 
+    // ── Torrents (docs/ux-contracts/add-torrent.md) ─────────────────────────
+
+    /// Whether this server takes a torrent from this user, and why not
+    /// when it doesn't — the Add-torrent room's gate (no ping flag exists).
+    /// Asked with an empty path: the global gates only; the per-library
+    /// mapping is `/torrent/add`'s own check.
+    pub async fn torrent_preflight_async(&self) -> Result<TorrentPreflight, ApiError> {
+        self.get("api/v1/torrent/preflight?path=").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn torrent_preflight(&self) -> Result<TorrentPreflight, ApiError> {
+        wait(self.torrent_preflight_async())
+    }
+
+    /// Per-library destination templates. Best-effort for callers: an
+    /// older server without the route answers 404, and the legacy
+    /// `Artist/Album` layout still applies.
+    pub async fn torrent_path_templates_async(&self) -> Result<TorrentTemplates, ApiError> {
+        self.get("api/v1/torrent/path-templates").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn torrent_path_templates(&self) -> Result<TorrentTemplates, ApiError> {
+        wait(self.torrent_path_templates_async())
+    }
+
+    /// Ask the server to read artist/album/year out of a `.torrent`.
+    /// `vpath` lets the server use that library's tag knowledge.
+    pub async fn torrent_auto_detect_async(
+        &self,
+        bytes: &[u8],
+        filename: &str,
+        vpath: Option<&str>,
+    ) -> Result<TorrentDetect, ApiError> {
+        let mut form = Multipart::new();
+        if let Some(vpath) = vpath.filter(|v| !v.is_empty()) {
+            form.field("vpath", vpath);
+        }
+        form.file("torrentFile", filename, bytes);
+        self.post_multipart("api/v1/torrent/auto-detect", form, Some(DETECT_TIMEOUT)).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn torrent_auto_detect(
+        &self,
+        bytes: &[u8],
+        filename: &str,
+        vpath: Option<&str>,
+    ) -> Result<TorrentDetect, ApiError> {
+        wait(self.torrent_auto_detect_async(bytes, filename, vpath))
+    }
+
+    /// Are the torrent's files already on disk somewhere the user can
+    /// see? Scans every library the user has (the server intersects with
+    /// their access), and seeds outright when everything is there.
+    pub async fn torrent_seed_existing_async(
+        &self,
+        bytes: &[u8],
+        filename: &str,
+    ) -> Result<SeedCheck, ApiError> {
+        let mut form = Multipart::new();
+        form.file("torrentFile", filename, bytes);
+        self.post_multipart("api/v1/torrent/seed-existing", form, Some(DETECT_TIMEOUT)).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn torrent_seed_existing(&self, bytes: &[u8], filename: &str) -> Result<SeedCheck, ApiError> {
+        wait(self.torrent_seed_existing_async(bytes, filename))
+    }
+
+    /// Hand the torrent to the server's client, to land at
+    /// `<vpath>/<sub_path>/<directory_name>`.
+    pub async fn torrent_add_async(&self, req: &TorrentAddRequest) -> Result<TorrentAdded, ApiError> {
+        let mut form = Multipart::new();
+        form.field("vpath", &req.vpath);
+        if !req.sub_path.is_empty() {
+            form.field("subPath", &req.sub_path);
+        }
+        form.field("directoryName", &req.directory_name);
+        form.field("renameRoot", if req.rename_root { "true" } else { "false" });
+        match &req.source {
+            TorrentSource::Magnet(magnet) => {
+                form.field("magnet", magnet);
+            }
+            TorrentSource::File { name, bytes } => {
+                form.file("torrentFile", name, bytes);
+            }
+        }
+        self.post_multipart("api/v1/torrent/add", form, Some(DETECT_TIMEOUT)).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn torrent_add(&self, req: &TorrentAddRequest) -> Result<TorrentAdded, ApiError> {
+        wait(self.torrent_add_async(req))
+    }
+
     /// The shape of a track, for drawing under the progress bar.
     ///
     /// `None` is every flavour of "there isn't one", and none of them is an
@@ -1001,6 +1139,72 @@ impl Client {
 
 /// Pull mStream's `{"error": "..."}` out of a failure body, falling back to a
 /// trimmed excerpt of whatever was actually returned.
+/// The torrent routes' error shape: `{ ok: false, error: <code>, message:
+/// <words> }` — the sentence is under `message`, the code under `error`
+/// (the rest of the API puts the sentence under `error`).
+fn extract_message(body: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(msg) = v.get("message").and_then(|m| m.as_str()).filter(|m| !m.is_empty())
+    {
+        return msg.to_string();
+    }
+    extract_error(body)
+}
+
+/// A `multipart/form-data` body, assembled by hand: the torrent routes
+/// are the API's only multipart, and reqwest's feature for it would pull
+/// a MIME-guessing dependency in for one boundary string. Same encoding
+/// on both builds.
+pub(crate) struct Multipart {
+    boundary: String,
+    body: Vec<u8>,
+}
+
+impl Multipart {
+    pub(crate) fn new() -> Self {
+        Multipart {
+            boundary: format!("----mstream-player-{:016x}{:016x}", fastrand::u64(..), fastrand::u64(..)),
+            body: Vec::new(),
+        }
+    }
+
+    /// A header parameter value: quotes and line breaks would end the
+    /// part early, so they are replaced rather than escaped (the server
+    /// only ever shows the filename back).
+    fn param(value: &str) -> String {
+        value.chars().map(|c| if c == '"' || c == '\r' || c == '\n' { '_' } else { c }).collect()
+    }
+
+    pub(crate) fn field(&mut self, name: &str, value: &str) -> &mut Self {
+        self.body.extend(format!(
+            "--{}\r\nContent-Disposition: form-data; name=\"{}\"\r\n\r\n",
+            self.boundary,
+            Self::param(name)
+        ).into_bytes());
+        self.body.extend(value.as_bytes());
+        self.body.extend(b"\r\n");
+        self
+    }
+
+    pub(crate) fn file(&mut self, name: &str, filename: &str, bytes: &[u8]) -> &mut Self {
+        self.body.extend(format!(
+            "--{}\r\nContent-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\nContent-Type: application/x-bittorrent\r\n\r\n",
+            self.boundary,
+            Self::param(name),
+            Self::param(filename)
+        ).into_bytes());
+        self.body.extend(bytes);
+        self.body.extend(b"\r\n");
+        self
+    }
+
+    /// The `Content-Type` header value and the finished body.
+    pub(crate) fn finish(mut self) -> (String, Vec<u8>) {
+        self.body.extend(format!("--{}--\r\n", self.boundary).into_bytes());
+        (format!("multipart/form-data; boundary={}", self.boundary), self.body)
+    }
+}
+
 fn extract_error(body: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
         if let Some(msg) = v.get("error").and_then(|e| e.as_str()) {
@@ -1017,6 +1221,31 @@ fn extract_error(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_multipart_body_carries_fields_and_the_file_between_its_boundary() {
+        let mut form = Multipart::new();
+        form.field("vpath", "music").field("renameRoot", "true");
+        form.file("torrentFile", "vela \"deluxe\".torrent", b"d4:infod4:name4:Velaee");
+        let (content_type, body) = form.finish();
+        let boundary = content_type.strip_prefix("multipart/form-data; boundary=").unwrap().to_string();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.starts_with(&format!("--{boundary}\r\nContent-Disposition: form-data; name=\"vpath\"\r\n\r\nmusic\r\n")));
+        assert!(text.contains("name=\"renameRoot\"\r\n\r\ntrue\r\n"));
+        assert!(
+            text.contains("name=\"torrentFile\"; filename=\"vela _deluxe_.torrent\"\r\nContent-Type: application/x-bittorrent\r\n\r\nd4:infod4:name4:Velaee\r\n"),
+            "quotes in a filename cannot end the part early: {text}"
+        );
+        assert!(text.ends_with(&format!("--{boundary}--\r\n")));
+        assert_eq!(text.matches(&format!("--{boundary}")).count(), 4, "three parts and the close");
+    }
+
+    #[test]
+    fn torrent_errors_read_the_sentence_not_the_code() {
+        assert_eq!(extract_message(r#"{"ok":false,"error":"no_source","message":"Provide a .torrent file"}"#), "Provide a .torrent file");
+        assert_eq!(extract_message(r#"{"error":"only a code"}"#), "only a code", "the rest of the API's shape still reads");
+        assert_eq!(extract_message("plain words"), "plain words");
+    }
 
     #[test]
     fn the_flags_that_exist_to_route_round_the_config_do_not_need_it() {

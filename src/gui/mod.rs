@@ -23,6 +23,8 @@ mod bar;
 mod playlists;
 mod servers;
 mod sonic;
+mod torrent;
+mod torrent_meta;
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
@@ -202,6 +204,35 @@ pub(crate) enum Act {
     FormSubmit,
     FormCancel,
     QrClose,
+    // ── Add torrent (see gui::torrent) ──────────────────────────────────
+    /// The room's ◂ — back to the Settings rows (Esc's twin).
+    TorBack,
+    /// A form row, clicked: the keyboard cursor lands there.
+    TorRow(torrent::Row),
+    /// The library picker's arrows (and the name, which cycles).
+    TorLib(i32),
+    /// Open the file picker; drop the loaded file; the chip's two verbs.
+    TorPick,
+    TorUnload,
+    TorHandOff,
+    TorDetect,
+    TorToggleRename,
+    TorToggleForce,
+    TorSubmit,
+    /// The file picker's controls.
+    TorPickerClose,
+    TorPickerSuggest(usize),
+    TorPickerScrollBy(i32),
+    TorPickerScrollTo(usize),
+    /// The partial-match picker: a location, download fresh, or back.
+    TorMatch(usize),
+    TorMatchFresh,
+    TorMatchClose,
+    /// The arrival chooser: add here, hand it on, the don't-ask box.
+    TorChooseAdd,
+    TorChooseHandOff,
+    TorChooseAsk,
+    TorChooseClose,
     /// A modal's whole-screen backdrop: swallow the click.
     Guard,
 }
@@ -287,7 +318,11 @@ const ROW_GAPLESS: usize = 1;
 const ROW_BLEND_SKIPS: usize = 2;
 const ROW_PAUSE_FADE: usize = 3;
 const ROW_MANAGE: usize = 4;
-const SET_ROWS: usize = 5;
+/// The torrents group: the Add-torrent doorway (the room, like Manage
+/// servers) and the ask-me switch for torrents arriving from outside.
+const ROW_TORRENT: usize = 5;
+const ROW_ASK: usize = 6;
+const SET_ROWS: usize = 7;
 
 /// Seconds of blend as a person reads them (the TUI's own spelling).
 fn fmt_blend(seconds: f32) -> String {
@@ -358,6 +393,8 @@ pub(crate) struct Gui {
     sonic: sonic::SonicUi,
     /// The playlists room: its dialogs and the two levels' wheels.
     playlists: playlists::PlaylistsUi,
+    /// The Add-torrent room: its form, picker, chooser and threads.
+    torrent: torrent::TorrentUi,
     /// The last frame left paced work unfinished (covers still waiting to
     /// upgrade to pixels): the event loop shortens its idle wait so the
     /// next frame comes promptly instead of a poll tick later.
@@ -393,6 +430,7 @@ impl Gui {
             albums: albums::AlbumsUi::new(),
             sonic: sonic::SonicUi::new(),
             playlists: playlists::PlaylistsUi::new(),
+            torrent: torrent::TorrentUi::new(),
             hot: false,
         }
     }
@@ -460,6 +498,11 @@ impl Gui {
             // ← on a doorway row would "adjust" into the room; only an
             // activation (Enter, click, →) opens it.
             ROW_MANAGE if delta > 0 => servers::open_room(self),
+            ROW_TORRENT if delta > 0 => torrent::open_room(self),
+            ROW_ASK => {
+                let ask = !self.config.torrent.ask;
+                torrent::set_ask(self, ask);
+            }
             ROW_BLEND => self.adjust_blend(delta),
             ROW_GAPLESS => {
                 self.app.gapless = !self.app.gapless;
@@ -507,6 +550,9 @@ impl Gui {
         if playlists::act(self, &act) {
             return false;
         }
+        if torrent::act(self, &act) {
+            return false;
+        }
         match act {
             Act::Nav(i) => {
                 // The gated room: with the flag gone the row isn't drawn,
@@ -527,6 +573,7 @@ impl Gui {
                 // room is a Settings sub-view, not a place to come back to.
                 self.servers.drop_open = false;
                 self.servers.room = false;
+                self.torrent.room = false;
                 self.note = (!matches!(
                     i,
                     FILES_NAV | ALBUMS_NAV | SEARCH_NAV | SETTINGS_NAV | SONIC_NAV
@@ -843,6 +890,8 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     }
     let tips = if gui.servers.modal_open() {
         t!("gui.tips.form")
+    } else if gui.torrent.modal_open() {
+        std::borrow::Cow::from(torrent::tips(gui))
     } else if sonic::modal_open(gui) {
         std::borrow::Cow::from(sonic::tips(gui))
     } else if playlists::modal_open(gui) {
@@ -851,6 +900,8 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         t!("gui.tips.sonic_pick")
     } else if gui.servers.room && gui.active == SETTINGS_NAV {
         t!("gui.tips.servers")
+    } else if gui.torrent.room && gui.active == SETTINGS_NAV {
+        std::borrow::Cow::from(torrent::tips(gui))
     } else {
         match gui.active {
             SETTINGS_NAV if gui.cursor.is_some() => t!("gui.tips.rows"),
@@ -898,6 +949,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     // Overlays draw (and register) last, so their rects win the pointer.
     playlists::draw_modals(frame, gui, area);
     sonic::draw_modals(frame, gui, area);
+    torrent::draw_modals(frame, gui, area);
     servers::draw_dropdown(frame, gui, area);
     servers::draw_modals(frame, gui, area);
 
@@ -1485,9 +1537,13 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if gui.servers.room {
         return servers::draw_room(frame, gui, content);
     }
+    if gui.torrent.room {
+        return torrent::draw_room(frame, gui, content);
+    }
     let (check_on, check_off) = if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") };
     put(frame, content.x, content.y, &t!("gui.set.playback"), dim());
     put(frame, content.x, content.y + 6, &t!("gui.set.servers_group"), dim());
+    put(frame, content.x, content.y + 9, &t!("gui.set.torrents_group"), dim());
 
     let rows: [(String, String); SET_ROWS] = [
         (
@@ -1518,6 +1574,14 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             format!("{} {}", t!("gui.srv.manage"), if legacy_conhost() { ">" } else { "▸" }),
             t!("gui.srv.manage_desc").to_string(),
         ),
+        (
+            format!("{} {}", t!("gui.set.tor_add"), if legacy_conhost() { ">" } else { "▸" }),
+            t!("gui.set.tor_add_desc").to_string(),
+        ),
+        (
+            format!("{} {}", if gui.config.torrent.ask { check_on } else { check_off }, t!("gui.set.tor_ask")),
+            t!("gui.set.tor_ask_desc").to_string(),
+        ),
     ];
 
     for (i, (label, desc)) in rows.iter().enumerate() {
@@ -1538,8 +1602,10 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         put(frame, content.x, y, label, label_style);
         // The description takes whatever room the row has left, clipped at
         // the cell edge — with the queue open that is not much, and the
-        // full sentence returns the moment the queue folds away.
-        let desc_x = content.x + 27;
+        // full sentence returns the moment the queue folds away. A label
+        // wider than the column (a translation, the torrents switch)
+        // pushes it over rather than being written through.
+        let desc_x = content.x + (label.chars().count() as u16 + 2).max(27);
         let avail = rect.right().saturating_sub(desc_x) as usize;
         if avail >= 10 {
             put(frame, desc_x, y, &bar::clip(desc, avail), desc_style);
@@ -1558,7 +1624,12 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 
 /// Where settings row `i` draws, under its section label.
 fn row_y(top: u16, i: usize) -> u16 {
-    if i < ROW_MANAGE { top + 1 + i as u16 } else { top + 7 }
+    match i {
+        i if i < ROW_MANAGE => top + 1 + i as u16,
+        ROW_MANAGE => top + 7,
+        ROW_TORRENT => top + 10,
+        _ => top + 11,
+    }
 }
 
 // ── Input ───────────────────────────────────────────────────────────────────
@@ -1573,6 +1644,11 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     // outright, the room takes its row keys, and everything else falls
     // through untouched.
     if let Some(quit) = servers::handle_key(gui, key) {
+        return quit;
+    }
+    // The torrent surfaces next: the arrival chooser can be up over any
+    // room, and the room itself owns the keys while it is open.
+    if let Some(quit) = torrent::handle_key(gui, key) {
         return quit;
     }
     let browse = gui.browse_room()
@@ -1782,6 +1858,7 @@ fn event_loop(
             // The servers layer looks first: session answers that would
             // land on the TUI's connect screen open the GUI's form instead.
             servers::observe(gui, &ev);
+            torrent::observe(gui, &ev);
             // A random pick that lands while results are up owes them a
             // rebuild — clause 22's promise, kept here because the App
             // consumes the pick into the setup view first.
@@ -1794,6 +1871,7 @@ fn event_loop(
             }
         }
         servers::poll(gui);
+        torrent::poll(gui);
 
         let over = gui.ui.hovering_clickable();
         if over != hand {
@@ -1913,14 +1991,20 @@ impl Gui {
             }
             NavId::Sonic => sonic::wheel(self, delta),
             NavId::Playlists => playlists::wheel(self, delta),
+            // Settings scrolls nothing itself; its Add-torrent room's
+            // file picker does.
+            NavId::Settings => torrent::wheel(self, delta),
             // Nothing scrollable in these rooms — said here, on the
             // record, rather than by falling through a router.
-            NavId::Artists | NavId::Genres | NavId::Recent | NavId::Settings => {}
+            NavId::Artists | NavId::Genres | NavId::Recent => {}
         }
     }
 }
 
-pub fn run(server: Option<String>, token: Option<String>) -> i32 {
+/// `torrent` is the `--torrent` seam: a `.torrent` path or a magnet link
+/// the player was opened WITH, the way the OS hands one to the app it
+/// registered for them (docs/ux-contracts/add-torrent.md, entry point 2).
+pub fn run(server: Option<String>, token: Option<String>, torrent: Option<String>) -> i32 {
     // The GUI's own config read (the [gui] section, and the save guard);
     // `startup` below does its own tolerant load for the player prefs.
     let (config, config_ok) = match config::load() {
@@ -1941,6 +2025,9 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     gui.pending = pending;
     if std::env::var("MSTREAM_GUI_DEMO").is_ok_and(|v| v == "1") {
         gui.demo = Some(demo_now());
+    }
+    if let Some(arg) = torrent {
+        torrent::arrive(&mut gui, &arg);
     }
 
     let _title = crate::tui::WindowTitle::claim("mStream Player");

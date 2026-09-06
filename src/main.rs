@@ -160,7 +160,7 @@ enum Command {
     Tui(cmd_library::ConnArgs),
     /// Launch the GUI player — the mouse-first surface the installers open
     /// (preview: Files browsing and playback, the bottom bar, Settings)
-    Gui(cmd_library::ConnArgs),
+    Gui(GuiArgs),
     /// Run the headless server-audio engine (jukebox mode)
     Serve(ServeArgs),
     /// Play one source and exit — end-to-end streaming/seek smoke test
@@ -203,6 +203,20 @@ enum Command {
     },
     /// List playlists, or show one playlist's tracks
     Playlists(cmd_library::PlaylistArgs),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Args)]
+struct GuiArgs {
+    #[command(flatten)]
+    conn: cmd_library::ConnArgs,
+
+    /// Open with a torrent — a .torrent file's path or a magnet link — the
+    /// way the OS hands one to the app it registered for them. The GUI
+    /// asks whether to add it to the server or hand it to another app
+    /// (Settings › Torrents decides whether it keeps asking).
+    #[arg(long, value_name = "FILE-OR-MAGNET")]
+    torrent: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -308,7 +322,9 @@ fn main() {
         (Some(Command::Tui(conn)), _) => {
             std::process::exit(tui::run(conn.server, conn.token));
         }
-        (Some(Command::Gui(conn)), _) => std::process::exit(gui::run(conn.server, conn.token)),
+        (Some(Command::Gui(args)), _) => {
+            std::process::exit(gui::run(args.conn.server, args.conn.token, args.torrent));
+        }
         (Some(Command::Play(args)), _) => std::process::exit(cmd_play::run(args)),
         (Some(Command::Setup(args)), _) => std::process::exit(setup::run(args)),
         (Some(Command::Qr(args)), _) => std::process::exit(setup::run_qr(args)),

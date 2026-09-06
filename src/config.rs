@@ -88,6 +88,10 @@ pub struct Config {
     /// `[gui]` — the GUI player surface's own choices (`mstream-player gui`).
     #[serde(default, skip_serializing_if = "GuiPrefs::is_default")]
     pub gui: GuiPrefs,
+    /// `[torrent]` — what a torrent handed to the GUI (`mstream-player gui
+    /// --torrent …`) does on arrival.
+    #[serde(default, skip_serializing_if = "TorrentPrefs::is_default")]
+    pub torrent: TorrentPrefs,
     /// `[keys]` — action name to the keys that should fire it. Empty means
     /// the built-in bindings, and only the actions named here are changed.
     /// See `mstream-player keys` for the full list in this format.
@@ -116,6 +120,7 @@ impl Default for Config {
             display: DisplayPrefs::default(),
             mouse: MousePrefs::default(),
             gui: GuiPrefs::default(),
+            torrent: TorrentPrefs::default(),
             keys: std::collections::BTreeMap::new(),
             servers: Vec::new(),
             extra: Keep::new(),
@@ -425,6 +430,31 @@ pub struct GuiPrefs {
 impl GuiPrefs {
     fn is_default(&self) -> bool {
         *self == GuiPrefs::default()
+    }
+}
+
+/// `[torrent]` — the Add-torrent room's one persisted choice: whether a
+/// torrent that arrives from outside (the `--torrent` seam the installers'
+/// file associations will launch) asks "add here, or hand it on?" first.
+/// The arrival chooser's don't-ask-again box turns it off; the Settings
+/// row is the way back (docs/ux-contracts/add-torrent.md, clause 51).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TorrentPrefs {
+    pub ask: bool,
+    #[serde(flatten)]
+    pub extra: Keep,
+}
+
+impl Default for TorrentPrefs {
+    fn default() -> Self {
+        TorrentPrefs { ask: true, extra: Keep::new() }
+    }
+}
+
+impl TorrentPrefs {
+    fn is_default(&self) -> bool {
+        *self == TorrentPrefs::default()
     }
 }
 
