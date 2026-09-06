@@ -136,6 +136,7 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         last_path: None,
         prefs: config::PlayerPrefs::default(),
         tunnel_code: None,
+        self_signed: false,
         keys: Default::default(),
         theme: config::ThemePrefs::default(),
         display: config::DisplayPrefs::default(),

@@ -242,7 +242,9 @@ impl App {
             }
             // The Sonic Path tab owns this one; it lands here only because
             // the four discovery replies come through one door.
-            Event::Journey { stops, note, length } => self.consume_journey(stops, note, length),
+            Event::Journey { stops, note, length, issue } => {
+                self.consume_journey(stops, note, length, issue)
+            }
             Event::Genres(genres) => {
                 if let Some(picker) = self.dj_panel.genres.as_mut() {
                     picker.all = genres.into_iter().map(|g| g.name).collect();

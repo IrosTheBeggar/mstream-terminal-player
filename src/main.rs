@@ -31,6 +31,8 @@ mod runtime;
 #[cfg(not(target_arch = "wasm32"))]
 mod serve;
 #[cfg(not(target_arch = "wasm32"))]
+mod gui;
+#[cfg(not(target_arch = "wasm32"))]
 mod kit;
 #[cfg(not(target_arch = "wasm32"))]
 mod setup;
@@ -156,6 +158,9 @@ struct Cli {
 enum Command {
     /// Launch the interactive terminal player (the default)
     Tui(cmd_library::ConnArgs),
+    /// Launch the GUI player — the mouse-first surface the installers open
+    /// (preview: Files browsing and playback, the bottom bar, Settings)
+    Gui(GuiArgs),
     /// Run the headless server-audio engine (jukebox mode)
     Serve(ServeArgs),
     /// Play one source and exit — end-to-end streaming/seek smoke test
@@ -198,6 +203,20 @@ enum Command {
     },
     /// List playlists, or show one playlist's tracks
     Playlists(cmd_library::PlaylistArgs),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Args)]
+struct GuiArgs {
+    #[command(flatten)]
+    conn: cmd_library::ConnArgs,
+
+    /// Open with a torrent — a .torrent file's path or a magnet link — the
+    /// way the OS hands one to the app it registered for them. The GUI
+    /// asks whether to add it to the server or hand it to another app
+    /// (Settings › Torrents decides whether it keeps asking).
+    #[arg(long, value_name = "FILE-OR-MAGNET")]
+    torrent: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -280,7 +299,9 @@ fn main() {
     // A one-shot subcommand keeps its hands off the default location: see
     // logging::init.
     let run = match &cli.command {
-        None | Some(Command::Tui(_)) | Some(Command::Serve(_)) => logging::Run::Session,
+        None | Some(Command::Tui(_)) | Some(Command::Gui(_)) | Some(Command::Serve(_)) => {
+            logging::Run::Session
+        }
         Some(_) => logging::Run::OneShot,
     };
     if let Some(path) = logging::init(run) {
@@ -300,6 +321,9 @@ fn main() {
     let serve_args = match (cli.command, cli.port) {
         (Some(Command::Tui(conn)), _) => {
             std::process::exit(tui::run(conn.server, conn.token));
+        }
+        (Some(Command::Gui(args)), _) => {
+            std::process::exit(gui::run(args.conn.server, args.conn.token, args.torrent));
         }
         (Some(Command::Play(args)), _) => std::process::exit(cmd_play::run(args)),
         (Some(Command::Setup(args)), _) => std::process::exit(setup::run(args)),

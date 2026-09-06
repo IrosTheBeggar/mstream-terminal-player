@@ -71,6 +71,8 @@ pub(crate) struct Startup {
     /// Pairing code for the remembered server, when it is one reached through
     /// a tunnel. Without it that server cannot be dialled again.
     pub tunnel_code: Option<String>,
+    /// The chosen entry trusts its own TLS certificate.
+    pub self_signed: bool,
     /// The `[keys]` section, unvalidated — the app reports what it can't use.
     pub keys: std::collections::BTreeMap<String, Vec<String>>,
     /// The `[theme]` section, likewise.
@@ -112,11 +114,11 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
             .find(|entry| config::same_server(&entry.url, server))
             .cloned()
             .or(Some(config::ServerEntry { url: server.clone(), ..Default::default() })),
-        None => config::most_recent_server(&config).cloned(),
+        None => config::preferred_server(&config).cloned(),
     };
-    let (server, username, last_path) = match chosen {
-        Some(entry) => (Some(entry.url), entry.username, entry.last_path),
-        None => (None, None, None),
+    let (server, username, last_path, self_signed) = match chosen {
+        Some(entry) => (Some(entry.url), entry.username, entry.last_path, entry.self_signed),
+        None => (None, None, None, false),
     };
     let token = token
         .or_else(|| server.as_deref().and_then(|url| config::token_for(&credentials, url)));
@@ -132,6 +134,7 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
         last_path,
         prefs: config.player,
         tunnel_code,
+        self_signed,
         keys: config.keys,
         theme: config.theme,
         display: config.display,
@@ -186,6 +189,7 @@ pub(crate) fn app_from(start: Startup) -> App {
         .with_prefs(&start.prefs)
         .with_keys(&start.keys)
         .with_tunnel(start.tunnel_code);
+    app.session.self_signed = start.self_signed;
     if let Some(path) = start.last_path {
         // Pick up where the last session left off; `start` browses this.
         app.path = path;
@@ -434,7 +438,7 @@ pub(crate) fn window_title(app: &App) -> String {
 /// AudioFailed, so the hook stands back rather than tearing the terminal
 /// down under a UI that is still running (audit #32).
 #[cfg(not(target_arch = "wasm32"))]
-fn install_panic_hook() {
+pub(crate) fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         if worker::panics_are_caught(std::thread::current().name()) {
@@ -551,6 +555,15 @@ pub(crate) fn dispatch(
                 }
             }
             Effect::Api(cmd) => {
+                // A server that presents its own certificate needs the
+                // STREAM client to extend the same trust the api client is
+                // about to — the flag rides the command either way, and
+                // this is the one native funnel both front ends share.
+                if let ApiCmd::Connect { server, self_signed: true, .. }
+                | ApiCmd::Login { server, self_signed: true, .. } = &cmd
+                {
+                    crate::engine::http::trust_server(server);
+                }
                 let _ = api_tx.send(cmd);
             }
             Effect::Discover => worker::spawn_discovery(event_tx.clone()),

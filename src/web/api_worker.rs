@@ -59,9 +59,12 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
     match cmd {
         ApiCmd::Shutdown => None,
 
-        ApiCmd::Connect { server, token } => Some(connect(session, &server, token).await),
+        // `self_signed` has no meaning here: the browser owns TLS trust.
+        ApiCmd::Connect { server, token, self_signed: _ } => {
+            Some(connect(session, &server, token).await)
+        }
 
-        ApiCmd::Login { server, username, password } => {
+        ApiCmd::Login { server, username, password, self_signed: _ } => {
             Some(login(session, &server, &username, &password).await)
         }
 
@@ -117,6 +120,29 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
+        ApiCmd::SonicRandom { side } => {
+            with_session(session, async |s| {
+                s.client
+                    .random_song_async(&crate::api::types::RandomSongRequest::default())
+                    .await
+                    .map(|r| Event::SonicRandom {
+                        side,
+                        track: r.songs.into_iter().next().map(Box::new),
+                    })
+            })
+            .await
+        }
+
+        ApiCmd::DiscoveryProbe => {
+            with_session(session, async |s| {
+                s.client
+                    .ping_async()
+                    .await
+                    .map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+            })
+            .await
+        }
+
         ApiCmd::Discover { node, seed, dest } => {
             with_session(session, async |s| {
                 worker::discover(&s.client, &node, &seed, dest).await
@@ -131,6 +157,42 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
                     .playlist_save_async(&name, &files)
                     .await
                     .map(|()| Event::PlaylistSaved { name: name.clone(), count })
+            })
+            .await
+        }
+
+        ApiCmd::CreatePlaylist { name } => {
+            with_session(session, async |s| {
+                match s.client.playlist_new_async(&name).await {
+                    Ok(()) => Ok(Event::PlaylistCreated),
+                    Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+                    Err(e) => Ok(Event::Error(format!("couldn't create {name}: {e}"))),
+                }
+            })
+            .await
+        }
+
+        ApiCmd::RenamePlaylist { from, to } => {
+            with_session(session, async |s| {
+                match s.client.playlist_rename_async(&from, &to).await {
+                    Ok(()) => Ok(Event::PlaylistRenamed),
+                    Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+                    Err(ApiError::NotFound(_)) => Ok(Event::Error(
+                        "this server can't rename playlists — it needs mStream 5.16".into(),
+                    )),
+                    Err(e) => Ok(Event::Error(format!("couldn't rename {from}: {e}"))),
+                }
+            })
+            .await
+        }
+
+        ApiCmd::DeletePlaylist { name } => {
+            with_session(session, async |s| {
+                match s.client.playlist_delete_async(&name).await {
+                    Ok(()) => Ok(Event::PlaylistDeleted),
+                    Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+                    Err(e) => Ok(Event::Error(format!("couldn't delete {name}: {e}"))),
+                }
             })
             .await
         }

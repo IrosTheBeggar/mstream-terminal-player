@@ -15,6 +15,11 @@ repository = "https://github.com/IrosTheBeggar/mstream-terminal-player"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 fastrand = "2"
+# The Add-torrent room's release-name parser: a ladder of the record's
+# own patterns (scene grammar, "Artist - Album (1999)", dot names). Already
+# in the tree through tracing-subscriber's env-filter; shared because the
+# parser is pure string work.
+regex = "1"
 toml = "1.1.4"
 # Shared: on wasm this is the fetch backend (its TLS/socket internals are
 # target-gated inside reqwest itself), which is what makes api::Client's

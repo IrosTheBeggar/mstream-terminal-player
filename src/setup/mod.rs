@@ -1136,7 +1136,9 @@ impl Wizard {
             Done::Picked(picker::Pick::Folder(path)) => {
                 self.add_folder(path.display().to_string());
             }
-            Done::Picked(picker::Pick::Cancelled) => {}
+            // A file answer belongs to the GUI's torrent picker, never to
+            // a folder dialog; matched so the enum stays exhaustive.
+            Done::Picked(picker::Pick::Cancelled | picker::Pick::File(_)) => {}
             Done::Picked(picker::Pick::Unavailable(why)) => {
                 self.note = Some((
                     t!("note.no_picker", why = why).to_string(),
@@ -1588,7 +1590,9 @@ pub(crate) fn common_prefix(items: &[String]) -> String {
 /// quiet zone, PNG-encoded so [`tui::graphics`] can draw it through
 /// whatever pixel protocol the terminal answered. Rendered generously
 /// (8 px a module) so the protocol only ever scales it down.
-fn qr_art(data: &str) -> Option<crate::tui::art::Art> {
+// pub(crate): the GUI's pairing modal draws the same ticket the wizard
+// does, through the same two paths.
+pub(crate) fn qr_art(data: &str) -> Option<crate::tui::art::Art> {
     const SCALE: u32 = 8;
     const QUIET: u32 = 4; // modules of quiet zone each side, per the QR spec
     let code = qrcode::QrCode::new(data.as_bytes()).ok()?;
@@ -1618,7 +1622,7 @@ fn qr_art(data: &str) -> Option<crate::tui::art::Art> {
 /// must be DARK, and the page already surrounds the block with empty dark
 /// cells wider than the spec's four modules — rendering it again only cost
 /// four rows and columns this render can't spare.
-fn qr_lines(data: &str) -> Option<Vec<String>> {
+pub(crate) fn qr_lines(data: &str) -> Option<Vec<String>> {
     use qrcode::render::unicode::Dense1x2;
     let code = qrcode::QrCode::new(data.as_bytes()).ok()?;
     let rendered = code
