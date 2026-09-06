@@ -1143,7 +1143,7 @@ pub struct App {
     pub capabilities: crate::api::types::Capabilities,
     /// The server's libraries, as the ping named them. Empty until it answers,
     /// which is the same as "no reason to stop anywhere in particular".
-    libraries: Vec<String>,
+    pub(crate) libraries: Vec<String>,
     pub autodj: AutoDjMode,
     /// How Auto-DJ chooses, beyond the mode.
     pub dj: dj::Settings,

@@ -358,7 +358,7 @@ fn open_qr(gui: &mut Gui, index: usize) {
 /// fresh copy back to the Gui — so a stale in-memory config can never
 /// undo what another flow (a connect's SaveSession, an exit-time
 /// remember) has written since boot.
-fn update_config(gui: &mut Gui, mutate: impl FnOnce(&mut Config)) -> bool {
+pub(crate) fn update_config(gui: &mut Gui, mutate: impl FnOnce(&mut Config)) -> bool {
     if !gui.config_ok {
         return false;
     }

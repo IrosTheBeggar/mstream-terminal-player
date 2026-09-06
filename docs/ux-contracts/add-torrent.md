@@ -3,10 +3,10 @@
 | | |
 |---|---|
 | **Design of record** | `mstream_music` @ `origin/master` (`0f8b23f`, merged 2026-08-28) — `lib/screens/add_torrent_screen.dart` (the "smart" panel), `lib/native/torrent_channel.dart` + `MainActivity` (both directions of the OS hand-off), the intent chooser in `lib/main.dart`, the two settings rows in `lib/screens/settings_screen.dart`, `lib/util/torrent_meta.dart`. The screen is itself a port of the webapp's standalone panel (`webapp/alpha/m.js setupAddTorrentPanel`; `webapp/torrent/` is the reduced mobile-web sibling) — where the two disagree, this contract says so. |
-| **Server API** | `GET /api/v1/torrent/preflight?path=` (active · clientType · noUpload · userAllowed · reason) · `GET /api/v1/torrent/path-templates` · `POST /api/v1/torrent/auto-detect` (multipart) · `POST /api/v1/torrent/seed-existing` (multipart) · `POST /api/v1/torrent/add` (multipart: vpath · subPath · directoryName · renameRoot · exactly one of magnet / torrentFile) |
-| **Already in this repo** | nothing — no torrent client surface exists; all five client calls are new. The kit brings the local-path machinery (typed completion + the fallback browser, the wizard's), the modal, and the browse rooms' gating precedents |
-| **Target surface** | the GUI player — a room (plus a CLI seam for torrents arriving from the OS) |
-| **Status** | contract extracted 2026-08-31; **open questions below — discussion before implementation** |
+| **Server API** | `GET /api/v1/torrent/preflight?path=` (active · clientType · displayName · noUpload · userAllowed · reason) · `GET /api/v1/torrent/path-templates` · `POST /api/v1/torrent/auto-detect` (multipart) · `POST /api/v1/torrent/seed-existing` (multipart) · `POST /api/v1/torrent/add` (multipart: vpath · subPath · directoryName · renameRoot · exactly one of magnet / torrentFile) |
+| **Already in this repo** | nothing before this slice — no torrent client surface existed; all five client calls, the multipart body and the metadata parser are new (`src/api/mod.rs`, `src/gui/torrent_meta.rs`). The kit brought the modal, the line editor, the wizard's path-completion machinery and the servers room's thread-and-reply pattern |
+| **Target surface** | the GUI player — a room off Settings, plus `mstream-player gui --torrent <file-or-magnet>` for torrents arriving from the OS (`src/gui/torrent.rs`) |
+| **Status** | contract extracted 2026-08-31; the five open questions settled and the room implemented 2026-09-01 (decisions in the deviations log) |
 
 ## Intent
 
@@ -21,13 +21,15 @@ files and `magnet:` links is what makes the receiving half exist.
 
 ## Entry points
 
-1. **In-app navigation** — the screen on its own.
+1. **In-app navigation** — the screen on its own. *Here: the Settings
+   room's `Add a torrent ▸` doorway, the Manage-servers shape.*
 2. **Opened WITH a torrent** — the OS delivers a `.torrent` (file manager,
-   browser download, share) or a `magnet:` link to the app. What happens
-   next is the **ask-me setting**'s call:
-   - *ask* (default): a chooser sheet — "add it here, or hand it on?" —
-     with a don't-ask-again checkbox (checking it is what flips the
-     setting; the Settings switch is the way back).
+   browser download, share) or a `magnet:` link to the app. *Here: the
+   `--torrent` seam, which the installers' file associations will
+   launch.* What happens next is the **ask-me setting**'s call:
+   - *ask* (default): a chooser — "add it here, or hand it on?" — with a
+     don't-ask-again checkbox (checking it is what flips the setting;
+     the Settings switch is the way back).
    - *skip*: straight into the screen, source pre-filled.
    Delivery is one-shot (cold start and already-running both drain the
    same slot, so nothing double-delivers), and every arrival is logged —
@@ -108,28 +110,25 @@ valid infohash.
     typed path.
 22. `/torrent/add` answers with the torrent's name and where files will
     land; a duplicate is its own wording ("already added"), not an error.
-23. *(Record split: the webapp panel also words `match_unmapped` — files
-    all present but the daemon's path mapping unconfirmed, "ask your
-    admin to run auto-detect, then retry" — and `pad_files_missing` — a
-    hybrid torrent this client type can't seed without re-downloading
-    boundary pieces. The mobile screen falls through and lets `/add`'s
-    412 speak. See Open questions.)*
+23. *(Record split, settled here for the webapp's side: this surface also
+    words `match_unmapped` — files all present but the daemon's path
+    mapping unconfirmed, "ask your admin to run auto-detect, then retry"
+    — and `pad_files_missing` — a hybrid torrent this client type can't
+    seed without re-downloading boundary pieces. The mobile screen falls
+    through and lets `/add`'s 412 speak. See the deviations log.)*
 
 ### Receiving, and being the default
 
 50. The app **registers for** `.torrent` (view + share) and the
     `magnet:` scheme — on most systems nothing else claims them, so a
-    tapped magnet just arrives.
+    tapped magnet just arrives. *Here: the installers' job (Phase 8);
+    the app ships the seam they launch.*
 51. The **ask-me switch** in Settings decides what an arrival does
     (chooser vs straight to the screen). Stored as "skip", shown as
     "ask" — the sheet's checkbox sets it, the switch is the only way
     back.
-52. The **default-app row** in Settings opens the OS's own
-    open-by-default screen — an app cannot make itself the default; taking
-    the user there is the most it may do. It is also the only in-app way
-    back from having made some *other* app the default, which is
-    otherwise a silent dead end. Both rows exist only on platforms where
-    receiving works at all.
+52. ~~The **default-app row** in Settings opens the OS's own
+    open-by-default screen~~ — *not ported; see the deviations log.*
 
 ### The hand-off
 
@@ -141,9 +140,12 @@ valid infohash.
 
 ## Wording
 
-The record ships `torrent*` keys in all ten locales — carried over at
-implementation, not re-made. The parser, sanitizer and validator wordings
-above quote the record's English.
+The record's `torrent*` and `settingsTorrent*` keys were carried over
+from all ten `.arb` files into `locales/*.yml` (`gui.tor.*`, `gui.set.*`);
+the strings new to this surface — the gate's standing, the picker, the
+hand-off's outcomes, the two webapp seed-check sentences, the tips —
+were written here in the same ten languages. The parser, sanitizer and
+validator wordings above quote the record's English.
 
 ## Out of scope here
 
@@ -151,50 +153,62 @@ above quote the record's English.
   per-vpath templates authoring) — the webapp admin page's own feature.
 - **The `/torrent` mobile-web page** — the reduced sibling, not the
   record.
+- **A native file dialog** — the wizard's osascript / rfd / ashpd pickers
+  choose folders; a file-typed sibling is a later nicety. The typed
+  picker below is the same filesystem either way.
 
-## Translation notes (terminal GUI) — for discussion
+## Translation notes (terminal GUI)
 
-| Record | Here (proposed) |
+| Record | Here |
 |---|---|
-| System file picker, typed, starting in Downloads | The kit's **local path machinery** — the wizard's typed completion + fallback browser (`docs/ui-kit.md`), started at `~/Downloads`, suggestions narrowed to `.torrent`; the structural gate stays (clause 3). Terminal bonus: dropping a file on the window pastes its path into the same input. |
-| Magnet TextField | The kit line input; bracketed paste; live infohash mark (clause 4) |
-| Opened-with (intents) | A **CLI seam**: `mstream-player gui --torrent <file-or-magnet>` as the `IncomingTorrent` equivalent — the chooser/ask-me flow rides it unchanged |
+| System file picker, typed, starting in Downloads | The kit's **path modal for files** (`src/gui/torrent.rs`, the wizard's typed completion re-drawn): the line editor starts in `~/Downloads/`, suggestions are that folder's sub-folders and `.torrent` files only, Tab completes, Enter descends or loads; the structural gate stays (clause 3). Terminal bonus: dropping a file on the window types its path into the same line (escaped spaces and quotes are undone). Listings and reads run on threads. |
+| Magnet TextField | The kit line input as a 1-row field; live infohash mark at the row's right edge (clause 4) |
+| Opened-with (intents) | The **CLI seam**: `mstream-player gui --torrent <file-or-magnet>` as the `IncomingTorrent` equivalent — the chooser / ask-me flow rides it unchanged, and the arrival is logged |
 | OS registration (manifest) | The **Phase-8 installers'** job: macOS document types + `magnet:` URL scheme on the .app, Windows file association, Linux `.desktop` MimeType — all launching the seam above. The app ships the seam; the installers ship the claim. |
-| Android "open by default" settings screen | **No terminal equivalent** — see Open questions |
-| Hand-off chooser (ACTION_VIEW) | `open` / `xdg-open` / `start` on the staged file — with a guard for the case where *we* are the default (an open-with loop) |
-| Preflight banner | The sonic room's pattern inverted: the nav row shows when connected (no ping flag exists), the room itself banners the reason |
+| Android "open by default" settings screen | **Not ported** — no OS screen to open from a terminal app; the row returns with the installers (deviations) |
+| Hand-off chooser (ACTION_VIEW) | `open` / `xdg-open` / `start` on the file, **staged** into the player's own temp folder — which doubles as the loop guard: an arrival from that folder is our own file coming back, i.e. this player is the default app, and the room says so instead of offering the hand-off again |
+| Preflight banner | The sonic room's pattern inverted: the doorway shows when connected (no ping flag exists); the room itself banners the server's reason in gold, and the primary is disabled with the reason on its tip |
 | Chooser + match-picker sheets | Kit modals (the sonic menu's shape) |
 | Snackbars | The note line |
+| Material TextFields, 56 px each | **1-row fields** (label column + value, the caret marking the focused one — the Settings rows' grammar). The kit's 3-row input cards would need 24 rows for the form alone; at the 100×24 floor the whole room — gate, source, metadata, destination, options, the tall primary — fits its 14 content rows exactly, and breathes at 18 |
 
-## Open questions (to settle before implementation)
+## Decisions on the open questions (2026-09-01)
 
-1. **The seed-check taxonomy split** (clause 23): adopt the webapp's
-   fuller wordings for `match_unmapped` / `pad_files_missing`, or the
-   mobile screen's fall-through-and-let-412-speak? The webapp's are
-   actionable; the mobile's are simpler. My lean: the webapp's two
-   sentences — they exist because the fall-through error confused people.
-2. **Delivery to a running instance**: a second `mstream-player gui
-   --torrent x` while one runs — hand the torrent to the running GUI
-   (needs a local socket / file drop) or just run the flow in the new
-   instance and exit? My lean: v1 opens a second instance; the socket is
-   its own slice.
-3. **The defaults row**: with no OS screen to open from a terminal app,
-   does the row become guidance text ("your installer registered
-   mStream for torrents; change it in System Settings → …"), or does it
-   drop until the installers exist? My lean: drop it now, note it in the
-   installer slice.
-4. **Does the hand-off earn its place here?** On a desktop with a real
-   torrent client installed, "open with the default app" is one
-   `open` away — but the record keeps it because mid-flow is exactly
-   when you realize the torrent isn't for the server. My lean: keep it,
-   one text verb on the file chip.
-5. **Where the room lives**: a nav row (digit 10 doesn't exist — the
-   digits are spent), a Settings doorway like Manage servers, or a verb
-   on the Files bar? My lean: a Settings doorway + the `--torrent` seam,
-   since arriving-from-outside is the record's main road anyway.
+1. **Seed-check taxonomy split** — the webapp's fuller wordings are
+   adopted for `match_unmapped` / `pad_files_missing` (they exist
+   because the fall-through error confused people); the mobile's
+   fall-through stays the record for the other outcomes.
+2. **Delivery to a running instance** — v1 opens a second instance; the
+   local socket is its own slice if it is ever wanted.
+3. **The defaults row** — dropped until the installers exist; noted in
+   the Phase 8 plan, which owns the registration.
+4. **The hand-off** — kept, as one text verb on the file chip (mid-flow
+   is exactly when you learn the torrent isn't for the server).
+5. **Where the room lives** — a Settings doorway plus the `--torrent`
+   seam; the nav digits are spent, and arriving from outside is the
+   record's main road anyway.
 
 ## Deviations log
 
 - **2026-08-31 — No design canvas planned**: the screen is a form — kit
-  inputs, cards, modals, a banner — every element already drawn once.
-  Revisit if discussion disagrees.
+  inputs, modals, a banner — every element already drawn once.
+- **2026-09-01 — Clause 52 not ported**: an app cannot open a terminal
+  into "System Settings › Default apps"; with nothing registered yet
+  there is nothing to change either. The Phase 8 installers own the
+  registration and the row comes back with them.
+- **2026-09-01 — 1-row fields, not the kit's 3-row cards** (translation
+  notes): the room's height budget at the 24-row floor.
+- **2026-09-01 — The hand-off says so on success**: the record stays
+  quiet (the system chooser is up); a terminal that just spawned `open`
+  has nothing visible to show, so the note says "handed to the system's
+  torrent app — the form stays as it is". "Nothing will take it" and
+  "could not hand it over" keep the record's words.
+- **2026-09-01 — A staged hand-off doubles as the loop guard**: the
+  record's system chooser never offers the app itself; `open` may, once
+  the installers register us. An arrival from the staging folder is
+  named ("mStream is the default app for torrents — choose another app
+  in your system settings") and taken, never bounced again.
+- **2026-09-01 — Done resets the form in place**: the record pops its
+  screen; the room has nowhere to pop to, so a success (added, seeded,
+  already there) clears the source and keeps the library and toggles
+  for the next one.
