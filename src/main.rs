@@ -164,7 +164,7 @@ enum Command {
     Play(cmd_play::PlayArgs),
     /// First-run setup for a fresh mStream server: folders, login, extras
     Setup(setup::SetupArgs),
-    /// Manage the server: its library folders (needs an admin session)
+    /// Manage the server: its libraries, the discovery network (needs an admin session)
     Admin(admin::AdminArgs),
     /// Show the server's Quick Connect code as a scannable QR page
     Qr(setup::QrArgs),

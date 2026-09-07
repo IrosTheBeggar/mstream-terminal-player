@@ -42,6 +42,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// back, and the caller cached the timeout as "this track has no shape".
 #[cfg(not(target_arch = "wasm32"))]
 const DECODE_TIMEOUT: Duration = Duration::from_secs(45);
+/// A discovery snapshot download: the server answers once the transfer is
+/// verified, and a cross-network pull can take minutes (its own ceiling
+/// is ten).
+#[cfg(not(target_arch = "wasm32"))]
+const FETCH_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The directory to ask [`Client::file_explorer`] for when what you want is
 /// "wherever it makes sense to start".
@@ -90,6 +95,78 @@ impl fmt::Display for ApiError {
 }
 
 impl std::error::Error for ApiError {}
+
+/// The discovery catalog's one-argument peer actions — each is
+/// `POST api/v1/admin/discovery/p2p/<route> {endpointId}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerAction {
+    /// Drop the held snapshot (the catalog row stays).
+    RemoveSnapshot,
+    /// Drop an offline server from the catalog now; it returns on its
+    /// next announcement. Refused (409) while its snapshot is held.
+    Forget,
+    /// Blocklist + snapshot + catalog row, all in one server-side action.
+    Block,
+    Unblock,
+}
+
+impl PeerAction {
+    fn path(self) -> &'static str {
+        match self {
+            PeerAction::RemoveSnapshot => "api/v1/admin/discovery/p2p/peer-dbs/remove",
+            PeerAction::Forget => "api/v1/admin/discovery/p2p/forget",
+            PeerAction::Block => "api/v1/admin/discovery/p2p/block",
+            PeerAction::Unblock => "api/v1/admin/discovery/p2p/unblock",
+        }
+    }
+}
+
+/// The discovery network's numeric settings, each its own route and body
+/// key. Every one applies from the server's next check, no restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoverySetting {
+    /// Disk the downloaded peer snapshots may use, total (10–100000 MB).
+    MaxStorageMb,
+    /// Days of silence before an offline server leaves the list (0 = never).
+    PeerRetentionDays,
+    /// How many servers' snapshots to keep downloaded automatically (0–50).
+    AutoFetchCount,
+    /// Days before a downloaded snapshot may be swapped out (0 = never).
+    RotationDays,
+    /// The sidecar memory watchdog's ceiling in MB (0 = off).
+    SidecarMaxRssMb,
+}
+
+impl DiscoverySetting {
+    /// The route and the body key it reads.
+    fn route(self) -> (&'static str, &'static str) {
+        match self {
+            DiscoverySetting::MaxStorageMb => {
+                ("api/v1/admin/discovery/p2p/max-storage", "maxPeerDbStorageMb")
+            }
+            DiscoverySetting::PeerRetentionDays => {
+                ("api/v1/admin/discovery/p2p/peer-retention", "peerRetentionDays")
+            }
+            DiscoverySetting::AutoFetchCount => {
+                ("api/v1/admin/discovery/p2p/auto-fetch-count", "autoFetchCount")
+            }
+            DiscoverySetting::RotationDays => ("api/v1/admin/discovery/p2p/rotation", "rotationDays"),
+            DiscoverySetting::SidecarMaxRssMb => {
+                ("api/v1/admin/discovery/p2p/sidecar-max-rss", "sidecarMaxRssMb")
+            }
+        }
+    }
+
+    /// The server's own bounds for the value (mirrors its Joi schema).
+    pub fn bounds(self) -> (u64, u64) {
+        match self {
+            DiscoverySetting::MaxStorageMb => (10, 100_000),
+            DiscoverySetting::PeerRetentionDays | DiscoverySetting::RotationDays => (0, 3650),
+            DiscoverySetting::AutoFetchCount => (0, 50),
+            DiscoverySetting::SidecarMaxRssMb => (0, 100_000),
+        }
+    }
+}
 
 /// Run the async core to completion for the sync (native) surface.
 ///
@@ -961,6 +1038,275 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn admin_iroh(&self) -> Result<IrohStatus, ApiError> {
         wait(self.admin_iroh_async())
+    }
+
+    // ── The discovery network (P2P), route for route with the webapp's
+    //    Discovery page. Everything here is admin-gated. ───────────────────
+
+    pub async fn admin_discovery_status_async(&self) -> Result<DiscoveryStatus, ApiError> {
+        self.get("api/v1/admin/discovery/p2p/status").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_status(&self) -> Result<DiscoveryStatus, ApiError> {
+        wait(self.admin_discovery_status_async())
+    }
+
+    /// The catalog. `include_incompatible` lifts the server's hide-by-default
+    /// filter on peers whose embedding model cannot serve this server.
+    pub async fn admin_discovery_catalog_async(
+        &self,
+        include_incompatible: bool,
+    ) -> Result<DiscoveryCatalog, ApiError> {
+        let path = if include_incompatible {
+            "api/v1/admin/discovery/p2p/catalog?includeIncompatible=1"
+        } else {
+            "api/v1/admin/discovery/p2p/catalog"
+        };
+        self.get(path).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_catalog(
+        &self,
+        include_incompatible: bool,
+    ) -> Result<DiscoveryCatalog, ApiError> {
+        wait(self.admin_discovery_catalog_async(include_incompatible))
+    }
+
+    /// The discovery log ring past `since` (0 = everything it holds).
+    pub async fn admin_discovery_activity_async(
+        &self,
+        since: u64,
+    ) -> Result<DiscoveryActivity, ApiError> {
+        self.get(&format!("api/v1/admin/discovery/p2p/activity?since={since}")).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_activity(&self, since: u64) -> Result<DiscoveryActivity, ApiError> {
+        wait(self.admin_discovery_activity_async(since))
+    }
+
+    /// Join the discovery network, optionally opening the federation
+    /// request inbox in the same breath (which turns federation on). The
+    /// server may download its sidecar before answering, so this gets the
+    /// decode ceiling like [`Client::admin_discovery_enabled_async`].
+    pub async fn admin_discovery_join_network_async(
+        &self,
+        accept_requests: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        let body = if accept_requests {
+            serde_json::json!({ "enabled": true, "acceptFederationRequests": true })
+        } else {
+            serde_json::json!({ "enabled": true })
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        return self
+            .send_within(
+                Method::POST,
+                "api/v1/admin/discovery/p2p/enabled",
+                Some(body),
+                Some(DECODE_TIMEOUT),
+            )
+            .await;
+        #[cfg(target_arch = "wasm32")]
+        return self.post("api/v1/admin/discovery/p2p/enabled", body).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_join_network(
+        &self,
+        accept_requests: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_join_network_async(accept_requests))
+    }
+
+    /// The server's name on the network (1–64 chars, no `|`). The server
+    /// re-announces at once when a snapshot is published.
+    pub async fn admin_discovery_set_name_async(
+        &self,
+        name: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/discovery/p2p/name", serde_json::json!({ "name": name })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_set_name(&self, name: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_set_name_async(name))
+    }
+
+    /// The catalog blurb beside the name (up to 180 chars, no `|`).
+    pub async fn admin_discovery_set_description_async(
+        &self,
+        description: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(
+            "api/v1/admin/discovery/p2p/description",
+            serde_json::json!({ "description": description }),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_set_description(
+        &self,
+        description: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_set_description_async(description))
+    }
+
+    /// Befriend a server by its endpoint ticket (or bare endpoint id),
+    /// persisted to the config so the friendship survives restarts.
+    pub async fn admin_discovery_befriend_async(
+        &self,
+        peer: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(
+            "api/v1/admin/discovery/p2p/join",
+            serde_json::json!({ "peer": peer, "persist": true }),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_befriend(&self, peer: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_befriend_async(peer))
+    }
+
+    /// Download (or refresh) a catalog peer's snapshot. The server answers
+    /// when the verified transfer is done — minutes, across networks — so
+    /// this call carries its own ceiling. A manual download arrives pinned.
+    pub async fn admin_discovery_fetch_async(
+        &self,
+        endpoint_id: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        let body = serde_json::json!({ "endpointId": endpoint_id });
+        #[cfg(not(target_arch = "wasm32"))]
+        return self
+            .send_within(
+                Method::POST,
+                "api/v1/admin/discovery/p2p/peer-dbs/fetch",
+                Some(body),
+                Some(FETCH_TIMEOUT),
+            )
+            .await;
+        #[cfg(target_arch = "wasm32")]
+        return self.post("api/v1/admin/discovery/p2p/peer-dbs/fetch", body).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_fetch(&self, endpoint_id: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_fetch_async(endpoint_id))
+    }
+
+    /// Pin (rotation immunity) or unpin a held snapshot.
+    pub async fn admin_discovery_pin_async(
+        &self,
+        endpoint_id: &str,
+        pinned: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(
+            "api/v1/admin/discovery/p2p/peer-dbs/pin",
+            serde_json::json!({ "endpointId": endpoint_id, "pinned": pinned }),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_pin(
+        &self,
+        endpoint_id: &str,
+        pinned: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_pin_async(endpoint_id, pinned))
+    }
+
+    /// The one-argument peer actions: remove a snapshot, forget, block,
+    /// unblock.
+    pub async fn admin_discovery_peer_async(
+        &self,
+        action: PeerAction,
+        endpoint_id: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(action.path(), serde_json::json!({ "endpointId": endpoint_id })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_peer(
+        &self,
+        action: PeerAction,
+        endpoint_id: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_peer_async(action, endpoint_id))
+    }
+
+    /// One of the numeric settings; the server validates the bounds.
+    pub async fn admin_discovery_setting_async(
+        &self,
+        setting: DiscoverySetting,
+        value: u64,
+    ) -> Result<serde_json::Value, ApiError> {
+        let (path, key) = setting.route();
+        let mut body = serde_json::Map::new();
+        body.insert(key.to_string(), serde_json::json!(value));
+        self.post(path, serde_json::Value::Object(body)).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_setting(
+        &self,
+        setting: DiscoverySetting,
+        value: u64,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_setting_async(setting, value))
+    }
+
+    /// Federation's state (admin) — the discovery room reads `available`
+    /// to decide whether "ask to federate" exists on this platform.
+    pub async fn admin_federation_async(&self) -> Result<FederationParams, ApiError> {
+        self.get("api/v1/admin/federation").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation(&self) -> Result<FederationParams, ApiError> {
+        wait(self.admin_federation_async())
+    }
+
+    /// Pairing requests in both directions — the catalog's relationship
+    /// column derives from them.
+    pub async fn admin_federation_requests_async(&self) -> Result<FederationRequests, ApiError> {
+        self.get("api/v1/admin/federation/requests").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_requests(&self) -> Result<FederationRequests, ApiError> {
+        wait(self.admin_federation_requests_async())
+    }
+
+    /// Ask a discovery peer to federate: an optional message (≤ 500 chars)
+    /// and the libraries offered back if they accept. No access changes
+    /// hands now — 409 when a request is already open with that peer.
+    pub async fn admin_federation_request_send_async(
+        &self,
+        endpoint_id: &str,
+        offer_vpaths: &[String],
+        message: Option<&str>,
+    ) -> Result<serde_json::Value, ApiError> {
+        let mut body = serde_json::json!({ "endpointId": endpoint_id, "offerVpaths": offer_vpaths });
+        if let Some(message) = message.map(str::trim).filter(|m| !m.is_empty()) {
+            body["message"] = serde_json::json!(message);
+        }
+        self.post("api/v1/admin/federation/requests", body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_request_send(
+        &self,
+        endpoint_id: &str,
+        offer_vpaths: &[String],
+        message: Option<&str>,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_request_send_async(endpoint_id, offer_vpaths, message))
     }
 
     /// Per-library scan progress (works for any signed-in user; on a fresh

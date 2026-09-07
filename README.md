@@ -368,13 +368,30 @@ mstream-player admin --server http://nas:3000
 mstream-player admin --same-machine          # this terminal runs on the server: add folders with the OS dialog
 ```
 
-One room so far: **Libraries**, the server's music folders — each folder's name, its path
-as the server sees it, and whether the scanner follows symlinks (`s` flips it, from the next
-scan on). `b` browses the server's own disk; with `--same-machine` it opens the OS folder
-dialog instead, the same picker the setup wizard uses. `t` types a path, with completion from
-the server. Every way of adding ends at the naming step, because the name is the library's
-vpath — its address in every link, playlist and user grant — and the server cannot rename
-one, so it is asked for once. `r` removes behind a warning; the files never move.
+Two rooms. **Libraries** (the default) is the server's music folders — each folder's name,
+its path as the server sees it, and whether the scanner follows symlinks (`s` flips it, from
+the next scan on). `b` browses the server's own disk; with `--same-machine` it opens the OS
+folder dialog instead, the same picker the setup wizard uses. `t` types a path, with
+completion from the server. Every way of adding ends at the naming step, because the name is
+the library's vpath — its address in every link, playlist and user grant — and the server
+cannot rename one, so it is asked for once. `r` removes behind a warning; the files never move.
+
+```
+mstream-player admin discovery               # the discovery network (P2P)
+```
+
+**Discovery** is the webapp's Discovery page: one state line (connected, joined and waiting,
+reconnecting, not joined), the four tabs — Stats, Activity, Invite, Config — and the servers
+you follow as a table, polled every ten seconds. `←`/`→` switch tabs. On a row, `Enter` opens
+the server's sheet with everything the webapp's card offers; `d` downloads or updates its
+snapshot, `p` pins it against rotation, `r` removes the snapshot, `f` asks the server to
+federate (a message plus the libraries you would share back), `g` forgets an offline server,
+`b` blocks behind a warning. `/` filters, `h` shows the servers hidden for an incompatible
+embedding model, `u` lists the blocked ones. Invite holds the endpoint and the ticket a friend
+pastes (`y` copies it where the terminal allows); `j` focuses the box a friend's ticket goes
+into. Config edits the announced name and description (`e`) and the five numeric settings
+(`1`–`5`). Off the network, the room is the webapp's pitch with one card that joins at once
+and the federation-requests opt-in, on by default; `x` leaves again, behind a warning.
 
 The saved session must belong to an admin. Two server settings answer with errors the room
 explains in words: `lockAdmin` (the panel is locked, HTTP 405) and an address-restricted admin

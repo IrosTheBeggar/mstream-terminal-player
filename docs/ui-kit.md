@@ -145,6 +145,28 @@ banned.
   joins the OSC 22 hand-cursor set (see the pointer contract under
   Behavioral rules).
 
+### Tabs
+One row, under the screen's state line: the ACTIVE tab is a 1-row filled
+slab (bg LightBlue, fg Black BOLD, one cell of padding each side) — the
+kit's sanctioned dense-context button shape, so no third button style
+appears — and the others are text buttons (fg DarkGray; hover Cyan +
+BOLD), two cells apart. `←`/`→` and clicks switch; the pane beneath keeps
+one fixed height whatever the tab, so nothing below it moves. The tab
+row's right edge may carry the active pane's one-line note (the log's
+"newest first"), dropped when the row is too narrow. First consumer:
+the admin panel's Discovery room.
+
+### State line
+One row under the header, on rooms that watch a live thing: `• word` in
+the state's color and BOLD — Green when it is well, Yellow while it is
+getting there or recovering, DarkGray when it is idle — then plain
+facts separated by ` · `, the one that matters most first. The facts
+after the state are optional and drop from the RIGHT when the window is
+narrow; the state itself is never clipped. Under it, while something is
+in progress with no estimate, the scan widget's all-dim bar
+(`▱` × 10, DarkGray) and a LightBlue present-progressive sentence — never
+a fake percentage. The radio dot `•` is the glyph (never `●`).
+
 ### Text input
 Label above (fg DarkGray, UPPERCASE, small). 3-row Rounded card: idle
 border DarkGray; focused border LightBlue with the `▏` caret after the
@@ -163,6 +185,12 @@ dropped — so the draft is never illegal. They commit on BLUR: Enter
 commits, Esc cancels, and a click anywhere outside the active chip
 commits too — then the click proceeds as normal. Re-clicking the chip
 being edited never clobbers the draft.
+**An inline input outside a modal** (the Discovery room's befriend box)
+is idle until focused — a click or its own key focuses it, the border
+turns LightBlue and the caret appears — and while focused it takes every
+key: the tips line speaks for the field alone, Enter submits, Esc gives
+the keys back to the screen. Unfocused it never steals a letter, so the
+room's single-key actions keep working around it.
 
 ### Path input + completion
 Suggestions under the input, max 6 visible — the list WINDOWS around the

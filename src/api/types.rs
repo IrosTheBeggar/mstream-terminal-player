@@ -272,6 +272,178 @@ pub struct AdminDirEntry {
     pub follow_symlinks: bool,
 }
 
+// ── Discovery network (P2P) ─────────────────────────────────────────────────
+
+/// `GET api/v1/admin/discovery/p2p/status` — the sidecar's live mesh state,
+/// the server's announced identity, and the settings the admin room edits.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscoveryStatus {
+    pub enabled: bool,
+    /// The p2p-sidecar binary exists for this platform.
+    pub binary_found: bool,
+    /// Missing, but the server can download it when enabling.
+    pub binary_fetchable: bool,
+    pub running: bool,
+    pub endpoint_id: Option<String>,
+    /// The endpoint ticket a friend pastes to befriend this server.
+    pub ticket: Option<String>,
+    /// Subscribed to the catalog topic — the mesh may still be empty.
+    pub joined: bool,
+    /// Live gossip links; the sidecar's own count is the authority.
+    pub neighbors: u32,
+    pub neighbor_ids: Vec<String>,
+    pub watchdog: DiscoveryWatchdog,
+    pub recovery: DiscoveryRecovery,
+    pub known_peers: u32,
+    pub community_seeds: bool,
+    #[serde(deserialize_with = "null_default")]
+    pub server_name: String,
+    #[serde(deserialize_with = "null_default")]
+    pub server_description: String,
+    pub max_peer_db_storage_mb: u64,
+    pub auto_fetch_count: u32,
+    pub rotation_days: u32,
+    pub peer_retention_days: u32,
+    pub blocked_peers: Vec<String>,
+}
+
+/// The sidecar memory watchdog: `last_rss_mb` is null before the first
+/// reading (or where RSS cannot be read); `max_rss_mb` 0 means off.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscoveryWatchdog {
+    pub last_rss_mb: Option<f64>,
+    pub restarts: u32,
+    pub max_rss_mb: u64,
+}
+
+/// Crash recovery owns the sidecar while `attempts > 0` or a retry is armed.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscoveryRecovery {
+    pub attempts: u32,
+    pub retry_pending: bool,
+}
+
+/// `GET api/v1/admin/discovery/p2p/catalog` — every server heard from,
+/// most useful first, with what the local shelf holds of each.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscoveryCatalog {
+    pub peers: Vec<CatalogPeer>,
+    /// Rows the server filtered out: their embedding model cannot power
+    /// this server's similar-search (`?includeIncompatible=1` shows them).
+    pub hidden_incompatible: u32,
+    pub local_model_id: Option<String>,
+    pub auto_fetch: bool,
+    pub storage: CatalogStorage,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CatalogStorage {
+    pub used_bytes: u64,
+    pub cap_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CatalogPeer {
+    /// The peer's endpoint id (64 hex) — the key every action takes.
+    pub from: String,
+    pub payload: PeerPayload,
+    pub updated_at: String,
+    /// Heard within the last ~90 s.
+    pub online: bool,
+    /// Live holders of this peer's current snapshot.
+    pub seeders: u32,
+    /// What the local shelf holds of this peer, if anything.
+    pub fetched: Option<HeldSnapshot>,
+    /// `None` = unknown (no local embedding model established yet).
+    pub compatible: Option<bool>,
+}
+
+/// The peer's own signed announcement — everything in it is REMOTE text.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PeerPayload {
+    #[serde(deserialize_with = "null_default")]
+    pub name: String,
+    #[serde(deserialize_with = "null_default")]
+    pub description: String,
+    pub row_count: u64,
+    pub snapshot_seq: u64,
+    #[serde(deserialize_with = "null_default")]
+    pub model_id: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HeldSnapshot {
+    pub snapshot_seq: u64,
+    /// The peer has announced a newer snapshot than the one held.
+    pub stale: bool,
+    pub size_bytes: u64,
+    pub fetched_at: String,
+    pub first_fetched_at: String,
+    /// Immune to rotation.
+    pub pinned: bool,
+}
+
+/// `GET api/v1/admin/discovery/p2p/activity?since=<seq>` — the discovery
+/// slice of the server log, delta-polled by sequence number.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscoveryActivity {
+    pub entries: Vec<ActivityEntry>,
+    pub last_seq: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ActivityEntry {
+    pub seq: u64,
+    /// ISO timestamp.
+    pub t: String,
+    /// `error` | `warn` | `info` | `debug`.
+    pub level: String,
+    pub message: String,
+}
+
+/// `GET api/v1/admin/federation` — the fields the discovery room reads.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FederationParams {
+    pub enabled: bool,
+    /// Iroh has a build for this platform.
+    pub available: bool,
+    pub accept_requests: bool,
+}
+
+/// `GET api/v1/admin/federation/requests` — pairing asks in both
+/// directions; the catalog derives its relationship column from them.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FederationRequests {
+    pub accept_requests: bool,
+    pub requests: Vec<FederationRequest>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FederationRequest {
+    pub id: i64,
+    pub peer_endpoint_id: String,
+    /// Self-asserted by the remote server.
+    pub peer_name: Option<String>,
+    /// `in` | `out`.
+    pub direction: String,
+    /// `received` | `accepted` | `granting` | `completed` | `pending-delivery`
+    /// | `delivered` | `rejected` | `cancelled` …
+    pub state: String,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct FileEntry {

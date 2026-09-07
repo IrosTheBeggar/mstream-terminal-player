@@ -458,6 +458,23 @@ follow-symlinks toggle. The two gates above land as sentences (405 → "locked",
 admin here, or restricted by address"). Not built: the Overview (rooms + network stats,
 canvas "Admin Overview", pinned), counts and scan columns (no per-library source since the
 velvet removal; `/scan/progress` rows exist only mid-scan), rename (no API).
+
+**Discovery room ✅ 2026-09-06** — `mstream-player admin discovery` (`src/admin/discovery.rs`;
+`src/admin/mod.rs` is now the hub: the `Screen` trait, the shared terminal session, header and
+bottom lines, the gate sentences). The webapp's Discovery page in the kit, per the "Admin P2P
+Discovery" canvas: the state line (connected / joined, waiting / reconnecting, attempt N / not
+joined / binary missing) with the all-dim "searching" bar, the four tabs in an eight-row pane
+(Stats tiles, the Activity ring delta-polled by seq, Invite with the endpoint + ticket + the
+befriend box as an inline kit input, Config with the identity and the five numeric settings on
+digits), the catalog as a table whose SNAPSHOT and FEDERATION columns replace the card chips
+(relations derived from `/admin/federation/requests`), the Enter sheet as a list picker, `f`
+compose (message + offered vpaths), block and leave as gold gates, `h` incompatible, `u`
+blocked, `/` filter, a quiet ten-second poll. Off the network: the pitch, one join card that
+posts `enabled` at once (no gate, by the user's call) and the federation-requests opt-in on by
+default; the identity modal opens after the join, as the webapp does. `y` copies the ticket
+over OSC 52 (best effort; Apple Terminal ignores it). Kit additions to document: tabs (active
+= 1-row filled slab), the state line, an inline non-modal input. Not built: the Overview
+(pinned), a Federation room ("they asked you" points at the webapp's tab for now).
 Admin auth is the **same JWT** — `admin` comes from the users table, and the token is byte
 identical, so the client must probe rather than inspect it. Two gates will bite a terminal client:
 `lockAdmin` returns 405, and `adminAccess.mode` restricts by IP, so a panel run from another
