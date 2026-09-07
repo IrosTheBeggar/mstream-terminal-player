@@ -447,6 +447,17 @@ with tags, and drilling into one played a doorway.
   live. No federated peers are available, so that half would ship unverified.
 
 #### B4 — Admin panel
+
+**Libraries room ✅ 2026-09-06** — `mstream-player admin` (`src/admin/`), the kit surface the
+"Admin Libraries" canvas settled on, barebones by choice: a NAME · FOLDER · SYMLINKS table over
+`admin/directories` (` [X]` outside the selection, tips on the bottom edge, no bottom bar or gold
+rule), adding by the OS picker (`--same-machine`, the wizard's `picker.rs` on the worker), the
+admin file explorer, or a typed path with server-fed completion — every route ending in the Name
+modal, because the vpath is permanent (no rename API) — the remove gate, and the per-library
+follow-symlinks toggle. The two gates above land as sentences (405 → "locked", 403 → "not an
+admin here, or restricted by address"). Not built: the Overview (rooms + network stats,
+canvas "Admin Overview", pinned), counts and scan columns (no per-library source since the
+velvet removal; `/scan/progress` rows exist only mid-scan), rename (no API).
 Admin auth is the **same JWT** — `admin` comes from the users table, and the token is byte
 identical, so the client must probe rather than inspect it. Two gates will bite a terminal client:
 `lockAdmin` returns 405, and `adminAccess.mode` restricts by IP, so a panel run from another

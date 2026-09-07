@@ -798,6 +798,61 @@ impl Client {
         wait(self.admin_add_directory_async(directory, vpath))
     }
 
+    /// Remove a library folder by vpath. The files stay on disk; the server
+    /// drops the library (and, on its next scan, its tracks) from the database.
+    pub async fn admin_remove_directory_async(
+        &self,
+        vpath: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.send(
+            Method::DELETE,
+            "api/v1/admin/directory",
+            Some(serde_json::json!({ "vpath": vpath })),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_remove_directory(&self, vpath: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_remove_directory_async(vpath))
+    }
+
+    /// A library's follow-symlinks flag. Takes effect on that library's
+    /// next scan — the server says so, and so does the UI.
+    pub async fn admin_set_follow_symlinks_async(
+        &self,
+        vpath: &str,
+        follow: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(
+            "api/v1/admin/directory/follow-symlinks",
+            serde_json::json!({ "vpath": vpath, "followSymlinks": follow }),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_set_follow_symlinks(
+        &self,
+        vpath: &str,
+        follow: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_set_follow_symlinks_async(vpath, follow))
+    }
+
+    /// The ADMIN file explorer: any directory on the server's own disk (the
+    /// public one only walks the libraries). `~` is the server user's home,
+    /// resolved server-side; the listing's `path` is the absolute form.
+    pub async fn admin_file_explorer_async(&self, directory: &str) -> Result<DirListing, ApiError> {
+        self.post("api/v1/admin/file-explorer", serde_json::json!({ "directory": directory }))
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_file_explorer(&self, directory: &str) -> Result<DirListing, ApiError> {
+        wait(self.admin_file_explorer_async(directory))
+    }
+
     /// Create a user. The wizard's first user is `admin: true` with every
     /// vpath — creating it is what closes the fresh install's open window.
     pub async fn admin_create_user_async(

@@ -267,6 +267,9 @@ pub struct DirEntry {
 #[serde(default)]
 pub struct AdminDirEntry {
     pub root: String,
+    /// Per-library: whether the scanner follows symlinks inside it.
+    #[serde(rename = "followSymlinks")]
+    pub follow_symlinks: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

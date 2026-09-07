@@ -360,6 +360,26 @@ mstream-player logout
 Servers running in public mode (no users configured) need no login — just pass
 `--server <url>`. `--server` accepts the same shorthand as the connect screen.
 
+## Admin panel
+
+```
+mstream-player admin                         # manage the saved session's server
+mstream-player admin --server http://nas:3000
+mstream-player admin --same-machine          # this terminal runs on the server: add folders with the OS dialog
+```
+
+One room so far: **Libraries**, the server's music folders — each folder's name, its path
+as the server sees it, and whether the scanner follows symlinks (`s` flips it, from the next
+scan on). `b` browses the server's own disk; with `--same-machine` it opens the OS folder
+dialog instead, the same picker the setup wizard uses. `t` types a path, with completion from
+the server. Every way of adding ends at the naming step, because the name is the library's
+vpath — its address in every link, playlist and user grant — and the server cannot rename
+one, so it is asked for once. `r` removes behind a warning; the files never move.
+
+The saved session must belong to an admin. Two server settings answer with errors the room
+explains in words: `lockAdmin` (the panel is locked, HTTP 405) and an address-restricted admin
+panel (403 from another machine).
+
 ## Now playing
 
 `0` gives the whole terminal over to what's playing:
