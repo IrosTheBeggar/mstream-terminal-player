@@ -472,9 +472,18 @@ compose (message + offered vpaths), block and leave as gold gates, `h` incompati
 blocked, `/` filter, a quiet ten-second poll. Off the network: the pitch, one join card that
 posts `enabled` at once (no gate, by the user's call) and the federation-requests opt-in on by
 default; the identity modal opens after the join, as the webapp does. `y` copies the ticket
-over OSC 52 (best effort; Apple Terminal ignores it). Kit additions to document: tabs (active
-= 1-row filled slab), the state line, an inline non-modal input. Not built: the Overview
-(pinned), a Federation room ("they asked you" points at the webapp's tab for now).
+over OSC 52 (best effort; Apple Terminal ignores it). Kit additions documented: tabs (active
+= 1-row filled slab), the state line, an inline non-modal input.
+
+**Federation room ✅ 2026-09-07** — `mstream-player admin federation` (`src/admin/federation.rs`),
+per the "Admin Federation" canvas: the state line (on · relay · endpoint · inbox), three tabs
+Requests · Tickets · Peers, each a full-height table with its affordance on top (the inbox
+checkbox card, the mint card, the paste box with the `mstrfed1:` ticket decoded client-side as
+the webapp does), the webapp's request-state vocabulary as kit colors with the retry ladder
+off the engine's state, one `Form` shape for mint / accept / limits (Tab-cycled fields, digits
+only in the caps, the tri-state expiry), the minted ticket shown whole, gold gates for decline
+/ revoke / forget / turn off, a quiet 30 s poll. What a peer shares is kept in memory from the
+last `t` (the server stores no list). Not built: the Overview (pinned), a "view peer" jump.
 Admin auth is the **same JWT** — `admin` comes from the users table, and the token is byte
 identical, so the client must probe rather than inspect it. Two gates will bite a terminal client:
 `lockAdmin` returns 405, and `adminAccess.mode` restricts by IP, so a panel run from another

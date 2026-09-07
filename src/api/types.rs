@@ -20,6 +20,16 @@ where
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
+/// A SQLite flag: the server hands `0`/`1` (or a real boolean, or null)
+/// where a client wants a `bool`.
+fn int_bool<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Bool(b) => b,
+        serde_json::Value::Number(n) => n.as_i64().unwrap_or(0) != 0,
+        _ => false,
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoginResponse {
     pub token: String,
@@ -411,14 +421,103 @@ pub struct ActivityEntry {
     pub message: String,
 }
 
-/// `GET api/v1/admin/federation` — the fields the discovery room reads.
+/// `GET api/v1/admin/federation` — the endpoint's state and the mint
+/// dialog's defaults.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FederationParams {
     pub enabled: bool,
     /// Iroh has a build for this platform.
     pub available: bool,
+    /// The endpoint is up (an endpoint id exists).
+    pub running: bool,
+    pub endpoint_id: Option<String>,
+    /// Connected to a relay.
+    pub online: bool,
+    pub relay_url: Option<String>,
+    /// What a new key's limits are prefilled with.
+    pub limit_defaults: FederationLimits,
+    /// The federation-requests inbox is open to discovery peers.
     pub accept_requests: bool,
+}
+
+/// Per-key bandwidth caps; 0 = unlimited.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FederationLimits {
+    pub stream_kbps: u64,
+    pub daily_mb: u64,
+    pub max_streams: u64,
+}
+
+/// One key this server minted — a read-only grant for the libraries it
+/// names — as `GET api/v1/admin/federation/keys` lists it.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FederationKey {
+    pub id: i64,
+    pub name: String,
+    pub library_names: Vec<String>,
+    pub stream_kbps: u64,
+    pub daily_mb: u64,
+    pub max_streams: u64,
+    /// SQLite UTC `YYYY-MM-DD HH:MM:SS`; None = never.
+    pub expires_at: Option<String>,
+    #[serde(deserialize_with = "int_bool")]
+    pub expired: bool,
+    /// Bytes served to this key today (UTC), live.
+    pub usage_today_bytes: u64,
+    pub last_used: Option<String>,
+    /// The endpoint that redeemed the ticket first (TOFU); None = not yet.
+    pub bound_endpoint_id: Option<String>,
+    pub bound_at: Option<String>,
+    pub created_at: String,
+    /// The swap-ready `mstrfed1:` ticket — None while the endpoint is down.
+    pub ticket: Option<String>,
+}
+
+/// `POST api/v1/admin/federation/keys` — the fresh key and its ticket.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MintedKey {
+    pub id: i64,
+    pub name: String,
+    pub ticket: Option<String>,
+}
+
+/// `GET api/v1/admin/federation/peers` — a server this one can read. The
+/// row also carries the peer's endpoint ticket and API key; a client has
+/// no business with either, so they are not read.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FederationPeer {
+    pub id: i64,
+    #[serde(deserialize_with = "null_default")]
+    pub name: String,
+    /// `ok`, or the last failed test's words; None = never tested.
+    pub last_status: Option<String>,
+    /// Stamped by an `ok` test only.
+    pub last_seen: Option<String>,
+    /// The Discover panel may send this peer similarity queries.
+    #[serde(deserialize_with = "int_bool")]
+    pub use_discovery: bool,
+    pub added_at: String,
+}
+
+/// `POST api/v1/admin/federation/peers/:id/test`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PeerTest {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub health: Option<PeerHealth>,
+}
+
+/// The peer's own answer — remote text.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PeerHealth {
+    pub libraries: Vec<String>,
 }
 
 /// `GET api/v1/admin/federation/requests` — pairing asks in both
@@ -440,8 +539,21 @@ pub struct FederationRequest {
     /// `in` | `out`.
     pub direction: String,
     /// `received` | `accepted` | `granting` | `completed` | `pending-delivery`
-    /// | `delivered` | `rejected` | `cancelled` …
+    /// | `delivered` | `rejected` | `refused` | `cancelled` | `expired`.
     pub state: String,
+    /// Remote text on an inbound request, ours on an outbound one.
+    #[serde(deserialize_with = "null_default")]
+    pub message: String,
+    /// What they offer (inbound) or what we offered (outbound).
+    pub offered_libraries: Vec<String>,
+    /// The delivery ladder: failures so far, and when the next try is.
+    pub fail_count: u32,
+    pub next_attempt_at: Option<String>,
+    pub reject_reason: Option<String>,
+    /// The peer row a completed exchange created.
+    pub created_peer_id: Option<i64>,
+    /// SQLite UTC `YYYY-MM-DD HH:MM:SS`.
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

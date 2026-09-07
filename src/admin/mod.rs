@@ -1,4 +1,4 @@
-//! The admin panel: `mstream-player admin [libraries|discovery]` — the
+//! The admin panel: `mstream-player admin [libraries|discovery|federation]` — the
 //! server's management rooms, drawn full-screen from the UI kit the way
 //! the setup wizard is, against the saved session's server.
 //!
@@ -11,9 +11,10 @@
 //! room to pump its worker, tick its timers, draw, and answer input.
 
 mod discovery;
+mod federation;
 mod libraries;
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Subcommand};
 use ratatui::Frame;
@@ -22,6 +23,7 @@ use ratatui::crossterm::event::{
     KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::crossterm::execute;
+use ratatui::crossterm::style::Print;
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::Span;
@@ -62,6 +64,8 @@ enum RoomCmd {
     Libraries,
     /// The discovery network (P2P): the mesh, the servers you follow, invites, settings
     Discovery,
+    /// Federation: requests, the tickets you minted, the peers you can read
+    Federation,
 }
 
 pub fn run(args: AdminArgs) -> i32 {
@@ -76,6 +80,7 @@ pub fn run(args: AdminArgs) -> i32 {
     match args.room.unwrap_or(RoomCmd::Libraries) {
         RoomCmd::Libraries => run_tui(libraries::start(client, args.same_machine)),
         RoomCmd::Discovery => run_tui(discovery::start(client)),
+        RoomCmd::Federation => run_tui(federation::start(client)),
     }
 }
 
@@ -304,4 +309,122 @@ pub(crate) fn gate_message(e: &ApiError, what: &str) -> String {
         ApiError::Server { status: 405, .. } => t!("admin.gate_locked").to_string(),
         other => format!("{what}: {other}"),
     }
+}
+
+// ── Text, time and clipboard helpers shared by the rooms ──────────────────
+
+/// The first twelve hex digits and an ellipsis — the webapp's fingerprint.
+pub(crate) fn short_id(id: &str) -> String {
+    let head: String = id.chars().filter(char::is_ascii_hexdigit).take(12).collect();
+    if head.is_empty() { "…".to_string() } else { format!("{head}…") }
+}
+
+/// `raw` minus every character that acts on the terminal or reorders a
+/// reader instead of showing itself, trimmed, cut to `cap` characters.
+pub(crate) fn printable(raw: &str, cap: usize) -> String {
+    raw.chars()
+        .filter(|c| !(c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')))
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(cap)
+        .collect()
+}
+
+pub(crate) fn fmt_count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// The webapp's discoveryBytes: GB past a gigabyte, MB past a megabyte,
+/// KB below.
+pub(crate) fn fmt_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    let n = n as f64;
+    if n >= KB * KB * KB {
+        format!("{:.1} GB", n / (KB * KB * KB))
+    } else if n >= KB * KB {
+        format!("{:.1} MB", n / (KB * KB))
+    } else {
+        format!("{:.0} KB", (n / KB).ceil())
+    }
+}
+
+pub(crate) fn unix_now() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// `YYYY-MM-DDTHH:MM:SS[.fff]Z` (what the server's JSON emits) or SQLite's
+/// `YYYY-MM-DD HH:MM:SS` (UTC, what its rows carry) → Unix seconds.
+/// Anything else, or an offset other than Z, is `None`.
+pub(crate) fn iso_unix(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b'T' | b' ') || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let num = |from: usize, to: usize| s.get(from..to)?.parse::<i64>().ok();
+    let (y, m, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (hh, mm, ss) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    // Days from civil (Howard Hinnant), proleptic Gregorian.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hh * 3600 + mm * 60 + ss)
+}
+
+/// The inverse of [`iso_unix`]: Unix seconds → `YYYY-MM-DDTHH:MM:SS.000Z`,
+/// for the cutoffs a form turns into ISO for the server.
+pub(crate) fn iso_at(t: i64) -> String {
+    let days = t.div_euclid(86_400);
+    let rem = t.rem_euclid(86_400);
+    // Civil from days (Howard Hinnant), proleptic Gregorian.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+/// A duration as the webapp's table suffix: minutes under an hour, hours
+/// under two days, days after.
+pub(crate) fn age_text(secs: i64) -> String {
+    let mins = secs.max(0) / 60;
+    if mins < 1 {
+        t!("p2p.age_now").to_string()
+    } else if mins < 60 {
+        t!("p2p.age_m", n = mins).to_string()
+    } else if mins < 48 * 60 {
+        t!("p2p.age_h", n = mins / 60).to_string()
+    } else {
+        t!("p2p.age_d", n = mins / (24 * 60)).to_string()
+    }
+}
+
+/// OSC 52: hand the text to the terminal's clipboard, where the terminal
+/// allows it (kitty, iTerm2 with the setting on, xterm, foot, Windows
+/// Terminal; Apple Terminal ignores it). Best effort — the note says so.
+pub(crate) fn copy_to_clipboard(text: &str) -> bool {
+    use base64::Engine;
+    let payload = base64::engine::general_purpose::STANDARD.encode(text);
+    execute!(std::io::stdout(), Print(format!("\x1b]52;c;{payload}\x1b\\"))).is_ok()
 }

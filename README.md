@@ -393,6 +393,22 @@ into. Config edits the announced name and description (`e`) and the five numeric
 (`1`–`5`). Off the network, the room is the webapp's pitch with one card that joins at once
 and the federation-requests opt-in, on by default; `x` leaves again, behind a warning.
 
+```
+mstream-player admin federation              # requests, the tickets you minted, the peers you can read
+```
+
+**Federation** is the webapp's Federation tab as three tabs on `←`/`→`, each a table with its
+own affordance on top. **Requests** holds the inbox switch (`s`) and every pairing ask in
+either direction with the webapp's state words; on a row, `a` accepts (a form: the libraries
+they may read, the bandwidth limits, an expiry, and whether to take what they offered), `n`
+declines behind a warning, `c` withdraws your own ask, `d` dismisses a finished record.
+**Tickets** is the mint card (`n`: who it is for, the libraries, the limits) and the keys you
+minted; the ticket to hand over is shown whole and `y` copies it, `l` edits limits and the
+expiry, `b` lets a claimed ticket be claimed again, `r` revokes behind a warning. **Peers**
+has the paste box (`j`) with the ticket decoded beneath it before anything is sent, then the
+servers you can read: `t` tests one and shows what it shares, `s` flips the discovery opt-out,
+`r` forgets it behind a warning. `x` turns the endpoint off, behind a warning.
+
 The saved session must belong to an admin. Two server settings answer with errors the room
 explains in words: `lockAdmin` (the panel is locked, HTTP 405) and an address-restricted admin
 panel (403 from another machine).

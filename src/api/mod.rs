@@ -121,6 +121,17 @@ impl PeerAction {
     }
 }
 
+/// A federation key's expiry, as the limits route takes it: leave it as it
+/// is, clear it, or set a new future cutoff (which is also how an expired
+/// key is renewed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpiryChange {
+    Keep,
+    Never,
+    /// ISO 8601, in the future.
+    At(String),
+}
+
 /// The discovery network's numeric settings, each its own route and body
 /// key. Every one applies from the server's next check, no restart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1307,6 +1318,291 @@ impl Client {
         message: Option<&str>,
     ) -> Result<serde_json::Value, ApiError> {
         wait(self.admin_federation_request_send_async(endpoint_id, offer_vpaths, message))
+    }
+
+    // ── The rest of federation's admin surface: keys, requests, peers ──────
+
+    /// The keys minted here, each with its swap-ready ticket while the
+    /// endpoint runs.
+    pub async fn admin_federation_keys_async(&self) -> Result<Vec<FederationKey>, ApiError> {
+        self.get("api/v1/admin/federation/keys").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_keys(&self) -> Result<Vec<FederationKey>, ApiError> {
+        wait(self.admin_federation_keys_async())
+    }
+
+    /// Mint a read-only key for `vpaths` (1–64-char name); `expires_at` is
+    /// ISO 8601 in the future, or None for never.
+    pub async fn admin_federation_mint_async(
+        &self,
+        name: &str,
+        vpaths: &[String],
+        limits: &FederationLimits,
+        expires_at: Option<&str>,
+    ) -> Result<MintedKey, ApiError> {
+        let mut body = serde_json::json!({
+            "name": name,
+            "vpaths": vpaths,
+            "streamKbps": limits.stream_kbps,
+            "dailyMb": limits.daily_mb,
+            "maxStreams": limits.max_streams,
+        });
+        if let Some(expires_at) = expires_at {
+            body["expiresAt"] = serde_json::json!(expires_at);
+        }
+        self.post("api/v1/admin/federation/keys", body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_mint(
+        &self,
+        name: &str,
+        vpaths: &[String],
+        limits: &FederationLimits,
+        expires_at: Option<&str>,
+    ) -> Result<MintedKey, ApiError> {
+        wait(self.admin_federation_mint_async(name, vpaths, limits, expires_at))
+    }
+
+    /// A key's limits, applied from its next request; the expiry is
+    /// tri-state so a limit tweak never restarts an expiry clock by accident.
+    pub async fn admin_federation_key_limits_async(
+        &self,
+        id: i64,
+        limits: &FederationLimits,
+        expiry: ExpiryChange,
+    ) -> Result<serde_json::Value, ApiError> {
+        let mut body = serde_json::json!({
+            "streamKbps": limits.stream_kbps,
+            "dailyMb": limits.daily_mb,
+            "maxStreams": limits.max_streams,
+        });
+        match expiry {
+            ExpiryChange::Keep => {}
+            ExpiryChange::Never => body["expiresAt"] = serde_json::Value::Null,
+            ExpiryChange::At(iso) => body["expiresAt"] = serde_json::json!(iso),
+        }
+        self.post(&format!("api/v1/admin/federation/keys/{id}/limits"), body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_key_limits(
+        &self,
+        id: i64,
+        limits: &FederationLimits,
+        expiry: ExpiryChange,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_key_limits_async(id, limits, expiry))
+    }
+
+    /// Revoke a key: live streams on it are cut at once.
+    pub async fn admin_federation_key_revoke_async(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::DELETE, &format!("api/v1/admin/federation/keys/{id}"), None).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_key_revoke(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_key_revoke_async(id))
+    }
+
+    /// Let the ticket be claimed again (the friend reinstalled).
+    pub async fn admin_federation_key_reset_binding_async(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(&format!("api/v1/admin/federation/keys/{id}/reset-binding"), serde_json::json!({}))
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_key_reset_binding(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_key_reset_binding_async(id))
+    }
+
+    /// Accept an inbound request: mint for `vpaths` and send the ticket
+    /// back; `accept_their_offer` also takes what they offered.
+    pub async fn admin_federation_request_accept_async(
+        &self,
+        id: i64,
+        vpaths: &[String],
+        limits: &FederationLimits,
+        expires_at: Option<&str>,
+        accept_their_offer: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        let mut body = serde_json::json!({
+            "vpaths": vpaths,
+            "streamKbps": limits.stream_kbps,
+            "dailyMb": limits.daily_mb,
+            "maxStreams": limits.max_streams,
+            "acceptTheirOffer": accept_their_offer,
+        });
+        if let Some(expires_at) = expires_at {
+            body["expiresAt"] = serde_json::json!(expires_at);
+        }
+        self.post(&format!("api/v1/admin/federation/requests/{id}/accept"), body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_request_accept(
+        &self,
+        id: i64,
+        vpaths: &[String],
+        limits: &FederationLimits,
+        expires_at: Option<&str>,
+        accept_their_offer: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_request_accept_async(id, vpaths, limits, expires_at, accept_their_offer))
+    }
+
+    /// Decline an inbound request; the server ignores that peer's asks
+    /// for seven days.
+    pub async fn admin_federation_request_reject_async(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(&format!("api/v1/admin/federation/requests/{id}/reject"), serde_json::json!({})).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_request_reject(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_request_reject_async(id))
+    }
+
+    /// Withdraw an outbound request that has not been answered.
+    pub async fn admin_federation_request_cancel_async(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(&format!("api/v1/admin/federation/requests/{id}/cancel"), serde_json::json!({})).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_request_cancel(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_request_cancel_async(id))
+    }
+
+    /// Drop a finished record (409 while the exchange is still live).
+    pub async fn admin_federation_request_dismiss_async(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::DELETE, &format!("api/v1/admin/federation/requests/{id}"), None).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_request_dismiss(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_request_dismiss_async(id))
+    }
+
+    /// The inbox switch, live.
+    pub async fn admin_federation_accept_requests_async(
+        &self,
+        enabled: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/federation/accept-requests", serde_json::json!({ "enabled": enabled }))
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_accept_requests(
+        &self,
+        enabled: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_accept_requests_async(enabled))
+    }
+
+    /// The servers this one can read.
+    pub async fn admin_federation_peers_async(&self) -> Result<Vec<FederationPeer>, ApiError> {
+        self.get("api/v1/admin/federation/peers").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_peers(&self) -> Result<Vec<FederationPeer>, ApiError> {
+        wait(self.admin_federation_peers_async())
+    }
+
+    /// Add a peer from a friend's `mstrfed1:` ticket; the server tests it
+    /// in the background. 400 for a ticket that does not parse or one
+    /// already added.
+    pub async fn admin_federation_peer_add_async(
+        &self,
+        ticket: &str,
+        name: Option<&str>,
+    ) -> Result<serde_json::Value, ApiError> {
+        let mut body = serde_json::json!({ "ticket": ticket });
+        if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
+            body["name"] = serde_json::json!(name);
+        }
+        self.post("api/v1/admin/federation/peers", body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_peer_add(
+        &self,
+        ticket: &str,
+        name: Option<&str>,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_peer_add_async(ticket, name))
+    }
+
+    /// Test a peer now — the server dials it and waits for its health
+    /// answer, so this gets the decode ceiling.
+    pub async fn admin_federation_peer_test_async(&self, id: i64) -> Result<PeerTest, ApiError> {
+        let path = format!("api/v1/admin/federation/peers/{id}/test");
+        #[cfg(not(target_arch = "wasm32"))]
+        return self
+            .send_within(Method::POST, &path, Some(serde_json::json!({})), Some(DECODE_TIMEOUT))
+            .await;
+        #[cfg(target_arch = "wasm32")]
+        return self.post(&path, serde_json::json!({})).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_peer_test(&self, id: i64) -> Result<PeerTest, ApiError> {
+        wait(self.admin_federation_peer_test_async(id))
+    }
+
+    /// Whether the Discover panel may query this peer.
+    pub async fn admin_federation_peer_discovery_async(
+        &self,
+        id: i64,
+        enabled: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(
+            &format!("api/v1/admin/federation/peers/{id}/discovery"),
+            serde_json::json!({ "enabled": enabled }),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_peer_discovery(
+        &self,
+        id: i64,
+        enabled: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_peer_discovery_async(id, enabled))
+    }
+
+    /// Forget a peer; its bridge is closed with it.
+    pub async fn admin_federation_peer_remove_async(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::DELETE, &format!("api/v1/admin/federation/peers/{id}"), None).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_peer_remove(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_peer_remove_async(id))
     }
 
     /// Per-library scan progress (works for any signed-in user; on a fresh
