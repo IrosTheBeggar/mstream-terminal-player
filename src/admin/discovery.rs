@@ -2371,6 +2371,7 @@ mod tests {
     fn english() -> std::sync::MutexGuard<'static, ()> {
         let guard = crate::setup::tests::LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         rust_i18n::set_locale("en");
+        crate::kit::theme::pin_modern_terminal();
         guard
     }
 
