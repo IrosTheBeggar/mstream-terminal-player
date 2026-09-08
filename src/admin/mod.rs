@@ -1,4 +1,4 @@
-//! The admin panel: `mstream-player admin [libraries|discovery|federation]` — the
+//! The admin panel: `mstream-player admin [libraries|discovery|federation|backups]` — the
 //! server's management rooms, drawn full-screen from the UI kit the way
 //! the setup wizard is, against the saved session's server.
 //!
@@ -10,6 +10,7 @@
 //! Rooms keep their own state, worker and drawing; the loop only asks a
 //! room to pump its worker, tick its timers, draw, and answer input.
 
+mod backups;
 mod discovery;
 mod federation;
 mod libraries;
@@ -49,7 +50,7 @@ pub struct AdminArgs {
     #[arg(long, hide = true, global = true)]
     token: Option<String>,
 
-    /// This terminal runs on the server's own machine: adding a folder opens
+    /// This terminal runs on the server's own machine: choosing a folder opens
     /// the OS folder dialog, and the paths it picks are the server's paths
     #[arg(long, global = true)]
     same_machine: bool,
@@ -66,6 +67,8 @@ enum RoomCmd {
     Discovery,
     /// Federation: requests, the tickets you minted, the peers you can read
     Federation,
+    /// Backups: each library's copies on other drives, their schedules and runs
+    Backups,
 }
 
 pub fn run(args: AdminArgs) -> i32 {
@@ -81,6 +84,7 @@ pub fn run(args: AdminArgs) -> i32 {
         RoomCmd::Libraries => run_tui(libraries::start(client, args.same_machine)),
         RoomCmd::Discovery => run_tui(discovery::start(client)),
         RoomCmd::Federation => run_tui(federation::start(client)),
+        RoomCmd::Backups => run_tui(backups::start(client, args.same_machine)),
     }
 }
 

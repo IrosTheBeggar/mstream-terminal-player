@@ -276,10 +276,142 @@ pub struct DirEntry {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct AdminDirEntry {
+    /// The library's row id — what the backup routes address it by.
+    pub id: i64,
     pub root: String,
     /// Per-library: whether the scanner follows symlinks inside it.
     #[serde(rename = "followSymlinks")]
     pub follow_symlinks: bool,
+}
+
+// ── Backups ─────────────────────────────────────────────────────────────────
+
+/// `GET api/v1/admin/backup/destinations`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BackupDestinations {
+    pub destinations: Vec<BackupDestination>,
+}
+
+/// One backup destination: a library copied to a folder on another drive
+/// on a schedule, with its most recent run.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BackupDestination {
+    pub id: i64,
+    pub library_id: i64,
+    #[serde(deserialize_with = "null_default")]
+    pub library_name: String,
+    pub dest_path: String,
+    /// `after-scan` | `daily` | `manual`.
+    pub trigger_type: String,
+    pub daily_at_hour: Option<u32>,
+    /// Days deleted or changed files stay recoverable in the backup's
+    /// trash; 0 = no trash.
+    pub retention_days: u32,
+    #[serde(deserialize_with = "int_bool")]
+    pub enabled: bool,
+    /// The per-file pause during a run, ms; 0 = no throttle.
+    #[serde(deserialize_with = "null_default")]
+    pub inter_file_delay_ms: u32,
+    /// The effective exclude patterns (the server's defaults when the row
+    /// stores none).
+    #[serde(rename = "excludeGlobs")]
+    pub exclude_globs: Vec<String>,
+    /// The most recent attempt, if any (dedup skips excluded).
+    #[serde(rename = "lastRun")]
+    pub last_run: Option<BackupRun>,
+    pub created_at: String,
+}
+
+/// One run — a destination's `lastRun`, and the rows of
+/// `GET api/v1/admin/backup/destinations/:id/history`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BackupRun {
+    pub id: i64,
+    /// SQLite UTC `YYYY-MM-DD HH:MM:SS`.
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    /// `running` | `success` | `partial` | `failed` | `skipped`.
+    pub status: String,
+    pub trigger_reason: Option<String>,
+    pub files_copied: u64,
+    pub files_unchanged: u64,
+    pub files_trashed: u64,
+    pub bytes_copied: u64,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BackupHistory {
+    pub history: Vec<BackupRun>,
+}
+
+/// `GET api/v1/admin/backup/status`: the run in flight, if any, and how
+/// many tasks wait behind the active scan or backup.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BackupStatus {
+    pub active: Option<ActiveBackup>,
+    pub queue_length: u32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ActiveBackup {
+    pub destination_id: i64,
+    pub history_id: i64,
+    pub library_name: Option<String>,
+    pub dest_path: Option<String>,
+    pub started_at: Option<String>,
+    pub trigger_reason: Option<String>,
+    pub files_copied: u64,
+    pub files_unchanged: u64,
+    pub files_trashed: u64,
+    pub bytes_copied: u64,
+    /// The previous run's copied + unchanged + trashed — the progress
+    /// denominator; None on a destination's first run.
+    pub expected_files: Option<u64>,
+}
+
+/// `GET api/v1/admin/backup/platform`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BackupPlatform {
+    pub platform: String,
+    pub homedir: String,
+    pub default_excludes: Vec<String>,
+}
+
+/// `POST api/v1/admin/backup/check-path` — the errors a save would raise
+/// and the warnings an operator should read first.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PathCheck {
+    pub ok: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+    pub info: PathCheckInfo,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PathCheckInfo {
+    pub dest_exists: bool,
+    pub dest_is_empty: Option<bool>,
+    pub parent_exists: bool,
+    pub same_drive: Option<bool>,
+    pub same_drive_reliable: bool,
+}
+
+/// `POST api/v1/admin/backup/destinations/:id/run`: `queued`, or
+/// `skipped` when a run is already in progress.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RunAnswer {
+    pub status: String,
 }
 
 // ── Discovery network (P2P) ─────────────────────────────────────────────────

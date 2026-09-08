@@ -132,6 +132,63 @@ pub enum ExpiryChange {
     At(String),
 }
 
+/// A backup destination to add: `POST api/v1/admin/backup/destinations`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewBackupDestination {
+    pub library_id: i64,
+    pub dest_path: String,
+    /// `after-scan` | `daily` | `manual`.
+    pub trigger_type: String,
+    /// Required with `daily`.
+    pub daily_at_hour: Option<u32>,
+    pub retention_days: u32,
+    pub inter_file_delay_ms: u32,
+    /// None = the server's defaults, and whatever they become later.
+    pub exclude_globs: Option<Vec<String>>,
+}
+
+/// The fields a `PATCH` may carry; None leaves a field alone.
+/// `exclude_globs`: None = untouched, Some(None) = back to the server's
+/// defaults, Some(Some(list)) = pinned to that list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BackupPatch {
+    pub dest_path: Option<String>,
+    pub trigger_type: Option<String>,
+    pub daily_at_hour: Option<Option<u32>>,
+    pub retention_days: Option<u32>,
+    pub inter_file_delay_ms: Option<u32>,
+    pub enabled: Option<bool>,
+    pub exclude_globs: Option<Option<Vec<String>>>,
+}
+
+impl BackupPatch {
+    fn body(&self) -> serde_json::Value {
+        let mut body = serde_json::Map::new();
+        if let Some(v) = &self.dest_path {
+            body.insert("destPath".into(), serde_json::json!(v));
+        }
+        if let Some(v) = &self.trigger_type {
+            body.insert("triggerType".into(), serde_json::json!(v));
+        }
+        if let Some(v) = &self.daily_at_hour {
+            body.insert("dailyAtHour".into(), serde_json::json!(v));
+        }
+        if let Some(v) = self.retention_days {
+            body.insert("retentionDays".into(), serde_json::json!(v));
+        }
+        if let Some(v) = self.inter_file_delay_ms {
+            body.insert("interFileDelayMs".into(), serde_json::json!(v));
+        }
+        if let Some(v) = self.enabled {
+            body.insert("enabled".into(), serde_json::json!(v));
+        }
+        if let Some(v) = &self.exclude_globs {
+            body.insert("excludeGlobs".into(), serde_json::json!(v));
+        }
+        serde_json::Value::Object(body)
+    }
+}
+
 /// The discovery network's numeric settings, each its own route and body
 /// key. Every one applies from the server's next check, no restart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1603,6 +1660,138 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn admin_federation_peer_remove(&self, id: i64) -> Result<serde_json::Value, ApiError> {
         wait(self.admin_federation_peer_remove_async(id))
+    }
+
+    // ── Backups: the admin's destinations, their runs, the live status ─────
+
+    pub async fn admin_backup_destinations_async(&self) -> Result<Vec<BackupDestination>, ApiError> {
+        let list: BackupDestinations = self.get("api/v1/admin/backup/destinations").await?;
+        Ok(list.destinations)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_destinations(&self) -> Result<Vec<BackupDestination>, ApiError> {
+        wait(self.admin_backup_destinations_async())
+    }
+
+    pub async fn admin_backup_status_async(&self) -> Result<BackupStatus, ApiError> {
+        self.get("api/v1/admin/backup/status").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_status(&self) -> Result<BackupStatus, ApiError> {
+        wait(self.admin_backup_status_async())
+    }
+
+    /// The server's platform, home and default exclude patterns.
+    pub async fn admin_backup_platform_async(&self) -> Result<BackupPlatform, ApiError> {
+        self.get("api/v1/admin/backup/platform").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_platform(&self) -> Result<BackupPlatform, ApiError> {
+        wait(self.admin_backup_platform_async())
+    }
+
+    /// Preview what saving this path would say: the hard errors and the
+    /// warnings (same drive, exists with files, will be created…).
+    /// `exclude_dest_id` lets an edit skip its own row in the overlap check.
+    pub async fn admin_backup_check_path_async(
+        &self,
+        library_id: i64,
+        dest_path: &str,
+        exclude_dest_id: Option<i64>,
+    ) -> Result<PathCheck, ApiError> {
+        let mut body = serde_json::json!({ "libraryId": library_id, "destPath": dest_path });
+        if let Some(id) = exclude_dest_id {
+            body["excludeDestId"] = serde_json::json!(id);
+        }
+        self.post("api/v1/admin/backup/check-path", body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_check_path(
+        &self,
+        library_id: i64,
+        dest_path: &str,
+        exclude_dest_id: Option<i64>,
+    ) -> Result<PathCheck, ApiError> {
+        wait(self.admin_backup_check_path_async(library_id, dest_path, exclude_dest_id))
+    }
+
+    pub async fn admin_backup_add_async(
+        &self,
+        dest: &NewBackupDestination,
+    ) -> Result<serde_json::Value, ApiError> {
+        let mut body = serde_json::json!({
+            "libraryId": dest.library_id,
+            "destPath": dest.dest_path,
+            "triggerType": dest.trigger_type,
+            "retentionDays": dest.retention_days,
+            "enabled": true,
+            "interFileDelayMs": dest.inter_file_delay_ms,
+        });
+        if let Some(hour) = dest.daily_at_hour {
+            body["dailyAtHour"] = serde_json::json!(hour);
+        }
+        if let Some(globs) = &dest.exclude_globs {
+            body["excludeGlobs"] = serde_json::json!(globs);
+        }
+        self.post("api/v1/admin/backup/destinations", body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_add(&self, dest: &NewBackupDestination) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_backup_add_async(dest))
+    }
+
+    /// Change any field but the library; a queued run picks the new
+    /// settings up when its turn comes, a running one finishes with the old.
+    pub async fn admin_backup_patch_async(
+        &self,
+        id: i64,
+        patch: &BackupPatch,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::PATCH, &format!("api/v1/admin/backup/destinations/{id}"), Some(patch.body()))
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_patch(&self, id: i64, patch: &BackupPatch) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_backup_patch_async(id, patch))
+    }
+
+    /// Drop the schedule and its history; the files on disk stay.
+    pub async fn admin_backup_remove_async(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::DELETE, &format!("api/v1/admin/backup/destinations/{id}"), None).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_remove(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_backup_remove_async(id))
+    }
+
+    /// Run now — `queued`, or `skipped` while a run is still in progress.
+    /// A disabled destination answers 400.
+    pub async fn admin_backup_run_async(&self, id: i64) -> Result<RunAnswer, ApiError> {
+        self.post(&format!("api/v1/admin/backup/destinations/{id}/run"), serde_json::json!({})).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_run(&self, id: i64) -> Result<RunAnswer, ApiError> {
+        wait(self.admin_backup_run_async(id))
+    }
+
+    /// The most recent runs, newest first.
+    pub async fn admin_backup_history_async(&self, id: i64, limit: u32) -> Result<Vec<BackupRun>, ApiError> {
+        let h: BackupHistory =
+            self.get(&format!("api/v1/admin/backup/destinations/{id}/history?limit={limit}")).await?;
+        Ok(h.history)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_history(&self, id: i64, limit: u32) -> Result<Vec<BackupRun>, ApiError> {
+        wait(self.admin_backup_history_async(id, limit))
     }
 
     /// Per-library scan progress (works for any signed-in user; on a fresh

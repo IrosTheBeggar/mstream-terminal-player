@@ -409,6 +409,21 @@ has the paste box (`j`) with the ticket decoded beneath it before anything is se
 servers you can read: `t` tests one and shows what it shares, `s` flips the discovery opt-out,
 `r` forgets it behind a warning. `x` turns the endpoint off, behind a warning.
 
+```
+mstream-player admin backups                 # each library's copies on other drives
+```
+
+**Backups** is the webapp's Backups page, still marked beta there. One state line carries
+the run in flight with the kit's scan bar, or the tasks waiting behind a scan, or idle. The
+add card sits above the table of destinations — library, folder, trigger, retention, the last
+run's status and age, on or off. On a row, `Enter` opens the last fifty runs with the chosen
+run's notes beneath, `n` runs it now, `e` edits it, `s` flips it on or off, `r` removes it
+behind a warning that the files on disk stay. Adding and editing share one form: the library
+(fixed when editing), the trigger, the destination folder — `^B` browses the server's disk, or
+the OS dialog with `--same-machine` — with the server's own verdict on the path beneath it as
+you type, retention, throttle, the daily hour, and the exclude patterns, prefilled from the
+server and sent only when changed so an untouched list keeps following the server's defaults.
+
 The saved session must belong to an admin. Two server settings answer with errors the room
 explains in words: `lockAdmin` (the panel is locked, HTTP 405) and an address-restricted admin
 panel (403 from another machine).

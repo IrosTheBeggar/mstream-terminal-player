@@ -484,6 +484,19 @@ off the engine's state, one `Form` shape for mint / accept / limits (Tab-cycled 
 only in the caps, the tri-state expiry), the minted ticket shown whole, gold gates for decline
 / revoke / forget / turn off, a quiet 30 s poll. What a peer shares is kept in memory from the
 last `t` (the server stores no list). Not built: the Overview (pinned), a "view peer" jump.
+
+**Backups room ✅ 2026-09-07** — `mstream-player admin backups` (`src/admin/backups.rs`), per the
+"Admin Backups" canvas: the page's beta banner as a chip, the live-progress card and queue
+notice as one state line (the bar's denominator is the previous run's total; a first run gets
+the all-dim bar), the add card over a LIBRARY · DESTINATION · TRIGGER · RETENTION · LAST RUN · ON
+table with throttle and excludes on the note line, one form for add and edit (radio row for the
+library, the kit's radio group for the trigger, the path with `^B` browse — server browser or the
+OS dialog with `--same-machine` — and the server's check-path verdict beneath, digit fields, the
+exclude list prefilled from `/backup/platform` and OMITTED when untouched; edit sends only what
+changed and `^P` sends `excludeGlobs: null`), the history modal with the selected run's notes
+wrapped beneath, the remove gate ("the files on disk stay"), a 2 s poll in flight and 5 s idle.
+`AdminDirEntry` gained the library `id` the backup routes address. Live-checked against the
+scratch server: add (manual) → run now → history → remove.
 Admin auth is the **same JWT** — `admin` comes from the users table, and the token is byte
 identical, so the client must probe rather than inspect it. Two gates will bite a terminal client:
 `lockAdmin` returns 405, and `adminAccess.mode` restricts by IP, so a panel run from another

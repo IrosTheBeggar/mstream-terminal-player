@@ -2509,7 +2509,7 @@ mod tests {
         out
     }
 
-    fn row<'a>(frame: &'a str, name: &str) -> String {
+    fn row(frame: &str, name: &str) -> String {
         frame.lines().find(|l| l.contains(name)).map(str::to_string).unwrap_or_default()
     }
 
