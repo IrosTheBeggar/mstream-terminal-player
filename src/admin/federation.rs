@@ -463,6 +463,9 @@ pub(crate) struct Room {
     busy: Option<String>,
     queued: Option<Op>,
     in_flight: bool,
+    /// The endpoint start is on its way: the card waits, dim and inert,
+    /// until the next load says the endpoint is on (or the start failed).
+    starting: bool,
     tscroll: usize,
     sel_anchor: Option<usize>,
     last_load: Option<Instant>,
@@ -491,6 +494,7 @@ impl Room {
             note: None,
             busy: None,
             queued: None,
+            starting: false,
             in_flight: false,
             tscroll: 0,
             sel_anchor: None,
@@ -568,7 +572,9 @@ impl Room {
                 if let Some(p) = &self.params
                     && !p.enabled
                     && p.available
+                    && !self.starting
                 {
+                    self.starting = true;
                     self.queue(Op::SetEnabled(true), t!("fed.busy_turning_on"));
                 }
             }
@@ -847,6 +853,7 @@ impl Room {
             Done::Loaded(Ok(loaded)) => {
                 let loaded = *loaded;
                 let enabled = loaded.params.enabled;
+                self.starting = false;
                 self.params = Some(loaded.params);
                 if let Some((accept, requests)) = loaded.requests {
                     self.accept_requests = accept;
@@ -884,6 +891,7 @@ impl Room {
                 self.reload(true);
             }
             Done::Enabled { on, result: Err(e) } => {
+                self.starting = false;
                 self.fail(&if on { t!("fed.fail_turn_on") } else { t!("fed.fail_turn_off") }, e);
                 self.reload(false);
             }
@@ -1522,7 +1530,7 @@ fn footer_hint(room: &Room) -> String {
         Modal::Forget(_) => t!("fed.hint_forget"),
         Modal::TurnOff => t!("fed.hint_turn_off"),
         Modal::None if room.params.is_none() => t!("fed.hint_loading"),
-        Modal::None if !room.enabled() => t!("fed.hint_off"),
+        Modal::None if !room.enabled() => if room.starting { t!("fed.hint_loading") } else { t!("fed.hint_off") },
         Modal::None if room.ticket_focus => t!("fed.hint_ticket"),
         Modal::None => {
             let mut s = String::new();
@@ -1576,18 +1584,20 @@ fn draw_off(frame: &mut Frame, room: &mut Room, column: Rect, p: &FederationPara
     if p.available {
         frame.render_widget(Paragraph::new(Span::styled(t!("fed.state_off").to_string(), dim())), line(column.y));
         let card = Rect { x: column.x, y, width: column.width, height: 3 };
-        let hover = room.ui.pointer.is_some_and(|pt| card.contains(pt));
-        let color = if hover { th().bright } else { th().ok };
+        let starting = room.starting;
+        let hover = !starting && room.ui.pointer.is_some_and(|pt| card.contains(pt));
+        let color = if starting { th().dim } else if hover { th().bright } else { th().ok };
         let block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(Style::default().fg(color));
         let inner = block.inner(card);
         frame.render_widget(block, card);
+        let label = if starting { t!("fed.turning_on") } else { t!("fed.turn_on") };
         frame.render_widget(
-            Paragraph::new(Span::styled(t!("fed.turn_on").to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)))
-                .alignment(Alignment::Center),
+            Paragraph::new(Span::styled(label.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD))).alignment(Alignment::Center),
             inner,
         );
-        room.ui.click(card, Act::TurnOn);
-        room.ui.tip(card, t!("fed.tip_turn_on"));
+        if !starting {
+            room.ui.click(card, Act::TurnOn);
+        }
         y += 4;
     } else {
         frame.render_widget(
@@ -1785,7 +1795,6 @@ fn draw_requests(frame: &mut Frame, room: &mut Room, body: Rect) {
         Rect { x: inner.x + 5, y: inner.y + 1, width: inner.width.saturating_sub(5), height: 1 },
     );
     room.ui.click(card, Act::ToggleInbox);
-    room.ui.tip(card, t!("fed.tip_inbox"));
 
     let table = Rect { x: body.x, y: body.y + 5, width: body.width, height: body.height.saturating_sub(5) };
     if table.height < 3 {
@@ -1874,7 +1883,6 @@ fn draw_tickets(frame: &mut Frame, room: &mut Room, body: Rect) {
         inner,
     );
     room.ui.click(card, Act::Mint);
-    room.ui.tip(card, t!("fed.tip_mint"));
 
     let table = Rect { x: body.x, y: body.y + 4, width: body.width, height: body.height.saturating_sub(4) };
     if table.height < 3 {
@@ -2531,6 +2539,14 @@ mod tests {
         press(&mut room, KeyCode::Enter);
         assert_eq!(room.queued, Some(Op::SetEnabled(true)));
         room.queued = None;
+        // While the start is on its way the card is dim, says so, and takes no second press.
+        let frame = draw(&mut room);
+        assert!(frame.contains("Starting federation…") && !frame.contains("Turn federation on"), "{frame}");
+        assert!(frame.contains("starting the federation endpoint…"), "{frame}");
+        assert!(!frame.contains("Enter turn on"), "{frame}");
+        press(&mut room, KeyCode::Enter);
+        room.act(Act::TurnOn);
+        assert!(room.queued.is_none(), "one start at a time");
         // The platform without an Iroh binary says so, in gold.
         room.apply(Done::Enabled { on: true, result: Ok(serde_json::json!({ "enabled": true, "available": false })) });
         assert!(room.note.as_ref().is_some_and(|(n, e)| *e && n.contains("no prebuilt binary")));
@@ -2540,7 +2556,15 @@ mod tests {
         room.apply(loaded(unavailable));
         let frame = draw(&mut room);
         assert!(frame.contains("• unavailable — Iroh has no prebuilt binary"), "{frame}");
-        assert!(!frame.contains("Turn federation on"), "{frame}");
+        assert!(!frame.contains("Turn federation on") && !frame.contains("Starting federation…"), "{frame}");
+        // A failed start hands the card back.
+        room.apply(loaded(params_off()));
+        press(&mut room, KeyCode::Enter);
+        assert!(room.starting);
+        room.queued = None;
+        room.apply(Done::Enabled { on: true, result: Err(ApiError::Server { status: 500, message: "relay down".into() }) });
+        assert!(!room.starting);
+        assert!(draw(&mut room).contains("Turn federation on"));
         assert!(matches!(press(&mut room, KeyCode::Esc), Some(Outcome::Quit)));
     }
 
