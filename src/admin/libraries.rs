@@ -35,7 +35,9 @@ use rust_i18n::t;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
-use super::{Outcome, Screen, draw_bottom, draw_header, frame_ground, gate_message, host_of};
+use super::{
+    Outcome, Screen, ServerHome, draw_bottom, draw_header, frame_ground, gate_message, host_of,
+};
 use crate::api::types::DirListing;
 use crate::api::{ApiError, Client};
 use crate::kit::theme::th;
@@ -155,6 +157,10 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
     let (job_tx, job_rx) = std::sync::mpsc::channel::<(Arc<Client>, Op)>();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<Done>();
     std::thread::spawn(move || {
+        // A typed `~` is the server user's home: learned once, expanded
+        // here before the listing and the add — the server resolves only
+        // the bare form, and only in its file explorer.
+        let mut home = ServerHome::new();
         while let Ok((client, op)) = job_rx.recv() {
             let done = match op {
                 Op::Load => Done::Loaded(client.admin_directories().map(|dirs| {
@@ -171,11 +177,17 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
                     Done::Browsed(client.admin_file_explorer(&path).map_err(|e| e.to_string()))
                 }
                 Op::Complete(dir) => {
-                    let listing = client.admin_file_explorer(&dir).map_err(|e| e.to_string());
+                    let listing = home
+                        .expand(&client, &dir)
+                        .and_then(|dir| client.admin_file_explorer(&dir))
+                        .map_err(|e| e.to_string());
                     Done::Completed { dir, listing }
                 }
                 Op::Add { directory, vpath } => {
-                    let result = client.admin_add_directory(&directory, &vpath).map(|_| ());
+                    let result = home
+                        .expand(&client, &directory)
+                        .and_then(|directory| client.admin_add_directory(&directory, &vpath))
+                        .map(|_| ());
                     Done::Added { vpath, result }
                 }
                 Op::Remove(vpath) => {
@@ -390,8 +402,9 @@ impl Room {
     }
 
     /// Queue a listing for the dir-part of the draft, if it changed. The
-    /// server lists and resolves: `~` is the server user's home, and the
-    /// listing's own `path` is what accepted suggestions build on.
+    /// server lists and resolves — the worker expands a leading `~` to the
+    /// server user's home first — and the listing's own `path` is what
+    /// accepted suggestions build on.
     fn refresh_completion(&mut self) {
         if let Modal::PathEntry(draft) = &mut self.modal {
             draft.sel = None;
@@ -1484,6 +1497,46 @@ mod tests {
         let Modal::Name(draft) = &room.modal else { panic!("the Name modal") };
         assert_eq!(draft.directory, "/srv/media/");
         assert_eq!(draft.name.value(), "media");
+    }
+
+    #[test]
+    fn a_typed_tilde_goes_out_as_typed_and_completes_to_the_servers_home() {
+        let _en = english();
+        let mut room = room(false);
+        handle_key(&mut room, key(KeyCode::Char('t')));
+        // The dir-part leaves as typed: the worker expands `~` once the
+        // server has said where it is, and the listing comes back resolved.
+        type_text(&mut room, "~/mu");
+        assert_eq!(room.queued, Some(Op::Complete("~/".into())));
+        room.queued = None;
+        room.apply(Done::Completed {
+            dir: "~/".into(),
+            listing: Ok(DirListing {
+                path: "/home/sherika".into(),
+                directories: vec![DirEntry { name: "Music".into() }, DirEntry { name: "Videos".into() }],
+                files: Vec::new(),
+            }),
+        });
+        let Modal::PathEntry(draft) = &room.modal else { panic!("the path modal") };
+        assert_eq!(draft.suggestions(), vec!["Music".to_string()]);
+        // Accepting builds on the resolved home: the field turns absolute.
+        handle_key(&mut room, key(KeyCode::Tab));
+        let Modal::PathEntry(draft) = &room.modal else { panic!("the path modal") };
+        assert_eq!(draft.text.value(), "/home/sherika/Music/");
+        assert_eq!(room.queued, Some(Op::Complete("/home/sherika/Music/".into())));
+        room.queued = None;
+        // Enter with the tilde still in the field keeps it for the add —
+        // the worker expands that the same way.
+        handle_key(&mut room, key(KeyCode::Esc));
+        handle_key(&mut room, key(KeyCode::Char('t')));
+        type_text(&mut room, "~/Music");
+        room.queued = None;
+        handle_key(&mut room, key(KeyCode::Enter));
+        let Modal::Name(draft) = &room.modal else { panic!("the Name modal") };
+        assert_eq!(draft.directory, "~/Music");
+        assert_eq!(draft.name.value(), "music", "the leaf, as a slug");
+        handle_key(&mut room, key(KeyCode::Enter));
+        assert_eq!(room.queued, Some(Op::Add { directory: "~/Music".into(), vpath: "music".into() }));
     }
 
     #[test]

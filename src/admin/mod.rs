@@ -436,3 +436,94 @@ pub(crate) fn copy_to_clipboard(text: &str) -> bool {
     let payload = base64::engine::general_purpose::STANDARD.encode(text);
     execute!(std::io::stdout(), Print(format!("\x1b]52;c;{payload}\x1b\\"))).is_ok()
 }
+
+/// The server user's home — the one the admin file explorer spells `~` and
+/// resolves. Nothing else on the server does: the add-directory route
+/// answers a tilde with a 500 and the backup routes with "must be
+/// absolute", and the explorer itself only knows the bare form. A room's
+/// worker learns the home once and expands a typed `~` before any route
+/// sees the path, so the modal keeps what the user typed.
+pub(crate) struct ServerHome(Option<String>);
+
+impl ServerHome {
+    pub(crate) fn new() -> Self {
+        ServerHome(None)
+    }
+
+    /// `path` with a leading `~` — alone, or before a separator — replaced
+    /// by the server's home. Anything else comes back untouched, without a
+    /// request. The one request that learns the home fails like any other
+    /// call, so the caller's own sentence names what could not be done.
+    pub(crate) fn expand(&mut self, client: &Client, path: &str) -> Result<String, ApiError> {
+        if !home_ref(path) {
+            return Ok(path.to_string());
+        }
+        let home = match &self.0 {
+            Some(home) => home.clone(),
+            None => {
+                let listed = client.admin_file_explorer("~")?.path;
+                if listed.is_empty() {
+                    return Err(ApiError::Decode {
+                        endpoint: "api/v1/admin/file-explorer".into(),
+                        message: "the listing of ~ names no path".into(),
+                    });
+                }
+                self.0 = Some(listed.clone());
+                listed
+            }
+        };
+        Ok(join_home(&home, path))
+    }
+}
+
+/// A shell's home reference: `~` alone, or `~` before a separator. `~user`
+/// is not one — here it is a folder called `~user`.
+pub(crate) fn home_ref(path: &str) -> bool {
+    path == "~" || path.starts_with("~/") || path.starts_with("~\\")
+}
+
+/// A home reference (see [`home_ref`]) rooted at `home`, in the home's own
+/// separator — a Windows server's `~/Music` becomes `C:\Users\me\Music`.
+pub(crate) fn join_home(home: &str, path: &str) -> String {
+    let rest = &path[1..];
+    let trimmed = home.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        // A root as the home ("/"): it already ends in its separator.
+        return format!("{home}{}", rest.trim_start_matches(['/', '\\']));
+    }
+    if trimmed.contains('\\') {
+        format!("{trimmed}{}", rest.replace('/', "\\"))
+    } else {
+        format!("{trimmed}{rest}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_home_reference_is_the_tilde_alone_or_before_a_separator() {
+        assert!(home_ref("~"));
+        assert!(home_ref("~/"));
+        assert!(home_ref("~/Music"));
+        assert!(home_ref("~\\Music"));
+        assert!(!home_ref("~music"), "a folder called ~music");
+        assert!(!home_ref("/srv/~"));
+        assert!(!home_ref(""));
+    }
+
+    #[test]
+    fn a_home_reference_is_rooted_at_the_servers_home_in_its_own_separator() {
+        assert_eq!(join_home("/home/me", "~"), "/home/me");
+        assert_eq!(join_home("/home/me", "~/"), "/home/me/");
+        assert_eq!(join_home("/home/me/", "~/Music"), "/home/me/Music");
+        assert_eq!(join_home("C:\\Users\\me", "~\\Music"), "C:\\Users\\me\\Music");
+        assert_eq!(
+            join_home("C:\\Users\\me\\", "~/Music/2024"),
+            "C:\\Users\\me\\Music\\2024",
+            "typed unix-style at a Windows server"
+        );
+        assert_eq!(join_home("/", "~/x"), "/x", "a root as the home keeps one separator");
+    }
+}

@@ -28,8 +28,8 @@ use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
 use super::{
-    Outcome, Screen, age_text, draw_bottom, draw_header, fmt_bytes, fmt_count, frame_ground,
-    gate_message, host_of, iso_unix, printable, unix_now,
+    Outcome, Screen, ServerHome, age_text, draw_bottom, draw_header, fmt_bytes, fmt_count,
+    frame_ground, gate_message, host_of, iso_unix, printable, unix_now,
 };
 use crate::api::types::{ActiveBackup, BackupDestination, BackupRun, BackupStatus, DirListing, PathCheck, RunAnswer};
 use crate::api::{ApiError, BackupPatch, Client, NewBackupDestination};
@@ -336,6 +336,10 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
     let (job_tx, job_rx) = std::sync::mpsc::channel::<(Arc<Client>, Op)>();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<Done>();
     std::thread::spawn(move || {
+        // A typed `~` destination is the server user's home: learned once,
+        // expanded here before the check and the save — the backup routes
+        // insist on an absolute path.
+        let mut home = ServerHome::new();
         while let Ok((client, op)) = job_rx.recv() {
             let done = match op {
                 Op::Load => Done::Loaded(client.admin_backup_destinations().and_then(|dests| {
@@ -349,12 +353,33 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
                 })),
                 Op::Platform => Done::Platform(client.admin_backup_platform().map(|p| p.default_excludes)),
                 Op::Check { library_id, dest, exclude_dest_id } => {
-                    let result = client.admin_backup_check_path(library_id, &dest, exclude_dest_id);
+                    let result = home
+                        .expand(&client, &dest)
+                        .and_then(|path| client.admin_backup_check_path(library_id, &path, exclude_dest_id));
                     Done::Checked { dest, result }
                 }
-                Op::Add(dest) => Done::Added(client.admin_backup_add(&dest).map(|_| ())),
-                Op::Patch { id, patch, what } => {
-                    Done::Patched { id, what, result: client.admin_backup_patch(id, &patch).map(|_| ()) }
+                Op::Add(mut dest) => Done::Added(
+                    home.expand(&client, &dest.dest_path)
+                        .and_then(|path| {
+                            dest.dest_path = path;
+                            client.admin_backup_add(&dest)
+                        })
+                        .map(|_| ()),
+                ),
+                Op::Patch { id, mut patch, what } => {
+                    let expanded = match patch.dest_path.as_deref() {
+                        Some(path) => home.expand(&client, path).map(Some),
+                        None => Ok(None),
+                    };
+                    let result = expanded
+                        .and_then(|path| {
+                            if path.is_some() {
+                                patch.dest_path = path;
+                            }
+                            client.admin_backup_patch(id, &patch)
+                        })
+                        .map(|_| ());
+                    Done::Patched { id, what, result }
                 }
                 Op::Remove(id) => Done::Removed(client.admin_backup_remove(id).map(|_| ())),
                 Op::Run(id) => Done::Ran(client.admin_backup_run(id)),

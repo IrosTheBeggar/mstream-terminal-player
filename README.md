@@ -372,7 +372,8 @@ Two rooms. **Libraries** (the default) is the server's music folders — each fo
 its path as the server sees it, and whether the scanner follows symlinks (`s` flips it, from
 the next scan on). `b` browses the server's own disk; with `--same-machine` it opens the OS
 folder dialog instead, the same picker the setup wizard uses. `t` types a path, with
-completion from the server. Every way of adding ends at the naming step, because the name is
+completion from the server; `~` is the server user's home, as it is for `b`. Every way of
+adding ends at the naming step, because the name is
 the library's vpath — its address in every link, playlist and user grant — and the server
 cannot rename one, so it is asked for once. `r` removes behind a warning; the files never move.
 
@@ -419,10 +420,11 @@ add card sits above the table of destinations — library, folder, trigger, rete
 run's status and age, on or off. On a row, `Enter` opens the last fifty runs with the chosen
 run's notes beneath, `n` runs it now, `e` edits it, `s` flips it on or off, `r` removes it
 behind a warning that the files on disk stay. Adding and editing share one form: the library
-(fixed when editing), the trigger, the destination folder — `^B` browses the server's disk, or
-the OS dialog with `--same-machine` — with the server's own verdict on the path beneath it as
-you type, retention, throttle, the daily hour, and the exclude patterns, prefilled from the
-server and sent only when changed so an untouched list keeps following the server's defaults.
+(fixed when editing), the trigger, the destination folder — typed (`~` is the server user's
+home), or `^B` browses the server's disk, or the OS dialog with `--same-machine` — with the
+server's own verdict on the path beneath it as you type, retention, throttle, the daily hour,
+and the exclude patterns, prefilled from the server and sent only when changed so an untouched
+list keeps following the server's defaults.
 
 ```
 mstream-player admin torrents                # the torrent client and what it does for you
