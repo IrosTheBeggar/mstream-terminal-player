@@ -447,10 +447,81 @@ with tags, and drilling into one played a doorway.
   live. No federated peers are available, so that half would ship unverified.
 
 #### B4 — Admin panel
+
+**Libraries room ✅ 2026-09-06** — `mstream-player admin` (`src/admin/`), the kit surface the
+"Admin Libraries" canvas settled on, barebones by choice: a NAME · FOLDER · SYMLINKS table over
+`admin/directories` (` [X]` outside the selection, tips on the bottom edge, no bottom bar or gold
+rule), adding by the OS picker (`--same-machine`, the wizard's `picker.rs` on the worker), the
+admin file explorer, or a typed path with server-fed completion — every route ending in the Name
+modal, because the vpath is permanent (no rename API) — the remove gate, and the per-library
+follow-symlinks toggle. The two gates above land as sentences (405 → "locked", 403 → "not an
+admin here, or restricted by address"). Not built: the Overview (rooms + network stats,
+canvas "Admin Overview", pinned), counts and scan columns (no per-library source since the
+velvet removal; `/scan/progress` rows exist only mid-scan), rename (no API).
+
+**Discovery room ✅ 2026-09-06** — `mstream-player admin discovery` (`src/admin/discovery.rs`;
+`src/admin/mod.rs` is now the hub: the `Screen` trait, the shared terminal session, header and
+bottom lines, the gate sentences). The webapp's Discovery page in the kit, per the "Admin P2P
+Discovery" canvas: the state line (connected / joined, waiting / reconnecting, attempt N / not
+joined / binary missing) with the all-dim "searching" bar, the four tabs in an eight-row pane
+(Stats tiles, the Activity ring delta-polled by seq, Invite with the endpoint + ticket + the
+befriend box as an inline kit input, Config with the identity and the five numeric settings on
+digits), the catalog as a table whose SNAPSHOT and FEDERATION columns replace the card chips
+(relations derived from `/admin/federation/requests`), the Enter sheet as a list picker, `f`
+compose (message + offered vpaths), block and leave as gold gates, `h` incompatible, `u`
+blocked, `/` filter, a quiet ten-second poll. Off the network: the pitch, one join card that
+posts `enabled` at once (no gate, by the user's call) and the federation-requests opt-in on by
+default; the identity modal opens after the join, as the webapp does. `y` copies the ticket
+over OSC 52 (best effort; Apple Terminal ignores it). Kit additions documented: tabs (active
+= 1-row filled slab), the state line, an inline non-modal input.
+
+**Federation room ✅ 2026-09-07** — `mstream-player admin federation` (`src/admin/federation.rs`),
+per the "Admin Federation" canvas: the state line (on · relay · endpoint · inbox), three tabs
+Requests · Tickets · Peers, each a full-height table with its affordance on top (the inbox
+checkbox card, the mint card, the paste box with the `mstrfed1:` ticket decoded client-side as
+the webapp does), the webapp's request-state vocabulary as kit colors with the retry ladder
+off the engine's state, one `Form` shape for mint / accept / limits (Tab-cycled fields, digits
+only in the caps, the tri-state expiry), the minted ticket shown whole, gold gates for decline
+/ revoke / forget / turn off, a quiet 30 s poll. What a peer shares is kept in memory from the
+last `t` (the server stores no list). Not built: the Overview (pinned), a "view peer" jump.
+
+**Backups room ✅ 2026-09-07** — `mstream-player admin backups` (`src/admin/backups.rs`), per the
+"Admin Backups" canvas: the page's beta banner as a chip, the live-progress card and queue
+notice as one state line (the bar's denominator is the previous run's total; a first run gets
+the all-dim bar), the add card over a LIBRARY · DESTINATION · TRIGGER · RETENTION · LAST RUN · ON
+table with throttle and excludes on the note line, one form for add and edit (radio row for the
+library, the kit's radio group for the trigger, the path with `^B` browse — server browser or the
+OS dialog with `--same-machine` — and the server's check-path verdict beneath, digit fields, the
+exclude list prefilled from `/backup/platform` and OMITTED when untouched; edit sends only what
+changed and `^P` sends `excludeGlobs: null`), the history modal with the selected run's notes
+wrapped beneath, the remove gate ("the files on disk stay"), a 2 s poll in flight and 5 s idle.
+`AdminDirEntry` gained the library `id` the backup routes address. Live-checked against the
+scratch server: add (manual) → run now → history → remove.
 Admin auth is the **same JWT** — `admin` comes from the users table, and the token is byte
 identical, so the client must probe rather than inspect it. Two gates will bite a terminal client:
 `lockAdmin` returns 405, and `adminAccess.mode` restricts by IP, so a panel run from another
 machine gets 403 under hardened configs. Say that plainly rather than showing a bare error.
+
+**Torrents room ✅ 2026-09-08** — `mstream-player admin torrents` (`src/admin/torrents.rs`), per the
+"Admin Torrents" canvas: two phases — the client page (radio group Disabled / Transmission /
+qBittorrent / Deluge with each daemon's port and quirk; the policy radio beneath it only when the
+server has more than one user; Enter posts `/admin/torrent/client` and opens Connect) and the
+connect page (HOST · PORT · USERNAME · PASSWORD · RPC PATH · HTTPS per client; `^T` posts
+`/<client>/test`, Enter `/connect`, the daemon's answer under the form, qBittorrent's CSRF caveat)
+— then the state line (connected / disconnected with the reason / asking) and five tabs: Torrents
+(NAME · STATUS · PROGRESS · DOWN · SIZE · ADDED BY, `/` filter, `r` remove behind the files-stay
+gate, the daemon's list error inline), Libraries (ACCESS ladder · PATH AS SEEN BY <client> ·
+TEMPLATE; `d`/`D` auto-detect, `m` manual mapping with the 422 reason in the modal, `t` template
+modal with the sample preview, `^S` suggested, `^X` clear), Seeding (`a` a `.torrent` — the OS
+file dialog with `--same-machine` (picker gained `pick_file`), else a path modal with local Tab
+completion; SEARCH IN ticks on digits; one multipart POST per file, queued; outcomes in the
+webapp's words), Access (policy radio posts at once; USER · ADMIN · TORRENTS toggles; hidden with
+one user), Client (status, saved fields, other saved clients, `t` test, `c` switch, `x`
+disconnect gate). Polls: the list every 5 s on the Torrents tab, everything every 30 s. API:
+the torrent types, twenty calls, a raw multipart `send_bytes`, `admin_users`;
+`extract_error` now prefers a body's `message` sentence over its `error` code. Locales `tor:`
+(240 keys × 10). Live-checked on the scratch server: choose Transmission → the connect form → a
+probe against nothing ("connection failed: connect ECONNREFUSED") → back to Disabled.
 
 Build, in order of fit: **logs** (`/api/v1/admin/logs/recent?since=<seq>` is a purpose-built
 tail-poll API with a cursor), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and

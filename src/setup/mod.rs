@@ -2412,7 +2412,7 @@ fn enrichment_name(pass: &str) -> String {
 /// selector rendered as a question mark; mStream#908 smoke follow-up).
 /// The stand-ins keep the shape language: CP437 has its own triangles,
 /// squares, and dots. Every self-identifying terminal keeps the originals.
-fn g(fancy: &'static str, plain: &'static str) -> &'static str {
+pub(crate) fn g(fancy: &'static str, plain: &'static str) -> &'static str {
     if crate::kit::theme::legacy_conhost() { plain } else { fancy }
 }
 
@@ -3232,7 +3232,7 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn folder(path: &str) -> Folder {
@@ -3465,7 +3465,7 @@ mod tests {
     /// Serialises the one test that flips the process-global locale
     /// against the tests that assert English strings — today's config
     /// env-race lesson, applied before it flakes.
-    static LOCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static LOCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn every_locale_mirrors_the_english_keys_and_placeholders() {

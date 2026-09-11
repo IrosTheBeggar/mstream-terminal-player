@@ -34,6 +34,8 @@ mod serve;
 mod kit;
 #[cfg(not(target_arch = "wasm32"))]
 mod setup;
+#[cfg(not(target_arch = "wasm32"))]
+mod admin;
 
 /// The browser build (see its module note). Everything below this line that
 /// swaps a module out for a hand-written stand-in exists so the App, the
@@ -162,6 +164,8 @@ enum Command {
     Play(cmd_play::PlayArgs),
     /// First-run setup for a fresh mStream server: folders, login, extras
     Setup(setup::SetupArgs),
+    /// Manage the server: libraries, discovery, federation, backups, torrents (needs an admin session)
+    Admin(admin::AdminArgs),
     /// Show the server's Quick Connect code as a scannable QR page
     Qr(setup::QrArgs),
     /// Authenticate against an mStream server and save the session
@@ -303,6 +307,7 @@ fn main() {
         }
         (Some(Command::Play(args)), _) => std::process::exit(cmd_play::run(args)),
         (Some(Command::Setup(args)), _) => std::process::exit(setup::run(args)),
+        (Some(Command::Admin(args)), _) => std::process::exit(admin::run(args)),
         (Some(Command::Qr(args)), _) => std::process::exit(setup::run_qr(args)),
         (Some(Command::Login(args)), _) => std::process::exit(cmd_library::login(args)),
         (Some(Command::Logout), _) => std::process::exit(cmd_library::logout()),

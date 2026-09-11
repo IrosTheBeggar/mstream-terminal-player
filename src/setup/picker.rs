@@ -95,3 +95,58 @@ pub fn pick_folder() -> Pick {
 pub fn pick_folder() -> Pick {
     Pick::Unavailable("no native picker on this platform".to_string())
 }
+
+/// What came back from asking for a file.
+pub enum FilePick {
+    File(PathBuf),
+    Cancelled,
+    #[allow(dead_code)]
+    Unavailable(String),
+}
+
+#[cfg(target_os = "macos")]
+pub fn pick_file(title: &str) -> FilePick {
+    let safe: String = title.chars().filter(|c| *c != '"' && *c != '\\').collect();
+    let script = format!("POSIX path of (choose file with prompt \"{safe}\")");
+    match std::process::Command::new("/usr/bin/osascript").arg("-e").arg(&script).output() {
+        Ok(out) if out.status.success() => {
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if path.is_empty() { FilePick::Cancelled } else { FilePick::File(PathBuf::from(path)) }
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            if err.contains("-128") { FilePick::Cancelled } else { FilePick::Unavailable(err.trim().to_string()) }
+        }
+        Err(e) => FilePick::Unavailable(e.to_string()),
+    }
+}
+
+#[cfg(windows)]
+pub fn pick_file(title: &str) -> FilePick {
+    match rfd::FileDialog::new().set_title(title).add_filter("Torrent", &["torrent"]).pick_file() {
+        Some(path) => FilePick::File(path),
+        None => FilePick::Cancelled,
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn pick_file(title: &str) -> FilePick {
+    use ashpd::desktop::file_chooser::SelectedFiles;
+
+    let request = async { SelectedFiles::open_file().title(title).send().await?.response() };
+    match crate::runtime::block_on(request) {
+        Ok(Ok(files)) => match files.uris().first().and_then(|uri| uri.to_file_path().ok()) {
+            Some(path) => FilePick::File(path),
+            None => FilePick::Cancelled,
+        },
+        Ok(Err(ashpd::Error::Response(_))) => FilePick::Cancelled,
+        Ok(Err(e)) => FilePick::Unavailable(e.to_string()),
+        Err(e) => FilePick::Unavailable(e),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+pub fn pick_file(_title: &str) -> FilePick {
+    FilePick::Unavailable("no native picker on this platform".to_string())
+}
+

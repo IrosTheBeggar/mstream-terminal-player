@@ -13,6 +13,10 @@
 // CI must never silently ship an iconless exe again.
 fn main() {
     println!("cargo:rerun-if-changed=assets/mstream-logo.ico");
+    // The wizard and admin copy is embedded at compile time (rust_i18n::i18n!),
+    // and the macro leaves no trace cargo can see: a locale-only edit must
+    // still rebuild, or the binary keeps rendering yesterday's strings.
+    println!("cargo:rerun-if-changed=locales");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }

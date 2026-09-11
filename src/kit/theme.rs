@@ -89,8 +89,23 @@ pub enum Tier {
 /// reader that eats all input (see tui::graphics) - and the legacy
 /// fonts draw many glyphs as '?'.
 pub(crate) fn legacy_conhost() -> bool {
+    #[cfg(test)]
+    if PIN_MODERN.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
     static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ONCE.get_or_init(|| legacy_conhost_for(cfg!(windows), |var| std::env::var(var).ok()))
+}
+
+/// Frame tests name the fancy glyphs. A bare CI console — windows-latest
+/// exports none of the identifying variables — would flip every checkbox,
+/// caret and arrow to the CP437 stand-ins, so those tests pin the answer.
+#[cfg(test)]
+static PIN_MODERN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+pub(crate) fn pin_modern_terminal() {
+    PIN_MODERN.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Pure form - unit-tested; the env reads live in [`legacy_conhost`].

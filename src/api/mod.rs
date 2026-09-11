@@ -43,6 +43,22 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(not(target_arch = "wasm32"))]
 const DECODE_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// The ceiling for a call that waits on a torrent daemon's round trip; the
+/// browser build has no per-request timeout to set.
+#[cfg(not(target_arch = "wasm32"))]
+fn daemon_ceiling() -> Option<std::time::Duration> {
+    Some(DECODE_TIMEOUT)
+}
+#[cfg(target_arch = "wasm32")]
+fn daemon_ceiling() -> Option<std::time::Duration> {
+    None
+}
+/// A discovery snapshot download: the server answers once the transfer is
+/// verified, and a cross-network pull can take minutes (its own ceiling
+/// is ten).
+#[cfg(not(target_arch = "wasm32"))]
+const FETCH_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// The directory to ask [`Client::file_explorer`] for when what you want is
 /// "wherever it makes sense to start".
 ///
@@ -90,6 +106,176 @@ impl fmt::Display for ApiError {
 }
 
 impl std::error::Error for ApiError {}
+
+/// The discovery catalog's one-argument peer actions — each is
+/// `POST api/v1/admin/discovery/p2p/<route> {endpointId}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerAction {
+    /// Drop the held snapshot (the catalog row stays).
+    RemoveSnapshot,
+    /// Drop an offline server from the catalog now; it returns on its
+    /// next announcement. Refused (409) while its snapshot is held.
+    Forget,
+    /// Blocklist + snapshot + catalog row, all in one server-side action.
+    Block,
+    Unblock,
+}
+
+impl PeerAction {
+    fn path(self) -> &'static str {
+        match self {
+            PeerAction::RemoveSnapshot => "api/v1/admin/discovery/p2p/peer-dbs/remove",
+            PeerAction::Forget => "api/v1/admin/discovery/p2p/forget",
+            PeerAction::Block => "api/v1/admin/discovery/p2p/block",
+            PeerAction::Unblock => "api/v1/admin/discovery/p2p/unblock",
+        }
+    }
+}
+
+/// A federation key's expiry, as the limits route takes it: leave it as it
+/// is, clear it, or set a new future cutoff (which is also how an expired
+/// key is renewed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpiryChange {
+    Keep,
+    Never,
+    /// ISO 8601, in the future.
+    At(String),
+}
+
+/// A backup destination to add: `POST api/v1/admin/backup/destinations`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewBackupDestination {
+    pub library_id: i64,
+    pub dest_path: String,
+    /// `after-scan` | `daily` | `manual`.
+    pub trigger_type: String,
+    /// Required with `daily`.
+    pub daily_at_hour: Option<u32>,
+    pub retention_days: u32,
+    pub inter_file_delay_ms: u32,
+    /// None = the server's defaults, and whatever they become later.
+    pub exclude_globs: Option<Vec<String>>,
+}
+
+/// The credentials a torrent probe sends: the fields a client lacks
+/// (qBittorrent has no RPC path, Deluge no username) stay `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TorrentCreds {
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: String,
+    pub rpc_path: Option<String>,
+    pub use_https: bool,
+}
+
+impl TorrentCreds {
+    fn body(&self) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "host": self.host,
+            "port": self.port,
+            "password": self.password,
+            "useHttps": self.use_https,
+        });
+        if let Some(u) = &self.username {
+            body["username"] = serde_json::json!(u);
+        }
+        if let Some(p) = &self.rpc_path {
+            body["rpcPath"] = serde_json::json!(p);
+        }
+        body
+    }
+}
+
+/// The fields a `PATCH` may carry; None leaves a field alone.
+/// `exclude_globs`: None = untouched, Some(None) = back to the server's
+/// defaults, Some(Some(list)) = pinned to that list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BackupPatch {
+    pub dest_path: Option<String>,
+    pub trigger_type: Option<String>,
+    pub daily_at_hour: Option<Option<u32>>,
+    pub retention_days: Option<u32>,
+    pub inter_file_delay_ms: Option<u32>,
+    pub enabled: Option<bool>,
+    pub exclude_globs: Option<Option<Vec<String>>>,
+}
+
+impl BackupPatch {
+    fn body(&self) -> serde_json::Value {
+        let mut body = serde_json::Map::new();
+        if let Some(v) = &self.dest_path {
+            body.insert("destPath".into(), serde_json::json!(v));
+        }
+        if let Some(v) = &self.trigger_type {
+            body.insert("triggerType".into(), serde_json::json!(v));
+        }
+        if let Some(v) = &self.daily_at_hour {
+            body.insert("dailyAtHour".into(), serde_json::json!(v));
+        }
+        if let Some(v) = self.retention_days {
+            body.insert("retentionDays".into(), serde_json::json!(v));
+        }
+        if let Some(v) = self.inter_file_delay_ms {
+            body.insert("interFileDelayMs".into(), serde_json::json!(v));
+        }
+        if let Some(v) = self.enabled {
+            body.insert("enabled".into(), serde_json::json!(v));
+        }
+        if let Some(v) = &self.exclude_globs {
+            body.insert("excludeGlobs".into(), serde_json::json!(v));
+        }
+        serde_json::Value::Object(body)
+    }
+}
+
+/// The discovery network's numeric settings, each its own route and body
+/// key. Every one applies from the server's next check, no restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoverySetting {
+    /// Disk the downloaded peer snapshots may use, total (10–100000 MB).
+    MaxStorageMb,
+    /// Days of silence before an offline server leaves the list (0 = never).
+    PeerRetentionDays,
+    /// How many servers' snapshots to keep downloaded automatically (0–50).
+    AutoFetchCount,
+    /// Days before a downloaded snapshot may be swapped out (0 = never).
+    RotationDays,
+    /// The sidecar memory watchdog's ceiling in MB (0 = off).
+    SidecarMaxRssMb,
+}
+
+impl DiscoverySetting {
+    /// The route and the body key it reads.
+    fn route(self) -> (&'static str, &'static str) {
+        match self {
+            DiscoverySetting::MaxStorageMb => {
+                ("api/v1/admin/discovery/p2p/max-storage", "maxPeerDbStorageMb")
+            }
+            DiscoverySetting::PeerRetentionDays => {
+                ("api/v1/admin/discovery/p2p/peer-retention", "peerRetentionDays")
+            }
+            DiscoverySetting::AutoFetchCount => {
+                ("api/v1/admin/discovery/p2p/auto-fetch-count", "autoFetchCount")
+            }
+            DiscoverySetting::RotationDays => ("api/v1/admin/discovery/p2p/rotation", "rotationDays"),
+            DiscoverySetting::SidecarMaxRssMb => {
+                ("api/v1/admin/discovery/p2p/sidecar-max-rss", "sidecarMaxRssMb")
+            }
+        }
+    }
+
+    /// The server's own bounds for the value (mirrors its Joi schema).
+    pub fn bounds(self) -> (u64, u64) {
+        match self {
+            DiscoverySetting::MaxStorageMb => (10, 100_000),
+            DiscoverySetting::PeerRetentionDays | DiscoverySetting::RotationDays => (0, 3650),
+            DiscoverySetting::AutoFetchCount => (0, 50),
+            DiscoverySetting::SidecarMaxRssMb => (0, 100_000),
+        }
+    }
+}
 
 /// Run the async core to completion for the sync (native) surface.
 ///
@@ -271,7 +457,33 @@ impl Client {
                     .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?,
             );
         }
+        self.finish(path, req).await
+    }
 
+    /// A request whose body is raw bytes under its own content type — the
+    /// multipart upload the seed-existing route takes.
+    async fn send_bytes<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<T, ApiError> {
+        let url = self.endpoint(path)?;
+        let mut req = self.http.request(method, url);
+        if let Some(token) = &self.token {
+            req = req.header("x-access-token", token);
+        }
+        req = req.header("Content-Type", content_type).body(body);
+        self.finish(path, req).await
+    }
+
+    /// Send, map the status codes, decode the body.
+    async fn finish<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        req: reqwest::RequestBuilder,
+    ) -> Result<T, ApiError> {
         let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
         let status = resp.status();
         let text = resp.text().await.map_err(|e| ApiError::Network(e.to_string()))?;
@@ -798,6 +1010,61 @@ impl Client {
         wait(self.admin_add_directory_async(directory, vpath))
     }
 
+    /// Remove a library folder by vpath. The files stay on disk; the server
+    /// drops the library (and, on its next scan, its tracks) from the database.
+    pub async fn admin_remove_directory_async(
+        &self,
+        vpath: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.send(
+            Method::DELETE,
+            "api/v1/admin/directory",
+            Some(serde_json::json!({ "vpath": vpath })),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_remove_directory(&self, vpath: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_remove_directory_async(vpath))
+    }
+
+    /// A library's follow-symlinks flag. Takes effect on that library's
+    /// next scan — the server says so, and so does the UI.
+    pub async fn admin_set_follow_symlinks_async(
+        &self,
+        vpath: &str,
+        follow: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(
+            "api/v1/admin/directory/follow-symlinks",
+            serde_json::json!({ "vpath": vpath, "followSymlinks": follow }),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_set_follow_symlinks(
+        &self,
+        vpath: &str,
+        follow: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_set_follow_symlinks_async(vpath, follow))
+    }
+
+    /// The ADMIN file explorer: any directory on the server's own disk (the
+    /// public one only walks the libraries). `~` is the server user's home,
+    /// resolved server-side; the listing's `path` is the absolute form.
+    pub async fn admin_file_explorer_async(&self, directory: &str) -> Result<DirListing, ApiError> {
+        self.post("api/v1/admin/file-explorer", serde_json::json!({ "directory": directory }))
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_file_explorer(&self, directory: &str) -> Result<DirListing, ApiError> {
+        wait(self.admin_file_explorer_async(directory))
+    }
+
     /// Create a user. The wizard's first user is `admin: true` with every
     /// vpath — creating it is what closes the fresh install's open window.
     pub async fn admin_create_user_async(
@@ -908,6 +1175,915 @@ impl Client {
         wait(self.admin_iroh_async())
     }
 
+    // ── The discovery network (P2P), route for route with the webapp's
+    //    Discovery page. Everything here is admin-gated. ───────────────────
+
+    pub async fn admin_discovery_status_async(&self) -> Result<DiscoveryStatus, ApiError> {
+        self.get("api/v1/admin/discovery/p2p/status").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_status(&self) -> Result<DiscoveryStatus, ApiError> {
+        wait(self.admin_discovery_status_async())
+    }
+
+    /// The catalog. `include_incompatible` lifts the server's hide-by-default
+    /// filter on peers whose embedding model cannot serve this server.
+    pub async fn admin_discovery_catalog_async(
+        &self,
+        include_incompatible: bool,
+    ) -> Result<DiscoveryCatalog, ApiError> {
+        let path = if include_incompatible {
+            "api/v1/admin/discovery/p2p/catalog?includeIncompatible=1"
+        } else {
+            "api/v1/admin/discovery/p2p/catalog"
+        };
+        self.get(path).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_catalog(
+        &self,
+        include_incompatible: bool,
+    ) -> Result<DiscoveryCatalog, ApiError> {
+        wait(self.admin_discovery_catalog_async(include_incompatible))
+    }
+
+    /// The discovery log ring past `since` (0 = everything it holds).
+    pub async fn admin_discovery_activity_async(
+        &self,
+        since: u64,
+    ) -> Result<DiscoveryActivity, ApiError> {
+        self.get(&format!("api/v1/admin/discovery/p2p/activity?since={since}")).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_activity(&self, since: u64) -> Result<DiscoveryActivity, ApiError> {
+        wait(self.admin_discovery_activity_async(since))
+    }
+
+    /// Join the discovery network, optionally opening the federation
+    /// request inbox in the same breath (which turns federation on). The
+    /// server may download its sidecar before answering, so this gets the
+    /// decode ceiling like [`Client::admin_discovery_enabled_async`].
+    pub async fn admin_discovery_join_network_async(
+        &self,
+        accept_requests: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        let body = if accept_requests {
+            serde_json::json!({ "enabled": true, "acceptFederationRequests": true })
+        } else {
+            serde_json::json!({ "enabled": true })
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        return self
+            .send_within(
+                Method::POST,
+                "api/v1/admin/discovery/p2p/enabled",
+                Some(body),
+                Some(DECODE_TIMEOUT),
+            )
+            .await;
+        #[cfg(target_arch = "wasm32")]
+        return self.post("api/v1/admin/discovery/p2p/enabled", body).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_join_network(
+        &self,
+        accept_requests: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_join_network_async(accept_requests))
+    }
+
+    /// The server's name on the network (1–64 chars, no `|`). The server
+    /// re-announces at once when a snapshot is published.
+    pub async fn admin_discovery_set_name_async(
+        &self,
+        name: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/discovery/p2p/name", serde_json::json!({ "name": name })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_set_name(&self, name: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_set_name_async(name))
+    }
+
+    /// The catalog blurb beside the name (up to 180 chars, no `|`).
+    pub async fn admin_discovery_set_description_async(
+        &self,
+        description: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(
+            "api/v1/admin/discovery/p2p/description",
+            serde_json::json!({ "description": description }),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_set_description(
+        &self,
+        description: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_set_description_async(description))
+    }
+
+    /// Befriend a server by its endpoint ticket (or bare endpoint id),
+    /// persisted to the config so the friendship survives restarts.
+    pub async fn admin_discovery_befriend_async(
+        &self,
+        peer: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(
+            "api/v1/admin/discovery/p2p/join",
+            serde_json::json!({ "peer": peer, "persist": true }),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_befriend(&self, peer: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_befriend_async(peer))
+    }
+
+    /// Download (or refresh) a catalog peer's snapshot. The server answers
+    /// when the verified transfer is done — minutes, across networks — so
+    /// this call carries its own ceiling. A manual download arrives pinned.
+    pub async fn admin_discovery_fetch_async(
+        &self,
+        endpoint_id: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        let body = serde_json::json!({ "endpointId": endpoint_id });
+        #[cfg(not(target_arch = "wasm32"))]
+        return self
+            .send_within(
+                Method::POST,
+                "api/v1/admin/discovery/p2p/peer-dbs/fetch",
+                Some(body),
+                Some(FETCH_TIMEOUT),
+            )
+            .await;
+        #[cfg(target_arch = "wasm32")]
+        return self.post("api/v1/admin/discovery/p2p/peer-dbs/fetch", body).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_fetch(&self, endpoint_id: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_fetch_async(endpoint_id))
+    }
+
+    /// Pin (rotation immunity) or unpin a held snapshot.
+    pub async fn admin_discovery_pin_async(
+        &self,
+        endpoint_id: &str,
+        pinned: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(
+            "api/v1/admin/discovery/p2p/peer-dbs/pin",
+            serde_json::json!({ "endpointId": endpoint_id, "pinned": pinned }),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_pin(
+        &self,
+        endpoint_id: &str,
+        pinned: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_pin_async(endpoint_id, pinned))
+    }
+
+    /// The one-argument peer actions: remove a snapshot, forget, block,
+    /// unblock.
+    pub async fn admin_discovery_peer_async(
+        &self,
+        action: PeerAction,
+        endpoint_id: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(action.path(), serde_json::json!({ "endpointId": endpoint_id })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_peer(
+        &self,
+        action: PeerAction,
+        endpoint_id: &str,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_peer_async(action, endpoint_id))
+    }
+
+    /// One of the numeric settings; the server validates the bounds.
+    pub async fn admin_discovery_setting_async(
+        &self,
+        setting: DiscoverySetting,
+        value: u64,
+    ) -> Result<serde_json::Value, ApiError> {
+        let (path, key) = setting.route();
+        let mut body = serde_json::Map::new();
+        body.insert(key.to_string(), serde_json::json!(value));
+        self.post(path, serde_json::Value::Object(body)).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_discovery_setting(
+        &self,
+        setting: DiscoverySetting,
+        value: u64,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_discovery_setting_async(setting, value))
+    }
+
+    /// Federation's state (admin) — the discovery room reads `available`
+    /// to decide whether "ask to federate" exists on this platform.
+    pub async fn admin_federation_async(&self) -> Result<FederationParams, ApiError> {
+        self.get("api/v1/admin/federation").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation(&self) -> Result<FederationParams, ApiError> {
+        wait(self.admin_federation_async())
+    }
+
+    /// Pairing requests in both directions — the catalog's relationship
+    /// column derives from them.
+    pub async fn admin_federation_requests_async(&self) -> Result<FederationRequests, ApiError> {
+        self.get("api/v1/admin/federation/requests").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_requests(&self) -> Result<FederationRequests, ApiError> {
+        wait(self.admin_federation_requests_async())
+    }
+
+    /// Ask a discovery peer to federate: an optional message (≤ 500 chars)
+    /// and the libraries offered back if they accept. No access changes
+    /// hands now — 409 when a request is already open with that peer.
+    pub async fn admin_federation_request_send_async(
+        &self,
+        endpoint_id: &str,
+        offer_vpaths: &[String],
+        message: Option<&str>,
+    ) -> Result<serde_json::Value, ApiError> {
+        let mut body = serde_json::json!({ "endpointId": endpoint_id, "offerVpaths": offer_vpaths });
+        if let Some(message) = message.map(str::trim).filter(|m| !m.is_empty()) {
+            body["message"] = serde_json::json!(message);
+        }
+        self.post("api/v1/admin/federation/requests", body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_request_send(
+        &self,
+        endpoint_id: &str,
+        offer_vpaths: &[String],
+        message: Option<&str>,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_request_send_async(endpoint_id, offer_vpaths, message))
+    }
+
+    // ── The rest of federation's admin surface: keys, requests, peers ──────
+
+    /// The keys minted here, each with its swap-ready ticket while the
+    /// endpoint runs.
+    pub async fn admin_federation_keys_async(&self) -> Result<Vec<FederationKey>, ApiError> {
+        self.get("api/v1/admin/federation/keys").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_keys(&self) -> Result<Vec<FederationKey>, ApiError> {
+        wait(self.admin_federation_keys_async())
+    }
+
+    /// Mint a read-only key for `vpaths` (1–64-char name); `expires_at` is
+    /// ISO 8601 in the future, or None for never.
+    pub async fn admin_federation_mint_async(
+        &self,
+        name: &str,
+        vpaths: &[String],
+        limits: &FederationLimits,
+        expires_at: Option<&str>,
+    ) -> Result<MintedKey, ApiError> {
+        let mut body = serde_json::json!({
+            "name": name,
+            "vpaths": vpaths,
+            "streamKbps": limits.stream_kbps,
+            "dailyMb": limits.daily_mb,
+            "maxStreams": limits.max_streams,
+        });
+        if let Some(expires_at) = expires_at {
+            body["expiresAt"] = serde_json::json!(expires_at);
+        }
+        self.post("api/v1/admin/federation/keys", body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_mint(
+        &self,
+        name: &str,
+        vpaths: &[String],
+        limits: &FederationLimits,
+        expires_at: Option<&str>,
+    ) -> Result<MintedKey, ApiError> {
+        wait(self.admin_federation_mint_async(name, vpaths, limits, expires_at))
+    }
+
+    /// A key's limits, applied from its next request; the expiry is
+    /// tri-state so a limit tweak never restarts an expiry clock by accident.
+    pub async fn admin_federation_key_limits_async(
+        &self,
+        id: i64,
+        limits: &FederationLimits,
+        expiry: ExpiryChange,
+    ) -> Result<serde_json::Value, ApiError> {
+        let mut body = serde_json::json!({
+            "streamKbps": limits.stream_kbps,
+            "dailyMb": limits.daily_mb,
+            "maxStreams": limits.max_streams,
+        });
+        match expiry {
+            ExpiryChange::Keep => {}
+            ExpiryChange::Never => body["expiresAt"] = serde_json::Value::Null,
+            ExpiryChange::At(iso) => body["expiresAt"] = serde_json::json!(iso),
+        }
+        self.post(&format!("api/v1/admin/federation/keys/{id}/limits"), body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_key_limits(
+        &self,
+        id: i64,
+        limits: &FederationLimits,
+        expiry: ExpiryChange,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_key_limits_async(id, limits, expiry))
+    }
+
+    /// Revoke a key: live streams on it are cut at once.
+    pub async fn admin_federation_key_revoke_async(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::DELETE, &format!("api/v1/admin/federation/keys/{id}"), None).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_key_revoke(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_key_revoke_async(id))
+    }
+
+    /// Let the ticket be claimed again (the friend reinstalled).
+    pub async fn admin_federation_key_reset_binding_async(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(&format!("api/v1/admin/federation/keys/{id}/reset-binding"), serde_json::json!({}))
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_key_reset_binding(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_key_reset_binding_async(id))
+    }
+
+    /// Accept an inbound request: mint for `vpaths` and send the ticket
+    /// back; `accept_their_offer` also takes what they offered.
+    pub async fn admin_federation_request_accept_async(
+        &self,
+        id: i64,
+        vpaths: &[String],
+        limits: &FederationLimits,
+        expires_at: Option<&str>,
+        accept_their_offer: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        let mut body = serde_json::json!({
+            "vpaths": vpaths,
+            "streamKbps": limits.stream_kbps,
+            "dailyMb": limits.daily_mb,
+            "maxStreams": limits.max_streams,
+            "acceptTheirOffer": accept_their_offer,
+        });
+        if let Some(expires_at) = expires_at {
+            body["expiresAt"] = serde_json::json!(expires_at);
+        }
+        self.post(&format!("api/v1/admin/federation/requests/{id}/accept"), body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_request_accept(
+        &self,
+        id: i64,
+        vpaths: &[String],
+        limits: &FederationLimits,
+        expires_at: Option<&str>,
+        accept_their_offer: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_request_accept_async(id, vpaths, limits, expires_at, accept_their_offer))
+    }
+
+    /// Decline an inbound request; the server ignores that peer's asks
+    /// for seven days.
+    pub async fn admin_federation_request_reject_async(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(&format!("api/v1/admin/federation/requests/{id}/reject"), serde_json::json!({})).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_request_reject(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_request_reject_async(id))
+    }
+
+    /// Withdraw an outbound request that has not been answered.
+    pub async fn admin_federation_request_cancel_async(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(&format!("api/v1/admin/federation/requests/{id}/cancel"), serde_json::json!({})).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_request_cancel(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_request_cancel_async(id))
+    }
+
+    /// Drop a finished record (409 while the exchange is still live).
+    pub async fn admin_federation_request_dismiss_async(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::DELETE, &format!("api/v1/admin/federation/requests/{id}"), None).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_request_dismiss(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_request_dismiss_async(id))
+    }
+
+    /// The inbox switch, live.
+    pub async fn admin_federation_accept_requests_async(
+        &self,
+        enabled: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/federation/accept-requests", serde_json::json!({ "enabled": enabled }))
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_accept_requests(
+        &self,
+        enabled: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_accept_requests_async(enabled))
+    }
+
+    /// The servers this one can read.
+    pub async fn admin_federation_peers_async(&self) -> Result<Vec<FederationPeer>, ApiError> {
+        self.get("api/v1/admin/federation/peers").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_peers(&self) -> Result<Vec<FederationPeer>, ApiError> {
+        wait(self.admin_federation_peers_async())
+    }
+
+    /// Add a peer from a friend's `mstrfed1:` ticket; the server tests it
+    /// in the background. 400 for a ticket that does not parse or one
+    /// already added.
+    pub async fn admin_federation_peer_add_async(
+        &self,
+        ticket: &str,
+        name: Option<&str>,
+    ) -> Result<serde_json::Value, ApiError> {
+        let mut body = serde_json::json!({ "ticket": ticket });
+        if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
+            body["name"] = serde_json::json!(name);
+        }
+        self.post("api/v1/admin/federation/peers", body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_peer_add(
+        &self,
+        ticket: &str,
+        name: Option<&str>,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_peer_add_async(ticket, name))
+    }
+
+    /// Test a peer now — the server dials it and waits for its health
+    /// answer, so this gets the decode ceiling.
+    pub async fn admin_federation_peer_test_async(&self, id: i64) -> Result<PeerTest, ApiError> {
+        let path = format!("api/v1/admin/federation/peers/{id}/test");
+        #[cfg(not(target_arch = "wasm32"))]
+        return self
+            .send_within(Method::POST, &path, Some(serde_json::json!({})), Some(DECODE_TIMEOUT))
+            .await;
+        #[cfg(target_arch = "wasm32")]
+        return self.post(&path, serde_json::json!({})).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_peer_test(&self, id: i64) -> Result<PeerTest, ApiError> {
+        wait(self.admin_federation_peer_test_async(id))
+    }
+
+    /// Whether the Discover panel may query this peer.
+    pub async fn admin_federation_peer_discovery_async(
+        &self,
+        id: i64,
+        enabled: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.post(
+            &format!("api/v1/admin/federation/peers/{id}/discovery"),
+            serde_json::json!({ "enabled": enabled }),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_peer_discovery(
+        &self,
+        id: i64,
+        enabled: bool,
+    ) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_peer_discovery_async(id, enabled))
+    }
+
+    /// Forget a peer; its bridge is closed with it.
+    pub async fn admin_federation_peer_remove_async(
+        &self,
+        id: i64,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::DELETE, &format!("api/v1/admin/federation/peers/{id}"), None).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_federation_peer_remove(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_federation_peer_remove_async(id))
+    }
+
+    // ── Backups: the admin's destinations, their runs, the live status ─────
+
+    pub async fn admin_backup_destinations_async(&self) -> Result<Vec<BackupDestination>, ApiError> {
+        let list: BackupDestinations = self.get("api/v1/admin/backup/destinations").await?;
+        Ok(list.destinations)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_destinations(&self) -> Result<Vec<BackupDestination>, ApiError> {
+        wait(self.admin_backup_destinations_async())
+    }
+
+    pub async fn admin_backup_status_async(&self) -> Result<BackupStatus, ApiError> {
+        self.get("api/v1/admin/backup/status").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_status(&self) -> Result<BackupStatus, ApiError> {
+        wait(self.admin_backup_status_async())
+    }
+
+    /// The server's platform, home and default exclude patterns.
+    pub async fn admin_backup_platform_async(&self) -> Result<BackupPlatform, ApiError> {
+        self.get("api/v1/admin/backup/platform").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_platform(&self) -> Result<BackupPlatform, ApiError> {
+        wait(self.admin_backup_platform_async())
+    }
+
+    /// Preview what saving this path would say: the hard errors and the
+    /// warnings (same drive, exists with files, will be created…).
+    /// `exclude_dest_id` lets an edit skip its own row in the overlap check.
+    pub async fn admin_backup_check_path_async(
+        &self,
+        library_id: i64,
+        dest_path: &str,
+        exclude_dest_id: Option<i64>,
+    ) -> Result<PathCheck, ApiError> {
+        let mut body = serde_json::json!({ "libraryId": library_id, "destPath": dest_path });
+        if let Some(id) = exclude_dest_id {
+            body["excludeDestId"] = serde_json::json!(id);
+        }
+        self.post("api/v1/admin/backup/check-path", body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_check_path(
+        &self,
+        library_id: i64,
+        dest_path: &str,
+        exclude_dest_id: Option<i64>,
+    ) -> Result<PathCheck, ApiError> {
+        wait(self.admin_backup_check_path_async(library_id, dest_path, exclude_dest_id))
+    }
+
+    pub async fn admin_backup_add_async(
+        &self,
+        dest: &NewBackupDestination,
+    ) -> Result<serde_json::Value, ApiError> {
+        let mut body = serde_json::json!({
+            "libraryId": dest.library_id,
+            "destPath": dest.dest_path,
+            "triggerType": dest.trigger_type,
+            "retentionDays": dest.retention_days,
+            "enabled": true,
+            "interFileDelayMs": dest.inter_file_delay_ms,
+        });
+        if let Some(hour) = dest.daily_at_hour {
+            body["dailyAtHour"] = serde_json::json!(hour);
+        }
+        if let Some(globs) = &dest.exclude_globs {
+            body["excludeGlobs"] = serde_json::json!(globs);
+        }
+        self.post("api/v1/admin/backup/destinations", body).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_add(&self, dest: &NewBackupDestination) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_backup_add_async(dest))
+    }
+
+    /// Change any field but the library; a queued run picks the new
+    /// settings up when its turn comes, a running one finishes with the old.
+    pub async fn admin_backup_patch_async(
+        &self,
+        id: i64,
+        patch: &BackupPatch,
+    ) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::PATCH, &format!("api/v1/admin/backup/destinations/{id}"), Some(patch.body()))
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_patch(&self, id: i64, patch: &BackupPatch) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_backup_patch_async(id, patch))
+    }
+
+    /// Drop the schedule and its history; the files on disk stay.
+    pub async fn admin_backup_remove_async(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::DELETE, &format!("api/v1/admin/backup/destinations/{id}"), None).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_remove(&self, id: i64) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_backup_remove_async(id))
+    }
+
+    /// Run now — `queued`, or `skipped` while a run is still in progress.
+    /// A disabled destination answers 400.
+    pub async fn admin_backup_run_async(&self, id: i64) -> Result<RunAnswer, ApiError> {
+        self.post(&format!("api/v1/admin/backup/destinations/{id}/run"), serde_json::json!({})).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_run(&self, id: i64) -> Result<RunAnswer, ApiError> {
+        wait(self.admin_backup_run_async(id))
+    }
+
+    /// The most recent runs, newest first.
+    pub async fn admin_backup_history_async(&self, id: i64, limit: u32) -> Result<Vec<BackupRun>, ApiError> {
+        let h: BackupHistory =
+            self.get(&format!("api/v1/admin/backup/destinations/{id}/history?limit={limit}")).await?;
+        Ok(h.history)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_backup_history(&self, id: i64, limit: u32) -> Result<Vec<BackupRun>, ApiError> {
+        wait(self.admin_backup_history_async(id, limit))
+    }
+
+    // ── Torrents (admin) ────────────────────────────────────────────────────
+
+    /// The chosen client, the access policy, every client's saved fields.
+    pub async fn admin_torrent_params_async(&self) -> Result<TorrentParams, ApiError> {
+        self.get("api/v1/admin/torrent").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_params(&self) -> Result<TorrentParams, ApiError> {
+        wait(self.admin_torrent_params_async())
+    }
+
+    /// Choose the client: `disabled`, `transmission`, `qbittorrent`, `deluge`.
+    /// Every client keeps its saved credentials across a switch.
+    pub async fn admin_torrent_set_client_async(&self, client: &str) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/torrent/client", serde_json::json!({ "client": client })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_set_client(&self, client: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_torrent_set_client_async(client))
+    }
+
+    /// Who may add torrents: `all` or `whitelist`.
+    pub async fn admin_torrent_set_policy_async(&self, enabled_for: &str) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/torrent/enabled-for", serde_json::json!({ "enabledFor": enabled_for })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_set_policy(&self, enabled_for: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_torrent_set_policy_async(enabled_for))
+    }
+
+    /// One user's place on the whitelist.
+    pub async fn admin_user_torrent_access_async(&self, username: &str, allow: bool) -> Result<serde_json::Value, ApiError> {
+        self.post(
+            "api/v1/admin/users/torrent-access",
+            serde_json::json!({ "username": username, "allowTorrent": allow }),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_user_torrent_access(&self, username: &str, allow: bool) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_user_torrent_access_async(username, allow))
+    }
+
+    /// Probe a daemon with the given credentials: `connect` false saves
+    /// nothing, true saves them after a good probe. Always HTTP 200 — read
+    /// [`ProbeAnswer::ok`].
+    pub async fn admin_torrent_probe_async(
+        &self,
+        client: &str,
+        creds: &TorrentCreds,
+        connect: bool,
+    ) -> Result<ProbeAnswer, ApiError> {
+        let verb = if connect { "connect" } else { "test" };
+        self.send_within(Method::POST, &format!("api/v1/admin/torrent/{client}/{verb}"), Some(creds.body()), daemon_ceiling())
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_probe(&self, client: &str, creds: &TorrentCreds, connect: bool) -> Result<ProbeAnswer, ApiError> {
+        wait(self.admin_torrent_probe_async(client, creds, connect))
+    }
+
+    /// Forget a client's credentials; the daemon keeps everything.
+    pub async fn admin_torrent_disconnect_async(&self, client: &str) -> Result<serde_json::Value, ApiError> {
+        self.post(&format!("api/v1/admin/torrent/{client}/disconnect"), serde_json::json!({})).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_disconnect(&self, client: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_torrent_disconnect_async(client))
+    }
+
+    /// A live probe of the saved credentials.
+    pub async fn admin_torrent_status_async(&self) -> Result<TorrentStatus, ApiError> {
+        self.send_within(Method::GET, "api/v1/admin/torrent/status", None, daemon_ceiling()).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_status(&self) -> Result<TorrentStatus, ApiError> {
+        wait(self.admin_torrent_status_async())
+    }
+
+    /// Everything the daemon knows, mStream's rows marked.
+    pub async fn admin_torrent_list_async(&self) -> Result<TorrentList, ApiError> {
+        self.send_within(Method::GET, "api/v1/admin/torrent/list", None, daemon_ceiling()).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_list(&self) -> Result<TorrentList, ApiError> {
+        wait(self.admin_torrent_list_async())
+    }
+
+    /// Drop an mStream-added torrent from the daemon, files kept. A 404 is
+    /// the server refusing a torrent mStream did not add.
+    pub async fn admin_torrent_remove_async(&self, info_hash: &str) -> Result<RemoveAnswer, ApiError> {
+        self.send(Method::DELETE, &format!("api/v1/admin/torrent/{info_hash}"), None).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_remove(&self, info_hash: &str) -> Result<RemoveAnswer, ApiError> {
+        wait(self.admin_torrent_remove_async(info_hash))
+    }
+
+    /// The cached daemon-side view of every library.
+    pub async fn admin_torrent_vpath_access_async(&self) -> Result<VpathAccess, ApiError> {
+        self.get("api/v1/admin/torrent/vpath-access").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_vpath_access(&self) -> Result<VpathAccess, ApiError> {
+        wait(self.admin_torrent_vpath_access_async())
+    }
+
+    /// Re-run the probe for one library, or every library when `None`.
+    pub async fn admin_torrent_auto_detect_async(&self, vpath: Option<&str>) -> Result<VpathAccess, ApiError> {
+        let body = match vpath {
+            Some(v) => serde_json::json!({ "vpathName": v }),
+            None => serde_json::json!({}),
+        };
+        self.send_within(Method::POST, "api/v1/admin/torrent/vpath-access/auto-detect", Some(body), daemon_ceiling())
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_auto_detect(&self, vpath: Option<&str>) -> Result<VpathAccess, ApiError> {
+        wait(self.admin_torrent_auto_detect_async(vpath))
+    }
+
+    /// Type the daemon's path for a library; the server verifies it with the
+    /// same probe. A 422 carries the daemon's reason.
+    pub async fn admin_torrent_manual_mapping_async(&self, vpath: &str, daemon_path: &str) -> Result<serde_json::Value, ApiError> {
+        self.send_within(
+            Method::POST,
+            "api/v1/admin/torrent/vpath-access/manual",
+            Some(serde_json::json!({ "vpathName": vpath, "daemonPath": daemon_path })),
+            daemon_ceiling(),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_manual_mapping(&self, vpath: &str, daemon_path: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_torrent_manual_mapping_async(vpath, daemon_path))
+    }
+
+    /// Every library's template plus the server's variables and sample.
+    pub async fn admin_torrent_path_templates_async(&self) -> Result<PathTemplates, ApiError> {
+        self.get("api/v1/admin/torrent/path-templates").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_path_templates(&self) -> Result<PathTemplates, ApiError> {
+        wait(self.admin_torrent_path_templates_async())
+    }
+
+    /// Save a library's template; `None` clears it (freeform entry again).
+    pub async fn admin_torrent_set_template_async(&self, vpath: &str, template: Option<&str>) -> Result<TemplateSaved, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("api/v1/admin/torrent/path-templates/{vpath}"),
+            Some(serde_json::json!({ "template": template })),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_set_template(&self, vpath: &str, template: Option<&str>) -> Result<TemplateSaved, ApiError> {
+        wait(self.admin_torrent_set_template_async(vpath, template))
+    }
+
+    /// Hand the server a `.torrent` for content already on disk: multipart,
+    /// one file, the libraries to search (none = every library). Always HTTP
+    /// 200 — the outcome is in the body.
+    pub async fn admin_torrent_seed_existing_async(
+        &self,
+        file_name: &str,
+        bytes: &[u8],
+        vpaths: &[String],
+    ) -> Result<SeedOutcome, ApiError> {
+        let boundary = format!("----mstream-player-{:016x}{:016x}", fastrand::u64(..), fastrand::u64(..));
+        let mut body = Vec::with_capacity(bytes.len() + 512);
+        if !vpaths.is_empty() {
+            body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"vpaths\"\r\n\r\n").as_bytes());
+            body.extend_from_slice(serde_json::to_string(vpaths).unwrap_or_default().as_bytes());
+            body.extend_from_slice(b"\r\n");
+        }
+        let safe_name: String = file_name.chars().filter(|c| *c != '"' && *c != '\r' && *c != '\n').collect();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"torrentFile\"; filename=\"{safe_name}\"\r\nContent-Type: application/x-bittorrent\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        self.send_bytes(
+            Method::POST,
+            "api/v1/admin/torrent/seed-existing",
+            &format!("multipart/form-data; boundary={boundary}"),
+            body,
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_seed_existing(&self, file_name: &str, bytes: &[u8], vpaths: &[String]) -> Result<SeedOutcome, ApiError> {
+        wait(self.admin_torrent_seed_existing_async(file_name, bytes, vpaths))
+    }
+
+    /// Every user with their flags, keyed by username.
+    pub async fn admin_users_async(&self) -> Result<std::collections::BTreeMap<String, AdminUser>, ApiError> {
+        self.get("api/v1/admin/users").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_users(&self) -> Result<std::collections::BTreeMap<String, AdminUser>, ApiError> {
+        wait(self.admin_users_async())
+    }
+
     /// Per-library scan progress (works for any signed-in user; on a fresh
     /// zero-account server too).
     pub async fn scan_progress_async(&self) -> Result<Vec<ScanProgressRow>, ApiError> {
@@ -936,8 +2112,12 @@ impl Client {
 /// trimmed excerpt of whatever was actually returned.
 fn extract_error(body: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Some(msg) = v.get("error").and_then(|e| e.as_str()) {
-            return msg.to_string();
+        // Newer routes answer `{error: <code>, message: <sentence>}`; the
+        // sentence is the one for a human.
+        let message = v.get("message").and_then(|m| m.as_str()).filter(|m| !m.trim().is_empty());
+        let error = v.get("error").and_then(|e| e.as_str());
+        if let Some(text) = message.or(error) {
+            return text.to_string();
         }
     }
     let trimmed = body.trim();

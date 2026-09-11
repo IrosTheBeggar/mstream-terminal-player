@@ -360,6 +360,112 @@ mstream-player logout
 Servers running in public mode (no users configured) need no login — just pass
 `--server <url>`. `--server` accepts the same shorthand as the connect screen.
 
+## Admin panel
+
+```
+mstream-player admin                         # manage the saved session's server
+mstream-player admin --server http://nas:3000
+mstream-player admin --same-machine          # this terminal runs on the server: add folders with the OS dialog
+```
+
+Two rooms. **Libraries** (the default) is the server's music folders — each folder's name,
+its path as the server sees it, and whether the scanner follows symlinks (`s` flips it, from
+the next scan on). `b` browses the server's own disk; with `--same-machine` it opens the OS
+folder dialog instead, the same picker the setup wizard uses. `t` types a path, with
+completion from the server; `~` is the server user's home, as it is for `b`. Every way of
+adding ends at the naming step, because the name is
+the library's vpath — its address in every link, playlist and user grant — and the server
+cannot rename one, so it is asked for once. `r` removes behind a warning; the files never move.
+
+```
+mstream-player admin discovery               # the discovery network (P2P)
+```
+
+**Discovery** is the webapp's Discovery page: one state line (connected, joined and waiting,
+reconnecting, not joined), the four tabs — Stats, Activity, Invite, Config — and the servers
+you follow as a table, polled every ten seconds. `←`/`→` switch tabs. On a row, `Enter` opens
+the server's sheet with everything the webapp's card offers; `d` downloads or updates its
+snapshot, `p` pins it against rotation, `r` removes the snapshot, `f` asks the server to
+federate (a message plus the libraries you would share back), `g` forgets an offline server,
+`b` blocks behind a warning. `/` filters, `h` shows the servers hidden for an incompatible
+embedding model, `u` lists the blocked ones. Invite holds the endpoint and the ticket a friend
+pastes (`y` copies it where the terminal allows); `j` focuses the box a friend's ticket goes
+into. Config edits the announced name and description (`e`) and the five numeric settings
+(`1`–`5`). Off the network, the room is the webapp's pitch with one card that joins at once
+and the federation-requests opt-in, on by default; `x` leaves again, behind a warning.
+
+```
+mstream-player admin federation              # requests, the tickets you minted, the peers you can read
+```
+
+**Federation** is the webapp's Federation tab as three tabs on `←`/`→`, each a table with its
+own affordance on top. **Requests** holds the inbox switch (`s`) and every pairing ask in
+either direction with the webapp's state words; on a row, `a` accepts (a form: the libraries
+they may read, the bandwidth limits, an expiry, and whether to take what they offered), `n`
+declines behind a warning, `c` withdraws your own ask, `d` dismisses a finished record.
+**Tickets** is the mint card (`n`: who it is for, the libraries, the limits) and the keys you
+minted; the ticket to hand over is shown whole and `y` copies it, `l` edits limits and the
+expiry, `b` lets a claimed ticket be claimed again, `r` revokes behind a warning. **Peers**
+has the paste box (`j`) with the ticket decoded beneath it before anything is sent, then the
+servers you can read: `t` tests one and shows what it shares, `s` flips the discovery opt-out,
+`r` forgets it behind a warning. `x` turns the endpoint off, behind a warning.
+
+```
+mstream-player admin backups                 # each library's copies on other drives
+```
+
+**Backups** is the webapp's Backups page, still marked beta there. One state line carries
+the run in flight with the kit's scan bar, or the tasks waiting behind a scan, or idle. The
+add card sits above the table of destinations — library, folder, trigger, retention, the last
+run's status and age, on or off. On a row, `Enter` opens the last fifty runs with the chosen
+run's notes beneath, `n` runs it now, `e` edits it, `s` flips it on or off, `r` removes it
+behind a warning that the files on disk stay. Adding and editing share one form: the library
+(fixed when editing), the trigger, the destination folder — typed (`~` is the server user's
+home), or `^B` browses the server's disk, or the OS dialog with `--same-machine` — with the
+server's own verdict on the path beneath it as you type, retention, throttle, the daily hour,
+and the exclude patterns, prefilled from the server and sent only when changed so an untouched
+list keeps following the server's defaults.
+
+```
+mstream-player admin torrents                # the torrent client and what it does for you
+```
+
+**Torrents** is the webapp's Torrent Client page, beta there too. Until a client is chosen and
+connected, the page is the setup: the client as a radio group (Transmission, qBittorrent,
+Deluge), who may add torrents beneath it when the server has more than one user, and the
+connect form where `^T` probes without saving and Enter saves after a good probe. Connected,
+one state line carries the daemon's status and five tabs follow. Torrents is the daemon's
+list with a progress bar, a name-or-hash filter and `r` to drop an mStream-added torrent (the
+files stay). Libraries shows the daemon-side path of each library with the verified /
+inferred / probing / unconfirmed ladder and its destination template: `d` re-probes, `m` maps
+a path by hand, `t` edits the template with a live preview. Seeding hands the server a
+`.torrent` for content already on disk (`a`, a typed path or the OS dialog with
+`--same-machine`). Access holds the policy and the per-user whitelist, and only exists with
+more than one user. Client shows the connection: `t` tests, `c` switches client, `x`
+disconnects behind a gate.
+
+```
+mstream-player admin torrents                # the torrent client and what it does for you
+```
+
+**Torrents** is the webapp's Torrent Client page, beta there too. Until a client is chosen and
+connected, the page is the setup: the client as a radio group (Transmission, qBittorrent,
+Deluge), who may add torrents beneath it when the server has more than one user, and the
+connect form where `^T` probes without saving and Enter saves after a good probe. Connected,
+one state line carries the daemon's status and five tabs follow. Torrents is the daemon's
+list with a progress bar, a name-or-hash filter and `r` to drop an mStream-added torrent (the
+files stay). Libraries shows the daemon-side path of each library with the verified /
+inferred / probing / unconfirmed ladder and its destination template: `d` re-probes, `m` maps
+a path by hand, `t` edits the template with a live preview. Seeding hands the server a
+`.torrent` for content already on disk (`a`, a typed path or the OS dialog with
+`--same-machine`). Access holds the policy and the per-user whitelist, and only exists with
+more than one user. Client shows the connection: `t` tests, `c` switches client, `x`
+disconnects behind a gate.
+
+The saved session must belong to an admin. Two server settings answer with errors the room
+explains in words: `lockAdmin` (the panel is locked, HTTP 405) and an address-restricted admin
+panel (403 from another machine).
+
 ## Now playing
 
 `0` gives the whole terminal over to what's playing:

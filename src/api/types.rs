@@ -20,6 +20,16 @@ where
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
+/// A SQLite flag: the server hands `0`/`1` (or a real boolean, or null)
+/// where a client wants a `bool`.
+fn int_bool<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Bool(b) => b,
+        serde_json::Value::Number(n) => n.as_i64().unwrap_or(0) != 0,
+        _ => false,
+    })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoginResponse {
     pub token: String,
@@ -266,7 +276,416 @@ pub struct DirEntry {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct AdminDirEntry {
+    /// The library's row id — what the backup routes address it by.
+    pub id: i64,
     pub root: String,
+    /// Per-library: whether the scanner follows symlinks inside it.
+    #[serde(rename = "followSymlinks")]
+    pub follow_symlinks: bool,
+}
+
+// ── Backups ─────────────────────────────────────────────────────────────────
+
+/// `GET api/v1/admin/backup/destinations`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BackupDestinations {
+    pub destinations: Vec<BackupDestination>,
+}
+
+/// One backup destination: a library copied to a folder on another drive
+/// on a schedule, with its most recent run.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BackupDestination {
+    pub id: i64,
+    pub library_id: i64,
+    #[serde(deserialize_with = "null_default")]
+    pub library_name: String,
+    pub dest_path: String,
+    /// `after-scan` | `daily` | `manual`.
+    pub trigger_type: String,
+    pub daily_at_hour: Option<u32>,
+    /// Days deleted or changed files stay recoverable in the backup's
+    /// trash; 0 = no trash.
+    pub retention_days: u32,
+    #[serde(deserialize_with = "int_bool")]
+    pub enabled: bool,
+    /// The per-file pause during a run, ms; 0 = no throttle.
+    #[serde(deserialize_with = "null_default")]
+    pub inter_file_delay_ms: u32,
+    /// The effective exclude patterns (the server's defaults when the row
+    /// stores none).
+    #[serde(rename = "excludeGlobs")]
+    pub exclude_globs: Vec<String>,
+    /// The most recent attempt, if any (dedup skips excluded).
+    #[serde(rename = "lastRun")]
+    pub last_run: Option<BackupRun>,
+    pub created_at: String,
+}
+
+/// One run — a destination's `lastRun`, and the rows of
+/// `GET api/v1/admin/backup/destinations/:id/history`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BackupRun {
+    pub id: i64,
+    /// SQLite UTC `YYYY-MM-DD HH:MM:SS`.
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    /// `running` | `success` | `partial` | `failed` | `skipped`.
+    pub status: String,
+    pub trigger_reason: Option<String>,
+    pub files_copied: u64,
+    pub files_unchanged: u64,
+    pub files_trashed: u64,
+    pub bytes_copied: u64,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct BackupHistory {
+    pub history: Vec<BackupRun>,
+}
+
+/// `GET api/v1/admin/backup/status`: the run in flight, if any, and how
+/// many tasks wait behind the active scan or backup.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BackupStatus {
+    pub active: Option<ActiveBackup>,
+    pub queue_length: u32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ActiveBackup {
+    pub destination_id: i64,
+    pub history_id: i64,
+    pub library_name: Option<String>,
+    pub dest_path: Option<String>,
+    pub started_at: Option<String>,
+    pub trigger_reason: Option<String>,
+    pub files_copied: u64,
+    pub files_unchanged: u64,
+    pub files_trashed: u64,
+    pub bytes_copied: u64,
+    /// The previous run's copied + unchanged + trashed — the progress
+    /// denominator; None on a destination's first run.
+    pub expected_files: Option<u64>,
+}
+
+/// `GET api/v1/admin/backup/platform`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BackupPlatform {
+    pub platform: String,
+    pub homedir: String,
+    pub default_excludes: Vec<String>,
+}
+
+/// `POST api/v1/admin/backup/check-path` — the errors a save would raise
+/// and the warnings an operator should read first.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PathCheck {
+    pub ok: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+    pub info: PathCheckInfo,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PathCheckInfo {
+    pub dest_exists: bool,
+    pub dest_is_empty: Option<bool>,
+    pub parent_exists: bool,
+    pub same_drive: Option<bool>,
+    pub same_drive_reliable: bool,
+}
+
+/// `POST api/v1/admin/backup/destinations/:id/run`: `queued`, or
+/// `skipped` when a run is already in progress.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RunAnswer {
+    pub status: String,
+}
+
+// ── Discovery network (P2P) ─────────────────────────────────────────────────
+
+/// `GET api/v1/admin/discovery/p2p/status` — the sidecar's live mesh state,
+/// the server's announced identity, and the settings the admin room edits.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscoveryStatus {
+    pub enabled: bool,
+    /// The p2p-sidecar binary exists for this platform.
+    pub binary_found: bool,
+    /// Missing, but the server can download it when enabling.
+    pub binary_fetchable: bool,
+    pub running: bool,
+    pub endpoint_id: Option<String>,
+    /// The endpoint ticket a friend pastes to befriend this server.
+    pub ticket: Option<String>,
+    /// Subscribed to the catalog topic — the mesh may still be empty.
+    pub joined: bool,
+    /// Live gossip links; the sidecar's own count is the authority.
+    pub neighbors: u32,
+    pub neighbor_ids: Vec<String>,
+    pub watchdog: DiscoveryWatchdog,
+    pub recovery: DiscoveryRecovery,
+    pub known_peers: u32,
+    pub community_seeds: bool,
+    #[serde(deserialize_with = "null_default")]
+    pub server_name: String,
+    #[serde(deserialize_with = "null_default")]
+    pub server_description: String,
+    pub max_peer_db_storage_mb: u64,
+    pub auto_fetch_count: u32,
+    pub rotation_days: u32,
+    pub peer_retention_days: u32,
+    pub blocked_peers: Vec<String>,
+}
+
+/// The sidecar memory watchdog: `last_rss_mb` is null before the first
+/// reading (or where RSS cannot be read); `max_rss_mb` 0 means off.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscoveryWatchdog {
+    pub last_rss_mb: Option<f64>,
+    pub restarts: u32,
+    pub max_rss_mb: u64,
+}
+
+/// Crash recovery owns the sidecar while `attempts > 0` or a retry is armed.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscoveryRecovery {
+    pub attempts: u32,
+    pub retry_pending: bool,
+}
+
+/// `GET api/v1/admin/discovery/p2p/catalog` — every server heard from,
+/// most useful first, with what the local shelf holds of each.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscoveryCatalog {
+    pub peers: Vec<CatalogPeer>,
+    /// Rows the server filtered out: their embedding model cannot power
+    /// this server's similar-search (`?includeIncompatible=1` shows them).
+    pub hidden_incompatible: u32,
+    pub local_model_id: Option<String>,
+    pub auto_fetch: bool,
+    pub storage: CatalogStorage,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CatalogStorage {
+    pub used_bytes: u64,
+    pub cap_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CatalogPeer {
+    /// The peer's endpoint id (64 hex) — the key every action takes.
+    pub from: String,
+    pub payload: PeerPayload,
+    pub updated_at: String,
+    /// Heard within the last ~90 s.
+    pub online: bool,
+    /// Live holders of this peer's current snapshot.
+    pub seeders: u32,
+    /// What the local shelf holds of this peer, if anything.
+    pub fetched: Option<HeldSnapshot>,
+    /// `None` = unknown (no local embedding model established yet).
+    pub compatible: Option<bool>,
+}
+
+/// The peer's own signed announcement — everything in it is REMOTE text.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PeerPayload {
+    #[serde(deserialize_with = "null_default")]
+    pub name: String,
+    #[serde(deserialize_with = "null_default")]
+    pub description: String,
+    pub row_count: u64,
+    pub snapshot_seq: u64,
+    #[serde(deserialize_with = "null_default")]
+    pub model_id: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HeldSnapshot {
+    pub snapshot_seq: u64,
+    /// The peer has announced a newer snapshot than the one held.
+    pub stale: bool,
+    pub size_bytes: u64,
+    pub fetched_at: String,
+    pub first_fetched_at: String,
+    /// Immune to rotation.
+    pub pinned: bool,
+}
+
+/// `GET api/v1/admin/discovery/p2p/activity?since=<seq>` — the discovery
+/// slice of the server log, delta-polled by sequence number.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DiscoveryActivity {
+    pub entries: Vec<ActivityEntry>,
+    pub last_seq: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ActivityEntry {
+    pub seq: u64,
+    /// ISO timestamp.
+    pub t: String,
+    /// `error` | `warn` | `info` | `debug`.
+    pub level: String,
+    pub message: String,
+}
+
+/// `GET api/v1/admin/federation` — the endpoint's state and the mint
+/// dialog's defaults.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FederationParams {
+    pub enabled: bool,
+    /// Iroh has a build for this platform.
+    pub available: bool,
+    /// The endpoint is up (an endpoint id exists).
+    pub running: bool,
+    pub endpoint_id: Option<String>,
+    /// Connected to a relay.
+    pub online: bool,
+    pub relay_url: Option<String>,
+    /// What a new key's limits are prefilled with.
+    pub limit_defaults: FederationLimits,
+    /// The federation-requests inbox is open to discovery peers.
+    pub accept_requests: bool,
+}
+
+/// Per-key bandwidth caps; 0 = unlimited.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FederationLimits {
+    pub stream_kbps: u64,
+    pub daily_mb: u64,
+    pub max_streams: u64,
+}
+
+/// One key this server minted — a read-only grant for the libraries it
+/// names — as `GET api/v1/admin/federation/keys` lists it.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FederationKey {
+    pub id: i64,
+    pub name: String,
+    pub library_names: Vec<String>,
+    pub stream_kbps: u64,
+    pub daily_mb: u64,
+    pub max_streams: u64,
+    /// SQLite UTC `YYYY-MM-DD HH:MM:SS`; None = never.
+    pub expires_at: Option<String>,
+    #[serde(deserialize_with = "int_bool")]
+    pub expired: bool,
+    /// Bytes served to this key today (UTC), live.
+    pub usage_today_bytes: u64,
+    pub last_used: Option<String>,
+    /// The endpoint that redeemed the ticket first (TOFU); None = not yet.
+    pub bound_endpoint_id: Option<String>,
+    pub bound_at: Option<String>,
+    pub created_at: String,
+    /// The swap-ready `mstrfed1:` ticket — None while the endpoint is down.
+    pub ticket: Option<String>,
+}
+
+/// `POST api/v1/admin/federation/keys` — the fresh key and its ticket.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MintedKey {
+    pub id: i64,
+    pub name: String,
+    pub ticket: Option<String>,
+}
+
+/// `GET api/v1/admin/federation/peers` — a server this one can read. The
+/// row also carries the peer's endpoint ticket and API key; a client has
+/// no business with either, so they are not read.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FederationPeer {
+    pub id: i64,
+    #[serde(deserialize_with = "null_default")]
+    pub name: String,
+    /// `ok`, or the last failed test's words; None = never tested.
+    pub last_status: Option<String>,
+    /// Stamped by an `ok` test only.
+    pub last_seen: Option<String>,
+    /// The Discover panel may send this peer similarity queries.
+    #[serde(deserialize_with = "int_bool")]
+    pub use_discovery: bool,
+    pub added_at: String,
+}
+
+/// `POST api/v1/admin/federation/peers/:id/test`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PeerTest {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub health: Option<PeerHealth>,
+}
+
+/// The peer's own answer — remote text.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PeerHealth {
+    pub libraries: Vec<String>,
+}
+
+/// `GET api/v1/admin/federation/requests` — pairing asks in both
+/// directions; the catalog derives its relationship column from them.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FederationRequests {
+    pub accept_requests: bool,
+    pub requests: Vec<FederationRequest>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct FederationRequest {
+    pub id: i64,
+    pub peer_endpoint_id: String,
+    /// Self-asserted by the remote server.
+    pub peer_name: Option<String>,
+    /// `in` | `out`.
+    pub direction: String,
+    /// `received` | `accepted` | `granting` | `completed` | `pending-delivery`
+    /// | `delivered` | `rejected` | `refused` | `cancelled` | `expired`.
+    pub state: String,
+    /// Remote text on an inbound request, ours on an outbound one.
+    #[serde(deserialize_with = "null_default")]
+    pub message: String,
+    /// What they offer (inbound) or what we offered (outbound).
+    pub offered_libraries: Vec<String>,
+    /// The delivery ladder: failures so far, and when the next try is.
+    pub fail_count: u32,
+    pub next_attempt_at: Option<String>,
+    pub reject_reason: Option<String>,
+    /// The peer row a completed exchange created.
+    pub created_peer_id: Option<i64>,
+    /// SQLite UTC `YYYY-MM-DD HH:MM:SS`.
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -865,3 +1284,242 @@ pub struct ScanProgressRow {
     pub pct: Option<u32>,
     pub scanned: u64,
 }
+
+// ── Torrents (admin) ─────────────────────────────────────────────────────────
+
+/// `GET /admin/torrent`: the chosen client, the access policy, and every
+/// client's saved non-secret fields (passwords are never returned).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct TorrentParams {
+    #[serde(default)]
+    pub client: String,
+    #[serde(rename = "enabledFor", default)]
+    pub enabled_for: String,
+    #[serde(default)]
+    pub transmission: TorrentClientConfig,
+    #[serde(default)]
+    pub qbittorrent: TorrentClientConfig,
+    #[serde(default)]
+    pub deluge: TorrentClientConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct TorrentClientConfig {
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default, deserialize_with = "null_default")]
+    pub username: String,
+    #[serde(rename = "rpcPath", default)]
+    pub rpc_path: Option<String>,
+    #[serde(rename = "useHttps", default)]
+    pub use_https: bool,
+    /// A host is saved — the daemon may still be unreachable.
+    #[serde(default)]
+    pub configured: bool,
+}
+
+/// `GET /admin/torrent/status`: a live probe of the saved credentials.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct TorrentStatus {
+    #[serde(default)]
+    pub connected: bool,
+    #[serde(default)]
+    pub configured: bool,
+    #[serde(rename = "clientType", default)]
+    pub client_type: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Transmission's RPC number; a number on the wire.
+    #[serde(rename = "rpcVersion", default)]
+    pub rpc_version: Option<serde_json::Value>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// `POST /admin/torrent/<client>/test` and `/connect` — always HTTP 200; a
+/// failed probe is `ok: false` with the daemon's sentence in `message`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct ProbeAnswer {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(rename = "rpcVersion", default)]
+    pub rpc_version: Option<serde_json::Value>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// `GET /admin/torrent/list` — never an HTTP error: an unreachable daemon
+/// is an empty list with `error` set.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct TorrentList {
+    #[serde(default)]
+    pub torrents: Vec<Torrent>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(rename = "clientType", default)]
+    pub client_type: Option<String>,
+}
+
+/// One torrent as the daemon reports it, normalised by the server. The
+/// rates are floats on the wire for Deluge, so they are floats here.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct Torrent {
+    #[serde(rename = "infoHash", default)]
+    pub info_hash: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub name: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub status: String,
+    /// 0.0 to 1.0.
+    #[serde(default)]
+    pub percent: f64,
+    #[serde(rename = "rateDownload", default)]
+    pub rate_download: f64,
+    #[serde(rename = "rateUpload", default)]
+    pub rate_upload: f64,
+    #[serde(default)]
+    pub eta: f64,
+    #[serde(rename = "sizeBytes", default)]
+    pub size_bytes: u64,
+    #[serde(rename = "errorMessage", default, deserialize_with = "null_default")]
+    pub error_message: String,
+    #[serde(rename = "managedByMstream", default)]
+    pub managed_by_mstream: bool,
+    #[serde(rename = "managedBy", default)]
+    pub managed_by: Option<String>,
+    #[serde(rename = "addedAt", default)]
+    pub added_at: f64,
+}
+
+/// `DELETE /admin/torrent/:infoHash`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RemoveAnswer {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(rename = "daemonRemoveOk", default = "yes")]
+    pub daemon_remove_ok: bool,
+    #[serde(rename = "daemonRemoveError", default)]
+    pub daemon_remove_error: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// `GET /admin/torrent/vpath-access`: one row per library, keyed by name.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct VpathAccess {
+    #[serde(rename = "clientType", default)]
+    pub client_type: Option<String>,
+    #[serde(default)]
+    pub vpaths: std::collections::BTreeMap<String, AccessRow>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// The daemon-side view of one library: the confidence ladder
+/// (verified / inferred / pending / unconfirmed), how it was learned.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct AccessRow {
+    #[serde(rename = "daemonPath", default)]
+    pub daemon_path: Option<String>,
+    #[serde(rename = "mstreamWritable", default)]
+    pub mstream_writable: Option<bool>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub confidence: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(rename = "lastProbedAt", default)]
+    pub last_probed_at: Option<serde_json::Value>,
+    #[serde(rename = "lastError", default)]
+    pub last_error: Option<String>,
+}
+
+/// `GET /admin/torrent/path-templates`: each library's template plus the
+/// server's variable list, suggestion and sample metadata for previews.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct PathTemplates {
+    #[serde(default)]
+    pub vpaths: std::collections::BTreeMap<String, TemplateRow>,
+    #[serde(rename = "supportedVars", default)]
+    pub supported_vars: Vec<String>,
+    #[serde(rename = "suggestedTemplate", default)]
+    pub suggested_template: String,
+    #[serde(rename = "sampleMetadata", default)]
+    pub sample_metadata: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct TemplateRow {
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
+/// `PUT /admin/torrent/path-templates/:vpath`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct TemplateSaved {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub template: Option<String>,
+    #[serde(rename = "samplePath", default)]
+    pub sample_path: Option<String>,
+}
+
+/// `POST /admin/torrent/seed-existing`: one file's outcome, always HTTP 200.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct SeedOutcome {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default, deserialize_with = "null_default")]
+    pub outcome: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub vpath: Option<String>,
+    #[serde(rename = "matchedRoot", default)]
+    pub matched_root: Option<String>,
+    /// Where the daemon was told the content lives (`seeded`).
+    #[serde(rename = "addedAt", default)]
+    pub added_at: Option<String>,
+    #[serde(rename = "mappingConfidence", default)]
+    pub mapping_confidence: Option<String>,
+    #[serde(rename = "padFilesTotal", default)]
+    pub pad_files_total: Option<u32>,
+    #[serde(rename = "padFilesPresent", default)]
+    pub pad_files_present: Option<u32>,
+    #[serde(rename = "clientType", default)]
+    pub client_type: Option<String>,
+    #[serde(default)]
+    pub matched: Option<u32>,
+    #[serde(default)]
+    pub total: Option<u32>,
+    #[serde(default)]
+    pub missing: Vec<String>,
+    #[serde(rename = "checkedVpaths", default)]
+    pub checked_vpaths: Vec<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// One row of `GET /admin/users`, keyed by username there.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct AdminUser {
+    #[serde(default)]
+    pub admin: bool,
+    #[serde(default)]
+    pub vpaths: Vec<String>,
+    #[serde(rename = "allowTorrent", default)]
+    pub allow_torrent: bool,
+}
+
