@@ -502,6 +502,27 @@ identical, so the client must probe rather than inspect it. Two gates will bite 
 `lockAdmin` returns 405, and `adminAccess.mode` restricts by IP, so a panel run from another
 machine gets 403 under hardened configs. Say that plainly rather than showing a bare error.
 
+**Torrents room ✅ 2026-09-08** — `mstream-player admin torrents` (`src/admin/torrents.rs`), per the
+"Admin Torrents" canvas: two phases — the client page (radio group Disabled / Transmission /
+qBittorrent / Deluge with each daemon's port and quirk; the policy radio beneath it only when the
+server has more than one user; Enter posts `/admin/torrent/client` and opens Connect) and the
+connect page (HOST · PORT · USERNAME · PASSWORD · RPC PATH · HTTPS per client; `^T` posts
+`/<client>/test`, Enter `/connect`, the daemon's answer under the form, qBittorrent's CSRF caveat)
+— then the state line (connected / disconnected with the reason / asking) and five tabs: Torrents
+(NAME · STATUS · PROGRESS · DOWN · SIZE · ADDED BY, `/` filter, `r` remove behind the files-stay
+gate, the daemon's list error inline), Libraries (ACCESS ladder · PATH AS SEEN BY <client> ·
+TEMPLATE; `d`/`D` auto-detect, `m` manual mapping with the 422 reason in the modal, `t` template
+modal with the sample preview, `^S` suggested, `^X` clear), Seeding (`a` a `.torrent` — the OS
+file dialog with `--same-machine` (picker gained `pick_file`), else a path modal with local Tab
+completion; SEARCH IN ticks on digits; one multipart POST per file, queued; outcomes in the
+webapp's words), Access (policy radio posts at once; USER · ADMIN · TORRENTS toggles; hidden with
+one user), Client (status, saved fields, other saved clients, `t` test, `c` switch, `x`
+disconnect gate). Polls: the list every 5 s on the Torrents tab, everything every 30 s. API:
+the torrent types, twenty calls, a raw multipart `send_bytes`, `admin_users`;
+`extract_error` now prefers a body's `message` sentence over its `error` code. Locales `tor:`
+(240 keys × 10). Live-checked on the scratch server: choose Transmission → the connect form → a
+probe against nothing ("connection failed: connect ECONNREFUSED") → back to Disabled.
+
 Build, in order of fit: **logs** (`/api/v1/admin/logs/recent?since=<seq>` is a purpose-built
 tail-poll API with a cursor), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and
 `/api/v1/scan/status` — no admin rights, no IP gate), **users & access**, **server audio**

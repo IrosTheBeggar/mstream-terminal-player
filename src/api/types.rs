@@ -1284,3 +1284,242 @@ pub struct ScanProgressRow {
     pub pct: Option<u32>,
     pub scanned: u64,
 }
+
+// ── Torrents (admin) ─────────────────────────────────────────────────────────
+
+/// `GET /admin/torrent`: the chosen client, the access policy, and every
+/// client's saved non-secret fields (passwords are never returned).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct TorrentParams {
+    #[serde(default)]
+    pub client: String,
+    #[serde(rename = "enabledFor", default)]
+    pub enabled_for: String,
+    #[serde(default)]
+    pub transmission: TorrentClientConfig,
+    #[serde(default)]
+    pub qbittorrent: TorrentClientConfig,
+    #[serde(default)]
+    pub deluge: TorrentClientConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct TorrentClientConfig {
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default, deserialize_with = "null_default")]
+    pub username: String,
+    #[serde(rename = "rpcPath", default)]
+    pub rpc_path: Option<String>,
+    #[serde(rename = "useHttps", default)]
+    pub use_https: bool,
+    /// A host is saved — the daemon may still be unreachable.
+    #[serde(default)]
+    pub configured: bool,
+}
+
+/// `GET /admin/torrent/status`: a live probe of the saved credentials.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct TorrentStatus {
+    #[serde(default)]
+    pub connected: bool,
+    #[serde(default)]
+    pub configured: bool,
+    #[serde(rename = "clientType", default)]
+    pub client_type: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Transmission's RPC number; a number on the wire.
+    #[serde(rename = "rpcVersion", default)]
+    pub rpc_version: Option<serde_json::Value>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// `POST /admin/torrent/<client>/test` and `/connect` — always HTTP 200; a
+/// failed probe is `ok: false` with the daemon's sentence in `message`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct ProbeAnswer {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(rename = "rpcVersion", default)]
+    pub rpc_version: Option<serde_json::Value>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// `GET /admin/torrent/list` — never an HTTP error: an unreachable daemon
+/// is an empty list with `error` set.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct TorrentList {
+    #[serde(default)]
+    pub torrents: Vec<Torrent>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(rename = "clientType", default)]
+    pub client_type: Option<String>,
+}
+
+/// One torrent as the daemon reports it, normalised by the server. The
+/// rates are floats on the wire for Deluge, so they are floats here.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct Torrent {
+    #[serde(rename = "infoHash", default)]
+    pub info_hash: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub name: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub status: String,
+    /// 0.0 to 1.0.
+    #[serde(default)]
+    pub percent: f64,
+    #[serde(rename = "rateDownload", default)]
+    pub rate_download: f64,
+    #[serde(rename = "rateUpload", default)]
+    pub rate_upload: f64,
+    #[serde(default)]
+    pub eta: f64,
+    #[serde(rename = "sizeBytes", default)]
+    pub size_bytes: u64,
+    #[serde(rename = "errorMessage", default, deserialize_with = "null_default")]
+    pub error_message: String,
+    #[serde(rename = "managedByMstream", default)]
+    pub managed_by_mstream: bool,
+    #[serde(rename = "managedBy", default)]
+    pub managed_by: Option<String>,
+    #[serde(rename = "addedAt", default)]
+    pub added_at: f64,
+}
+
+/// `DELETE /admin/torrent/:infoHash`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RemoveAnswer {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(rename = "daemonRemoveOk", default = "yes")]
+    pub daemon_remove_ok: bool,
+    #[serde(rename = "daemonRemoveError", default)]
+    pub daemon_remove_error: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// `GET /admin/torrent/vpath-access`: one row per library, keyed by name.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct VpathAccess {
+    #[serde(rename = "clientType", default)]
+    pub client_type: Option<String>,
+    #[serde(default)]
+    pub vpaths: std::collections::BTreeMap<String, AccessRow>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// The daemon-side view of one library: the confidence ladder
+/// (verified / inferred / pending / unconfirmed), how it was learned.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct AccessRow {
+    #[serde(rename = "daemonPath", default)]
+    pub daemon_path: Option<String>,
+    #[serde(rename = "mstreamWritable", default)]
+    pub mstream_writable: Option<bool>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub confidence: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(rename = "lastProbedAt", default)]
+    pub last_probed_at: Option<serde_json::Value>,
+    #[serde(rename = "lastError", default)]
+    pub last_error: Option<String>,
+}
+
+/// `GET /admin/torrent/path-templates`: each library's template plus the
+/// server's variable list, suggestion and sample metadata for previews.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct PathTemplates {
+    #[serde(default)]
+    pub vpaths: std::collections::BTreeMap<String, TemplateRow>,
+    #[serde(rename = "supportedVars", default)]
+    pub supported_vars: Vec<String>,
+    #[serde(rename = "suggestedTemplate", default)]
+    pub suggested_template: String,
+    #[serde(rename = "sampleMetadata", default)]
+    pub sample_metadata: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct TemplateRow {
+    #[serde(default)]
+    pub template: Option<String>,
+}
+
+/// `PUT /admin/torrent/path-templates/:vpath`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct TemplateSaved {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub template: Option<String>,
+    #[serde(rename = "samplePath", default)]
+    pub sample_path: Option<String>,
+}
+
+/// `POST /admin/torrent/seed-existing`: one file's outcome, always HTTP 200.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct SeedOutcome {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default, deserialize_with = "null_default")]
+    pub outcome: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub vpath: Option<String>,
+    #[serde(rename = "matchedRoot", default)]
+    pub matched_root: Option<String>,
+    /// Where the daemon was told the content lives (`seeded`).
+    #[serde(rename = "addedAt", default)]
+    pub added_at: Option<String>,
+    #[serde(rename = "mappingConfidence", default)]
+    pub mapping_confidence: Option<String>,
+    #[serde(rename = "padFilesTotal", default)]
+    pub pad_files_total: Option<u32>,
+    #[serde(rename = "padFilesPresent", default)]
+    pub pad_files_present: Option<u32>,
+    #[serde(rename = "clientType", default)]
+    pub client_type: Option<String>,
+    #[serde(default)]
+    pub matched: Option<u32>,
+    #[serde(default)]
+    pub total: Option<u32>,
+    #[serde(default)]
+    pub missing: Vec<String>,
+    #[serde(rename = "checkedVpaths", default)]
+    pub checked_vpaths: Vec<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// One row of `GET /admin/users`, keyed by username there.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct AdminUser {
+    #[serde(default)]
+    pub admin: bool,
+    #[serde(default)]
+    pub vpaths: Vec<String>,
+    #[serde(rename = "allowTorrent", default)]
+    pub allow_torrent: bool,
+}
+

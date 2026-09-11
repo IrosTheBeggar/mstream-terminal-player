@@ -1,4 +1,4 @@
-//! The admin panel: `mstream-player admin [libraries|discovery|federation|backups]` — the
+//! The admin panel: `mstream-player admin [libraries|discovery|federation|backups|torrents]` — the
 //! server's management rooms, drawn full-screen from the UI kit the way
 //! the setup wizard is, against the saved session's server.
 //!
@@ -11,6 +11,7 @@
 //! room to pump its worker, tick its timers, draw, and answer input.
 
 mod backups;
+mod torrents;
 mod discovery;
 mod federation;
 mod libraries;
@@ -69,6 +70,8 @@ enum RoomCmd {
     Federation,
     /// Backups: each library's copies on other drives, their schedules and runs
     Backups,
+    /// Torrents: the torrent client, its list, each library's daemon-side path, seeding, who may add
+    Torrents,
 }
 
 pub fn run(args: AdminArgs) -> i32 {
@@ -85,6 +88,7 @@ pub fn run(args: AdminArgs) -> i32 {
         RoomCmd::Discovery => run_tui(discovery::start(client)),
         RoomCmd::Federation => run_tui(federation::start(client)),
         RoomCmd::Backups => run_tui(backups::start(client, args.same_machine)),
+        RoomCmd::Torrents => run_tui(torrents::start(client, args.same_machine)),
     }
 }
 

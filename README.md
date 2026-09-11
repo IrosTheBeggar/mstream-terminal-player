@@ -424,6 +424,42 @@ the OS dialog with `--same-machine` — with the server's own verdict on the pat
 you type, retention, throttle, the daily hour, and the exclude patterns, prefilled from the
 server and sent only when changed so an untouched list keeps following the server's defaults.
 
+```
+mstream-player admin torrents                # the torrent client and what it does for you
+```
+
+**Torrents** is the webapp's Torrent Client page, beta there too. Until a client is chosen and
+connected, the page is the setup: the client as a radio group (Transmission, qBittorrent,
+Deluge), who may add torrents beneath it when the server has more than one user, and the
+connect form where `^T` probes without saving and Enter saves after a good probe. Connected,
+one state line carries the daemon's status and five tabs follow. Torrents is the daemon's
+list with a progress bar, a name-or-hash filter and `r` to drop an mStream-added torrent (the
+files stay). Libraries shows the daemon-side path of each library with the verified /
+inferred / probing / unconfirmed ladder and its destination template: `d` re-probes, `m` maps
+a path by hand, `t` edits the template with a live preview. Seeding hands the server a
+`.torrent` for content already on disk (`a`, a typed path or the OS dialog with
+`--same-machine`). Access holds the policy and the per-user whitelist, and only exists with
+more than one user. Client shows the connection: `t` tests, `c` switches client, `x`
+disconnects behind a gate.
+
+```
+mstream-player admin torrents                # the torrent client and what it does for you
+```
+
+**Torrents** is the webapp's Torrent Client page, beta there too. Until a client is chosen and
+connected, the page is the setup: the client as a radio group (Transmission, qBittorrent,
+Deluge), who may add torrents beneath it when the server has more than one user, and the
+connect form where `^T` probes without saving and Enter saves after a good probe. Connected,
+one state line carries the daemon's status and five tabs follow. Torrents is the daemon's
+list with a progress bar, a name-or-hash filter and `r` to drop an mStream-added torrent (the
+files stay). Libraries shows the daemon-side path of each library with the verified /
+inferred / probing / unconfirmed ladder and its destination template: `d` re-probes, `m` maps
+a path by hand, `t` edits the template with a live preview. Seeding hands the server a
+`.torrent` for content already on disk (`a`, a typed path or the OS dialog with
+`--same-machine`). Access holds the policy and the per-user whitelist, and only exists with
+more than one user. Client shows the connection: `t` tests, `c` switches client, `x`
+disconnects behind a gate.
+
 The saved session must belong to an admin. Two server settings answer with errors the room
 explains in words: `lockAdmin` (the panel is locked, HTTP 405) and an address-restricted admin
 panel (403 from another machine).

@@ -42,6 +42,17 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// back, and the caller cached the timeout as "this track has no shape".
 #[cfg(not(target_arch = "wasm32"))]
 const DECODE_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// The ceiling for a call that waits on a torrent daemon's round trip; the
+/// browser build has no per-request timeout to set.
+#[cfg(not(target_arch = "wasm32"))]
+fn daemon_ceiling() -> Option<std::time::Duration> {
+    Some(DECODE_TIMEOUT)
+}
+#[cfg(target_arch = "wasm32")]
+fn daemon_ceiling() -> Option<std::time::Duration> {
+    None
+}
 /// A discovery snapshot download: the server answers once the transfer is
 /// verified, and a cross-network pull can take minutes (its own ceiling
 /// is ten).
@@ -145,6 +156,36 @@ pub struct NewBackupDestination {
     pub inter_file_delay_ms: u32,
     /// None = the server's defaults, and whatever they become later.
     pub exclude_globs: Option<Vec<String>>,
+}
+
+/// The credentials a torrent probe sends: the fields a client lacks
+/// (qBittorrent has no RPC path, Deluge no username) stay `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TorrentCreds {
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: String,
+    pub rpc_path: Option<String>,
+    pub use_https: bool,
+}
+
+impl TorrentCreds {
+    fn body(&self) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "host": self.host,
+            "port": self.port,
+            "password": self.password,
+            "useHttps": self.use_https,
+        });
+        if let Some(u) = &self.username {
+            body["username"] = serde_json::json!(u);
+        }
+        if let Some(p) = &self.rpc_path {
+            body["rpcPath"] = serde_json::json!(p);
+        }
+        body
+    }
 }
 
 /// The fields a `PATCH` may carry; None leaves a field alone.
@@ -416,7 +457,33 @@ impl Client {
                     .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?,
             );
         }
+        self.finish(path, req).await
+    }
 
+    /// A request whose body is raw bytes under its own content type — the
+    /// multipart upload the seed-existing route takes.
+    async fn send_bytes<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> Result<T, ApiError> {
+        let url = self.endpoint(path)?;
+        let mut req = self.http.request(method, url);
+        if let Some(token) = &self.token {
+            req = req.header("x-access-token", token);
+        }
+        req = req.header("Content-Type", content_type).body(body);
+        self.finish(path, req).await
+    }
+
+    /// Send, map the status codes, decode the body.
+    async fn finish<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        req: reqwest::RequestBuilder,
+    ) -> Result<T, ApiError> {
         let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
         let status = resp.status();
         let text = resp.text().await.map_err(|e| ApiError::Network(e.to_string()))?;
@@ -1794,6 +1861,229 @@ impl Client {
         wait(self.admin_backup_history_async(id, limit))
     }
 
+    // ── Torrents (admin) ────────────────────────────────────────────────────
+
+    /// The chosen client, the access policy, every client's saved fields.
+    pub async fn admin_torrent_params_async(&self) -> Result<TorrentParams, ApiError> {
+        self.get("api/v1/admin/torrent").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_params(&self) -> Result<TorrentParams, ApiError> {
+        wait(self.admin_torrent_params_async())
+    }
+
+    /// Choose the client: `disabled`, `transmission`, `qbittorrent`, `deluge`.
+    /// Every client keeps its saved credentials across a switch.
+    pub async fn admin_torrent_set_client_async(&self, client: &str) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/torrent/client", serde_json::json!({ "client": client })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_set_client(&self, client: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_torrent_set_client_async(client))
+    }
+
+    /// Who may add torrents: `all` or `whitelist`.
+    pub async fn admin_torrent_set_policy_async(&self, enabled_for: &str) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/torrent/enabled-for", serde_json::json!({ "enabledFor": enabled_for })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_set_policy(&self, enabled_for: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_torrent_set_policy_async(enabled_for))
+    }
+
+    /// One user's place on the whitelist.
+    pub async fn admin_user_torrent_access_async(&self, username: &str, allow: bool) -> Result<serde_json::Value, ApiError> {
+        self.post(
+            "api/v1/admin/users/torrent-access",
+            serde_json::json!({ "username": username, "allowTorrent": allow }),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_user_torrent_access(&self, username: &str, allow: bool) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_user_torrent_access_async(username, allow))
+    }
+
+    /// Probe a daemon with the given credentials: `connect` false saves
+    /// nothing, true saves them after a good probe. Always HTTP 200 — read
+    /// [`ProbeAnswer::ok`].
+    pub async fn admin_torrent_probe_async(
+        &self,
+        client: &str,
+        creds: &TorrentCreds,
+        connect: bool,
+    ) -> Result<ProbeAnswer, ApiError> {
+        let verb = if connect { "connect" } else { "test" };
+        self.send_within(Method::POST, &format!("api/v1/admin/torrent/{client}/{verb}"), Some(creds.body()), daemon_ceiling())
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_probe(&self, client: &str, creds: &TorrentCreds, connect: bool) -> Result<ProbeAnswer, ApiError> {
+        wait(self.admin_torrent_probe_async(client, creds, connect))
+    }
+
+    /// Forget a client's credentials; the daemon keeps everything.
+    pub async fn admin_torrent_disconnect_async(&self, client: &str) -> Result<serde_json::Value, ApiError> {
+        self.post(&format!("api/v1/admin/torrent/{client}/disconnect"), serde_json::json!({})).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_disconnect(&self, client: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_torrent_disconnect_async(client))
+    }
+
+    /// A live probe of the saved credentials.
+    pub async fn admin_torrent_status_async(&self) -> Result<TorrentStatus, ApiError> {
+        self.send_within(Method::GET, "api/v1/admin/torrent/status", None, daemon_ceiling()).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_status(&self) -> Result<TorrentStatus, ApiError> {
+        wait(self.admin_torrent_status_async())
+    }
+
+    /// Everything the daemon knows, mStream's rows marked.
+    pub async fn admin_torrent_list_async(&self) -> Result<TorrentList, ApiError> {
+        self.send_within(Method::GET, "api/v1/admin/torrent/list", None, daemon_ceiling()).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_list(&self) -> Result<TorrentList, ApiError> {
+        wait(self.admin_torrent_list_async())
+    }
+
+    /// Drop an mStream-added torrent from the daemon, files kept. A 404 is
+    /// the server refusing a torrent mStream did not add.
+    pub async fn admin_torrent_remove_async(&self, info_hash: &str) -> Result<RemoveAnswer, ApiError> {
+        self.send(Method::DELETE, &format!("api/v1/admin/torrent/{info_hash}"), None).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_remove(&self, info_hash: &str) -> Result<RemoveAnswer, ApiError> {
+        wait(self.admin_torrent_remove_async(info_hash))
+    }
+
+    /// The cached daemon-side view of every library.
+    pub async fn admin_torrent_vpath_access_async(&self) -> Result<VpathAccess, ApiError> {
+        self.get("api/v1/admin/torrent/vpath-access").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_vpath_access(&self) -> Result<VpathAccess, ApiError> {
+        wait(self.admin_torrent_vpath_access_async())
+    }
+
+    /// Re-run the probe for one library, or every library when `None`.
+    pub async fn admin_torrent_auto_detect_async(&self, vpath: Option<&str>) -> Result<VpathAccess, ApiError> {
+        let body = match vpath {
+            Some(v) => serde_json::json!({ "vpathName": v }),
+            None => serde_json::json!({}),
+        };
+        self.send_within(Method::POST, "api/v1/admin/torrent/vpath-access/auto-detect", Some(body), daemon_ceiling())
+            .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_auto_detect(&self, vpath: Option<&str>) -> Result<VpathAccess, ApiError> {
+        wait(self.admin_torrent_auto_detect_async(vpath))
+    }
+
+    /// Type the daemon's path for a library; the server verifies it with the
+    /// same probe. A 422 carries the daemon's reason.
+    pub async fn admin_torrent_manual_mapping_async(&self, vpath: &str, daemon_path: &str) -> Result<serde_json::Value, ApiError> {
+        self.send_within(
+            Method::POST,
+            "api/v1/admin/torrent/vpath-access/manual",
+            Some(serde_json::json!({ "vpathName": vpath, "daemonPath": daemon_path })),
+            daemon_ceiling(),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_manual_mapping(&self, vpath: &str, daemon_path: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_torrent_manual_mapping_async(vpath, daemon_path))
+    }
+
+    /// Every library's template plus the server's variables and sample.
+    pub async fn admin_torrent_path_templates_async(&self) -> Result<PathTemplates, ApiError> {
+        self.get("api/v1/admin/torrent/path-templates").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_path_templates(&self) -> Result<PathTemplates, ApiError> {
+        wait(self.admin_torrent_path_templates_async())
+    }
+
+    /// Save a library's template; `None` clears it (freeform entry again).
+    pub async fn admin_torrent_set_template_async(&self, vpath: &str, template: Option<&str>) -> Result<TemplateSaved, ApiError> {
+        self.send(
+            Method::PUT,
+            &format!("api/v1/admin/torrent/path-templates/{vpath}"),
+            Some(serde_json::json!({ "template": template })),
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_set_template(&self, vpath: &str, template: Option<&str>) -> Result<TemplateSaved, ApiError> {
+        wait(self.admin_torrent_set_template_async(vpath, template))
+    }
+
+    /// Hand the server a `.torrent` for content already on disk: multipart,
+    /// one file, the libraries to search (none = every library). Always HTTP
+    /// 200 — the outcome is in the body.
+    pub async fn admin_torrent_seed_existing_async(
+        &self,
+        file_name: &str,
+        bytes: &[u8],
+        vpaths: &[String],
+    ) -> Result<SeedOutcome, ApiError> {
+        let boundary = format!("----mstream-player-{:016x}{:016x}", fastrand::u64(..), fastrand::u64(..));
+        let mut body = Vec::with_capacity(bytes.len() + 512);
+        if !vpaths.is_empty() {
+            body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"vpaths\"\r\n\r\n").as_bytes());
+            body.extend_from_slice(serde_json::to_string(vpaths).unwrap_or_default().as_bytes());
+            body.extend_from_slice(b"\r\n");
+        }
+        let safe_name: String = file_name.chars().filter(|c| *c != '"' && *c != '\r' && *c != '\n').collect();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"torrentFile\"; filename=\"{safe_name}\"\r\nContent-Type: application/x-bittorrent\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        self.send_bytes(
+            Method::POST,
+            "api/v1/admin/torrent/seed-existing",
+            &format!("multipart/form-data; boundary={boundary}"),
+            body,
+        )
+        .await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_torrent_seed_existing(&self, file_name: &str, bytes: &[u8], vpaths: &[String]) -> Result<SeedOutcome, ApiError> {
+        wait(self.admin_torrent_seed_existing_async(file_name, bytes, vpaths))
+    }
+
+    /// Every user with their flags, keyed by username.
+    pub async fn admin_users_async(&self) -> Result<std::collections::BTreeMap<String, AdminUser>, ApiError> {
+        self.get("api/v1/admin/users").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_users(&self) -> Result<std::collections::BTreeMap<String, AdminUser>, ApiError> {
+        wait(self.admin_users_async())
+    }
+
     /// Per-library scan progress (works for any signed-in user; on a fresh
     /// zero-account server too).
     pub async fn scan_progress_async(&self) -> Result<Vec<ScanProgressRow>, ApiError> {
@@ -1822,8 +2112,12 @@ impl Client {
 /// trimmed excerpt of whatever was actually returned.
 fn extract_error(body: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Some(msg) = v.get("error").and_then(|e| e.as_str()) {
-            return msg.to_string();
+        // Newer routes answer `{error: <code>, message: <sentence>}`; the
+        // sentence is the one for a human.
+        let message = v.get("message").and_then(|m| m.as_str()).filter(|m| !m.trim().is_empty());
+        let error = v.get("error").and_then(|e| e.as_str());
+        if let Some(text) = message.or(error) {
+            return text.to_string();
         }
     }
     let trimmed = body.trim();
