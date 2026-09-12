@@ -1747,6 +1747,8 @@ fn run_tui(mut wizard: Wizard) -> i32 {
         wizard.logo_gfx = wizard.graphics.fork();
     }
 
+    // The wizard's palette is its interface: not subject to NO_COLOR.
+    crate::console::keep_colors();
     let mut terminal = ratatui::init();
     // A wizard whose buttons cannot be clicked is half a wizard; like the
     // player, a terminal that refuses mouse reports still works by keys.

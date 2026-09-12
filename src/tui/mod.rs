@@ -210,6 +210,8 @@ pub fn run(server: Option<String>, token: Option<String>) -> i32 {
     app.tap = Some(tap);
     let pending = app.start();
 
+    // The player's palette is its interface: not subject to NO_COLOR.
+    crate::console::keep_colors();
     let mut terminal = ratatui::init();
     // After init and before anything is drawn — not because the query
     // needs raw mode (the crate flips termios itself; graphics-probe calls

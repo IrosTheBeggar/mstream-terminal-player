@@ -194,6 +194,14 @@ A value it can't read costs you that colour and nothing else — it says what wa
 wrong on the first screen and keeps the default. Errors stay red and aren't
 configurable; an error that isn't red is a trap.
 
+Every full-screen page — the player, the setup wizard, the admin rooms — keeps
+its palette even when `NO_COLOR` is set in the environment. That convention is
+for programs that decorate their output, and the plain commands (`ls`,
+`search`, `info`, …) honour it; a full-screen page's palette is the interface,
+and without it the wizard reads as broken. Tool shells and some IDE terminals
+export `NO_COLOR=1` without saying so — that, not the console, is why a page
+used to come up white on black in a Command Prompt opened from one.
+
 ### Crossfade
 
 ```toml
