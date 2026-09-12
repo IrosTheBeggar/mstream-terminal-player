@@ -138,5 +138,24 @@ else
 fi
 stop_fake
 
+# ── Scenario G: the admin hub signs in when the server asks it to ────────
+# A fake with the auth wall up and one account: the tokenless pre-flight
+# ping is a 401, the sign-in page comes first, the room after; the second
+# run on the same HOME rides the kept session straight into the room.
+PORT="$(FAKE_AUTH=1 start_fake G)"
+curl -s -o /dev/null -X PUT -H 'Content-Type: application/json'   -d '{"username":"alice","password":"hunter2","admin":true}'   "http://127.0.0.1:$PORT/api/v1/admin/users"
+ARGS=(admin --server "http://127.0.0.1:$PORT")
+leg admin-signin admin-signin.exp "$WORK/h7" "$WORK/admin-signin.out"
+assert "the sign-in kept its session" "
+import pathlib
+found=list(pathlib.Path('$WORK/h7').rglob('credentials.toml'))
+assert found, 'no credentials.toml under the HOME'
+assert 'fake-token' in found[0].read_text(), 'the issued token is not stored'
+cfg=list(pathlib.Path('$WORK/h7').rglob('config.toml'))
+assert cfg and 'alice' in cfg[0].read_text(), 'the server entry does not name the account'
+"
+leg admin-room admin-room.exp "$WORK/h7" "$WORK/admin-room.out"
+stop_fake
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "e2e: ALL PASS"; else echo "e2e: $FAILS FAILURE(S)"; exit 1; fi

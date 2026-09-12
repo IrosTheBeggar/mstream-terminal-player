@@ -15,6 +15,7 @@ mod torrents;
 mod discovery;
 mod federation;
 mod libraries;
+mod login;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -75,7 +76,7 @@ enum RoomCmd {
 }
 
 pub fn run(args: AdminArgs) -> i32 {
-    let client = match Client::resolve(args.server.as_deref(), args.token.as_deref()) {
+    let mut client = match Client::resolve(args.server.as_deref(), args.token.as_deref()) {
         Ok(client) => client,
         Err(e) => {
             eprintln!("mstream-player: {e}");
@@ -83,13 +84,51 @@ pub fn run(args: AdminArgs) -> i32 {
         }
     };
     crate::setup::boot_language();
-    match args.room.unwrap_or(RoomCmd::Libraries) {
-        RoomCmd::Libraries => run_tui(libraries::start(client, args.same_machine)),
-        RoomCmd::Discovery => run_tui(discovery::start(client)),
-        RoomCmd::Federation => run_tui(federation::start(client)),
-        RoomCmd::Backups => run_tui(backups::start(client, args.same_machine)),
-        RoomCmd::Torrents => run_tui(torrents::start(client, args.same_machine)),
+
+    // Pre-flight. Every room needs an admin session, and the rooms already
+    // explain a 403 (not an admin, or an address restriction) and a 405
+    // (lockAdmin) in their own words — but a 401 has an answer the hub can
+    // give itself: no saved session for this server, or one it no longer
+    // accepts, so ask once and keep what the server issues, the way
+    // `mstream-player login` and the wizard's own account creation do.
+    // Anything else the ping says (a server down; a public-mode server,
+    // which needs no session at all) is the room's to show.
+    let mut unsaved: Option<String> = None;
+    if matches!(client.ping(), Err(ApiError::Unauthorized)) {
+        let mut page = login::start(client);
+        let code = run_tui(&mut page);
+        if code != 0 {
+            return code;
+        }
+        let Some((username, token)) = page.session() else {
+            return 0; // Esc: nothing to open
+        };
+        let server = page.server();
+        client = match Client::new(&server) {
+            Ok(fresh) => fresh.with_token(Some(token.clone())),
+            Err(e) => {
+                eprintln!("mstream-player: {e}");
+                return 1;
+            }
+        };
+        if let Err(e) = login::remember(&server, &username, &token) {
+            // Signed in for this run regardless; the terminal is the
+            // room's until it closes, so the warning waits.
+            unsaved = Some(e);
+        }
     }
+
+    let code = match args.room.unwrap_or(RoomCmd::Libraries) {
+        RoomCmd::Libraries => run_tui(&mut libraries::start(client, args.same_machine)),
+        RoomCmd::Discovery => run_tui(&mut discovery::start(client)),
+        RoomCmd::Federation => run_tui(&mut federation::start(client)),
+        RoomCmd::Backups => run_tui(&mut backups::start(client, args.same_machine)),
+        RoomCmd::Torrents => run_tui(&mut torrents::start(client, args.same_machine)),
+    };
+    if let Some(e) = unsaved {
+        eprintln!("mstream-player: signed in, but the session was not saved: {e}");
+    }
+    code
 }
 
 /// How a room's loop ended.
@@ -116,6 +155,13 @@ pub(crate) trait Screen {
     /// cadence, say). Nothing by default.
     fn tick(&mut self) {}
 
+    /// Asked right after the pump: a screen whose job is done (the sign-in
+    /// page, once the server answered) ends the loop from here — the rooms
+    /// only ever end on a key or a click, and never override it.
+    fn finished(&self) -> Option<Outcome> {
+        None
+    }
+
     fn render(&mut self, frame: &mut Frame);
 
     /// A key press (Ctrl-C is the loop's own).
@@ -130,7 +176,7 @@ pub(crate) trait Screen {
 
 /// The terminal session around a room: ground lease, mouse capture,
 /// pointer contract, event loop, teardown.
-fn run_tui<S: Screen>(mut screen: S) -> i32 {
+fn run_tui<S: Screen>(screen: &mut S) -> i32 {
     let _title = crate::tui::WindowTitle::claim("mStream Admin");
 
     // Claim the window background BEFORE ratatui takes the terminal — the
@@ -144,7 +190,7 @@ fn run_tui<S: Screen>(mut screen: S) -> i32 {
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(seq));
     }
     set_pointer_shape(false, mouse_on);
-    let outcome = event_loop(&mut terminal, &mut screen, mouse_on);
+    let outcome = event_loop(&mut terminal, screen, mouse_on);
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(POINTER_RESET));
@@ -171,6 +217,9 @@ fn event_loop<S: Screen>(
         screen.tick();
         terminal.draw(|frame| screen.render(frame))?;
         screen.pump();
+        if let Some(outcome) = screen.finished() {
+            return Ok(outcome);
+        }
 
         let over = screen.ui().hovering_clickable();
         if over != hand {

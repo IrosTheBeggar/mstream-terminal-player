@@ -1,0 +1,24 @@
+#!/usr/bin/expect -f
+# The admin hub against a server whose accounts exist, with no saved
+# session: the sign-in page comes first, and a good name + password
+# opens the room (the session is asserted on disk by run.sh).
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(HOME) $::env(WIZHOME)
+proc drain {secs} { expect -timeout $secs timeout {} }
+spawn {*}$argv
+exec stty rows 40 columns 100 < $spawn_out(slave,name)
+expect { "USERNAME" {} timeout { puts "NO-SIGNIN"; exit 2 } }
+drain 1
+send "alice"
+drain 1
+send "\t"
+drain 1
+send "hunter2\r"
+expect { "Libraries" {} timeout { puts "NO-ROOM"; exec kill -9 [exp_pid]; expect eof; exit 3 } }
+drain 2
+send "\x03"
+expect eof
+exit 0
