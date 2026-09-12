@@ -184,6 +184,8 @@ fn run_tui<S: Screen>(screen: &mut S) -> i32 {
     let claim = theme::acquire_ground();
     let ground_guard = GroundGuard;
 
+    // The room's palette is its interface: not subject to NO_COLOR.
+    crate::console::keep_colors();
     let mut terminal = ratatui::init();
     let mouse_on = execute!(std::io::stdout(), EnableMouseCapture).is_ok();
     if let Some(seq) = claim {

@@ -27,6 +27,25 @@ pub fn stderr_free() -> bool {
     !TUI_OWNS_TERMINAL.load(Ordering::Relaxed)
 }
 
+/// A full-screen page keeps its palette whatever `NO_COLOR` says.
+///
+/// crossterm honours no-color.org: once the variable is set, every colour
+/// it writes comes out with EMPTY parameters — `ESC[;m`, a reset — so a
+/// designed page turns into white-on-black with bold as its only emphasis.
+/// A wizard like that reads as broken, and in the rooms an accent, a
+/// warning and a hint all look alike. The convention is for programs that
+/// decorate their OUTPUT; a full-screen page's palette is the interface.
+/// So the wizard, the admin rooms and the player call this before their
+/// first styled write, and the plain commands (`ls`, `search`, `info`, …),
+/// which print into whatever the shell collects, keep honouring the
+/// variable untouched. (Found live: tool shells and some IDE terminals
+/// export `NO_COLOR=1` without saying so, and every page opened from one
+/// came up monochrome — the console itself rendered colour fine.)
+#[cfg(not(target_arch = "wasm32"))]
+pub fn keep_colors() {
+    ratatui::crossterm::style::force_color_output(true);
+}
+
 /// Like `eprintln!`, for diagnostics that can fire while the TUI owns the
 /// terminal. Silent there — the only reader is the person the smear would
 /// land on — but no longer lost: every line also goes to the flight
@@ -58,5 +77,26 @@ mod tests {
         assert!(!stderr_free(), "claimed: diagnostics hold their tongue");
         release_terminal();
         assert!(stderr_free(), "released: the shell is a log again");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_full_screen_page_keeps_its_colours_under_no_color() {
+        use ratatui::crossterm::Command;
+        use ratatui::crossterm::style::{Color, SetForegroundColor};
+        let rendered = || {
+            let mut s = String::new();
+            SetForegroundColor(Color::Red).write_ansi(&mut s).unwrap();
+            s
+        };
+        // What NO_COLOR does once crossterm has read it (process-global,
+        // like the variable itself): the colour parameters vanish and the
+        // bare `ESC[m` — a reset — is all that reaches the terminal.
+        ratatui::crossterm::style::force_color_output(false);
+        assert_eq!(rendered(), "\x1b[m", "NO_COLOR strips a colour down to a reset");
+        // A page's first act puts them back, whatever the environment says.
+        keep_colors();
+        let back = rendered();
+        assert!(back.starts_with("\x1b[38;") && back.ends_with('m'), "a full-screen page draws in colour: {back:?}");
     }
 }
