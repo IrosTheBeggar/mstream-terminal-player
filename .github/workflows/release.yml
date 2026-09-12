@@ -81,6 +81,18 @@ jobs:
 
       - name: Build
         shell: bash
+        # 64 MiB stacks for rustc's threads (the default is 8 MiB). The
+        # v0.6.0 tag build died on darwin-x64 with `rustc interrupted by
+        # SIGBUS` — a stack overflow inside an LLVM machine pass
+        # (MachineLateInstrsCleanup recursing over one very large function
+        # of this crate) while cross-compiling x86_64-apple-darwin on the
+        # arm64 runner with rustc 1.98.1; the other five targets built. The
+        # compiler's own advice for this crash class is a larger
+        # RUST_MIN_STACK, and the legs that never needed it take no harm.
+        # (`cross` runs cargo in a container and does not pass this
+        # through — those legs were never the problem.)
+        env:
+          RUST_MIN_STACK: 67108864
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
