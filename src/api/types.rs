@@ -30,6 +30,23 @@ fn int_bool<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     })
 }
 
+/// The ping's `transcode` field is the server's defaults object when
+/// transcoding is on offer and the literal `false` when it is not — which
+/// is every fresh install for the ten-odd seconds its ffmpeg bootstrap
+/// takes, and for good wherever that download failed (mStream's
+/// `src/api/server-info.js`: `transcode.isDownloaded() && …`). Reading the
+/// boolean as `None` is the same answer the missing field already gets;
+/// rejecting it failed the whole ping, and the setup wizard's first page
+/// opened on "could not reach the server" on every platform.
+fn transcode_or_off<'de, D: Deserializer<'de>>(d: D) -> Result<Option<TranscodeInfo>, D::Error> {
+    match serde_json::Value::deserialize(d)? {
+        v @ serde_json::Value::Object(_) => {
+            serde_json::from_value(v).map(Some).map_err(serde::de::Error::custom)
+        }
+        _ => Ok(None),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoginResponse {
     pub token: String,
@@ -42,6 +59,9 @@ pub struct LoginResponse {
 #[serde(default)]
 pub struct Ping {
     pub vpaths: Vec<String>,
+    /// `None` when the server has no transcoding to offer — sent as the
+    /// literal `false`, not as a missing field (see [`transcode_or_off`]).
+    #[serde(deserialize_with = "transcode_or_off")]
     pub transcode: Option<TranscodeInfo>,
     #[serde(rename = "noFileModify")]
     pub no_file_modify: bool,
@@ -1143,6 +1163,33 @@ mod tests {
         let p: Ping = serde_json::from_str(json).unwrap();
         assert_eq!(p.vpaths, vec!["testlib"]);
         assert_eq!(p.transcode.unwrap().default_codec.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn a_ping_with_transcode_off_is_still_a_ping() {
+        // Captured from a live 6.26.0 bundle in its first seconds, before the
+        // ffmpeg bootstrap had finished: `transcode` is the literal `false`,
+        // and the setup wizard's first page said "could not reach the server"
+        // over it (invalid type: boolean `false`, expected struct
+        // TranscodeInfo). The boolean means what the missing field means.
+        let json = r#"{"vpaths":[],"noMkdir":false,"noUpload":false,"noFileModify":false,
+            "federationDiscovery":false,"federationBrowse":false,"federationDirect":false,
+            "federationInbox":0,"vpathMetaData":{},"transcode":false,
+            "supportedAudioFiles":{"mp3":true,"flac":true},"discovery":true,
+            "discoveryP2p":false,"playlists":[],"discoveryPath":true}"#;
+        let p: Ping = serde_json::from_str(json).unwrap();
+        assert!(p.transcode.is_none());
+        assert!(p.discovery && p.discovery_path && !p.discovery_p2p, "the rest still reads");
+        assert!(Capabilities::from(&p).discovery_path, "and the capabilities lift out of it");
+
+        // The other spellings of "nothing to offer" read the same way, and
+        // the object still reads as the object.
+        for json in [r#"{"transcode":null}"#, r#"{"transcode":true}"#, r#"{}"#] {
+            let p: Ping = serde_json::from_str(json).unwrap();
+            assert!(p.transcode.is_none(), "{json}");
+        }
+        let p: Ping = serde_json::from_str(r#"{"transcode":{"defaultCodec":"mp3"}}"#).unwrap();
+        assert_eq!(p.transcode.unwrap().default_codec.as_deref(), Some("mp3"));
     }
 
     #[test]
