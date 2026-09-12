@@ -26,6 +26,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 PORT = int(sys.argv[1])
 LOOP = os.environ.get("FAKE_LOOP", "") not in ("", "0")
+# FAKE_AUTH=1: the real wall's shape for the admin hub's sign-in leg — once
+# a user exists, /ping and /admin/* want the issued token (401 otherwise),
+# and /auth/login only knows the users PUT there. Off by default: the
+# wizard legs run on the zero-account window this would close.
+AUTH = os.environ.get("FAKE_AUTH", "") not in ("", "0")
 
 STEPS = [
     [{"vpath": "media", "pct": 4, "scanned": 118}],
@@ -64,6 +69,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _deny(self):
+        body = json.dumps({"error": "Authentication Error"}).encode()
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _walled(self):
+        """True when this request must carry the token and does not."""
+        if not AUTH or not state["users"]:
+            return False
+        if self.path != "/api/v1/ping" and not self.path.startswith("/api/v1/admin/"):
+            return False
+        return self.headers.get("x-access-token") != "fake-token"
+
     def _body(self):
         n = int(self.headers.get("Content-Length", 0) or 0)
         raw = self.rfile.read(n) if n else b"{}"
@@ -73,6 +94,8 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def do_GET(self):
+        if self._walled():
+            return self._deny()
         if self.path == "/api/v1/scan/progress":
             i = calls["n"]
             calls["n"] += 1
@@ -112,12 +135,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = self._body()
         if self.path == "/api/v1/auth/login":
+            if AUTH and body.get("username") not in state["users"]:
+                return self._deny()
             return self._json(
                 {"token": "fake-token", "vpaths": sorted(state["directories"])}
             )
         return self._json({})
 
     def do_PUT(self):
+        if self._walled():
+            return self._deny()
         body = self._body()
         if self.path == "/api/v1/admin/directory":
             state["directories"][body.get("vpath", "?")] = body.get("directory", "?")

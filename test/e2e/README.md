@@ -2,7 +2,7 @@
 
 `bash test/e2e/run.sh` drives the real binary through the real event
 loop with expect(1), against a **stateful fake mStream**
-(`fake_mstream.py`) — no Node, no real server, no audio files. Six
+(`fake_mstream.py`) — no Node, no real server, no audio files. Seven
 scenarios, each on a fresh fake and a fresh `$HOME`:
 
 - **A** — the full English walk (folders → extras → login → Done), then
@@ -21,6 +21,11 @@ scenarios, each on a fresh fake and a fresh `$HOME`:
 - **F** — the scan widget's whole choreography: file scan with a queued
   sibling, the enrichment passes (waveforms with an estimate, album art
   without), completion — `check_scan.py` verifies every state.
+- **G** — the admin hub's sign-in: a fake with its auth wall up
+  (`FAKE_AUTH=1`) and one account, `mstream-player admin` on a fresh
+  `$HOME` gets the sign-in page, a good name + password opens the
+  Libraries room, the session lands in `credentials.toml`, and the
+  second run goes straight to the room.
 
 ## The two harness laws (learned the hard way)
 

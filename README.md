@@ -462,7 +462,9 @@ a path by hand, `t` edits the template with a live preview. Seeding hands the se
 more than one user. Client shows the connection: `t` tests, `c` switches client, `x`
 disconnects behind a gate.
 
-The saved session must belong to an admin. Two server settings answer with errors the room
+Without a saved session for that server — or with one the server no longer accepts — the
+hub opens a sign-in page first and keeps the session for next time, the way `login` does.
+The account must be an admin's. Two server settings answer with errors the room
 explains in words: `lockAdmin` (the panel is locked, HTTP 405) and an address-restricted admin
 panel (403 from another machine).
 

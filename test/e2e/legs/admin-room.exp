@@ -1,0 +1,24 @@
+#!/usr/bin/expect -f
+# The second run on the same HOME: the kept session opens the room
+# directly — the sign-in page must not come back.
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(HOME) $::env(WIZHOME)
+# The kept session is asserted on disk under this HOME: pin the XDG
+# config dir there too — GitHub's Ubuntu runners export one that
+# points elsewhere (macOS never consults it).
+set env(XDG_CONFIG_HOME) $::env(WIZHOME)/.config
+proc drain {secs} { expect -timeout $secs timeout {} }
+spawn {*}$argv
+exec stty rows 40 columns 100 < $spawn_out(slave,name)
+expect {
+  "USERNAME" { puts "ASKED-AGAIN"; exec kill -9 [exp_pid]; expect eof; exit 2 }
+  "Libraries" {}
+  timeout { puts "NO-ROOM"; exec kill -9 [exp_pid]; expect eof; exit 3 }
+}
+drain 2
+send "\x03"
+expect eof
+exit 0
