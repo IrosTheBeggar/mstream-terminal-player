@@ -1,4 +1,4 @@
-//! The admin panel: `mstream-player admin [libraries|discovery|federation|backups|torrents]` — the
+//! The admin panel: `mstream-player admin [libraries|discovery|federation|backups|torrents|users]` — the
 //! server's management rooms, drawn full-screen from the UI kit the way
 //! the setup wizard is, against the saved session's server.
 //!
@@ -16,6 +16,7 @@ mod discovery;
 mod federation;
 mod libraries;
 mod login;
+mod users;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -73,6 +74,8 @@ enum RoomCmd {
     Backups,
     /// Torrents: the torrent client, its list, each library's daemon-side path, seeding, who may add
     Torrents,
+    /// Users: who has an account, what each one may do, which libraries they see
+    Users,
 }
 
 pub fn run(args: AdminArgs) -> i32 {
@@ -124,6 +127,7 @@ pub fn run(args: AdminArgs) -> i32 {
         RoomCmd::Federation => run_tui(&mut federation::start(client)),
         RoomCmd::Backups => run_tui(&mut backups::start(client, args.same_machine)),
         RoomCmd::Torrents => run_tui(&mut torrents::start(client, args.same_machine)),
+        RoomCmd::Users => run_tui(&mut users::start(client)),
     };
     if let Some(e) = unsaved {
         eprintln!("mstream-player: signed in, but the session was not saved: {e}");

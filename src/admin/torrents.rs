@@ -2934,7 +2934,7 @@ mod tests {
 
     fn users(n: usize) -> BTreeMap<String, AdminUser> {
         let all = [("iros", true, true), ("mira", false, true), ("guest", false, false), ("dj-tom", false, false)];
-        all.iter().take(n).map(|(u, admin, allow)| (u.to_string(), AdminUser { admin: *admin, vpaths: Vec::new(), allow_torrent: *allow })).collect()
+        all.iter().take(n).map(|(u, admin, allow)| (u.to_string(), AdminUser { admin: *admin, allow_torrent: *allow, ..Default::default() })).collect()
     }
 
     fn status_ok() -> TorrentStatus {
