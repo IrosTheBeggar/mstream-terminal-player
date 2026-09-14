@@ -1322,7 +1322,6 @@ fn draw_table(frame: &mut Frame, room: &mut Room, column: Rect) {
         inner,
     );
     room.ui.click(card, Act::Add);
-    room.ui.tip(card, t!("bak.tip_add"));
 
     let table = Rect { x: column.x, y: column.y + 6, width: column.width, height: column.height.saturating_sub(6) };
     if table.height < 3 {
@@ -1441,7 +1440,6 @@ fn draw_table(frame: &mut Frame, room: &mut Room, column: Rect) {
         };
         frame.render_widget(Paragraph::new(Span::styled(glyph, on_style)), on_rect);
         room.ui.click(on_rect, Act::ToggleEnabled(d.id));
-        room.ui.tip(on_rect, t!("bak.tip_on"));
         room.ui.click(cell(table.x, on_x.saturating_sub(table.x + 1)), Act::Select(i));
     }
     let bar = Rect { x: table.x + table.width, y: rows_y, width: 1, height: visible as u16 };
@@ -1579,7 +1577,7 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
         Paragraph::new(Span::styled(clip(&title, w.saturating_sub(4)), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::FormCancel, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::FormCancel);
     let mut y = inner.y + 2;
 
     // LIBRARY
@@ -1728,7 +1726,7 @@ fn draw_browser(frame: &mut Frame, room: &mut Room, area: Rect, browse: &Browse)
         Paragraph::new(Span::styled(t!("bak.browser_title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::BrowseCancel, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::BrowseCancel);
     frame.render_widget(
         Paragraph::new(Span::styled(browse.path.clone(), dim())),
         Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
@@ -1770,7 +1768,7 @@ fn draw_history(frame: &mut Frame, room: &mut Room, area: Rect, dest: &BackupDes
         )),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::HistoryClose, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::HistoryClose);
     if !loaded {
         return;
     }

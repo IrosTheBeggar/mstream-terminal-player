@@ -2856,7 +2856,7 @@ fn draw_entry_modal(
     let w = inner.width.saturating_sub(2);
     let line = |y: u16| Rect { x, y, width: w, height: 1 };
     frame.render_widget(Paragraph::new(Span::styled(clip(&title, w.saturating_sub(4)), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))), line(inner.y));
-    kit::modal_close(frame, &mut room.ui, inner, Act::ModalCancel, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::ModalCancel);
     field_box(frame, room, Rect { x, y: inner.y + 2, width: w, height: 4 }, &label, input, true, false, placeholder, Act::ModalSubmit);
     let mut y = inner.y + 7;
     for l in body {
@@ -2934,7 +2934,7 @@ mod tests {
 
     fn users(n: usize) -> BTreeMap<String, AdminUser> {
         let all = [("iros", true, true), ("mira", false, true), ("guest", false, false), ("dj-tom", false, false)];
-        all.iter().take(n).map(|(u, admin, allow)| (u.to_string(), AdminUser { admin: *admin, vpaths: Vec::new(), allow_torrent: *allow })).collect()
+        all.iter().take(n).map(|(u, admin, allow)| (u.to_string(), AdminUser { admin: *admin, allow_torrent: *allow, ..Default::default() })).collect()
     }
 
     fn status_ok() -> TorrentStatus {

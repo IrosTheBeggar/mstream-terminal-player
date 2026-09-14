@@ -1559,14 +1559,39 @@ pub struct SeedOutcome {
     pub message: Option<String>,
 }
 
-/// One row of `GET /admin/users`, keyed by username there.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+/// One row of `GET /admin/users`, keyed by username there. The four
+/// permission flags default the way the server creates a user (folders
+/// and uploads on, file changes on, server audio off) so an older server
+/// that omits one reads as it behaves.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct AdminUser {
     #[serde(default)]
     pub admin: bool,
     #[serde(default)]
     pub vpaths: Vec<String>,
+    #[serde(rename = "allowMkdir", default = "yes")]
+    pub allow_mkdir: bool,
+    #[serde(rename = "allowUpload", default = "yes")]
+    pub allow_upload: bool,
+    #[serde(rename = "allowFileModify", default = "yes")]
+    pub allow_file_modify: bool,
+    #[serde(rename = "allowServerAudio", default)]
+    pub allow_server_audio: bool,
     #[serde(rename = "allowTorrent", default)]
     pub allow_torrent: bool,
+}
+
+impl Default for AdminUser {
+    fn default() -> Self {
+        AdminUser {
+            admin: false,
+            vpaths: Vec::new(),
+            allow_mkdir: true,
+            allow_upload: true,
+            allow_file_modify: true,
+            allow_server_audio: false,
+            allow_torrent: false,
+        }
+    }
 }
 

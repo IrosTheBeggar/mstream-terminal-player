@@ -376,7 +376,7 @@ mstream-player admin --server http://nas:3000
 mstream-player admin --same-machine          # this terminal runs on the server: add folders with the OS dialog
 ```
 
-Two rooms. **Libraries** (the default) is the server's music folders — each folder's name,
+Six rooms. **Libraries** (the default) is the server's music folders — each folder's name,
 its path as the server sees it, and whether the scanner follows symlinks (`s` flips it, from
 the next scan on). `b` browses the server's own disk; with `--same-machine` it opens the OS
 folder dialog instead, the same picker the setup wizard uses. `t` types a path, with
@@ -453,22 +453,20 @@ more than one user. Client shows the connection: `t` tests, `c` switches client,
 disconnects behind a gate.
 
 ```
-mstream-player admin torrents                # the torrent client and what it does for you
+mstream-player admin users                   # who has an account, what each may do, which libraries they see
 ```
 
-**Torrents** is the webapp's Torrent Client page, beta there too. Until a client is chosen and
-connected, the page is the setup: the client as a radio group (Transmission, qBittorrent,
-Deluge), who may add torrents beneath it when the server has more than one user, and the
-connect form where `^T` probes without saving and Enter saves after a good probe. Connected,
-one state line carries the daemon's status and five tabs follow. Torrents is the daemon's
-list with a progress bar, a name-or-hash filter and `r` to drop an mStream-added torrent (the
-files stay). Libraries shows the daemon-side path of each library with the verified /
-inferred / probing / unconfirmed ladder and its destination template: `d` re-probes, `m` maps
-a path by hand, `t` edits the template with a live preview. Seeding hands the server a
-`.torrent` for content already on disk (`a`, a typed path or the OS dialog with
-`--same-machine`). Access holds the policy and the per-user whitelist, and only exists with
-more than one user. Client shows the connection: `t` tests, `c` switches client, `x`
-disconnects behind a gate.
+**Users** is the webapp's Users page as one table: USER · ADMIN · LIBRARIES · FOLDERS · UPLOAD ·
+AUDIO · MODIFY, every permission a checkbox cell that `1`–`5` (or a click) flips at once. `l`
+edits the library grant, `p` sets a new password (typed twice, since the terminal masks it),
+`r` removes behind a gate that names what goes with the account — playlists, play history and
+library grants; the music files stay — and warns when the row is the only admin, who also
+cannot be un-admined. `a` adds a user with the webapp's defaults: every library ticked, admin
+only on a server with no users yet, folders and uploads on, server audio off. A server with no
+users runs without logins; the room says so in gold, and once the first user is created it
+signs itself in as that user and keeps the session, so the panel stays open instead of
+bouncing to the sign-in page. MODIFY is the file-change permission the API carries and the
+webapp no longer shows.
 
 Without a saved session for that server — or with one the server no longer accepts — the
 hub opens a sign-in page first and keeps the session for next time, the way `login` does.

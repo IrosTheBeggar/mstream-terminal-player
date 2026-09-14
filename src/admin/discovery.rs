@@ -1440,7 +1440,6 @@ fn draw_off(frame: &mut Frame, room: &mut Room, column: Rect, s: &DiscoveryStatu
             inner,
         );
         room.ui.click(card, Act::Join);
-        room.ui.tip(card, if s.binary_found { t!("p2p.tip_join") } else { t!("p2p.tip_join_download") });
         y += 4;
 
         // The opt-in: the kit's checkbox card, on by default. Space and a
@@ -1465,7 +1464,6 @@ fn draw_off(frame: &mut Frame, room: &mut Room, column: Rect, s: &DiscoveryStatu
             Rect { x: inner.x + 5, y: inner.y + 1, width: inner.width.saturating_sub(5), height: 1 },
         );
         room.ui.click(opt, Act::ToggleRequests);
-        room.ui.tip(opt, t!("p2p.tip_requests"));
         y += 5;
     }
 
@@ -1690,7 +1688,7 @@ fn draw_invite(frame: &mut Frame, room: &mut Room, pane: Rect, s: &DiscoveryStat
     if let Some(ticket) = &s.ticket {
         let copy = t!("p2p.invite_copy").to_string();
         let w = copy.chars().count() as u16 + 4;
-        let rect = kit::button(
+        kit::button(
             frame,
             &mut room.ui,
             Rect { x: pane.right().saturating_sub(w), y: pane.y + 1, width: w, height: 1 },
@@ -1698,7 +1696,6 @@ fn draw_invite(frame: &mut Frame, room: &mut Room, pane: Rect, s: &DiscoveryStat
             false,
             Act::CopyTicket,
         );
-        room.ui.tip(rect, t!("p2p.tip_copy"));
         frame.render_widget(
             Paragraph::new(printable(ticket, 4096)).wrap(Wrap { trim: false }),
             Rect { x: pane.x, y: pane.y + 2, width: pane.width, height: 2 },
@@ -2026,7 +2023,7 @@ fn draw_sheet(frame: &mut Frame, room: &mut Room, area: Rect, id: &str, sel: usi
         Paragraph::new(Span::styled(display_name(&peer), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::SheetClose, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::SheetClose);
     frame.render_widget(
         Paragraph::new(Span::raw(printable(&peer.payload.description, DESCRIPTION_MAX))),
         line(inner.y + 1),
@@ -2110,7 +2107,7 @@ fn draw_compose(frame: &mut Frame, room: &mut Room, area: Rect, c: &Compose) {
         Paragraph::new(Span::styled(t!("p2p.compose_title", name = c.name).to_string(), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::ComposeCancel, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::ComposeCancel);
     for (i, key) in ["p2p.compose_1", "p2p.compose_2", "p2p.compose_3"].iter().enumerate() {
         frame.render_widget(Paragraph::new(Span::styled(t!(*key).to_string(), dim())), line(inner.y + 1 + i as u16));
     }
@@ -2202,7 +2199,7 @@ fn draw_identity(frame: &mut Frame, room: &mut Room, area: Rect, d: &IdentityDra
         Paragraph::new(Span::styled(t!("p2p.identity_title").to_string(), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::IdentityCancel, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::IdentityCancel);
     let at = |y: u16| Rect { x: inner.x + 1, y, width: inner.width.saturating_sub(2), height: 4 };
     modal_field(
         frame,
@@ -2247,7 +2244,7 @@ fn draw_setting(frame: &mut Frame, room: &mut Room, area: Rect, d: &SettingDraft
         Paragraph::new(Span::styled(t!(title).to_string(), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::SettingCancel, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::SettingCancel);
     frame.render_widget(
         Paragraph::new(Span::styled(t!(help).to_string(), dim())).wrap(Wrap { trim: false }),
         Rect { x: inner.x + 1, y: inner.y + 2, width: inner.width.saturating_sub(2), height: 4 },
@@ -2322,7 +2319,7 @@ fn draw_blocked(frame: &mut Frame, room: &mut Room, area: Rect, sel: usize) {
         Paragraph::new(Span::styled(t!("p2p.blocked_title").to_string(), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::BlockedClose, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::BlockedClose);
     if blocked.is_empty() {
         frame.render_widget(Paragraph::new(Span::styled(t!("p2p.blocked_empty").to_string(), dim())), line(inner.y + 2));
     }

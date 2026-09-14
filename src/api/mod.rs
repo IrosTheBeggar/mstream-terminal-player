@@ -188,6 +188,69 @@ impl TorrentCreds {
     }
 }
 
+/// What `PUT /admin/users` takes: the account and its first grants. The
+/// server has no `allowFileModify` here — that flag starts on and is set
+/// afterwards through [`UserAccess`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewUser {
+    pub username: String,
+    pub password: String,
+    pub vpaths: Vec<String>,
+    pub admin: bool,
+    pub allow_mkdir: bool,
+    pub allow_upload: bool,
+    pub allow_server_audio: bool,
+}
+
+impl NewUser {
+    fn body(&self) -> serde_json::Value {
+        serde_json::json!({
+            "username": self.username,
+            "password": self.password,
+            "vpaths": self.vpaths,
+            "admin": self.admin,
+            "allowMkdir": self.allow_mkdir,
+            "allowUpload": self.allow_upload,
+            "allowServerAudio": self.allow_server_audio,
+        })
+    }
+}
+
+/// The five flags `POST /admin/users/access` sets as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserAccess {
+    pub admin: bool,
+    pub allow_mkdir: bool,
+    pub allow_upload: bool,
+    pub allow_file_modify: bool,
+    pub allow_server_audio: bool,
+}
+
+impl UserAccess {
+    /// A user's flags as the server holds them — the base every toggle
+    /// echoes.
+    pub fn of(user: &AdminUser) -> Self {
+        UserAccess {
+            admin: user.admin,
+            allow_mkdir: user.allow_mkdir,
+            allow_upload: user.allow_upload,
+            allow_file_modify: user.allow_file_modify,
+            allow_server_audio: user.allow_server_audio,
+        }
+    }
+
+    fn body(&self, username: &str) -> serde_json::Value {
+        serde_json::json!({
+            "username": username,
+            "admin": self.admin,
+            "allowMkdir": self.allow_mkdir,
+            "allowUpload": self.allow_upload,
+            "allowFileModify": self.allow_file_modify,
+            "allowServerAudio": self.allow_server_audio,
+        })
+    }
+}
+
 /// The fields a `PATCH` may carry; None leaves a field alone.
 /// `exclude_globs`: None = untouched, Some(None) = back to the server's
 /// defaults, Some(Some(list)) = pinned to that list.
@@ -2082,6 +2145,61 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn admin_users(&self) -> Result<std::collections::BTreeMap<String, AdminUser>, ApiError> {
         wait(self.admin_users_async())
+    }
+
+    /// Create a user: `PUT /admin/users`. The server refuses a taken name
+    /// with a bare 500, so callers check the list first.
+    pub async fn admin_add_user_async(&self, user: &NewUser) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::PUT, "api/v1/admin/users", Some(user.body())).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_add_user(&self, user: &NewUser) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_add_user_async(user))
+    }
+
+    /// Delete a user: `DELETE /admin/users {username}`. The server cascades
+    /// the user's playlists, play history and library grants; files stay.
+    pub async fn admin_delete_user_async(&self, username: &str) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::DELETE, "api/v1/admin/users", Some(serde_json::json!({ "username": username }))).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_delete_user(&self, username: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_delete_user_async(username))
+    }
+
+    /// Set a user's password: `POST /admin/users/password`.
+    pub async fn admin_set_user_password_async(&self, username: &str, password: &str) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/users/password", serde_json::json!({ "username": username, "password": password })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_set_user_password(&self, username: &str, password: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_set_user_password_async(username, password))
+    }
+
+    /// Replace a user's library grant: `POST /admin/users/vpaths` with the
+    /// whole list.
+    pub async fn admin_set_user_vpaths_async(&self, username: &str, vpaths: &[String]) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/users/vpaths", serde_json::json!({ "username": username, "vpaths": vpaths })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_set_user_vpaths(&self, username: &str, vpaths: &[String]) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_set_user_vpaths_async(username, vpaths))
+    }
+
+    /// Set a user's five access flags as one: `POST /admin/users/access`.
+    /// The route defaults any flag it does not see (file changes on,
+    /// server audio off), so a caller changing one flag echoes them all.
+    pub async fn admin_set_user_access_async(&self, username: &str, access: &UserAccess) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/users/access", access.body(username)).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_set_user_access(&self, username: &str, access: &UserAccess) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_set_user_access_async(username, access))
     }
 
     /// Per-library scan progress (works for any signed-in user; on a fresh

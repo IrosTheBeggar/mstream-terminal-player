@@ -2067,7 +2067,6 @@ fn draw_peers(frame: &mut Frame, room: &mut Room, body: Rect) {
         };
         frame.render_widget(Paragraph::new(Span::styled(glyph, disc_style)), disc);
         room.ui.click(disc, Act::ToggleDiscovery(p.id));
-        room.ui.tip(disc, t!("fed.tip_discovery"));
     });
     if room.note.is_none()
         && room.busy.is_none()
@@ -2150,7 +2149,7 @@ fn draw_form(frame: &mut Frame, room: &mut Room, area: Rect, f: &Form) {
         Paragraph::new(Span::styled(title.to_string(), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::FormCancel, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::FormCancel);
     let x = inner.x + 1;
     let w = inner.width.saturating_sub(2);
     let mut y = inner.y + 1;
@@ -2269,7 +2268,7 @@ fn draw_minted(frame: &mut Frame, room: &mut Room, area: Rect, name: &str, ticke
         Paragraph::new(Span::styled(t!("fed.minted_title", name = name).to_string(), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::MintedDone, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::MintedDone);
     let body = Rect { x: inner.x + 1, y: inner.y + 1, width: inner.width.saturating_sub(2), height: 2 };
     frame.render_widget(
         Paragraph::new(t!("fed.minted_text", libraries = libraries.join(", ")).to_string()).wrap(Wrap { trim: false }),
@@ -2312,7 +2311,7 @@ fn draw_peer_name(frame: &mut Frame, room: &mut Room, area: Rect, name: &Input, 
         Paragraph::new(Span::styled(t!("fed.peer_name_title").to_string(), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::PeerNameCancel, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::PeerNameCancel);
     frame.render_widget(Paragraph::new(Span::styled(preview_words(preview), Style::default().fg(th().ok))), line(inner.y + 2));
     modal_field(frame, room, Rect { x: inner.x + 1, y: inner.y + 4, width: 40.min(inner.width.saturating_sub(2)), height: 4 }, &t!("fed.peer_name_label"), name, true, Act::PeerNameAdd);
     let label = t!("fed.peer_name_add").to_string();

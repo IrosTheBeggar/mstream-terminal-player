@@ -523,6 +523,18 @@ the torrent types, twenty calls, a raw multipart `send_bytes`, `admin_users`;
 (240 keys × 10). Live-checked on the scratch server: choose Transmission → the connect form → a
 probe against nothing ("connection failed: connect ECONNREFUSED") → back to Disabled.
 
+**Users room ✅ 2026-09-13** — `mstream-player admin users` (`src/admin/users.rs`), per the "Admin
+Users" canvas: one table USER · ADMIN · LIBRARIES · FOLDERS · UPLOAD · AUDIO · MODIFY with checkbox
+cells (`1`–`5` or a click flips a flag through `POST /admin/users/access`, echoing all five since the
+route defaults the ones it does not see), `l` the library grant as a checkbox modal (`POST
+/admin/users/vpaths` with the whole list), `p` a new password typed twice, `r` a gold gate naming the
+server's CASCADE (playlists, play history, grants; files stay) with an extra line for the last admin;
+`a` the add form with the webapp's defaults (`PUT /admin/users`; empty and taken names refused before
+the server, which answers a taken name with a bare 500). Public mode (zero users) is the gold state
+line plus the webapp's two warnings; after the first user the room signs in as that user
+(`/auth/login`), keeps the session the way the hub's sign-in page does, and reloads. MODIFY
+(`allowFileModify`) is shown although the webapp dropped it. Quiet 30 s reload, never under a modal.
+
 Build, in order of fit: **logs** (`/api/v1/admin/logs/recent?since=<seq>` is a purpose-built
 tail-poll API with a cursor), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and
 `/api/v1/scan/status` — no admin rights, no IP gate), **users & access**, **server audio**
