@@ -990,7 +990,6 @@ fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect) {
         inner,
     );
     room.ui.click(add_rect, Act::Add);
-    room.ui.tip(add_rect, t!("usr.tip_add"));
     y += 4;
 
     // The table. The [X] remove control sits to the RIGHT of the selection.
@@ -1079,7 +1078,6 @@ fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect) {
         let x_style = if x_hover { Style::default().fg(th().danger).add_modifier(Modifier::BOLD) } else { dim() };
         frame.render_widget(Paragraph::new(Span::styled("[X]", x_style)), x_rect);
         room.ui.click(x_rect, Act::Remove(name.clone()));
-        room.ui.tip(x_rect, t!("usr.tip_remove"));
     });
 }
 
@@ -1188,7 +1186,7 @@ fn draw_add(frame: &mut Frame, room: &mut Room, area: Rect, f: &AddForm) {
         Paragraph::new(Span::styled(t!("usr.form_title").to_string(), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::FormCancel, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::FormCancel);
 
     let fields = f.fields();
     let index_of = |field: AField| fields.iter().position(|x| *x == field).unwrap_or(0);
@@ -1267,7 +1265,7 @@ fn draw_libraries(frame: &mut Frame, room: &mut Room, area: Rect, d: &LibsDraft)
         Paragraph::new(Span::styled(t!("usr.libs_title", user = printable(&d.username, NAME_MAX)).to_string(), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::LibsCancel, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::LibsCancel);
     let mut y = inner.y + 2;
     if d.libraries.is_empty() {
         frame.render_widget(Paragraph::new(Span::styled(t!("usr.form_no_libraries").to_string(), dim())), line(y));
@@ -1316,7 +1314,7 @@ fn draw_password(frame: &mut Frame, room: &mut Room, area: Rect, d: &PwDraft) {
         Paragraph::new(Span::styled(t!("usr.pw_title", user = printable(&d.username, NAME_MAX)).to_string(), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::PwCancel, t!("path_modal.tip_close"));
+    kit::modal_close_plain(frame, &mut room.ui, inner, Act::PwCancel);
     let fw = w.min(44);
     if inner.y + 5 < inner.bottom() {
         field_box(frame, room, Rect { x, y: inner.y + 2, width: fw, height: 4 }, &t!("usr.field_password"), &d.password, d.focus == 0, true, Act::PwFocus(0));
