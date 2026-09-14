@@ -1,6 +1,8 @@
 //! The admin panel: `mstream-player admin [libraries|discovery|federation|backups|torrents|users]` — the
 //! server's management rooms, drawn full-screen from the UI kit the way
-//! the setup wizard is, against the saved session's server.
+//! the setup wizard is, against the saved session's server. And one page
+//! that is not a room: `mstream-player stats`, the account's listening
+//! log, which shares this hub's chrome and sign-in but needs no admin.
 //!
 //! Each room is a [`Screen`]. This hub owns the terminal session around
 //! it — ground lease, mouse capture, pointer contract, the event loop,
@@ -16,6 +18,8 @@ mod discovery;
 mod federation;
 mod libraries;
 mod login;
+mod stats;
+mod tz;
 mod users;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -79,7 +83,7 @@ enum RoomCmd {
 }
 
 pub fn run(args: AdminArgs) -> i32 {
-    let mut client = match Client::resolve(args.server.as_deref(), args.token.as_deref()) {
+    let client = match Client::resolve(args.server.as_deref(), args.token.as_deref()) {
         Ok(client) => client,
         Err(e) => {
             eprintln!("mstream-player: {e}");
@@ -87,39 +91,10 @@ pub fn run(args: AdminArgs) -> i32 {
         }
     };
     crate::setup::boot_language();
-
-    // Pre-flight. Every room needs an admin session, and the rooms already
-    // explain a 403 (not an admin, or an address restriction) and a 405
-    // (lockAdmin) in their own words — but a 401 has an answer the hub can
-    // give itself: no saved session for this server, or one it no longer
-    // accepts, so ask once and keep what the server issues, the way
-    // `mstream-player login` and the wizard's own account creation do.
-    // Anything else the ping says (a server down; a public-mode server,
-    // which needs no session at all) is the room's to show.
-    let mut unsaved: Option<String> = None;
-    if matches!(client.ping(), Err(ApiError::Unauthorized)) {
-        let mut page = login::start(client);
-        let code = run_tui(&mut page);
-        if code != 0 {
-            return code;
-        }
-        let Some((username, token)) = page.session() else {
-            return 0; // Esc: nothing to open
-        };
-        let server = page.server();
-        client = match Client::new(&server) {
-            Ok(fresh) => fresh.with_token(Some(token.clone())),
-            Err(e) => {
-                eprintln!("mstream-player: {e}");
-                return 1;
-            }
-        };
-        if let Err(e) = login::remember(&server, &username, &token) {
-            // Signed in for this run regardless; the terminal is the
-            // room's until it closes, so the warning waits.
-            unsaved = Some(e);
-        }
-    }
+    let Session { client, unsaved, .. } = match ensure_session(client) {
+        Ok(session) => session,
+        Err(code) => return code,
+    };
 
     let code = match args.room.unwrap_or(RoomCmd::Libraries) {
         RoomCmd::Libraries => run_tui(&mut libraries::start(client, args.same_machine)),
@@ -133,6 +108,95 @@ pub fn run(args: AdminArgs) -> i32 {
         eprintln!("mstream-player: signed in, but the session was not saved: {e}");
     }
     code
+}
+
+#[derive(Args)]
+pub struct StatsArgs {
+    /// The server to read — defaults to the saved session's server
+    #[arg(long)]
+    server: Option<String>,
+
+    /// Auth token override (default: the saved session's token)
+    #[arg(long, hide = true)]
+    token: Option<String>,
+}
+
+/// `mstream-player stats`: the account's listening log, on the hub's
+/// terminal session and behind the same sign-in — any account, not an
+/// admin's, since every account has a log of its own.
+pub fn run_stats(args: StatsArgs) -> i32 {
+    let client = match Client::resolve(args.server.as_deref(), args.token.as_deref()) {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("mstream-player: {e}");
+            return 1;
+        }
+    };
+    crate::setup::boot_language();
+    let Session { client, username, unsaved } = match ensure_session(client) {
+        Ok(session) => session,
+        Err(code) => return code,
+    };
+    let code = run_tui_as(&mut stats::start(client, username), "mStream Stats");
+    if let Some(e) = unsaved {
+        eprintln!("mstream-player: signed in, but the session was not saved: {e}");
+    }
+    code
+}
+
+/// A session a page can open against: the client, who it is signed in
+/// as (when the saved session or the sign-in page knows), and — signed in
+/// this run but not kept — the reason to print once the page closes.
+struct Session {
+    client: Client,
+    username: Option<String>,
+    unsaved: Option<String>,
+}
+
+/// Pre-flight. Every room needs an admin session, and the rooms already
+/// explain a 403 (not an admin, or an address restriction) and a 405
+/// (lockAdmin) in their own words — but a 401 has an answer the hub can
+/// give itself: no saved session for this server, or one it no longer
+/// accepts, so ask once and keep what the server issues, the way
+/// `mstream-player login` and the wizard's own account creation do.
+/// Anything else the ping says (a server down; a public-mode server,
+/// which needs no session at all) is the page's to show. `Err` carries
+/// the exit code when the sign-in page ended the run.
+fn ensure_session(client: Client) -> Result<Session, i32> {
+    if !matches!(client.ping(), Err(ApiError::Unauthorized)) {
+        let username = saved_username(&client.server());
+        return Ok(Session { client, username, unsaved: None });
+    }
+    let mut page = login::start(client);
+    let code = run_tui(&mut page);
+    if code != 0 {
+        return Err(code);
+    }
+    let Some((username, token)) = page.session() else {
+        return Err(0); // Esc: nothing to open
+    };
+    let server = page.server();
+    let client = match Client::new(&server) {
+        Ok(fresh) => fresh.with_token(Some(token.clone())),
+        Err(e) => {
+            eprintln!("mstream-player: {e}");
+            return Err(1);
+        }
+    };
+    // Signed in for this run regardless; the terminal is the page's
+    // until it closes, so the warning waits.
+    let unsaved = login::remember(&server, &username, &token).err();
+    Ok(Session { client, username: Some(username), unsaved })
+}
+
+/// Who the saved session signs in as on `server`, if the config knows.
+fn saved_username(server: &str) -> Option<String> {
+    let config = crate::config::load().ok()?;
+    config
+        .servers
+        .iter()
+        .find(|entry| crate::config::same_server(&entry.url, server))
+        .and_then(|entry| entry.username.clone())
 }
 
 /// How a room's loop ended.
@@ -181,7 +245,12 @@ pub(crate) trait Screen {
 /// The terminal session around a room: ground lease, mouse capture,
 /// pointer contract, event loop, teardown.
 fn run_tui<S: Screen>(screen: &mut S) -> i32 {
-    let _title = crate::tui::WindowTitle::claim("mStream Admin");
+    run_tui_as(screen, "mStream Admin")
+}
+
+/// [`run_tui`] under a window title of the page's own.
+fn run_tui_as<S: Screen>(screen: &mut S, title: &str) -> i32 {
+    let _title = crate::tui::WindowTitle::claim(title);
 
     // Claim the window background BEFORE ratatui takes the terminal — the
     // OSC 11 query runs its own raw-mode transaction on the tty.
@@ -321,13 +390,15 @@ pub(crate) fn frame_ground(frame: &mut Frame, min_width: u16, min_height: u16) -
 /// The room's heading on the top row, and the server it manages — its
 /// host and the admin role — at the right edge.
 pub(crate) fn draw_header(frame: &mut Frame, area: Rect, title: &str, host: &str) {
+    draw_header_as(frame, area, title, &format!("{host} · {}", t!("admin.role")));
+}
+
+/// [`draw_header`] with the right edge spelled by the caller — the stats
+/// page puts the account there, not a role.
+pub(crate) fn draw_header_as(frame: &mut Frame, area: Rect, title: &str, right: &str) {
     let head = Rect { x: 2, y: 0, width: area.width.saturating_sub(4), height: 1 };
     frame.render_widget(Paragraph::new(Span::styled(title.to_string(), bold())), head);
-    frame.render_widget(
-        Paragraph::new(Span::styled(format!("{host} · {}", t!("admin.role")), dim()))
-            .alignment(Alignment::Right),
-        head,
-    );
+    frame.render_widget(Paragraph::new(Span::styled(right.to_string(), dim())).alignment(Alignment::Right), head);
 }
 
 /// The bottom edge: one status line (an error in gold, a note in dim, a

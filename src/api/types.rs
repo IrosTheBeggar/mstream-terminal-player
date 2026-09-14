@@ -1595,3 +1595,192 @@ impl Default for AdminUser {
     }
 }
 
+
+// ── Stats API v2 (/api/v1/stats/*), mStream 6.27 ─────────────────────────────
+// The read side of the server's listening log, for `mstream-player stats`.
+// A `track` is the server's metadata object in either shape the webapp
+// handles (flat, or `{filepath, metadata}`), so it rides as a Value and the
+// stats page reads a title and artist out of it.
+
+/// The resolved range a stats read covered.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct StatsPeriod {
+    pub label: String,
+    pub from: String,
+    pub to: String,
+    pub tz: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct OriginSlice {
+    pub plays: u64,
+    #[serde(rename = "listenedMs")]
+    pub listened_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Origins {
+    pub local: OriginSlice,
+    pub peers: OriginSlice,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct StreakDays {
+    pub current: u32,
+    pub longest: u32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Sessions {
+    pub count: u64,
+    #[serde(rename = "avgMs")]
+    pub avg_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TopDay {
+    pub date: String,
+    pub plays: u64,
+    #[serde(rename = "listenedMs")]
+    pub listened_ms: u64,
+}
+
+/// `GET /stats/summary`: the period's totals as data.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct StatsSummary {
+    pub period: StatsPeriod,
+    pub events: u64,
+    pub plays: u64,
+    #[serde(rename = "uniqueTracks")]
+    pub unique_tracks: u64,
+    #[serde(rename = "uniqueArtists")]
+    pub unique_artists: u64,
+    #[serde(rename = "uniqueAlbums")]
+    pub unique_albums: u64,
+    #[serde(rename = "listenedMs")]
+    pub listened_ms: u64,
+    pub skips: u64,
+    #[serde(rename = "skipRate")]
+    pub skip_rate: Option<f64>,
+    #[serde(rename = "completionRate")]
+    pub completion_rate: Option<f64>,
+    pub discoveries: u64,
+    #[serde(rename = "libraryCoveragePct")]
+    pub library_coverage_pct: Option<f64>,
+    pub sessions: Sessions,
+    #[serde(rename = "streakDays")]
+    pub streak_days: StreakDays,
+    #[serde(rename = "topDay")]
+    pub top_day: Option<TopDay>,
+    #[serde(rename = "peakHour")]
+    pub peak_hour: Option<i32>,
+    #[serde(rename = "peakWeekday")]
+    pub peak_weekday: Option<i32>,
+    pub origins: Origins,
+}
+
+/// One bucket of `GET /stats/timeseries`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TimeBucket {
+    pub bucket: String,
+    pub plays: u64,
+    pub skips: u64,
+    #[serde(rename = "listenedMs")]
+    pub listened_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct StatsTimeseries {
+    pub bucket: String,
+    pub items: Vec<TimeBucket>,
+}
+
+/// One ranked row of `GET /stats/top`. A track row carries `track` (and,
+/// for a federated peer's track, `origin: "peer"` with `peer_name`); a
+/// group row (artists/albums/genres) carries `name`, `tracks`, and for an
+/// album its `artist`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TopItem {
+    pub rank: u32,
+    pub plays: u64,
+    #[serde(rename = "listenedMs")]
+    pub listened_ms: u64,
+    pub share: f64,
+    pub name: Option<String>,
+    pub artist: Option<String>,
+    pub tracks: Option<u64>,
+    #[serde(rename = "lastPlayed")]
+    pub last_played: Option<String>,
+    pub origin: Option<String>,
+    #[serde(rename = "peerName")]
+    pub peer_name: Option<String>,
+    pub track: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct StatsTop {
+    pub entity: String,
+    pub metric: String,
+    pub items: Vec<TopItem>,
+}
+
+/// One play of `GET /stats/history`, newest first.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct HistoryItem {
+    pub id: String,
+    #[serde(rename = "startedAt")]
+    pub started_at: String,
+    #[serde(rename = "playedMs")]
+    pub played_ms: u64,
+    #[serde(rename = "durationMs")]
+    pub duration_ms: Option<u64>,
+    /// `completed` · `skipped` · `stopped`.
+    pub outcome: String,
+    pub counted: bool,
+    /// `legacy` marks a play recorded through the old scrobble route.
+    pub source: Option<String>,
+    pub client: Option<String>,
+    /// `local` · `peer`.
+    pub origin: String,
+    #[serde(rename = "peerName")]
+    pub peer_name: Option<String>,
+    pub track: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct StatsHistory {
+    pub items: Vec<HistoryItem>,
+    pub next: Option<String>,
+}
+
+/// One selectable period from `GET /stats/periods`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PeriodOption {
+    pub period: String,
+    pub offset: i32,
+    pub label: String,
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct StatsPeriods {
+    pub earliest: Option<String>,
+    pub latest: Option<String>,
+    pub periods: Vec<PeriodOption>,
+}

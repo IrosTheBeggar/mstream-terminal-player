@@ -474,6 +474,38 @@ The account must be an admin's. Two server settings answer with errors the room
 explains in words: `lockAdmin` (the panel is locked, HTTP 405) and an address-restricted admin
 panel (403 from another machine).
 
+## Stats
+
+```
+mstream-player stats                         # your listening on the saved session's server
+mstream-player stats --server http://nas:3000
+```
+
+The server's `/stats` page (mStream 6.27 and up) as a page of its own, in the admin rooms'
+chrome and behind the same sign-in — but for any account, not an admin's, because the
+listening log is per account. One state line carries the period and its totals; `←`/`→`
+switch three tabs. **Overview** is the webapp's six tiles (plays, listening time, tracks,
+skips, streak, sessions, each against the previous period), plays per day as a column
+chart with the busiest day named, the 24-hour profile with the peak hour, and — while the
+log holds federated peers' tracks — where the tracks live. **Top** ranks tracks, artists,
+albums or genres (`t` cycles) by plays or by time (`m` flips), with the share bar, the
+plays, the time and, for tracks, the last play; the cursor row's rest goes on the note line.
+**Recent** is the log, newest first, paged as the cursor nears the end: the time and day,
+the track, the outcome in the webapp's words (completed, skipped at 0:08, stopped at 5:40,
+scrobbled at 0:30 for a play an older client sent), what was listened, and the client —
+web player, this player, the mobile app — or *not counted* where the server did not count
+the play. `x` forgets a play behind a gate; the log and the totals reload.
+
+`[` and `]` step through the periods the log has data in — this and last week, month,
+quarter, half-year and year, the older months and years, all time — and `p` lists them;
+`o` cycles the origin (all, this server, peers) while peer plays exist. Everything loads on
+entry and on a change; there is no poll. Times are in the machine's zone, read the way
+`date` reads it (`TZ`, else `/etc/localtime`), and the server is asked for its periods and
+buckets in that zone; a machine without a zone file gets UTC, and the state line says so.
+A server older than 6.27 has no Stats API, and the page says that instead. The terminal
+player does not yet report its own plays — the log shows what the web player and the apps
+reported.
+
 ## Now playing
 
 `0` gives the whole terminal over to what's playing:
