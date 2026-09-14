@@ -535,6 +535,29 @@ line plus the webapp's two warnings; after the first user the room signs in as t
 (`/auth/login`), keeps the session the way the hub's sign-in page does, and reloads. MODIFY
 (`allowFileModify`) is shown although the webapp dropped it. Quiet 30 s reload, never under a modal.
 
+**Stats page ✅ 2026-09-14** — `mstream-player stats` (`src/admin/stats.rs`, `src/admin/tz.rs`), per
+the "Player Stats" canvas: the server's `/stats` page (Stats API v2, mStream 6.27) as a standalone
+page on the hub's session and sign-in — any account, since the log is per account, so `run_stats`
+shares the preflight (`ensure_session`) with `admin::run` but is not a room. One state line (the
+period and its totals, "times in your zone" / "in UTC"), three tabs: Overview (the webapp's six
+tiles with the delta against the previous period — a second `/stats/summary` at offset−1 — plays
+per day/week/month as eighth-block columns from `/stats/timeseries`, the hourOfDay profile, the
+local/peer split with the ▰▱ bar while peer plays exist), Top (`/stats/top`, entity on `t`, metric on
+`m`, the share bar following the metric, `via <peer>` from peerName), Recent (`/stats/history`
+paged by the cursor as the selection nears the end; outcome, listened and client words as the
+webapp's stats-view.js spells them; `x` → gold gate → `DELETE /stats/plays/:id`, then a quiet
+reload). Periods from `/stats/periods` in the webapp's `periodOptions` order, stepped on `[` `]`,
+listed on `p`; the default period with no data falls to the first with data, as the webapp does.
+Every read carries a `seq`; a stale answer is dropped. Time zone without a crate: `tz.rs` reads the
+TZif file `/etc/localtime` points at (or `TZ` names) — transitions, then the POSIX footer rule — for
+the IANA name the server wants and the offsets the local clock needs; no file → UTC. Empty log,
+empty period, and a pre-6.27 server (404) are their own states. Not built from the canvas: the
+"no account" board — the server pins public mode to its sentinel account, so a public server logs
+plays too (a 403 there only means a federation key or guest token, said in one sentence). Deferred:
+the player reporting its own plays (`POST /stats/plays`) — the log shows other clients' listening
+until then. Locales `sta:` (177 keys × 10). Live-checked against a 6.27 scratch server seeded with
+252 plays.
+
 Build, in order of fit: **logs** (`/api/v1/admin/logs/recent?since=<seq>` is a purpose-built
 tail-poll API with a cursor), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and
 `/api/v1/scan/status` — no admin rights, no IP gate), **users & access**, **server audio**
