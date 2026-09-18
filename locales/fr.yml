@@ -1137,6 +1137,8 @@ gui:
     blend_skips_desc: "le saut manuel fond une seconde"
     pause_fade: "Fondu de pause"
     pause_fade_desc: "pause et reprise en rampe courte"
+    resume: "Reprendre la file"
+    resume_desc: "la file et votre position reviennent au lancement"
     servers_group: "SERVEURS"
     torrents_group: "TORRENTS"
     tor_add: "Ajouter un torrent"

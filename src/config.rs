@@ -151,6 +151,10 @@ pub struct PlayerPrefs {
     pub blend_skips: bool,
     /// Pause and resume ride a short ramp instead of landing mid-wave (C6).
     pub pause_fade: bool,
+    /// Save the play queue and your place, and restore them when the player
+    /// reopens — paused at the spot, never auto-played (contract clauses
+    /// 39–40). Off blocks the restore and drops the snapshot.
+    pub resume_queue: bool,
     /// How Auto-DJ chooses, beyond the mode.
     pub dj: AutoDjPrefs,
     #[serde(flatten)]
@@ -168,6 +172,7 @@ impl Default for PlayerPrefs {
             gapless: true,
             blend_skips: false,
             pause_fade: false,
+            resume_queue: true,
             dj: AutoDjPrefs::default(),
             extra: Keep::new(),
         }
@@ -570,6 +575,39 @@ pub fn credentials_path() -> Result<PathBuf, String> {
 /// deliberately *not* the OS temp dir, which is RAM-backed tmpfs on many
 /// Linux systems, where a spooled FLAC silently costs its size in memory.
 /// `None` (no usable location at all) lets the engine fall back to OS temp.
+/// The saved queue — the rows, the playing one and the position — next to
+/// the config (contract clause 39). JSON, since the rows carry the API's
+/// own track shape; not precious, so a corrupt file is ignored, never
+/// repaired.
+pub fn queue_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("queue.json"))
+}
+
+/// The saved queue's text, or `None` when there is none.
+pub fn load_queue_file() -> Result<Option<String>, String> {
+    let path = queue_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("could not read {}: {e}", path.display())),
+    }
+}
+
+pub fn save_queue_file(body: &str) -> Result<(), String> {
+    write_atomic(&queue_path()?, body, false)
+}
+
+/// Drop the saved queue: a cleared queue must not come back on the next
+/// launch, and neither may one the setting was turned off for.
+pub fn delete_queue_file() -> Result<(), String> {
+    let path = queue_path()?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("could not remove {}: {e}", path.display())),
+    }
+}
+
 pub fn spool_dir() -> Option<PathBuf> {
     cache_root().map(|root| root.join("spool"))
 }

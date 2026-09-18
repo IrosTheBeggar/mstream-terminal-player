@@ -1137,6 +1137,8 @@ gui:
     blend_skips_desc: "手動スキップを1秒フェード"
     pause_fade: "ポーズフェード"
     pause_fade_desc: "一時停止と再開を短くフェード"
+    resume: "キューを再開"
+    resume_desc: "起動時にキューと再生位置が戻ります"
     servers_group: "サーバー"
     torrents_group: "トレント"
     tor_add: "トレントを追加"

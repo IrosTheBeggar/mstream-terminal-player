@@ -319,12 +319,14 @@ const ROW_BLEND: usize = 0;
 const ROW_GAPLESS: usize = 1;
 const ROW_BLEND_SKIPS: usize = 2;
 const ROW_PAUSE_FADE: usize = 3;
-const ROW_MANAGE: usize = 4;
+/// The queue and the place in it come back on launch (contract clause 39).
+const ROW_RESUME: usize = 4;
+const ROW_MANAGE: usize = 5;
 /// The torrents group: the Add-torrent doorway (the room, like Manage
 /// servers) and the ask-me switch for torrents arriving from outside.
-const ROW_TORRENT: usize = 5;
-const ROW_ASK: usize = 6;
-const SET_ROWS: usize = 7;
+const ROW_TORRENT: usize = 6;
+const ROW_ASK: usize = 7;
+const SET_ROWS: usize = 8;
 
 /// Seconds of blend as a person reads them (the TUI's own spelling).
 fn fmt_blend(seconds: f32) -> String {
@@ -522,6 +524,10 @@ impl Gui {
                 self.app.pause_fade = !self.app.pause_fade;
                 let cmd = AudioCmd::SetPauseFade(self.app.pause_fade);
                 self.pend(vec![Effect::Audio(cmd)]);
+                self.save_now();
+            }
+            ROW_RESUME => {
+                self.app.resume_queue = !self.app.resume_queue;
                 self.save_now();
             }
             _ => {}
@@ -749,6 +755,12 @@ impl Gui {
                 } else {
                     track.metadata.duration.unwrap_or(0.0)
                 };
+                // A restored queue shows its place before anything plays
+                // (contract clause 40): the spot, paused.
+                let elapsed = match self.app.resume_spot {
+                    Some((_, position)) if self.app.status.is_idle() => position,
+                    _ => self.app.status.position,
+                };
                 Some(Now {
                     title: track
                         .metadata
@@ -756,7 +768,7 @@ impl Gui {
                         .map(str::to_string)
                         .unwrap_or_else(|| track.file_name().to_string()),
                     artist: track.metadata.artist.clone().unwrap_or_default(),
-                    elapsed: self.app.status.position,
+                    elapsed,
                     duration,
                 })
             }
@@ -765,7 +777,11 @@ impl Gui {
     }
 
     fn bar_paused(&self) -> bool {
-        if self.app.now_playing.is_some() { self.app.status.paused } else { self.demo_paused }
+        if self.app.now_playing.is_some() {
+            self.app.status.paused || (self.app.status.is_idle() && self.app.resume_spot.is_some())
+        } else {
+            self.demo_paused
+        }
     }
 }
 
@@ -1549,8 +1565,8 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
     let (check_on, check_off) = if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") };
     put(frame, content.x, content.y, &t!("gui.set.playback"), dim());
-    put(frame, content.x, content.y + 6, &t!("gui.set.servers_group"), dim());
-    put(frame, content.x, content.y + 9, &t!("gui.set.torrents_group"), dim());
+    put(frame, content.x, content.y + 7, &t!("gui.set.servers_group"), dim());
+    put(frame, content.x, content.y + 10, &t!("gui.set.torrents_group"), dim());
 
     let rows: [(String, String); SET_ROWS] = [
         (
@@ -1576,6 +1592,14 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 t!("gui.set.pause_fade")
             ),
             t!("gui.set.pause_fade_desc").to_string(),
+        ),
+        (
+            format!(
+                "{} {}",
+                if gui.app.resume_queue { check_on } else { check_off },
+                t!("gui.set.resume")
+            ),
+            t!("gui.set.resume_desc").to_string(),
         ),
         (
             format!("{} {}", t!("gui.srv.manage"), if legacy_conhost() { ">" } else { "▸" }),
@@ -1633,9 +1657,9 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 fn row_y(top: u16, i: usize) -> u16 {
     match i {
         i if i < ROW_MANAGE => top + 1 + i as u16,
-        ROW_MANAGE => top + 7,
-        ROW_TORRENT => top + 10,
-        _ => top + 11,
+        ROW_MANAGE => top + 8,
+        ROW_TORRENT => top + 11,
+        _ => top + 12,
     }
 }
 
@@ -1850,12 +1874,14 @@ fn event_loop(
     event_tx: &Sender<Event>,
 ) -> std::io::Result<()> {
     let mut hand = false;
+    let mut saver = tui::QueueSaver::new(&gui.app);
     loop {
         // A SaveSession about to be dispatched writes the config behind
         // this copy's back — a Quick Connect add mints a whole new entry
         // there. Reload after, so the dropdown and the room list it.
         let saving = gui.pending.iter().any(|e| matches!(e, Effect::SaveSession));
         tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
+        saver.tick(&gui.app);
         if saving && let Ok(fresh) = config::load() {
             gui.config = fresh;
         }
@@ -1908,6 +1934,7 @@ fn event_loop(
                 TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
                     gui.ui.dismiss_tooltip();
                     if handle_key(gui, key) {
+                        saver.flush(&gui.app);
                         return Ok(());
                     }
                 }
@@ -1920,6 +1947,7 @@ fn event_loop(
                             }
                             if let Some(act) = gui.ui.hit(at) {
                                 if gui.act(act) {
+                                    saver.flush(&gui.app);
                                     return Ok(());
                                 }
                             }

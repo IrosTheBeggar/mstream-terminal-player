@@ -1137,6 +1137,8 @@ gui:
     blend_skips_desc: "o pulo manual funde um segundo"
     pause_fade: "Fade de pausa"
     pause_fade_desc: "pausar e retomar em rampa curta"
+    resume: "Retomar a fila"
+    resume_desc: "a fila e a sua posição voltam ao iniciar"
     servers_group: "SERVIDORES"
     torrents_group: "TORRENTS"
     tor_add: "Adicionar um torrent"

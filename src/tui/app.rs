@@ -143,6 +143,9 @@ pub enum SettingRow {
     BlendSkips,
     /// Pause and resume ride a short ramp instead of landing mid-wave.
     PauseFade,
+    /// The queue and the place in it come back on launch; anything
+    /// toggles it (contract clause 39).
+    ResumeQueue,
     /// The root row that opens the logs group.
     LogsMenu,
     /// Whether the debug log is written at all; anything toggles it.
@@ -626,6 +629,34 @@ pub(crate) fn queue_without(items: &[Queued], server: &str, current: Option<usiz
     }
     let index = if keep.is_empty() { None } else { Some(index.unwrap_or(keep.len() - 1)) };
     Some(Sweep { keep, index, current_survives })
+}
+
+/// The saved queue (contract clause 39): the rows with their origins, the
+/// playing row and the seconds into it, shuffle and repeat. Versioned so a
+/// file from another shape is ignored, never migrated (clause 40).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QueueSnapshot {
+    pub version: u32,
+    pub index: Option<usize>,
+    pub position: f64,
+    pub shuffle: bool,
+    pub repeat: String,
+    pub items: Vec<Queued>,
+}
+
+pub const QUEUE_SNAPSHOT_VERSION: u32 = 1;
+
+/// A position at or within a second of the track's end restarts the track:
+/// resuming there would seek past the end and stop on play (contract
+/// clause 40). Unchanged when the length is unknown.
+pub(crate) fn clamp_resume_position(position: f64, duration: Option<f64>) -> f64 {
+    if !position.is_finite() || position <= 0.0 {
+        return 0.0;
+    }
+    match duration {
+        Some(d) if d > 0.0 && position >= d - 1.0 => 0.0,
+        _ => position,
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1173,6 +1204,14 @@ pub struct App {
     /// Booted with `--bundled-server`: the installer's own server, which the
     /// servers room never offers to remove (contract clauses 50–58).
     pub bundled_server: Option<String>,
+    /// Save the queue and the place in it, and bring both back on launch
+    /// (contract clause 39). The shell's saver reads it; Settings toggles it.
+    pub resume_queue: bool,
+    /// A restored queue's place — row and seconds in — opened paused and
+    /// never auto-played (contract clause 40). Spent by the first play,
+    /// which starts that row there; kept as the saved position until then,
+    /// so a checkpoint written before anything plays keeps the spot.
+    pub resume_spot: Option<(usize, f64)>,
     pub connected: bool,
     pub connecting: bool,
     pub connect: ConnectForm,
@@ -1421,6 +1460,8 @@ impl App {
             servers: Vec::new(),
             open_tunnel: None,
             bundled_server: None,
+            resume_queue: true,
+            resume_spot: None,
             connected: false,
             connecting: false,
             connect: ConnectForm::default(),
@@ -1557,6 +1598,7 @@ impl App {
         self.gapless = prefs.gapless;
         self.blend_skips = prefs.blend_skips;
         self.pause_fade = prefs.pause_fade;
+        self.resume_queue = prefs.resume_queue;
         self.dj = dj::Settings::from_prefs(&prefs.dj);
         self
     }
@@ -1574,6 +1616,7 @@ impl App {
             gapless: self.gapless,
             blend_skips: self.blend_skips,
             pause_fade: self.pause_fade,
+            resume_queue: self.resume_queue,
             dj: self.dj.to_prefs(),
             // Settings from a newer player belong to the file, not to this
             // app's state; `PlayerPrefs::adopt` is what carries them across.
@@ -2412,6 +2455,7 @@ impl App {
                 | SettingRow::Gapless
                 | SettingRow::BlendSkips
                 | SettingRow::PauseFade
+                | SettingRow::ResumeQueue
                 | SettingRow::LogWrite
                 | SettingRow::LogLevel => self.adjust_setting(1),
             },
@@ -2657,6 +2701,11 @@ impl App {
         } else {
             "off · pause lands at once".to_string()
         };
+        let resume = if self.resume_queue {
+            "on · the queue and your place come back on launch".to_string()
+        } else {
+            "off · each launch starts with an empty queue".to_string()
+        };
         vec![
             Entry::Parent,
             Entry::Setting {
@@ -2674,6 +2723,11 @@ impl App {
                 label: "Pause fade".into(),
                 detail: pause_fade,
                 row: SettingRow::PauseFade,
+            },
+            Entry::Setting {
+                label: "Resume queue".into(),
+                detail: resume,
+                row: SettingRow::ResumeQueue,
             },
         ]
     }
@@ -2772,6 +2826,11 @@ impl App {
             SettingRow::PauseFade => {
                 self.pause_fade = !self.pause_fade;
                 Effect::Audio(AudioCmd::SetPauseFade(self.pause_fade))
+            }
+            SettingRow::ResumeQueue => {
+                self.resume_queue = !self.resume_queue;
+                self.refresh_settings_rows();
+                return Vec::new();
             }
             SettingRow::LogWrite => {
                 self.log_write = !self.log_write;
@@ -3344,6 +3403,74 @@ impl App {
         effects
     }
 
+    /// What to write down for next time (contract clause 39): every row,
+    /// the playing one and the seconds into it — or the spot a restore is
+    /// still holding, so a checkpoint before anything plays cannot write
+    /// track 1 / 0:00 over the real place. `None` for an empty queue.
+    pub fn queue_snapshot(&self) -> Option<QueueSnapshot> {
+        if self.queue.items.is_empty() {
+            return None;
+        }
+        let (index, position) = match (self.resume_spot, self.queue.current) {
+            (Some((index, position)), _) if self.status.is_idle() => (Some(index), position),
+            (_, Some(current)) => {
+                let position = if self.status.is_idle() { 0.0 } else { self.status.position };
+                (Some(current), position)
+            }
+            (_, None) => (None, 0.0),
+        };
+        Some(QueueSnapshot {
+            version: QUEUE_SNAPSHOT_VERSION,
+            index,
+            position,
+            shuffle: self.queue.shuffle,
+            repeat: self.queue.repeat.label().to_string(),
+            items: self.queue.items.clone(),
+        })
+    }
+
+    /// Bring a saved queue back (contract clause 40): rows whose server is
+    /// no longer known are dropped, the playing row keeps its place when it
+    /// survives (else the index is clamped), a position at the end restarts
+    /// the track, and nothing plays — the spot waits for the first play.
+    /// Returns whether anything came back.
+    pub fn restore_queue(&mut self, snapshot: QueueSnapshot) -> bool {
+        if snapshot.version != QUEUE_SNAPSHOT_VERSION {
+            return false;
+        }
+        let live = self.origin();
+        let known = |origin: &Origin| {
+            origin.server == live.server
+                || self.servers.iter().any(|s| crate::config::same_server(&s.id, &origin.server))
+        };
+        let mut kept = Vec::with_capacity(snapshot.items.len());
+        let mut index = None;
+        for (i, item) in snapshot.items.into_iter().enumerate() {
+            if !known(&item.origin) {
+                continue;
+            }
+            if snapshot.index == Some(i) {
+                index = Some(kept.len());
+            }
+            kept.push(item);
+        }
+        if kept.is_empty() {
+            return false;
+        }
+        let index = index.or_else(|| snapshot.index.map(|i| i.min(kept.len() - 1)));
+        self.queue.replace(kept);
+        self.queue.shuffle = snapshot.shuffle;
+        self.queue.repeat = Repeat::from_label(&snapshot.repeat);
+        if let Some(index) = index {
+            let duration = self.queue.items[index].metadata.duration;
+            self.queue.current = Some(index);
+            self.queue.state.select(Some(index));
+            self.now_playing = Some(self.queue.items[index].track.clone());
+            self.resume_spot = Some((index, clamp_resume_position(snapshot.position, duration)));
+        }
+        true
+    }
+
     /// A queued track that cannot even be asked for — its server is gone
     /// from the list, its tunnel is closed. It walks on exactly as a track
     /// the engine refused would (contract clause 37).
@@ -3551,6 +3678,8 @@ impl App {
             Err(why) => return self.unplayable(index, why),
         };
         self.queue.start(index);
+        // Any play spends a restored spot: playback is somewhere real now.
+        self.resume_spot = None;
         let hint = item.metadata.duration;
         // Taken before the track moves into `now_playing`; the shape is
         // asked for by path, so nothing else about the track is needed.
@@ -3671,6 +3800,16 @@ impl App {
 
     fn play_pause(&mut self) -> Vec<Effect> {
         if self.status.is_idle() {
+            // A restored queue resumes where it was left (contract clause
+            // 40): that row, and the seconds into it — a seek right behind
+            // the play, which the engine answers once the source is open.
+            if let Some((index, position)) = self.resume_spot.take() {
+                let mut effects = self.play_index(index);
+                if position > 0.0 && effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))) {
+                    effects.push(Effect::Audio(AudioCmd::Seek(position)));
+                }
+                return effects;
+            }
             // Nothing loaded — start the queue if there is one.
             return match self.queue.next_index(true) {
                 Some(index) => self.play_index(index),

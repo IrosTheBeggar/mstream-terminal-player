@@ -1137,6 +1137,8 @@ gui:
     blend_skips_desc: "manuelles Weiter blendet kurz"
     pause_fade: "Pausen-Fade"
     pause_fade_desc: "Pause und Weiter laufen über eine kurze Rampe"
+    resume: "Warteschlange fortsetzen"
+    resume_desc: "Warteschlange und Position kommen beim Start zurück"
     servers_group: "SERVER"
     torrents_group: "TORRENTS"
     tor_add: "Torrent hinzufügen"

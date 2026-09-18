@@ -1137,6 +1137,8 @@ gui:
     blend_skips_desc: "ręczne pominięcie przenika sekundę"
     pause_fade: "Wyciszanie pauzy"
     pause_fade_desc: "pauza i wznowienie po krótkiej rampie"
+    resume: "Wznów kolejkę"
+    resume_desc: "kolejka i miejsce odtwarzania wracają po uruchomieniu"
     servers_group: "SERWERY"
     torrents_group: "TORRENTY"
     tor_add: "Dodaj torrent"

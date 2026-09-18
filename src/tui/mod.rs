@@ -88,6 +88,125 @@ pub(crate) struct Startup {
     /// `--bundled-server`: the installer's own server, seeded into the list
     /// and never offered for removal (contract clauses 50–58).
     pub bundled: Option<String>,
+    /// The saved queue, when the setting is on and a readable one exists
+    /// (contract clause 40).
+    pub queue: Option<app::QueueSnapshot>,
+}
+
+/// The saved queue as the config left it — `None` for no file, a file from
+/// another shape, or one that would not parse (never a reason to stop
+/// the player starting).
+#[cfg(not(target_arch = "wasm32"))]
+fn load_queue_snapshot() -> Option<app::QueueSnapshot> {
+    let text = config::load_queue_file().ok().flatten()?;
+    serde_json::from_str::<app::QueueSnapshot>(&text).ok()
+}
+
+/// Keeps `queue.json` current for the shell (contract clause 39): a write
+/// 800 ms after the queue last changed, a checkpoint every ten seconds
+/// while playing, a flush on the way out — and the file gone once a queue
+/// that existed this session is cleared, or the setting turned off.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct QueueSaver {
+    signature: u64,
+    dirty_since: Option<std::time::Instant>,
+    last_write: std::time::Instant,
+    /// A queue existed this session: only then does an empty one delete
+    /// the file — the empty queue a failed restore leaves behind must not
+    /// destroy the snapshot it failed to read.
+    had_queue: bool,
+    /// The setting as last seen, so turning it off deletes the file once.
+    enabled: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl QueueSaver {
+    const DEBOUNCE: Duration = Duration::from_millis(800);
+    const CHECKPOINT: Duration = Duration::from_secs(10);
+
+    pub(crate) fn new(app: &App) -> Self {
+        QueueSaver {
+            signature: Self::signature(app),
+            dirty_since: None,
+            last_write: std::time::Instant::now(),
+            had_queue: !app.queue.items.is_empty(),
+            enabled: app.resume_queue,
+        }
+    }
+
+    /// What a change to the queue looks like from outside: the rows, the
+    /// playing one, the modes and a held spot. Cheap enough per tick.
+    fn signature(app: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for item in &app.queue.items {
+            item.origin.server.hash(&mut h);
+            item.origin.peer.hash(&mut h);
+            item.filepath.hash(&mut h);
+        }
+        app.queue.current.hash(&mut h);
+        app.queue.shuffle.hash(&mut h);
+        app.queue.repeat.label().hash(&mut h);
+        app.resume_spot.map(|(i, _)| i).hash(&mut h);
+        h.finish()
+    }
+
+    /// Once per loop iteration.
+    pub(crate) fn tick(&mut self, app: &App) {
+        let now = std::time::Instant::now();
+        if !app.resume_queue {
+            if self.enabled {
+                self.enabled = false;
+                let _ = config::delete_queue_file();
+            }
+            return;
+        }
+        self.enabled = true;
+        let signature = Self::signature(app);
+        if signature != self.signature {
+            self.signature = signature;
+            self.dirty_since.get_or_insert(now);
+        }
+        let due = match self.dirty_since {
+            Some(since) => now.duration_since(since) >= Self::DEBOUNCE,
+            None => {
+                app.status.playing
+                    && !app.status.paused
+                    && !app.queue.items.is_empty()
+                    && now.duration_since(self.last_write) >= Self::CHECKPOINT
+            }
+        };
+        if due {
+            self.write(app);
+        }
+    }
+
+    /// Write now — quitting, or the debounce that just elapsed.
+    pub(crate) fn flush(&mut self, app: &App) {
+        if !app.resume_queue {
+            return;
+        }
+        self.write(app);
+    }
+
+    fn write(&mut self, app: &App) {
+        self.dirty_since = None;
+        self.last_write = std::time::Instant::now();
+        match app.queue_snapshot() {
+            Some(snapshot) => {
+                self.had_queue = true;
+                // A read-only config directory costs the next launch its
+                // queue and nothing else; the screen is not the place to say so.
+                if let Ok(body) = serde_json::to_string(&snapshot) {
+                    let _ = config::save_queue_file(&body);
+                }
+            }
+            None if self.had_queue => {
+                let _ = config::delete_queue_file();
+            }
+            None => {}
+        }
+    }
 }
 
 /// `--bundled-server` on boot (contract clause 51): the packaged server
@@ -184,6 +303,7 @@ pub(crate) fn startup(
         .and_then(|id| config::pairing_for(&credentials, id));
 
     let servers = known_servers(&config, &credentials);
+    let queue = if config.player.resume_queue { load_queue_snapshot() } else { None };
     Startup {
         server,
         token,
@@ -198,6 +318,7 @@ pub(crate) fn startup(
         mouse: config.mouse,
         servers,
         bundled,
+        queue,
     }
 }
 
@@ -251,6 +372,10 @@ pub(crate) fn app_from(start: Startup) -> App {
     app.session.self_signed = start.self_signed;
     app.servers = start.servers;
     app.bundled_server = start.bundled;
+    // After the servers, which decide which rows can come back at all.
+    if let Some(snapshot) = start.queue {
+        app.restore_queue(snapshot);
+    }
     if let Some(path) = start.last_path {
         // Pick up where the last session left off; `start` browses this.
         app.path = path;
@@ -393,8 +518,10 @@ fn event_loop(
 ) -> std::io::Result<()> {
     let mut title = String::new();
     let mut spun = Instant::now();
+    let mut saver = QueueSaver::new(app);
     loop {
         dispatch(app, &mut pending, audio_tx, api_tx, event_tx);
+        saver.tick(app);
 
         if spun.elapsed() >= SPIN_EVERY {
             app.spinner = app.spinner.wrapping_add(1);
@@ -455,6 +582,7 @@ fn event_loop(
 
         if app.should_quit {
             dispatch(app, &mut pending, audio_tx, api_tx, event_tx);
+            saver.flush(app);
             return Ok(());
         }
     }
@@ -801,6 +929,53 @@ mod tests {
 
         // Moving the pointer about is not an event worth an effect.
         assert!(on_mouse(&mut app, mouse_at(MouseEventKind::Moved, 10, 10), area).is_empty());
+    }
+
+    #[test]
+    fn the_queue_saver_writes_the_snapshot_and_removes_it_when_cleared_or_off() {
+        let _scratch = crate::config::testing::Scratch::new("queue-saver");
+        let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
+        app.connected = true;
+        app.push_queue(Track { filepath: "music/a.mp3".into(), metadata: Default::default() });
+        app.push_queue(Track { filepath: "music/b.mp3".into(), metadata: Default::default() });
+        app.queue.current = Some(1);
+        app.status = crate::player::PlayerStatus {
+            playing: true,
+            position: 9.0,
+            source: "http://host:3000/media/music/b.mp3?token=tok".into(),
+            ..Default::default()
+        };
+
+        let mut saver = QueueSaver::new(&app);
+        saver.flush(&app);
+        let saved = load_queue_snapshot().expect("the snapshot is on disk");
+        assert_eq!(saved.items.len(), 2);
+        assert_eq!((saved.index, saved.position), (Some(1), 9.0));
+        assert_eq!(saved.items[1].origin.server, "http://host:3000");
+
+        // A tick with nothing changed writes nothing new; a change is
+        // written once the debounce has passed (forced here by flushing).
+        app.queue.clear();
+        app.status = Default::default();
+        saver.flush(&app);
+        assert!(load_queue_snapshot().is_none(), "a cleared queue takes the file with it");
+
+        // Off: the file goes and stays gone.
+        app.push_queue(Track { filepath: "music/c.mp3".into(), metadata: Default::default() });
+        saver.flush(&app);
+        assert!(load_queue_snapshot().is_some());
+        app.resume_queue = false;
+        saver.tick(&app);
+        assert!(load_queue_snapshot().is_none(), "the setting off drops the snapshot");
+        saver.flush(&app);
+        assert!(load_queue_snapshot().is_none(), "and nothing is written while it is off");
+
+        // And startup brings a saved queue back only while the setting is on.
+        app.resume_queue = true;
+        let mut saver = QueueSaver::new(&app);
+        saver.flush(&app);
+        let start = startup(None, None, None);
+        assert!(start.queue.is_some(), "the default setting is on");
     }
 
     #[test]

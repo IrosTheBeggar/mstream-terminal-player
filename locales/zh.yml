@@ -1137,6 +1137,8 @@ gui:
     blend_skips_desc: "手动跳曲淡出一秒"
     pause_fade: "暂停淡出"
     pause_fade_desc: "暂停与恢复走短渐变"
+    resume: "恢复队列"
+    resume_desc: "启动时恢复队列和播放位置"
     servers_group: "服务器"
     torrents_group: "种子"
     tor_add: "添加种子"

@@ -1137,6 +1137,8 @@ gui:
     blend_skips_desc: "manual skips blend for a second"
     pause_fade: "Pause fade"
     pause_fade_desc: "pause and resume ride a short ramp"
+    resume: "Resume queue"
+    resume_desc: "the queue and your place come back on launch"
     servers_group: "SERVERS"
     torrents_group: "TORRENTS"
     tor_add: "Add a torrent"

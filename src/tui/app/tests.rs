@@ -1770,6 +1770,94 @@ fn a_row_on_a_closed_tunnel_walks_on_like_a_refused_one() {
 }
 
 #[test]
+fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone() {
+    // Contract clause 40: rows from a server no longer known are dropped,
+    // the playing row keeps its place, the position comes back, and
+    // nothing plays until asked — then that row, from that second.
+    let mut app = connected_app();
+    app.servers = vec![KnownServer { id: "http://b".into(), token: Some("bt".into()), self_signed: false }];
+    let mut long = at("http://b", "music/2.mp3");
+    long.track.metadata.duration = Some(300.0);
+    let snapshot = QueueSnapshot {
+        version: QUEUE_SNAPSHOT_VERSION,
+        index: Some(2),
+        position: 42.5,
+        shuffle: true,
+        repeat: "all".into(),
+        items: vec![
+            at("http://host:3000", "music/1.mp3"),
+            at("http://gone", "music/lost.mp3"),
+            long,
+            at("http://gone", "music/lost2.mp3"),
+        ],
+    };
+    assert!(app.restore_queue(snapshot));
+    assert_eq!(app.queue.items.len(), 2, "the two rows whose servers are known");
+    assert_eq!(app.queue.current, Some(1), "the playing row, renumbered");
+    assert_eq!(app.resume_spot, Some((1, 42.5)));
+    assert!(app.queue.shuffle && app.queue.repeat == Repeat::All);
+    assert!(app.now_playing.is_some(), "shown, not played");
+    assert!(app.status.is_idle());
+
+    // The first play is that row, from the spot; the seek rides behind it.
+    let effects = app.handle_action(Action::PlayPause);
+    assert_eq!(played_url(&effects), "http://b/media/music/2.mp3?token=bt");
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Seek(p)) if (*p - 42.5).abs() < 1e-9)));
+    assert!(app.resume_spot.is_none(), "spent");
+
+    // A position at the end restarts the track; a file from another
+    // shape is ignored; a snapshot with nothing known restores nothing.
+    assert_eq!(clamp_resume_position(299.2, Some(300.0)), 0.0);
+    assert_eq!(clamp_resume_position(12.0, Some(300.0)), 12.0);
+    assert_eq!(clamp_resume_position(12.0, None), 12.0);
+    assert_eq!(clamp_resume_position(-3.0, None), 0.0);
+    let mut fresh = connected_app();
+    assert!(!fresh.restore_queue(QueueSnapshot {
+        version: QUEUE_SNAPSHOT_VERSION + 1,
+        index: None,
+        position: 0.0,
+        shuffle: false,
+        repeat: "off".into(),
+        items: vec![at("http://host:3000", "music/1.mp3")],
+    }));
+    assert!(!fresh.restore_queue(QueueSnapshot {
+        version: QUEUE_SNAPSHOT_VERSION,
+        index: Some(0),
+        position: 0.0,
+        shuffle: false,
+        repeat: "off".into(),
+        items: vec![at("http://gone", "music/1.mp3")],
+    }));
+    assert!(fresh.queue.items.is_empty());
+}
+
+#[test]
+fn a_snapshot_round_trips_and_keeps_a_held_spot_until_something_plays() {
+    // Contract clause 39: what is written is what comes back; a checkpoint
+    // taken while a restored spot is still held writes that spot, not
+    // track 1 / 0:00.
+    let mut app = connected_app();
+    app.push_queue(track("music/a.mp3"));
+    app.push_queue(track("music/b.mp3"));
+    let effects = app.play_index(1);
+    app.status = PlayerStatus { playing: true, position: 17.0, source: played_url(&effects), ..Default::default() };
+    let snapshot = app.queue_snapshot().expect("a queue to save");
+    assert_eq!((snapshot.index, snapshot.position), (Some(1), 17.0));
+    let text = serde_json::to_string(&snapshot).unwrap();
+    let back: QueueSnapshot = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, snapshot);
+
+    let mut again = connected_app();
+    assert!(again.restore_queue(back));
+    assert_eq!(again.resume_spot, Some((1, 17.0)));
+    let held = again.queue_snapshot().unwrap();
+    assert_eq!((held.index, held.position), (Some(1), 17.0), "the held spot, not 0:00");
+
+    // An empty queue has nothing to write.
+    assert!(App::new(None, None, None).queue_snapshot().is_none());
+}
+
+#[test]
 fn a_removed_server_takes_its_rows_and_playback_lands_on_the_next_survivor() {
     // The pure rule first (contract clause 35).
     let items = vec![at("a", "1"), at("b", "2"), at("a", "3"), at("b", "4")];
@@ -2360,6 +2448,7 @@ fn remembered_preferences_are_applied_and_handed_back() {
         gapless: true,
         blend_skips: true,
         pause_fade: true,
+        resume_queue: true,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -2389,6 +2478,7 @@ fn nonsense_preferences_fall_back_rather_than_refusing_to_start() {
         gapless: false,
         blend_skips: false,
         pause_fade: false,
+        resume_queue: true,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -4129,6 +4219,7 @@ fn a_remembered_similar_mode_is_dropped_on_a_server_without_the_index() {
         gapless: false,
         blend_skips: false,
         pause_fade: false,
+        resume_queue: true,
         dj: Default::default(),
         extra: Default::default(),
     };

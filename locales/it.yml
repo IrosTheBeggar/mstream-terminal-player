@@ -1137,6 +1137,8 @@ gui:
     blend_skips_desc: "il salto manuale sfuma un secondo"
     pause_fade: "Dissolvenza pausa"
     pause_fade_desc: "pausa e ripresa su rampa breve"
+    resume: "Riprendi la coda"
+    resume_desc: "la coda e la tua posizione tornano all'avvio"
     servers_group: "SERVER"
     torrents_group: "TORRENT"
     tor_add: "Aggiungi un torrent"
