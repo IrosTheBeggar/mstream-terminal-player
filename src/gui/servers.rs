@@ -81,6 +81,9 @@ pub(crate) struct Form {
     /// The URL whose plain-http warning has been acknowledged (the TUI
     /// connect form's own rule: warn once, let the answer be yes).
     pub insecure_ack: Option<String>,
+    /// Editing the bundled server: the launcher owns its address, so the
+    /// URL field reads but never takes a key (contract clause 53).
+    pub locked_url: bool,
 }
 
 impl Form {
@@ -105,6 +108,7 @@ impl Form {
             switch: true,
             session_login: false,
             insecure_ack: None,
+            locked_url: false,
         }
     }
 
@@ -115,7 +119,7 @@ impl Form {
 
     /// Whether field `i` takes part in the focus cycle right now.
     fn focusable(&self, i: usize) -> bool {
-        !(self.public && matches!(i, 1 | 2))
+        !(self.public && matches!(i, 1 | 2)) && !(self.locked_url && i == 0)
     }
 
     fn step_focus(&mut self, forward: bool) {
@@ -132,6 +136,7 @@ impl Form {
 
     fn value_mut(&mut self) -> Option<&mut String> {
         match self.focus {
+            0 if self.locked_url => None,
             0 => Some(&mut self.server),
             1 => Some(&mut self.username),
             2 => Some(&mut self.password),
@@ -278,6 +283,7 @@ fn open_edit(gui: &mut Gui, index: usize) {
     if crate::quickconnect::is_tunnel_id(&entry.url) {
         return; // a tunnel identity is not an editable address
     }
+    let locked_url = is_bundled(gui, &entry.url);
     gui.servers.form = Some(Form {
         stage: FormStage::Direct,
         server: entry.url.clone(),
@@ -285,8 +291,22 @@ fn open_edit(gui: &mut Gui, index: usize) {
         self_signed: entry.self_signed,
         editing: Some(entry.url.clone()),
         switch: false,
+        locked_url,
+        // The address cannot take a key, so the cursor starts past it.
+        focus: if locked_url { 1 } else { 0 },
         ..Form::add()
     });
+}
+
+/// Whether `url` is the server this player was installed beside (contract
+/// clauses 50–58): never offered for removal, its address read-only.
+pub(crate) fn is_bundled(gui: &Gui, url: &str) -> bool {
+    gui.app.bundled_server.as_deref().is_some_and(|b| config::same_server(b, url))
+}
+
+/// Whether the Manage Servers cursor rests on the bundled server's row.
+pub(crate) fn cursor_on_bundled(gui: &Gui) -> bool {
+    gui.config.servers.get(gui.servers.cursor).is_some_and(|entry| is_bundled(gui, &entry.url))
 }
 
 /// Turn to the Quick Connect page and start a browse of this network.
@@ -901,7 +921,13 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::SrvEdit(i) => open_edit(gui, *i),
         Act::SrvDefault(i) => make_default(gui, *i),
         Act::SrvQr(i) => open_qr(gui, *i),
-        Act::SrvRemove(i) => gui.servers.confirm = Some(*i),
+        Act::SrvRemove(i) => {
+            if gui.config.servers.get(*i).is_some_and(|e| is_bundled(gui, &e.url)) {
+                gui.note = Some((t!("gui.srv.bundled_note").to_string(), false));
+            } else {
+                gui.servers.confirm = Some(*i);
+            }
+        }
         Act::SrvConfirm(yes) => {
             if let Some(index) = gui.servers.confirm.take()
                 && *yes
@@ -1123,7 +1149,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
             KeyCode::Char('x') => {
                 let cursor = gui.servers.cursor;
                 if cursor < rows {
-                    gui.servers.confirm = Some(cursor);
+                    gui.act(Act::SrvRemove(cursor));
                 }
             }
             _ => return None,
@@ -1322,6 +1348,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let tunnel = crate::quickconnect::is_tunnel_id(&entry.url);
     let current = gui.app.connected && config::same_server(&gui.app.session.server_id, &entry.url);
     let is_default = default.as_deref().is_some_and(|d| config::same_server(d, &entry.url));
+    let bundled = is_bundled(gui, &entry.url);
 
     let mut x = content.x + 2;
     let word = |frame: &mut Frame,
@@ -1395,6 +1422,15 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             Some(Act::SrvQr(index)),
         );
     }
+    if bundled {
+        // No Remove: the mark says why, and its dwell tooltip says the rest
+        // (contract clause 52).
+        let label = t!("gui.srv.bundled").to_string();
+        let rect = Rect { x, y: actions_y, width: label.chars().count() as u16, height: 1 };
+        put(frame, x, actions_y, &label, dim());
+        gui.ui.tip(rect, t!("gui.srv.bundled_note").to_string());
+        return;
+    }
     word(
         frame,
         gui,
@@ -1431,6 +1467,7 @@ struct FormView {
     submitting: bool,
     error: Option<String>,
     session_login: bool,
+    locked_url: bool,
 }
 
 fn draw_form(frame: &mut Frame, gui: &mut Gui, area: Rect) {
@@ -1607,6 +1644,7 @@ fn draw_direct(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             submitting: form.submitting,
             error: form.error.clone(),
             session_login: form.session_login,
+            locked_url: form.locked_url,
         }
     };
 
@@ -1681,7 +1719,7 @@ fn draw_direct(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         t!("gui.srv.form_server").to_string(),
         &view.server,
         view.focus == 0,
-        !view.session_login,
+        !view.session_login && !view.locked_url,
         false,
         Act::FormFocus(0),
     );
@@ -2261,6 +2299,48 @@ mod tests {
             None,
             "removing a server is the one flow that drops its code"
         );
+    }
+
+    #[test]
+    fn the_bundled_server_cannot_be_removed_and_keeps_its_address() {
+        use super::super::SETTINGS_NAV;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        // Contract clauses 52 and 53: no Remove verb, the note instead of a
+        // confirmation, and an edit form whose address takes no key.
+        let mut gui = two_server_gui();
+        gui.app.bundled_server = Some("http://attic.local:3000".into());
+        gui.queue_open = false;
+        gui.active = SETTINGS_NAV;
+        open_room(&mut gui);
+        gui.servers.cursor = 0;
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains(&t!("gui.srv.bundled").to_string()), "the mark: {text}");
+        assert!(!text.contains(&t!("gui.srv.act_remove").to_string()), "no remove verb: {text}");
+        assert!(text.contains(&t!("gui.tips.servers_bundled").to_string()), "the tips drop x: {text}");
+
+        handle_key(&mut gui, KeyEvent::from(KeyCode::Char('x')));
+        assert!(gui.servers.confirm.is_none(), "x asks nothing");
+        assert_eq!(gui.note.as_ref().map(|n| n.0.as_str()), Some(t!("gui.srv.bundled_note").as_ref()));
+
+        // The other server is as removable as ever.
+        gui.servers.cursor = 1;
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains(&t!("gui.srv.act_remove").to_string()), "{text}");
+        handle_key(&mut gui, KeyEvent::from(KeyCode::Char('x')));
+        assert_eq!(gui.servers.confirm, Some(1));
+        gui.act(Act::SrvConfirm(false));
+
+        // Editing the bundled entry: the URL field is locked and skipped.
+        gui.servers.cursor = 0;
+        handle_key(&mut gui, KeyEvent::from(KeyCode::Char('e')));
+        let form = gui.servers.form.as_ref().expect("the edit form opened");
+        assert!(form.locked_url);
+        assert_eq!(form.focus, 1, "the cursor starts past the address");
+        gui.act(Act::FormFocus(0));
+        handle_key(&mut gui, KeyEvent::from(KeyCode::Char('z')));
+        let form = gui.servers.form.as_ref().unwrap();
+        assert_eq!(form.server, "http://attic.local:3000", "typing never reaches the address");
+        assert_eq!(form.username, "paulz", "the letter went to the field that can take it");
     }
 
     #[test]

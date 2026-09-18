@@ -145,6 +145,7 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         mouse: config::MousePrefs::default(),
         // One server, the session's; nothing else to reach.
         servers: Vec::new(),
+        bundled: None,
     };
     let (theme, _warnings) = ui::Theme::from_prefs(&start.theme);
     ui::set_theme(theme);

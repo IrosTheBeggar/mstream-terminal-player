@@ -901,7 +901,12 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     } else if matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_))) {
         t!("gui.tips.sonic_pick")
     } else if gui.servers.room && gui.active == SETTINGS_NAV {
-        t!("gui.tips.servers")
+        // The bundled server's row has no remove key to name.
+        if servers::cursor_on_bundled(gui) {
+            t!("gui.tips.servers_bundled")
+        } else {
+            t!("gui.tips.servers")
+        }
     } else if gui.torrent.room && gui.active == SETTINGS_NAV {
         std::borrow::Cow::from(torrent::tips(gui))
     } else {
@@ -2006,15 +2011,20 @@ impl Gui {
 /// `torrent` is the `--torrent` seam: a `.torrent` path or a magnet link
 /// the player was opened WITH, the way the OS hands one to the app it
 /// registered for them (docs/ux-contracts/add-torrent.md, entry point 2).
-pub fn run(server: Option<String>, token: Option<String>, torrent: Option<String>) -> i32 {
-    // The GUI's own config read (the [gui] section, and the save guard);
-    // `startup` below does its own tolerant load for the player prefs.
+pub fn run(
+    server: Option<String>,
+    token: Option<String>,
+    torrent: Option<String>,
+    bundled: Option<String>,
+) -> i32 {
+    // The player's own tolerant load first — it may seed the bundled
+    // server — then the GUI's read of what is on disk (the [gui] section,
+    // and the save guard).
+    let start = tui::startup(server, token, bundled);
     let (config, config_ok) = match config::load() {
         Ok(config) => (config, true),
         Err(_) => (Config::default(), false),
     };
-
-    let start = tui::startup(server, token);
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let (audio_tx, tap) = worker::spawn_audio(event_tx.clone());
     let api_tx = worker::spawn_api(event_tx.clone());

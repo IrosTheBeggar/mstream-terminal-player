@@ -85,6 +85,29 @@ pub(crate) struct Startup {
     /// Every saved server, with its token: what a queued track needs to be
     /// reached from a session on another server (contract clause 30).
     pub servers: Vec<app::KnownServer>,
+    /// `--bundled-server`: the installer's own server, seeded into the list
+    /// and never offered for removal (contract clauses 50–58).
+    pub bundled: Option<String>,
+}
+
+/// `--bundled-server` on boot (contract clause 51): the packaged server
+/// gets an entry when it has none — without credentials, made the default
+/// — and an entry it already has is used as it stands, so a default the
+/// user chose later keeps standing. Returns the identity the mode guards.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn seed_bundled(config: &mut config::Config, url: &str) -> Option<String> {
+    let url = crate::api::server_url::normalize(url).ok()?;
+    let known = config.servers.iter().any(|entry| config::same_server(&entry.url, &url));
+    if !known {
+        // Seeded at the front and, being brand new, as the default; the
+        // MRU order sorts itself out from the first session on.
+        config::touch_server(config, &url, None);
+        config::set_default_server(config, Some(&url));
+        if let Err(e) = config::save(config) {
+            eprintln!("warning: could not save the bundled server: {e}");
+        }
+    }
+    Some(url)
 }
 
 /// The saved servers as the App's queue needs them (contract clause 30):
@@ -110,15 +133,26 @@ pub(crate) fn known_servers(
 /// with the replay harness so a scripted run begins exactly where the real
 /// binary would.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup {
-    let config = match config::load() {
-        Ok(config) => config,
+pub(crate) fn startup(
+    server: Option<String>,
+    token: Option<String>,
+    bundled: Option<String>,
+) -> Startup {
+    let (mut config, config_ok) = match config::load() {
+        Ok(config) => (config, true),
         Err(e) => {
             // A config we can't read shouldn't stop the player starting; the
             // worst case is being asked where the server is again.
             eprintln!("warning: {e}");
-            config::Config::default()
+            (config::Config::default(), false)
         }
+    };
+    // A config that failed to load is never written back — seeding into it
+    // would replace a file the user can still fix with a stub.
+    let bundled = match bundled {
+        Some(url) if config_ok => seed_bundled(&mut config, &url),
+        Some(url) => crate::api::server_url::normalize(&url).ok(),
+        None => None,
     };
     let credentials = config::load_credentials().unwrap_or_default();
 
@@ -163,6 +197,7 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
         display: config.display,
         mouse: config.mouse,
         servers,
+        bundled,
     }
 }
 
@@ -215,6 +250,7 @@ pub(crate) fn app_from(start: Startup) -> App {
         .with_tunnel(start.tunnel_code);
     app.session.self_signed = start.self_signed;
     app.servers = start.servers;
+    app.bundled_server = start.bundled;
     if let Some(path) = start.last_path {
         // Pick up where the last session left off; `start` browses this.
         app.path = path;
@@ -223,8 +259,8 @@ pub(crate) fn app_from(start: Startup) -> App {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run(server: Option<String>, token: Option<String>) -> i32 {
-    let start = startup(server, token);
+pub fn run(server: Option<String>, token: Option<String>, bundled: Option<String>) -> i32 {
+    let start = startup(server, token, bundled);
 
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let (audio_tx, tap) = worker::spawn_audio(event_tx.clone());
@@ -765,6 +801,37 @@ mod tests {
 
         // Moving the pointer about is not an event worth an effect.
         assert!(on_mouse(&mut app, mouse_at(MouseEventKind::Moved, 10, 10), area).is_empty());
+    }
+
+    #[test]
+    fn the_bundled_server_is_seeded_once_as_the_default() {
+        let _scratch = crate::config::testing::Scratch::new("bundled-seed");
+        // First boot: no servers saved. The bundled one is created without
+        // credentials and made the default (contract clause 51), and the
+        // session opens on it.
+        let start = startup(None, None, Some("nas.local:3000".into()));
+        assert_eq!(start.bundled.as_deref(), Some("http://nas.local:3000"));
+        assert_eq!(start.server.as_deref(), Some("http://nas.local:3000"));
+        let config = config::load().unwrap();
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.default_server.as_deref(), Some("http://nas.local:3000"));
+        assert!(config.servers[0].username.is_none(), "no credentials seeded");
+
+        // The user later chose another default: the next boot leaves that
+        // standing, and the bundled entry is not seeded a second time.
+        let mut config = config::load().unwrap();
+        config::touch_server(&mut config, "http://office.local:3000", None);
+        config::set_default_server(&mut config, Some("http://office.local:3000"));
+        config::save(&config).unwrap();
+        let start = startup(None, None, Some("http://nas.local:3000".into()));
+        assert_eq!(start.server.as_deref(), Some("http://office.local:3000"), "the chosen default stands");
+        assert_eq!(start.bundled.as_deref(), Some("http://nas.local:3000"), "still guarded");
+        assert_eq!(config::load().unwrap().servers.len(), 2, "seeded once, not twice");
+
+        // Without the flag the same config boots as it always did: nothing
+        // about the mode persists.
+        let start = startup(None, None, None);
+        assert!(start.bundled.is_none());
     }
 
     #[test]

@@ -433,7 +433,7 @@ pub fn run(args: ReplayArgs) -> i32 {
     // stored server, token, browse path and preferences.
     let mut app = if args.live {
         let start =
-            crate::tui::startup(args.conn.server.clone(), args.conn.token.clone());
+            crate::tui::startup(args.conn.server.clone(), args.conn.token.clone(), None);
         // Same palette the real binary would draw with, so a replay is a
         // faithful picture of what someone's config actually produces.
         ui::set_theme(crate::tui::theme_for(&start.theme));

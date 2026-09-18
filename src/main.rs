@@ -159,7 +159,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Launch the interactive terminal player (the default)
-    Tui(cmd_library::ConnArgs),
+    Tui(TuiArgs),
     /// Launch the GUI player — the mouse-first surface the installers open
     /// (preview: Files browsing and playback, the bottom bar, Settings)
     Gui(GuiArgs),
@@ -211,9 +211,30 @@ enum Command {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Args)]
+struct TuiArgs {
+    #[command(flatten)]
+    conn: cmd_library::ConnArgs,
+
+    /// The server this player was installed beside — the installers'
+    /// launcher passes it. The entry is seeded as the default on first boot
+    /// and can never be removed from here; other servers come and go as
+    /// usual. A launch property: nothing is persisted about the mode.
+    #[arg(long, value_name = "URL")]
+    bundled_server: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Args)]
 struct GuiArgs {
     #[command(flatten)]
     conn: cmd_library::ConnArgs,
+
+    /// The server this player was installed beside — the installers'
+    /// launcher passes it. The entry is seeded as the default on first boot
+    /// and can never be removed from here; other servers come and go as
+    /// usual. A launch property: nothing is persisted about the mode.
+    #[arg(long, value_name = "URL")]
+    bundled_server: Option<String>,
 
     /// Open with a torrent — a .torrent file's path or a magnet link — the
     /// way the OS hands one to the app it registered for them. The GUI
@@ -323,11 +344,16 @@ fn main() {
     engine::http::set_spool_dir(spool_dir);
 
     let serve_args = match (cli.command, cli.port) {
-        (Some(Command::Tui(conn)), _) => {
-            std::process::exit(tui::run(conn.server, conn.token));
+        (Some(Command::Tui(args)), _) => {
+            std::process::exit(tui::run(args.conn.server, args.conn.token, args.bundled_server));
         }
         (Some(Command::Gui(args)), _) => {
-            std::process::exit(gui::run(args.conn.server, args.conn.token, args.torrent));
+            std::process::exit(gui::run(
+                args.conn.server,
+                args.conn.token,
+                args.torrent,
+                args.bundled_server,
+            ));
         }
         (Some(Command::Play(args)), _) => std::process::exit(cmd_play::run(args)),
         (Some(Command::Setup(args)), _) => std::process::exit(setup::run(args)),
@@ -348,7 +374,7 @@ fn main() {
         (Some(Command::Keys), _) => {
             // The bindings in force, not the built-in ones: someone asking
             // what their keys are wants the answer for their config.
-            let start = tui::startup(None, None);
+            let start = tui::startup(None, None, None);
             print!("{}", tui::keymap_for(&start.keys).to_config_toml());
             std::process::exit(0);
         }
@@ -385,7 +411,7 @@ fn main() {
             }
         }
         // Bare `mstream-player` launches the player.
-        None => std::process::exit(tui::run(None, None)),
+        None => std::process::exit(tui::run(None, None, None)),
     }
 }
 
