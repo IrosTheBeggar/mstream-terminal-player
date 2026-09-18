@@ -240,6 +240,8 @@ pub(crate) fn open_room(gui: &mut Gui) {
         .config
         .servers
         .iter()
+        // A peer has no address of its own to ask.
+        .filter(|s| s.peer.is_none())
         .map(|s| (s.url.clone(), s.self_signed, crate::quickconnect::is_tunnel_id(&s.url)))
         .collect();
     for (url, self_signed, tunnel) in entries {
@@ -306,7 +308,13 @@ pub(crate) fn is_bundled(gui: &Gui, url: &str) -> bool {
 
 /// Whether the Manage Servers cursor rests on the bundled server's row.
 pub(crate) fn cursor_on_bundled(gui: &Gui) -> bool {
-    gui.config.servers.get(gui.servers.cursor).is_some_and(|entry| is_bundled(gui, &entry.url))
+    cursor_entry(gui).is_some_and(|entry| is_bundled(gui, &entry.url))
+}
+
+/// The tips line's word on the cursored row: a listed peer, a missing one,
+/// or none of that.
+pub(crate) fn cursor_peer_state(gui: &Gui) -> Option<bool> {
+    cursor_entry(gui).and_then(|entry| entry.peer.as_ref().map(|p| p.missing))
 }
 
 /// Turn to the Quick Connect page and start a browse of this network.
@@ -402,16 +410,86 @@ pub(crate) fn update_config(gui: &mut Gui, mutate: impl FnOnce(&mut Config)) -> 
     }
 }
 
+/// The room's rows in display order — peers under their parent — as
+/// indices into the stored list, which is what every action keys on.
+fn order(gui: &Gui) -> Vec<usize> {
+    config::grouped_order(&gui.config.servers)
+}
+
+/// The stored entry under display position `pos`.
+fn stored_at(gui: &Gui, pos: usize) -> Option<usize> {
+    order(gui).get(pos).copied()
+}
+
+/// The entry the room's cursor rests on.
+pub(crate) fn cursor_entry(gui: &Gui) -> Option<&config::ServerEntry> {
+    stored_at(gui, gui.servers.cursor).and_then(|i| gui.config.servers.get(i))
+}
+
+/// The parent's display name for a peer row's "via" line.
+fn parent_label(gui: &Gui, parent: &str) -> String {
+    gui.config
+        .servers
+        .iter()
+        .find(|e| config::same_server(&e.url, parent))
+        .map(config::display_name)
+        .unwrap_or_else(|| crate::quickconnect::display_server(parent))
+}
+
 fn make_default(gui: &mut Gui, index: usize) {
-    let Some(url) = gui.config.servers.get(index).map(|s| s.url.clone()) else { return };
+    let Some(entry) = gui.config.servers.get(index).cloned() else { return };
+    if !config::selectable(&entry) {
+        return;
+    }
+    let url = entry.url.clone();
     if update_config(gui, |config| config::set_default_server(config, Some(&url))) {
-        let shown = crate::quickconnect::display_server(&url);
+        let shown = config::display_name(&entry);
         gui.note = Some((t!("gui.srv.made_default", server = shown).to_string(), false));
+        // Make default switches at once, not just on the next launch
+        // (contract clause 15).
+        switch_to(gui, index);
+    }
+}
+
+/// Park a peer, or offer it again (contract clause 24). Hiding the one
+/// being browsed hands the browser to its parent first.
+fn set_hidden(gui: &mut Gui, index: usize, hidden: bool) {
+    let Some(entry) = gui.config.servers.get(index).cloned() else { return };
+    let Some(peer) = entry.peer.clone() else { return };
+    let current = gui.app.connected && config::same_server(&gui.app.session.server_id, &entry.url);
+    if hidden && current {
+        if let Some(parent) = gui.config.servers.iter().position(|e| config::same_server(&e.url, &peer.parent)) {
+            switch_to(gui, parent);
+        }
+    }
+    let url = entry.url.clone();
+    if update_config(gui, |config| {
+        config::set_peer_hidden(config, &url, hidden);
+    }) && hidden
+    {
+        gui.note = Some((t!("gui.srv.hidden_note").to_string(), false));
     }
 }
 
 fn remove_server(gui: &mut Gui, index: usize) {
-    let Some(url) = gui.config.servers.get(index).map(|s| s.url.clone()) else { return };
+    let Some(entry) = gui.config.servers.get(index).cloned() else { return };
+    let url = entry.url.clone();
+    // A peer's record goes alone — Forget (contract clause 23) — and its
+    // queued rows with it.
+    if let Some(peer) = entry.peer.clone() {
+        let saved = update_config(gui, |config| {
+            config.servers.retain(|e| !config::same_server(&e.url, &url));
+        });
+        if saved {
+            let effects = gui.app.drop_peer_items(&peer.parent, peer.id);
+            gui.pend(effects);
+            gui.app.servers.retain(|s| !config::same_server(&s.id, &url));
+            gui.note = Some((t!("gui.srv.removed", server = peer.name).to_string(), false));
+        }
+        let rows = gui.config.servers.len();
+        gui.servers.cursor = gui.servers.cursor.min(rows);
+        return;
+    }
     let mut credentials = match config::load_credentials() {
         Ok(credentials) => credentials,
         Err(_) => config::Credentials::default(),
@@ -450,16 +528,37 @@ pub(crate) fn switch_to(gui: &mut Gui, index: usize) {
     if gui.app.connected && config::same_server(&gui.app.session.server_id, &entry.url) {
         return; // already there
     }
+    if !config::selectable(&entry) {
+        return; // a parked or missing peer is not offered
+    }
+    // A peer is reached through its parent: the parent's address, token
+    // and trust, the peer's own identity and place (contract clause 27).
+    let (reach, peer) = match &entry.peer {
+        Some(peer) => {
+            let parent = gui
+                .config
+                .servers
+                .iter()
+                .find(|e| config::same_server(&e.url, &peer.parent))
+                .cloned();
+            let Some(parent) = parent else {
+                gui.note = Some((t!("gui.srv.no_parent").to_string(), true));
+                return;
+            };
+            (parent, Some((peer.parent.clone(), peer.id)))
+        }
+        None => (entry.clone(), None),
+    };
     let credentials = config::load_credentials().unwrap_or_default();
-    let token = config::token_for(&credentials, &entry.url);
-    let (server, tunnel_code) = if crate::quickconnect::is_tunnel_id(&entry.url) {
-        let Some(code) = config::pairing_for(&credentials, &entry.url) else {
+    let token = config::token_for(&credentials, &reach.url);
+    let (server, tunnel_code) = if crate::quickconnect::is_tunnel_id(&reach.url) {
+        let Some(code) = config::pairing_for(&credentials, &reach.url) else {
             gui.note = Some((t!("gui.srv.no_code").to_string(), true));
             return;
         };
         (String::new(), Some(code))
     } else {
-        (entry.url.clone(), None)
+        (reach.url.clone(), None)
     };
 
     // The outgoing session's place is worth keeping before it is replaced.
@@ -473,15 +572,16 @@ pub(crate) fn switch_to(gui: &mut Gui, index: usize) {
     let effects = gui.app.adopt_server(
         server,
         entry.url.clone(),
-        entry.username.clone(),
+        reach.username.clone(),
         token,
         tunnel_code,
-        entry.self_signed,
+        reach.self_signed,
         entry.last_path.clone(),
+        peer,
     );
     gui.pend(effects);
     gui.servers.switching = Some(entry.url.clone());
-    let shown = crate::quickconnect::display_server(&entry.url);
+    let shown = config::display_name(&entry);
     gui.note = Some((t!("gui.srv.reaching", server = shown).to_string(), false));
 }
 
@@ -525,7 +625,7 @@ pub(crate) fn submit_form(gui: &mut Gui) {
                 form.error = None;
             }
             gui.servers.pending_code = Some(code.clone());
-            gui.pend(vec![Effect::Api(ApiCmd::QuickConnect { code, token: None })]);
+            gui.pend(vec![Effect::Api(ApiCmd::QuickConnect { code, token: None , peer: None})]);
             return;
         }
         Some((FormStage::Direct, false)) => {}
@@ -583,7 +683,7 @@ pub(crate) fn submit_form(gui: &mut Gui) {
         }
         gui.app.session.self_signed = self_signed;
         let effect = if public {
-            Effect::Api(ApiCmd::Connect { server, token: None, self_signed })
+            Effect::Api(ApiCmd::Connect { server, token: None, self_signed, peer: None })
         } else {
             Effect::Api(ApiCmd::Login { server, username, password, self_signed })
         };
@@ -918,6 +1018,9 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::SrvAdd => open_add(gui),
         Act::SrvRow(i) => gui.servers.cursor = *i,
         Act::SrvSwitch(i) => switch_to(gui, *i),
+        Act::SrvHide(i) => set_hidden(gui, *i, true),
+        Act::SrvShow(i) => set_hidden(gui, *i, false),
+        Act::SrvForget(i) => gui.servers.confirm = Some(*i),
         Act::SrvEdit(i) => open_edit(gui, *i),
         Act::SrvDefault(i) => make_default(gui, *i),
         Act::SrvQr(i) => open_qr(gui, *i),
@@ -1110,48 +1213,54 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
 
     if gui.servers.room && gui.active == super::SETTINGS_NAV {
         let rows = gui.config.servers.len(); // + the add row at `rows`
+        // The cursor walks display order (peers under their parent); the
+        // verbs key on the stored entry under it.
+        let stored = stored_at(gui, gui.servers.cursor);
+        let entry = stored.and_then(|i| gui.config.servers.get(i)).cloned();
+        let peer = entry.as_ref().and_then(|e| e.peer.clone());
         match key.code {
             KeyCode::Esc => gui.servers.room = false,
             KeyCode::Down => gui.servers.cursor = (gui.servers.cursor + 1).min(rows),
             KeyCode::Up => gui.servers.cursor = gui.servers.cursor.saturating_sub(1),
-            KeyCode::Enter => {
-                let cursor = gui.servers.cursor;
-                if cursor >= rows {
-                    open_add(gui);
-                } else {
-                    switch_to(gui, cursor);
-                }
-            }
+            KeyCode::Enter => match stored {
+                Some(index) => switch_to(gui, index),
+                None => open_add(gui),
+            },
             KeyCode::Char('e') => {
-                let cursor = gui.servers.cursor;
-                if cursor < rows {
-                    open_edit(gui, cursor);
+                if let Some(index) = stored.filter(|_| peer.is_none()) {
+                    open_edit(gui, index);
                 }
             }
             KeyCode::Char('d') => {
-                let cursor = gui.servers.cursor;
-                if cursor < rows {
-                    make_default(gui, cursor);
+                if let Some(index) = stored {
+                    make_default(gui, index);
                 }
             }
             KeyCode::Char('p') => {
-                let cursor = gui.servers.cursor;
-                if cursor < rows
-                    && gui
-                        .config
-                        .servers
-                        .get(cursor)
-                        .is_some_and(|s| crate::quickconnect::is_tunnel_id(&s.url))
+                if let Some(index) = stored
+                    && entry.as_ref().is_some_and(|s| crate::quickconnect::is_tunnel_id(&s.url))
                 {
-                    open_qr(gui, cursor);
+                    open_qr(gui, index);
                 }
             }
-            KeyCode::Char('x') => {
-                let cursor = gui.servers.cursor;
-                if cursor < rows {
-                    gui.act(Act::SrvRemove(cursor));
+            KeyCode::Char('h') => {
+                if let (Some(index), Some(peer)) = (stored, peer.as_ref())
+                    && !peer.missing
+                {
+                    set_hidden(gui, index, !peer.hidden);
                 }
             }
+            KeyCode::Char('x') => match (stored, peer.as_ref()) {
+                // A listed peer is the parent admin's data: no removal.
+                (Some(_), Some(peer)) if !peer.missing => {}
+                (Some(index), Some(_)) => {
+                    gui.act(Act::SrvForget(index));
+                }
+                (Some(index), None) => {
+                    gui.act(Act::SrvRemove(index));
+                }
+                (None, _) => {}
+            },
             _ => return None,
         }
         return Some(false);
@@ -1174,8 +1283,10 @@ pub(crate) fn draw_header(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     if !gui.app.connected {
         return;
     }
-    let server = crate::quickconnect::display_server(&gui.app.session.server_id);
-    let many = gui.config.servers.len() > 1;
+    let server = gui.app.server_display();
+    // Shown only while more than one server can be picked: parked and
+    // missing peers do not count (contract clause 12).
+    let many = gui.config.servers.iter().filter(|e| config::selectable(e)).count() > 1;
     let chevron = if legacy_conhost() { " v" } else { " ▾" };
     let label = if many { format!("{server}{chevron}") } else { server };
     let width = label.chars().count() as u16;
@@ -1200,11 +1311,16 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
     gui.ui.click(area, Act::SrvCloseDrop);
 
-    let entries: Vec<(String, bool, bool)> = gui
-        .config
-        .servers
-        .iter()
-        .map(|s| {
+    // Grouped — a peer under the server it is reached through, with its
+    // "via" — and only what can be picked (contract clause 12).
+    let branch = if legacy_conhost() { "+" } else { "└" };
+    let entries: Vec<(usize, String, bool, bool)> = order(gui)
+        .into_iter()
+        .filter_map(|i| {
+            let s = gui.config.servers.get(i)?;
+            if !config::selectable(s) {
+                return None;
+            }
             let current =
                 gui.app.connected && config::same_server(&gui.app.session.server_id, &s.url);
             let default = gui
@@ -1212,13 +1328,21 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 .default_server
                 .as_deref()
                 .is_some_and(|d| config::same_server(d, &s.url));
-            (crate::quickconnect::display_server(&s.url), current, default)
+            let label = match &s.peer {
+                Some(peer) => format!(
+                    "{branch} {} · {}",
+                    peer.name,
+                    t!("gui.srv.via", parent = parent_label(gui, &peer.parent))
+                ),
+                None => config::display_name(s),
+            };
+            Some((i, label, current, default))
         })
         .collect();
     let add_label = format!("+ {}", t!("gui.srv.add"));
     let widest = entries
         .iter()
-        .map(|(label, _, _)| label.chars().count() + 4)
+        .map(|(_, label, _, _)| label.chars().count() + 4)
         .chain([add_label.chars().count() + 2])
         .max()
         .unwrap_or(20);
@@ -1243,8 +1367,8 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 
     let marker = if legacy_conhost() { ">" } else { "▸" };
     let star = if legacy_conhost() { "*" } else { "★" };
-    for (i, (label, current, default)) in entries.iter().enumerate() {
-        let y = inner.y + i as u16;
+    for (row, (i, label, current, default)) in entries.iter().enumerate() {
+        let y = inner.y + row as u16;
         if y >= inner.bottom() {
             break;
         }
@@ -1261,7 +1385,7 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         if *default {
             put(frame, inner.right().saturating_sub(1), y, star, Style::default().fg(th().gold));
         }
-        gui.ui.click(row, Act::SrvDrop(i));
+        gui.ui.click(row, Act::SrvDrop(*i));
     }
     let add_y = inner.y + entries.len() as u16;
     if add_y < inner.bottom() {
@@ -1282,42 +1406,63 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let marker = if legacy_conhost() { ">" } else { "▸" };
 
     let name_w = content.width.saturating_sub(30) as usize;
-    for (i, entry) in servers.iter().enumerate() {
-        let y = content.y + 2 + i as u16;
+    let branch = if legacy_conhost() { "+" } else { "└" };
+    let order = order(gui);
+    for (pos, &i) in order.iter().enumerate() {
+        let entry = &servers[i];
+        let y = content.y + 2 + pos as u16;
         if y + 3 >= content.bottom() {
             break;
         }
         let row = Rect { x: content.x, y, width: content.width, height: 1 };
-        let selected = gui.servers.cursor == i;
+        let selected = gui.servers.cursor == pos;
         let hover = gui.ui.pointer.is_some_and(|p| row.contains(p));
         if selected {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), row);
         }
         let current =
             gui.app.connected && config::same_server(&gui.app.session.server_id, &entry.url);
+        let parked = entry.peer.as_ref().is_some_and(|p| p.hidden);
         let style = match (selected, current, hover) {
             (true, _, _) => sel().add_modifier(Modifier::BOLD),
             (false, true, _) => Style::default().fg(th().accent).add_modifier(Modifier::BOLD),
             (false, false, true) => bright_bold(),
+            // A parked peer reads as parked, not gone (contract clause 24).
+            (false, false, false) if parked => dim(),
             (false, false, false) => Style::default(),
         };
         if current {
             let mstyle = if selected { sel() } else { Style::default().fg(th().accent) };
             put(frame, content.x, y, marker, mstyle.add_modifier(Modifier::BOLD));
         }
-        let name = crate::quickconnect::display_server(&entry.url);
-        put(frame, content.x + 2, y, &super::bar::clip(&name, name_w), style);
-
         let meta = if selected { sel() } else { dim() };
-        let user = entry.username.as_deref().unwrap_or("");
-        put(frame, content.right().saturating_sub(26), y, &super::bar::clip(user, 12), meta);
-        let version = gui.servers.version_label(&entry.url);
-        put(frame, content.right().saturating_sub(12), y, &super::bar::clip(&version, 9), meta);
+        match &entry.peer {
+            // A peer is a branch off its parent's row, named through it —
+            // or through the server that stopped sharing it (clause 25).
+            Some(peer) => {
+                let name = format!("{branch} {}", peer.name);
+                put(frame, content.x + 2, y, &super::bar::clip(&name, name_w), style);
+                let via = if peer.missing {
+                    t!("gui.srv.no_longer_shared", parent = parent_label(gui, &peer.parent))
+                } else {
+                    t!("gui.srv.via", parent = parent_label(gui, &peer.parent))
+                };
+                put(frame, content.right().saturating_sub(26), y, &super::bar::clip(&via, 23), meta);
+            }
+            None => {
+                let name = config::display_name(entry);
+                put(frame, content.x + 2, y, &super::bar::clip(&name, name_w), style);
+                let user = entry.username.as_deref().unwrap_or("");
+                put(frame, content.right().saturating_sub(26), y, &super::bar::clip(user, 12), meta);
+                let version = gui.servers.version_label(&entry.url);
+                put(frame, content.right().saturating_sub(12), y, &super::bar::clip(&version, 9), meta);
+            }
+        }
         if default.as_deref().is_some_and(|d| config::same_server(d, &entry.url)) {
             let dstyle = if selected { sel() } else { Style::default().fg(th().gold) };
             put(frame, content.right().saturating_sub(2), y, star, dstyle);
         }
-        gui.ui.click(row, Act::SrvRow(i));
+        gui.ui.click(row, Act::SrvRow(pos));
     }
 
     // The add row closes the list, cursor-reachable like any other.
@@ -1342,13 +1487,15 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
 
     // The cursored row's actions, on their own line under the list.
-    let Some(entry) = servers.get(gui.servers.cursor) else { return };
-    let index = gui.servers.cursor;
+    let Some(index) = order.get(gui.servers.cursor).copied() else { return };
+    let Some(entry) = servers.get(index) else { return };
     let actions_y = (add_y + 2).min(content.bottom().saturating_sub(1));
     let tunnel = crate::quickconnect::is_tunnel_id(&entry.url);
     let current = gui.app.connected && config::same_server(&gui.app.session.server_id, &entry.url);
     let is_default = default.as_deref().is_some_and(|d| config::same_server(d, &entry.url));
     let bundled = is_bundled(gui, &entry.url);
+    let peer = entry.peer.clone();
+    let selectable = config::selectable(entry);
 
     let mut x = content.x + 2;
     let word = |frame: &mut Frame,
@@ -1378,7 +1525,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             Style::default().fg(th().accent),
             None,
         );
-    } else {
+    } else if selectable {
         word(
             frame,
             gui,
@@ -1388,6 +1535,53 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             bright_bold(),
             Some(Act::SrvSwitch(index)),
         );
+    }
+    // A peer has nothing to edit and no removal while listed: hide or
+    // show it, and Forget once its parent stopped listing it (clause 25).
+    if let Some(peer) = peer {
+        if !is_default && selectable {
+            word(
+                frame,
+                gui,
+                &mut x,
+                t!("gui.srv.act_default").to_string(),
+                dim(),
+                bright_bold(),
+                Some(Act::SrvDefault(index)),
+            );
+        }
+        if peer.missing {
+            word(
+                frame,
+                gui,
+                &mut x,
+                t!("gui.srv.act_forget").to_string(),
+                Style::default().fg(th().danger),
+                Style::default().fg(th().danger).add_modifier(Modifier::BOLD),
+                Some(Act::SrvForget(index)),
+            );
+        } else if peer.hidden {
+            word(
+                frame,
+                gui,
+                &mut x,
+                t!("gui.srv.act_show").to_string(),
+                dim(),
+                bright_bold(),
+                Some(Act::SrvShow(index)),
+            );
+        } else {
+            word(
+                frame,
+                gui,
+                &mut x,
+                t!("gui.srv.act_hide").to_string(),
+                dim(),
+                bright_bold(),
+                Some(Act::SrvHide(index)),
+            );
+        }
+        return;
     }
     if !tunnel {
         word(
@@ -1825,12 +2019,12 @@ fn draw_confirm(frame: &mut Frame, gui: &mut Gui, area: Rect, index: usize) {
         return;
     };
     let url = entry.url.clone();
+    let shown = config::display_name(entry);
     let tunnel = crate::quickconnect::is_tunnel_id(&url);
     let inner = modal_frame(frame, area, 56, if tunnel { 11 } else { 9 }, th().danger);
     put(frame, inner.x + 1, inner.y, &t!("gui.srv.remove_title"), bright_bold());
     modal_close(frame, &mut gui.ui, inner, Act::SrvConfirm(false), t!("gui.srv.close_tip").to_string());
 
-    let shown = crate::quickconnect::display_server(&url);
     put(
         frame,
         inner.x + 2,
@@ -2341,6 +2535,102 @@ mod tests {
         let form = gui.servers.form.as_ref().unwrap();
         assert_eq!(form.server, "http://attic.local:3000", "typing never reaches the address");
         assert_eq!(form.username, "paulz", "the letter went to the field that can take it");
+    }
+
+    #[test]
+    fn federated_peers_list_under_their_parent_and_switch_through_it() {
+        use super::super::SETTINGS_NAV;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        // Contract clauses 12, 24, 25 and 27.
+        let scratch = Scratch::new("gui-peers");
+        let _ = &scratch;
+        let mut gui = two_server_gui();
+        gui.config.servers.push(ServerEntry {
+            url: config::peer_identity("http://attic.local:3000", 3),
+            peer: Some(config::PeerEntry {
+                parent: "http://attic.local:3000".into(),
+                id: 3,
+                name: "Paul's NAS".into(),
+                missing: false,
+                hidden: false,
+            }),
+            ..Default::default()
+        });
+        gui.config_ok = true;
+        config::save(&gui.config).unwrap();
+        gui.queue_open = false;
+        gui.active = SETTINGS_NAV;
+        open_room(&mut gui);
+
+        // The room seats the peer under its parent, named through it.
+        let rows = draw(&mut gui);
+        let attic = rows
+            .iter()
+            .enumerate()
+            .skip(1) // the header names the session too
+            .find(|(_, r)| r.contains("attic.local:3000"))
+            .map(|(i, _)| i)
+            .expect("the parent row");
+        assert!(rows[attic + 1].contains("Paul's NAS"), "the peer sits under its parent: {rows:?}");
+        assert!(rows[attic + 1].contains("via http://attic.local"), "{}", rows[attic + 1]);
+        gui.servers.cursor = 1; // display position: the peer
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains(&t!("gui.srv.act_hide").to_string()), "a listed peer can be parked: {text}");
+        assert!(!text.contains(&t!("gui.srv.act_edit").to_string()), "and has nothing to edit");
+        assert!(!text.contains(&t!("gui.srv.act_remove").to_string()), "and cannot be removed");
+
+        // Enter switches through the parent: the parent's address and
+        // credentials, the peer's own identity and id.
+        handle_key(&mut gui, KeyEvent::from(KeyCode::Enter));
+        assert!(
+            gui.pending.iter().any(|e| matches!(
+                e,
+                Effect::Api(ApiCmd::Connect { server, peer: Some(3), .. }) if server == "http://attic.local:3000"
+            )),
+            "{:?}",
+            gui.pending
+        );
+        assert_eq!(gui.app.session.server_id, config::peer_identity("http://attic.local:3000", 3));
+        assert_eq!(gui.app.session.peer, Some(("http://attic.local:3000".into(), 3)));
+        assert_eq!(gui.app.session.username.as_deref(), Some("paul"), "the parent's sign-in");
+
+        // The dropdown lists it grouped; a parked peer leaves the dropdown
+        // and the room hands the browser back to the parent. The room is
+        // closed for these looks so the screen holds only the dropdown.
+        gui.app.connected = true;
+        gui.servers.room = false;
+        gui.servers.drop_open = true;
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("Paul's NAS"), "{text}");
+        gui.servers.drop_open = false;
+        gui.pending.clear();
+        let peer_url = config::peer_identity("http://attic.local:3000", 3);
+        let peer_at = |gui: &Gui| gui.config.servers.iter().position(|e| e.url == peer_url).expect("the peer");
+        let at = peer_at(&gui);
+        gui.act(Act::SrvHide(at));
+        // The session save reorders the list by recency; find it again.
+        let at = peer_at(&gui);
+        assert!(gui.config.servers[at].peer.as_ref().unwrap().hidden);
+        assert_eq!(gui.app.session.server_id, "http://attic.local:3000", "browsing the parent again");
+        gui.servers.drop_open = true;
+        let text = draw(&mut gui).join("\n");
+        assert!(!text.contains("Paul's NAS"), "parked peers are not offered: {text}");
+        gui.servers.drop_open = false;
+        open_room(&mut gui);
+
+        // x on a listed peer asks nothing; once missing, x means Forget.
+        let at = peer_at(&gui);
+        gui.config.servers[at].peer.as_mut().unwrap().hidden = false;
+        gui.servers.cursor = config::grouped_order(&gui.config.servers).iter().position(|&i| i == at).unwrap();
+        handle_key(&mut gui, KeyEvent::from(KeyCode::Char('x')));
+        assert!(gui.servers.confirm.is_none());
+        gui.config.servers[at].peer.as_mut().unwrap().missing = true;
+        let text = draw(&mut gui).join("\n");
+        assert!(text.contains("no longer shared by"), "{text}");
+        handle_key(&mut gui, KeyEvent::from(KeyCode::Char('x')));
+        assert_eq!(gui.servers.confirm, Some(at));
+        gui.act(Act::SrvConfirm(true));
+        assert_eq!(gui.config.servers.len(), 2, "forgotten");
     }
 
     #[test]

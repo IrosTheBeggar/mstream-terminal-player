@@ -53,7 +53,9 @@ fn build(server: &str, prefix: &str, vpath: &str) -> Result<Url, String> {
             .path_segments_mut()
             .map_err(|_| "invalid server URL: cannot be a base".to_string())?;
         segments.pop_if_empty();
-        segments.push(prefix);
+        for part in prefix.split('/').filter(|p| !p.is_empty()) {
+            segments.push(part);
+        }
         for part in vpath.split('/').filter(|p| !p.is_empty()) {
             segments.push(part);
         }
@@ -68,6 +70,30 @@ pub fn media_url(server: &str, vpath: &str, token: Option<&str>) -> Result<Strin
         url.query_pairs_mut().append_pair("token", token);
     }
     Ok(url.to_string())
+}
+
+/// `{server}/api/v1/federation/peers/{peer}/stream/{vpath}?token=...` — a
+/// federated peer's bytes through its parent's proxy, which forwards Range
+/// so seeking works and has no transcode (contract clause 27). The token
+/// is the parent's.
+pub fn peer_media_url(
+    server: &str,
+    peer: i64,
+    vpath: &str,
+    token: Option<&str>,
+) -> Result<String, String> {
+    let mut url = build(server, &format!("api/v1/federation/peers/{peer}/stream"), vpath)?;
+    if let Some(token) = token {
+        url.query_pairs_mut().append_pair("token", token);
+    }
+    Ok(url.to_string())
+}
+
+/// `{server}/api/v1/federation/peers/{peer}/art/{file}` — a peer's cover
+/// through the parent's art proxy; the token travels in the header, as for
+/// [`album_art_url`].
+pub fn peer_art_url(server: &str, peer: i64, file: &str) -> Result<String, String> {
+    build(server, &format!("api/v1/federation/peers/{peer}/art"), file).map(|url| url.to_string())
 }
 
 /// `{server}/album-art/{file}` — the cover the server extracted and cached,
@@ -170,5 +196,13 @@ mod tests {
     #[test]
     fn rejects_bad_server_url() {
         assert!(media_url("not a url", "a.mp3", None).is_err());
+    }
+
+    #[test]
+    fn a_peers_bytes_and_art_come_through_the_parents_proxies() {
+        let u = peer_media_url("http://parent:3000/", 3, "music/Söng.flac", Some("pt")).unwrap();
+        assert_eq!(u, "http://parent:3000/api/v1/federation/peers/3/stream/music/S%C3%B6ng.flac?token=pt");
+        let u = peer_art_url("http://parent:3000", 3, "cover.jpeg").unwrap();
+        assert_eq!(u, "http://parent:3000/api/v1/federation/peers/3/art/cover.jpeg");
     }
 }

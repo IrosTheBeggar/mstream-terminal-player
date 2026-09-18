@@ -242,8 +242,10 @@ pub(crate) fn known_servers(
         .iter()
         .map(|entry| app::KnownServer {
             id: entry.url.clone(),
+            name: config::display_name(entry),
             token: config::token_for(credentials, &entry.url),
             self_signed: entry.self_signed,
+            peer: entry.peer.as_ref().map(|p| (p.parent.clone(), p.id)),
         })
         .collect()
 }
@@ -761,6 +763,16 @@ pub(crate) fn dispatch(
             // A queued track's server that presents its own certificate:
             // the stream client extends the trust the entry opted into.
             Effect::Trust(server) => crate::engine::http::trust_server(&server),
+            // A parent's peer list folds into the saved servers; nothing is
+            // written when nothing changed (contract clauses 20–23).
+            Effect::SavePeers { parent, listed } => {
+                if let Ok(mut config) = config::load()
+                    && config::reconcile_peers(&mut config, &parent, &listed)
+                    && let Err(e) = config::save(&config)
+                {
+                    eprintln!("warning: could not save the peer list: {e}");
+                }
+            }
             Effect::SaveSession => {
                 // A read-only config directory shouldn't take the app down;
                 // the sign-in just won't survive to the next run.

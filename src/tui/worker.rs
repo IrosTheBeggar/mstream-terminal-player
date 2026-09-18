@@ -72,12 +72,18 @@ pub enum ApiCmd {
     /// `self_signed` trusts the server's own TLS certificate — carried per
     /// command because the client is built here, from the one entry that
     /// opted in.
-    Connect { server: String, token: Option<String>, self_signed: bool },
+    /// `peer` aims the session at that federated peer of the server: every
+    /// read rides the parent's proxies with the parent's token (contract
+    /// clause 27).
+    Connect { server: String, token: Option<String>, self_signed: bool, peer: Option<i64> },
     Login { server: String, username: String, password: String, self_signed: bool },
     /// Dial a Quick Connect pairing code, then treat the resulting loopback
     /// address as an ordinary server. A token is carried when reconnecting to
     /// a tunnel server we have already signed in to.
-    QuickConnect { code: String, token: Option<String> },
+    QuickConnect { code: String, token: Option<String>, peer: Option<i64> },
+    /// The peers a saved server lists for browsing (contract clause 20),
+    /// asked once its ping says `federationBrowse`.
+    FederationPeers { parent: String },
     Browse(String),
     /// Fetch a library view for `dest` — the Library tab, or the Search tab
     /// drilling into an artist or album it found. The destination travels
@@ -419,6 +425,9 @@ pub enum Event {
     /// Credentials are missing or expired — the UI drops back to the
     /// connect screen.
     Unauthorized,
+    /// The peers `parent` lists for browsing, or `None` when the ask
+    /// failed — a failed fetch changes nothing (contract clause 20).
+    FederationPeers { parent: String, peers: Option<Vec<crate::api::types::PeerListing>> },
     Error(String),
 }
 
@@ -812,8 +821,8 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
         let result = match cmd {
             ApiCmd::Shutdown => break,
 
-            ApiCmd::Connect { server, token, self_signed } => {
-                connect(&mut client, &server, &server.clone(), token, self_signed)
+            ApiCmd::Connect { server, token, self_signed, peer } => {
+                connect(&mut client, &server, &server.clone(), token, self_signed, peer)
             }
 
             ApiCmd::Login { server, username, password, self_signed } => {
@@ -824,7 +833,7 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 login(&mut client, &endpoint, &id, &username, &password, self_signed)
             }
 
-            ApiCmd::QuickConnect { code, token } => match quick_connect(&code) {
+            ApiCmd::QuickConnect { code, token, peer } => match quick_connect(&code) {
                 Ok((id, opened)) => {
                     let url = opened.local_url.clone();
                     // Dial over the new tunnel while the old one is still up.
@@ -835,7 +844,7 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                     // just been pulled out from under it (finding #20).
                     // The bridge is plain http on loopback — TLS trust never
                     // comes up.
-                    let answer = connect(&mut client, &url, &id, token, false);
+                    let answer = connect(&mut client, &url, &id, token, false, peer);
                     if !tunnel_answered(&answer) {
                         // `opened` drops here, closing the tunnel that just
                         // failed and only that one. `client`, `bridge` and
@@ -937,6 +946,10 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
             .map(|r| Event::SonicRandom { side, track: r.songs.into_iter().next().map(Box::new) }),
         ApiCmd::DiscoveryProbe => {
             c.ping().map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+        }
+        // A failed ask is `None`: nothing about the saved peers changes.
+        ApiCmd::FederationPeers { parent } => {
+            Ok(Event::FederationPeers { parent, peers: c.federation_peers().ok() })
         }
         ApiCmd::Discover { node, seed, dest } => {
             crate::api::wait(discover(c, &node, &seed, dest))
@@ -1081,7 +1094,8 @@ fn establish(
     username: Option<String>,
     token: Option<String>,
 ) -> Result<Event, ApiError> {
-    let ping = c.ping()?;
+    // A peer answers no ping through the proxy; its layered `/api` does.
+    let ping = if c.peer().is_some() { c.ping_via_info()? } else { c.ping()? };
     let server = c.server();
     *client = Some(Arc::new(c));
     Ok(Event::Connected { server, id: id.to_string(), username, token, ping: Box::new(ping) })
@@ -1094,9 +1108,10 @@ fn connect(
     id: &str,
     token: Option<String>,
     self_signed: bool,
+    peer: Option<i64>,
 ) -> Option<Event> {
     let c = match Client::new_with(server, self_signed) {
-        Ok(c) => c.with_token(token.clone()),
+        Ok(c) => c.with_token(token.clone()).with_peer(peer),
         Err(e) => return Some(Event::Error(e.to_string())),
     };
     // Taken before the client moves; it is the address that was reached,

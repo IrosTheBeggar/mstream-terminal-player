@@ -94,6 +94,26 @@ pub struct Ping {
     /// Similarity federated out to paired servers.
     #[serde(rename = "federationDiscovery")]
     pub federation_discovery: bool,
+    /// This server lists federated peers a local user may browse through
+    /// its proxies (mStream #927): on only with federation enabled and at
+    /// least one peer. An older build omits the key.
+    #[serde(rename = "federationBrowse")]
+    pub federation_browse: bool,
+}
+
+/// One row of `GET /api/v1/federation/peers`: a peer this user may browse
+/// through the server, by the id every proxy route keys on.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct PeerListing {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PeerListingResponse {
+    pub peers: Vec<PeerListing>,
 }
 
 /// What this server can actually do, lifted out of [`Ping`].
@@ -111,6 +131,8 @@ pub struct Capabilities {
     pub discovery_path: bool,
     pub discovery_p2p: bool,
     pub federation_discovery: bool,
+    /// Peers to browse through this server (contract clause 20).
+    pub federation_browse: bool,
 }
 
 impl From<&Ping> for Capabilities {
@@ -120,6 +142,7 @@ impl From<&Ping> for Capabilities {
             discovery_path: ping.discovery_path,
             discovery_p2p: ping.discovery_p2p,
             federation_discovery: ping.federation_discovery,
+            federation_browse: ping.federation_browse,
         }
     }
 }
@@ -1427,6 +1450,7 @@ mod tests {
                 discovery_path: true,
                 discovery_p2p: false,
                 federation_discovery: false,
+                federation_browse: false,
             }
         );
         assert_eq!(caps.enabled_names(), vec!["similarity", "sonic journey"]);

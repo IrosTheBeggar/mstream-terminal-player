@@ -477,8 +477,170 @@ pub struct ServerEntry {
     /// for this server skips verification, and no other server's does.
     #[serde(default, skip_serializing_if = "is_false")]
     pub self_signed: bool,
+    /// A federated peer: reached through `peer.parent`, with no address,
+    /// credentials or transport of its own (contract clauses 20–28). The
+    /// entry's `url` is then the synthetic identity [`peer_identity`] mints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<PeerEntry>,
     #[serde(flatten)]
     pub extra: Keep,
+}
+
+/// A federated peer as the config keeps it: another server's peer, reached
+/// through that parent's browse and byte proxies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeerEntry {
+    /// The parent's identity — the saved entry it is reached through.
+    pub parent: String,
+    /// The peer's row id on that parent, which every proxy route keys on.
+    pub id: i64,
+    /// The peer's name as the parent reports it; a rename there is a new
+    /// label, never a new identity.
+    pub name: String,
+    /// The parent stopped listing it: flagged, not deleted, since queued
+    /// tracks point at it (contract clause 23). Forget drops the record.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub missing: bool,
+    /// Parked by the user, and kept that way across every reconcile — a
+    /// removal would only last until the parent's list was mirrored again
+    /// (contract clause 24).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
+}
+
+/// Marks a saved peer's identity: `mstream+peer://<id>@<parent identity>`.
+/// Not a scheme anything may dial — like the tunnel prefix, it names a
+/// row, and the parent's address is inside it.
+pub const PEER_ID_PREFIX: &str = "mstream+peer://";
+
+pub fn peer_identity(parent: &str, id: i64) -> String {
+    format!("{PEER_ID_PREFIX}{id}@{}", parent.trim_end_matches('/'))
+}
+
+/// What to call an entry: a peer's name, a tunnel's short identity, a
+/// standard server's address.
+pub fn display_name(entry: &ServerEntry) -> String {
+    match &entry.peer {
+        Some(peer) => peer.name.clone(),
+        None => crate::quickconnect::display_server(&entry.url),
+    }
+}
+
+/// Whether the picker may offer the entry: every server of its own, and a
+/// peer its parent still lists that the user has not parked.
+pub fn selectable(entry: &ServerEntry) -> bool {
+    entry.peer.as_ref().is_none_or(|peer| !peer.missing && !peer.hidden)
+}
+
+/// The list in display order — every server in its stored order, each
+/// peer directly under the parent it is reached through, a peer whose
+/// parent is gone at the end — as indices into the stored list, which is
+/// what every action keys on.
+pub fn grouped_order(servers: &[ServerEntry]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(servers.len());
+    let mut placed = vec![false; servers.len()];
+    for (i, entry) in servers.iter().enumerate() {
+        if entry.peer.is_some() {
+            continue;
+        }
+        out.push(i);
+        placed[i] = true;
+        for (j, other) in servers.iter().enumerate() {
+            if other.peer.as_ref().is_some_and(|p| same_server(&p.parent, &entry.url)) {
+                out.push(j);
+                placed[j] = true;
+            }
+        }
+    }
+    out.extend((0..servers.len()).filter(|&i| !placed[i]));
+    out
+}
+
+/// Fold a parent's peer list into the config (contract clauses 20–23):
+/// a listed peer is matched by id, then by name — the admin removing and
+/// re-adding a peer hands out a fresh id, and the old record's queued
+/// tracks must keep resolving — else appended; a rename updates the
+/// label only; a peer no longer listed is flagged missing, never deleted;
+/// one listed again is unflagged. Returns whether anything changed.
+pub fn reconcile_peers(config: &mut Config, parent: &str, listed: &[(i64, String)]) -> bool {
+    let mut changed = false;
+    let mut seen: Vec<usize> = Vec::new();
+    for (id, name) in listed {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let by_id = config
+            .servers
+            .iter()
+            .position(|e| e.peer.as_ref().is_some_and(|p| same_server(&p.parent, parent) && p.id == *id));
+        let found = by_id.or_else(|| {
+            // Adoptable: the same name under this parent, whose own id is
+            // no longer in the list.
+            config.servers.iter().position(|e| {
+                e.peer.as_ref().is_some_and(|p| {
+                    same_server(&p.parent, parent)
+                        && p.name == name
+                        && !listed.iter().any(|(other, _)| *other == p.id)
+                })
+            })
+        });
+        match found {
+            Some(index) => {
+                let entry = &mut config.servers[index];
+                let peer = entry.peer.as_mut().expect("matched on a peer");
+                if peer.id != *id || peer.name != name || peer.missing {
+                    peer.id = *id;
+                    peer.name = name.to_string();
+                    peer.missing = false;
+                    entry.url = peer_identity(parent, *id);
+                    changed = true;
+                }
+                seen.push(index);
+            }
+            None => {
+                config.servers.push(ServerEntry {
+                    url: peer_identity(parent, *id),
+                    peer: Some(PeerEntry {
+                        parent: parent.trim_end_matches('/').to_string(),
+                        id: *id,
+                        name: name.to_string(),
+                        missing: false,
+                        hidden: false,
+                    }),
+                    ..Default::default()
+                });
+                seen.push(config.servers.len() - 1);
+                changed = true;
+            }
+        }
+    }
+    for (index, entry) in config.servers.iter_mut().enumerate() {
+        if let Some(peer) = entry.peer.as_mut()
+            && same_server(&peer.parent, parent)
+            && !seen.contains(&index)
+            && !peer.missing
+        {
+            peer.missing = true;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Park a peer, or offer it again (contract clause 24). Returns whether the
+/// entry was a peer whose flag changed.
+pub fn set_peer_hidden(config: &mut Config, url: &str, hidden: bool) -> bool {
+    let Some(entry) = config.servers.iter_mut().find(|e| same_server(&e.url, url)) else {
+        return false;
+    };
+    match entry.peer.as_mut() {
+        Some(peer) if peer.hidden != hidden => {
+            peer.hidden = hidden;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// serde's `skip_serializing_if` for a bool that is only worth writing when
@@ -849,7 +1011,11 @@ pub fn set_default_server(config: &mut Config, url: Option<&str>) {
 /// admin, which is why removal is the ONE flow allowed to drop it (see
 /// [`forget_all_tokens`]); callers confirm with the user first.
 pub fn remove_server(config: &mut Config, credentials: &mut Credentials, url: &str) {
-    config.servers.retain(|s| !same_server(&s.url, url));
+    // A peer is only reachable through its parent, so the parent's removal
+    // takes its peers along (contract clause 28).
+    config.servers.retain(|s| {
+        !same_server(&s.url, url) && !s.peer.as_ref().is_some_and(|p| same_server(&p.parent, url))
+    });
     if config.default_server.as_deref().is_some_and(|d| same_server(d, url)) {
         config.default_server = None;
     }
@@ -1022,6 +1188,85 @@ fn restrict_permissions(_path: &Path) {}
 mod tests {
     use super::*;
     use super::testing::Scratch;
+
+    fn peer_of(parent: &str, id: i64, name: &str) -> ServerEntry {
+        ServerEntry {
+            url: peer_identity(parent, id),
+            peer: Some(PeerEntry {
+                parent: parent.into(),
+                id,
+                name: name.into(),
+                missing: false,
+                hidden: false,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_parents_peer_list_reconciles_by_id_then_name_and_flags_the_unlisted() {
+        // Contract clauses 20–23.
+        let mut config = Config::default();
+        config.servers.push(ServerEntry { url: "http://attic:3000".into(), ..Default::default() });
+        assert!(reconcile_peers(&mut config, "http://attic:3000", &[(3, "Nas".into()), (4, "Loft".into())]));
+        assert_eq!(config.servers.len(), 3);
+        assert_eq!(config.servers[1].url, "mstream+peer://3@http://attic:3000");
+        assert_eq!(config.servers[1].peer.as_ref().unwrap().name, "Nas");
+
+        // Nothing changed: nothing to write.
+        assert!(!reconcile_peers(&mut config, "http://attic:3000", &[(3, "Nas".into()), (4, "Loft".into())]));
+
+        // A rename is a new label under the same identity.
+        assert!(reconcile_peers(&mut config, "http://attic:3000", &[(3, "The NAS".into()), (4, "Loft".into())]));
+        assert_eq!(config.servers[1].peer.as_ref().unwrap().name, "The NAS");
+        assert_eq!(config.servers[1].url, "mstream+peer://3@http://attic:3000", "the identity stays");
+
+        // Removed and re-added on the parent under a fresh id: the old
+        // record is adopted by name, so its queued tracks keep resolving.
+        assert!(reconcile_peers(&mut config, "http://attic:3000", &[(9, "The NAS".into()), (4, "Loft".into())]));
+        assert_eq!(config.servers.len(), 3, "adopted, not appended");
+        assert_eq!(config.servers[1].peer.as_ref().unwrap().id, 9);
+        assert_eq!(config.servers[1].url, "mstream+peer://9@http://attic:3000");
+
+        // Unlisted: flagged missing, never deleted; listed again: unflagged.
+        assert!(reconcile_peers(&mut config, "http://attic:3000", &[(9, "The NAS".into())]));
+        assert!(config.servers[2].peer.as_ref().unwrap().missing);
+        assert_eq!(config.servers.len(), 3);
+        assert!(reconcile_peers(&mut config, "http://attic:3000", &[(9, "The NAS".into()), (4, "Loft".into())]));
+        assert!(!config.servers[2].peer.as_ref().unwrap().missing);
+
+        // An empty list — the parent stopped browsing — marks them all.
+        assert!(reconcile_peers(&mut config, "http://attic:3000", &[]));
+        assert!(config.servers.iter().filter_map(|e| e.peer.as_ref()).all(|p| p.missing));
+        // Another parent's peers are none of this reconcile's business.
+        config.servers.push(peer_of("http://office:3000", 1, "Desk"));
+        assert!(!reconcile_peers(&mut config, "http://attic:3000", &[]));
+        assert!(!config.servers[3].peer.as_ref().unwrap().missing);
+    }
+
+    #[test]
+    fn peers_group_under_their_parent_and_leave_with_it() {
+        // Contract clauses 4 and 28.
+        let mut config = Config::default();
+        config.servers = vec![
+            ServerEntry { url: "http://attic:3000".into(), ..Default::default() },
+            ServerEntry { url: "http://office:3000".into(), ..Default::default() },
+            peer_of("http://attic:3000", 3, "Nas"),
+            peer_of("http://gone:3000", 7, "Orphan"),
+        ];
+        assert_eq!(grouped_order(&config.servers), [0, 2, 1, 3], "peer under its parent, orphan last");
+        assert!(selectable(&config.servers[2]));
+        let peer_url = config.servers[2].url.clone();
+        assert!(set_peer_hidden(&mut config, &peer_url, true));
+        assert!(!selectable(&config.servers[2]));
+        assert!(!set_peer_hidden(&mut config, "http://attic:3000", true), "not a peer");
+
+        let mut credentials = Credentials::default();
+        remove_server(&mut config, &mut credentials, "http://attic:3000");
+        let left: Vec<&str> = config.servers.iter().map(|e| e.url.as_str()).collect();
+        assert_eq!(left, ["http://office:3000", "mstream+peer://7@http://gone:3000"]);
+        assert_eq!(display_name(&config.servers[1]), "Orphan");
+    }
 
     #[test]
     fn round_trips_config_and_credentials_separately() {

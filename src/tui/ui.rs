@@ -3000,6 +3000,7 @@ mod tests {
             discovery_path: true,
             discovery_p2p: false,
             federation_discovery: false,
+            federation_browse: false,
         };
         // What a real ping does on the way in: the Auto-DJ rows depend on it.
         app.dj_panel.rebuild(app.capabilities);

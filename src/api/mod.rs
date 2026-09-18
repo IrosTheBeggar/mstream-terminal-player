@@ -302,6 +302,10 @@ pub struct Client {
     /// segment — required for servers hosted under a reverse-proxy subpath.
     base: Url,
     token: Option<String>,
+    /// Aimed at a federated peer: every API path is rewritten onto the
+    /// parent's browse proxy, art onto its art proxy (contract clause 27).
+    /// `base` and `token` are then the parent's.
+    peer: Option<i64>,
     /// Set once this server has shown it can't answer a listing that asks for
     /// metadata, so the fallback costs one wasted request per session rather
     /// than one per folder.
@@ -356,6 +360,7 @@ impl Client {
             http,
             base,
             token: None,
+            peer: None,
             plain_listings: AtomicBool::new(false),
             no_waveforms: AtomicBool::new(false),
         })
@@ -364,6 +369,18 @@ impl Client {
     pub fn with_token(mut self, token: Option<String>) -> Self {
         self.token = token;
         self
+    }
+
+    /// Aim this client at the parent's federated peer `id`: reads go
+    /// through `/api/v1/federation/peers/{id}/api/…`, art through
+    /// `…/art/…`. `None` is the parent itself.
+    pub fn with_peer(mut self, peer: Option<i64>) -> Self {
+        self.peer = peer;
+        self
+    }
+
+    pub fn peer(&self) -> Option<i64> {
+        self.peer
     }
 
     /// Build a client from explicit overrides, falling back to the most
@@ -434,8 +451,17 @@ impl Client {
     // ── Plumbing ────────────────────────────────────────────────────────────
 
     fn endpoint(&self, path: &str) -> Result<Url, ApiError> {
+        let path = match self.peer {
+            // The proxy takes the peer's own API path whole after `/api/`,
+            // so `api/v1/db/albums` becomes `…/peers/3/api/api/v1/db/albums`.
+            Some(peer) => match path.strip_prefix("album-art/") {
+                Some(file) => format!("api/v1/federation/peers/{peer}/art/{file}"),
+                None => format!("api/v1/federation/peers/{peer}/api/{path}"),
+            },
+            None => path.to_string(),
+        };
         self.base
-            .join(path)
+            .join(&path)
             .map_err(|e| ApiError::Config(format!("could not build URL for {path}: {e}")))
     }
 
@@ -597,6 +623,31 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn ping(&self) -> Result<Ping, ApiError> {
         wait(self.ping_async())
+    }
+
+    /// The capability bootstrap for a federated peer: `/api/v1/ping` is
+    /// off the federation allowlist, but the layered `GET /api` is on it
+    /// and carries the same keys — the libraries the parent's key may
+    /// read, and the flags a peer never gets to keep (contract clause 26).
+    pub async fn ping_via_info_async(&self) -> Result<Ping, ApiError> {
+        self.get("api/").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn ping_via_info(&self) -> Result<Ping, ApiError> {
+        wait(self.ping_via_info_async())
+    }
+
+    /// The peers this user may browse through the server (contract clause
+    /// 20): `GET /api/v1/federation/peers`, answered only while federation
+    /// is on there.
+    pub async fn federation_peers_async(&self) -> Result<Vec<PeerListing>, ApiError> {
+        self.get::<PeerListingResponse>("api/v1/federation/peers").await.map(|r| r.peers)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn federation_peers(&self) -> Result<Vec<PeerListing>, ApiError> {
+        wait(self.federation_peers_async())
     }
 
     /// `GET /api/` — the server's version and API generations. The one
@@ -1096,7 +1147,11 @@ impl Client {
     /// version of [`Client::send`]: same header auth, same status mapping,
     /// but the body stays bytes instead of being read as text.
     pub async fn album_art_async(&self, file: &str) -> Result<Vec<u8>, ApiError> {
-        let url = urls::album_art_url(&self.server(), file).map_err(ApiError::Config)?;
+        let url = match self.peer {
+            Some(peer) => urls::peer_art_url(&self.server(), peer, file),
+            None => urls::album_art_url(&self.server(), file),
+        }
+        .map_err(ApiError::Config)?;
         let mut req = self.http.get(&url);
         if let Some(token) = &self.token {
             req = req.header("x-access-token", token);
@@ -2349,6 +2404,25 @@ fn extract_error(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_peer_client_rewrites_every_path_onto_the_parents_proxies() {
+        // Contract clause 27: reads through the browse proxy, art through
+        // the art proxy; the parent's base and token throughout.
+        let client = Client::new("http://parent:3000/").unwrap().with_token(Some("pt".into())).with_peer(Some(3));
+        assert_eq!(
+            client.endpoint("api/v1/db/albums").unwrap().as_str(),
+            "http://parent:3000/api/v1/federation/peers/3/api/api/v1/db/albums"
+        );
+        assert_eq!(
+            client.endpoint("album-art/cover.jpeg").unwrap().as_str(),
+            "http://parent:3000/api/v1/federation/peers/3/art/cover.jpeg"
+        );
+        assert_eq!(client.server(), "http://parent:3000", "the base is the parent's");
+        assert_eq!(client.peer(), Some(3));
+        let plain = Client::new("http://parent:3000").unwrap();
+        assert_eq!(plain.endpoint("api/v1/db/albums").unwrap().as_str(), "http://parent:3000/api/v1/db/albums");
+    }
 
     #[test]
     fn a_multipart_body_carries_fields_and_the_file_between_its_boundary() {

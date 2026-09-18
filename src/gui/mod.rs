@@ -204,6 +204,11 @@ pub(crate) enum Act {
     /// Opens the remove confirmation; the bool answers it.
     SrvRemove(usize),
     SrvConfirm(bool),
+    /// A federated peer's verbs: park it, offer it again, drop a record
+    /// its parent stopped listing (contract clauses 23–25).
+    SrvHide(usize),
+    SrvShow(usize),
+    SrvForget(usize),
     /// The form's fields, checkboxes and buttons.
     FormFocus(usize),
     FormToggle(usize),
@@ -578,6 +583,11 @@ impl Gui {
                 // The gated room: with the flag gone the row isn't drawn,
                 // and its digit must be as dead as the row (contract §1).
                 if i == SONIC_NAV && !self.app.capabilities.discovery_path {
+                    return false;
+                }
+                // A peer has no playlists to offer (contract clause 26): the
+                // row is not drawn, and its digit is as dead as the row.
+                if i == PLAYLISTS_NAV && self.app.session.peer.is_some() {
                     return false;
                 }
                 // A filter describes the list it was typed against —
@@ -957,11 +967,16 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     } else if matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_))) {
         t!("gui.tips.sonic_pick")
     } else if gui.servers.room && gui.active == SETTINGS_NAV {
-        // The bundled server's row has no remove key to name.
+        // The bundled server's row has no remove key to name; a peer's row
+        // has its own verbs.
         if servers::cursor_on_bundled(gui) {
             t!("gui.tips.servers_bundled")
         } else {
-            t!("gui.tips.servers")
+            match servers::cursor_peer_state(gui) {
+                Some(true) => t!("gui.tips.servers_peer_missing"),
+                Some(false) => t!("gui.tips.servers_peer"),
+                None => t!("gui.tips.servers"),
+            }
         }
     } else if gui.torrent.room && gui.active == SETTINGS_NAV {
         std::borrow::Cow::from(torrent::tips(gui))
@@ -1067,6 +1082,9 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         // The sonic room rides the ping's flag: absent is absent — no
         // placeholder row, and digit 9 goes dead with it (contract §1).
         if i == SONIC_NAV && !gui.app.capabilities.discovery_path {
+            continue;
+        }
+        if i == PLAYLISTS_NAV && gui.app.session.peer.is_some() {
             continue;
         }
         let y = match i {
@@ -1322,11 +1340,15 @@ fn draw_files_bar(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if !gui.app.path.is_empty() {
         x += draw_bar_back(frame, gui, x, y);
     }
-    let crumb = if gui.app.path.is_empty() {
+    let mut crumb = if gui.app.path.is_empty() {
         t!("gui.nav.files").to_string()
     } else {
         format!("{} {} {}", t!("gui.nav.files"), forward_glyph, gui.app.path)
     };
+    // A peer is read-only, and the crumb says so (contract clause 26).
+    if gui.app.session.peer.is_some() {
+        crumb = format!("{crumb} · {}", t!("gui.srv.read_only"));
+    }
     put(frame, x, y, &clip_lead(&crumb, count_x.saturating_sub(x + 2) as usize), dim());
 
     draw_bar_controls(frame, gui, content, content.y + 1);
@@ -1970,7 +1992,10 @@ fn event_loop(
         // A SaveSession about to be dispatched writes the config behind
         // this copy's back — a Quick Connect add mints a whole new entry
         // there. Reload after, so the dropdown and the room list it.
-        let saving = gui.pending.iter().any(|e| matches!(e, Effect::SaveSession));
+        let saving = gui
+            .pending
+            .iter()
+            .any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. }));
         tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
         saver.tick(&gui.app);
         if saving && let Ok(fresh) = config::load() {

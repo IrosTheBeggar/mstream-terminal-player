@@ -63,6 +63,10 @@ pub enum Effect {
     /// session's (contract clause 30). Idempotent; the shell registers the
     /// host with the stream client.
     Trust(String),
+    /// Fold `parent`'s peer list into the saved servers (contract clauses
+    /// 20–23): the shell reconciles the config and saves it when anything
+    /// changed. An empty list marks every peer of that parent missing.
+    SavePeers { parent: String, listed: Vec<(i64, String)> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -590,10 +594,17 @@ impl std::ops::Deref for Queued {
 /// that lives somewhere other than the session (contract clause 30).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnownServer {
-    /// The identity the config keys the entry by: its URL, or a tunnel id.
+    /// The identity the config keys the entry by: its URL, a tunnel id, or
+    /// a peer's synthetic identity.
     pub id: String,
+    /// What to call it: a peer's name, a tunnel's short identity, an
+    /// address.
+    pub name: String,
     pub token: Option<String>,
     pub self_signed: bool,
+    /// A federated peer: the parent it is reached through, and its row id
+    /// there. Everything else about it is the parent's.
+    pub peer: Option<(String, i64)>,
 }
 
 /// How to reach a queued track's server right now: the base its stream URL
@@ -604,6 +615,8 @@ pub struct Reach {
     pub base: String,
     pub token: Option<String>,
     pub self_signed: bool,
+    /// Through the parent's proxies, for this peer of it.
+    pub peer: Option<i64>,
 }
 
 /// The queue without `server`'s rows, and where playback lands afterwards
@@ -617,11 +630,22 @@ pub(crate) struct Sweep {
 }
 
 pub(crate) fn queue_without(items: &[Queued], server: &str, current: Option<usize>) -> Option<Sweep> {
+    // A parent's rows and its peers' rows alike: a peer's origin names the
+    // parent (contract clause 28).
+    queue_without_by(items, |origin| crate::config::same_server(&origin.server, server), current)
+}
+
+/// [`queue_without`], for whichever rows `gone` says are leaving.
+pub(crate) fn queue_without_by(
+    items: &[Queued],
+    gone: impl Fn(&Origin) -> bool,
+    current: Option<usize>,
+) -> Option<Sweep> {
     let mut keep = Vec::with_capacity(items.len());
     let mut index = None;
     let mut current_survives = false;
     for (i, item) in items.iter().enumerate() {
-        if crate::config::same_server(&item.origin.server, server) {
+        if gone(&item.origin) {
             continue;
         }
         if Some(i) == current {
@@ -1498,6 +1522,7 @@ impl App {
                 token,
                 username,
                 self_signed: false,
+                peer: None,
             },
             servers: Vec::new(),
             open_tunnel: None,
@@ -1923,6 +1948,16 @@ impl App {
     /// is a loopback port that means nothing to anyone, so it is named by its
     /// identity instead.
     pub fn server_display(&self) -> String {
+        // A peer is named, and named through its parent.
+        if let Some((parent, _)) = &self.session.peer {
+            let name = self
+                .servers
+                .iter()
+                .find(|s| crate::config::same_server(&s.id, &self.session.server_id))
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| self.session.server_id.clone());
+            return format!("{name} via {}", crate::quickconnect::display_server(parent));
+        }
         if crate::quickconnect::is_tunnel_id(&self.session.server_id) {
             return crate::quickconnect::display_server(&self.session.server_id);
         }
@@ -3388,6 +3423,11 @@ impl App {
     /// The session's identity as a queue origin: what the config keys the
     /// server by — its URL, or a tunnel id — never the loopback address.
     pub(crate) fn origin(&self) -> Origin {
+        // A peer session's rows are the parent's rows, through the proxy:
+        // the origin names the parent and the peer's id on it.
+        if let Some((parent, id)) = &self.session.peer {
+            return Origin { server: parent.clone(), peer: Some(*id) };
+        }
         let server = if self.session.server_id.is_empty() {
             self.session.server.clone()
         } else {
@@ -3425,23 +3465,27 @@ impl App {
     /// open — the worker holds one at a time, so a track on another tunnel
     /// waits for that server to be dialled again.
     pub(crate) fn reach(&self, origin: &Origin) -> Result<Reach, String> {
-        let live = if self.session.server_id.is_empty() {
-            &self.session.server
-        } else {
-            &self.session.server_id
-        };
-        if !live.is_empty() && crate::config::same_server(&origin.server, live) && origin.peer.is_none() {
+        // The session's own rows: whatever it is, it is reached already.
+        let mine = self.origin();
+        if !mine.server.is_empty() && crate::config::same_server(&origin.server, &mine.server) && origin.peer == mine.peer {
             return Ok(Reach {
                 base: self.session.server.clone(),
                 token: self.session.token.clone(),
                 self_signed: self.session.self_signed,
+                peer: origin.peer,
             });
         }
-        let shown = crate::quickconnect::display_server(&origin.server);
-        if origin.peer.is_some() {
-            return Err(format!("{shown}: a shared server's tracks cannot be reached yet"));
+        // A peer's rows go through its parent, however the parent is
+        // reached (contract clause 27).
+        if let Some(id) = origin.peer {
+            let parent = self.reach(&Origin { server: origin.server.clone(), peer: None })?;
+            return Ok(Reach { peer: Some(id), ..parent });
         }
-        let known = self.servers.iter().find(|s| crate::config::same_server(&s.id, &origin.server));
+        let shown = crate::quickconnect::display_server(&origin.server);
+        let known = self
+            .servers
+            .iter()
+            .find(|s| s.peer.is_none() && crate::config::same_server(&s.id, &origin.server));
         if crate::quickconnect::is_tunnel_id(&origin.server) {
             let open = self
                 .open_tunnel
@@ -3454,19 +3498,29 @@ impl App {
                 base: local_url.clone(),
                 token: known.and_then(|s| s.token.clone()),
                 self_signed: false,
+                peer: None,
             });
         }
         let Some(known) = known else {
             return Err(format!("{shown} is no longer a saved server"));
         };
-        Ok(Reach { base: known.id.clone(), token: known.token.clone(), self_signed: known.self_signed })
+        Ok(Reach {
+            base: known.id.clone(),
+            token: known.token.clone(),
+            self_signed: known.self_signed,
+            peer: None,
+        })
     }
 
     /// A queued track's stream URL, built from its own server, with how
-    /// that server was reached (contract clause 30).
+    /// that server was reached (contract clause 30). A peer's bytes come
+    /// through the parent's stream proxy (clause 27).
     pub(crate) fn stream_url(&self, item: &Queued) -> Result<(String, Reach), String> {
         let reach = self.reach(&item.origin)?;
-        let url = urls::media_url(&reach.base, &item.filepath, reach.token.as_deref())?;
+        let url = match reach.peer {
+            Some(peer) => urls::peer_media_url(&reach.base, peer, &item.filepath, reach.token.as_deref())?,
+            None => urls::media_url(&reach.base, &item.filepath, reach.token.as_deref())?,
+        };
         Ok((url, reach))
     }
 
@@ -3475,7 +3529,23 @@ impl App {
     /// playback lands on the next survivor — playing when something was —
     /// and a queue that belonged wholly to the server ends as a Clear would.
     pub(crate) fn drop_server_items(&mut self, server: &str) -> Vec<Effect> {
-        let Some(sweep) = queue_without(&self.queue.items, server, self.queue.current) else {
+        let sweep = queue_without(&self.queue.items, server, self.queue.current);
+        self.apply_sweep(sweep)
+    }
+
+    /// A forgotten peer takes its queued rows with it (contract clause
+    /// 23), by the same rule as a removed server.
+    pub(crate) fn drop_peer_items(&mut self, parent: &str, id: i64) -> Vec<Effect> {
+        let sweep = queue_without_by(
+            &self.queue.items,
+            |origin| crate::config::same_server(&origin.server, parent) && origin.peer == Some(id),
+            self.queue.current,
+        );
+        self.apply_sweep(sweep)
+    }
+
+    fn apply_sweep(&mut self, sweep: Option<Sweep>) -> Vec<Effect> {
+        let Some(sweep) = sweep else {
             return Vec::new();
         };
         let was_playing = self.status.playing && !self.status.paused;
@@ -4323,6 +4393,13 @@ impl App {
                 }
                 Vec::new()
             }
+            Event::FederationPeers { parent, peers } => match peers {
+                Some(peers) => vec![Effect::SavePeers {
+                    parent,
+                    listed: peers.into_iter().map(|p| (p.id, p.name)).collect(),
+                }],
+                None => Vec::new(),
+            },
             Event::Error(e) => {
                 self.connecting = false;
                 self.connect.submitting = false;

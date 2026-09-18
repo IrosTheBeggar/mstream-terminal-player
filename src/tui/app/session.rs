@@ -35,6 +35,10 @@ pub struct Session {
     /// entry's flag; every client the workers build for this session
     /// carries it.
     pub self_signed: bool,
+    /// A federated peer session: the parent's identity, and the peer's
+    /// row id on it. `server` and `token` are then the parent's, and
+    /// `server_id` the peer's own identity (contract clauses 26–27).
+    pub peer: Option<(String, i64)>,
 }
 
 /// Which step of the connect screen is showing.
@@ -120,7 +124,11 @@ impl App {
                 return Vec::new();
             };
             self.connecting = true;
-            return vec![Effect::Api(ApiCmd::QuickConnect { code, token: self.session.token.clone() })];
+            return vec![Effect::Api(ApiCmd::QuickConnect {
+                code,
+                token: self.session.token.clone(),
+                peer: self.session.peer.as_ref().map(|(_, id)| *id),
+            })];
         }
         if self.session.server.is_empty() {
             return Vec::new(); // connect form is showing
@@ -130,6 +138,7 @@ impl App {
             server: self.session.server.clone(),
             token: self.session.token.clone(),
             self_signed: self.session.self_signed,
+            peer: self.session.peer.as_ref().map(|(_, id)| *id),
         })]
     }
 
@@ -141,6 +150,7 @@ impl App {
     /// every row carries its own server and resolves against it at play
     /// time ([`App::play_index`]), so a switch changes what the browser
     /// shows and nothing else (contract clause 11).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn adopt_server(
         &mut self,
         server: String,
@@ -150,6 +160,7 @@ impl App {
         tunnel_code: Option<String>,
         self_signed: bool,
         last_path: Option<String>,
+        peer: Option<(String, i64)>,
     ) -> Vec<Effect> {
         self.connected = false;
         self.connect = ConnectForm::default();
@@ -160,6 +171,7 @@ impl App {
             token,
             username,
             self_signed,
+            peer,
         };
         self.shed_server_state();
         self.path = last_path.unwrap_or_default();
@@ -296,7 +308,7 @@ impl App {
                         return vec![Effect::Api(ApiCmd::Connect {
                             server: server.base_url,
                             token: None,
-                            self_signed: false,
+                            self_signed: false, peer: None
                         })];
                     }
                     self.submit_quick_connect()
@@ -318,7 +330,7 @@ impl App {
         // nothing is written until the connection actually succeeds.
         self.session.tunnel_code = Some(code.clone());
         self.info("dialling the tunnel — this can take a few seconds…");
-        vec![Effect::Api(ApiCmd::QuickConnect { code, token: self.session.token.clone() })]
+        vec![Effect::Api(ApiCmd::QuickConnect { code, token: self.session.token.clone() , peer: None})]
     }
 
     fn submit_connect(&mut self) -> Vec<Effect> {
@@ -348,7 +360,7 @@ impl App {
             return vec![Effect::Api(ApiCmd::Connect {
                 server,
                 token: None,
-                self_signed: self.session.self_signed,
+                self_signed: self.session.self_signed, peer: None
             })];
         }
 
@@ -404,7 +416,11 @@ impl App {
                     self.open_tunnel = Some((id.clone(), server.clone()));
                 }
                 self.session.server = server;
-                self.session.server_id = id;
+                // A peer session is filed under the peer's own identity; the
+                // worker answered with the parent's.
+                if self.session.peer.is_none() {
+                    self.session.server_id = id;
+                }
                 if token.is_some() {
                     self.session.token = token;
                 }
@@ -412,6 +428,12 @@ impl App {
                     self.session.username = username;
                 }
                 self.capabilities = crate::api::types::Capabilities::from(ping.as_ref());
+                // A peer keeps none of the optional features: its similar
+                // tracks, sonic path and playlists are off the federation
+                // allowlist, whatever the peer reports (contract clause 26).
+                if self.session.peer.is_some() {
+                    self.capabilities = crate::api::types::Capabilities::default();
+                }
                 // The Auto-DJ rows and the Sonic Path tab both turn on what
                 // the ping just said; a reconnect can be a different server.
                 self.dj_panel.rebuild(self.capabilities);
@@ -459,10 +481,22 @@ impl App {
                 ];
                 // Worth persisting when we hold a token we logged in for — or
                 // a pairing code, which is the only way back to this server
-                // even when it needs no login at all.
+                // even when it needs no login at all. A peer session holds
+                // the parent's, already saved under the parent.
                 let signed_in = self.session.token.is_some() && self.session.username.is_some();
-                if signed_in || self.session.tunnel_code.is_some() {
+                if (signed_in || self.session.tunnel_code.is_some()) && self.session.peer.is_none() {
                     effects.push(Effect::SaveSession);
+                }
+                // The peers this server lists, folded into the saved list
+                // (contract clause 20); a server that stopped listing any
+                // marks the ones it had missing.
+                if self.session.peer.is_none() && !self.session.server_id.is_empty() {
+                    let parent = self.session.server_id.clone();
+                    if self.capabilities.federation_browse {
+                        effects.push(Effect::Api(ApiCmd::FederationPeers { parent }));
+                    } else {
+                        effects.push(Effect::SavePeers { parent, listed: Vec::new() });
+                    }
                 }
                 effects
             }

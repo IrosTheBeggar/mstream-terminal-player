@@ -60,9 +60,11 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         ApiCmd::Shutdown => None,
 
         // `self_signed` has no meaning here: the browser owns TLS trust.
-        ApiCmd::Connect { server, token, self_signed: _ } => {
+        // One server, the page's own: no peers to aim at from here.
+        ApiCmd::Connect { server, token, self_signed: _, peer: _ } => {
             Some(connect(session, &server, token).await)
         }
+        ApiCmd::FederationPeers { .. } => None,
 
         ApiCmd::Login { server, username, password, self_signed: _ } => {
             Some(login(session, &server, &username, &password).await)

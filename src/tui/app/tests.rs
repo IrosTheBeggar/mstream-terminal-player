@@ -67,6 +67,7 @@ fn connected_app() -> App {
         discovery_path: true,
         discovery_p2p: false,
         federation_discovery: false,
+        federation_browse: false,
     };
     // What a real ping does on the way in: the Auto-DJ rows depend on it.
     app.dj_panel.rebuild(app.capabilities);
@@ -1315,7 +1316,7 @@ fn choosing_a_discovered_server_connects_to_it_directly() {
         vec![Effect::Api(ApiCmd::Connect {
             server: "http://192.168.1.71:3999".into(),
             token: None,
-            self_signed: false,
+            self_signed: false, peer: None
         })]
     );
 }
@@ -1346,7 +1347,7 @@ fn late_discovery_results_do_not_move_the_cursor_off_the_paste_row() {
     let effects = app.handle_action(Action::Submit);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None })]
+        vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None , peer: None})]
     );
 }
 
@@ -1384,7 +1385,7 @@ fn typing_a_code_jumps_past_the_discovered_servers() {
     let effects = app.handle_action(Action::Submit);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None })]
+        vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None , peer: None})]
     );
 }
 
@@ -1408,7 +1409,7 @@ fn pasting_a_pairing_code_dials_the_tunnel() {
     let effects = app.handle_action(Action::Submit);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None })]
+        vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None , peer: None})]
     );
     assert!(app.connecting);
 }
@@ -1483,7 +1484,7 @@ fn reconnecting_to_a_tunnel_server_dials_its_code_again() {
         effects,
         vec![Effect::Api(ApiCmd::QuickConnect {
             code: "mstr1:saved".into(),
-            token: Some("tok".into()),
+            token: Some("tok".into()), peer: None
         })],
         "the saved token rides the re-dialled tunnel"
     );
@@ -1624,7 +1625,7 @@ fn connecting_without_a_username_uses_public_mode() {
         vec![Effect::Api(ApiCmd::Connect {
             server: "http://host:3000".into(),
             token: None,
-            self_signed: false,
+            self_signed: false, peer: None
         })]
     );
 }
@@ -1652,6 +1653,7 @@ fn a_self_signed_session_carries_its_trust_into_every_connect() {
         None,
         false,
         Some("music/Ambient".into()),
+        None,
     );
     assert!(!app.session.self_signed, "trust never leaks across servers");
     assert_eq!(app.path, "music/Ambient", "the entry's last path comes along");
@@ -1691,13 +1693,15 @@ fn adopting_a_server_keeps_the_music_and_the_queue() {
     app.servers = vec![
         KnownServer {
             id: "http://attic.local:3000".into(),
+            name: "http://attic.local:3000".into(),
             token: Some("attic-token".into()),
-            self_signed: false,
+            self_signed: false, peer: None
         },
         KnownServer {
             id: "http://office.local:3000".into(),
+            name: "http://office.local:3000".into(),
             token: Some("office-token".into()),
-            self_signed: true,
+            self_signed: true, peer: None
         },
     ];
     app.push_queue(track("music/a.mp3"));
@@ -1712,6 +1716,7 @@ fn adopting_a_server_keeps_the_music_and_the_queue() {
         Some("office-token".into()),
         None,
         true,
+        None,
         None,
     );
     assert!(effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Connect { .. }))));
@@ -1748,8 +1753,9 @@ fn a_row_on_a_closed_tunnel_walks_on_like_a_refused_one() {
     let mut app = connected_app();
     app.servers.push(KnownServer {
         id: "mstream+iroh://faraway".into(),
+        name: "mstream+iroh://faraway".into(),
         token: Some("t".into()),
-        self_signed: false,
+        self_signed: false, peer: None
     });
     app.queue.push(at("mstream+iroh://faraway", "music/far.mp3"));
     app.push_queue(track("music/near.mp3"));
@@ -1775,7 +1781,7 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
     // the playing row keeps its place, the position comes back, and
     // nothing plays until asked — then that row, from that second.
     let mut app = connected_app();
-    app.servers = vec![KnownServer { id: "http://b".into(), token: Some("bt".into()), self_signed: false }];
+    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: Some("bt".into()), self_signed: false , peer: None}];
     let mut long = at("http://b", "music/2.mp3");
     long.track.metadata.duration = Some(300.0);
     let snapshot = QueueSnapshot {
@@ -1922,6 +1928,120 @@ fn moving_a_queued_row_keeps_current_on_its_track() {
 }
 
 #[test]
+fn a_peers_rows_play_through_the_parents_stream_proxy() {
+    // Contract clauses 27 and 30: a peer's origin names its parent, and
+    // its bytes come through the parent's proxy with the parent's token.
+    let mut app = connected_app();
+    app.queue.push(Queued {
+        origin: Origin { server: "http://host:3000".into(), peer: Some(3) },
+        track: track("music/x.mp3"),
+    });
+    let effects = app.play_index(0);
+    assert_eq!(
+        played_url(&effects),
+        "http://host:3000/api/v1/federation/peers/3/stream/music/x.mp3?token=tok"
+    );
+
+    // From a session on another server, the parent is reached through
+    // the book — and a parent removed takes the peer's rows too.
+    let mut app = App::new(Some("http://office:3000".into()), None, None);
+    app.connected = true;
+    app.servers = vec![KnownServer {
+        id: "http://attic:3000".into(),
+        name: "http://attic:3000".into(),
+        token: Some("at".into()),
+        self_signed: false,
+        peer: None,
+    }];
+    app.queue.push(Queued {
+        origin: Origin { server: "http://attic:3000".into(), peer: Some(5) },
+        track: track("music/y.mp3"),
+    });
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/5/stream/music/y.mp3?token=at");
+    app.drop_server_items("http://attic:3000");
+    assert!(app.queue.items.is_empty(), "a parent's removal sweeps its peers' rows");
+}
+
+#[test]
+fn a_peer_session_stamps_its_rows_and_keeps_none_of_the_optional_features() {
+    // Contract clauses 26 and 27.
+    let mut app = App::new(Some("http://attic:3000".into()), Some("at".into()), None);
+    app.servers = vec![KnownServer {
+        id: "mstream+peer://3@http://attic:3000".into(),
+        name: "Nas".into(),
+        token: None,
+        self_signed: false,
+        peer: Some(("http://attic:3000".into(), 3)),
+    }];
+    let effects = app.adopt_server(
+        "http://attic:3000".into(),
+        "mstream+peer://3@http://attic:3000".into(),
+        Some("paul".into()),
+        Some("at".into()),
+        None,
+        false,
+        None,
+        Some(("http://attic:3000".into(), 3)),
+    );
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::Api(ApiCmd::Connect { server, peer: Some(3), .. }) if server == "http://attic:3000"
+    )));
+    let ping = crate::api::types::Ping { discovery: true, discovery_path: true, ..Default::default() };
+    app.apply_event(Event::Connected {
+        server: "http://attic:3000".into(),
+        id: "http://attic:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::new(ping),
+    });
+    assert_eq!(app.session.server_id, "mstream+peer://3@http://attic:3000", "filed under the peer");
+    assert_eq!(app.capabilities, crate::api::types::Capabilities::default(), "pinned off");
+    assert_eq!(app.server_display(), "Nas via http://attic:3000");
+    app.push_queue(track("music/z.mp3"));
+    assert_eq!(app.queue.items[0].origin, Origin { server: "http://attic:3000".into(), peer: Some(3) });
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/3/stream/music/z.mp3?token=at");
+}
+
+#[test]
+fn a_parents_ping_asks_for_its_peers_and_the_answer_is_saved() {
+    // Contract clause 20.
+    let mut app = App::new(Some("http://attic:3000".into()), None, None);
+    let ping = crate::api::types::Ping { federation_browse: true, ..Default::default() };
+    let effects = app.apply_event(Event::Connected {
+        server: "http://attic:3000".into(),
+        id: "http://attic:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::new(ping),
+    });
+    assert!(effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::FederationPeers { parent }) if parent == "http://attic:3000")));
+
+    let effects = app.apply_event(Event::FederationPeers {
+        parent: "http://attic:3000".into(),
+        peers: Some(vec![crate::api::types::PeerListing { id: 3, name: "Nas".into() }]),
+    });
+    assert_eq!(
+        effects,
+        vec![Effect::SavePeers { parent: "http://attic:3000".into(), listed: vec![(3, "Nas".into())] }]
+    );
+    // A failed ask changes nothing.
+    assert!(app.apply_event(Event::FederationPeers { parent: "http://attic:3000".into(), peers: None }).is_empty());
+
+    // Without the flag, the parent's peers are marked missing.
+    let effects = app.apply_event(Event::Connected {
+        server: "http://attic:3000".into(),
+        id: "http://attic:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::default(),
+    });
+    assert!(effects.iter().any(|e| matches!(e, Effect::SavePeers { parent, listed } if parent == "http://attic:3000" && listed.is_empty())));
+}
+
+#[test]
 fn a_removed_server_takes_its_rows_and_playback_lands_on_the_next_survivor() {
     // The pure rule first (contract clause 35).
     let items = vec![at("a", "1"), at("b", "2"), at("a", "3"), at("b", "4")];
@@ -1939,7 +2059,7 @@ fn a_removed_server_takes_its_rows_and_playback_lands_on_the_next_survivor() {
     // Playing row 0 on the session's server; removing that server plays
     // the survivor, which lives on the other one.
     let mut app = connected_app();
-    app.servers = vec![KnownServer { id: "http://b".into(), token: None, self_signed: false }];
+    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: None, self_signed: false , peer: None}];
     app.queue.items = vec![at("http://host:3000", "music/1.mp3"), at("http://b", "music/2.mp3")];
     let effects = app.play_index(0);
     app.status = PlayerStatus { playing: true, source: played_url(&effects), ..Default::default() };
@@ -2021,7 +2141,7 @@ fn a_typed_address_is_completed_before_it_is_used() {
         vec![Effect::Api(ApiCmd::Connect {
             server: "http://nas:3000".into(),
             token: None,
-            self_signed: false,
+            self_signed: false, peer: None
         })]
     );
     assert_eq!(app.connect.server, "http://nas:3000", "the field shows what was assumed");
