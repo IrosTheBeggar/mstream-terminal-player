@@ -521,7 +521,11 @@ disconnect gate). Polls: the list every 5 s on the Torrents tab, everything ever
 the torrent types, twenty calls, a raw multipart `send_bytes`, `admin_users`;
 `extract_error` now prefers a body's `message` sentence over its `error` code. Locales `tor:`
 (240 keys × 10). Live-checked on the scratch server: choose Transmission → the connect form → a
-probe against nothing ("connection failed: connect ECONNREFUSED") → back to Disabled.
+probe against nothing ("connection failed: connect ECONNREFUSED") → back to Disabled. Cleanup
+2026-09-17, once the GUI's Add-torrent room was rebased in: the seeding tab's dialog is the shared
+typed `picker::pick_torrent` (`pick_file`/`FilePick` gone), and its POST rides the shared
+`Multipart` + `post_multipart` under the torrent routes' 45 s ceiling (`send_bytes` and the
+duplicate `extract_message` gone).
 
 Build, in order of fit: **logs** (`/api/v1/admin/logs/recent?since=<seq>` is a purpose-built
 tail-poll API with a cursor), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and

@@ -478,35 +478,16 @@ impl Client {
                     .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?,
             );
         }
-        self.finish(req, path, extract_error).await
-    }
-
-    /// A request whose body is raw bytes under its own content type — the
-    /// multipart upload the seed-existing route takes.
-    async fn send_bytes<T: DeserializeOwned>(
-        &self,
-        method: Method,
-        path: &str,
-        content_type: &str,
-        body: Vec<u8>,
-    ) -> Result<T, ApiError> {
-        let url = self.endpoint(path)?;
-        let mut req = self.http.request(method, url);
-        if let Some(token) = &self.token {
-            req = req.header("x-access-token", token);
-        }
-        req = req.header("Content-Type", content_type).body(body);
-        self.finish(req, path, extract_error).await
+        self.finish(req, path).await
     }
 
     /// Send a built request and map the answer: only 401 is a session
-    /// problem, the other failures carry the server's words as `words`
-    /// reads them out of the body.
+    /// problem, the other failures carry the server's words as
+    /// [`extract_error`] reads them out of the body.
     async fn finish<T: DeserializeOwned>(
         &self,
         req: reqwest::RequestBuilder,
         path: &str,
-        words: fn(&str) -> String,
     ) -> Result<T, ApiError> {
         let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
         let status = resp.status();
@@ -514,10 +495,10 @@ impl Client {
 
         match status {
             StatusCode::UNAUTHORIZED => return Err(ApiError::Unauthorized),
-            StatusCode::FORBIDDEN => return Err(ApiError::Forbidden(words(&text))),
+            StatusCode::FORBIDDEN => return Err(ApiError::Forbidden(extract_error(&text))),
             StatusCode::NOT_FOUND => return Err(ApiError::NotFound(path.to_string())),
             s if !s.is_success() => {
-                return Err(ApiError::Server { status: s.as_u16(), message: words(&text) });
+                return Err(ApiError::Server { status: s.as_u16(), message: extract_error(&text) });
             }
             _ => {}
         }
@@ -528,8 +509,9 @@ impl Client {
         })
     }
 
-    /// A multipart POST — the torrent routes' shape. `longest` is the
-    /// request's own ceiling: a seed check hashes files on the server.
+    /// A multipart POST — the torrent routes' shape, the user's and the
+    /// admin's. `longest` is the request's own ceiling: a seed check
+    /// hashes files on the server.
     async fn post_multipart<T: DeserializeOwned>(
         &self,
         path: &str,
@@ -550,7 +532,7 @@ impl Client {
             req = req.header("x-access-token", token);
         }
         req = req.header("Content-Type", content_type).body(body);
-        self.finish(req, path, extract_message).await
+        self.finish(req, path).await
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
@@ -2234,36 +2216,20 @@ impl Client {
 
     /// Hand the server a `.torrent` for content already on disk: multipart,
     /// one file, the libraries to search (none = every library). Always HTTP
-    /// 200 — the outcome is in the body.
+    /// 200 — the outcome is in the body. The server hashes the files before
+    /// it answers, so the call gets the torrent routes' own ceiling.
     pub async fn admin_torrent_seed_existing_async(
         &self,
         file_name: &str,
         bytes: &[u8],
         vpaths: &[String],
     ) -> Result<SeedOutcome, ApiError> {
-        let boundary = format!("----mstream-player-{:016x}{:016x}", fastrand::u64(..), fastrand::u64(..));
-        let mut body = Vec::with_capacity(bytes.len() + 512);
+        let mut form = Multipart::new();
         if !vpaths.is_empty() {
-            body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"vpaths\"\r\n\r\n").as_bytes());
-            body.extend_from_slice(serde_json::to_string(vpaths).unwrap_or_default().as_bytes());
-            body.extend_from_slice(b"\r\n");
+            form.field("vpaths", &serde_json::to_string(vpaths).unwrap_or_default());
         }
-        let safe_name: String = file_name.chars().filter(|c| *c != '"' && *c != '\r' && *c != '\n').collect();
-        body.extend_from_slice(
-            format!(
-                "--{boundary}\r\nContent-Disposition: form-data; name=\"torrentFile\"; filename=\"{safe_name}\"\r\nContent-Type: application/x-bittorrent\r\n\r\n"
-            )
-            .as_bytes(),
-        );
-        body.extend_from_slice(bytes);
-        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-        self.send_bytes(
-            Method::POST,
-            "api/v1/admin/torrent/seed-existing",
-            &format!("multipart/form-data; boundary={boundary}"),
-            body,
-        )
-        .await
+        form.file("torrentFile", file_name, bytes);
+        self.post_multipart("api/v1/admin/torrent/seed-existing", form, Some(DETECT_TIMEOUT)).await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2303,20 +2269,6 @@ impl Client {
         wait(self.scan_status_async())
     }
 
-}
-
-/// Pull mStream's `{"error": "..."}` out of a failure body, falling back to a
-/// trimmed excerpt of whatever was actually returned.
-/// The torrent routes' error shape: `{ ok: false, error: <code>, message:
-/// <words> }` — the sentence is under `message`, the code under `error`
-/// (the rest of the API puts the sentence under `error`).
-fn extract_message(body: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
-        && let Some(msg) = v.get("message").and_then(|m| m.as_str()).filter(|m| !m.is_empty())
-    {
-        return msg.to_string();
-    }
-    extract_error(body)
 }
 
 /// A `multipart/form-data` body, assembled by hand: the torrent routes
@@ -2373,6 +2325,10 @@ impl Multipart {
     }
 }
 
+/// Pull mStream's `{"error": "..."}` out of a failure body, falling back to a
+/// trimmed excerpt of whatever was actually returned. The torrent routes'
+/// shape — `{ ok: false, error: <code>, message: <words> }` — reads as the
+/// sentence, never the code.
 fn extract_error(body: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
         // Newer routes answer `{error: <code>, message: <sentence>}`; the
@@ -2410,13 +2366,6 @@ mod tests {
         );
         assert!(text.ends_with(&format!("--{boundary}--\r\n")));
         assert_eq!(text.matches(&format!("--{boundary}")).count(), 4, "three parts and the close");
-    }
-
-    #[test]
-    fn torrent_errors_read_the_sentence_not_the_code() {
-        assert_eq!(extract_message(r#"{"ok":false,"error":"no_source","message":"Provide a .torrent file"}"#), "Provide a .torrent file");
-        assert_eq!(extract_message(r#"{"error":"only a code"}"#), "only a code", "the rest of the API's shape still reads");
-        assert_eq!(extract_message("plain words"), "plain words");
     }
 
     #[test]
@@ -2508,5 +2457,11 @@ mod tests {
         assert_eq!(extract_error(r#"{"error":"Playlist not found"}"#), "Playlist not found");
         assert_eq!(extract_error("boom"), "boom");
         assert_eq!(extract_error("   "), "(empty response)");
+        // The torrent routes carry a code under `error` and the sentence
+        // under `message`: the sentence is the one for a human.
+        assert_eq!(
+            extract_error(r#"{"ok":false,"error":"no_source","message":"Provide a .torrent file"}"#),
+            "Provide a .torrent file"
+        );
     }
 }

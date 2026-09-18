@@ -953,7 +953,8 @@ fn native_pick(gui: &mut Gui) {
     };
     let tx = gui.torrent.tx.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(Reply::Picked(crate::setup::picker::pick_torrent(start.as_deref())));
+        use crate::setup::picker::{self, TORRENT_TITLE};
+        let _ = tx.send(Reply::Picked(picker::pick_torrent(TORRENT_TITLE, start.as_deref())));
     });
 }
 
