@@ -285,6 +285,14 @@ pub enum Action {
     Activate,
     Back,
     AddToQueue,
+    /// The highlighted track goes in right after the playing one — at the
+    /// end when nothing plays — and nothing starts (contract clause 32).
+    AddNext,
+    /// The highlighted track goes in next and starts at once.
+    PlayNow,
+    /// The highlighted queue row trades places with its neighbour.
+    MoveQueueUp,
+    MoveQueueDown,
     PlayPause,
     NextTrack,
     PrevTrack,
@@ -690,6 +698,40 @@ impl Queue {
         if self.state.selected().is_none() {
             self.state.select(Some(0));
         }
+    }
+
+    /// Insert right after the playing row — at the end when nothing plays
+    /// — and say where it landed (contract clause 32).
+    pub fn insert_next(&mut self, track: Queued) -> usize {
+        let at = match self.current {
+            Some(current) if current < self.items.len() => current + 1,
+            _ => self.items.len(),
+        };
+        self.items.insert(at, track);
+        if self.state.selected().is_none() {
+            self.state.select(Some(0));
+        }
+        at
+    }
+
+    /// Move row `from` to sit at `to`, keeping `current` on the same track.
+    pub fn move_row(&mut self, from: usize, to: usize) {
+        if from >= self.items.len() || to >= self.items.len() || from == to {
+            return;
+        }
+        let item = self.items.remove(from);
+        self.items.insert(to, item);
+        self.current = self.current.map(|cur| {
+            if cur == from {
+                to
+            } else if from < cur && cur <= to {
+                cur - 1
+            } else if to <= cur && cur < from {
+                cur + 1
+            } else {
+                cur
+            }
+        });
     }
 
     pub fn clear(&mut self) {
@@ -2059,6 +2101,10 @@ impl App {
                 }
             }
             Action::AddToQueue => self.add_selected_to_queue(),
+            Action::AddNext => self.queue_selected_next(false),
+            Action::PlayNow => self.queue_selected_next(true),
+            Action::MoveQueueUp => self.move_queue_row(-1),
+            Action::MoveQueueDown => self.move_queue_row(1),
 
             Action::PlayPause => self.play_pause(),
             Action::NextTrack => self.skip(true),
@@ -3250,23 +3296,85 @@ impl App {
         Vec::new()
     }
 
+    /// Whether the queue is what the keys act on: its column, or the Queue
+    /// tab of the full-screen view, whatever the hidden browser has focused.
+    fn on_the_queue(&self) -> bool {
+        if self.fullscreen { self.now_tab() == NowTab::Queue } else { self.focus == Focus::Queue }
+    }
+
     fn remove_from_queue(&mut self) -> Vec<Effect> {
-        // The Queue tab of the full-screen view is the queue, whatever the
-        // hidden browser screen happens to have focused.
-        let on_the_queue =
-            if self.fullscreen { self.now_tab() == NowTab::Queue } else { self.focus == Focus::Queue };
-        if !on_the_queue {
+        if !self.on_the_queue() {
             return Vec::new();
         }
         let Some(index) = self.queue.state.selected() else {
             return Vec::new();
         };
+        self.remove_queue_row(index)
+    }
+
+    /// Take row `index` out of the queue — the TUI's `d`, the GUI's hover
+    /// verb. The playing row removed stops playback rather than silently
+    /// continuing something no longer queued.
+    pub(crate) fn remove_queue_row(&mut self, index: usize) -> Vec<Effect> {
         if self.queue.remove(index) {
-            // The playing track was removed: stop rather than silently
-            // continuing something that is no longer in the queue.
             self.now_playing = None;
             return vec![Effect::Audio(AudioCmd::Stop)];
         }
+        Vec::new()
+    }
+
+    /// The highlighted queue row trades places with its neighbour
+    /// (contract clause 32). The announcement is re-made by the funnel:
+    /// what comes next may just have moved.
+    fn move_queue_row(&mut self, delta: isize) -> Vec<Effect> {
+        if !self.on_the_queue() {
+            return Vec::new();
+        }
+        let Some(from) = self.queue.state.selected() else {
+            return Vec::new();
+        };
+        let to = from as isize + delta;
+        if to < 0 || to as usize >= self.queue.items.len() {
+            return Vec::new();
+        }
+        self.queue.move_row(from, to as usize);
+        self.queue.state.select(Some(to as usize));
+        self.announced = None;
+        Vec::new()
+    }
+
+    /// The track the queue verbs act on: the full-screen Discover panel's
+    /// row when that is in front, else the browser's highlighted track.
+    fn selected_playable(&self) -> Option<Track> {
+        if let Some(track) = self.now_discover_selected() {
+            return Some(track);
+        }
+        if self.focus != Focus::Browser {
+            return None;
+        }
+        match self.pane().selected() {
+            Some(Entry::Track { track, .. }) => Some((**track).clone()),
+            _ => None,
+        }
+    }
+
+    /// Add next, and Play now (contract clause 32): the highlighted track
+    /// goes in right after the playing row — at the end when nothing plays
+    /// — and either waits its turn or starts at once. Neither starts an
+    /// empty queue by itself (clause 33).
+    fn queue_selected_next(&mut self, play: bool) -> Vec<Effect> {
+        let Some(track) = self.selected_playable() else {
+            return Vec::new();
+        };
+        let label = track.display_name();
+        let item = self.queued(track);
+        let index = self.queue.insert_next(item);
+        // Whatever was announced as next has just been cut in front of.
+        self.announced = None;
+        if play {
+            return self.play_index(index);
+        }
+        self.info(format!("{label} — next"));
         Vec::new()
     }
 

@@ -1047,6 +1047,8 @@ gui:
     empty: "(здесь пусто)"
     items: "%{count} элементов"
     queue_tip: "В очередь — a"
+    now_tip: "Играть сейчас — P"
+    next_tip: "Добавить следующим — N"
   no_server: "сервер не сохранён — запустите mstream-player setup, или: mstream-player gui --server <адрес>"
   class:
     artists: "Артисты"
@@ -1065,6 +1067,9 @@ gui:
   queue:
     title: "ОЧЕРЕДЬ"
     empty: "(в очереди пусто)"
+    one: "1 трек"
+    many: "%{n} треков"
+    remove_tip: "Убрать из очереди"
   alb:
     loading: "загрузка альбомов…"
     empty: "(в библиотеке нет альбомов)"

@@ -268,6 +268,16 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             gui.app.library.state.select(Some(*i));
             gui.forward(Action::AddToQueue);
         }
+        Act::AlbTrackNext(i) => {
+            gui.app.tab = Tab::Library;
+            gui.app.library.state.select(Some(*i));
+            gui.forward(Action::AddNext);
+        }
+        Act::AlbTrackNow(i) => {
+            gui.app.tab = Tab::Library;
+            gui.app.library.state.select(Some(*i));
+            gui.forward(Action::PlayNow);
+        }
         Act::AlbScrollBy(delta) => {
             gui.albums.tscroll = if *delta < 0 {
                 gui.albums.tscroll.saturating_sub(1)
@@ -613,6 +623,8 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str, arti
         selected,
         Act::AlbTrackRow,
         Act::AlbTrackQueue,
+        Act::AlbTrackNext,
+        Act::AlbTrackNow,
         gui.app.capture.is_none(),
     );
     scroll_list(

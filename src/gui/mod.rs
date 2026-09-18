@@ -87,6 +87,9 @@ pub(crate) enum Act {
     FileRow(usize),
     /// The hovered track row's revealed [+]: queue just that one.
     FileQueue(usize),
+    /// The hover verbs beside [+]: after the playing track, or at once.
+    FileNext(usize),
+    FileNow(usize),
     /// The Files scrollbar (kit `scroll_list`): step and jump.
     FScrollBy(i32),
     FScrollTo(usize),
@@ -95,6 +98,8 @@ pub(crate) enum Act {
     /// from a track.
     SearchRow(usize),
     SearchQueue(usize),
+    SearchNext(usize),
+    SearchNow(usize),
     SScrollBy(i32),
     SScrollTo(usize),
     /// A class chip: put the chip cursor there and flip the class.
@@ -114,6 +119,8 @@ pub(crate) enum Act {
     /// so it doubles as Back), the hover [+], and the kit scrollbar.
     AlbTrackRow(usize),
     AlbTrackQueue(usize),
+    AlbTrackNext(usize),
+    AlbTrackNow(usize),
     AlbScrollBy(i32),
     AlbScrollTo(usize),
     // ── The browser bar (docs/ux-contracts/browser-top-bar.md) ──────────
@@ -143,6 +150,11 @@ pub(crate) enum Act {
     /// A drilled track row, and its hover [+].
     PlTrackRow(usize),
     PlTrackQueue(usize),
+    PlTrackNext(usize),
+    PlTrackNow(usize),
+    /// A queue row: click plays it, its hover [x] removes it.
+    QueueRow(usize),
+    QueueRemove(usize),
     /// Whichever level is on screen scrolls.
     PlScrollBy(i32),
     PlScrollTo(usize),
@@ -704,6 +716,24 @@ impl Gui {
                 self.app.files.state.select(Some(i));
                 self.forward(Action::AddToQueue);
             }
+            Act::FileNext(i) => {
+                self.app.tab = Tab::Files;
+                self.app.files.state.select(Some(i));
+                self.forward(Action::AddNext);
+            }
+            Act::FileNow(i) => {
+                self.app.tab = Tab::Files;
+                self.app.files.state.select(Some(i));
+                self.forward(Action::PlayNow);
+            }
+            Act::QueueRow(i) => {
+                let effects = self.app.play_index(i);
+                self.pend(effects);
+            }
+            Act::QueueRemove(i) => {
+                let effects = self.app.remove_queue_row(i);
+                self.pend(effects);
+            }
             Act::FScrollBy(delta) => {
                 self.fscroll =
                     if delta < 0 { self.fscroll.saturating_sub(1) } else { self.fscroll + 1 };
@@ -719,6 +749,16 @@ impl Gui {
                 self.app.tab = Tab::Search;
                 self.app.search.state.select(Some(i));
                 self.forward(Action::AddToQueue);
+            }
+            Act::SearchNext(i) => {
+                self.app.tab = Tab::Search;
+                self.app.search.state.select(Some(i));
+                self.forward(Action::AddNext);
+            }
+            Act::SearchNow(i) => {
+                self.app.tab = Tab::Search;
+                self.app.search.state.select(Some(i));
+                self.forward(Action::PlayNow);
             }
             Act::SScrollBy(delta) => {
                 self.sscroll =
@@ -1115,6 +1155,8 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         selected,
         Act::FileRow,
         Act::FileQueue,
+        Act::FileNext,
+        Act::FileNow,
         gui.app.capture.is_none(),
     );
     scroll_list(
@@ -1310,8 +1352,10 @@ fn draw_pane_rows(
     selected: Option<usize>,
     row_act: fn(usize) -> Act,
     queue_act: fn(usize) -> Act,
+    next_act: fn(usize) -> Act,
+    now_act: fn(usize) -> Act,
     // An armed pick consumes the next activation outright (clause 10) —
-    // the hover [+] must not offer to queue what a click would capture.
+    // the hover verbs must not offer to queue what a click would capture.
     queue_plus: bool,
 ) {
     for (row, (index, entry)) in rows.iter().enumerate() {
@@ -1336,14 +1380,26 @@ fn draw_pane_rows(
                     let mark = if legacy_conhost() { ">" } else { "▸" };
                     put(frame, list.x, y, mark, if is_sel { sel().add_modifier(Modifier::BOLD) } else { Style::default().fg(th().ok).add_modifier(Modifier::BOLD) });
                 }
-                put(frame, list.x + 2, y, &bar::clip(label, name_width), style);
                 if hover && !is_sel && queue_plus {
-                    let plus = Rect { x: rect.right() - 3, y, width: 3, height: 1 };
-                    put(frame, plus.x, y, "[+]", dim());
+                    // Play now · Add next · Add to the end (contract clause
+                    // 32), each with the key its dwell tooltip names.
+                    let verbs = [
+                        (if legacy_conhost() { "[>]" } else { "[▸]" }, now_act(*index), t!("gui.files.now_tip")),
+                        (if legacy_conhost() { "[^]" } else { "[»]" }, next_act(*index), t!("gui.files.next_tip")),
+                        ("[+]", queue_act(*index), t!("gui.files.queue_tip")),
+                    ];
+                    put(frame, list.x + 2, y, &bar::clip(label, name_width.saturating_sub(8)), style);
                     ui.click(rect, row_act(*index));
-                    ui.click(plus, queue_act(*index));
-                    ui.tip(plus, t!("gui.files.queue_tip").to_string());
+                    let mut x = rect.right() - 3;
+                    for (glyph, act, tip) in verbs.into_iter().rev() {
+                        let cell = Rect { x, y, width: 3, height: 1 };
+                        put(frame, x, y, glyph, dim());
+                        ui.click(cell, act);
+                        ui.tip(cell, tip.to_string());
+                        x = x.saturating_sub(4);
+                    }
                 } else {
+                    put(frame, list.x + 2, y, &bar::clip(label, name_width), style);
                     let time = track.metadata.duration.map(bar::fmt_time).unwrap_or_default();
                     let tstyle = if is_sel { sel() } else { dim() };
                     put(frame, rect.right() - 1 - time.chars().count() as u16, y, &time, tstyle);
@@ -1501,6 +1557,8 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         selected,
         Act::SearchRow,
         Act::SearchQueue,
+        Act::SearchNext,
+        Act::SearchNow,
         gui.app.capture.is_none(),
     );
     scroll_list(
@@ -1531,7 +1589,12 @@ fn draw_queue(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         return;
     }
     let total: f64 = items.iter().filter_map(|t| t.metadata.duration).sum();
-    let head = format!("{} · {}", items.len(), bar::fmt_time(total));
+    let count = if items.len() == 1 {
+        t!("gui.queue.one").to_string()
+    } else {
+        t!("gui.queue.many", n = items.len()).to_string()
+    };
+    let head = if total > 0.0 { format!("{count} · {}", bar::fmt_time(total)) } else { count };
     put(frame, area.width - 2 - head.chars().count() as u16, 2, &head, dim());
 
     let avail = (area.height - 13) as usize;
@@ -1540,19 +1603,43 @@ fn draw_queue(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     gui.last_current = current;
     let (first, visible) = table_view(items.len(), reveal, gui.qscroll, avail);
     gui.qscroll = first;
-    for (row, (index, track)) in items.iter().enumerate().skip(first).take(visible).enumerate() {
+    let rows: Vec<(usize, String, Option<f64>)> = items
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(visible)
+        .map(|(i, t)| {
+            let title = t.metadata.display_title().unwrap_or_else(|| t.file_name()).to_string();
+            (i, title, t.metadata.duration)
+        })
+        .collect();
+    for (row, (index, title, duration)) in rows.into_iter().enumerate() {
         let y = 4 + row as u16;
         let is_current = gui.app.queue.current == Some(index);
-        let title = track.metadata.display_title().unwrap_or_else(|| track.file_name());
+        let rect = Rect { x, y, width: area.width - 1 - x, height: 1 };
+        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let style = match (is_current, hover) {
+            (true, _) => Style::default().fg(th().ok).add_modifier(Modifier::BOLD),
+            (false, true) => bright_bold(),
+            (false, false) => Style::default(),
+        };
         if is_current {
             let mark = if legacy_conhost() { ">" } else { "▸" };
-            put(frame, x, y, mark, Style::default().fg(th().ok).add_modifier(Modifier::BOLD));
-            put(frame, x + 2, y, &bar::clip(title, 22), Style::default().fg(th().ok).add_modifier(Modifier::BOLD));
-        } else {
-            put(frame, x + 2, y, &bar::clip(title, 22), Style::default());
+            put(frame, x, y, mark, style);
         }
-        let time = track.metadata.duration.map(bar::fmt_time).unwrap_or_default();
-        put(frame, area.width - 2 - time.chars().count() as u16, y, &time, dim());
+        put(frame, x + 2, y, &bar::clip(&title, 22), style);
+        // A click plays the row; hovering offers to take it out (contract
+        // clause 32); otherwise the length sits where the [x] would.
+        gui.ui.click(rect, Act::QueueRow(index));
+        if hover {
+            let cell = Rect { x: area.width - 5, y, width: 3, height: 1 };
+            put(frame, cell.x, y, "[x]", dim());
+            gui.ui.click(cell, Act::QueueRemove(index));
+            gui.ui.tip(cell, t!("gui.queue.remove_tip").to_string());
+        } else {
+            let time = duration.map(bar::fmt_time).unwrap_or_default();
+            put(frame, area.width - 2 - time.chars().count() as u16, y, &time, dim());
+        }
     }
 }
 
@@ -1806,6 +1893,8 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Enter if files => gui.forward_capturing(Action::Activate),
         KeyCode::Char('h') | KeyCode::Backspace if files => gui.forward(Action::Back),
         KeyCode::Char('a') if files => gui.forward(Action::AddToQueue),
+        KeyCode::Char('N') if files => gui.forward(Action::AddNext),
+        KeyCode::Char('P') if files => gui.forward(Action::PlayNow),
         // Search browsing: the same pane keys as Files, plus the chip
         // cursor on ←/→ and `t` to flip the class under it.
         KeyCode::Down if search => {
@@ -1819,6 +1908,8 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Enter if search => gui.forward_capturing(Action::Activate),
         KeyCode::Char('h') | KeyCode::Backspace if search => gui.forward(Action::Back),
         KeyCode::Char('a') if search => gui.forward(Action::AddToQueue),
+        KeyCode::Char('N') if search => gui.forward(Action::AddNext),
+        KeyCode::Char('P') if search => gui.forward(Action::PlayNow),
         KeyCode::Left if search => gui.chip = gui.chip.saturating_sub(1),
         KeyCode::Right if search => gui.chip = (gui.chip + 1).min(SEARCH_CLASSES.len() - 1),
         KeyCode::Char('t') if search => {
@@ -2207,13 +2298,53 @@ mod tests {
     }
 
     #[test]
+    fn the_hover_verbs_add_next_play_now_and_the_queue_rows_answer_clicks() {
+        // Contract clause 32, GUI-side: the verbs beside [+], a click on a
+        // queue row playing it, and its hover [x] removing it.
+        let mut gui = browsing_gui();
+        // Rows resolve against their server, so the session needs one.
+        gui.app.session.server = "http://host:3000".into();
+        gui.app.session.server_id = "http://host:3000".into();
+        gui.act(Act::FileQueue(2));
+        gui.act(Act::FileQueue(3));
+        gui.act(Act::QueueRow(1));
+        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { url, .. }) if url.contains("b.mp3"))), "{:?}", gui.pending);
+        assert_eq!(gui.app.queue.current, Some(1));
+        gui.pending.clear();
+        gui.app.status = crate::player::PlayerStatus { playing: true, source: "x".into(), ..Default::default() };
+
+        gui.act(Act::FileNext(2));
+        assert_eq!(gui.app.queue.items.len(), 3);
+        assert_eq!(gui.app.queue.items[2].filepath, "music/a.mp3", "in right after the playing row");
+        assert!(!gui.pending.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))), "add next never plays");
+
+        gui.act(Act::FileNow(3));
+        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { url, .. }) if url.contains("b.mp3"))), "play now plays: {:?}", gui.pending);
+        assert_eq!(gui.app.queue.current, Some(2));
+
+        gui.act(Act::QueueRemove(0));
+        assert_eq!(gui.app.queue.items.len(), 3);
+        assert_eq!(gui.app.queue.current, Some(1), "current followed its track down");
+
+        // The hover verbs are drawn, and named, over a hovered row.
+        gui.queue_open = false;
+        gui.ui.pointer = Some(Position { x: 30, y: 7 });
+        let all = draw(&mut gui).join("\n");
+        let hovered = all.lines().nth(7).unwrap_or("");
+        assert!(hovered.contains("Night Drive"), "the hovered row is a track: {hovered}");
+        assert!(hovered.contains("[+]"), "the queue-add: {hovered}");
+        assert!(hovered.contains("[»]") || hovered.contains("[^]"), "add next: {hovered}");
+        assert!(hovered.contains("[▸]") || hovered.contains("[>]"), "play now: {hovered}");
+    }
+
+    #[test]
     fn the_queue_panel_shows_the_real_queue_with_the_playing_marker() {
         let mut gui = browsing_gui();
         gui.act(Act::FileQueue(2));
         gui.act(Act::FileQueue(3));
         gui.app.queue.current = Some(1);
         let all = draw(&mut gui).join("\n");
-        assert!(all.contains("2 · 8:00"), "count and total time head the panel");
+        assert!(all.contains("2 tracks · 8:00"), "count and total time head the panel: {all}");
         assert!(all.contains("Aurora"), "queued titles are rows");
     }
 

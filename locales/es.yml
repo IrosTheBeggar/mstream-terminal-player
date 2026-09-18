@@ -1047,6 +1047,8 @@ gui:
     empty: "(nada aquí)"
     items: "%{count} elementos"
     queue_tip: "Añadir a la cola — a"
+    now_tip: "Reproducir ahora — P"
+    next_tip: "Añadir a continuación — N"
   no_server: "sin servidor guardado — ejecuta mstream-player setup, o: mstream-player gui --server <dirección>"
   class:
     artists: "Artistas"
@@ -1065,6 +1067,9 @@ gui:
   queue:
     title: "COLA"
     empty: "(nada en cola aún)"
+    one: "1 pista"
+    many: "%{n} pistas"
+    remove_tip: "Quitar de la cola"
   alb:
     loading: "cargando álbumes…"
     empty: "(no hay álbumes en la biblioteca)"

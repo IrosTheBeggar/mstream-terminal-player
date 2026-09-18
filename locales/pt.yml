@@ -1047,6 +1047,8 @@ gui:
     empty: "(nada aqui)"
     items: "%{count} itens"
     queue_tip: "Adicionar à fila — a"
+    now_tip: "Tocar agora — P"
+    next_tip: "Adicionar a seguir — N"
   no_server: "nenhum servidor salvo — rode mstream-player setup, ou: mstream-player gui --server <endereço>"
   class:
     artists: "Artistas"
@@ -1065,6 +1067,9 @@ gui:
   queue:
     title: "FILA"
     empty: "(nada na fila)"
+    one: "1 faixa"
+    many: "%{n} faixas"
+    remove_tip: "Remover da fila"
   alb:
     loading: "carregando álbuns…"
     empty: "(nenhum álbum na biblioteca)"

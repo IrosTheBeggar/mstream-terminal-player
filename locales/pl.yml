@@ -1047,6 +1047,8 @@ gui:
     empty: "(nic tu nie ma)"
     items: "%{count} pozycji"
     queue_tip: "Dodaj do kolejki — a"
+    now_tip: "Odtwórz teraz — P"
+    next_tip: "Dodaj jako następny — N"
   no_server: "brak zapisanego serwera — uruchom mstream-player setup, albo: mstream-player gui --server <adres>"
   class:
     artists: "Artyści"
@@ -1065,6 +1067,9 @@ gui:
   queue:
     title: "KOLEJKA"
     empty: "(nic w kolejce)"
+    one: "1 utwór"
+    many: "%{n} utworów"
+    remove_tip: "Usuń z kolejki"
   alb:
     loading: "wczytywanie albumów…"
     empty: "(brak albumów w bibliotece)"

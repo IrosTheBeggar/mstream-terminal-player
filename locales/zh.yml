@@ -1047,6 +1047,8 @@ gui:
     empty: "(这里没有内容)"
     items: "%{count} 项"
     queue_tip: "加入队列 — a"
+    now_tip: "立即播放 — P"
+    next_tip: "添加到下一首 — N"
   no_server: "未保存服务器 — 请运行 mstream-player setup，或：mstream-player gui --server <地址>"
   class:
     artists: "艺术家"
@@ -1065,6 +1067,9 @@ gui:
   queue:
     title: "队列"
     empty: "(队列为空)"
+    one: "1 首"
+    many: "%{n} 首"
+    remove_tip: "从队列中移除"
   alb:
     loading: "正在加载专辑…"
     empty: "（曲库中没有专辑）"

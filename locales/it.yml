@@ -1047,6 +1047,8 @@ gui:
     empty: "(niente qui)"
     items: "%{count} elementi"
     queue_tip: "Aggiungi alla coda — a"
+    now_tip: "Riproduci ora — P"
+    next_tip: "Aggiungi dopo — N"
   no_server: "nessun server salvato — esegui mstream-player setup, oppure: mstream-player gui --server <indirizzo>"
   class:
     artists: "Artisti"
@@ -1065,6 +1067,9 @@ gui:
   queue:
     title: "CODA"
     empty: "(niente in coda)"
+    one: "1 brano"
+    many: "%{n} brani"
+    remove_tip: "Rimuovi dalla coda"
   alb:
     loading: "caricamento album…"
     empty: "(nessun album nella libreria)"

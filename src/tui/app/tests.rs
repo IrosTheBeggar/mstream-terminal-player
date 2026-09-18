@@ -1858,6 +1858,70 @@ fn a_snapshot_round_trips_and_keeps_a_held_spot_until_something_plays() {
 }
 
 #[test]
+fn add_next_lands_after_the_playing_row_and_play_now_starts_it() {
+    // Contract clauses 32 and 33.
+    let mut app = connected_app();
+    app.apply_event(Event::Listing(Box::new(listing("/music", &[], &["a.mp3", "b.mp3", "c.mp3"]))));
+    app.focus = Focus::Browser;
+
+    // Nothing playing: Add next goes to the end and starts nothing.
+    app.files.state.select(Some(1)); // a.mp3 (row 0 is the Parent row)
+    let effects = app.handle_action(Action::AddNext);
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))), "never autoplays");
+    assert_eq!(app.queue.items.len(), 1);
+    assert!(app.status.is_idle());
+
+    // Playing row 0 with another row after it: Add next cuts in at 1.
+    app.push_queue(track("music/z.mp3"));
+    let effects = app.play_index(0);
+    app.status = PlayerStatus { playing: true, source: played_url(&effects), ..Default::default() };
+    app.files.state.select(Some(2)); // b.mp3
+    app.handle_action(Action::AddNext);
+    let paths: Vec<&str> = app.queue.items.iter().map(|i| i.filepath.as_str()).collect();
+    assert_eq!(paths, ["music/a.mp3", "music/b.mp3", "music/z.mp3"]);
+    assert_eq!(app.queue.current, Some(0), "the playing row stays where it is");
+
+    // Play now: in at 1 again, and started at once.
+    app.files.state.select(Some(3)); // c.mp3
+    let effects = app.handle_action(Action::PlayNow);
+    assert_eq!(played_url(&effects), "http://host:3000/media/music/c.mp3?token=tok");
+    let paths: Vec<&str> = app.queue.items.iter().map(|i| i.filepath.as_str()).collect();
+    assert_eq!(paths, ["music/a.mp3", "music/c.mp3", "music/b.mp3", "music/z.mp3"]);
+    assert_eq!(app.queue.current, Some(1));
+}
+
+#[test]
+fn moving_a_queued_row_keeps_current_on_its_track() {
+    // The pure rule: current follows the track it was on.
+    let mut queue = Queue { items: vec![item("a"), item("b"), item("c"), item("d")], current: Some(1), ..Default::default() };
+    queue.move_row(3, 0); // d to the front: b slides to 2
+    assert_eq!(queue.items.iter().map(|i| i.filepath.as_str()).collect::<Vec<_>>(), ["d", "a", "b", "c"]);
+    assert_eq!(queue.current, Some(2));
+    queue.move_row(2, 3); // the playing row itself moves
+    assert_eq!(queue.current, Some(3));
+    queue.move_row(0, 2); // d past the playing row: it slides back up
+    assert_eq!(queue.items.iter().map(|i| i.filepath.as_str()).collect::<Vec<_>>(), ["a", "c", "d", "b"]);
+    assert_eq!(queue.current, Some(3));
+    queue.move_row(9, 0); // out of range: nothing
+    assert_eq!(queue.current, Some(3));
+
+    // Through the keys, on the queue column: the highlighted row moves
+    // and stays highlighted; off the queue the keys do nothing.
+    let mut app = connected_app();
+    app.push_queue(track("1"));
+    app.push_queue(track("2"));
+    app.push_queue(track("3"));
+    app.focus = Focus::Queue;
+    app.queue.state.select(Some(0));
+    app.handle_action(Action::MoveQueueDown);
+    assert_eq!(app.queue.items.iter().map(|i| i.filepath.as_str()).collect::<Vec<_>>(), ["2", "1", "3"]);
+    assert_eq!(app.queue.state.selected(), Some(1));
+    app.focus = Focus::Browser;
+    app.handle_action(Action::MoveQueueUp);
+    assert_eq!(app.queue.items[0].filepath, "2", "the browser's keys are its own");
+}
+
+#[test]
 fn a_removed_server_takes_its_rows_and_playback_lands_on_the_next_survivor() {
     // The pure rule first (contract clause 35).
     let items = vec![at("a", "1"), at("b", "2"), at("a", "3"), at("b", "4")];

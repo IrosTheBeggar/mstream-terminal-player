@@ -1047,6 +1047,8 @@ gui:
     empty: "(hier ist nichts)"
     items: "%{count} Einträge"
     queue_tip: "In die Warteschlange — a"
+    now_tip: "Jetzt abspielen — P"
+    next_tip: "Als Nächstes — N"
   no_server: "kein Server gespeichert — mstream-player setup ausführen, oder: mstream-player gui --server <Adresse>"
   class:
     artists: "Interpreten"
@@ -1065,6 +1067,9 @@ gui:
   queue:
     title: "WARTESCHLANGE"
     empty: "(noch nichts eingereiht)"
+    one: "1 Titel"
+    many: "%{n} Titel"
+    remove_tip: "Aus der Warteschlange entfernen"
   alb:
     loading: "lade Alben…"
     empty: "(keine Alben in der Bibliothek)"

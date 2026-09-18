@@ -1047,6 +1047,8 @@ gui:
     empty: "(nothing here)"
     items: "%{count} items"
     queue_tip: "Add to the queue — a"
+    now_tip: "Play now — P"
+    next_tip: "Add next — N"
   no_server: "no server saved — run mstream-player setup, or: mstream-player gui --server <address>"
   class:
     artists: "Artists"
@@ -1065,6 +1067,9 @@ gui:
   queue:
     title: "QUEUE"
     empty: "(nothing queued yet)"
+    one: "1 track"
+    many: "%{n} tracks"
+    remove_tip: "Remove from the queue"
   alb:
     loading: "loading albums…"
     empty: "(no albums in the library)"

@@ -282,6 +282,8 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str) {
         selected,
         Act::PlTrackRow,
         Act::PlTrackQueue,
+        Act::PlTrackNext,
+        Act::PlTrackNow,
         gui.app.capture.is_none(),
     );
     scroll_list(
@@ -454,6 +456,16 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             gui.app.tab = crate::tui::app::Tab::Library;
             gui.app.library.state.select(Some(index));
             gui.forward(Action::AddToQueue);
+        }
+        Act::PlTrackNext(index) => {
+            gui.app.tab = crate::tui::app::Tab::Library;
+            gui.app.library.state.select(Some(index));
+            gui.forward(Action::AddNext);
+        }
+        Act::PlTrackNow(index) => {
+            gui.app.tab = crate::tui::app::Tab::Library;
+            gui.app.library.state.select(Some(index));
+            gui.forward(Action::PlayNow);
         }
         Act::PlScrollBy(delta) => {
             let scroll = if drilled(gui).is_some() {
