@@ -8,8 +8,10 @@
 //! interleaved between the event handler and the keymap (audit #61).
 
 use super::*;
-/// The Library tab's mode menu — static, so opening the tab costs no request.
-pub(super) fn library_root_entries() -> Vec<Entry> {
+/// The Library tab's mode menu — static, so opening the tab costs no
+/// request. A federated peer is read-only and has no playlists to list
+/// (contract clause 26), so that row is left off for one.
+pub(super) fn library_root_entries(peer: bool) -> Vec<Entry> {
     [
         ("Artists", LibraryNode::Artists),
         ("Albums", LibraryNode::Albums),
@@ -20,6 +22,7 @@ pub(super) fn library_root_entries() -> Vec<Entry> {
         ("Playlists", LibraryNode::Playlists),
     ]
     .into_iter()
+    .filter(|(_, node)| !(peer && *node == LibraryNode::Playlists))
     .map(|(label, node)| Entry::Node { label: label.to_string(), node })
     .collect()
 }

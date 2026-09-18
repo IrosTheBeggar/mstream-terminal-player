@@ -6,7 +6,7 @@
 | **Server API** | `GET /api/` (capabilities — `federationBrowse`, `federationDirect`, transcode, discovery) with `GET /api/v1/ping` as the older fallback; `POST /api/v1/auth/login`; `GET /api/v1/federation/peers` (a parent's peer list, caller-scoped); the parent's proxies for a peer — `/api/v1/federation/peers/:id/api/*` (browse), `/api/v1/federation/peers/:id/stream/*path` (bytes, Range forwarded, no transcode), `/api/v1/federation/peers/:id/art/*path`; `GET /api/v1/federation/peers/:id/access` (a direct guest ticket, mStream #943); `GET /api/v1/iroh/code` (LAN Quick Connect). Checked against mStream 6.28.0 (`c791799a`). |
 | **Already in this repo** | Config: `ServerEntry` (url, username, last_path, per-entry `self_signed`), `default_server` outranking most-recently-used, `Credentials` (tokens + Quick Connect pairing codes), `preferred_server` / `set_default_server` / `remove_server` (the ONE flow that drops a pairing code) / `touch_server`. Session: `Session { server, server_id, tunnel_code, token, self_signed }`, `App::adopt_server` (a switch keeps what is streaming and sheds the queue — see clause 11). The GUI's servers room (`src/gui/servers.rs`): the header dropdown, the add chooser (Standard connect · Quick Connect with mDNS rows), Manage Servers with switch · edit · make default · pair phone · remove, a one-shot validation client, sign-in-needed answers opening the form. Engine: per-host TLS trust. The queue: `Queue` of `Track { filepath, metadata }` — **no origin** — with `Queue` / `QueueAll` / `RemoveFromQueue` / `ClearQueue` / `ToggleRepeat` / `ToggleShuffle`, `play_listing` / `queue_listing`. **Missing**: federated peers as browsable entries, queue items that carry their server, cross-server playback and per-server tunnels, the failure walk, queue persistence across launches, and the bundled-server mode. |
 | **Target surface** | the GUI player — the servers room and the queue panel — with the origin-carrying queue landing in the shared App so the TUI follows |
-| **Status** | contract extracted 2026-09-17; **one addition beyond the record** (§ The bundled server, clauses 50–58) requested for the installers; open questions below — discussion before implementation |
+| **Status** | contract extracted 2026-09-17; **one addition beyond the record** (§ The bundled server, clauses 50–58) requested for the installers. **Implemented 2026-09-18** in the shared App and the GUI (six commits on the PR branch); clause 38 deferred — see the deviations log — and open questions 1–5 settled on their leans |
 
 ## Intent
 
@@ -491,3 +491,27 @@ additions to drawn idioms. Revisit if discussion disagrees.
 - **2026-09-17 — The bundled server is an addition** (clauses 50–58): no
   record; wording written fresh in all ten locales; the mechanism is open
   question 1.
+- **2026-09-18 — Implemented on the leans** of the open questions: the
+  flag is `--bundled-server <url>` on `gui` and `tui` (1); the bundled
+  entry is seeded without credentials (2); peers ride the parent's proxies
+  only — direct access (the guest ticket) is not ported (3); the origin is
+  a queue-row type wrapping the API's track (4); one `queue.json` serves
+  both surfaces (5).
+- **2026-09-18 — Tunnels do not yet follow the queue** (clause 38): the
+  api worker holds one Quick Connect bridge, so a queued row on another
+  tunnel is skipped with a word until that server is dialled again. A
+  standard server's rows and a peer's rows through its parent play from
+  any session. Per-server bridges are the next piece of the queue work.
+- **2026-09-18 — The skip toast names the track and keeps the reason**
+  ("Skipping a track that won’t play — {track}: {reason}"): the record's
+  literal, with the two facts a terminal user can act on.
+- **2026-09-18 — Reorder is keys only** (`<` and `>` on the queue column,
+  clause 32): the GUI's queue panel has no drag grip yet; its rows answer a
+  click and a hover [x].
+- **2026-09-18 — A restored spot shows on the GUI's bar** (clause 40): the
+  card names the row and its position, paused, and the first play starts
+  there. The TUI shows the row's marker and starts there on Space; its
+  transport reads the engine, which is idle until then.
+- **2026-09-18 — No Info verb in the servers room** (clause 25): a peer's
+  parent is on its row ("via {parent}"), which is what Info would have
+  said. The remove confirmation reads "Forget {name}?" for a missing peer.

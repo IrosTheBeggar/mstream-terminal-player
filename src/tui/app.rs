@@ -2360,7 +2360,7 @@ impl App {
         match tab {
             Tab::Library if self.library_stack.unopened() => {
                 self.library_stack.enter(LibraryNode::Root);
-                self.library.set(library_root_entries());
+                self.library.set(library_root_entries(self.session.peer.is_some()));
                 Vec::new()
             }
             Tab::Discover => {
@@ -2722,7 +2722,7 @@ impl App {
                 };
                 match node {
                     LibraryNode::Root => {
-                        self.library.set(library_root_entries());
+                        self.library.set(library_root_entries(self.session.peer.is_some()));
                         Vec::new()
                     }
                     node => {

@@ -119,7 +119,7 @@ impl Form {
 
     /// Whether field `i` takes part in the focus cycle right now.
     fn focusable(&self, i: usize) -> bool {
-        !(self.public && matches!(i, 1 | 2)) && !(self.locked_url && i == 0)
+        !((self.public && matches!(i, 1 | 2)) || (self.locked_url && i == 0))
     }
 
     fn step_focus(&mut self, forward: bool) {
@@ -457,10 +457,12 @@ fn set_hidden(gui: &mut Gui, index: usize, hidden: bool) {
     let Some(entry) = gui.config.servers.get(index).cloned() else { return };
     let Some(peer) = entry.peer.clone() else { return };
     let current = gui.app.connected && config::same_server(&gui.app.session.server_id, &entry.url);
-    if hidden && current {
-        if let Some(parent) = gui.config.servers.iter().position(|e| config::same_server(&e.url, &peer.parent)) {
-            switch_to(gui, parent);
-        }
+    if hidden
+        && current
+        && let Some(parent) =
+            gui.config.servers.iter().position(|e| config::same_server(&e.url, &peer.parent))
+    {
+        switch_to(gui, parent);
     }
     let url = entry.url.clone();
     if update_config(gui, |config| {

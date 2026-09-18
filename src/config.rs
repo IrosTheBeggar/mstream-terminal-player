@@ -1247,13 +1247,15 @@ mod tests {
     #[test]
     fn peers_group_under_their_parent_and_leave_with_it() {
         // Contract clauses 4 and 28.
-        let mut config = Config::default();
-        config.servers = vec![
-            ServerEntry { url: "http://attic:3000".into(), ..Default::default() },
-            ServerEntry { url: "http://office:3000".into(), ..Default::default() },
-            peer_of("http://attic:3000", 3, "Nas"),
-            peer_of("http://gone:3000", 7, "Orphan"),
-        ];
+        let mut config = Config {
+            servers: vec![
+                ServerEntry { url: "http://attic:3000".into(), ..Default::default() },
+                ServerEntry { url: "http://office:3000".into(), ..Default::default() },
+                peer_of("http://attic:3000", 3, "Nas"),
+                peer_of("http://gone:3000", 7, "Orphan"),
+            ],
+            ..Default::default()
+        };
         assert_eq!(grouped_order(&config.servers), [0, 2, 1, 3], "peer under its parent, orphan last");
         assert!(selectable(&config.servers[2]));
         let peer_url = config.servers[2].url.clone();

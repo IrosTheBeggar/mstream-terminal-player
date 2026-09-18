@@ -1783,6 +1783,19 @@ a LATER secondary screen (party view), Columns retired.
   parser tests + 2 multipart tests; smoked read-only against
   demo.mstream.io (the gate answers "No torrent client is selected" and
   the primary stays disabled with that reason on its tip).
+- **Multi-server and the queue ✅ 2026-09-18** — contract-first
+  (docs/ux-contracts/multi-server.md, contract 06, with the bundled-server
+  addition). Six commits: every queued row carries its server and plays
+  from it, so a switch keeps the queue and a removed server sweeps its
+  rows; `--bundled-server` seeds the installer's server as the default
+  and never offers to remove it; the queue and the place in it come back
+  on launch, paused (`queue.json`, `[player] resume_queue`); Add next /
+  Play now / row moves and a queue panel whose rows answer clicks;
+  federated peers browsed through their parent, read-only, seated under
+  it in the room and the dropdown, hidden or forgotten from there; the
+  failure walk probes a row's server, retries, holds and resumes.
+  Deferred, logged in the contract: per-server tunnels (clause 38), the
+  guest-ticket direct path to a peer, a drag grip for reorder.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
   of the Library tab views (Artists/Genres/Recent — the wall's drill
