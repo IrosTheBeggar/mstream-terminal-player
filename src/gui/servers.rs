@@ -406,6 +406,10 @@ fn remove_server(gui: &mut Gui, index: usize) {
             let shown = crate::quickconnect::display_server(&url);
             gui.note = Some((t!("gui.srv.removed", server = shown).to_string(), false));
         }
+        // Its queued tracks go with it, silently (contract clause 35).
+        let effects = gui.app.drop_server_items(&url);
+        gui.pend(effects);
+        gui.app.servers.retain(|s| !config::same_server(&s.id, &url));
         gui.servers.versions.remove(&url);
         if gui.servers.switching.as_deref().is_some_and(|s| config::same_server(s, &url)) {
             gui.servers.switching = None;
@@ -417,10 +421,9 @@ fn remove_server(gui: &mut Gui, index: usize) {
 
 // ── Switching ───────────────────────────────────────────────────────────────
 
-/// Adopt saved entry `index` as the session. The playing track keeps
-/// playing (its URL is already absolute); the rest of the queue cannot
-/// follow (queued tracks resolve against the session's server at play
-/// time), so it is cleared and the note says so.
+/// Adopt saved entry `index` as the session. Playback and the queue are
+/// untouched — every row carries its own server (contract clause 11); the
+/// browser is what changes.
 pub(crate) fn switch_to(gui: &mut Gui, index: usize) {
     gui.servers.drop_open = false;
     let Some(entry) = gui.config.servers.get(index).cloned() else { return };
@@ -447,7 +450,6 @@ pub(crate) fn switch_to(gui: &mut Gui, index: usize) {
         }
     }
 
-    let had_queue = !gui.app.queue.items.is_empty();
     let effects = gui.app.adopt_server(
         server,
         entry.url.clone(),
@@ -460,11 +462,7 @@ pub(crate) fn switch_to(gui: &mut Gui, index: usize) {
     gui.pend(effects);
     gui.servers.switching = Some(entry.url.clone());
     let shown = crate::quickconnect::display_server(&entry.url);
-    gui.note = Some(if had_queue {
-        (t!("gui.srv.queue_cleared", server = shown).to_string(), false)
-    } else {
-        (t!("gui.srv.reaching", server = shown).to_string(), false)
-    });
+    gui.note = Some((t!("gui.srv.reaching", server = shown).to_string(), false));
 }
 
 // ── The form's submit ───────────────────────────────────────────────────────
@@ -786,17 +784,11 @@ pub(crate) fn observe(gui: &mut Gui, event: &Event) {
             gui.servers.switching = None;
             // A pairing-code dial just answered: the session about to be
             // seated by this event is the tunnel's, so the code goes in
-            // now — nothing later knows it — and the old server's state
-            // is shed the way a switch sheds it.
+            // now — nothing later knows it — and the old server's browse
+            // state is shed the way a switch sheds it (the queue stays).
             if let Some(code) = gui.servers.pending_code.take() {
                 gui.app.session.tunnel_code = Some(code);
-                let had_queue = !gui.app.queue.items.is_empty();
                 gui.app.shed_server_state();
-                if had_queue && let Event::Connected { id, .. } = event {
-                    let shown = crate::quickconnect::display_server(id);
-                    gui.note =
-                        Some((t!("gui.srv.queue_cleared", server = shown).to_string(), false));
-                }
             }
             if gui.servers.form.as_ref().is_some_and(|f| f.session_login || f.switch) {
                 gui.servers.form = None;
@@ -1982,7 +1974,7 @@ mod tests {
         let mut gui = two_server_gui();
         // On disk too: the switch saves the outgoing session and reloads.
         config::save(&gui.config).unwrap();
-        gui.app.queue.items.push(crate::api::types::Track {
+        gui.app.push_queue(crate::api::types::Track {
             filepath: "music/a.mp3".into(),
             metadata: Default::default(),
         });
@@ -2000,7 +1992,7 @@ mod tests {
             "the switch rode out as the App's own connect: {:?}",
             gui.pending
         );
-        assert!(gui.app.queue.items.is_empty(), "the old server's queue cannot come along");
+        assert_eq!(gui.app.queue.items.len(), 1, "the queue comes along: its rows know their server");
         assert!(gui.app.now_playing.is_some(), "what was streaming keeps playing");
         assert_eq!(gui.app.session.server_id, "http://office.local:3000");
         assert_eq!(gui.servers.switching.as_deref(), Some("http://office.local:3000"));
@@ -2108,9 +2100,9 @@ mod tests {
         );
         assert!(gui.app.session.tunnel_code.is_none(), "nothing seated until it answers");
 
-        // The tunnel answers: the code is seated for the save, the old
-        // server's queue is shed, the form closes.
-        gui.app.queue.items.push(crate::api::types::Track {
+        // The tunnel answers: the code is seated for the save, the queue
+        // stays (its rows know their server), the form closes.
+        gui.app.push_queue(crate::api::types::Track {
             filepath: "music/a.mp3".into(),
             metadata: Default::default(),
         });
@@ -2125,7 +2117,7 @@ mod tests {
             },
         );
         assert_eq!(gui.app.session.tunnel_code.as_deref(), Some("mstr1:abc"));
-        assert!(gui.app.queue.items.is_empty(), "the old server's queue is shed");
+        assert_eq!(gui.app.queue.items.len(), 1, "the queue is kept across the dial");
         assert!(gui.servers.pending_code.is_none());
         assert!(gui.servers.form.is_none());
     }

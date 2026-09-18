@@ -1116,7 +1116,6 @@ gui:
     sign_in: "此服务器需要登录"
     tunnel_signin: "隧道已打开 — 登录以继续"
     no_code: "此服务器的配对码已丢失 — 请在经典播放器中重新粘贴"
-    queue_cleared: "队列已清空 — 其中的曲目属于上一个服务器；正在连接 %{server}…"
     remove_title: "移除服务器"
     remove_body: "忘记 %{server}？"
     remove_tunnel_note: "它的配对码是唯一的回路 — 移除即遗忘。"

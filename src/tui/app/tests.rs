@@ -8,13 +8,18 @@ fn track(path: &str) -> Track {
     Track { filepath: path.to_string(), metadata: TrackMetadata::default() }
 }
 
+/// A queue row from the test server, for tests that build a `Queue` by hand.
+fn item(path: &str) -> Queued {
+    Queued { origin: Origin { server: "http://host:3000".into(), peer: None }, track: track(path) }
+}
+
 #[test]
 fn removing_the_only_track_while_it_plays_reports_it_was_current() {
     // The emptied-queue outcome has to count as removing the current row —
     // a one-track queue has nowhere else to point, and reporting false
     // here would leave playback running on a track no longer queued.
     let mut queue = Queue::default();
-    queue.replace(vec![track("solo")]);
+    queue.replace(vec![item("solo")]);
     queue.start(0);
     assert!(queue.remove(0), "the emptied queue took the playing row with it");
     assert_eq!(queue.current, None);
@@ -411,7 +416,7 @@ fn an_end_from_the_track_left_behind_does_not_walk_the_queue_on() {
     // can cross in the post. Taking one for the other costs the user the
     // track they just chose: it is passed over without a note played.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b"), track("c")]);
+    app.replace_queue(vec![track("a"), track("b"), track("c")]);
     let first = app.handle_action(Action::PlayPause);
     app.handle_action(Action::NextTrack);
     assert_eq!(app.queue.current, Some(1));
@@ -424,7 +429,7 @@ fn an_end_from_the_track_left_behind_does_not_walk_the_queue_on() {
 #[test]
 fn queue_advances_on_track_end_and_stops_at_the_end() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    app.replace_queue(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
     let effects = app.handle_action(Action::PlayPause);
 
     let effects = app.apply_event(ended(&effects));
@@ -444,7 +449,7 @@ fn a_shuffled_queue_still_ends_when_repeat_is_off() {
     // counted: it used to draw another track forever while the
     // indicator said repeat was off.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b"), track("c")]);
+    app.replace_queue(vec![track("a"), track("b"), track("c")]);
     app.queue.shuffle = true;
 
     let mut effects = app.handle_action(Action::PlayPause);
@@ -477,7 +482,7 @@ fn jump_to_playing_puts_the_queue_on_screen_before_handing_it_the_cursor() {
     // arrows driving a list nobody could see, Enter restarting the
     // current track, and `d` deleting an unseen row.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
     app.handle_action(Action::PlayPause);
     assert!(!app.queue_column, "the column starts hidden");
 
@@ -493,7 +498,7 @@ fn jump_to_playing_in_the_fullscreen_view_turns_to_the_queue_tab() {
     // nothing — and a focus quietly parked on the queue would leave the
     // browser screen driving the hidden column after `0` back.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a")]);
+    app.replace_queue(vec![track("a")]);
     app.handle_action(Action::PlayPause);
     app.handle_action(Action::ToggleNowPlaying);
     app.now_tab = NowTab::Visualizer;
@@ -511,7 +516,7 @@ fn the_jump_keys_follow_the_fullscreen_view_like_the_arrows_do() {
     // dead while it silently moved the browser nobody could see.
     let mut app = connected_app();
     app.apply_event(Event::Listing(Box::new(listing("/lib/", &["sub"], &["a.mp3"]))));
-    app.queue.replace(vec![track("a"), track("b"), track("c")]);
+    app.replace_queue(vec![track("a"), track("b"), track("c")]);
     app.handle_action(Action::ToggleNowPlaying);
     app.now_tab = NowTab::Queue;
 
@@ -563,7 +568,7 @@ fn settings_tab(app: &App) -> usize {
 #[test]
 fn the_track_coming_up_never_wears_the_state_of_the_one_that_ended() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
     let effects = app.handle_action(Action::PlayPause);
     let first = played_url(&effects);
     app.apply_event(Event::Status(PlayerStatus {
@@ -606,7 +611,7 @@ fn a_length_already_known_is_shown_before_the_engine_confirms_it() {
     let mut app = connected_app();
     let mut long = track("a");
     long.metadata.duration = Some(221.0);
-    app.queue.replace(vec![long]);
+    app.replace_queue(vec![long]);
     app.handle_action(Action::PlayPause);
     assert_eq!(app.status.duration, 221.0);
 }
@@ -614,7 +619,7 @@ fn a_length_already_known_is_shown_before_the_engine_confirms_it() {
 #[test]
 fn repeat_all_wraps_but_repeat_one_only_traps_automatic_advance() {
     let mut queue = Queue {
-        items: vec![track("a"), track("b")],
+        items: vec![item("a"), item("b")],
         current: Some(1),
         ..Default::default()
     };
@@ -632,7 +637,7 @@ fn repeat_all_wraps_but_repeat_one_only_traps_automatic_advance() {
 #[test]
 fn previous_restarts_the_track_when_past_the_grace_window() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
     app.play_index(1);
 
     app.status.position = 10.0;
@@ -649,7 +654,7 @@ fn previous_restarts_the_track_when_past_the_grace_window() {
 #[test]
 fn removing_the_playing_track_stops_playback() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b"), track("c")]);
+    app.replace_queue(vec![track("a"), track("b"), track("c")]);
     app.play_index(1);
     app.focus = Focus::Queue;
     app.queue.state.select(Some(1));
@@ -663,7 +668,7 @@ fn removing_the_playing_track_stops_playback() {
 #[test]
 fn removing_an_earlier_track_keeps_the_current_one_playing() {
     let mut queue = Queue {
-        items: vec![track("a"), track("b"), track("c")],
+        items: vec![item("a"), item("b"), item("c")],
         current: Some(2),
         ..Default::default()
     };
@@ -811,7 +816,7 @@ fn waveforms_asked(effects: &[Effect]) -> Vec<String> {
 #[test]
 fn a_waveform_is_asked_for_once_per_track() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
 
     let effects = app.handle_action(Action::PlayPause);
     assert!(waveforms_asked(&effects).contains(&"a".to_string()), "the shape of what started");
@@ -838,7 +843,7 @@ fn a_shape_nobody_answered_for_is_asked_for_again() {
     // for exactly the track that most needs one — so it must leave the slot
     // free, or one bad moment is the last word on that track all session.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a")]);
+    app.replace_queue(vec![track("a")]);
     assert!(waveforms_asked(&app.handle_action(Action::PlayPause)).contains(&"a".to_string()));
 
     app.apply_event(Event::Waveform { filepath: "a".into(), bars: None, settled: false });
@@ -861,7 +866,7 @@ fn the_next_tracks_waveform_is_fetched_before_it_plays() {
     // announcement machinery already worked out what is coming, for the
     // crossfade; this rides along with it.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
 
     let effects = app.handle_action(Action::PlayPause);
     let asked = waveforms_asked(&effects);
@@ -881,7 +886,7 @@ fn a_queue_edit_moves_the_prefetch_with_it() {
     // The prefetch reads the announcement, so it has to follow one: a queue
     // edit that changes what comes next changes which shape is worth having.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
     app.handle_action(Action::PlayPause);
     assert!(app.waveforms.contains_key("b"));
 
@@ -889,7 +894,7 @@ fn a_queue_edit_moves_the_prefetch_with_it() {
     app.queue.state.select(Some(1));
     app.focus = Focus::Queue;
     app.handle_action(Action::RemoveFromQueue);
-    app.queue.push(track("c"));
+    app.push_queue(track("c"));
     let effects = app.handle_action(Action::JumpToPlaying);
     assert!(waveforms_asked(&effects).contains(&"c".to_string()), "{effects:?}");
 }
@@ -945,7 +950,7 @@ fn the_discover_tab_asks_what_to_look_around_from_before_anything_else() {
     // The step that lets you ask about a track without playing it — which
     // the full-screen panel cannot do, since it follows the speakers.
     let mut app = connected_app();
-    app.queue.replace(vec![track("playing")]);
+    app.replace_queue(vec![track("playing")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
     assert_eq!(*app.discover_node(), DiscoverNode::Root);
@@ -1005,7 +1010,7 @@ fn a_discover_seed_can_be_pointed_at_rather_than_played() {
 fn how_close_leads_the_row_rather_than_where_it_sits() {
     // The rows arrive in order, so a rank says nothing a position does not.
     let mut app = connected_app();
-    app.queue.replace(vec![track("playing")]);
+    app.replace_queue(vec![track("playing")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
     app.handle_action(Action::Activate); // seed: what's playing
@@ -1027,7 +1032,7 @@ fn the_full_screen_panel_still_just_follows_the_speakers() {
     // It is glanced at while a track plays, so it steers itself: no seed to
     // choose, no menu, one question re-asked when the answer would change.
     let mut app = connected_app();
-    app.queue.replace(vec![track("first"), track("second")]);
+    app.replace_queue(vec![track("first"), track("second")]);
     app.play_index(0);
     assert!(app.now_discover.is_none(), "nothing until the tab is looked at");
 
@@ -1657,28 +1662,147 @@ fn a_self_signed_session_carries_its_trust_into_every_connect() {
     );
 }
 
+/// A queue row from a named server, for the cross-server tests.
+fn at(server: &str, path: &str) -> Queued {
+    Queued { origin: Origin { server: server.to_string(), peer: None }, track: track(path) }
+}
+
 #[test]
-fn adopting_a_server_keeps_the_music_but_not_the_queue() {
-    let mut app = App::new(Some("http://attic.local:3000".into()), None, None);
+fn a_queued_track_remembers_the_server_it_came_from() {
+    // Contract clause 30: every queued track carries its origin.
+    let mut app = connected_app();
+    app.push_queue(track("music/a.mp3"));
+    assert_eq!(app.queue.items[0].origin, Origin { server: "http://host:3000".into(), peer: None });
+
+    // A tunnel session stamps its identity, never the loopback port the
+    // bridge happens to be on this run.
+    let mut app = App::new(Some("http://127.0.0.1:5123".into()), None, None);
+    app.session.server_id = "mstream+iroh://endpoint".into();
+    app.push_queue(track("music/a.mp3"));
+    assert_eq!(app.queue.items[0].origin.server, "mstream+iroh://endpoint");
+}
+
+#[test]
+fn adopting_a_server_keeps_the_music_and_the_queue() {
+    // Contract clause 11: a switch changes the browsed server and nothing
+    // else. Clause 30: each row then plays from its own server.
+    let mut app = App::new(Some("http://attic.local:3000".into()), Some("attic-token".into()), None);
     app.connected = true;
-    app.queue.items.push(track("music/a.mp3"));
-    app.queue.items.push(track("music/b.mp3"));
+    app.servers = vec![
+        KnownServer {
+            id: "http://attic.local:3000".into(),
+            token: Some("attic-token".into()),
+            self_signed: false,
+        },
+        KnownServer {
+            id: "http://office.local:3000".into(),
+            token: Some("office-token".into()),
+            self_signed: true,
+        },
+    ];
+    app.push_queue(track("music/a.mp3"));
+    app.push_queue(track("music/b.mp3"));
     app.queue.current = Some(0);
     app.now_playing = Some(track("music/a.mp3"));
 
-    app.adopt_server(
+    let effects = app.adopt_server(
         "http://office.local:3000".into(),
         "http://office.local:3000".into(),
         None,
+        Some("office-token".into()),
         None,
-        None,
-        false,
+        true,
         None,
     );
+    assert!(effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Connect { .. }))));
     assert!(app.now_playing.is_some(), "what is streaming already has its URL");
-    assert!(app.queue.items.is_empty(), "queued filepaths mean nothing to the new server");
-    assert_eq!(app.queue.current, None);
+    assert_eq!(app.queue.items.len(), 2, "the queue comes along");
+    assert_eq!(app.queue.current, Some(0));
     assert!(!app.connected, "connected again only when the new server answers");
+
+    // Office answers. The attic row still plays from the attic, with the
+    // attic's own token, and nothing about its certificate is special.
+    app.apply_event(Event::Connected {
+        server: "http://office.local:3000".into(),
+        id: "http://office.local:3000".into(),
+        username: None,
+        token: Some("office-token".into()),
+        ping: Box::default(),
+    });
+    let effects = app.play_index(1);
+    assert_eq!(played_url(&effects), "http://attic.local:3000/media/music/b.mp3?token=attic-token");
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Trust(_))));
+
+    // A row queued on office plays from office, whose certificate the
+    // entry trusts by choice — the stream client is told so.
+    app.push_queue(track("music/c.mp3"));
+    let effects = app.play_index(2);
+    assert_eq!(played_url(&effects), "http://office.local:3000/media/music/c.mp3?token=office-token");
+    assert!(effects.iter().any(|e| matches!(e, Effect::Trust(s) if s == "http://office.local:3000")));
+}
+
+#[test]
+fn a_row_on_a_closed_tunnel_walks_on_like_a_refused_one() {
+    // Contract clauses 30 and 37: a tunnel row is reachable only while its
+    // bridge is open; until then it is skipped with a word, not a stall.
+    let mut app = connected_app();
+    app.servers.push(KnownServer {
+        id: "mstream+iroh://faraway".into(),
+        token: Some("t".into()),
+        self_signed: false,
+    });
+    app.queue.push(at("mstream+iroh://faraway", "music/far.mp3"));
+    app.push_queue(track("music/near.mp3"));
+
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://host:3000/media/music/near.mp3?token=tok");
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text.contains("tunnel is closed")),
+        "said why: {:?}",
+        app.message
+    );
+
+    // Once its bridge is open the same row plays through the loopback,
+    // with the token the entry saved.
+    app.open_tunnel = Some(("mstream+iroh://faraway".into(), "http://127.0.0.1:4242".into()));
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://127.0.0.1:4242/media/music/far.mp3?token=t");
+}
+
+#[test]
+fn a_removed_server_takes_its_rows_and_playback_lands_on_the_next_survivor() {
+    // The pure rule first (contract clause 35).
+    let items = vec![at("a", "1"), at("b", "2"), at("a", "3"), at("b", "4")];
+    let sweep = queue_without(&items, "a", Some(0)).unwrap();
+    assert_eq!(sweep.keep.iter().map(|i| i.filepath.as_str()).collect::<Vec<_>>(), ["2", "4"]);
+    assert_eq!((sweep.index, sweep.current_survives), (Some(0), false), "the first survivor after it");
+    let sweep = queue_without(&items, "a", Some(1)).unwrap();
+    assert_eq!((sweep.index, sweep.current_survives), (Some(0), true), "the current row, renumbered");
+    let sweep = queue_without(&items, "b", Some(3)).unwrap();
+    assert_eq!((sweep.index, sweep.current_survives), (Some(1), false), "nothing after it: the last");
+    assert!(queue_without(&items, "c", Some(0)).is_none(), "nothing dropped, nothing to do");
+    let sweep = queue_without(&[at("a", "1")], "a", Some(0)).unwrap();
+    assert!(sweep.keep.is_empty() && sweep.index.is_none());
+
+    // Playing row 0 on the session's server; removing that server plays
+    // the survivor, which lives on the other one.
+    let mut app = connected_app();
+    app.servers = vec![KnownServer { id: "http://b".into(), token: None, self_signed: false }];
+    app.queue.items = vec![at("http://host:3000", "music/1.mp3"), at("http://b", "music/2.mp3")];
+    let effects = app.play_index(0);
+    app.status = PlayerStatus { playing: true, source: played_url(&effects), ..Default::default() };
+    let effects = app.drop_server_items("http://host:3000");
+    assert_eq!(app.queue.items.len(), 1);
+    assert_eq!(played_url(&effects), "http://b/media/music/2.mp3");
+
+    // Idle, and the whole queue was the removed server's: it empties as a
+    // Clear would, quietly.
+    let mut app = connected_app();
+    app.queue.items = vec![at("http://host:3000", "music/1.mp3")];
+    let effects = app.drop_server_items("http://host:3000");
+    assert!(app.queue.items.is_empty());
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Stop))));
+    assert!(app.message.is_none(), "no toast for a sweep");
 }
 
 #[test]
@@ -2372,7 +2496,7 @@ fn the_seed_row_names_the_track_it_would_take() {
     };
     assert_eq!(detail, "nothing playing");
 
-    app.queue.replace(vec![track("playing")]);
+    app.replace_queue(vec![track("playing")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
     let Entry::Discover { detail, .. } = &app.discover.entries[0] else {
@@ -2389,7 +2513,7 @@ fn the_seed_row_names_the_track_it_would_take() {
 #[test]
 fn similar_tracks_are_ordinary_playable_rows() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("seed")]);
+    app.replace_queue(vec![track("seed")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
     app.handle_action(Action::Activate); // seed: what's playing
@@ -2437,7 +2561,7 @@ fn an_artist_drills_into_its_ways_in_without_asking_again() {
     // The entry points arrived with the artist list, so going in costs
     // nothing — the whole reason the server sends them inline.
     let mut app = connected_app();
-    app.queue.replace(vec![track("seed")]);
+    app.replace_queue(vec![track("seed")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
     app.handle_action(Action::Activate); // seed: what's playing
@@ -2663,7 +2787,7 @@ fn a_track_that_will_not_play_is_skipped_rather_than_stopping_everything() {
     // message appeared and nothing moved. One bad file should cost one
     // track, not the session.
     let mut app = connected_app();
-    app.queue.replace(vec![track("broken"), track("fine"), track("also-fine")]);
+    app.replace_queue(vec![track("broken"), track("fine"), track("also-fine")]);
     let started = app.handle_action(Action::PlayPause);
 
     let effects = app.apply_event(failed(&started, "unrecognised format"));
@@ -2683,7 +2807,7 @@ fn a_failure_from_a_track_already_left_is_not_pinned_on_this_one() {
     // unheard, and counted a failure against a track nothing had been
     // tried on.
     let mut app = connected_app();
-    app.queue.replace(vec![track("stalled.mp3"), track("chosen.mp3"), track("after.mp3")]);
+    app.replace_queue(vec![track("stalled.mp3"), track("chosen.mp3"), track("after.mp3")]);
     let stalled = app.handle_action(Action::PlayPause);
     let chosen = app.handle_action(Action::NextTrack);
 
@@ -2707,7 +2831,7 @@ fn a_queue_where_nothing_plays_gives_up_instead_of_looping() {
     // forever, hammering the server and never making a sound.
     let mut app = connected_app();
     app.queue.repeat = Repeat::All;
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
     let started = app.handle_action(Action::PlayPause);
 
     let next = app.apply_event(failed(&started, "nope"));
@@ -2724,7 +2848,7 @@ fn running_out_of_queue_ends_the_run_of_failures() {
     // limit, and the first hiccup after the network came back was
     // declared the end of everything on a queue that was otherwise fine.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b"), track("c")]);
+    app.replace_queue(vec![track("a"), track("b"), track("c")]);
     app.handle_action(Action::PlayPause);
     let second = app.handle_action(Action::NextTrack);
     // The network dies on b; the walk fails through c and runs out.
@@ -2751,7 +2875,7 @@ fn one_track_playing_forgives_the_failures_before_it() {
     // The give-up counter is about a *run* of failures. A queue with one
     // bad file every few tracks must keep going indefinitely.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
     let started = app.handle_action(Action::PlayPause);
     let effects = app.apply_event(failed(&started, "nope"));
     assert_eq!(app.failures, 1);
@@ -2767,7 +2891,7 @@ fn j_aims_the_sonic_path_at_the_highlighted_track() {
     // obvious place to leave from, and the highlighted one is where to
     // arrive — so there is nothing left to ask and it plots straight away.
     let mut app = connected_app();
-    app.queue.replace(vec![track("playing")]);
+    app.replace_queue(vec![track("playing")]);
     app.play_index(0);
     browsing(&mut app, &["far-away"], 0);
 
@@ -2846,7 +2970,7 @@ fn a_disabled_journey_probes_before_naming_a_reason() {
     // scanned yet" — so the answer is a re-ping, not a guess, and the user
     // never reads an explanation that then gets retracted.
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
@@ -2972,7 +3096,7 @@ fn changing_the_length_asks_for_a_different_arc() {
     // of waypoints, so it has to be replotted. Sliding the length does not
     // ask on its own, though: that would be a request per keystroke.
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
@@ -3008,7 +3132,7 @@ fn changing_the_length_asks_for_a_different_arc() {
 #[test]
 fn playing_a_sonic_path_replaces_the_queue_and_starts_it() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("old")]);
+    app.replace_queue(vec![track("old")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
@@ -3036,7 +3160,7 @@ fn playing_a_sonic_path_replaces_the_queue_and_starts_it() {
 #[test]
 fn queueing_a_sonic_path_adds_to_what_is_already_there() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("old")]);
+    app.replace_queue(vec![track("old")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
@@ -3061,7 +3185,7 @@ fn a_stop_row_is_an_ordinary_track_row() {
     // The whole reason the stops are Entry::Track: `a` queues one, and
     // Enter plays the path from there — no new keys, no new rules.
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
@@ -3143,7 +3267,7 @@ fn an_armed_pick_is_called_off_by_escape() {
 #[test]
 fn use_playing_song_takes_what_is_on_the_speakers() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("sounding")]);
+    app.replace_queue(vec![track("sounding")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(sonic_tab(&app)));
     // Landing on the tab with something playing already suggests it as the
@@ -3161,7 +3285,7 @@ fn use_playing_song_takes_what_is_on_the_speakers() {
 #[test]
 fn clearing_an_end_puts_the_row_back_to_not_set() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("sounding")]);
+    app.replace_queue(vec![track("sounding")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(sonic_tab(&app)));
     assert!(app.sonic.start.is_some());
@@ -3177,7 +3301,7 @@ fn clearing_an_end_puts_the_row_back_to_not_set() {
 #[test]
 fn saving_a_path_as_a_playlist_asks_for_a_name_first() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
@@ -3218,7 +3342,7 @@ fn the_path_says_what_it_is_doing_and_why_it_came_back_empty() {
     // A results view with no stops under the controls and no word about
     // why is the one state this tab must never be in.
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
@@ -3267,7 +3391,7 @@ fn the_path_says_what_it_is_doing_and_why_it_came_back_empty() {
 #[test]
 fn start_over_clears_both_ends_and_the_path() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
@@ -3322,7 +3446,7 @@ fn search_replies_that_pass_each_other_cannot_swap_the_results() {
 #[test]
 fn a_path_reply_for_a_length_since_changed_keeps_waiting() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
@@ -3378,7 +3502,7 @@ fn drilling_out_of_search_lights_the_search_tab_spinner() {
 #[test]
 fn a_path_reply_that_arrives_after_start_over_is_dropped() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
@@ -3589,7 +3713,7 @@ fn jumping_to_what_is_playing_goes_to_the_queue() {
             ..Default::default()
         },
     };
-    app.queue.replace(vec![track("a"), named, track("c")]);
+    app.replace_queue(vec![track("a"), named, track("c")]);
     app.play_index(1);
     // Wander off.
     app.focus = Focus::Browser;
@@ -3608,7 +3732,7 @@ fn jumping_to_what_is_playing_goes_to_the_queue() {
 #[test]
 fn jumping_with_nothing_playing_says_so() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("a")]);
+    app.replace_queue(vec![track("a")]);
     assert!(app.handle_action(Action::JumpToPlaying).is_empty());
     assert_eq!(app.focus, Focus::Browser, "the cursor stays where it was");
     assert!(app.message.as_ref().unwrap().text.contains("nothing is playing"));
@@ -3700,7 +3824,7 @@ fn the_genre_chooser_owns_the_keyboard_while_it_is_open() {
     assert_eq!(app.input_mode(), InputMode::Panel);
 
     // Space toggles a genre in there rather than pausing the music.
-    app.queue.replace(vec![track("a")]);
+    app.replace_queue(vec![track("a")]);
     let effects = app.handle_action(Action::PlayPause);
     assert!(effects.is_empty(), "no playback from inside the chooser");
 
@@ -3831,7 +3955,7 @@ fn a_cleared_end_stays_cleared_when_you_come_back() {
     // identical to never having chosen one — so stepping away and back
     // filled it straight back in, which is the one thing it must not do.
     let mut app = connected_app();
-    app.queue.replace(vec![track("playing")]);
+    app.replace_queue(vec![track("playing")]);
     app.play_index(0);
 
     let sonic = sonic_tab(&app);
@@ -3907,7 +4031,7 @@ fn a_wait_nothing_will_answer_is_given_up_on() {
     // that could be closed, and the full-screen Discover panel never had
     // one — and neither can be retried while its flag is still up.
     let mut app = connected_app();
-    app.queue.replace(vec![track("first")]);
+    app.replace_queue(vec![track("first")]);
     app.play_index(0);
     on_the_now_discover_tab(&mut app);
     assert!(app.now_discover.as_ref().unwrap().pending);
@@ -3944,7 +4068,7 @@ fn a_request_carries_the_session_the_panel_is_tuning() {
     app.dj.artist_cooldown = 2;
 
     // Two tracks played, newest first, with the artist of each.
-    app.queue.replace(vec![
+    app.replace_queue(vec![
         track_by("a", "Alpha"),
         track_by("b", "Beta"),
         track_by("c", "Gamma"),
@@ -3968,7 +4092,7 @@ fn a_request_carries_the_session_the_panel_is_tuning() {
 fn the_cooldown_list_does_not_repeat_an_artist() {
     // Three tracks by the same artist should not spend the whole cooldown.
     let mut app = connected_app();
-    app.queue.replace(vec![
+    app.replace_queue(vec![
         track_by("a", "Alpha"),
         track_by("b", "Alpha"),
         track_by("c", "Beta"),
@@ -4054,7 +4178,7 @@ fn switching_autodj_on_with_an_empty_queue_starts_it() {
 #[test]
 fn switching_autodj_on_does_not_jump_a_queue_the_user_built() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
     let effects = app.handle_action(Action::ToggleAutoDj);
     assert!(autodj_effect(&effects).is_none(), "there are tracks waiting already");
 }
@@ -4063,7 +4187,7 @@ fn switching_autodj_on_does_not_jump_a_queue_the_user_built() {
 fn autodj_requests_only_once_the_queue_has_nothing_after_the_current_track() {
     let mut app = connected_app();
     app.autodj = AutoDjMode::BpmKey;
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
 
     let effects = app.play_index(0);
     assert!(autodj_effect(&effects).is_none(), "one track still waiting");
@@ -4090,7 +4214,7 @@ fn autodj_requests_only_once_the_queue_has_nothing_after_the_current_track() {
 fn autodj_picks_are_appended_and_deduped() {
     let mut app = connected_app();
     app.autodj = AutoDjMode::Similar;
-    app.queue.replace(vec![track("a")]);
+    app.replace_queue(vec![track("a")]);
     app.play_index(0);
 
     app.apply_event(Event::AutoDjPick {
@@ -4182,7 +4306,7 @@ fn now_art(app: &App) -> Option<&crate::tui::art::Art> {
 #[test]
 fn starting_a_track_asks_for_its_cover_once() {
     let mut app = connected_app();
-    app.queue.replace(vec![
+    app.replace_queue(vec![
         track_with_cover("lib/a.mp3", "aa.jpeg"),
         track_with_cover("lib/b.mp3", "aa.jpeg"),
         track("lib/plain.mp3"),
@@ -4208,7 +4332,7 @@ fn starting_a_track_asks_for_its_cover_once() {
 #[test]
 fn a_cover_reply_reaches_the_playing_track_whenever_it_lands() {
     let mut app = connected_app();
-    app.queue.replace(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
     app.play_index(0);
     assert_eq!(now_art(&app), None, "nothing has arrived yet");
 
@@ -4220,7 +4344,7 @@ fn a_cover_reply_reaches_the_playing_track_whenever_it_lands() {
 
     // "The server has no cover for this" is also an answer, and it must
     // not leave the previous track's art on screen.
-    app.queue.replace(vec![track_with_cover("lib/b.mp3", "bb.jpeg")]);
+    app.replace_queue(vec![track_with_cover("lib/b.mp3", "bb.jpeg")]);
     app.play_index(0);
     app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: None, settled: true });
     assert_eq!(now_art(&app), None);
@@ -4234,7 +4358,7 @@ fn a_cover_nobody_answered_for_is_asked_for_again() {
     // session while the waveform beside it quietly recovered. The
     // waveform's rule, applied here.
     let mut app = connected_app();
-    app.queue.replace(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
     let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into() });
     assert!(app.play_index(0).contains(&asked));
 
@@ -4255,13 +4379,13 @@ fn a_cover_nobody_answered_for_is_asked_for_again() {
 fn the_art_cache_is_bounded() {
     let mut app = connected_app();
     for n in 0..ART_CACHE_CAP {
-        app.queue.replace(vec![track_with_cover("lib/a.mp3", &format!("{n}.jpeg"))]);
+        app.replace_queue(vec![track_with_cover("lib/a.mp3", &format!("{n}.jpeg"))]);
         app.play_index(0);
     }
     assert_eq!(app.art.len(), ART_CACHE_CAP);
 
     // One more starts the cache over rather than growing without bound.
-    app.queue.replace(vec![track_with_cover("lib/a.mp3", "again.jpeg")]);
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "again.jpeg")]);
     app.play_index(0);
     assert_eq!(app.art.len(), 1);
 }
@@ -4281,7 +4405,7 @@ fn announced_url(effects: &[Effect]) -> Option<String> {
 /// the announced one.
 fn blending(app: &mut App, tracks: &[&str]) -> (String, String) {
     app.crossfade = 6.0;
-    app.queue.replace(tracks.iter().map(|t| track(t)).collect());
+    app.replace_queue(tracks.iter().map(|t| track(t)).collect());
     let play = app.play_index(0);
     let url = played_url(&play);
     let status = PlayerStatus { source: url.clone(), playing: true, ..Default::default() };
@@ -4306,7 +4430,7 @@ fn a_playing_queue_announces_its_next_track_once() {
 #[test]
 fn no_crossfade_means_no_announcements() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    app.replace_queue(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
     let play = app.play_index(0);
     let url = played_url(&play);
     let effects = app
@@ -4364,7 +4488,7 @@ fn a_handover_the_queue_no_longer_describes_falls_back_to_a_real_play() {
 
     // The engine blended into b, but by the time the event lands the queue
     // has been rebuilt around different tracks entirely.
-    app.queue.replace(vec![track("lib/x.mp3"), track("lib/y.mp3")]);
+    app.replace_queue(vec![track("lib/x.mp3"), track("lib/y.mp3")]);
     let effects = app.apply_event(Event::HandedOver { from: url, to: announced });
     assert!(
         played_url(&effects).contains("x.mp3"),
@@ -4400,14 +4524,14 @@ fn a_push_behind_the_wrap_reannounces_the_new_tail() {
     let mut app = connected_app();
     app.crossfade = 6.0;
     app.queue.repeat = Repeat::All;
-    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    app.replace_queue(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
     let play = app.play_index(1);
     let url = played_url(&play);
     let status = PlayerStatus { source: url.clone(), playing: true, ..Default::default() };
     let effects = app.apply_event(Event::Status(status.clone()));
     assert!(announced_url(&effects).expect("the wrap").contains("a.mp3"));
 
-    app.queue.push(track("lib/c.mp3"));
+    app.push_queue(track("lib/c.mp3"));
     let effects = app.apply_event(Event::Status(status));
     let announced = announced_url(&effects).expect("the push changed the answer");
     assert!(announced.contains("c.mp3"), "{announced}");
@@ -4440,7 +4564,7 @@ fn a_duplicate_next_is_never_announced_and_still_advances() {
     // never announced, and the transition takes the ordinary road.
     let mut app = connected_app();
     app.crossfade = 6.0;
-    app.queue.replace(vec![track("lib/x.mp3"), track("lib/x.mp3"), track("lib/y.mp3")]);
+    app.replace_queue(vec![track("lib/x.mp3"), track("lib/x.mp3"), track("lib/y.mp3")]);
     let play = app.play_index(0);
     let url = played_url(&play);
     let status = PlayerStatus { source: url.clone(), playing: true, ..Default::default() };
@@ -4462,7 +4586,7 @@ fn the_fallback_adopts_the_copy_ahead_not_behind() {
     // walk backwards into rows already heard (review finding).
     let mut app = connected_app();
     app.crossfade = 6.0;
-    app.queue.replace(vec![
+    app.replace_queue(vec![
         track("lib/a.mp3"),
         track("lib/b.mp3"),
         track("lib/a.mp3"),
@@ -4549,7 +4673,7 @@ fn gapless_announces_the_next_track_without_a_blend() {
     // the engine to hold something appendable, blend or no blend.
     let mut app = connected_app();
     app.gapless = true;
-    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    app.replace_queue(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
     let play = app.play_index(0);
     let url = played_url(&play);
     let effects = app
@@ -4569,7 +4693,7 @@ fn gapless_repeat_one_announces_its_own_seam() {
     let mut app = connected_app();
     app.gapless = true;
     app.queue.repeat = Repeat::One;
-    app.queue.replace(vec![track("lib/a.mp3")]);
+    app.replace_queue(vec![track("lib/a.mp3")]);
     let play = app.play_index(0);
     let url = played_url(&play);
     let effects = app.apply_event(Event::Status(PlayerStatus {
@@ -4745,7 +4869,7 @@ fn a_lone_track_under_repeat_all_gets_its_seam() {
     let mut app = connected_app();
     app.gapless = true;
     app.queue.repeat = Repeat::All;
-    app.queue.replace(vec![track("lib/only.mp3")]);
+    app.replace_queue(vec![track("lib/only.mp3")]);
     let play = app.play_index(0);
     let url = played_url(&play);
     let effects = app.apply_event(Event::Status(PlayerStatus {
@@ -4769,7 +4893,7 @@ fn turning_crossfade_on_withdraws_a_standing_seam_announcement() {
     let mut app = connected_app();
     app.gapless = true;
     app.queue.repeat = Repeat::One;
-    app.queue.replace(vec![track("lib/a.mp3")]);
+    app.replace_queue(vec![track("lib/a.mp3")]);
     let play = app.play_index(0);
     let url = played_url(&play);
     let effects = app.apply_event(Event::Status(PlayerStatus {

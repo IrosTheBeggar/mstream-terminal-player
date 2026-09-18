@@ -1116,7 +1116,6 @@ gui:
     sign_in: "questo server richiede l'accesso"
     tunnel_signin: "tunnel aperto — accedi per continuare"
     no_code: "il codice di associazione di questo server è andato perso — incollalo di nuovo nel player classico"
-    queue_cleared: "coda svuotata — i suoi brani erano del server precedente; connessione a %{server}…"
     remove_title: "RIMUOVI SERVER"
     remove_body: "Dimenticare %{server}?"
     remove_tunnel_note: "Il suo codice di associazione è l'unica via di ritorno — rimuovendolo si perde."

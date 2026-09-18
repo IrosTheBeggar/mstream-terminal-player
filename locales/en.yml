@@ -1116,7 +1116,6 @@ gui:
     sign_in: "this server needs a sign-in"
     tunnel_signin: "tunnel open — sign in to continue"
     no_code: "the pairing code for this server is gone — paste it again in the classic player"
-    queue_cleared: "queue cleared — its tracks lived on the last server; reaching %{server}…"
     remove_title: "REMOVE SERVER"
     remove_body: "Forget %{server}?"
     remove_tunnel_note: "Its pairing code is the only way back in — removing forgets it."

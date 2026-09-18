@@ -72,6 +72,8 @@ impl Shell {
             // Nothing durable to save to in a spike. localStorage is the
             // obvious home when this grows up.
             Effect::SaveSession => {}
+            // The browser's fetch owns TLS; nothing to register.
+            Effect::Trust(_) => {}
         }
     }
 }
@@ -141,6 +143,8 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         theme: config::ThemePrefs::default(),
         display: config::DisplayPrefs::default(),
         mouse: config::MousePrefs::default(),
+        // One server, the session's; nothing else to reach.
+        servers: Vec::new(),
     };
     let (theme, _warnings) = ui::Theme::from_prefs(&start.theme);
     ui::set_theme(theme);

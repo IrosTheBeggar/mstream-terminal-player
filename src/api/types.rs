@@ -157,7 +157,7 @@ pub struct TranscodeInfo {
 }
 
 /// Track metadata, as nested under `metadata` on library responses.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TrackMetadata {
     pub title: Option<String>,
@@ -217,7 +217,7 @@ impl TrackMetadata {
 
 /// A library track. `filepath` is the vpath-prefixed path used to build
 /// `/media/...` URLs.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub filepath: String,
     #[serde(default, deserialize_with = "null_default")]

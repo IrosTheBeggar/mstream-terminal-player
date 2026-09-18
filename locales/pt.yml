@@ -1116,7 +1116,6 @@ gui:
     sign_in: "este servidor precisa de login"
     tunnel_signin: "túnel aberto — entre para continuar"
     no_code: "o código de pareamento deste servidor se perdeu — cole-o de novo no player clássico"
-    queue_cleared: "fila esvaziada — suas faixas eram do servidor anterior; conectando a %{server}…"
     remove_title: "REMOVER SERVIDOR"
     remove_body: "Esquecer %{server}?"
     remove_tunnel_note: "Seu código de pareamento é o único caminho de volta — remover o esquece."

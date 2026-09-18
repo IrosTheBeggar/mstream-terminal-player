@@ -1116,7 +1116,6 @@ gui:
     sign_in: "dieser Server braucht eine Anmeldung"
     tunnel_signin: "Tunnel offen — zum Fortfahren anmelden"
     no_code: "der Kopplungscode für diesen Server fehlt — im klassischen Player neu einfügen"
-    queue_cleared: "Warteschlange geleert — ihre Titel gehörten zum letzten Server; erreiche %{server}…"
     remove_title: "SERVER ENTFERNEN"
     remove_body: "%{server} vergessen?"
     remove_tunnel_note: "Sein Kopplungscode ist der einzige Weg zurück — Entfernen vergisst ihn."

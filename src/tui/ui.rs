@@ -3268,13 +3268,17 @@ mod tests {
             filepath: "lib/a.mp3".into(),
             metadata: TrackMetadata { duration: seconds, ..Default::default() },
         };
+        let home = |t: Track| crate::tui::app::Queued {
+            origin: crate::tui::app::Origin { server: "http://host".into(), peer: None },
+            track: t,
+        };
         let mut queue = Queue::default();
         assert_eq!(queue_title(&queue), " Queue (0) ");
 
-        queue.replace(vec![track(Some(2400.0)), track(Some(1800.0))]);
+        queue.replace(vec![home(track(Some(2400.0))), home(track(Some(1800.0)))]);
         assert_eq!(queue_title(&queue), " Queue (2) · 1h 10m ");
 
-        queue.replace(vec![track(None)]);
+        queue.replace(vec![home(track(None))]);
         assert_eq!(queue_title(&queue), " Queue (1) ", "no total when nothing knows its length");
     }
 
@@ -3307,7 +3311,7 @@ mod tests {
     #[test]
     fn transport_shows_track_position_and_modes() {
         let mut app = connected_app();
-        app.queue.replace(vec![Track {
+        app.replace_queue(vec![Track {
             filepath: "lib/a.mp3".into(),
             metadata: TrackMetadata {
                 title: Some("Moonlight".into()),
@@ -3338,7 +3342,7 @@ mod tests {
     #[test]
     fn the_gap_before_a_track_starts_reads_as_starting_not_stopped() {
         let mut app = connected_app();
-        app.queue.replace(vec![Track {
+        app.replace_queue(vec![Track {
             filepath: "lib/a.mp3".into(),
             metadata: TrackMetadata {
                 title: Some("Moonlight".into()),
@@ -3394,7 +3398,7 @@ mod tests {
     #[test]
     fn the_now_playing_screen_replaces_the_frame() {
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.play_index(0);
         app.status.playing = true;
         app.status.position = 71.0;
@@ -3601,7 +3605,7 @@ mod tests {
         // corrected offset away with every frame: the selection stuck to
         // the bottom edge and the list slid underneath it.
         let mut app = connected_app();
-        app.queue.replace(
+        app.replace_queue(
             (0..40)
                 .map(|i| Track {
                     filepath: format!("lib/{i:02}.mp3"),
@@ -4164,7 +4168,7 @@ mod tests {
         // the rule below it. Off by one it is a dangling join: a ┴ under
         // nothing, and the border stopping at a blank cell.
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.play_index(0);
         app.handle_action(Action::ToggleNowPlaying);
 
@@ -4246,7 +4250,7 @@ mod tests {
     #[test]
     fn the_now_playing_screen_survives_a_small_terminal() {
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.play_index(0);
         app.handle_action(Action::ToggleNowPlaying);
         for (w, h) in [(20u16, 4u16), (32, 6), (200, 60)] {
@@ -4335,7 +4339,7 @@ mod tests {
         // A list of neighbours means nothing without saying neighbours of
         // what, so every view in the tab carries the seed in its title.
         let mut app = connected_app();
-        app.queue.replace(vec![Track {
+        app.replace_queue(vec![Track {
             filepath: "lib/seed.mp3".into(),
             metadata: TrackMetadata {
                 artist: Some("Seed Artist".into()),
@@ -4393,7 +4397,7 @@ mod tests {
     #[test]
     fn a_sonic_path_shows_the_arc_it_would_queue() {
         let mut app = connected_app();
-        app.queue.replace(vec![Track {
+        app.replace_queue(vec![Track {
             filepath: "lib/start.mp3".into(),
             metadata: TrackMetadata {
                 artist: Some("First".into()),
@@ -4475,7 +4479,7 @@ mod tests {
     #[test]
     fn a_sonic_path_survives_a_small_terminal() {
         let mut app = connected_app();
-        app.queue.replace(vec![Track { filepath: "a".into(), metadata: Default::default() }]);
+        app.replace_queue(vec![Track { filepath: "a".into(), metadata: Default::default() }]);
         app.play_index(0);
         app.files.set(vec![crate::tui::app::Entry::Track {
             label: "b".into(),
@@ -4684,7 +4688,7 @@ mod tests {
     #[test]
     fn the_queue_column_opens_and_closes_on_tab() {
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         assert!(!draw(&mut app).contains("Queue ("));
 
         app.handle_action(Action::CycleFocus);
@@ -4727,7 +4731,7 @@ mod tests {
     #[test]
     fn the_queue_heading_shares_that_line_so_the_lists_start_level() {
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Artist"], &[]))));
         app.handle_action(Action::CycleFocus);
 
@@ -5015,7 +5019,7 @@ mod tests {
     fn the_visualizer_names_its_mode_and_v_moves_between_them() {
         use crate::tui::viz::{VIZ_MODES, VizMode};
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.play_index(0);
         app.handle_action(Action::ToggleNowPlaying);
         while app.now_tab() != NowTab::Visualizer {
@@ -5121,7 +5125,7 @@ mod tests {
         let mut app = connected_app();
         assert!(!app.drawing_audio(), "the browser does not need thirty frames a second");
 
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.play_index(0);
         app.handle_action(Action::ToggleNowPlaying);
         assert!(!app.drawing_audio(), "nor does the queue tab of the now-playing view");
@@ -5138,7 +5142,7 @@ mod tests {
     #[test]
     fn the_card_says_what_the_file_is() {
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.play_index(0);
         app.handle_action(Action::ToggleNowPlaying);
 
@@ -5466,7 +5470,7 @@ mod tests {
     #[test]
     fn the_queue_key_says_whether_the_column_is_open() {
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
 
         let closed = draw_sized(&mut app, 140, 20);
         assert!(closed.contains(" Tab:Queue "), "{}", closed.lines().next().unwrap());

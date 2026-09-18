@@ -1116,7 +1116,6 @@ gui:
     sign_in: "ten serwer wymaga logowania"
     tunnel_signin: "tunel otwarty — zaloguj się, aby kontynuować"
     no_code: "kod parowania tego serwera przepadł — wklej go ponownie w klasycznym odtwarzaczu"
-    queue_cleared: "kolejka wyczyszczona — jej utwory należały do poprzedniego serwera; łączenie z %{server}…"
     remove_title: "USUŃ SERWER"
     remove_body: "Zapomnieć %{server}?"
     remove_tunnel_note: "Jego kod parowania to jedyna droga powrotu — usunięcie go zapomina."

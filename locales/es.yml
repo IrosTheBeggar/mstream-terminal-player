@@ -1116,7 +1116,6 @@ gui:
     sign_in: "este servidor necesita iniciar sesión"
     tunnel_signin: "túnel abierto — inicia sesión para continuar"
     no_code: "el código de emparejamiento de este servidor se ha perdido — pégalo de nuevo en el reproductor clásico"
-    queue_cleared: "cola vaciada — sus pistas eran del servidor anterior; conectando con %{server}…"
     remove_title: "QUITAR SERVIDOR"
     remove_body: "¿Olvidar %{server}?"
     remove_tunnel_note: "Su código de emparejamiento es la única vía de vuelta — quitarlo lo olvida."

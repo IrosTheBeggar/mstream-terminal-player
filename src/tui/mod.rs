@@ -82,6 +82,28 @@ pub(crate) struct Startup {
     pub display: config::DisplayPrefs,
     /// Whether to ask the terminal to report the mouse.
     pub mouse: config::MousePrefs,
+    /// Every saved server, with its token: what a queued track needs to be
+    /// reached from a session on another server (contract clause 30).
+    pub servers: Vec<app::KnownServer>,
+}
+
+/// The saved servers as the App's queue needs them (contract clause 30):
+/// each entry's identity, its token, and whether its certificate is
+/// trusted by choice.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn known_servers(
+    config: &config::Config,
+    credentials: &config::Credentials,
+) -> Vec<app::KnownServer> {
+    config
+        .servers
+        .iter()
+        .map(|entry| app::KnownServer {
+            id: entry.url.clone(),
+            token: config::token_for(credentials, &entry.url),
+            self_signed: entry.self_signed,
+        })
+        .collect()
 }
 
 /// Resolve the starting point from stored config plus any overrides. Shared
@@ -127,6 +149,7 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
         .filter(|s| crate::quickconnect::is_tunnel_id(s))
         .and_then(|id| config::pairing_for(&credentials, id));
 
+    let servers = known_servers(&config, &credentials);
     Startup {
         server,
         token,
@@ -139,6 +162,7 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
         theme: config.theme,
         display: config.display,
         mouse: config.mouse,
+        servers,
     }
 }
 
@@ -190,6 +214,7 @@ pub(crate) fn app_from(start: Startup) -> App {
         .with_keys(&start.keys)
         .with_tunnel(start.tunnel_code);
     app.session.self_signed = start.self_signed;
+    app.servers = start.servers;
     if let Some(path) = start.last_path {
         // Pick up where the last session left off; `start` browses this.
         app.path = path;
@@ -569,6 +594,9 @@ pub(crate) fn dispatch(
                 let _ = api_tx.send(cmd);
             }
             Effect::Discover => worker::spawn_discovery(event_tx.clone()),
+            // A queued track's server that presents its own certificate:
+            // the stream client extends the trust the entry opted into.
+            Effect::Trust(server) => crate::engine::http::trust_server(&server),
             Effect::SaveSession => {
                 // A read-only config directory shouldn't take the app down;
                 // the sign-in just won't survive to the next run.

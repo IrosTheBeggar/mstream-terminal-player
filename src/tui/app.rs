@@ -58,6 +58,11 @@ pub enum Effect {
     SaveSession,
     /// Look for servers advertising themselves on the local network.
     Discover,
+    /// Trust this server's own TLS certificate for the streams about to be
+    /// opened against it — a queued track's server, which may not be the
+    /// session's (contract clause 30). Idempotent; the shell registers the
+    /// host with the stream client.
+    Trust(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -543,9 +548,89 @@ impl Pane {
     }
 }
 
+/// Where a queued track lives: the saved server's identity — the string the
+/// config keys entries by (a URL, or a tunnel id) — and, for a federated
+/// peer, the peer's row id on that parent. Stamped when the track is
+/// queued, read when it plays: a queue can mix servers (contract clause
+/// 30), and a switch changes the browsed server, never the queue (11).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Origin {
+    pub server: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<i64>,
+}
+
+/// One queue row: the track, and where it came from. Derefs to the track
+/// so every reader that only wants its tags keeps reading them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Queued {
+    pub origin: Origin,
+    pub track: Track,
+}
+
+impl std::ops::Deref for Queued {
+    type Target = Track;
+    fn deref(&self) -> &Track {
+        &self.track
+    }
+}
+
+/// A saved server as the queue needs to know it: enough to reach a track
+/// that lives somewhere other than the session (contract clause 30).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownServer {
+    /// The identity the config keys the entry by: its URL, or a tunnel id.
+    pub id: String,
+    pub token: Option<String>,
+    pub self_signed: bool,
+}
+
+/// How to reach a queued track's server right now: the base its stream URL
+/// is built on, the token that authenticates it, and whether its
+/// certificate is trusted by the user's choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reach {
+    pub base: String,
+    pub token: Option<String>,
+    pub self_signed: bool,
+}
+
+/// The queue without `server`'s rows, and where playback lands afterwards
+/// (contract clause 35): the current row's new position when it survives,
+/// else the first survivor after it, else the last survivor. `None` when
+/// no row belonged to `server`. Pure.
+pub(crate) struct Sweep {
+    pub keep: Vec<Queued>,
+    pub index: Option<usize>,
+    pub current_survives: bool,
+}
+
+pub(crate) fn queue_without(items: &[Queued], server: &str, current: Option<usize>) -> Option<Sweep> {
+    let mut keep = Vec::with_capacity(items.len());
+    let mut index = None;
+    let mut current_survives = false;
+    for (i, item) in items.iter().enumerate() {
+        if crate::config::same_server(&item.origin.server, server) {
+            continue;
+        }
+        if Some(i) == current {
+            current_survives = true;
+            index = Some(keep.len());
+        } else if current.is_some_and(|cur| i > cur) && !current_survives && index.is_none() {
+            index = Some(keep.len());
+        }
+        keep.push(item.clone());
+    }
+    if keep.len() == items.len() {
+        return None;
+    }
+    let index = if keep.is_empty() { None } else { Some(index.unwrap_or(keep.len() - 1)) };
+    Some(Sweep { keep, index, current_survives })
+}
+
 #[derive(Debug, Default)]
 pub struct Queue {
-    pub items: Vec<Track>,
+    pub items: Vec<Queued>,
     pub current: Option<usize>,
     pub state: ListState,
     pub repeat: Repeat,
@@ -563,13 +648,13 @@ impl Default for Repeat {
 }
 
 impl Queue {
-    pub fn replace(&mut self, tracks: Vec<Track>) {
+    pub fn replace(&mut self, tracks: Vec<Queued>) {
         self.items = tracks;
         self.current = None;
         self.state.select(if self.items.is_empty() { None } else { Some(0) });
     }
 
-    pub fn push(&mut self, track: Track) {
+    pub fn push(&mut self, track: Queued) {
         self.items.push(track);
         if self.state.selected().is_none() {
             self.state.select(Some(0));
@@ -1076,6 +1161,18 @@ pub struct App {
     /// Which server this is, whose token, as one value — not five parallel
     /// fields that every connect path had to remember together (audit #56).
     pub session: Session,
+    /// Every saved server as the queue needs it — enough to reach a track
+    /// that lives somewhere other than the session (contract clause 30).
+    /// Seeded by the shell from the config and the credentials; the
+    /// session's own server is answered from `session` first.
+    pub servers: Vec<KnownServer>,
+    /// The Quick Connect bridge the api worker holds open, by identity and
+    /// loopback address. One at a time (the worker's rule): a queued track
+    /// on another tunnel is unreachable until that server is dialled again.
+    pub open_tunnel: Option<(String, String)>,
+    /// Booted with `--bundled-server`: the installer's own server, which the
+    /// servers room never offers to remove (contract clauses 50–58).
+    pub bundled_server: Option<String>,
     pub connected: bool,
     pub connecting: bool,
     pub connect: ConnectForm,
@@ -1321,6 +1418,9 @@ impl App {
                 username,
                 self_signed: false,
             },
+            servers: Vec::new(),
+            open_tunnel: None,
+            bundled_server: None,
             connected: false,
             connecting: false,
             connect: ConnectForm::default(),
@@ -2208,7 +2308,7 @@ impl App {
             // Enter on a neighbour queues it and starts it.
             if let Some(track) = self.now_discover_selected() {
                 let label = track.display_name();
-                self.queue.push(track);
+                self.push_queue(track);
                 self.info(format!("playing {label}"));
                 return self.play_index(self.queue.items.len() - 1);
             }
@@ -2323,7 +2423,7 @@ impl App {
                 if tracks.is_empty() {
                     return Vec::new();
                 }
-                self.queue.replace(tracks);
+                self.replace_queue(tracks);
                 self.play_index(offset)
             }
         }
@@ -3051,7 +3151,7 @@ impl App {
                 _ => None,
             },
             Focus::Queue => {
-                self.queue.state.selected().and_then(|i| self.queue.items.get(i)).cloned()
+                self.queue.state.selected().and_then(|i| self.queue.items.get(i)).map(|item| item.track.clone())
             }
         }
     }
@@ -3064,7 +3164,8 @@ impl App {
         if let Some(track) = self.now_discover_selected() {
             let label = track.display_name();
             let was_empty = self.queue.items.is_empty();
-            self.queue.push(track);
+            let queued = self.queued(track);
+            self.queue.push(queued);
             self.info(format!("queued {label}"));
             if was_empty && self.status.is_idle() {
                 return self.play_index(0);
@@ -3079,7 +3180,8 @@ impl App {
         };
         let label = track.display_name();
         let was_empty = self.queue.items.is_empty();
-        self.queue.push(*track);
+        let queued = self.queued(*track);
+        self.queue.push(queued);
         self.info(format!("queued {label}"));
 
         // Nothing playing and nothing queued before: start immediately.
@@ -3112,8 +3214,169 @@ impl App {
     /// One row's media URL, by the same road [`App::play_index`] builds the
     /// one it plays. None only when the URL cannot be built at all, which
     /// play_index would have refused too.
-    fn queue_url(&self, track: &Track) -> Option<String> {
-        urls::media_url(&self.session.server, &track.filepath, self.session.token.as_deref()).ok()
+    fn queue_url(&self, item: &Queued) -> Option<String> {
+        self.stream_url(item).ok().map(|(url, _)| url)
+    }
+
+    /// The session's identity as a queue origin: what the config keys the
+    /// server by — its URL, or a tunnel id — never the loopback address.
+    pub(crate) fn origin(&self) -> Origin {
+        let server = if self.session.server_id.is_empty() {
+            self.session.server.clone()
+        } else {
+            self.session.server_id.clone()
+        };
+        Origin { server, peer: None }
+    }
+
+    /// Stamp a track with where it came from — the session — on its way
+    /// into the queue (contract clause 30).
+    pub(crate) fn queued(&self, track: Track) -> Queued {
+        Queued { origin: self.origin(), track }
+    }
+
+    pub(crate) fn queued_all(&self, tracks: Vec<Track>) -> Vec<Queued> {
+        let origin = self.origin();
+        tracks.into_iter().map(|track| Queued { origin: origin.clone(), track }).collect()
+    }
+
+    /// Replace the queue with these tracks, stamped as the session's.
+    pub(crate) fn replace_queue(&mut self, tracks: Vec<Track>) {
+        let tracks = self.queued_all(tracks);
+        self.queue.replace(tracks);
+    }
+
+    /// Append one track, stamped as the session's.
+    pub(crate) fn push_queue(&mut self, track: Track) {
+        let track = self.queued(track);
+        self.queue.push(track);
+    }
+
+    /// How to reach a queued track's server right now (contract clause 30):
+    /// the session answers for its own server; a saved standard server
+    /// answers from the book; a tunnel server only while its bridge is
+    /// open — the worker holds one at a time, so a track on another tunnel
+    /// waits for that server to be dialled again.
+    pub(crate) fn reach(&self, origin: &Origin) -> Result<Reach, String> {
+        let live = if self.session.server_id.is_empty() {
+            &self.session.server
+        } else {
+            &self.session.server_id
+        };
+        if !live.is_empty() && crate::config::same_server(&origin.server, live) && origin.peer.is_none() {
+            return Ok(Reach {
+                base: self.session.server.clone(),
+                token: self.session.token.clone(),
+                self_signed: self.session.self_signed,
+            });
+        }
+        let shown = crate::quickconnect::display_server(&origin.server);
+        if origin.peer.is_some() {
+            return Err(format!("{shown}: a shared server's tracks cannot be reached yet"));
+        }
+        let known = self.servers.iter().find(|s| crate::config::same_server(&s.id, &origin.server));
+        if crate::quickconnect::is_tunnel_id(&origin.server) {
+            let open = self
+                .open_tunnel
+                .as_ref()
+                .filter(|(id, _)| crate::config::same_server(id, &origin.server));
+            let Some((_, local_url)) = open else {
+                return Err(format!("{shown} is not connected — its tunnel is closed"));
+            };
+            return Ok(Reach {
+                base: local_url.clone(),
+                token: known.and_then(|s| s.token.clone()),
+                self_signed: false,
+            });
+        }
+        let Some(known) = known else {
+            return Err(format!("{shown} is no longer a saved server"));
+        };
+        Ok(Reach { base: known.id.clone(), token: known.token.clone(), self_signed: known.self_signed })
+    }
+
+    /// A queued track's stream URL, built from its own server, with how
+    /// that server was reached (contract clause 30).
+    pub(crate) fn stream_url(&self, item: &Queued) -> Result<(String, Reach), String> {
+        let reach = self.reach(&item.origin)?;
+        let url = urls::media_url(&reach.base, &item.filepath, reach.token.as_deref())?;
+        Ok((url, reach))
+    }
+
+    /// A removed server takes its queued tracks with it, silently (contract
+    /// clause 35): the playing row keeps playing where it survives; else
+    /// playback lands on the next survivor — playing when something was —
+    /// and a queue that belonged wholly to the server ends as a Clear would.
+    pub(crate) fn drop_server_items(&mut self, server: &str) -> Vec<Effect> {
+        let Some(sweep) = queue_without(&self.queue.items, server, self.queue.current) else {
+            return Vec::new();
+        };
+        let was_playing = self.status.playing && !self.status.paused;
+        let was_on = !self.status.is_idle();
+        // Rows shifted under the announcement; the refresh at the end
+        // re-announces from wherever playback lands.
+        self.announced = None;
+        self.queue.items = sweep.keep;
+        if self.queue.items.is_empty() {
+            self.queue.clear();
+            self.now_playing = None;
+            self.failures = 0;
+            let mut effects = vec![Effect::Audio(AudioCmd::Stop)];
+            effects.extend(self.refresh_prepared());
+            return effects;
+        }
+        let mut effects = match (sweep.current_survives, sweep.index) {
+            (true, Some(index)) => {
+                self.queue.current = Some(index);
+                self.queue.state.select(Some(index));
+                Vec::new()
+            }
+            (false, Some(index)) if was_playing => self.play_index(index),
+            (false, Some(index)) => {
+                self.now_playing = None;
+                self.queue.current = None;
+                self.queue.state.select(Some(index));
+                if was_on { vec![Effect::Audio(AudioCmd::Stop)] } else { Vec::new() }
+            }
+            _ => Vec::new(),
+        };
+        effects.extend(self.refresh_prepared());
+        effects
+    }
+
+    /// A queued track that cannot even be asked for — its server is gone
+    /// from the list, its tunnel is closed. It walks on exactly as a track
+    /// the engine refused would (contract clause 37).
+    fn unplayable(&mut self, index: usize, why: String) -> Vec<Effect> {
+        self.queue.start(index);
+        self.now_playing = self.queue.items.get(index).map(|item| item.track.clone());
+        self.starting = None;
+        self.playback_failed(why)
+    }
+
+    /// One source would not play: say which, count it, and carry on to the
+    /// next — or stop once every row has failed in turn (contract clause
+    /// 37). Shared by the engine's refusal and a URL that could not be
+    /// built at all.
+    fn playback_failed(&mut self, error: String) -> Vec<Effect> {
+        let what = self
+            .now_playing
+            .as_ref()
+            .map(Track::display_name)
+            .unwrap_or_else(|| "that track".to_string());
+        self.failures += 1;
+        // A queue where nothing plays must not be walked forever —
+        // with repeat on, skipping would go round and round.
+        if self.failures >= self.queue.items.len().max(1) {
+            self.failures = 0;
+            self.now_playing = None;
+            self.queue.current = None;
+            self.error(format!("{what} could not be played, and nor could the rest"));
+            return vec![Effect::Audio(AudioCmd::Stop)];
+        }
+        self.error(format!("skipping {what} — {error}"));
+        // Manual, so repeat-one doesn't sit on the broken track.
+        self.skip(true)
     }
 
     /// The queue row whose media URL is `url`, if any. A scan, but of an
@@ -3251,6 +3514,7 @@ impl App {
         if shuffle {
             fastrand::shuffle(&mut tracks);
         }
+        let tracks = self.queued_all(tracks);
         self.queue.replace(tracks);
         self.play_index(0)
     }
@@ -3265,7 +3529,7 @@ impl App {
         }
         let count = tracks.len();
         let was_empty = self.queue.items.is_empty();
-        for track in tracks {
+        for track in self.queued_all(tracks) {
             self.queue.push(track);
         }
         self.info(format!("queued {count}"));
@@ -3276,24 +3540,23 @@ impl App {
     }
 
     pub fn play_index(&mut self, index: usize) -> Vec<Effect> {
-        let Some(track) = self.queue.items.get(index).cloned() else {
+        let Some(item) = self.queue.items.get(index).cloned() else {
             return Vec::new();
         };
-        let session = &self.session;
-        let url = match urls::media_url(&session.server, &track.filepath, session.token.as_deref()) {
-            Ok(url) => url,
-            Err(e) => {
-                self.error(e);
-                return Vec::new();
-            }
+        // From the track's own server, whichever is browsed (contract
+        // clause 30). A row that cannot be reached walks on like a row
+        // the engine refused.
+        let (url, reach) = match self.stream_url(&item) {
+            Ok(built) => built,
+            Err(why) => return self.unplayable(index, why),
         };
         self.queue.start(index);
-        let hint = track.metadata.duration;
+        let hint = item.metadata.duration;
         // Taken before the track moves into `now_playing`; the shape is
         // asked for by path, so nothing else about the track is needed.
-        let filepath = track.filepath.clone();
-        self.remember_played(&track);
-        self.now_playing = Some(track);
+        let filepath = item.filepath.clone();
+        self.remember_played(&item.track);
+        self.now_playing = Some(item.track);
         // Every Play wipes the engine's pending next (play_source clears
         // it), so whatever announcement stood is now this side's belief
         // alone. Drop it and the trailing refresh re-announces — free when
@@ -3306,7 +3569,11 @@ impl App {
         // one.
         self.seek_goal = None;
 
-        let mut effects = vec![Effect::Audio(AudioCmd::Play { url, duration_hint: hint })];
+        let mut effects = Vec::new();
+        if reach.self_signed {
+            effects.push(Effect::Trust(reach.base.clone()));
+        }
+        effects.push(Effect::Audio(AudioCmd::Play { url, duration_hint: hint }));
         effects.extend(self.fetch_art());
         effects.extend(self.fetch_waveform(&filepath));
         effects.extend(self.maybe_autodj());
@@ -3557,7 +3824,7 @@ impl App {
                     .or_else(|| self.index_of_url(&to));
                 match adopted {
                     Some(index) => {
-                        let track = self.queue.items[index].clone();
+                        let track = self.queue.items[index].track.clone();
                         self.queue.start(index);
                         self.remember_played(&track);
                         self.now_playing = Some(track);
@@ -3613,24 +3880,7 @@ impl App {
                 // One bad file used to end the listening session: the message
                 // appeared and the queue simply stopped. Say which track, and
                 // carry on to the next.
-                let what = self
-                    .now_playing
-                    .as_ref()
-                    .map(Track::display_name)
-                    .unwrap_or_else(|| "that track".to_string());
-                self.failures += 1;
-                // A queue where nothing plays must not be walked forever —
-                // with repeat on, skipping would go round and round.
-                if self.failures >= self.queue.items.len().max(1) {
-                    self.failures = 0;
-                    self.now_playing = None;
-                    self.queue.current = None;
-                    self.error(format!("{what} could not be played, and nor could the rest"));
-                    return vec![Effect::Audio(AudioCmd::Stop)];
-                }
-                self.error(format!("skipping {what} — {error}"));
-                // Manual, so repeat-one doesn't sit on the broken track.
-                self.skip(true)
+                self.playback_failed(error)
             }
             // Everything about who we are connected to and how goes
             // through one door into session.rs, which owns the connect

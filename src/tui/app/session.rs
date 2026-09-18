@@ -137,12 +137,10 @@ impl App {
     /// server switch. The same door as [`App::begin`], with the teardown a
     /// mid-session change needs first.
     ///
-    /// What is already streaming keeps playing: its URL was resolved when it
-    /// started and the engine holds it. The REST of the queue cannot come
-    /// along — queued tracks are filepaths resolved against the session's
-    /// server at play time ([`App::play_index`]), so on another server they
-    /// would be wrong songs or dead URLs. Clearing them is the honest move,
-    /// and the caller says so in a note.
+    /// What is playing keeps playing, and so does the rest of the queue:
+    /// every row carries its own server and resolves against it at play
+    /// time ([`App::play_index`]), so a switch changes what the browser
+    /// shows and nothing else (contract clause 11).
     pub(crate) fn adopt_server(
         &mut self,
         server: String,
@@ -168,16 +166,13 @@ impl App {
         self.begin()
     }
 
-    /// Drop everything that belonged to the server being left: the queue
-    /// (its filepaths resolve against the session's server at play time),
-    /// the announced next, and the search. What is already streaming keeps
-    /// playing — its URL was resolved when it started. Shared by
-    /// [`App::adopt_server`] and the GUI's pairing-code dial, which can
-    /// only shed once the new tunnel has actually answered.
+    /// Drop everything that belonged to the server being left — the
+    /// announced next, the search, the browse — and keep the queue: its rows
+    /// carry their own servers (contract clause 11). What is already
+    /// streaming keeps playing. Shared by [`App::adopt_server`] and the
+    /// GUI's pairing-code dial, which can only shed once the new tunnel has
+    /// actually answered.
     pub(crate) fn shed_server_state(&mut self) {
-        self.queue.items.clear();
-        self.queue.current = None;
-        self.queue.state.select(None);
         // The Connected handler rebuilds capabilities, libraries and panes.
         self.announced = None;
         self.search_hits = None;
@@ -403,6 +398,11 @@ impl App {
                 self.connected = true;
                 self.connecting = false;
                 self.connect.submitting = false;
+                // The worker holds one bridge: this one, from now on. Queued
+                // tracks on it resolve through the loopback address.
+                if crate::quickconnect::is_tunnel_id(&id) {
+                    self.open_tunnel = Some((id.clone(), server.clone()));
+                }
                 self.session.server = server;
                 self.session.server_id = id;
                 if token.is_some() {
@@ -488,6 +488,7 @@ impl App {
             Event::TunnelReady { local_url, id } => {
                 self.connecting = false;
                 self.connect.submitting = false;
+                self.open_tunnel = Some((id.clone(), local_url.clone()));
                 // The form carries the loopback address, which is a real,
                 // working endpoint for the sign-in about to happen; the
                 // identity is what the session will be filed under.

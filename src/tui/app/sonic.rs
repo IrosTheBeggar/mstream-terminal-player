@@ -373,7 +373,8 @@ impl App {
                 if self.sonic.stops.is_empty() {
                     return Vec::new();
                 }
-                self.queue.replace(self.sonic.tracks());
+                let tracks = self.queued_all(self.sonic.tracks());
+                self.queue.replace(tracks);
                 self.play_index(0)
             }
             SonicRow::QueueAll => {
@@ -383,7 +384,7 @@ impl App {
                 }
                 let count = tracks.len();
                 let was_empty = self.queue.items.is_empty();
-                for track in tracks {
+                for track in self.queued_all(tracks) {
                     self.queue.push(track);
                 }
                 self.info(format!("queued {count} stops"));
@@ -419,7 +420,8 @@ impl App {
         if index >= self.sonic.stops.len() {
             return Vec::new();
         }
-        self.queue.replace(self.sonic.tracks());
+        let tracks = self.queued_all(self.sonic.tracks());
+        self.queue.replace(tracks);
         self.play_index(index)
     }
 
@@ -431,6 +433,7 @@ impl App {
         let track = stop.to_track();
         self.info(format!("queued {}", track.display_name()));
         let was_empty = self.queue.items.is_empty();
+        let track = self.queued(track);
         self.queue.push(track);
         if was_empty && self.status.is_idle() {
             return self.play_index(0);

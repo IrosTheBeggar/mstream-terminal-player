@@ -276,6 +276,7 @@ impl App {
                 // If the queue already ran dry, this pick should start playing
                 // rather than sit there.
                 let start_it = self.queue.current.is_none() && self.status.is_idle();
+                let pick = self.queued(pick);
                 self.queue.push(pick);
                 if !explained {
                     self.info(format!("auto-dj: {label}"));

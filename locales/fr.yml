@@ -1116,7 +1116,6 @@ gui:
     sign_in: "ce serveur demande une connexion"
     tunnel_signin: "tunnel ouvert — connectez-vous pour continuer"
     no_code: "le code d'appairage de ce serveur a disparu — collez-le à nouveau dans le lecteur classique"
-    queue_cleared: "file vidée — ses pistes venaient du serveur précédent ; connexion à %{server}…"
     remove_title: "RETIRER LE SERVEUR"
     remove_body: "Oublier %{server} ?"
     remove_tunnel_note: "Son code d'appairage est le seul chemin du retour — le retirer l'oublie."
