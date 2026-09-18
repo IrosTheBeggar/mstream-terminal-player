@@ -1998,6 +1998,8 @@ fn event_loop(
             .any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. }));
         tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
         saver.tick(&gui.app);
+        let ticked = gui.app.tick();
+        gui.pend(ticked);
         if saving && let Ok(fresh) = config::load() {
             gui.config = fresh;
         }

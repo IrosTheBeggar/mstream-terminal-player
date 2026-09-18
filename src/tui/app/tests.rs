@@ -3068,7 +3068,7 @@ fn a_track_that_will_not_play_is_skipped_rather_than_stopping_everything() {
     assert_eq!(app.queue.current, Some(1), "moved on to the next track");
     assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
     let message = &app.message.as_ref().unwrap().text;
-    assert!(message.contains("skipping"), "got: {message}");
+    assert!(message.contains("won’t play"), "got: {message}");
     assert!(message.contains("broken"), "and names the track: {message}");
 }
 
@@ -3112,7 +3112,7 @@ fn a_queue_where_nothing_plays_gives_up_instead_of_looping() {
     let effects = app.apply_event(failed(&next, "nope"));
     assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)], "it stops rather than wrapping");
     assert_eq!(app.queue.current, None);
-    assert!(app.message.as_ref().unwrap().text.contains("nor could the rest"));
+    assert!(app.message.as_ref().unwrap().text.contains("check the files or server"));
 }
 
 #[test]
@@ -3125,9 +3125,9 @@ fn running_out_of_queue_ends_the_run_of_failures() {
     app.replace_queue(vec![track("a"), track("b"), track("c")]);
     app.handle_action(Action::PlayPause);
     let second = app.handle_action(Action::NextTrack);
-    // The network dies on b; the walk fails through c and runs out.
-    let third = app.apply_event(failed(&second, "network is down"));
-    let ended = app.apply_event(failed(&third, "network is down"));
+    // b and c will not decode; the walk fails through them and runs out.
+    let third = app.apply_event(failed(&second, "unrecognised format"));
+    let ended = app.apply_event(failed(&third, "unrecognised format"));
     assert_eq!(ended, vec![Effect::Audio(AudioCmd::Stop)]);
     assert_eq!(app.queue.current, None, "the walk ran out of queue");
     assert_eq!(app.failures, 0, "and the run of failures ended with it");
@@ -3135,13 +3135,92 @@ fn running_out_of_queue_ends_the_run_of_failures() {
     // The engine reports the stop the dead end asked for, as it would live.
     app.apply_event(Event::Status(PlayerStatus::default()));
 
-    // The network returns; one track hiccups. That is a skip, not the
-    // end of everything.
+    // Later, one track hiccups. That is a skip, not the end of everything.
     let again = app.handle_action(Action::PlayPause);
     app.apply_event(failed(&again, "one bad moment"));
     let message = app.message.as_ref().unwrap().text.clone();
-    assert!(message.contains("skipping"), "{message}");
-    assert!(!message.contains("nor could the rest"), "{message}");
+    assert!(message.contains("won’t play"), "{message}");
+    assert!(!message.contains("check the files or server"), "{message}");
+}
+
+#[test]
+fn a_failure_that_reads_as_the_networks_probes_the_server_first() {
+    // Contract clause 37: a transient failure asks the row's server
+    // whether it answers; one that does means the row's own open failed —
+    // retried a bounded number of times, then skipped.
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a"), track("b")]);
+    let started = app.handle_action(Action::PlayPause);
+    let a_url = played_url(&started);
+
+    let effects = app.apply_event(failed(&started, "request failed: connection reset by peer"));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCmd::Probe { server, base, .. })]
+                if server == "http://host:3000" && base == "http://host:3000"
+        ),
+        "{effects:?}"
+    );
+    assert_eq!(app.queue.current, Some(0), "nothing moves until the probe answers");
+    assert_eq!(app.failures, 0);
+
+    // The server answers: the same row again, twice, then the walk.
+    let retry = app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: true });
+    assert_eq!(played_url(&retry), a_url, "retry one");
+    let effects = app.apply_event(failed(&retry, "request failed: connection reset by peer"));
+    assert!(matches!(effects.as_slice(), [Effect::Api(ApiCmd::Probe { .. })]));
+    let retry = app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: true });
+    assert_eq!(played_url(&retry), a_url, "retry two");
+    let effects = app.apply_event(failed(&retry, "request failed: connection reset by peer"));
+    assert!(matches!(effects.as_slice(), [Effect::Api(ApiCmd::Probe { .. })]));
+    let skipped = app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: true });
+    assert!(played_url(&skipped).contains("/b"), "out of retries: the next row");
+    assert_eq!(app.failures, 1);
+    assert!(app.message.as_ref().unwrap().text.contains("won’t play"));
+
+    // A probe answering for a row the user has already left is stale.
+    let effects = app.apply_event(failed(&skipped, "no answer from the server after 20s"));
+    assert!(matches!(effects.as_slice(), [Effect::Api(ApiCmd::Probe { .. })]));
+    app.handle_action(Action::PrevTrack);
+    assert!(app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: true }).is_empty());
+}
+
+#[test]
+fn an_unreachable_server_holds_the_row_and_resumes_when_it_answers() {
+    // Contract clause 37: no connectivity pauses and holds — the row is
+    // never skipped — and the server is asked again on a cadence.
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a"), track("b")]);
+    let started = app.handle_action(Action::PlayPause);
+    let a_url = played_url(&started);
+    app.apply_event(failed(&started, "no answer from the server after 20s"));
+    let held = app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: false });
+    assert_eq!(held, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.stall.as_ref().map(|s| s.index), Some(0), "held on the row");
+    assert_eq!(app.queue.current, Some(0));
+    assert!(app.message.as_ref().unwrap().text.contains("Lost the connection"));
+
+    // Asked again only once the cadence has passed.
+    let asked = app.stall.as_ref().unwrap().asked;
+    assert!(app.tick_at(asked + std::time::Duration::from_secs(1)).is_empty());
+    let effects = app.tick_at(asked + std::time::Duration::from_secs(6));
+    assert!(matches!(effects.as_slice(), [Effect::Api(ApiCmd::Probe { .. })]), "{effects:?}");
+    assert!(app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: false }).is_empty());
+    assert!(app.stall.is_some(), "still held");
+
+    // Back: the row starts where the walk stopped.
+    let resumed = app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: true });
+    assert_eq!(played_url(&resumed), a_url);
+    assert!(app.stall.is_none());
+
+    // The user can always move on: a skip while held ends the hold.
+    app.apply_event(failed(&resumed, "no answer from the server after 20s"));
+    app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: false });
+    assert!(app.stall.is_some());
+    let next = app.handle_action(Action::NextTrack);
+    assert!(played_url(&next).contains("/b"));
+    assert!(app.stall.is_none());
 }
 
 #[test]

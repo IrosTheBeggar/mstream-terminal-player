@@ -663,6 +663,46 @@ pub(crate) fn queue_without_by(
     Some(Sweep { keep, index, current_survives })
 }
 
+/// The failure walk's hold (contract clause 37): a row whose server did
+/// not answer. Nothing skips past it; the server is asked again on a
+/// cadence, and the row starts when it answers.
+#[derive(Debug, Clone)]
+pub struct Stall {
+    pub index: usize,
+    pub server: String,
+    pub asked: crate::clock::Instant,
+}
+
+/// How often a held row's server is asked again.
+const STALL_PROBE_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+/// Transient failures retried on the same row before it is skipped.
+const MAX_RETRIES: u32 = 2;
+
+/// Whether an open failure reads as the network's rather than the file's:
+/// the server never answered, or the connection died on the way. A 4xx,
+/// a format the decoder does not speak, an address that cannot be built
+/// are the source's fault and skip at once (contract clause 37).
+pub(crate) fn transient_failure(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    if e.contains("invalid url") || e.contains("stream init failed") {
+        return false;
+    }
+    if ["401", "403", "404", "410", "unsupported", "decode", "format", "not found"]
+        .iter()
+        .any(|word| e.contains(word))
+    {
+        return false;
+    }
+    e.contains("no answer")
+        || e.contains("request failed")
+        || e.contains("connect")
+        || e.contains("reset")
+        || e.contains("timed out")
+        || e.contains("dns")
+        || e.contains("unreachable")
+        || e.contains("network")
+}
+
 /// The saved queue (contract clause 39): the rows with their origins, the
 /// playing row and the seconds into it, shuffle and repeat. Versioned so a
 /// file from another shape is ignored, never migrated (clause 40).
@@ -1387,6 +1427,16 @@ pub struct App {
     /// skipping so a queue of nothing but broken files stops rather than
     /// looping.
     failures: usize,
+    /// Retries of the row being played after a transient failure whose
+    /// server answered the probe (contract clause 37); reset by a play
+    /// that took.
+    retries: u32,
+    /// A transient failure waiting on its probe: the row it happened on.
+    probing: Option<usize>,
+    /// The hold (contract clause 37): a row whose server did not answer.
+    /// Playback stays on it, the server is asked again every few seconds,
+    /// and the row starts the moment it answers.
+    pub stall: Option<Stall>,
     /// The debug log's two switches, mirrored from crate::logging for the
     /// Settings rows: whether anything is written, and how loud once it is.
     /// `log_touched` is what lets quitting persist only choices actually
@@ -1573,6 +1623,9 @@ impl App {
             status: PlayerStatus::default(),
             starting: None,
             failures: 0,
+            retries: 0,
+            probing: None,
+            stall: None,
             browse_undo: None,
             log_write: crate::logging::writing(),
             log_level: crate::logging::level(),
@@ -3656,19 +3709,40 @@ impl App {
         self.queue.start(index);
         self.now_playing = self.queue.items.get(index).map(|item| item.track.clone());
         self.starting = None;
-        self.playback_failed(why)
+        // Nothing to probe: the server could not even be named.
+        self.skip_failed(Some(&why))
     }
 
-    /// One source would not play: say which, count it, and carry on to the
-    /// next — or stop once every row has failed in turn (contract clause
-    /// 37). Shared by the engine's refusal and a URL that could not be
-    /// built at all.
+    /// One source would not play (contract clause 37). A failure that reads
+    /// as the network's asks the row's server whether it answers at all
+    /// before deciding; the file's own fault skips at once. Shared by the
+    /// engine's refusal and a URL that could not be built.
     fn playback_failed(&mut self, error: String) -> Vec<Effect> {
+        if transient_failure(&error)
+            && let Some(index) = self.queue.current
+            && let Some(item) = self.queue.items.get(index)
+            && let Ok(reach) = self.reach(&item.origin)
+        {
+            self.probing = Some(index);
+            return vec![Effect::Api(ApiCmd::Probe {
+                server: item.origin.server.clone(),
+                base: reach.base,
+                self_signed: reach.self_signed,
+            })];
+        }
+        self.skip_failed(Some(&error))
+    }
+
+    /// Walk past the row that would not play: say so — the record's words,
+    /// with the track named and the reason kept — count it, and carry on;
+    /// or stop once every row has failed in turn.
+    fn skip_failed(&mut self, reason: Option<&str>) -> Vec<Effect> {
         let what = self
             .now_playing
             .as_ref()
             .map(Track::display_name)
             .unwrap_or_else(|| "that track".to_string());
+        self.retries = 0;
         self.failures += 1;
         // A queue where nothing plays must not be walked forever —
         // with repeat on, skipping would go round and round.
@@ -3676,12 +3750,82 @@ impl App {
             self.failures = 0;
             self.now_playing = None;
             self.queue.current = None;
-            self.error(format!("{what} could not be played, and nor could the rest"));
+            self.error("Can't play these tracks — check the files or server.");
             return vec![Effect::Audio(AudioCmd::Stop)];
         }
-        self.error(format!("skipping {what} — {error}"));
+        match reason {
+            Some(reason) => self.error(format!("Skipping a track that won’t play — {what}: {reason}")),
+            None => self.error(format!("Skipping a track that won’t play — {what}")),
+        }
         // Manual, so repeat-one doesn't sit on the broken track.
         self.skip(true)
+    }
+
+    /// The probe answered (contract clause 37). A server that answers means
+    /// the row's own open failed: try it again, a bounded number of times,
+    /// then skip it. One that does not answer holds the row: playback stays
+    /// on it, paused, until the server is back.
+    fn probe_answered(&mut self, server: &str, reachable: bool) -> Vec<Effect> {
+        if let Some(stall) = self.stall.as_ref().filter(|s| s.server == server) {
+            if !reachable {
+                return Vec::new();
+            }
+            let index = stall.index;
+            self.stall = None;
+            self.retries = 0;
+            self.info("back online — resuming");
+            return self.play_index(index);
+        }
+        let Some(index) = self.probing.take() else {
+            return Vec::new();
+        };
+        if self.queue.current != Some(index) {
+            return Vec::new(); // the user moved on while the probe was out
+        }
+        if reachable {
+            if self.retries < MAX_RETRIES {
+                self.retries += 1;
+                return self.play_index(index);
+            }
+            return self.skip_failed(None);
+        }
+        self.stall = Some(Stall {
+            index,
+            server: server.to_string(),
+            asked: crate::clock::Instant::now(),
+        });
+        self.error("Lost the connection — paused. Resumes when you’re back online.");
+        vec![Effect::Audio(AudioCmd::Stop)]
+    }
+
+    /// Once per loop iteration: a held row's server is asked again on a
+    /// cadence (contract clause 37).
+    pub fn tick(&mut self) -> Vec<Effect> {
+        self.tick_at(crate::clock::Instant::now())
+    }
+
+    pub fn tick_at(&mut self, now: crate::clock::Instant) -> Vec<Effect> {
+        let Some(stall) = self.stall.as_mut() else {
+            return Vec::new();
+        };
+        if now.duration_since(stall.asked) < STALL_PROBE_EVERY {
+            return Vec::new();
+        }
+        stall.asked = now;
+        let index = stall.index;
+        let Some(item) = self.queue.items.get(index) else {
+            self.stall = None;
+            return Vec::new();
+        };
+        let Ok(reach) = self.reach(&item.origin) else {
+            self.stall = None;
+            return Vec::new();
+        };
+        vec![Effect::Api(ApiCmd::Probe {
+            server: item.origin.server.clone(),
+            base: reach.base,
+            self_signed: reach.self_signed,
+        })]
     }
 
     /// The queue row whose media URL is `url`, if any. A scan, but of an
@@ -3858,6 +4002,9 @@ impl App {
         self.queue.start(index);
         // Any play spends a restored spot: playback is somewhere real now.
         self.resume_spot = None;
+        // And ends a hold: the user (or the probe) moved things along.
+        self.stall = None;
+        self.probing = None;
         let hint = item.metadata.duration;
         // Taken before the track moves into `now_playing`; the shape is
         // asked for by path, so nothing else about the track is needed.
@@ -4097,9 +4244,11 @@ impl App {
                     self.starting = None;
                 }
                 // Something loaded and is playing, so whatever went wrong
-                // before is behind us — the run of failures starts over.
+                // before is behind us — the run of failures starts over,
+                // and so do the retries of the row (contract clause 37).
                 if !status.source.is_empty() {
                     self.failures = 0;
+                    self.retries = 0;
                 }
                 // A seek goal has served once status catches up to it — or
                 // once the source changes under it, where the old track's
@@ -4393,6 +4542,7 @@ impl App {
                 }
                 Vec::new()
             }
+            Event::Reachable { server, reachable } => self.probe_answered(&server, reachable),
             Event::FederationPeers { parent, peers } => match peers {
                 Some(peers) => vec![Effect::SavePeers {
                     parent,

@@ -524,6 +524,7 @@ fn event_loop(
     loop {
         dispatch(app, &mut pending, audio_tx, api_tx, event_tx);
         saver.tick(app);
+        pending.extend(app.tick());
 
         if spun.elapsed() >= SPIN_EVERY {
             app.spinner = app.spinner.wrapping_add(1);

@@ -84,6 +84,11 @@ pub enum ApiCmd {
     /// The peers a saved server lists for browsing (contract clause 20),
     /// asked once its ping says `federationBrowse`.
     FederationPeers { parent: String },
+    /// Is `server` — reached at `base` — answering at all? The failure
+    /// walk's question (contract clause 37): a track that would not open
+    /// is skipped when its server answers and held when it does not.
+    /// Its own one-shot client: the row's server may not be the session's.
+    Probe { server: String, base: String, self_signed: bool },
     Browse(String),
     /// Fetch a library view for `dest` — the Library tab, or the Search tab
     /// drilling into an artist or album it found. The destination travels
@@ -428,6 +433,8 @@ pub enum Event {
     /// The peers `parent` lists for browsing, or `None` when the ask
     /// failed — a failed fetch changes nothing (contract clause 20).
     FederationPeers { parent: String, peers: Option<Vec<crate::api::types::PeerListing>> },
+    /// The probe's answer: whether `server` answered its public `/api`.
+    Reachable { server: String, reachable: bool },
     Error(String),
 }
 
@@ -918,6 +925,14 @@ fn spawn_read(
 /// shouldn't bounce the user to a login form.
 #[cfg(not(target_arch = "wasm32"))]
 fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
+    // The probe needs no session: it asks the row's own server, which may
+    // be one the session never reached.
+    if let ApiCmd::Probe { server, base, self_signed } = cmd {
+        let reachable = Client::new_with(&base, self_signed)
+            .and_then(|c| c.server_info())
+            .is_ok();
+        return Event::Reachable { server, reachable };
+    }
     let Some(c) = client else {
         return Event::Error("not connected to a server".into());
     };
@@ -1009,9 +1024,11 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
             Ok(Event::Waveform { filepath, bars: answer.ok().flatten(), settled })
         }
         // The connection commands never reach here; api_loop keeps them.
+        // The probe answered above, before the session client was needed.
         ApiCmd::Connect { .. }
         | ApiCmd::Login { .. }
         | ApiCmd::QuickConnect { .. }
+        | ApiCmd::Probe { .. }
         | ApiCmd::Shutdown => return Event::Error("connection change routed as a read".into()),
     };
     match answered {
