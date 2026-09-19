@@ -99,6 +99,62 @@ pub struct Ping {
     /// least one peer. An older build omits the key.
     #[serde(rename = "federationBrowse")]
     pub federation_browse: bool,
+    /// This server hands its own devices direct access to its federated
+    /// peers — the `access` route (mStream #943). Same shape as
+    /// `federationBrowse`: the key's presence says the build has the route,
+    /// its value that there is a peer to reach. Whether a given peer
+    /// cooperates is answered per peer by the access route.
+    #[serde(rename = "federationDirect")]
+    pub federation_direct: bool,
+}
+
+/// `GET /api/v1/federation/peers/:id/access` on the wire: what a device
+/// needs to reach a peer without the parent in the path — or the parent's
+/// word that the peer will not mint (`direct: false`). Tolerant on purpose:
+/// which fields arrived decides which of the three answers this is.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct DirectAccessResponse {
+    pub direct: bool,
+    pub reason: Option<String>,
+    #[serde(rename = "endpointTicket")]
+    pub endpoint_ticket: Option<String>,
+    #[serde(rename = "endpointId")]
+    pub endpoint_id: Option<String>,
+    #[serde(rename = "guestToken")]
+    pub guest_token: Option<String>,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: Option<String>,
+    #[serde(rename = "directTicket")]
+    pub direct_ticket: Option<String>,
+}
+
+/// A guest ticket a parent handed out for one of its peers: the `mstrfedg1:`
+/// envelope the tunnel is dialled with, the guest JWT every request to the
+/// peer carries, and the token's own times — read off its claims, which is
+/// what the peer's wall judges by (contract clause 27).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectTicket {
+    pub ticket: String,
+    pub guest_token: String,
+    /// The peer's endpoint id, when the parent could read its ticket: how
+    /// one peer listed by two parents would be told apart.
+    pub endpoint_id: Option<String>,
+    pub issued_at: Option<std::time::SystemTime>,
+    pub expires_at: Option<std::time::SystemTime>,
+}
+
+/// The parent's answer to an access request, sorted into what the App does
+/// with it: dial the peer, stay on the proxy for the session, or ask again
+/// later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectAnswer {
+    Granted(DirectTicket),
+    /// `direct: false` — an older peer, or federation switched off there.
+    Denied(String),
+    /// The peer could not be reached for the mint, or the answer was not
+    /// one of the shapes above.
+    Failed(String),
 }
 
 /// One row of `GET /api/v1/federation/peers`: a peer this user may browse
@@ -133,6 +189,8 @@ pub struct Capabilities {
     pub federation_discovery: bool,
     /// Peers to browse through this server (contract clause 20).
     pub federation_browse: bool,
+    /// The parent offers direct access to its peers (the access route).
+    pub federation_direct: bool,
 }
 
 impl From<&Ping> for Capabilities {
@@ -143,6 +201,7 @@ impl From<&Ping> for Capabilities {
             discovery_p2p: ping.discovery_p2p,
             federation_discovery: ping.federation_discovery,
             federation_browse: ping.federation_browse,
+            federation_direct: ping.federation_direct,
         }
     }
 }
@@ -1451,6 +1510,7 @@ mod tests {
                 discovery_p2p: false,
                 federation_discovery: false,
                 federation_browse: false,
+                federation_direct: false,
             }
         );
         assert_eq!(caps.enabled_names(), vec!["similarity", "sonic journey"]);

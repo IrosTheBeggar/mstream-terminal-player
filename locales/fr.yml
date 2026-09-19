@@ -1129,6 +1129,7 @@ gui:
     bundled: "livré avec l'installateur"
     bundled_note: "Ce serveur a été installé avec le lecteur : il ne peut pas être retiré d'ici. Les autres serveurs s'ajoutent et se retirent comme d'habitude."
     via: "via %{parent}"
+    direct: "direct"
     no_longer_shared: "plus partagé par %{parent}"
     act_hide: "masquer"
     act_show: "afficher"

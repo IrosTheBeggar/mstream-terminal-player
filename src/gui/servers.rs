@@ -1365,11 +1365,18 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 .as_deref()
                 .is_some_and(|d| config::same_server(d, &s.url));
             let label = match &s.peer {
-                Some(peer) => format!(
-                    "{branch} {} · {}",
-                    peer.name,
-                    t!("gui.srv.via", parent = parent_label(gui, &peer.parent))
-                ),
+                Some(peer) => {
+                    let mut label = format!(
+                        "{branch} {} · {}",
+                        peer.name,
+                        t!("gui.srv.via", parent = parent_label(gui, &peer.parent))
+                    );
+                    // Reached over a tunnel of its own (contract clause 27).
+                    if peer_is_direct(gui, &s.url) {
+                        label.push_str(&format!(" · {}", t!("gui.srv.direct")));
+                    }
+                    label
+                }
                 None => config::display_name(s),
             };
             Some((i, label, current, default))
@@ -1433,6 +1440,11 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 }
 
 /// The Manage Servers room, in the Settings content column.
+/// Whether a peer's own tunnel is up — its bytes no longer cross the parent.
+fn peer_is_direct(gui: &Gui, identity: &str) -> bool {
+    matches!(gui.app.tunnels.get(identity), Some(crate::tui::app::TunnelState::Up { .. }))
+}
+
 pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     put(frame, content.x, content.y, &t!("gui.srv.title"), dim());
 
@@ -1479,9 +1491,16 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 let name = format!("{branch} {}", peer.name);
                 put(frame, content.x + 2, y, &super::bar::clip(&name, name_w), style);
                 let via = if peer.missing {
-                    t!("gui.srv.no_longer_shared", parent = parent_label(gui, &peer.parent))
+                    t!("gui.srv.no_longer_shared", parent = parent_label(gui, &peer.parent)).to_string()
+                } else if peer_is_direct(gui, &entry.url) {
+                    // Reached over a tunnel of its own (contract clause 27).
+                    format!(
+                        "{} · {}",
+                        t!("gui.srv.via", parent = parent_label(gui, &peer.parent)),
+                        t!("gui.srv.direct")
+                    )
                 } else {
-                    t!("gui.srv.via", parent = parent_label(gui, &peer.parent))
+                    t!("gui.srv.via", parent = parent_label(gui, &peer.parent)).to_string()
                 };
                 put(frame, content.right().saturating_sub(26), y, &super::bar::clip(&via, 23), meta);
             }

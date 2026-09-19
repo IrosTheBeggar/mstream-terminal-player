@@ -82,6 +82,16 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             })
         }
         ApiCmd::TunnelClose { id } => Some(Event::TunnelClosed { id }),
+        // No peers to reach from the browser: the page's own server only.
+        ApiCmd::DirectAccess { parent, id, .. } => Some(Event::DirectAccess {
+            parent,
+            id,
+            answer: crate::api::types::DirectAnswer::Failed("direct access needs the native player".into()),
+        }),
+        ApiCmd::Retarget { identity, .. } => Some(Event::RetargetFailed {
+            identity,
+            why: "the browser build has one server, the page's own".into(),
+        }),
 
         ApiCmd::Browse(path) => {
             with_session(session, async |s| {
@@ -218,7 +228,8 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
-        ApiCmd::AlbumArt { file } => {
+        // One server, the page's own: a row's reach is that server anyway.
+        ApiCmd::AlbumArt { file, .. } => {
             // The waveform's rule, exactly as the native worker applies
             // it: a 404 or undecodable bytes settle as "no art"; a
             // transport failure — or no session yet — is not an answer
@@ -237,7 +248,7 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             Some(Event::AlbumArt { file, art, settled })
         }
 
-        ApiCmd::Waveform { filepath } => {
+        ApiCmd::Waveform { filepath, .. } => {
             // Art's rule, for the same reason: a shape nobody could draw is
             // not worth the "not connected" toast `with_session` would raise.
             let client = session.borrow().as_ref().map(|s| s.client.clone());

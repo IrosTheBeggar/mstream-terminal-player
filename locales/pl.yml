@@ -1129,6 +1129,7 @@ gui:
     bundled: "z instalatora"
     bundled_note: "Ten serwer został zainstalowany razem z odtwarzaczem, więc nie da się go stąd usunąć. Pozostałe serwery można dodawać i usuwać jak zwykle."
     via: "przez %{parent}"
+    direct: "bezpośrednio"
     no_longer_shared: "%{parent} już tego nie udostępnia"
     act_hide: "ukryj"
     act_show: "pokaż"

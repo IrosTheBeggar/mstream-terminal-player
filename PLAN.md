@@ -1794,9 +1794,9 @@ a LATER secondary screen (party view), Columns retired.
   federated peers browsed through their parent, read-only, seated under
   it in the room and the dropdown, hidden or forgotten from there; the
   failure walk probes a row's server, retries, holds and resumes.
-  Deferred, logged in the contract: per-server tunnels (clause 38), the
-  guest-ticket direct path to a peer — planned below, T1–T4 — and a
-  drag grip for reorder.
+  Per-server tunnels (clause 38) and the guest-ticket direct path to a
+  peer landed 2026-09-19 on the shared tunnel crate — T1–T3 below; T4's
+  two-server rig is still to run. A drag grip for reorder stays deferred.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
   of the Library tab views (Artists/Genres/Recent — the wall's drill
@@ -2042,8 +2042,13 @@ selectable through the crate).
   shape and on the api client, a status change reaching the App. The
   envelope, ALPN, handshake and swap tests live in the crate. Size S–M: the
   crate carries the tunnel; what is left is plumbing and the token.
-- **T2 — tunnels follow the queue** (clause 38, and clause 37's tunnel
-  step). `tunnel_targets()` and `reconcile_tunnels(now)` as above;
+- **T2 — tunnels follow the queue ✅ 2026-09-19** (clause 38, and clause 37's
+  tunnel step). As planned; the policy lives in `tick_at` (`reconcile_tunnels`
+  every tick, the stall probe after it), the ladder's bookkeeping sits beside
+  the registry (`tunnel_retry`, `tunnel_release`), and a held row keeps its
+  restored spot for when the tunnel comes up. One settlement: the session's
+  own tunnel is re-dialled on the ladder after a failure, but the browser is
+  not reconnected on its own — the user saw the error. 798 tests. Plan text: `tunnel_targets()` and `reconcile_tunnels(now)` as above;
   `TunnelState::Down` carries the ladder. The failure walk gains a hold
   beside `Stall`: `play_index` on a row whose transport is a tunnel that is
   wanted and not `Rejected` does not skip — it parks on the row, paused,
@@ -2069,7 +2074,17 @@ selectable through the crate).
   skips with the word; a switch away keeps the queue's tunnel; the last row
   leaving releases after 10 s and not before; art asked with the row's
   reach. Size M.
-- **T3 — guest tickets** (clause 27's direct sentence). `src/api/types.rs`:
+- **T3 — guest tickets ✅ 2026-09-19** (clause 27's direct sentence). As planned,
+  with the crate carrying the handshake. Settlements: the ticket's times are
+  read off the guest JWT's own `iat`/`exp` (no date parsing; the peer's wall
+  judges by the same claims); `Retarget` is a fourth connection command,
+  since a `Connected` re-opens the browser; the record's `federationMissing`
+  gate is not ported (a missing peer's access call fails at the parent and
+  waits for the gap); a peer session that goes direct keeps `session.peer`,
+  so the read-only rules and pinned capabilities stand. The GUI's mark is
+  "· direct" beside "via {parent}" (`gui.srv.direct`, ten locales). Unverified
+  live until T4's rig: the whole path ships on the crate's harness and the
+  App's tests. Plan text: `src/api/types.rs`:
   `Ping.federation_direct` (`federationDirect`),
   `Capabilities.federation_direct`, `DirectAccessAnswer` (the three
   shapes; a 200 missing fields is transient, not a refusal).

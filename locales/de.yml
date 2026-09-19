@@ -1129,6 +1129,7 @@ gui:
     bundled: "mit dem Installer gekommen"
     bundled_note: "Dieser Server wurde zusammen mit dem Player installiert und kann hier nicht entfernt werden. Andere Server lassen sich wie gewohnt hinzufügen und entfernen."
     via: "über %{parent}"
+    direct: "direkt"
     no_longer_shared: "von %{parent} nicht mehr geteilt"
     act_hide: "ausblenden"
     act_show: "einblenden"

@@ -68,6 +68,7 @@ fn connected_app() -> App {
         discovery_p2p: false,
         federation_discovery: false,
         federation_browse: false,
+        federation_direct: false,
     };
     // What a real ping does on the way in: the Auto-DJ rows depend on it.
     app.dj_panel.rebuild(app.capabilities);
@@ -812,7 +813,7 @@ fn waveforms_asked(effects: &[Effect]) -> Vec<String> {
     effects
         .iter()
         .filter_map(|e| match e {
-            Effect::Api(ApiCmd::Waveform { filepath }) => Some(filepath.clone()),
+            Effect::Api(ApiCmd::Waveform { filepath, .. }) => Some(filepath.clone()),
             _ => None,
         })
         .collect()
@@ -1651,6 +1652,718 @@ fn a_remembered_tunnel_server_dials_with_the_code_from_the_book() {
     );
 }
 
+// ── Direct access to a peer (contract clause 27) ─────────────────────────
+
+const ATTIC: &str = "http://attic:3000";
+
+fn nas() -> String {
+    crate::config::peer_identity(ATTIC, 3)
+}
+
+/// A guest ticket as the worker hands it to the App: issued `ago` seconds
+/// ago, good for `left` more.
+fn guest(name: &str, ago: u64, left: u64) -> crate::api::types::DirectTicket {
+    let now = std::time::SystemTime::now();
+    crate::api::types::DirectTicket {
+        ticket: format!("mstrfedg1:{name}"),
+        guest_token: format!("guest-{name}"),
+        endpoint_id: None,
+        issued_at: Some(now - secs(ago)),
+        expires_at: Some(now + secs(left)),
+    }
+}
+
+fn granted(name: &str) -> Event {
+    Event::DirectAccess { parent: ATTIC.into(), id: 3, answer: crate::api::types::DirectAnswer::Granted(guest(name, 60, 86_340)) }
+}
+
+fn nas_row(path: &str) -> Queued {
+    Queued { origin: Origin { server: ATTIC.into(), peer: Some(3) }, track: track(path) }
+}
+
+/// Connected to the parent, which offers direct access; the peer is in the book.
+fn federated_app() -> App {
+    let mut app = App::new(Some(ATTIC.into()), Some("at".into()), None);
+    app.connected = true;
+    app.servers = vec![
+        KnownServer {
+            id: ATTIC.into(),
+            name: ATTIC.into(),
+            token: Some("at".into()),
+            self_signed: false,
+            peer: None,
+            pairing: None,
+        },
+        KnownServer {
+            id: nas(),
+            name: "Nas".into(),
+            token: None,
+            self_signed: false,
+            peer: Some((ATTIC.into(), 3)),
+            pairing: None,
+        },
+    ];
+    app.direct_offered.insert(ATTIC.into());
+    app
+}
+
+fn direct_asks(effects: &[Effect]) -> Vec<(i64, bool)> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Api(ApiCmd::DirectAccess { id, refresh, .. }) => Some((*id, *refresh)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_parent_that_offers_direct_access_is_remembered_from_its_ping() {
+    let mut app = App::new(Some(ATTIC.into()), Some("at".into()), None);
+    app.apply_event(Event::Connected {
+        server: ATTIC.into(),
+        id: ATTIC.into(),
+        username: None,
+        token: Some("at".into()),
+        ping: Box::new(crate::api::types::Ping { federation_direct: true, ..Default::default() }),
+    });
+    assert!(app.direct_offered.contains(ATTIC));
+    assert!(app.capabilities.federation_direct);
+    // The flag going off is information too.
+    app.apply_event(Event::Connected {
+        server: ATTIC.into(),
+        id: ATTIC.into(),
+        username: None,
+        token: Some("at".into()),
+        ping: Box::new(crate::api::types::Ping::default()),
+    });
+    assert!(!app.direct_offered.contains(ATTIC));
+}
+
+#[test]
+fn a_queued_peer_row_asks_its_parent_for_direct_access_once() {
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    let now = crate::clock::Instant::now();
+    let effects = app.tick_at(now);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCmd::DirectAccess { parent, id: 3, reach, refresh: false })]
+                if parent == ATTIC && reach.base == ATTIC && reach.token.as_deref() == Some("at") && reach.peer.is_none()
+        ),
+        "the access call rides the parent, plainly: {effects:?}"
+    );
+    assert!(app.direct.get(&nas()).is_some_and(|s| s.asking));
+    assert!(direct_asks(&app.tick_at(now + secs(1))).is_empty(), "one ask in flight, not one per tick");
+
+    // A parent that does not offer it is never asked.
+    let mut plain = federated_app();
+    plain.direct_offered.clear();
+    plain.queue.push(nas_row("music/y.mp3"));
+    assert!(direct_asks(&plain.tick_at(now)).is_empty());
+}
+
+#[test]
+fn a_granted_ticket_dials_the_peer_and_its_rows_play_from_its_own_tunnel() {
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    let now = crate::clock::Instant::now();
+    app.tick_at(now);
+
+    // Meanwhile the row rides the parent's proxy.
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/3/stream/music/y.mp3?token=at");
+
+    app.apply_event(granted("T1"));
+    let state = app.direct.get(&nas()).expect("a ticket in hand");
+    assert!(!state.asking);
+    assert_eq!(state.ticket.as_ref().map(|t| t.ticket.as_str()), Some("mstrfedg1:T1"));
+
+    // The peer's own tunnel is a target now, dialled with the ticket.
+    let effects = app.tick_at(now + secs(1));
+    assert!(
+        effects.contains(&Effect::Api(ApiCmd::TunnelOpen { id: nas(), credential: "mstrfedg1:T1".into() })),
+        "{effects:?}"
+    );
+    assert!(direct_asks(&effects).is_empty(), "the ticket is fresh: nothing to ask");
+
+    // Up: plain /media with the guest token in the ordinary slot.
+    app.apply_event(Event::TunnelUp { id: nas(), local_url: "http://127.0.0.1:5000".into(), local_token: "lt".into() });
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://127.0.0.1:5000/media/music/y.mp3?token=guest-T1&__lt=lt");
+    // Its cover too, from the peer itself.
+    assert!(
+        matches!(app.reach(&Origin { server: ATTIC.into(), peer: Some(3) }), Ok(Reach { base, peer: None, .. }) if base == "http://127.0.0.1:5000")
+    );
+}
+
+#[test]
+fn a_parent_that_declines_keeps_the_peer_on_the_proxy_for_the_session() {
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    let now = crate::clock::Instant::now();
+    app.tick_at(now);
+    app.apply_event(Event::DirectAccess {
+        parent: ATTIC.into(),
+        id: 3,
+        answer: crate::api::types::DirectAnswer::Denied("an older build".into()),
+    });
+    assert!(app.direct.get(&nas()).is_some_and(|s| s.denied));
+    assert!(direct_asks(&app.tick_at(now + secs(3600))).is_empty(), "declined for the session");
+    assert!(!app.tunnel_targets().contains(&nas()));
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/3/stream/music/y.mp3?token=at");
+}
+
+#[test]
+fn a_stale_ticket_is_renewed_in_place_and_a_failure_waits_for_the_gap() {
+    assert!(!ticket_stale(&guest("fresh", 60, 86_340), std::time::SystemTime::now()));
+    assert!(ticket_stale(&guest("old", 3 * 3600, 3600), std::time::SystemTime::now()), "three quarters gone");
+    assert!(ticket_stale(&guest("dead", 86_400, 0), std::time::SystemTime::now() + secs(1)));
+
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 3 * 3600, 3600)), ..Default::default() });
+    let now = crate::clock::Instant::now();
+    assert_eq!(direct_asks(&app.tick_at(now)), vec![(3, false)], "stale: asked, not as a refusal");
+
+    // Empty-handed: the next ask waits for the gap, not the next tick.
+    app.apply_event(Event::DirectAccess {
+        parent: ATTIC.into(),
+        id: 3,
+        answer: crate::api::types::DirectAnswer::Failed("Peer unreachable".into()),
+    });
+    assert!(direct_asks(&app.tick_at(now + secs(60))).is_empty());
+    assert_eq!(direct_asks(&app.tick_at(now + secs(301))), vec![(3, false)]);
+
+    // A new ticket swaps in place: same port, only what is asked for from
+    // now on carries the new token.
+    let effects = app.apply_event(granted("T2"));
+    assert!(
+        effects.contains(&Effect::Api(ApiCmd::TunnelCredential { id: nas(), credential: "mstrfedg1:T2".into() })),
+        "{effects:?}"
+    );
+    assert!(matches!(app.tunnels.get(&nas()), Some(TunnelState::Up { .. })));
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://127.0.0.1:5000/media/music/y.mp3?token=guest-T2&__lt=lt");
+}
+
+#[test]
+fn a_refused_guest_ticket_is_re_minted_at_once_and_the_proxy_serves_meanwhile() {
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    let now = crate::clock::Instant::now();
+    let effects = app.tick_at(now);
+    assert!(effects.contains(&Effect::Api(ApiCmd::TunnelOpen { id: nas(), credential: "mstrfedg1:T1".into() })));
+
+    // The peer says NO: not a re-pair — the parent re-mints, now.
+    app.apply_event(Event::TunnelFailed { id: nas(), rejected: true, why: "handshake rejected — the guest token was refused".into() });
+    assert_eq!(app.direct.get(&nas()).and_then(|s| s.refused.clone()), Some("mstrfedg1:T1".into()));
+    let effects = app.tick_at(now + secs(1));
+    assert_eq!(direct_asks(&effects), vec![(3, true)], "a re-mint, asked at once");
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::TunnelOpen { .. }))), "the refused ticket is not dialled again");
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/3/stream/music/y.mp3?token=at");
+
+    // A fresh ticket: the reconcile dials again with it.
+    app.apply_event(granted("T2"));
+    let effects = app.tick_at(now + secs(2));
+    assert!(effects.contains(&Effect::Api(ApiCmd::TunnelOpen { id: nas(), credential: "mstrfedg1:T2".into() })), "{effects:?}");
+
+    // The same refused ticket handed out again: the gap applies.
+    let mut again = federated_app();
+    again.queue.push(nas_row("music/y.mp3"));
+    again.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), refused: Some("mstrfedg1:T1".into()), ..Default::default() });
+    assert_eq!(direct_asks(&again.tick_at(now)), vec![(3, true)]);
+    again.apply_event(granted("T1"));
+    assert!(direct_asks(&again.tick_at(now + secs(30))).is_empty());
+    assert_eq!(direct_asks(&again.tick_at(now + secs(61))), vec![(3, true)]);
+}
+
+#[test]
+fn a_peer_whose_tunnel_is_up_is_browsed_through_it_and_back_when_it_goes() {
+    let mut app = federated_app();
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+
+    let effects = app.adopt_server(ATTIC.into(), nas(), None, Some("at".into()), None, false, Some("music".into()), Some((ATTIC.into(), 3)));
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::Connect {
+            server: "http://127.0.0.1:5000".into(),
+            identity: nas(),
+            token: Some("guest-T1".into()),
+            self_signed: false,
+            peer: None,
+            local_token: Some("lt".into()),
+        })]
+    );
+    app.apply_event(Event::Connected {
+        server: "http://127.0.0.1:5000".into(),
+        id: nas(),
+        username: None,
+        token: Some("guest-T1".into()),
+        ping: Box::new(Default::default()),
+    });
+    assert!(app.session_is_direct());
+    assert_eq!(app.session.server_id, nas(), "filed under the peer's identity");
+    assert!(app.session.peer.is_some(), "still a peer session: read-only, capabilities pinned");
+    assert_eq!(app.capabilities, crate::api::types::Capabilities::default());
+
+    // Its own rows play plainly from its tunnel…
+    app.push_queue(track("music/z.mp3"));
+    assert_eq!(app.queue.items[0].origin, Origin { server: ATTIC.into(), peer: Some(3) }, "the row's identity is transport-free");
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://127.0.0.1:5000/media/music/z.mp3?token=guest-T1&__lt=lt");
+
+    // …and when the tunnel goes, the session moves back onto the parent's
+    // proxies without re-opening the browser.
+    let path_before = app.path.clone();
+    let effects = app.apply_event(Event::TunnelClosed { id: nas() });
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::Retarget {
+            identity: nas(),
+            server: ATTIC.into(),
+            token: Some("at".into()),
+            self_signed: false,
+            peer: Some(3),
+            local_token: None,
+        })]
+    );
+    app.apply_event(Event::Retargeted { identity: nas(), server: format!("{ATTIC}/"), token: Some("at".into()) });
+    assert_eq!(app.session.server, format!("{ATTIC}/"));
+    assert_eq!(app.session.token.as_deref(), Some("at"));
+    assert_eq!(app.path, path_before, "the browse stack stays");
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/3/stream/music/z.mp3?token=at");
+}
+
+#[test]
+fn a_browsed_peer_goes_direct_when_its_own_tunnel_comes_up() {
+    let mut app = federated_app();
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    // Browsing the peer through the parent today.
+    app.adopt_server(ATTIC.into(), nas(), None, Some("at".into()), None, false, None, Some((ATTIC.into(), 3)));
+    app.apply_event(Event::Connected {
+        server: ATTIC.into(),
+        id: nas(),
+        username: None,
+        token: Some("at".into()),
+        ping: Box::new(Default::default()),
+    });
+    assert!(!app.session_is_direct());
+
+    let effects = app.apply_event(Event::TunnelUp { id: nas(), local_url: "http://127.0.0.1:5000".into(), local_token: "lt".into() });
+    assert!(
+        effects.contains(&Effect::Api(ApiCmd::Retarget {
+            identity: nas(),
+            server: "http://127.0.0.1:5000".into(),
+            token: Some("guest-T1".into()),
+            self_signed: false,
+            peer: None,
+            local_token: Some("lt".into()),
+        })),
+        "{effects:?}"
+    );
+    app.apply_event(Event::Retargeted { identity: nas(), server: "http://127.0.0.1:5000/".into(), token: Some("guest-T1".into()) });
+    assert!(app.session_is_direct());
+}
+
+#[test]
+fn a_401_on_a_direct_session_renews_the_ticket_instead_of_asking_for_a_sign_in() {
+    let mut app = federated_app();
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+    app.adopt_server(ATTIC.into(), nas(), None, Some("at".into()), None, false, None, Some((ATTIC.into(), 3)));
+    app.apply_event(Event::Connected {
+        server: "http://127.0.0.1:5000".into(),
+        id: nas(),
+        username: None,
+        token: Some("guest-T1".into()),
+        ping: Box::new(Default::default()),
+    });
+
+    app.apply_event(Event::Unauthorized);
+    assert!(app.connected, "no sign-in form for a guest token");
+    assert_eq!(app.direct.get(&nas()).and_then(|s| s.refused.clone()), Some("mstrfedg1:T1".into()));
+    let now = crate::clock::Instant::now();
+    assert_eq!(direct_asks(&app.tick_at(now)), vec![(3, true)]);
+    // The new token rides both the tunnel and the session.
+    let effects = app.apply_event(granted("T2"));
+    assert!(effects.contains(&Effect::Api(ApiCmd::TunnelCredential { id: nas(), credential: "mstrfedg1:T2".into() })));
+    assert!(effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Retarget { token: Some(t), .. }) if t == "guest-T2")), "{effects:?}");
+}
+
+#[test]
+fn a_401_on_a_direct_row_renews_the_ticket_and_plays_the_row_again_or_through_the_proxy() {
+    let mut app = federated_app();
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+    app.queue.push(nas_row("music/y.mp3"));
+    app.play_index(0);
+
+    let effects = app.playback_failed("request failed: 401 Unauthorized".into());
+    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.tunnel_wait, Some(TunnelWait { index: 0, id: nas() }));
+    assert!(app.message.as_ref().is_some_and(|m| m.text == "Renewing access to Nas…"), "{:?}", app.message);
+    let now = crate::clock::Instant::now();
+    assert_eq!(direct_asks(&app.tick_at(now)), vec![(3, true)]);
+
+    // Renewed: the row plays again with the new token.
+    let effects = app.apply_event(granted("T2"));
+    assert_eq!(played_url(&effects), "http://127.0.0.1:5000/media/music/y.mp3?token=guest-T2&__lt=lt");
+    assert!(app.tunnel_wait.is_none());
+
+    // Or declined: the peer's tunnel goes and the row plays through the
+    // parent.
+    let mut app = federated_app();
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+    app.queue.push(nas_row("music/y.mp3"));
+    app.play_index(0);
+    app.playback_failed("request failed: 401 Unauthorized".into());
+    let effects = app.apply_event(Event::DirectAccess {
+        parent: ATTIC.into(),
+        id: 3,
+        answer: crate::api::types::DirectAnswer::Denied("federation is off there".into()),
+    });
+    assert!(effects.contains(&Effect::Api(ApiCmd::TunnelClose { id: nas() })));
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/3/stream/music/y.mp3?token=at");
+}
+
+#[test]
+fn a_running_peer_tunnel_that_gives_up_on_its_token_has_it_re_minted() {
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+    let now = crate::clock::Instant::now();
+    assert!(direct_asks(&app.tick_at(now)).is_empty(), "fresh and up: nothing to ask");
+
+    app.apply_event(Event::TunnelStatus { id: nas(), status: crate::quickconnect::TunnelStatus::Rejected });
+    assert_eq!(app.direct.get(&nas()).and_then(|s| s.refused.clone()), Some("mstrfedg1:T1".into()));
+    assert_eq!(direct_asks(&app.tick_at(now + secs(1))), vec![(3, true)]);
+    // The tunnel is still there: the new ticket swaps in, and the crate
+    // re-dials with it at once.
+    let effects = app.apply_event(granted("T2"));
+    assert!(effects.contains(&Effect::Api(ApiCmd::TunnelCredential { id: nas(), credential: "mstrfedg1:T2".into() })), "{effects:?}");
+
+    // A Quick Connect tunnel saying the same is a re-pair, not a retry.
+    let mut qc = connected_app();
+    qc.servers.push(faraway());
+    qc.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    qc.apply_event(Event::TunnelStatus { id: FARAWAY.into(), status: crate::quickconnect::TunnelStatus::Rejected });
+    assert!(qc.direct.is_empty());
+}
+
+#[test]
+fn a_tunnel_parent_is_kept_for_the_access_call_and_let_go_once_the_peer_is_direct() {
+    // The peer's parent is a Quick Connect server: its tunnel carries the
+    // proxy path until the peer is direct, and the access call whenever
+    // the ticket is due.
+    let mut app = connected_app();
+    let parent = "mstream+iroh://faraway";
+    let pid = crate::config::peer_identity(parent, 7);
+    app.servers.push(faraway());
+    app.servers.push(KnownServer { id: pid.clone(), name: "Shed".into(), token: None, self_signed: false, peer: Some((parent.into(), 7)), pairing: None });
+    app.direct_offered.insert(parent.into());
+    app.queue.push(Queued { origin: Origin { server: parent.into(), peer: Some(7) }, track: track("music/s.mp3") });
+
+    // No ticket yet: the parent is wanted (the proxy, and the access call).
+    assert!(app.tunnel_targets().contains(parent));
+    assert!(!app.tunnel_targets().contains(&pid));
+
+    // A fresh ticket and the peer's own tunnel up: the parent is let go.
+    app.direct.insert(pid.clone(), DirectState { ticket: Some(guest("S1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(pid.clone(), tunnel_up("http://127.0.0.1:6000"));
+    assert!(app.tunnel_targets().contains(&pid));
+    assert!(!app.tunnel_targets().contains(parent), "the bytes no longer cross the parent");
+
+    // The ticket going stale wants the parent back for the re-mint.
+    app.direct.insert(pid.clone(), DirectState { ticket: Some(guest("S1", 3 * 3600, 3600)), ..Default::default() });
+    assert!(app.tunnel_targets().contains(parent));
+}
+
+// ── Tunnels follow the queue (contract clause 38) ───────────────────────
+
+fn tunnel_up(local_url: &str) -> TunnelState {
+    TunnelState::Up {
+        local_url: local_url.into(),
+        local_token: "lt".into(),
+        status: crate::quickconnect::TunnelStatus::Connected,
+        path: None,
+    }
+}
+
+/// A saved Quick Connect server with a pairing code in the book.
+fn faraway() -> KnownServer {
+    KnownServer {
+        id: "mstream+iroh://faraway".into(),
+        name: "quick connect · faraway".into(),
+        token: Some("t".into()),
+        self_signed: false,
+        peer: None,
+        pairing: Some("mstr1:far".into()),
+    }
+}
+
+const FARAWAY: &str = "mstream+iroh://faraway";
+
+fn secs(n: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(n)
+}
+
+#[test]
+fn a_queued_row_on_a_tunnel_server_has_its_tunnel_dialled() {
+    // Whichever server is browsed: the session is on a standard server.
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    let now = crate::clock::Instant::now();
+    assert!(app.tick_at(now).is_empty(), "nothing queued, nothing to dial");
+
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    let effects = app.tick_at(now);
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::TunnelOpen { id: FARAWAY.into(), credential: "mstr1:far".into() })]
+    );
+    assert_eq!(app.tunnels.get(FARAWAY), Some(&TunnelState::Dialling));
+    assert!(app.tick_at(now + secs(1)).is_empty(), "one dial in flight, not one per tick");
+}
+
+#[test]
+fn a_tunnel_nothing_references_is_released_after_the_grace() {
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    let now = crate::clock::Instant::now();
+    assert!(app.tick_at(now).is_empty(), "wanted and up: nothing to do");
+
+    app.queue.items.clear();
+    assert!(app.tick_at(now).is_empty(), "the grace starts");
+    assert!(app.tick_at(now + secs(9)).is_empty(), "and holds");
+    let effects = app.tick_at(now + secs(10));
+    assert_eq!(effects, vec![Effect::Api(ApiCmd::TunnelClose { id: FARAWAY.into() })]);
+    assert!(!app.tunnels.contains_key(FARAWAY));
+    assert!(app.tick_at(now + secs(20)).is_empty(), "closed once");
+}
+
+#[test]
+fn a_row_arriving_inside_the_grace_keeps_the_tunnel() {
+    // A restore, a clear-then-refill and the launch's empty queue all pass
+    // through "nothing queued" for a moment.
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    let now = crate::clock::Instant::now();
+    assert!(app.tick_at(now).is_empty(), "the grace starts");
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    assert!(app.tick_at(now + secs(5)).is_empty(), "wanted again: the release is cancelled");
+    assert!(app.tick_at(now + secs(30)).is_empty(), "and stays cancelled");
+    assert!(matches!(app.tunnels.get(FARAWAY), Some(TunnelState::Up { .. })));
+}
+
+#[test]
+fn the_ladder_spaces_the_dials_and_a_refused_code_is_never_redialled_on_its_own() {
+    assert_eq!(tunnel_retry_delay(1), secs(5));
+    assert_eq!(tunnel_retry_delay(2), secs(10));
+    assert_eq!(tunnel_retry_delay(3), secs(20));
+    assert_eq!(tunnel_retry_delay(4), secs(40));
+    assert_eq!(tunnel_retry_delay(5), secs(60));
+    assert_eq!(tunnel_retry_delay(10), secs(60));
+    assert_eq!(tunnel_retry_delay(11), secs(300));
+
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    let now = crate::clock::Instant::now();
+    assert!(matches!(app.tick_at(now).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+
+    app.apply_event(Event::TunnelFailed { id: FARAWAY.into(), rejected: false, why: "no answer".into() });
+    let failed = app.tunnel_retry.get(FARAWAY).expect("on the ladder").failed_at;
+    assert!(app.tick_at(failed + secs(4)).is_empty(), "the first rung is five seconds");
+    assert!(matches!(app.tick_at(failed + secs(5)).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+
+    app.apply_event(Event::TunnelFailed { id: FARAWAY.into(), rejected: false, why: "no answer".into() });
+    let failed = app.tunnel_retry.get(FARAWAY).expect("still on the ladder").failed_at;
+    assert_eq!(app.tunnel_retry.get(FARAWAY).unwrap().failures, 2);
+    assert!(app.tick_at(failed + secs(9)).is_empty(), "the second rung is ten");
+    assert!(matches!(app.tick_at(failed + secs(10)).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+
+    // Up: the ladder is forgotten.
+    app.apply_event(Event::TunnelUp {
+        id: FARAWAY.into(),
+        local_url: "http://127.0.0.1:4242".into(),
+        local_token: "lt".into(),
+    });
+    assert!(!app.tunnel_retry.contains_key(FARAWAY));
+
+    // Refused: a rotated code is a re-pair, not a retry.
+    app.tunnels.remove(FARAWAY);
+    assert!(matches!(app.tick_at(failed + secs(60)).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+    app.apply_event(Event::TunnelFailed { id: FARAWAY.into(), rejected: true, why: "rejected".into() });
+    let failed = app.tunnel_retry.get(FARAWAY).unwrap().failed_at;
+    assert!(app.tick_at(failed + secs(3600)).is_empty(), "never on its own");
+    assert!(matches!(app.tunnels.get(FARAWAY), Some(TunnelState::Down { rejected: true, .. })));
+}
+
+#[test]
+fn a_row_on_a_tunnel_not_yet_up_is_held_and_starts_when_it_comes_up() {
+    // Contract clause 37's tunnel step: brought up and re-seeded without
+    // skipping.
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    app.push_queue(track("music/near.mp3"));
+
+    // Not even asked for yet — but dialable, so it is waited for.
+    let effects = app.play_index(0);
+    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.tunnel_wait, Some(TunnelWait { index: 0, id: FARAWAY.into() }));
+    assert_eq!(app.queue.current, Some(0));
+    assert!(app.now_playing.as_ref().is_some_and(|t| t.filepath == "music/far.mp3"));
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text == "Connecting to quick connect · faraway…"),
+        "{:?}",
+        app.message
+    );
+
+    // The reconcile dials it on the next tick.
+    let now = crate::clock::Instant::now();
+    assert!(matches!(app.tick_at(now).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+
+    // Up: the held row plays from the loopback, with both tokens.
+    let effects = app.apply_event(Event::TunnelUp {
+        id: FARAWAY.into(),
+        local_url: "http://127.0.0.1:4242".into(),
+        local_token: "lt".into(),
+    });
+    assert_eq!(played_url(&effects), "http://127.0.0.1:4242/media/music/far.mp3?token=t&__lt=lt");
+    assert!(app.tunnel_wait.is_none());
+}
+
+#[test]
+fn a_held_row_keeps_its_restored_spot_for_when_the_tunnel_comes_up() {
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    app.resume_spot = Some((0, 42.5));
+
+    let effects = app.play_row_resuming(0);
+    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.resume_spot, Some((0, 42.5)), "the spot is spent by a play, not by a wait");
+
+    let effects = app.apply_event(Event::TunnelUp {
+        id: FARAWAY.into(),
+        local_url: "http://127.0.0.1:4242".into(),
+        local_token: "lt".into(),
+    });
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+    assert!(effects.contains(&Effect::Audio(AudioCmd::Seek(42.5))), "{effects:?}");
+    assert_eq!(app.resume_spot, None);
+}
+
+#[test]
+fn a_refused_tunnel_skips_the_held_row_with_a_word_and_an_unanswered_one_keeps_waiting() {
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    app.push_queue(track("music/near.mp3"));
+    app.play_index(0);
+    assert!(app.tunnel_wait.is_some());
+
+    // No answer: the ladder will dial again; the row waits, nothing plays.
+    let effects =
+        app.apply_event(Event::TunnelFailed { id: FARAWAY.into(), rejected: false, why: "no answer".into() });
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))), "{effects:?}");
+    assert!(app.tunnel_wait.is_some());
+    assert_eq!(app.queue.current, Some(0));
+
+    // Refused: nothing will bring it up, so the row walks on.
+    let effects = app.apply_event(Event::TunnelFailed {
+        id: FARAWAY.into(),
+        rejected: true,
+        why: "tunnel handshake rejected — wrong or rotated connect secret".into(),
+    });
+    assert_eq!(played_url(&effects), "http://host:3000/media/music/near.mp3?token=tok");
+    assert!(app.tunnel_wait.is_none());
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text.contains("won’t play") && m.text.contains("rejected")),
+        "{:?}",
+        app.message
+    );
+}
+
+#[test]
+fn a_switch_away_keeps_the_tunnel_the_queue_still_needs() {
+    // Contract clause 11 with clause 38: the session leaves its tunnel
+    // server; the queue's rows keep the tunnel until they leave too.
+    let mut app = App::new(Some(FARAWAY.into()), Some("t".into()), None).with_tunnel(Some("mstr1:far".into()));
+    app.connected = true;
+    app.session.server = "http://127.0.0.1:4242".into();
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    app.servers.push(faraway());
+    app.push_queue(track("music/far.mp3"));
+    assert_eq!(app.queue.items[0].origin.server, FARAWAY);
+
+    app.adopt_server("http://office:3000".into(), "http://office:3000".into(), None, None, None, false, None, None);
+    let now = crate::clock::Instant::now();
+    assert!(app.tick_at(now).is_empty());
+    assert!(app.tick_at(now + secs(60)).is_empty(), "wanted by the queue: never released");
+    assert!(matches!(app.tunnels.get(FARAWAY), Some(TunnelState::Up { .. })));
+
+    // …and released once the last row leaves.
+    app.queue.items.clear();
+    assert!(app.tick_at(now + secs(60)).is_empty());
+    assert_eq!(app.tick_at(now + secs(70)), vec![Effect::Api(ApiCmd::TunnelClose { id: FARAWAY.into() })]);
+}
+
+#[test]
+fn a_playing_row_from_another_server_asks_that_server_for_its_cover_and_shape() {
+    // Contract clause 30: the art URL is built from the row's own server.
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    let mut far = at(FARAWAY, "music/far.mp3");
+    far.track.metadata.album_art = Some("far.jpg".into());
+    app.queue.push(far);
+    let mut near = track("music/near.mp3");
+    near.metadata.album_art = Some("near.jpg".into());
+    app.push_queue(near);
+
+    let effects = app.play_index(0);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Api(ApiCmd::AlbumArt { file, reach: Some(Reach { base, local_token, .. }) })
+                if file == "far.jpg" && base == "http://127.0.0.1:4242" && local_token.as_deref() == Some("lt")
+        )),
+        "the cover comes from the row's server: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Api(ApiCmd::Waveform { filepath, reach: Some(_) }) if filepath == "music/far.mp3"
+        )),
+        "and so does the shape: {effects:?}"
+    );
+
+    // The session's own row asks the session.
+    let effects = app.play_index(1);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Api(ApiCmd::AlbumArt { file, reach: None }) if file == "near.jpg"
+        )),
+        "{effects:?}"
+    );
+}
+
 #[test]
 fn a_remembered_tunnel_with_no_code_says_so_instead_of_hanging() {
     // Credentials deleted, or a config.toml copied to a new machine
@@ -1949,16 +2662,19 @@ fn a_row_on_a_closed_tunnel_walks_on_like_a_refused_one() {
         app.message
     );
 
-    // While its tunnel is being dialled the row is skipped the same way,
-    // with a word that says so. (The skip budget is what a played track
+    // While its tunnel is being dialled the row is held, not skipped
+    // (contract clause 37): nothing plays, the row is current, and the
+    // line says what it waits on. (The skip budget is what a played track
     // resets; nothing has played here, so it is reset by hand.)
     app.failures = 0;
     app.tunnels.insert("mstream+iroh://faraway".into(), TunnelState::Dialling);
     let effects = app.play_index(0);
-    assert_eq!(played_url(&effects), "http://host:3000/media/music/near.mp3?token=tok");
+    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.tunnel_wait, Some(TunnelWait { index: 0, id: "mstream+iroh://faraway".into() }));
+    assert_eq!(app.queue.current, Some(0));
     assert!(
-        app.message.as_ref().is_some_and(|m| m.text.contains("being dialled")),
-        "said why: {:?}",
+        app.message.as_ref().is_some_and(|m| m.text.contains("Connecting to quick connect · faraway")),
+        "said what it waits on: {:?}",
         app.message
     );
 
@@ -4877,7 +5593,7 @@ fn starting_a_track_asks_for_its_cover_once() {
     ]);
 
     let effects = app.play_index(0);
-    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into() });
+    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None });
     assert!(effects.contains(&asked), "got {effects:?}");
 
     // The next track shares the cover and the first ask is still out; the
@@ -4923,7 +5639,7 @@ fn a_cover_nobody_answered_for_is_asked_for_again() {
     // waveform's rule, applied here.
     let mut app = connected_app();
     app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
-    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into() });
+    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None });
     assert!(app.play_index(0).contains(&asked));
 
     // The fetch dies with the network: nothing was learned, so nothing is
