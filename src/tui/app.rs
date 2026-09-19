@@ -721,6 +721,53 @@ pub(crate) fn tunnel_retry_delay(failures: u32) -> std::time::Duration {
     std::time::Duration::from_secs(TUNNEL_RETRY_LADDER_SECS[step.min(TUNNEL_RETRY_LADDER_SECS.len() - 1)])
 }
 
+/// A guest ticket is asked for again once this much of its life is gone —
+/// the parent re-mints past the same point — so the token in hand never
+/// runs out mid-session (contract clause 27).
+const DIRECT_REFRESH_AT: f64 = 0.75;
+/// After a refresh that came back empty-handed, how long before a stale
+/// ticket is asked for again; a refused or expired token has the shorter
+/// gap, since every request is failing meanwhile.
+const DIRECT_REFRESH_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(300);
+const DIRECT_REFUSED_RETRY_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A peer's direct access as its parent last answered (contract clause 27):
+/// the ticket in hand, when it was fetched, whether the parent declined for
+/// the session, and the bookkeeping that spaces the asks.
+#[derive(Debug, Clone, Default)]
+pub struct DirectState {
+    pub ticket: Option<crate::api::types::DirectTicket>,
+    /// When a NEW ticket was fetched — the same one handed out again does
+    /// not restart the clock.
+    pub fetched_at: Option<crate::clock::Instant>,
+    /// The parent answered `direct: false`: the proxy for the session.
+    pub denied: bool,
+    /// An access request is out.
+    pub asking: bool,
+    pub last_ask: Option<crate::clock::Instant>,
+    pub last_failure: Option<crate::clock::Instant>,
+    /// The ticket the peer refused at the handshake, or that its wall
+    /// answered 401 to: not dialled again; the next ask is a re-mint.
+    pub refused: Option<String>,
+}
+
+/// Whether a ticket is past the point of asking for the next one: expired,
+/// or more than [`DIRECT_REFRESH_AT`] of its life gone. A ticket with no
+/// readable times is never stale on its own — a refusal renews it.
+pub(crate) fn ticket_stale(ticket: &crate::api::types::DirectTicket, now: std::time::SystemTime) -> bool {
+    match (ticket.issued_at, ticket.expires_at) {
+        (_, Some(expires)) if now >= expires => true,
+        (Some(issued), Some(expires)) => match expires.duration_since(issued) {
+            Ok(life) if !life.is_zero() => {
+                let refresh_at = issued + life.mul_f64(DIRECT_REFRESH_AT);
+                now >= refresh_at
+            }
+            _ => true,
+        },
+        _ => false,
+    }
+}
+
 /// A tunnel's failed dials, for the ladder.
 #[derive(Debug, Clone)]
 pub struct TunnelRetry {
@@ -1375,6 +1422,10 @@ pub struct App {
     pub tunnel_release: std::collections::BTreeMap<String, crate::clock::Instant>,
     /// The row parked on a tunnel that is not up yet (contract clause 37).
     pub tunnel_wait: Option<TunnelWait>,
+    /// Direct access per peer, by the peer's identity (contract clause 27).
+    pub direct: std::collections::BTreeMap<String, DirectState>,
+    /// The parents whose capability payload said `federationDirect`.
+    pub direct_offered: std::collections::BTreeSet<String>,
     /// Booted with `--bundled-server`: the installer's own server, which the
     /// servers room never offers to remove (contract clauses 50–58).
     pub bundled_server: Option<String>,
@@ -1648,6 +1699,8 @@ impl App {
             tunnel_retry: Default::default(),
             tunnel_release: Default::default(),
             tunnel_wait: None,
+            direct: Default::default(),
+            direct_offered: Default::default(),
             bundled_server: None,
             resume_queue: true,
             resume_spot: None,
@@ -3592,8 +3645,77 @@ impl App {
     /// own server, or a peer's parent.
     pub(crate) fn session_transport(&self) -> &str {
         match &self.session.peer {
+            // A peer reached over a tunnel of its own carries its own bytes.
+            Some(_) if self.session_is_direct() => &self.session.server_id,
             Some((parent, _)) => parent,
             None => &self.session.server_id,
+        }
+    }
+
+    /// A peer session whose requests go to the peer's own tunnel rather
+    /// than through the parent's proxies (contract clause 27).
+    pub(crate) fn session_is_direct(&self) -> bool {
+        self.session.peer.is_some()
+            && self
+                .tunnel_at(&self.session.server)
+                .is_some_and(|(id, _)| crate::config::same_server(id, &self.session.server_id))
+    }
+
+    /// The ticket in hand for a peer, by its identity.
+    pub(crate) fn direct_ticket(&self, peer_id: &str) -> Option<&crate::api::types::DirectTicket> {
+        self.direct.get(peer_id).and_then(|state| state.ticket.as_ref())
+    }
+
+    /// The peers the session and the queue reference — (identity, parent,
+    /// row id on the parent), each once.
+    fn peer_targets(&self) -> Vec<(String, String, i64)> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        let mut add = |parent: &str, id: i64| {
+            let pid = crate::config::peer_identity(parent, id);
+            if seen.insert(pid.clone()) {
+                out.push((pid, parent.to_string(), id));
+            }
+        };
+        if let Some((parent, id)) = &self.session.peer {
+            add(parent, *id);
+        }
+        for item in &self.queue.items {
+            if let Some(id) = item.origin.peer {
+                add(&item.origin.server, id);
+            }
+        }
+        out
+    }
+
+    /// Whether a peer's own tunnel is worth dialling: its parent offers
+    /// direct access, nobody declined this session, and a ticket the peer
+    /// has not refused is in hand.
+    fn direct_ready(&self, peer_id: &str, parent: &str) -> bool {
+        if !self.direct_offered.contains(parent) {
+            return false;
+        }
+        self.direct.get(peer_id).is_some_and(|state| {
+            !state.denied
+                && state.ticket.as_ref().is_some_and(|t| state.refused.as_deref() != Some(t.ticket.as_str()))
+        })
+    }
+
+    /// Whether a peer's ticket needs asking for: none, refused, expired, or
+    /// stale (contract clause 27).
+    fn ticket_due(&self, peer_id: &str, parent: &str, now_wall: std::time::SystemTime) -> bool {
+        if !self.direct_offered.contains(parent) {
+            return false;
+        }
+        match self.direct.get(peer_id) {
+            None => true,
+            Some(state) if state.denied => false,
+            Some(state) => match &state.ticket {
+                None => true,
+                Some(ticket) => {
+                    state.refused.as_deref() == Some(ticket.ticket.as_str()) || ticket_stale(ticket, now_wall)
+                }
+            },
         }
     }
 
@@ -3612,12 +3734,19 @@ impl App {
     }
 
     /// The loopback token the session's own requests carry, when its
-    /// transport is a tunnel that is up.
+    /// address is a tunnel's bridge.
     pub(crate) fn session_local_token(&self) -> Option<String> {
-        match self.tunnels.get(self.session_transport()) {
-            Some(TunnelState::Up { local_token, .. }) => Some(local_token.clone()),
-            _ => None,
-        }
+        self.tunnel_at(&self.session.server).map(|(_, token)| token.to_string())
+    }
+
+    /// What to call a server identity: the book's name, else the identity
+    /// as it should be shown.
+    pub(crate) fn server_name_of(&self, id: &str) -> String {
+        self.servers
+            .iter()
+            .find(|s| crate::config::same_server(&s.id, id))
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| crate::quickconnect::display_server(id))
     }
 
     /// Whether a row is the session's own — same server, same peer or none.
@@ -3634,19 +3763,36 @@ impl App {
     /// worker holds one open (contract clause 38) — a row on a tunnel that
     /// is closed or still dialling cannot be asked for yet.
     pub(crate) fn reach(&self, origin: &Origin) -> Result<Reach, String> {
-        // The session's own rows: whatever it is, it is reached already.
+        // The session's own rows: whatever it is, it is reached already. A
+        // peer session over the peer's own tunnel serves plain `/media`
+        // with the guest token (contract clause 27).
         if self.is_session_origin(origin) {
+            let direct = self.session_is_direct();
             return Ok(Reach {
                 base: self.session.server.clone(),
                 token: self.session.token.clone(),
-                self_signed: self.session.self_signed,
-                peer: origin.peer,
+                self_signed: if direct { false } else { self.session.self_signed },
+                peer: if direct { None } else { origin.peer },
                 local_token: self.session_local_token(),
             });
         }
-        // A peer's rows go through its parent, however the parent is
-        // reached (contract clause 27).
         if let Some(id) = origin.peer {
+            // A peer with a tunnel of its own serves its bytes itself, with
+            // the guest token in the ordinary slot (contract clause 27)…
+            let pid = crate::config::peer_identity(&origin.server, id);
+            if let Some(TunnelState::Up { local_url, local_token, .. }) = self.tunnels.get(&pid)
+                && let Some(ticket) = self.direct_ticket(&pid)
+            {
+                return Ok(Reach {
+                    base: local_url.clone(),
+                    token: Some(ticket.guest_token.clone()),
+                    self_signed: false,
+                    peer: None,
+                    local_token: Some(local_token.clone()),
+                });
+            }
+            // …and rides its parent's proxies otherwise, however the parent
+            // is reached.
             let parent = self.reach(&Origin { server: origin.server.clone(), peer: None })?;
             return Ok(Reach { peer: Some(id), ..parent });
         }
@@ -3874,6 +4020,28 @@ impl App {
     /// before deciding; the file's own fault skips at once. Shared by the
     /// engine's refusal and a URL that could not be built.
     fn playback_failed(&mut self, error: String) -> Vec<Effect> {
+        // A direct peer's wall stopped honouring the guest token: renew it
+        // through the parent and try the row again, the proxy being the
+        // fallback (contract clause 27). The row waits on the peer's own
+        // tunnel identity, which the renewal's outcome resolves.
+        if (error.contains("401") || error.contains("403"))
+            && let Some(index) = self.queue.current
+            && let Some(item) = self.queue.items.get(index)
+            && let Some(id) = item.origin.peer
+        {
+            let pid = crate::config::peer_identity(&item.origin.server, id);
+            if matches!(self.tunnels.get(&pid), Some(TunnelState::Up { .. }))
+                && let Some(state) = self.direct.get_mut(&pid)
+                && let Some(ticket) = &state.ticket
+            {
+                state.refused = Some(ticket.ticket.clone());
+                state.last_ask = None;
+                let what = self.server_name_of(&pid);
+                self.tunnel_wait = Some(TunnelWait { index, id: pid });
+                self.info(format!("Renewing access to {what}…"));
+                return vec![Effect::Audio(AudioCmd::Stop)];
+            }
+        }
         if transient_failure(&error)
             && let Some(index) = self.queue.current
             && let Some(item) = self.queue.items.get(index)
@@ -3962,8 +4130,59 @@ impl App {
     }
 
     pub fn tick_at(&mut self, now: crate::clock::Instant) -> Vec<Effect> {
-        let mut effects = self.reconcile_tunnels(now);
+        let mut effects = self.reconcile_direct(now);
+        effects.extend(self.reconcile_tunnels(now));
         effects.extend(self.probe_stall(now));
+        effects
+    }
+
+    /// Once a tick: every referenced peer whose parent offers direct access
+    /// is asked for a ticket when it holds none, a stale one, or the one
+    /// the peer refused — spaced by the record's gaps — and never again
+    /// once the parent declined (contract clause 27).
+    pub(crate) fn reconcile_direct(&mut self, now: crate::clock::Instant) -> Vec<Effect> {
+        let now_wall = std::time::SystemTime::now();
+        let mut asks = Vec::new();
+        for (pid, parent, id) in self.peer_targets() {
+            if !self.direct_offered.contains(&parent) {
+                continue;
+            }
+            let state = self.direct.get(&pid).cloned().unwrap_or_default();
+            if state.denied || state.asking {
+                continue;
+            }
+            let refused = state.refused.is_some()
+                && state.refused == state.ticket.as_ref().map(|t| t.ticket.clone());
+            let expired = state.ticket.as_ref().and_then(|t| t.expires_at).is_some_and(|e| now_wall >= e);
+            let stale = state.ticket.as_ref().is_some_and(|t| ticket_stale(t, now_wall));
+            if !(state.ticket.is_none() || refused || expired || stale) {
+                continue;
+            }
+            // Attempts are spaced after a refusal or an expiry (every
+            // request is failing, so the short gap); only failed attempts
+            // are spaced for a merely stale ticket.
+            let urgent = refused || expired;
+            let held_back = match (urgent, state.last_ask, state.last_failure) {
+                (true, Some(asked), _) => now.duration_since(asked) < DIRECT_REFUSED_RETRY_GAP,
+                (false, _, Some(failed)) => now.duration_since(failed) < DIRECT_REFRESH_MIN_GAP,
+                _ => false,
+            };
+            if held_back {
+                continue;
+            }
+            // The access call rides the parent, however the parent is
+            // reached; a parent whose tunnel is not up yet is a target
+            // meanwhile (see `want_for_peer`).
+            let Ok(reach) = self.reach(&Origin { server: parent.clone(), peer: None }) else { continue };
+            asks.push((pid, parent, id, reach, refused));
+        }
+        let mut effects = Vec::new();
+        for (pid, parent, id, reach, refresh) in asks {
+            let state = self.direct.entry(pid).or_default();
+            state.asking = true;
+            state.last_ask = Some(now);
+            effects.push(Effect::Api(ApiCmd::DirectAccess { parent, id, reach, refresh }));
+        }
         effects
     }
 
@@ -3998,21 +4217,60 @@ impl App {
     /// queued row's server that is one — a peer's rows name their parent.
     pub(crate) fn tunnel_targets(&self) -> std::collections::BTreeSet<String> {
         let mut wanted = std::collections::BTreeSet::new();
-        let transport = self.session_transport();
-        if crate::quickconnect::is_tunnel_id(transport) {
-            wanted.insert(transport.to_string());
+        match &self.session.peer {
+            Some((parent, id)) => self.want_for_peer(&mut wanted, parent, *id),
+            None => {
+                let transport = self.session_transport();
+                if crate::quickconnect::is_tunnel_id(transport) {
+                    wanted.insert(transport.to_string());
+                }
+            }
         }
         for item in &self.queue.items {
-            if crate::quickconnect::is_tunnel_id(&item.origin.server) {
-                wanted.insert(item.origin.server.clone());
+            match item.origin.peer {
+                Some(id) => self.want_for_peer(&mut wanted, &item.origin.server, id),
+                None => {
+                    if crate::quickconnect::is_tunnel_id(&item.origin.server) {
+                        wanted.insert(item.origin.server.clone());
+                    }
+                }
             }
         }
         wanted
     }
 
+    /// What a referenced peer needs kept up (contract clause 27): a tunnel
+    /// of its own when its parent offers direct access and a ticket is in
+    /// hand; and its parent's tunnel, when the parent is one, until the
+    /// peer is direct — and whenever the ticket is due, since the access
+    /// call rides the parent.
+    fn want_for_peer(&self, wanted: &mut std::collections::BTreeSet<String>, parent: &str, id: i64) {
+        let pid = crate::config::peer_identity(parent, id);
+        if self.direct_ready(&pid, parent) {
+            wanted.insert(pid.clone());
+        }
+        if crate::quickconnect::is_tunnel_id(parent) {
+            let peer_up = matches!(self.tunnels.get(&pid), Some(TunnelState::Up { .. }));
+            if !peer_up || self.ticket_due(&pid, parent, std::time::SystemTime::now()) {
+                wanted.insert(parent.to_string());
+            }
+        }
+    }
+
     /// What tunnel `id` is dialled with: the session's own code when the
     /// session is on it, else the pairing the book saved for it.
     fn credential_for(&self, id: &str) -> Option<String> {
+        // A peer's own tunnel dials with the guest ticket its parent handed
+        // out — unless the peer refused that one.
+        if id.starts_with(crate::config::PEER_ID_PREFIX) {
+            return self.direct.get(id).and_then(|state| {
+                state
+                    .ticket
+                    .as_ref()
+                    .filter(|t| state.refused.as_deref() != Some(t.ticket.as_str()))
+                    .map(|t| t.ticket.clone())
+            });
+        }
         if id == self.session_transport()
             && let Some(code) = &self.session.tunnel_code
         {
@@ -4823,6 +5081,23 @@ impl App {
             | Event::TunnelStatus { .. }
             | Event::TunnelPath { .. }) => self.consume_tunnel(event),
             Event::Reachable { server, reachable } => self.probe_answered(&server, reachable),
+            Event::DirectAccess { parent, id, answer } => self.consume_direct(&parent, id, answer),
+            Event::Retargeted { identity, server, token } => {
+                if crate::config::same_server(&identity, &self.session.server_id) {
+                    self.session.server = server;
+                    self.session.token = token;
+                }
+                Vec::new()
+            }
+            Event::RetargetFailed { identity, why } => {
+                // The session keeps the transport it had; say why the move
+                // did not happen.
+                if crate::config::same_server(&identity, &self.session.server_id) {
+                    let what = self.server_name_of(&identity);
+                    self.info(format!("{what}: {why} — staying on the current path"));
+                }
+                Vec::new()
+            }
             Event::FederationPeers { parent, peers } => match peers {
                 Some(peers) => vec![Effect::SavePeers {
                     parent,

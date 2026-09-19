@@ -82,6 +82,16 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             })
         }
         ApiCmd::TunnelClose { id } => Some(Event::TunnelClosed { id }),
+        // No peers to reach from the browser: the page's own server only.
+        ApiCmd::DirectAccess { parent, id, .. } => Some(Event::DirectAccess {
+            parent,
+            id,
+            answer: crate::api::types::DirectAnswer::Failed("direct access needs the native player".into()),
+        }),
+        ApiCmd::Retarget { identity, .. } => Some(Event::RetargetFailed {
+            identity,
+            why: "the browser build has one server, the page's own".into(),
+        }),
 
         ApiCmd::Browse(path) => {
             with_session(session, async |s| {

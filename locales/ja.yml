@@ -1129,6 +1129,7 @@ gui:
     bundled: "インストーラー付属"
     bundled_note: "このサーバーはプレイヤーと一緒にインストールされたため、ここからは削除できません。ほかのサーバーは通常どおり追加・削除できます。"
     via: "%{parent} 経由"
+    direct: "直接"
     no_longer_shared: "%{parent} はもう共有していません"
     act_hide: "非表示"
     act_show: "表示"

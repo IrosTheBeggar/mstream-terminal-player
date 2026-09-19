@@ -116,6 +116,12 @@ impl App {
         // open it first when it is not. The worker keeps a tunnel open for
         // as long as it is asked to, whichever session is current
         // (contract clause 38).
+        // A peer whose own tunnel is up is browsed through it — plain
+        // paths, the guest token — rather than through the parent's
+        // proxies (contract clause 27).
+        if let Some(effects) = self.connect_direct() {
+            return effects;
+        }
         let transport = self.session_transport().to_string();
         if crate::quickconnect::is_tunnel_id(&transport) {
             let credential = self.session.tunnel_code.clone().or_else(|| {
@@ -148,6 +154,62 @@ impl App {
             peer: self.session.peer.as_ref().map(|(_, id)| *id),
             local_token: None,
         })]
+    }
+
+    /// The Connect for a peer session whose own tunnel is up and whose
+    /// guest ticket is in hand; `None` when it rides the parent instead.
+    fn connect_direct(&mut self) -> Option<Vec<Effect>> {
+        self.session.peer.as_ref()?;
+        let pid = self.session.server_id.clone();
+        let (local_url, local_token) = match self.tunnels.get(&pid) {
+            Some(super::TunnelState::Up { local_url, local_token, .. }) => {
+                (local_url.clone(), local_token.clone())
+            }
+            _ => return None,
+        };
+        let guest = self.direct_ticket(&pid)?.guest_token.clone();
+        self.connecting = true;
+        self.session.server = local_url.clone();
+        Some(vec![Effect::Api(ApiCmd::Connect {
+            server: local_url,
+            identity: pid,
+            token: Some(guest),
+            self_signed: false,
+            peer: None,
+            local_token: Some(local_token),
+        })])
+    }
+
+    /// The session moving onto the browsed peer's own tunnel: the same
+    /// identity, a new address and token, nothing else (clause 27).
+    fn retarget_to_direct(&self, pid: &str) -> Option<Effect> {
+        let Some(super::TunnelState::Up { local_url, local_token, .. }) = self.tunnels.get(pid) else {
+            return None;
+        };
+        let guest = self.direct_ticket(pid)?.guest_token.clone();
+        Some(Effect::Api(ApiCmd::Retarget {
+            identity: pid.to_string(),
+            server: local_url.clone(),
+            token: Some(guest),
+            self_signed: false,
+            peer: None,
+            local_token: Some(local_token.clone()),
+        }))
+    }
+
+    /// The session moving back onto the parent's proxies, however the
+    /// parent is reached.
+    fn retarget_to_proxy(&self) -> Option<Effect> {
+        let (parent, id) = self.session.peer.clone()?;
+        let reach = self.reach(&super::Origin { server: parent, peer: None }).ok()?;
+        Some(Effect::Api(ApiCmd::Retarget {
+            identity: self.session.server_id.clone(),
+            server: reach.base,
+            token: reach.token,
+            self_signed: reach.self_signed,
+            peer: Some(id),
+            local_token: reach.local_token,
+        }))
     }
 
     /// Connect the session through the tunnel under `transport`: at once
@@ -579,6 +641,16 @@ impl App {
                 // The peers this server lists, folded into the saved list
                 // (contract clause 20); a server that stopped listing any
                 // marks the ones it had missing.
+                // Whether this server hands its devices direct access to
+                // its peers (contract clause 27) — read here, with the
+                // token, since the flag is caller-scoped.
+                if self.session.peer.is_none() && !self.session.server_id.is_empty() {
+                    if ping.federation_direct {
+                        self.direct_offered.insert(self.session.server_id.clone());
+                    } else {
+                        self.direct_offered.remove(&self.session.server_id);
+                    }
+                }
                 if self.session.peer.is_none() && !self.session.server_id.is_empty() {
                     let parent = self.session.server_id.clone();
                     if self.capabilities.federation_browse {
@@ -634,6 +706,19 @@ impl App {
                 Vec::new()
             }
             Event::Unauthorized => {
+                // A direct peer's wall stopped honouring the guest token:
+                // renew it through the parent rather than asking anyone to
+                // sign in (contract clause 27).
+                if self.session_is_direct() {
+                    let pid = self.session.server_id.clone();
+                    let what = self.server_name_of(&pid);
+                    if let Some(state) = self.direct.get_mut(&pid) {
+                        state.refused = state.ticket.as_ref().map(|t| t.ticket.clone());
+                        state.last_ask = None;
+                    }
+                    self.info(format!("Renewing access to {what}…"));
+                    return Vec::new();
+                }
                 // An established session went bad. Offer the login form for
                 // the server we were already using rather than dumping the
                 // user back at "how do you want to connect?".
@@ -682,6 +767,16 @@ impl App {
                     self.tunnel_wait = None;
                     effects.extend(self.play_row_resuming(index));
                 }
+                // The browsed peer's own tunnel: the session moves onto it,
+                // browse stack and all (contract clause 27).
+                if self.connected
+                    && self.session.peer.is_some()
+                    && crate::config::same_server(&id, &self.session.server_id)
+                    && !self.session_is_direct()
+                    && let Some(effect) = self.retarget_to_direct(&id)
+                {
+                    effects.push(effect);
+                }
                 effects
             }
             Event::TunnelFailed { id, rejected, why } => {
@@ -703,10 +798,22 @@ impl App {
                     self.connect.submitting = false;
                     self.error(why.clone());
                 }
+                // A peer refusing its guest ticket is not a re-pair: the
+                // parent re-mints it, and the reconcile asks at once
+                // (contract clause 27). The proxy serves meanwhile.
+                let peer = id.starts_with(crate::config::PEER_ID_PREFIX);
+                if rejected
+                    && peer
+                    && let Some(state) = self.direct.get_mut(&id)
+                {
+                    state.refused = state.ticket.as_ref().map(|t| t.ticket.clone());
+                    state.last_ask = None;
+                }
                 // A row parked on a tunnel the server refused walks on like a
                 // row the engine refused; one whose server did not answer
                 // keeps waiting for the ladder.
                 if rejected
+                    && !peer
                     && let Some(wait) = self.tunnel_wait.as_ref().filter(|w| w.id == id)
                 {
                     let index = wait.index;
@@ -716,13 +823,21 @@ impl App {
                 Vec::new()
             }
             Event::TunnelClosed { id } => {
+                let was_direct = self.session_is_direct()
+                    && crate::config::same_server(&id, &self.session.server_id);
+                let was_transport = id == self.session_transport();
                 self.tunnels.remove(&id);
                 if self.pending_tunnel.as_deref() == Some(id.as_str()) {
                     self.pending_tunnel = None;
                     self.connecting = false;
                 }
-                if id == self.session_transport() {
+                if was_transport {
                     self.tunnel_path = None;
+                }
+                // The browsed peer's own tunnel went: back through the
+                // parent's proxies, browse stack and all.
+                if was_direct && self.connected {
+                    return self.retarget_to_proxy().into_iter().collect();
                 }
                 Vec::new()
             }
@@ -745,5 +860,108 @@ impl App {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The parent's answer about direct access to one of its peers
+    /// (contract clause 27): a ticket dials the peer's own tunnel — or swaps
+    /// into the running one and moves a browsed peer's session onto it; a
+    /// refusal holds for the session and puts the peer back on the proxy;
+    /// a failure waits for the gap.
+    pub(super) fn consume_direct(
+        &mut self,
+        parent: &str,
+        id: i64,
+        answer: crate::api::types::DirectAnswer,
+    ) -> Vec<Effect> {
+        use crate::api::types::DirectAnswer;
+        let pid = crate::config::peer_identity(parent, id);
+        let now = crate::clock::Instant::now();
+        let browsed = self.session.peer.is_some()
+            && crate::config::same_server(&pid, &self.session.server_id);
+        let mut effects = Vec::new();
+        match answer {
+            DirectAnswer::Granted(ticket) => {
+                let state = self.direct.entry(pid.clone()).or_default();
+                state.asking = false;
+                state.denied = false;
+                state.last_failure = None;
+                let changed = state.ticket.as_ref().map(|t| t.ticket.as_str()) != Some(ticket.ticket.as_str());
+                if !changed {
+                    // The same ticket again — the parent's cache was not due
+                    // for a re-mint. A refused one stays refused, and the gap
+                    // applies before the next ask.
+                    if state.refused.is_some() {
+                        state.last_failure = Some(now);
+                    }
+                    return effects;
+                }
+                state.ticket = Some(ticket.clone());
+                state.fetched_at = Some(now);
+                state.refused = None;
+                match self.tunnels.get(&pid) {
+                    // In place: same port, the queued URLs survive; only what
+                    // is asked for from now on carries the new token.
+                    Some(super::TunnelState::Up { .. }) => {
+                        effects.push(Effect::Api(ApiCmd::TunnelCredential {
+                            id: pid.clone(),
+                            credential: ticket.ticket.clone(),
+                        }));
+                        if browsed
+                            && self.connected
+                            && let Some(effect) = self.retarget_to_direct(&pid)
+                        {
+                            effects.push(effect);
+                        }
+                        // A row held for the renewal plays again.
+                        if let Some(wait) = self.tunnel_wait.as_ref().filter(|w| w.id == pid) {
+                            let index = wait.index;
+                            self.tunnel_wait = None;
+                            effects.extend(self.play_row_resuming(index));
+                        }
+                    }
+                    // A refused dial left it down: the reconcile dials again
+                    // with the new ticket.
+                    Some(super::TunnelState::Down { .. }) => {
+                        self.tunnels.remove(&pid);
+                    }
+                    _ => {}
+                }
+            }
+            DirectAnswer::Denied(_reason) => {
+                let state = self.direct.entry(pid.clone()).or_default();
+                state.asking = false;
+                state.denied = true;
+                state.ticket = None;
+                state.refused = None;
+                let was_direct = browsed && self.session_is_direct();
+                if self.tunnels.remove(&pid).is_some() {
+                    self.tunnel_retry.remove(&pid);
+                    effects.push(Effect::Api(ApiCmd::TunnelClose { id: pid.clone() }));
+                }
+                if was_direct
+                    && self.connected
+                    && let Some(effect) = self.retarget_to_proxy()
+                {
+                    effects.push(effect);
+                }
+                // A row held for the renewal plays through the proxy now.
+                if let Some(wait) = self.tunnel_wait.as_ref().filter(|w| w.id == pid) {
+                    let index = wait.index;
+                    self.tunnel_wait = None;
+                    effects.extend(self.play_row_resuming(index));
+                }
+            }
+            DirectAnswer::Failed(why) => {
+                let state = self.direct.entry(pid.clone()).or_default();
+                state.asking = false;
+                state.last_failure = Some(now);
+                if let Some(wait) = self.tunnel_wait.as_ref().filter(|w| w.id == pid) {
+                    let index = wait.index;
+                    self.tunnel_wait = None;
+                    return self.unplayable(index, why);
+                }
+            }
+        }
+        effects
     }
 }

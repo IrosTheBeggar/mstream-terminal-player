@@ -1129,6 +1129,7 @@ gui:
     bundled: "随安装程序附带"
     bundled_note: "此服务器随播放器一同安装，无法在此移除。其他服务器可照常添加和移除。"
     via: "经由 %{parent}"
+    direct: "直连"
     no_longer_shared: "%{parent} 不再共享"
     act_hide: "隐藏"
     act_show: "显示"

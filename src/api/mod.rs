@@ -666,6 +666,33 @@ impl Client {
         wait(self.federation_peers_async())
     }
 
+    /// `GET /api/v1/federation/peers/{id}/access` — direct access to one
+    /// of this server's peers for the caller's own device (mStream #943).
+    /// Always on the parent's plain client, never through a peer client's
+    /// rewrite. `refresh` asks the parent to re-mint a token the peer just
+    /// refused.
+    pub async fn federation_access_async(
+        &self,
+        id: i64,
+        refresh: bool,
+    ) -> Result<crate::api::types::DirectAccessResponse, ApiError> {
+        let path = if refresh {
+            format!("api/v1/federation/peers/{id}/access?refresh=1")
+        } else {
+            format!("api/v1/federation/peers/{id}/access")
+        };
+        self.get(&path).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn federation_access(
+        &self,
+        id: i64,
+        refresh: bool,
+    ) -> Result<crate::api::types::DirectAccessResponse, ApiError> {
+        wait(self.federation_access_async(id, refresh))
+    }
+
     /// `GET /api/` — the server's version and API generations. The one
     /// endpoint that answers without auth, which is what lets the Manage
     /// Servers screen show a version for servers it holds no token for.

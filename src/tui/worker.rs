@@ -114,6 +114,23 @@ pub enum ApiCmd {
     // lands; the worker's half is here first.
     #[allow(dead_code)]
     TunnelCredential { id: String, credential: String },
+    /// Ask `parent` — reached as `reach` says — for direct access to its
+    /// peer `id` (contract clause 27): a guest ticket, or its refusal.
+    /// `refresh` asks for a re-mint of a token the peer refused.
+    DirectAccess { parent: String, id: i64, reach: crate::tui::app::Reach, refresh: bool },
+    /// Swap the session's client for the same identity — a browsed peer
+    /// going direct once its own tunnel is up, or back to the parent's
+    /// proxy when that tunnel goes — after `server` answers. Nothing about
+    /// the session but its transport changes; a connect would re-open the
+    /// browser.
+    Retarget {
+        identity: String,
+        server: String,
+        token: Option<String>,
+        self_signed: bool,
+        peer: Option<i64>,
+        local_token: Option<String>,
+    },
     /// The peers a saved server lists for browsing (contract clause 20),
     /// asked once its ping says `federationBrowse`.
     FederationPeers { parent: String },
@@ -380,6 +397,12 @@ pub enum Event {
     TunnelFailed { id: String, rejected: bool, why: String },
     /// The tunnel under `id` was closed on request.
     TunnelClosed { id: String },
+    /// The parent's answer about direct access to its peer `id`.
+    DirectAccess { parent: String, id: i64, answer: crate::api::types::DirectAnswer },
+    /// The session's client now speaks to `server` under the same identity.
+    Retargeted { identity: String, server: String, token: Option<String> },
+    /// `server` did not answer; the session keeps the transport it had.
+    RetargetFailed { identity: String, why: String },
     /// One source would not play — wrong format, gone from the server, or
     /// something this decoder doesn't speak. The rest of the queue is fine.
     /// Named for the same reason [`Event::TrackEnded`] is, and more urgently:
@@ -907,6 +930,9 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
             }
             ApiCmd::TunnelClose { id } => Some(close_tunnel(&tunnels, id)),
             ApiCmd::TunnelCredential { id, credential } => swap_credential(&tunnels, id, &credential),
+            ApiCmd::Retarget { identity, server, token, self_signed, peer, local_token } => {
+                Some(retarget(&mut client, &server, &identity, token, self_signed, peer, local_token))
+            }
 
             read => {
                 spawn_read(client.clone(), caps, events.clone(), read);
@@ -974,6 +1000,15 @@ fn spawn_read(
 /// shouldn't bounce the user to a login form.
 #[cfg(not(target_arch = "wasm32"))]
 fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
+    // Direct access is asked of the parent as the App reached it — never
+    // through a peer client's rewrite, and not necessarily the session.
+    if let ApiCmd::DirectAccess { parent, id, reach, refresh } = cmd {
+        let answer = match client_for(&reach) {
+            Some(c) => direct_answer(c.federation_access(id, refresh)),
+            None => crate::api::types::DirectAnswer::Failed("the parent's address will not parse".into()),
+        };
+        return Event::DirectAccess { parent, id, answer };
+    }
     // The probe needs no session: it asks the row's own server, which may
     // be one the session never reached.
     if let ApiCmd::Probe { server, base, self_signed, local_token } = cmd {
@@ -1092,6 +1127,8 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         | ApiCmd::TunnelOpen { .. }
         | ApiCmd::TunnelClose { .. }
         | ApiCmd::TunnelCredential { .. }
+        | ApiCmd::DirectAccess { .. }
+        | ApiCmd::Retarget { .. }
         | ApiCmd::Probe { .. }
         | ApiCmd::Shutdown => return Event::Error("connection change routed as a read".into()),
     };
@@ -1308,6 +1345,86 @@ fn login(
         Ok(event) => Some(event),
         Err(e) => Some(Event::Error(e.to_string())),
     }
+}
+
+/// Swap the session's client for the same identity once `server` answers.
+/// A peer's layered `GET /api` is the ping either way — the loopback of a
+/// direct peer serves it plainly, the parent's proxy serves it rewritten.
+#[cfg(not(target_arch = "wasm32"))]
+fn retarget(
+    client: &mut Option<Arc<Client>>,
+    server: &str,
+    identity: &str,
+    token: Option<String>,
+    self_signed: bool,
+    peer: Option<i64>,
+    local_token: Option<String>,
+) -> Event {
+    let failed = |why: String| Event::RetargetFailed { identity: identity.to_string(), why };
+    let c = match Client::new_with(server, self_signed) {
+        Ok(c) => c.with_token(token.clone()).with_peer(peer).with_local_token(local_token),
+        Err(e) => return failed(e.to_string()),
+    };
+    if let Err(e) = c.ping_via_info() {
+        return failed(e.to_string());
+    }
+    let server = c.server();
+    *client = Some(Arc::new(c));
+    Event::Retargeted { identity: identity.to_string(), server, token }
+}
+
+/// Sort the parent's access answer (contract clause 27): a grant with every
+/// field is a ticket, `direct: false` is a refusal that holds for the
+/// session, and anything else — the peer unreachable for the mint (a 502),
+/// a 200 missing fields — is transient.
+#[cfg(not(target_arch = "wasm32"))]
+fn direct_answer(
+    result: Result<crate::api::types::DirectAccessResponse, ApiError>,
+) -> crate::api::types::DirectAnswer {
+    use crate::api::types::{DirectAnswer, DirectTicket};
+    let response = match result {
+        Ok(response) => response,
+        Err(e) => return DirectAnswer::Failed(e.to_string()),
+    };
+    if !response.direct {
+        return DirectAnswer::Denied(
+            response.reason.unwrap_or_else(|| "the parent declined direct access".to_string()),
+        );
+    }
+    let (Some(ticket), Some(guest_token)) = (response.direct_ticket, response.guest_token) else {
+        return DirectAnswer::Failed("the access answer is missing its ticket".into());
+    };
+    if !ticket.starts_with("mstrfedg") || guest_token.is_empty() {
+        return DirectAnswer::Failed("the access answer is not a guest ticket".into());
+    }
+    let (issued_at, expires_at) = jwt_times(&guest_token);
+    DirectAnswer::Granted(DirectTicket {
+        ticket,
+        guest_token,
+        endpoint_id: response.endpoint_id.filter(|id| !id.is_empty()),
+        issued_at,
+        expires_at,
+    })
+}
+
+/// The `iat` and `exp` claims of a JWT, read without verifying it — the
+/// peer verifies; this side only needs to know when to ask for a new one.
+#[cfg(not(target_arch = "wasm32"))]
+fn jwt_times(token: &str) -> (Option<std::time::SystemTime>, Option<std::time::SystemTime>) {
+    use base64::Engine as _;
+    let Some(payload) = token.split('.').nth(1) else { return (None, None) };
+    let normalised: String = payload.chars().filter(|c| *c != '=').collect();
+    let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(normalised) else {
+        return (None, None);
+    };
+    let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return (None, None) };
+    let at = |key: &str| {
+        claims
+            .get(key)
+            .and_then(|v| v.as_u64())
+            .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+    };
+    (at("iat"), at("exp"))
 }
 
 /// Shared by the native api thread (via `api::wait`) and the web worker
@@ -1945,6 +2062,66 @@ mod tests {
         for mode in [AutoDjMode::Off, AutoDjMode::BpmKey] {
             assert_eq!(mode.next_available(few).prev_available(few), mode);
             assert_ne!(mode.prev_available(few), mode, "left always moves");
+        }
+    }
+
+    #[test]
+    fn the_access_answer_is_sorted_into_a_ticket_a_refusal_or_a_retry() {
+        use crate::api::types::{DirectAccessResponse, DirectAnswer};
+        use base64::Engine as _;
+        // A guest JWT with readable times: issued at 1700000000, one day long.
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"federationGuest":true,"iat":1700000000,"exp":1700086400}"#);
+        let jwt = format!("eyJhbGciOiJIUzI1NiJ9.{claims}.sig");
+        let granted = DirectAccessResponse {
+            direct: true,
+            reason: None,
+            endpoint_ticket: Some("endpointabc".into()),
+            endpoint_id: Some("abc".into()),
+            guest_token: Some(jwt.clone()),
+            expires_at: Some("2023-11-15T22:13:20.000Z".into()),
+            direct_ticket: Some("mstrfedg1:eyJ0IjoiZW5kcG9pbnRhYmMiLCJnIjoiLi4uIn0".into()),
+        };
+        match direct_answer(Ok(granted)) {
+            DirectAnswer::Granted(ticket) => {
+                assert_eq!(ticket.guest_token, jwt);
+                assert_eq!(ticket.endpoint_id.as_deref(), Some("abc"));
+                let epoch = std::time::UNIX_EPOCH;
+                assert_eq!(ticket.issued_at, Some(epoch + std::time::Duration::from_secs(1_700_000_000)));
+                assert_eq!(ticket.expires_at, Some(epoch + std::time::Duration::from_secs(1_700_086_400)));
+            }
+            other => panic!("a full grant is a ticket, got {other:?}"),
+        }
+
+        // `direct: false` is the parent's word: the proxy for the session.
+        let denied = DirectAccessResponse {
+            direct: false,
+            reason: Some("peer does not offer guest access".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            direct_answer(Ok(denied)),
+            DirectAnswer::Denied("peer does not offer guest access".into())
+        );
+
+        // A 200 missing its ticket, and a peer unreachable for the mint
+        // (the parent's 502), are transient.
+        let half = DirectAccessResponse { direct: true, ..Default::default() };
+        assert!(matches!(direct_answer(Ok(half)), DirectAnswer::Failed(_)));
+        let down = ApiError::Server { status: 502, message: "Peer unreachable".into() };
+        assert!(matches!(direct_answer(Err(down)), DirectAnswer::Failed(why) if why.contains("502") || why.contains("unreachable")));
+
+        // A token whose payload is not JSON still yields a ticket, with no
+        // times to schedule by.
+        let opaque = DirectAccessResponse {
+            direct: true,
+            guest_token: Some("not.a.jwt".into()),
+            direct_ticket: Some("mstrfedg1:xyz".into()),
+            ..Default::default()
+        };
+        match direct_answer(Ok(opaque)) {
+            DirectAnswer::Granted(ticket) => assert_eq!((ticket.issued_at, ticket.expires_at), (None, None)),
+            other => panic!("{other:?}"),
         }
     }
 
