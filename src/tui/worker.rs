@@ -1092,7 +1092,7 @@ fn open_tunnel(tunnels: &Arc<TunnelTable>, id: String, credential: String, event
             // tunnel lagged never waits on a dial that will not happen.
             let _ = events.send(Event::TunnelUp {
                 id,
-                local_url: crate::quickconnect::local_url(tunnel.local_port),
+                local_url: tunnel.local_url(),
                 local_token: tunnel.local_token(),
             });
             return;
@@ -1104,11 +1104,13 @@ fn open_tunnel(tunnels: &Arc<TunnelTable>, id: String, credential: String, event
     }
     let tunnels = Arc::clone(tunnels);
     let _ = thread::Builder::new().name("mstream-tunnel-dial".into()).spawn(move || {
-        let dialled = crate::runtime::block_on(iroh_tunnel::connect_tunnel(&credential, 0))
-            .and_then(|dialled| dialled.map_err(|e| e.to_string()));
+        let dialled = match crate::runtime::block_on(iroh_tunnel::connect_tunnel(&credential, 0)) {
+            Ok(dialled) => dialled,
+            Err(why) => Err(iroh_tunnel::DialError::Local(why)),
+        };
         let event = match dialled {
             Ok(tunnel) => {
-                let local_url = crate::quickconnect::local_url(tunnel.local_port);
+                let local_url = tunnel.local_url();
                 let local_token = tunnel.local_token();
                 let mut table = lock(&tunnels);
                 match table.slots.get_mut(&id) {
@@ -1127,12 +1129,12 @@ fn open_tunnel(tunnels: &Arc<TunnelTable>, id: String, credential: String, event
                     }
                 }
             }
-            Err(why) => {
+            Err(e) => {
                 lock(&tunnels).slots.remove(&id);
-                // The shared client words a refused credential with
-                // "rejected" for both kinds; everything else is a server
+                // A refused credential is the one failure a re-dial with
+                // the same code cannot fix; everything else is a server
                 // that did not answer.
-                Event::TunnelFailed { id, rejected: why.contains("rejected"), why }
+                Event::TunnelFailed { id, rejected: e.is_rejected(), why: e.to_string() }
             }
         };
         let _ = events.send(event);

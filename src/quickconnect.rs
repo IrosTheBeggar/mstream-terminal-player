@@ -7,47 +7,20 @@
 //! local HTTP port — so ordinary HTTP, range requests and all, rides over it
 //! unchanged.
 //!
-//! The live tunnel — the dial, the loopback bridge, the reconnect supervisor,
-//! the in-place credential swap, the loopback token — is the shared
-//! `mstream-iroh-tunnel` crate's (`iroh_tunnel::connect_tunnel`), the same
-//! code the mobile app ships. What stays here is the player's own: the
-//! identity a tunnel server is remembered by, the words for its state, the
-//! parse that yields that identity before anything is dialled, and the staged
-//! `quickconnect-probe`, which walks the dial one step at a time so a hostile
-//! network's failure has a name.
+//! The tunnel itself — the parse, the dial, the loopback bridge, the reconnect
+//! supervisor, the in-place credential swap, the loopback token — is the
+//! shared `mstream-iroh-tunnel` crate's (`iroh_tunnel`), the same client the
+//! mobile app ships. What is the player's own lives here: the identity a
+//! tunnel server is remembered by, the words for a tunnel's state, and the
+//! `quickconnect-probe` diagnostic, which walks the crate's dial one stage at
+//! a time so a hostile network's failure has a name.
 //!
 //! Two things this is *not*. The secret gates the pipe, not the API: after the
 //! tunnel is up the client still logs in normally. And the code itself is
 //! fetched over an existing connection by an admin, so the flow is pair on the
 //! LAN, then roam.
 
-use std::str::FromStr;
-use std::time::Duration;
-
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD_NO_PAD;
-use iroh::endpoint::{Connection, presets};
-use iroh::{Endpoint, EndpointAddr, RelayUrl, TransportAddr};
-use iroh_tickets::endpoint::EndpointTicket;
-use serde::Deserialize;
-
-/// Wire protocol version. Note this is a *separate* axis from the `mstr<V>`
-/// code version: a v1 code dials ALPN v2 today.
-pub const TUNNEL_ALPN: &[u8] = b"mstream/tunnel/2";
-
-const PAIRING_PREFIX: &str = "mstr";
-/// Highest pairing-code version we understand.
-const MAX_PAIRING_VERSION: u32 = 1;
-const SECRET_LEN: usize = 32;
-
-/// The server bounds its handshake read; match it so a hostile peer can't make
-/// us buffer.
-const HANDSHAKE_LIMIT: usize = 256;
-/// Waiting for our own home relay before dialling. Cross-network, the first
-/// stream can reset on a path that isn't ready yet.
-const ONLINE_TIMEOUT: Duration = Duration::from_secs(8);
-const DIAL_TIMEOUT: Duration = Duration::from_secs(25);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+use iroh_tunnel::{DialError, PairingKind, Stage};
 
 /// Marks a remembered server as one reached through a tunnel rather than at a
 /// URL. Deliberately not a real scheme: nothing may hand it to an HTTP client.
@@ -123,17 +96,16 @@ pub fn local_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-#[derive(Debug, Clone)]
+/// What a pairing code names: the server's iroh endpoint id, a public key.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingCode {
-    pub addr: EndpointAddr,
-    secret: Vec<u8>,
+    pub endpoint_id: String,
 }
 
 impl PairingCode {
     /// Short form of the endpoint id, for display. Never shows the secret.
     pub fn endpoint_label(&self) -> String {
-        let id = self.addr.id.to_string();
-        id.chars().take(12).collect()
+        self.endpoint_id.chars().take(12).collect()
     }
 
     /// Stable identity of the server this code reaches.
@@ -143,7 +115,7 @@ impl PairingCode {
     /// is what makes it the right thing to file a saved session under. The
     /// loopback URL a session happens to use is none of those things.
     pub fn server_id(&self) -> String {
-        format!("{TUNNEL_ID_PREFIX}{}", self.addr.id)
+        format!("{TUNNEL_ID_PREFIX}{}", self.endpoint_id)
     }
 }
 
@@ -162,155 +134,19 @@ pub fn display_server(server: &str) -> String {
     }
 }
 
-#[derive(Deserialize)]
-struct PairingPayload {
-    t: String,
-    s: String,
-}
-
-/// Decode base64 in any of the four shapes the server's own parser accepts:
-/// url-safe or standard alphabet, padded or not.
-fn decode_b64(raw: &str) -> Result<Vec<u8>, String> {
-    let normalised: String = raw
-        .trim()
-        .chars()
-        .filter(|c| *c != '=')
-        .map(|c| match c {
-            '-' => '+',
-            '_' => '/',
-            other => other,
-        })
-        .collect();
-    STANDARD_NO_PAD.decode(normalised).map_err(|e| format!("not valid base64: {e}"))
-}
-
-/// Parse a pairing code.
-///
-/// A body with no `mstr<V>:` prefix is a legacy code and treated as v1, which
-/// is what the server's parser does.
+/// Parse a pairing code for the identity it names — the shared crate's
+/// parse, which is the server's own shape: a versioned envelope, a bare body
+/// as legacy v1, either base64 alphabet. A federation guest ticket is not a
+/// pairing code: it reaches a peer, which is dialled by its own row, never
+/// pasted here.
 pub fn parse_code(raw: &str) -> Result<PairingCode, String> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Err("no pairing code given".to_string());
-    }
-
-    let body = match raw.split_once(':') {
-        Some((head, body)) if head.starts_with(PAIRING_PREFIX) => {
-            let version: u32 = head[PAIRING_PREFIX.len()..]
-                .parse()
-                .map_err(|_| format!("unrecognised pairing code prefix '{head}'"))?;
-            if version > MAX_PAIRING_VERSION {
-                return Err(format!(
-                    "this code is version {version}; this player understands up to \
-                     {MAX_PAIRING_VERSION} — update the player"
-                ));
-            }
-            body
-        }
-        // No recognised prefix: legacy v1 body.
-        _ => raw,
-    };
-
-    let payload: PairingPayload = serde_json::from_slice(&decode_b64(body)?)
-        .map_err(|e| format!("pairing code payload is not valid JSON: {e}"))?;
-
-    let ticket = EndpointTicket::from_str(payload.t.trim())
-        .map_err(|e| format!("pairing code contains an invalid endpoint ticket: {e}"))?;
-    let secret = decode_b64(&payload.s)?;
-    if secret.len() != SECRET_LEN {
-        return Err(format!(
-            "pairing secret should be {SECRET_LEN} bytes, got {}",
-            secret.len()
-        ));
-    }
-
-    Ok(PairingCode { addr: ticket.into(), secret })
-}
-
-// ── The dial, one stage at a time — for `probe` only ─────────────────────
-// The session's tunnels are dialled by the shared crate; these are the same
-// steps, kept apart so the diagnostic can say which one died.
-
-/// Bind the local endpoint the way every tunnel user must: n0 defaults, plus
-/// the two settings the defaults leave off that decide whether a corporate
-/// network works at all. The OS trust store, because the relay is plain HTTPS
-/// on 443 and TLS inspection (Netskope, Zscaler) re-signs it with a CA only
-/// the system keychain knows — iroh's embedded Mozilla roots would call that
-/// an UnknownIssuer and fail the one road a UDP-blocked network has left.
-/// And the environment's proxy, because a proxy-only network drops direct
-/// dials on the floor.
-async fn bind_endpoint() -> Result<Endpoint, String> {
-    Endpoint::builder(presets::N0)
-        .ca_tls_config(iroh::tls::CaTlsConfig::system())
-        .proxy_from_env()
-        .bind()
-        .await
-        .map_err(|e| format!("could not start the local endpoint: {e}"))
-}
-
-/// Best effort — if the relay isn't ready in time, dial anyway rather than
-/// failing outright. The outcome is returned rather than discarded because a
-/// dial that then times out means opposite things on a machine that reached
-/// the relay network and one that never could.
-async fn wait_for_relay(endpoint: &Endpoint) -> bool {
-    tokio::time::timeout(ONLINE_TIMEOUT, endpoint.online()).await.is_ok()
-}
-
-/// Reach the server by whatever path iroh finds — direct, or relayed for a
-/// network that blocks UDP.
-async fn dial(
-    endpoint: &Endpoint,
-    addr: &EndpointAddr,
-    relay_online: bool,
-) -> Result<Connection, String> {
-    tokio::time::timeout(DIAL_TIMEOUT, endpoint.connect(addr.clone(), TUNNEL_ALPN))
-        .await
-        .map_err(|_| dial_timeout_message(relay_online))?
-        .map_err(|e| format!("could not reach the server: {e}"))
-}
-
-/// The same silent 25 seconds point at opposite culprits depending on whether
-/// this machine ever reached the relay network itself.
-fn dial_timeout_message(relay_online: bool) -> String {
-    if relay_online {
-        "timed out reaching the server through the tunnel — the relay network \
-         is reachable from here, so the server may be offline, or its pairing \
-         code was issued while the server had no relay contact"
-            .to_string()
-    } else {
-        "timed out reaching the server, and the iroh relay network was \
-         unreachable too — this network may block or intercept it (corporate \
-         networks often do); if it requires a proxy, set HTTPS_PROXY and retry"
-            .to_string()
-    }
-}
-
-/// The first bi-stream is the gate: write the secret, close our side, read the
-/// verdict.
-async fn handshake(connection: &Connection, secret: &[u8]) -> Result<(), String> {
-    let attempt = async {
-        let (mut send, mut recv) = connection
-            .open_bi()
-            .await
-            .map_err(|e| format!("could not open the handshake stream: {e}"))?;
-        send.write_all(secret).await.map_err(|e| format!("handshake write failed: {e}"))?;
-        // The server reads to end, so it only proceeds once we finish.
-        send.finish().map_err(|e| format!("handshake finish failed: {e}"))?;
-
-        // A rejection can arrive as "NO", as an empty read, or as a transport
-        // error when the server drops the connection — all three mean the same
-        // thing, so treat any read failure as a rejection rather than an
-        // infrastructure problem.
-        Ok::<_, String>(recv.read_to_end(HANDSHAKE_LIMIT).await.ok())
-    };
-
-    let reply = tokio::time::timeout(HANDSHAKE_TIMEOUT, attempt)
-        .await
-        .map_err(|_| "the server never answered the pairing handshake".to_string())??;
-
-    match reply.as_deref() {
-        Some(b"OK") => Ok(()),
-        _ => Err("the server rejected this pairing code — it may have been rotated".to_string()),
+    let credential = iroh_tunnel::inspect(raw).map_err(|e| e.to_string())?;
+    match credential.kind {
+        PairingKind::Tunnel => Ok(PairingCode { endpoint_id: credential.endpoint_id }),
+        PairingKind::FederationGuest => Err(
+            "this is a federation guest ticket, not a pairing code — a peer is reached through its parent"
+                .to_string(),
+        ),
     }
 }
 
@@ -322,13 +158,16 @@ fn proxy_env_var() -> Option<&'static str> {
         .find(|name| std::env::var(name).is_ok_and(|v| !v.is_empty()))
 }
 
-/// The relay the endpoint settled on, if any. The probe names it so a
-/// corporate allowlist request can name it too.
-fn home_relay(endpoint: &Endpoint) -> Option<RelayUrl> {
-    endpoint.addr().addrs.into_iter().find_map(|addr| match addr {
-        TransportAddr::Relay(url) => Some(url),
-        _ => None,
-    })
+/// The same silent failure points at opposite culprits depending on whether
+/// this machine ever reached the relay network itself.
+fn unreachable_advice(relay_online: bool) -> &'static str {
+    if relay_online {
+        "the relay network is reachable from here, so the server may be offline, or its \
+         pairing code was issued while the server had no relay contact"
+    } else {
+        "the iroh relay network was unreachable too — this network may block or intercept \
+         it (corporate networks often do); if it requires a proxy, set HTTPS_PROXY and retry"
+    }
 }
 
 /// Diagnostic: dial a pairing code and make one real HTTP request through the
@@ -349,52 +188,39 @@ pub fn probe(code: &str) -> i32 {
         println!("proxy: ${name} is set and will be used for relay dials");
     }
 
-    // The dial's stages one at a time — the same steps the shared tunnel
-    // client composes — so a hostile network's failure has a name. Then the
-    // whole thing again through that client, loopback bridge included, and
-    // one real request over it.
+    // The shared client's dial, one stage at a time — then one real request
+    // over the bridge it built, through the ordinary API client.
     let started = std::time::Instant::now();
-    let stage = move |what: &str| {
+    let mut narrate = |stage: Stage| {
+        let what = match stage {
+            Stage::Bound => "local endpoint up".to_string(),
+            Stage::Relay { online: true, url: Some(url) } => format!("relay reached ({url})"),
+            Stage::Relay { online: true, url: None } => "relay reported online".to_string(),
+            Stage::Relay { online: false, .. } => "NO RELAY — dialling direct anyway; if that fails too, this \
+                 network likely blocks or intercepts the iroh relay servers"
+                .to_string(),
+            Stage::Connected => "server accepted the connection".to_string(),
+            Stage::Handshaken => "pairing handshake accepted".to_string(),
+            Stage::Serving { local_port } => format!("tunnel up at {}", local_url(local_port)),
+        };
         println!("  {what} after {:.2}s", started.elapsed().as_secs_f64());
     };
-    let staged = crate::runtime::block_on(async move {
-        let endpoint = bind_endpoint().await?;
-        stage("local endpoint up");
-        let relay_online = wait_for_relay(&endpoint).await;
-        match (relay_online, home_relay(&endpoint)) {
-            (true, Some(url)) => stage(&format!("relay reached ({url})")),
-            (true, None) => stage("relay reported online"),
-            (false, _) => stage(
-                "NO RELAY — dialling direct anyway; if that fails too, this \
-                 network likely blocks or intercepts the iroh relay servers",
-            ),
+    let tunnel = match crate::runtime::block_on(iroh_tunnel::connect_tunnel_staged(code, 0, &mut narrate)) {
+        Ok(Ok(tunnel)) => tunnel,
+        Ok(Err(e)) => {
+            eprintln!("FAIL: {e}");
+            if let DialError::Unreachable { relay_online, .. } = e {
+                eprintln!("      {}", unreachable_advice(relay_online));
+            }
+            return 1;
         }
-        let connection = dial(&endpoint, &parsed.addr, relay_online).await?;
-        stage("server accepted the connection");
-        handshake(&connection, &parsed.secret).await?;
-        stage("pairing handshake accepted");
-        connection.close(0u32.into(), b"probe done");
-        Ok::<(), String>(())
-    })
-    .and_then(|staged| staged);
-    if let Err(e) = staged {
-        eprintln!("FAIL: {e}");
-        return 1;
-    }
-
-    let opened = crate::runtime::block_on(iroh_tunnel::connect_tunnel(code, 0))
-        .and_then(|dialled| dialled.map_err(|e| e.to_string()));
-    let tunnel = match opened {
-        Ok(tunnel) => tunnel,
         Err(e) => {
             eprintln!("FAIL: {e}");
             return 1;
         }
     };
-    let base = local_url(tunnel.local_port);
-    println!("tunnel up at {base} after {:.2}s", started.elapsed().as_secs_f64());
 
-    let client = match crate::api::Client::new(&base) {
+    let client = match crate::api::Client::new(&tunnel.local_url()) {
         Ok(client) => client.with_local_token(Some(tunnel.local_token())),
         Err(e) => {
             eprintln!("FAIL: {e}");
@@ -419,9 +245,6 @@ pub fn probe(code: &str) -> i32 {
     }
 }
 
-/// Codes for the tests that need a real-shaped one — the App's and the GUI's
-/// as well as this module's — since a pasted code is parsed for its identity
-/// before anything is dialled.
 #[cfg(test)]
 pub(crate) mod testing {
     use base64::Engine as _;
@@ -435,7 +258,7 @@ pub(crate) mod testing {
         });
         let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
         match version {
-            Some(v) => format!("{}{v}:{body}", super::PAIRING_PREFIX),
+            Some(v) => format!("mstr{v}:{body}"),
             None => body,
         }
     }
@@ -458,12 +281,18 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::{encode, TICKET};
     use super::*;
+    use base64::Engine as _;
+    use iroh::Endpoint;
+    use iroh::endpoint::presets;
+    use iroh_tickets::endpoint::EndpointTicket;
+    use iroh_tunnel::TUNNEL_ALPN;
 
     #[test]
     fn parses_a_v1_code() {
         let code = parse_code(&encode(Some(1), TICKET, &[7u8; 32])).unwrap();
-        assert_eq!(code.secret, vec![7u8; 32]);
         assert!(!code.endpoint_label().is_empty());
+        assert!(code.server_id().starts_with(TUNNEL_ID_PREFIX));
+        assert!(code.endpoint_id.len() > 40, "an endpoint id is a public key: {}", code.endpoint_id);
     }
 
     #[test]
@@ -496,14 +325,21 @@ mod tests {
     #[test]
     fn treats_a_bare_body_as_legacy_v1() {
         // The server's own parser accepts an unprefixed body; so must we.
-        let code = parse_code(&encode(None, TICKET, &[1u8; 32])).unwrap();
-        assert_eq!(code.secret.len(), SECRET_LEN);
+        assert!(parse_code(&encode(None, TICKET, &[1u8; 32])).is_ok());
     }
 
     #[test]
     fn rejects_a_future_version_with_advice() {
         let err = parse_code(&encode(Some(2), TICKET, &[1u8; 32])).unwrap_err();
-        assert!(err.contains("update the player"), "got: {err}");
+        assert!(err.to_lowercase().contains("update"), "got: {err}");
+    }
+
+    #[test]
+    fn a_guest_ticket_is_not_a_pairing_code() {
+        let json = serde_json::json!({ "t": TICKET, "g": "guest-token" }).to_string();
+        let ticket = format!("mstrfedg1:{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json));
+        let err = parse_code(&ticket).unwrap_err();
+        assert!(err.contains("guest ticket"), "got: {err}");
     }
 
     #[test]
@@ -680,10 +516,10 @@ mod tests {
     }
 
     #[test]
-    fn a_dial_timeout_names_the_right_culprit() {
-        let reached = dial_timeout_message(true);
+    fn an_unreachable_server_names_the_right_culprit() {
+        let reached = unreachable_advice(true);
         assert!(reached.contains("server may be offline"), "got: {reached}");
-        let unreached = dial_timeout_message(false);
+        let unreached = unreachable_advice(false);
         assert!(unreached.contains("relay network was unreachable"), "got: {unreached}");
         assert!(unreached.contains("HTTPS_PROXY"), "got: {unreached}");
     }

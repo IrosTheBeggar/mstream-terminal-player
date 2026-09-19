@@ -1991,7 +1991,13 @@ selectable through the crate).
   the App's picture can never lag behind a dial that will not happen. The
   code is parsed for its identity before anything is dialled, which is why
   the tests type a real-shaped code (`quickconnect::testing::sample_code`).
-  789 tests; the wasm build checks. `Cargo.toml`: the crate under
+  789 tests; the wasm build checks. **E3 followed on 2026-09-19** (crate
+  v0.2.0): the probe rides `connect_tunnel_staged` and prints the crate's
+  stages, a refused code is `DialError::is_rejected()` rather than a word in
+  the error text, `parse_code` is `iroh_tunnel::inspect` (a guest ticket is
+  refused as not a pairing code), the crate is pulled without its C ABI and
+  with `os-trust`, and `iroh` itself is a dev-dependency only — for the
+  tests' fake server endpoint. `Cargo.toml`: the crate under
   the non-wasm target dependencies — at v0.1.0 as is; from E3 with
   `default-features = false` (no C symbols in the player binary) and its
   OS-trust feature on (the `platform-verifier` pin this player carries

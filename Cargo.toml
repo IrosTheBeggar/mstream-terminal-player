@@ -83,17 +83,16 @@ stream-download = "0.24.2"
 # "time" is for the open() timeout in engine::http — the runtime already ran
 # with enable_all(), the timer just wasn't compiled in (PLAN.md finding #69).
 tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
-# platform-verifier: trust what the operating system trusts for the relay's
-# TLS, not just the compiled-in Mozilla bundle — corporate networks put a
-# TLS-inspecting proxy in front of :443 and re-sign with a CA that only the
-# OS keychain knows (the tunnel research round).
-iroh = { version = "1", features = ["platform-verifier"] }
 # The tunnel client shared with the mobile app (and anyone else): dials a
 # Quick Connect code or a federation guest ticket and serves the server on
 # a loopback port, with a reconnect supervisor and an in-place credential
-# swap. By git tag until it is on crates.io; the `iroh` line above stays for
-# the staged `quickconnect-probe`, which drives the dial one step at a time.
-mstream-iroh-tunnel = { git = "https://github.com/IrosTheBeggar/mstream-iroh-tunnel", tag = "v0.1.0" }
+# swap. By git tag until it is on crates.io. Without its C ABI (no
+# `#[no_mangle]` symbols in this binary); with `os-trust`, so the relay's
+# TLS is checked against what the operating system trusts, not just the
+# compiled-in Mozilla bundle — corporate networks put a TLS-inspecting proxy
+# in front of :443 and re-sign with a CA that only the OS keychain knows
+# (the tunnel research round).
+mstream-iroh-tunnel = { git = "https://github.com/IrosTheBeggar/mstream-iroh-tunnel", tag = "v0.2.0", default-features = false, features = ["os-trust"] }
 # The optional debug log (MSTREAM_LOG): a fmt subscriber writing to a file,
 # never the terminal. env-filter so RUST_LOG chooses what third-party crates
 # (iroh's relay and holepunch narration above all) get to say.
@@ -103,7 +102,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # in-memory ring holds the story of a session at the default level rather
 # than waiting for someone to turn iroh's chatter up.
 tracing = "0.1"
-iroh-tickets = "1"
 # 0.22 rather than 0.23: reqwest, iroh, portmapper and tokio-websockets are
 # all on 0.22.1, and pinning a major of our own put two copies of base64 in
 # the tree for one decode call (PLAN.md finding #70).
@@ -209,6 +207,12 @@ auto-req = "no"
 
 [package.metadata.generate-rpm.requires]
 alsa-lib = "*"
+
+# The tests' fake mStream endpoint — the server half of the tunnel protocol,
+# relay-free — speaks iroh directly; the player itself no longer does.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+iroh = "1"
+iroh-tickets = "1"
 
 [dev-dependencies]
 # The locale-completeness test parses locales/*.yml directly.
