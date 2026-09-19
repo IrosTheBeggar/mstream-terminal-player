@@ -2036,6 +2036,31 @@ fn a_401_on_a_direct_row_renews_the_ticket_and_plays_the_row_again_or_through_th
 }
 
 #[test]
+fn a_running_peer_tunnel_that_gives_up_on_its_token_has_it_re_minted() {
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+    let now = crate::clock::Instant::now();
+    assert!(direct_asks(&app.tick_at(now)).is_empty(), "fresh and up: nothing to ask");
+
+    app.apply_event(Event::TunnelStatus { id: nas(), status: crate::quickconnect::TunnelStatus::Rejected });
+    assert_eq!(app.direct.get(&nas()).and_then(|s| s.refused.clone()), Some("mstrfedg1:T1".into()));
+    assert_eq!(direct_asks(&app.tick_at(now + secs(1))), vec![(3, true)]);
+    // The tunnel is still there: the new ticket swaps in, and the crate
+    // re-dials with it at once.
+    let effects = app.apply_event(granted("T2"));
+    assert!(effects.contains(&Effect::Api(ApiCmd::TunnelCredential { id: nas(), credential: "mstrfedg1:T2".into() })), "{effects:?}");
+
+    // A Quick Connect tunnel saying the same is a re-pair, not a retry.
+    let mut qc = connected_app();
+    qc.servers.push(faraway());
+    qc.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    qc.apply_event(Event::TunnelStatus { id: FARAWAY.into(), status: crate::quickconnect::TunnelStatus::Rejected });
+    assert!(qc.direct.is_empty());
+}
+
+#[test]
 fn a_tunnel_parent_is_kept_for_the_access_call_and_let_go_once_the_peer_is_direct() {
     // The peer's parent is a Quick Connect server: its tunnel carries the
     // proxy path until the peer is direct, and the access call whenever

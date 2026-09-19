@@ -845,6 +845,18 @@ impl App {
                 if let Some(super::TunnelState::Up { status: current, .. }) = self.tunnels.get_mut(&id) {
                     *current = status;
                 }
+                // A running peer tunnel whose supervisor gave up on the guest
+                // token: the parent re-mints it, and the swap re-dials at
+                // once (contract clause 27). A Quick Connect server's
+                // rotated code is a re-pair, not a retry.
+                if status == crate::quickconnect::TunnelStatus::Rejected
+                    && id.starts_with(crate::config::PEER_ID_PREFIX)
+                    && let Some(state) = self.direct.get_mut(&id)
+                    && state.refused.is_none()
+                {
+                    state.refused = state.ticket.as_ref().map(|t| t.ticket.clone());
+                    state.last_ask = None;
+                }
                 Vec::new()
             }
             Event::TunnelPath { id, path } => {
