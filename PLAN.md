@@ -1795,7 +1795,8 @@ a LATER secondary screen (party view), Columns retired.
   it in the room and the dropdown, hidden or forgotten from there; the
   failure walk probes a row's server, retries, holds and resumes.
   Deferred, logged in the contract: per-server tunnels (clause 38), the
-  guest-ticket direct path to a peer, a drag grip for reorder.
+  guest-ticket direct path to a peer — planned below, T1–T4 — and a
+  drag grip for reorder.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
   of the Library tab views (Artists/Genres/Recent — the wall's drill
@@ -1803,6 +1804,366 @@ a LATER secondary screen (party view), Columns retired.
   sonic contract's §5 search-skip), track-level add-to-playlist (its
   own contract; `playlist/add-song` awaits), then e2e legs (fake server
   needs player endpoints).
+
+#### Per-server tunnels and guest tickets — the plan (2026-09-18)
+
+The two deferrals the multi-server contract logged, taken together because
+they are one mechanism: **a tunnel registry that outlives the session**.
+Clause 38 (a Quick Connect server's tunnel stays up while the queue
+references it) needs bridges keyed by server instead of the api thread's
+single slot; clause 27's direct sentence (a peer with a guest ticket gets a
+tunnel of its own) is a second kind of credential dialled into the same
+registry. Record: `ServerManager` in `mstream_music`
+(`lib/singletons/server_list.dart` — `_tunnelTargets`, `setQueueIrohServers`,
+`ensureTunnels`, `_ensureHandle`, `_refreshDirectAccess`, `_maintainDirect`,
+`onDirectAuthRejected`), `lib/singletons/tunnel_policy.dart` (the
+constants), `lib/objects/direct_access.dart` (the payload),
+`lib/util/stream_url.dart` (the URL shapes). Server side, read at mStream
+`c791799a` (6.28.0): `docs/federation-guest-ticket.md`,
+`src/api/federation-browse.js` (the access route), `src/state/federation.js`
+(the federation endpoint's accept loop), `src/api/federation-auth.js` (what
+a guest may call), `src/api/server-info.js` (`federationDirect`).
+
+**Where we stand.** `api_loop` (`src/tui/worker.rs`) owns one
+`TunnelBridge` and one `(local_url, id)` pair; `ApiCmd::QuickConnect` dials
+and connects in one step and keeps the old bridge until the new one answers
+(`tunnel_answered`); `resolve_target` maps the loopback address back to the
+identity for a login. The App mirrors the single slot as `open_tunnel`, and
+`reach()` (`src/tui/app.rs`) answers a queued row on any other tunnel with
+"is not connected — its tunnel is closed", which the failure walk turns
+into a skip with a word. A peer always rides its parent's proxies with the
+parent's token. Nothing dials for a row; only a switch dials. Two things
+stay as they are: every bridge binds its own iroh `Endpoint`
+(`Tunnel::open` → `bind_endpoint`), and the `Redialer` inside a bridge
+re-dials a dead QUIC connection on the same loopback port, so a URL built
+on that port survives a network blip. What changes is who owns bridges and
+how many. One more fact that shapes the design: `Event::Connected` is a
+full re-open (the browser goes to the opening path, art and the sonic path
+clear), so a transport swap under a live session needs a command of its
+own, not a second connect.
+
+**The tunnel core is shared** (decided 2026-09-18). The mobile app's
+`rust/iroh_tunnel` crate (`crate-type = ["cdylib", "rlib"]`, ~1.3k lines
+of core under a thin C ABI, iroh 1.1.0) already does what T1 and T3 would
+have grown here: both credential kinds (`PairingKind` — a `mstr1:` code, a
+`mstrfedg1:` guest ticket dialled on the federation ALPN with the JWT on
+the first bi-stream), `Tunnel::set_credential` in place on the same port,
+a reconnect supervisor with `STATUS_{CONNECTING,CONNECTED,RECONNECTING,
+REJECTED,DOWN}` on a watch channel, `path_kind`, `force_reconnect`,
+`nudge_network`, an events ring, and a per-tunnel loopback token every
+local request must carry as `__lt=<token>` so another process on the
+machine cannot use the bridge as a proxy. Its interop harness
+(`interop/harness.mjs`, a replica of the server's endpoint on
+`@number0/iroh` 1.1.0) covers JSON, Range, concurrency, the kick and the
+GUEST phase (dial, refusal, swap), and the mobile federation rig proved
+the guest path live on 2026-09-05. One wire implementation for every
+client — the mobile app, this player, and third parties through the C
+ABI and the dev CLI — is the decision; the crate moves to its own
+repository first (`IROH_TUNNEL_CRATE_PLAN.md` in the mobile repo), and
+this player consumes it as a Rust dependency, never through the C ABI.
+The player keeps what is its own: the identity conventions
+(`mstream+iroh://`, `display_server`), the book, the App-side policy, and
+the staged `quickconnect-probe` until the crate exposes its stages.
+
+**The shape.**
+
+1. **The keeper** (worker side, mechanical). A registry of the crate's
+   `Tunnel`s keyed by identity — `mstream+iroh://<endpoint>` for a Quick Connect server,
+   `mstream+peer://<id>@<parent>` for a direct peer — shared between the
+   api thread and one thread per dial (`Arc<Mutex<HashMap<String, Slot>>>`;
+   a cold dial can take ONLINE 8 s + DIAL 25 s + HANDSHAKE 15 s and must
+   never sit on the api thread, where connection commands are serialized).
+   Three commands, four events:
+   - `ApiCmd::TunnelOpen { id, credential }` — a no-op when the id is up or
+     dialling; else a dial thread that installs the bridge and answers
+     `Event::TunnelUp { id, local_url }` or
+     `Event::TunnelFailed { id, rejected, why }` (`rejected` = the server
+     said NO — a rotated code or a refused guest token; everything else is
+     unreachable).
+   - `ApiCmd::TunnelClose { id }` — drop the bridge (its `Drop` closes the
+     listener and the connection); `Event::TunnelClosed { id }`.
+   - `ApiCmd::TunnelCredential { id, credential }` — the crate's
+     `set_credential`: same port, same URLs; applies at the next re-dial,
+     at once for a supervisor that gave up on a refused token.
+   - `Event::TunnelPath { id, path }` and `Event::TunnelStatus { id, status }`
+     from one sampler over the registry, polling `status()` and
+     `path_kind()` on today's cadence and reporting changes — so the App
+     sees a live tunnel go reconnecting, rejected or down without waiting
+     for a request to fail.
+   The api thread's `bridge`, `tunnel`, `resolve_target` and
+   `tunnel_answered` retire. `ApiCmd::Connect` and `Login` gain
+   `identity: String` (what the session is filed under — today derived from
+   the loopback address), and `ApiCmd::QuickConnect` and
+   `Event::TunnelReady` retire: the App composes *open, then connect at the
+   loopback*. A fourth command, `ApiCmd::Retarget { identity, server, token }`
+   → `Event::Retargeted { identity, server }`, swaps the session's client
+   for the same identity after a `GET /api` through the new base answers;
+   the App updates `session.server` and `session.token` and nothing else.
+2. **The policy** (App side, pure, on the fake clock — the `Stall` probe's
+   pattern). `App.tunnels: BTreeMap<String, TunnelState>` replaces
+   `open_tunnel`; `TunnelState` is `Dialling { since } | Up { local_url,
+   path } | Down { failed_at, attempts } | Rejected`. `tunnel_targets()` is
+   recomputed after every queue edit, switch, restore, removal and tick:
+   the session's transport plus every queued row's transport (a Quick
+   Connect row → its own id; a peer row → its parent when the parent is a
+   tunnel server, and its own id once T3 makes it direct).
+   `reconcile_tunnels(now)` (from `tick_at`) opens what is wanted and
+   absent — on the cold-dial ladder — and releases what is unwanted **after
+   a 10 s grace** (a release deadline per id, cancelled when the id is
+   wanted again: a restore, a clear-then-refill and the launch's empty
+   queue all pass through "nothing queued" for a moment; the record tore a
+   launch tunnel down mid-dial before it had the grace). A `Rejected` id is
+   never re-dialled automatically; a user switch or a re-pair is what tries
+   again.
+3. **Identity on the wire.** The credential a target dials with comes from
+   the book: `KnownServer` gains `pairing: Option<String>` (seeded from
+   `Credentials.pairings` by `known_servers`), so `Session.tunnel_code` and
+   the GUI's `pairing_for` lookup in `switch_to` collapse into it. A guest
+   ticket is runtime-only — the record never persists one, and nothing
+   here should either.
+4. **Direct peers.** A parent whose capability payload says
+   `federationDirect` is asked for each peer of it that is a target:
+   `GET /api/v1/federation/peers/:id/access` with the parent's token, on the
+   parent's plain client (never through `with_peer`'s rewrite). Granted →
+   the peer's identity is opened with the `mstrfedg1:` ticket — ALPN
+   `mstream/federation/1`, the JWT as the first bi-stream, `OK` back — and
+   from then on the peer answers plain `/media`, `/album-art` and
+   `/api/...` at its loopback with the guest token in the ordinary slots.
+   Denied (`direct: false`) → the proxy for the rest of the session.
+   Failed (a 502, a malformed 200) → the ladder. The ticket is asked for
+   again at three quarters of its life and swapped in place; a 401 on the
+   direct path asks once more with `?refresh=1`, then falls back.
+
+**Wire facts** (read from the sources above; the shared crate's unit tests
+and harness pin the credential, ALPN and handshake rows — this player's
+tests pin the rest):
+
+| | Quick Connect | Direct peer |
+|---|---|---|
+| Identity | `mstream+iroh://<endpoint>` | `mstream+peer://<id>@<parent>` (in the config since the peer work) |
+| Credential | `mstr1:` pairing code — `{t: EndpointTicket, s: 32-byte secret}` | `mstrfedg1:` guest ticket — `{t: the PEER's federation EndpointTicket, g: a JWT}`; unknown fields ignored, a missing `t`/`g` rejected, a newer version says "update the player" |
+| ALPN | `mstream/tunnel/2` | `mstream/federation/1` |
+| First bi-stream | the secret bytes, `finish`, read `OK` | the token's UTF-8 bytes, `finish`, read `OK`; a refusal is `NO` or a close with reason `unauthorized`/`backoff` |
+| Later bi-streams | one TCP connection each into the server's HTTP port | the same, into the peer's HTTP port |
+| Auth per request | the user's JWT (`x-access-token` / `?token=`) | the guest JWT in the same slots; claims `{federationGuest, federationKeyId, iat, exp}`, no `username` |
+| What answers | everything | the key's allowlist (`federation-auth.js`): `GET /api`, `GET /api/`, the db reads, `POST file-explorer`, `…/recursive`, `…/m3u`, `random-songs`, `federation/health`, `discovery/similar`, and the `/media/`, `/album-art/` GET prefixes — no ping, playlists, transcode or waveform |
+| Lifetime | until re-paired | the token's `exp` (24 h by default); the parent re-mints past 75 % of it, or on `?refresh=1` (served from cache within 5 s of a mint) |
+| Revocation | rotating the connect secret | deleting or expiring the parent's key on the peer — every guest of it fails at its next handshake and its next request |
+
+The access route in full: `GET /api/v1/federation/peers/:id/access[?refresh=1]`
+→ `200 {direct: true, endpointTicket, endpointId, guestToken, expiresAt,
+directTicket}` · `200 {direct: false, reason}` · `502` when the peer cannot
+be reached for the mint. `federationDirect` beside `federationBrowse` in
+`GET /api/` is the key's presence (the build has the route) and its value
+(there is a peer to reach); whether a given peer cooperates is only known
+from the access route. Both flags are caller-scoped, so they are read from
+a ping made with the parent's token — the session's own, or a one-shot
+`GET /api/` with the token for a saved parent that is not browsed (the
+`Probe` command grown a token and the flag).
+
+**The constants** (the record's `TunnelTiming`, kept as named consts in
+`app.rs` so the tests can read them): queue release grace **10 s**;
+cold-dial retry ladder **5, 10, 20, 40, 60 s**, then **5 min** after the
+tenth failure; direct ticket refresh at **0.75** of its life; **5 min**
+between failed refreshes of a stale ticket, **60 s** after a refusal, at
+once when the ticket has already expired; the switch spinner's bound
+**12 s** before the header says it is still connecting (the record's
+`awaitTunnelReady`). Not ported: the record's network-change hooks
+(`retryAfterNetworkReturn`, the probes, the watchdogs) — this player has
+no connectivity events; the App's ladder covers cold dials and the crate's
+supervisor covers a live tunnel that drops (its own backoff, cut short by
+`force_reconnect` or the relay coming back).
+
+**Slices** (each a commit; `cargo test`,
+`cargo check --target wasm32-unknown-unknown`, clippy on the new code).
+The shared crate exists: <https://github.com/IrosTheBeggar/mstream-iroh-tunnel>,
+tag `v0.1.0` (2026-09-18 — the crate as it left the mobile repo: ABI 2,
+iroh 1.1.0, MIT). T1 depends on it by git tag until it is on crates.io:
+`mstream-iroh-tunnel = { git = "https://github.com/IrosTheBeggar/mstream-iroh-tunnel", tag = "v0.1.0" }`
+(the `c-abi` / `os-trust` features arrive with E3, so at v0.1.0 the C
+symbols are compiled in — harmless, and the OS trust store is not yet
+selectable through the crate).
+
+- **T1 — the keeper, on the shared crate ✅ 2026-09-18.** As planned, with
+  two settlements: iroh is pinned at 1.1.0 (the crate's tested line —
+  `cargo update` had reached for 1.2.0), and an open request for a tunnel
+  the worker already holds re-reports it rather than staying silent, so
+  the App's picture can never lag behind a dial that will not happen. The
+  code is parsed for its identity before anything is dialled, which is why
+  the tests type a real-shaped code (`quickconnect::testing::sample_code`).
+  789 tests; the wasm build checks. `Cargo.toml`: the crate under
+  the non-wasm target dependencies — at v0.1.0 as is; from E3 with
+  `default-features = false` (no C symbols in the player binary) and its
+  OS-trust feature on (the `platform-verifier` pin this player carries
+  for the corporate trust store, which the player's own `iroh` feature
+  line keeps enabling meanwhile through feature unification); iroh moves
+  from 1.0.3 to 1.1.0 with it. `src/quickconnect.rs`
+  shrinks to what is the player's own — `TUNNEL_ID_PREFIX`, `is_tunnel_id`,
+  `display_server`, the identity read off the ticket (`server_id`,
+  `endpoint_label`), and `probe`, which keeps the old staged dial until the
+  crate exposes its stages (E3) and then moves over; `Tunnel`, `Redialer`,
+  `TunnelBridge`, `open_bridge`, `handshake` and the accept loop go.
+  `src/tui/worker.rs`: the registry holds `iroh_tunnel::Tunnel`s;
+  `TunnelOpen { id, credential }` runs `connect_tunnel(&credential, 0)` on a
+  dial thread over the player's runtime (`runtime::runtime()` made
+  `pub(crate)`, since `set_credential`, `force_reconnect` and
+  `begin_shutdown` take a `&Runtime`) and answers `TunnelUp { id, local_url,
+  local_token }` or `TunnelFailed { id, rejected, why }` (`rejected` read off
+  the error text, the harness's contract, until E3 types it); `TunnelClose`
+  → `begin_shutdown`; `TunnelCredential` → `set_credential`; the sampler as
+  above, and the crate's events ring drained into the player's log ring at
+  info. `Connect` / `Login` gain `identity`; `QuickConnect`, `TunnelReady`,
+  `resolve_target`, `tunnel_answered`, the api thread's `bridge` and
+  `tunnel` retire. **The loopback token**: `Reach` gains
+  `local_token: Option<String>`; the builders in `src/api/urls.rs` append
+  `__lt=<token>` to every URL shape (the record's `localTokenQuery`), and
+  `Client` gains a query pair it adds to every request, set when a session's
+  base is a bridge — the engine's stream client needs nothing, the token is
+  in the URL. `src/tui/app.rs` + `app/session.rs`: `tunnels` replaces
+  `open_tunnel`; `begin()` for a tunnel server connects at the loopback when
+  the tunnel is up and opens it first when not (`connecting` shows
+  meanwhile); `TunnelUp` for the identity the session waits on → `Connect`;
+  `NeedsLogin` at a loopback address → the sign-in form as `TunnelReady` did;
+  `TunnelFailed { rejected: true }` → the "rejected — it may have been
+  rotated" line; `tunnel_path` only from the session transport's id.
+  `src/tui/mod.rs`: `known_servers` seeds `pairing`. `src/gui/servers.rs`:
+  `switch_to` stops looking the code up. `src/web/api_worker.rs`,
+  `src/web/mod.rs`: stubs (`TunnelOpen` → `TunnelFailed { rejected: false,
+  why: "tunnels need the native player" }`). Tests: the three
+  tunnel-session tests in `app/tests.rs` re-anchored on the composition;
+  the worker's `resolve_target` / `tunnel_answered` tests retire; new:
+  open-then-connect, a rejected dial's wording, the token on every URL
+  shape and on the api client, a status change reaching the App. The
+  envelope, ALPN, handshake and swap tests live in the crate. Size S–M: the
+  crate carries the tunnel; what is left is plumbing and the token.
+- **T2 — tunnels follow the queue** (clause 38, and clause 37's tunnel
+  step). `tunnel_targets()` and `reconcile_tunnels(now)` as above;
+  `TunnelState::Down` carries the ladder. The failure walk gains a hold
+  beside `Stall`: `play_index` on a row whose transport is a tunnel that is
+  wanted and not `Rejected` does not skip — it parks on the row, paused,
+  with the line **"Connecting to %{server}…"**, and `TunnelUp` for that id
+  re-runs `play_index` (the record: recover in place — ensure that server's
+  tunnel, re-seed, resume; don't skip). `TunnelFailed { rejected: true }`,
+  a server with no pairing code and a server gone from the book skip with a
+  word as today. Reads that belong to a row ride the row's reach:
+  `ApiCmd::AlbumArt { file, reach: Option<Reach> }` and
+  `Waveform { filepath, reach }` — `answer()` builds a one-shot client from
+  a given reach (the `Probe` pattern), so a mixed queue's now-playing cover
+  comes from its own server instead of the browsed one (clause 30's art
+  sentence, unmet today). The crossfade announcement re-derives on the
+  trailing refresh after `TunnelUp`, so a next row whose tunnel came up
+  late still prefetches. Launch: the restored queue's tunnel servers are
+  targets as soon as `restore_queue` runs, so the restored spot's server is
+  dialling while the user reads the screen (the record pre-warms the resume
+  server the same way). Removal and Forget: the sweep drops the rows, the
+  target leaves, the release runs after the grace. Contract: clause 38's
+  deviation closes; the status row updates. Tests (fake clock): targets
+  from the session and the rows; a row added inside the grace cancels the
+  release; the ladder's delays; a hold resumes on `TunnelUp`; `Rejected`
+  skips with the word; a switch away keeps the queue's tunnel; the last row
+  leaving releases after 10 s and not before; art asked with the row's
+  reach. Size M.
+- **T3 — guest tickets** (clause 27's direct sentence). `src/api/types.rs`:
+  `Ping.federation_direct` (`federationDirect`),
+  `Capabilities.federation_direct`, `DirectAccessAnswer` (the three
+  shapes; a 200 missing fields is transient, not a refusal).
+  `src/api/mod.rs`: `federation_access_async(id, refresh)` on the plain
+  client. `src/tui/worker.rs`: `ApiCmd::DirectAccess { parent, id, reach,
+  refresh }` → `Event::DirectAccess { parent, id, answer: Granted(DirectTicket)
+  | Denied(reason) | Failed(why) }`. `src/tui/app.rs`: `direct: HashMap<peer
+  identity, DirectState { ticket, token, endpoint_id, expires_at,
+  fetched_at, denied, last_ask, last_failure, refused: Option<String> }>`
+  and `direct_offered: HashSet<parent>`; a peer target whose parent offers
+  direct, not denied, not missing, asks when it holds no ticket, a stale
+  one (≥ 0.75 of its life), or the one the peer refused — rate-limited as
+  above; `Granted` → `TunnelOpen` with the `mstrfedg1:` ticket as the
+  credential (the crate parses it and dials the federation ALPN), or
+  `TunnelCredential` when the tunnel is up (the crate's in-place swap); the parent stays a target while
+  a peer's ticket is due and the parent is itself a tunnel server (the
+  access call rides it). `reach()`: a peer whose own bridge is `Up` →
+  `Reach { base: local_url, token: guest, self_signed: false, peer: None }`
+  → `media_url` / `album_art_url`; else the parent proxy as today.
+  Session: a switch to (or a launch on) a peer whose bridge is up connects
+  at its loopback with the guest token and `identity` = the peer id,
+  `session.peer` kept so the read-only rules and the pinned capabilities
+  still apply; `TunnelUp` for the *browsed* peer → `Retarget` to the
+  loopback (the record flips a peer's URL shape exactly when its tunnel
+  does; the browse stack stays); `TunnelClosed` or a denial → `Retarget`
+  back to the parent's proxy base with the parent's token. A 401 on the
+  direct path (an `Unauthorized` from the session client, or a 401 open
+  failure on a row whose reach was direct — `transient_failure` must not
+  eat it) asks the parent once with `refresh=1`, swaps the credential and
+  retries the row; a second refusal falls back to the proxy for the
+  session. A refused guest handshake surfaces as `TunnelFailed { rejected:
+  true }` or a `Rejected` status on a running tunnel, and both mean
+  "refresh through the parent", never "re-pair". Wording: the servers
+  room's peer row gains **"· direct"** while its own tunnel is up; the hold line from T2 is reused; the ten locales.
+  Contract: clause 27's direct sentence and the "direct access not ported
+  (3)" deviation close; the wording table gains the rows; the Server API
+  row already lists the route. Tests: the three answers parse; one ask per
+  target, not per tick; stale → refresh, in place; denied → no re-ask this
+  session; refused → one refresh then the proxy; the two reach shapes;
+  `Retarget` keeps the browse stack; the 401 path. Size L — most of it
+  policy, all of it testable offline.
+- **T4 — the rig and the docs.** Two scratch servers from the
+  `local-mstream-scratch-server` recipe with `iroh.enabled` and
+  `federation.enabled` on both (the secrets self-generate;
+  `federation.serverName` for labels); pair them with the player's own
+  room — `mstream-player admin federation` mints on A and pastes on B —
+  then: the player on B lists A as a peer with `federationBrowse` and
+  `federationDirect` true; the access route mints; the player dials A's
+  federation endpoint and a queued row from A plays from
+  `127.0.0.1:<port>/media/...?token=<guest>`; B's own Quick Connect code
+  (`GET /api/v1/iroh/code`, admin) pairs B as a tunnel server, rows from
+  both are queued, a switch to a standard server keeps both bridges, and
+  removing the last row of each releases it 10 s later (the ring says so
+  at info). `quickconnect-probe` stays the diagnostic for a code; a
+  `federation-probe <ticket>` sibling is cheap if the guest handshake needs
+  staging. PLAN and the contract's status row. Size S, plus whatever the
+  rig teaches.
+
+**Open questions (leans).**
+
+1. *Where the policy lives* — the App, on the fake clock (lean), or the
+   worker with timers. The App: the ladder, the grace and the ticket
+   schedule are then unit-tested like the `Stall` cadence, and the worker
+   stays a dialler.
+2. *A hold that never ends* — a row waiting on a tunnel whose ladder keeps
+   failing: hold indefinitely (lean; the record's playback path "would
+   rather wait than fail", the line says what it waits on, and a skip is
+   one key) or time out into the skip after the ladder's first long delay.
+3. *The browsed peer going direct mid-session* — `Retarget` when its tunnel
+   comes up (lean; the record's behaviour) or only at the next switch.
+4. *One iroh endpoint per tunnel* — settled by the crate, which binds one
+   per `connect_tunnel`; N relay connections for N tunnels is fine for a
+   handful, and a shared endpoint would be the crate's optimisation, not
+   this player's.
+5. *Dial a peer direct when its parent is a standard server* — yes (lean;
+   the record dials whenever the parent offers it and the peer has not
+   declined: the bytes stop crossing the parent's link twice either way).
+6. *A per-row tunnel mark in the queue panel* — no (lean); the hold line
+   and the servers room's "· direct" are enough until a listener asks.
+
+**Out of scope.** DJ fan-out over tunnels (this player's DJ is pointed at
+one server, clause 35); downloads and the offline copy; the record's status
+strip and Repair sheet (the servers room's re-pair path stands); the wasm
+build (no iroh — the stubs say so).
+
+**Risks.** The guest handshake is no longer this player's to prove: the
+crate's harness GUEST phase covers it against `@number0/iroh`, and the
+mobile rig covered it live; T4's rig still proves the whole path from this
+player. What the switch does put at risk: the crate's supervisor replaces
+the `Redialer` whose single-flight re-dial and 4 s cooldown fixed requests
+stacking up behind a dead link — read `supervise` and the bridges' wait on
+the status watch before deleting the old code, and keep the "tunnel is
+flakey" listening test in the smoke round. iroh 1.0.3 → 1.1.0 is a
+lockfile bump the mobile side already made (it cleared four audit
+advisories) but it is new to the six release targets here. Two endpoints on
+one Mac should connect over the ticket's direct addresses without a relay;
+on the Netskope network the relay wait costs 8 s per dial and nothing more
+(a Known-risks line until seen). `runtime::block_on` runs dials on the
+shared multi-thread runtime, so concurrent dial threads are fine.
+
 
 ## Smoke testing
 
