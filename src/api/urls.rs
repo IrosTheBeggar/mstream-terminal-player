@@ -63,6 +63,18 @@ fn build(server: &str, prefix: &str, vpath: &str) -> Result<Url, String> {
     Ok(url)
 }
 
+/// Append the loopback token a tunnel bridge requires (`__lt=…`), when the
+/// URL points at one. The shared tunnel client drops any local connection
+/// whose first request line lacks it, so no other process on the machine can
+/// use the bridge as a proxy — which means every URL the player builds for a
+/// bridge, streams and art included, has to carry it.
+pub fn with_local_token(url: String, token: Option<&str>) -> String {
+    let Some(token) = token else { return url };
+    let Ok(mut parsed) = Url::parse(&url) else { return url };
+    parsed.query_pairs_mut().append_pair("__lt", token);
+    parsed.to_string()
+}
+
 /// `{server}/media/{vpath}?token=...` — the raw file, byte-for-byte.
 pub fn media_url(server: &str, vpath: &str, token: Option<&str>) -> Result<String, String> {
     let mut url = build(server, "media", vpath)?;
@@ -154,6 +166,20 @@ mod tests {
         assert_eq!(u, "http://host/mstream/media/lib/a.mp3?token=t");
         let u = media_url("http://host/mstream", "lib/a.mp3", Some("t")).unwrap();
         assert_eq!(u, "http://host/mstream/media/lib/a.mp3?token=t");
+    }
+
+    #[test]
+    fn the_loopback_token_rides_every_shape_and_nothing_else() {
+        let media = media_url("http://127.0.0.1:4242", "lib/a.mp3", Some("t")).unwrap();
+        assert_eq!(
+            with_local_token(media, Some("lt9")),
+            "http://127.0.0.1:4242/media/lib/a.mp3?token=t&__lt=lt9"
+        );
+        let art = album_art_url("http://127.0.0.1:4242", "x.jpg").unwrap();
+        assert_eq!(with_local_token(art, Some("lt9")), "http://127.0.0.1:4242/album-art/x.jpg?__lt=lt9");
+        // A direct server has no gate, so nothing is appended.
+        let plain = media_url("http://host:3000", "lib/a.mp3", None).unwrap();
+        assert_eq!(with_local_token(plain.clone(), None), plain);
     }
 
     #[test]

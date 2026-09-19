@@ -184,13 +184,17 @@ pub(crate) struct ServersUi {
     pub confirm: Option<usize>,
     pub qr: Option<Qr>,
     /// A switch in flight: the identity being adopted, for routing
-    /// NeedsLogin/TunnelReady into the form.
+    /// NeedsLogin into the form.
     pub switching: Option<String>,
     /// A pairing-code dial in flight. Held OUTSIDE the session until the
     /// tunnel answers: the code is only seated (and the old server's
-    /// state shed) on Connected/TunnelReady, so a bad code costs an error
-    /// line, never the session that was playing.
+    /// state shed) on Connected, or on the sign-in the tunnel asks for,
+    /// so a bad code costs an error line, never the session that was
+    /// playing.
     pub pending_code: Option<String>,
+    /// The identity that code parsed to — what the dial is filed under,
+    /// and what `TunnelUp` is matched against.
+    pub pending_dial: Option<String>,
     versions: HashMap<String, Probe>,
     tx: Sender<Reply>,
     rx: Receiver<Reply>,
@@ -208,6 +212,7 @@ impl ServersUi {
             qr: None,
             switching: None,
             pending_code: None,
+            pending_dial: None,
             versions: HashMap::new(),
             tx,
             rx,
@@ -354,6 +359,7 @@ fn form_back(gui: &mut Gui) {
     if close {
         gui.servers.form = None;
         gui.servers.pending_code = None;
+        gui.servers.pending_dial = None;
     } else if let Some(form) = gui.servers.form.as_mut() {
         form.stage = FormStage::Choosing;
         form.error = None;
@@ -618,16 +624,28 @@ pub(crate) fn submit_form(gui: &mut Gui) {
                 }
                 return;
             }
-            // The dial rides the funnel: only the api worker can host the
-            // tunnel bridge, and it keeps the CURRENT session's bridge up
-            // until the new tunnel actually answers (finding #20). The
-            // code waits in `pending_code` — see the field's note.
+            // The identity is in the code, so a code that does not parse
+            // is refused here, before any dial.
+            let id = match crate::quickconnect::parse_code(&code) {
+                Ok(parsed) => parsed.server_id(),
+                Err(e) => {
+                    if let Some(form) = gui.servers.form.as_mut() {
+                        form.error = Some(e);
+                    }
+                    return;
+                }
+            };
+            // The dial rides the funnel: the api worker holds the tunnels,
+            // and a dial that fails touches neither the current session nor
+            // its tunnel. The code waits in `pending_code` — see the field's
+            // note; `TunnelUp` connects through the tunnel it opened.
             if let Some(form) = gui.servers.form.as_mut() {
                 form.submitting = true;
                 form.error = None;
             }
             gui.servers.pending_code = Some(code.clone());
-            gui.pend(vec![Effect::Api(ApiCmd::QuickConnect { code, token: None , peer: None})]);
+            gui.servers.pending_dial = Some(id.clone());
+            gui.pend(vec![Effect::Api(ApiCmd::TunnelOpen { id, credential: code })]);
             return;
         }
         Some((FormStage::Direct, false)) => {}
@@ -684,10 +702,16 @@ pub(crate) fn submit_form(gui: &mut Gui) {
             return;
         }
         gui.app.session.self_signed = self_signed;
+        // A form aimed at a tunnel's bridge signs in under the tunnel's
+        // identity, with the bridge's loopback token on every request.
+        let (identity, local_token) = match gui.app.tunnel_at(&server) {
+            Some((id, token)) => (id.to_string(), Some(token.to_string())),
+            None => (server.clone(), None),
+        };
         let effect = if public {
-            Effect::Api(ApiCmd::Connect { server, token: None, self_signed, peer: None })
+            Effect::Api(ApiCmd::Connect { server, identity, token: None, self_signed, peer: None, local_token })
         } else {
-            Effect::Api(ApiCmd::Login { server, username, password, self_signed })
+            Effect::Api(ApiCmd::Login { server, identity, username, password, self_signed, local_token })
         };
         if let Some(form) = gui.servers.form.as_mut() {
             form.submitting = true;
@@ -909,6 +933,7 @@ pub(crate) fn observe(gui: &mut Gui, event: &Event) {
             // now — nothing later knows it — and the old server's browse
             // state is shed the way a switch sheds it (the queue stays).
             if let Some(code) = gui.servers.pending_code.take() {
+                gui.servers.pending_dial = None;
                 gui.app.session.tunnel_code = Some(code);
                 gui.app.shed_server_state();
             }
@@ -929,7 +954,31 @@ pub(crate) fn observe(gui: &mut Gui, event: &Event) {
                     if entered_a_code { form.paste_row() } else { form.row.min(form.paste_row()) };
             }
         }
-        Event::NeedsLogin { server } if gui.servers.switching.is_some() => {
+        // The tunnel a pasted code opened is up: connect through it, under
+        // the identity the code named. The App keeps the tunnel itself.
+        Event::TunnelUp { id, local_url, local_token }
+            if gui.servers.pending_dial.as_deref() == Some(id.as_str()) =>
+        {
+            gui.pend(vec![Effect::Api(ApiCmd::Connect {
+                server: local_url.clone(),
+                identity: id.clone(),
+                token: None,
+                self_signed: false,
+                peer: None,
+                local_token: Some(local_token.clone()),
+            })]);
+        }
+        Event::NeedsLogin { server }
+            if gui.servers.switching.is_some() || gui.servers.pending_code.is_some() =>
+        {
+            // A fresh dial's code is seated now — the sign-in about to
+            // happen ends in a Connected whose save needs it. The pending
+            // marker stays armed until then, so that Connected still
+            // sheds the old server's state.
+            let fresh_tunnel = gui.servers.pending_code.is_some();
+            if let Some(code) = gui.servers.pending_code.clone() {
+                gui.app.session.tunnel_code = Some(code);
+            }
             let identity = gui.servers.switching.clone().unwrap_or_default();
             let entry = gui
                 .config
@@ -946,34 +995,8 @@ pub(crate) fn observe(gui: &mut Gui, event: &Event) {
                 session_login: true,
                 ..Form::add()
             });
-            gui.note = Some((t!("gui.srv.sign_in").to_string(), false));
-        }
-        Event::TunnelReady { local_url, .. }
-            if gui.servers.switching.is_some() || gui.servers.pending_code.is_some() =>
-        {
-            // A fresh dial's code is seated now — the sign-in about to
-            // happen ends in a Connected whose save needs it. The pending
-            // marker stays armed until then, so that Connected still
-            // sheds the old server's state.
-            if let Some(code) = gui.servers.pending_code.clone() {
-                gui.app.session.tunnel_code = Some(code);
-            }
-            let identity = gui.servers.switching.clone().unwrap_or_default();
-            let entry = gui
-                .config
-                .servers
-                .iter()
-                .find(|s| config::same_server(&s.url, &identity));
-            gui.servers.form = Some(Form {
-                stage: FormStage::Direct,
-                server: local_url.clone(),
-                username: entry.and_then(|e| e.username.clone()).unwrap_or_default(),
-                focus: 1,
-                switch: true,
-                session_login: true,
-                ..Form::add()
-            });
-            gui.note = Some((t!("gui.srv.tunnel_signin").to_string(), false));
+            let note = if fresh_tunnel { t!("gui.srv.tunnel_signin") } else { t!("gui.srv.sign_in") };
+            gui.note = Some((note.to_string(), false));
         }
         Event::Unauthorized if gui.app.connected => {
             // An established session went bad; offer the sign-in for the
@@ -989,22 +1012,31 @@ pub(crate) fn observe(gui: &mut Gui, event: &Event) {
                 ..Form::add()
             });
         }
-        Event::Error(message) => {
-            // A dial that failed leaves the session exactly as it was —
-            // the code never reached it. The error lands on the form.
-            let dialling = gui.servers.pending_code.is_some();
-            if let Some(form) = gui.servers.form.as_mut()
-                && (form.session_login || dialling)
-                && form.submitting
-            {
-                form.submitting = false;
-                form.error = Some(message.clone());
-            }
-            if dialling {
-                gui.servers.pending_code = None;
-            }
+        Event::TunnelFailed { id, why, .. }
+            if gui.servers.pending_dial.as_deref() == Some(id.as_str())
+                || gui.servers.switching.is_some() =>
+        {
+            dial_failed(gui, why);
         }
+        Event::Error(message) => dial_failed(gui, message),
         _ => {}
+    }
+}
+
+/// A dial (or a connect) that failed leaves the session exactly as it was —
+/// the code never reached it. The error lands on the form.
+fn dial_failed(gui: &mut Gui, message: &str) {
+    let dialling = gui.servers.pending_code.is_some();
+    if let Some(form) = gui.servers.form.as_mut()
+        && (form.session_login || dialling)
+        && form.submitting
+    {
+        form.submitting = false;
+        form.error = Some(message.to_string());
+    }
+    if dialling {
+        gui.servers.pending_code = None;
+        gui.servers.pending_dial = None;
     }
 }
 
@@ -1084,6 +1116,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             gui.servers.form = None;
             // A dial walked away from must not ambush a later connect.
             gui.servers.pending_code = None;
+            gui.servers.pending_dial = None;
         }
         Act::QrClose => gui.servers.qr = None,
         Act::Guard => {}
@@ -1127,6 +1160,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
             if key.code == KeyCode::Esc && !session_login {
                 gui.servers.form = None;
                 gui.servers.pending_code = None;
+                gui.servers.pending_dial = None;
             }
             return Some(false);
         }
@@ -2318,21 +2352,45 @@ mod tests {
         gui.act(Act::FormMethod(1));
         // Typing anywhere means "I have a code" — the TUI's rule.
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        for c in "mstr1:abc".chars() {
+        let code = crate::quickconnect::testing::sample_code();
+        let id = crate::quickconnect::testing::sample_id();
+        for c in code.chars() {
             handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }
-        assert_eq!(gui.servers.form.as_ref().unwrap().code, "mstr1:abc", "keys landed in the code");
+        assert_eq!(gui.servers.form.as_ref().unwrap().code, code, "keys landed in the code");
         submit_form(&mut gui);
-        assert_eq!(gui.servers.pending_code.as_deref(), Some("mstr1:abc"));
+        assert_eq!(gui.servers.pending_code.as_deref(), Some(code.as_str()));
+        assert_eq!(gui.servers.pending_dial.as_deref(), Some(id.as_str()), "filed under the code's identity");
         assert!(
             gui.pending.iter().any(|e| matches!(
                 e,
-                Effect::Api(ApiCmd::QuickConnect { code, .. }) if code == "mstr1:abc"
+                Effect::Api(ApiCmd::TunnelOpen { id: opened, credential }) if *opened == id && *credential == code
             )),
             "the dial rode the funnel: {:?}",
             gui.pending
         );
         assert!(gui.app.session.tunnel_code.is_none(), "nothing seated until it answers");
+
+        // The tunnel comes up: the GUI connects through it, under the
+        // identity, with the bridge's loopback token on every request.
+        gui.pending.clear();
+        observe(
+            &mut gui,
+            &Event::TunnelUp {
+                id: id.clone(),
+                local_url: "http://127.0.0.1:51234".into(),
+                local_token: "lt".into(),
+            },
+        );
+        assert!(
+            gui.pending.iter().any(|e| matches!(
+                e,
+                Effect::Api(ApiCmd::Connect { server, identity, local_token, .. })
+                    if server == "http://127.0.0.1:51234" && *identity == id && local_token.as_deref() == Some("lt")
+            )),
+            "connected through the fresh tunnel: {:?}",
+            gui.pending
+        );
 
         // The tunnel answers: the code is seated for the save, the queue
         // stays (its rows know their server), the form closes.
@@ -2350,7 +2408,7 @@ mod tests {
                 ping: Box::default(),
             },
         );
-        assert_eq!(gui.app.session.tunnel_code.as_deref(), Some("mstr1:abc"));
+        assert_eq!(gui.app.session.tunnel_code.as_deref(), Some(code.as_str()));
         assert_eq!(gui.app.queue.items.len(), 1, "the queue is kept across the dial");
         assert!(gui.servers.pending_code.is_none());
         assert!(gui.servers.form.is_none());
@@ -2365,13 +2423,30 @@ mod tests {
         let form = gui.servers.form.as_ref().unwrap();
         assert!(form.error.is_some(), "an empty code is refused locally");
 
+        // A code that is not one is refused before any dial.
         gui.servers.form.as_mut().unwrap().code = "mstr1:bad".into();
         submit_form(&mut gui);
-        observe(&mut gui, &Event::Error("could not reach the tunnel".into()));
+        let form = gui.servers.form.as_ref().unwrap();
+        assert!(form.error.is_some(), "garbage is refused locally");
+        assert!(!form.submitting);
+        assert!(gui.servers.pending_dial.is_none());
+
+        // A real code whose server does not answer: the failure lands on
+        // the form and nowhere else.
+        let code = crate::quickconnect::testing::sample_code();
+        let id = crate::quickconnect::testing::sample_id();
+        gui.servers.form.as_mut().unwrap().code = code;
+        submit_form(&mut gui);
+        assert!(gui.servers.form.as_ref().unwrap().submitting);
+        observe(
+            &mut gui,
+            &Event::TunnelFailed { id, rejected: false, why: "could not reach the tunnel".into() },
+        );
         let form = gui.servers.form.as_ref().unwrap();
         assert!(!form.submitting);
         assert_eq!(form.error.as_deref(), Some("could not reach the tunnel"));
         assert!(gui.servers.pending_code.is_none());
+        assert!(gui.servers.pending_dial.is_none());
         assert!(gui.app.session.tunnel_code.is_none(), "the session never felt it");
         assert_eq!(gui.app.session.server_id, "http://attic.local:3000", "still home");
     }

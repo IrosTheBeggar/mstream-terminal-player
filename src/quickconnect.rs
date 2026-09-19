@@ -7,6 +7,15 @@
 //! local HTTP port — so ordinary HTTP, range requests and all, rides over it
 //! unchanged.
 //!
+//! The live tunnel — the dial, the loopback bridge, the reconnect supervisor,
+//! the in-place credential swap, the loopback token — is the shared
+//! `mstream-iroh-tunnel` crate's (`iroh_tunnel::connect_tunnel`), the same
+//! code the mobile app ships. What stays here is the player's own: the
+//! identity a tunnel server is remembered by, the words for its state, the
+//! parse that yields that identity before anything is dialled, and the staged
+//! `quickconnect-probe`, which walks the dial one step at a time so a hostile
+//! network's failure has a name.
+//!
 //! Two things this is *not*. The secret gates the pipe, not the API: after the
 //! tunnel is up the client still logs in normally. And the code itself is
 //! fetched over an existing connection by an admin, so the flow is pair on the
@@ -44,20 +53,6 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 /// URL. Deliberately not a real scheme: nothing may hand it to an HTTP client.
 pub const TUNNEL_ID_PREFIX: &str = "mstream+iroh://";
 
-/// Opening a stream on a live connection is near-instant; on a connection
-/// whose network died it hangs until QUIC gives the path up. This is how
-/// long the bridge waits before declaring the tunnel dead and re-dialling —
-/// longer than iroh's 5s heartbeat so a healthy-but-slow moment isn't a
-/// false death, shorter than the 15–30s path idle timeouts so a real death
-/// costs seconds, not half a minute of silence.
-const STREAM_TIMEOUT: Duration = Duration::from_secs(8);
-
-/// How long a failed dial holds further dials off. Without it, every
-/// caller queued behind a failed re-dial took its own 25-second turn at a
-/// network that just said no — on a dead link, requests stacked up half a
-/// minute apiece instead of failing fast (pre-merge review).
-const DIAL_COOLDOWN: Duration = Duration::from_secs(4);
-
 /// How the tunnel is reaching the server right now. iroh starts a
 /// connection on its relay path and holepunches toward a direct one, so
 /// this can change moments after connecting — and change back when a
@@ -81,6 +76,51 @@ impl TunnelPath {
             TunnelPath::Reconnecting => "reconnecting…",
         }
     }
+
+    /// From the shared tunnel client's `path_kind()`: unknown (0) is what it
+    /// reports whenever the tunnel is not connected, so that reads as
+    /// between tunnels here.
+    pub fn from_kind(kind: u8) -> TunnelPath {
+        match kind {
+            1 => TunnelPath::Direct,
+            2 => TunnelPath::Relay,
+            _ => TunnelPath::Reconnecting,
+        }
+    }
+}
+
+/// What a tunnel's supervisor is doing, as the shared client reports it —
+/// its `STATUS_*` codes, named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelStatus {
+    Connecting,
+    Connected,
+    /// The connection died and the supervisor is re-dialling on the same
+    /// loopback port; requests wait for it, bounded.
+    Reconnecting,
+    /// The server refused the credential and the supervisor gave up: a
+    /// rotated pairing code, or an expired guest token. A new credential
+    /// re-dials at once.
+    Rejected,
+    Down,
+}
+
+impl TunnelStatus {
+    pub fn from_code(code: u8) -> TunnelStatus {
+        match code {
+            0 => TunnelStatus::Connecting,
+            1 => TunnelStatus::Connected,
+            2 => TunnelStatus::Reconnecting,
+            3 => TunnelStatus::Rejected,
+            _ => TunnelStatus::Down,
+        }
+    }
+}
+
+/// The base URL a tunnel serves at, from the loopback port the shared client
+/// bound.
+pub fn local_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
 }
 
 #[derive(Debug, Clone)]
@@ -187,147 +227,9 @@ pub fn parse_code(raw: &str) -> Result<PairingCode, String> {
     Ok(PairingCode { addr: ticket.into(), secret })
 }
 
-/// A live tunnel. Each [`Tunnel::open_stream`] is one TCP connection's worth of
-/// traffic to the server's HTTP port.
-pub struct Tunnel {
-    connection: Connection,
-    // Held because dropping the endpoint tears down the connection.
-    _endpoint: Endpoint,
-}
-
-impl Tunnel {
-    /// Dial the server and complete the secret handshake.
-    pub async fn open(code: &PairingCode) -> Result<Self, String> {
-        let endpoint = bind_endpoint().await?;
-        let relay_online = wait_for_relay(&endpoint).await;
-        let connection = dial(&endpoint, &code.addr, relay_online).await?;
-        handshake(&connection, &code.secret).await?;
-        Ok(Tunnel { connection, _endpoint: endpoint })
-    }
-
-    /// Which kind of path is carrying application data right now.
-    fn path(&self) -> TunnelPath {
-        let paths = self.connection.paths();
-        // The selected path is the one QUIC is actually sending on; when
-        // the snapshot catches a moment with none selected, judge by what
-        // exists — a live IP path is what "direct" means either way.
-        match paths.iter().find(|p| p.is_selected()).map(|p| p.is_relay()) {
-            Some(true) => TunnelPath::Relay,
-            Some(false) => TunnelPath::Direct,
-            None if paths.iter().any(|p| p.is_ip()) => TunnelPath::Direct,
-            None => TunnelPath::Relay,
-        }
-    }
-
-    /// Open one tunnelled TCP connection to the server's HTTP port.
-    pub async fn open_stream(
-        &self,
-    ) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream), String> {
-        self.connection
-            .open_bi()
-            .await
-            .map_err(|e| format!("tunnel stream failed: {e}"))
-    }
-}
-
-/// The tunnel a bridge is currently speaking through, re-dialled when it
-/// dies. A QUIC connection is one-shot: fifteen to thirty seconds of dead
-/// network (a lid closed, a VPN re-auth, WiFi wandering) ends it for good,
-/// and before this existed the bridge kept trying to open streams on the
-/// corpse — every API call and every prepare failed from there to the end
-/// of the session (the "tunnel is flakey" report). The pairing code is the
-/// standing capability to dial, so the bridge holds it and uses it.
-struct Redialer {
-    code: PairingCode,
-    /// The lock is held across a re-dial on purpose: the first caller to
-    /// find the tunnel dead dials for everyone, and the rest queue here
-    /// rather than racing their own dials.
-    current: tokio::sync::Mutex<Standing>,
-}
-
-/// What the redialer currently holds: a tunnel if one is live, and when
-/// the last dial failed, so callers arriving during a dead spell fail
-/// fast instead of each serving a full dial timeout in turn.
-struct Standing {
-    tunnel: Option<std::sync::Arc<Tunnel>>,
-    last_failed_dial: Option<std::time::Instant>,
-}
-
-impl Redialer {
-    fn new(code: PairingCode, first: Tunnel) -> Self {
-        Redialer {
-            code,
-            current: tokio::sync::Mutex::new(Standing {
-                tunnel: Some(std::sync::Arc::new(first)),
-                last_failed_dial: None,
-            }),
-        }
-    }
-
-    /// The current tunnel's path, without waiting: a locked slot means a
-    /// re-dial is underway, and an empty one means the last tunnel died —
-    /// both of which the UI honestly calls "reconnecting".
-    fn path(&self) -> TunnelPath {
-        match self.current.try_lock() {
-            Ok(slot) => match slot.tunnel.as_ref() {
-                Some(tunnel) => tunnel.path(),
-                None => TunnelPath::Reconnecting,
-            },
-            Err(_) => TunnelPath::Reconnecting,
-        }
-    }
-
-    /// A stream on the current tunnel — or on a fresh one when the current
-    /// tunnel turns out to be dead. One failure buys one re-dial; a failed
-    /// re-dial fails this caller and the next one starts clean.
-    async fn stream(
-        &self,
-    ) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream), String> {
-        let mut slot = self.current.lock().await;
-        if let Some(tunnel) = slot.tunnel.as_ref() {
-            match tokio::time::timeout(STREAM_TIMEOUT, tunnel.open_stream()).await {
-                Ok(Ok(pair)) => return Ok(pair),
-                Ok(Err(e)) => {
-                    crate::stderrln!("[quickconnect] tunnel died ({e}); re-dialling");
-                }
-                Err(_) => {
-                    crate::stderrln!("[quickconnect] tunnel unresponsive; re-dialling");
-                }
-            }
-            slot.tunnel = None;
-        }
-        // A dial that just failed answers for everyone who arrives during
-        // the cooldown: fail fast rather than serve a full timeout each.
-        if let Some(at) = slot.last_failed_dial {
-            if at.elapsed() < DIAL_COOLDOWN {
-                return Err("the tunnel is down; the next dial is moments away".to_string());
-            }
-        }
-        // Dial-timeout bounded inside Tunnel::open; the handshake re-proves
-        // the secret the same as the first dial.
-        let tunnel = match Tunnel::open(&self.code).await {
-            Ok(tunnel) => std::sync::Arc::new(tunnel),
-            Err(e) => {
-                slot.last_failed_dial = Some(std::time::Instant::now());
-                return Err(e);
-            }
-        };
-        let pair = match tokio::time::timeout(STREAM_TIMEOUT, tunnel.open_stream()).await {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => {
-                slot.last_failed_dial = Some(std::time::Instant::now());
-                return Err(e);
-            }
-            Err(_) => {
-                slot.last_failed_dial = Some(std::time::Instant::now());
-                return Err("fresh tunnel would not open a stream".to_string());
-            }
-        };
-        slot.tunnel = Some(tunnel);
-        slot.last_failed_dial = None;
-        Ok(pair)
-    }
-}
+// ── The dial, one stage at a time — for `probe` only ─────────────────────
+// The session's tunnels are dialled by the shared crate; these are the same
+// steps, kept apart so the diagnostic can say which one died.
 
 /// Bind the local endpoint the way every tunnel user must: n0 defaults, plus
 /// the two settings the defaults leave off that decide whether a corporate
@@ -412,150 +314,6 @@ async fn handshake(connection: &Connection, secret: &[u8]) -> Result<(), String>
     }
 }
 
-/// A live tunnel exposed as a local HTTP endpoint.
-///
-/// This is the trick that keeps Quick Connect cheap: a loopback listener turns
-/// each inbound TCP connection into one tunnel bi-stream, so the ordinary
-/// `api::Client` — and the playback engine's range requests — can point at
-/// `local_url` and work exactly as they do against a direct server.
-pub struct TunnelBridge {
-    pub local_url: String,
-    /// The dialler the accept loop is using — shared here so the UI can ask
-    /// how the server is currently being reached.
-    redialer: std::sync::Arc<Redialer>,
-    /// Dropping this stops the accept loop and closes the tunnel.
-    _shutdown: tokio::sync::oneshot::Sender<()>,
-}
-
-impl TunnelBridge {
-    /// How the tunnel is reaching the server right now. Cheap and
-    /// non-blocking; safe to poll from a sampler.
-    pub fn path(&self) -> TunnelPath {
-        self.redialer.path()
-    }
-}
-
-/// Dial a pairing code and publish it on loopback. Blocking; call from a worker
-/// thread.
-pub fn open_bridge(code: &PairingCode) -> Result<TunnelBridge, String> {
-    let code = code.clone();
-    crate::runtime::block_on(async move {
-        // The first dial happens here, eagerly, so a bad code or an
-        // unreachable server fails the connect attempt rather than the
-        // first request through a bridge that was never going to work.
-        let redialer =
-            std::sync::Arc::new(Redialer::new(code.clone(), Tunnel::open(&code).await?));
-        publish_on_loopback(redialer).await
-    })?
-}
-
-/// The loopback half of a bridge: bind a local port, pump every inbound TCP
-/// connection through the dialler. Split from [`open_bridge`] so the probe
-/// can publish a tunnel it has already dialled stage by stage.
-async fn publish_on_loopback(
-    redialer: std::sync::Arc<Redialer>,
-) -> Result<TunnelBridge, String> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| format!("could not open a local port for the tunnel: {e}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| format!("could not read the local tunnel port: {e}"))?
-        .port();
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(accept_loop(listener, redialer.clone(), shutdown_rx));
-
-    Ok(TunnelBridge {
-        local_url: format!("http://127.0.0.1:{port}"),
-        redialer,
-        _shutdown: shutdown_tx,
-    })
-}
-
-async fn accept_loop(
-    listener: tokio::net::TcpListener,
-    redialer: std::sync::Arc<Redialer>,
-    mut shutdown: tokio::sync::oneshot::Receiver<()>,
-) {
-    loop {
-        let socket = tokio::select! {
-            _ = &mut shutdown => break,
-            accepted = listener.accept() => match accepted {
-                Ok((socket, _)) => socket,
-                // Accept errors are transient (file-handle pressure, a
-                // half-open reset). Breaking here killed the whole bridge
-                // for the rest of the session over one of them; breathe
-                // instead, and let the shutdown side stay the only exit.
-                Err(e) => {
-                    crate::stderrln!("[quickconnect] accept failed: {e}");
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                    continue;
-                }
-            },
-        };
-        let redialer = redialer.clone();
-        tokio::spawn(async move {
-            if let Err(e) = bridge_one(socket, redialer).await {
-                // Individual connections failing is normal (the client hangs
-                // up on keep-alive idle); only worth a line for diagnosis —
-                // and not worth smearing across a session that is drawing,
-                // where "normal" made it a repeat offender (audit #44).
-                crate::stderrln!("[quickconnect] stream ended: {e}");
-            }
-        });
-    }
-}
-
-/// Pump one TCP connection through one tunnel bi-stream, both directions —
-/// and pass either side's hang-up through to the other, promptly.
-///
-/// This used to wait for *both* directions to finish, which held the
-/// client-side TCP open after the server's side of the stream had ended.
-/// An HTTP client's connection pool reads that as a healthy idle
-/// connection: reqwest would offer the corpse to its next request, whose
-/// bytes then poured into a stream nothing was answering, and the caller
-/// waited out its whole timeout. The engine's prepare-ahead open was the
-/// caller that paid — every crossfade whose prepare fired within the
-/// pool's idle window of the previous download finishing went out as a
-/// hard cut (the listening-session trace that found this). Ending the
-/// bridge when either side ends is what a direct connection would do:
-/// the server's FIN reaches the client, and the pool buries the body.
-async fn bridge_one(
-    socket: tokio::net::TcpStream,
-    redialer: std::sync::Arc<Redialer>,
-) -> Result<(), String> {
-    let (mut send, mut recv) = redialer.stream().await?;
-    let (mut client_read, mut client_write) = socket.into_split();
-
-    let upstream = async {
-        tokio::io::copy(&mut client_read, &mut send).await?;
-        // Signal end-of-request so the server stops waiting for more.
-        let _ = send.finish();
-        Ok::<_, std::io::Error>(())
-    };
-    let downstream = async {
-        tokio::io::copy(&mut recv, &mut client_write).await?;
-        Ok::<_, std::io::Error>(())
-    };
-
-    // Asymmetric on purpose. A client done SENDING may still be owed a
-    // response — an HTTP client that half-closes after its request is
-    // within its rights (the end-to-end test does exactly this) — so
-    // upstream ending only stops the upstream copy. A server that ended
-    // its side will never send another byte: that is the moment to close
-    // the client's connection too, so no connection pool is left holding
-    // a corpse (the listening-session finding).
-    tokio::pin!(upstream, downstream);
-    tokio::select! {
-        up = &mut upstream => {
-            up.map_err(|e| e.to_string())?;
-            (&mut downstream).await.map_err(|e| e.to_string())
-        }
-        down = &mut downstream => down.map_err(|e| e.to_string()),
-    }
-}
-
 /// Which proxy variable is set, if any — named but never printed whole,
 /// since proxy URLs routinely carry credentials. Mirrors iroh's read order.
 fn proxy_env_var() -> Option<&'static str> {
@@ -591,13 +349,15 @@ pub fn probe(code: &str) -> i32 {
         println!("proxy: ${name} is set and will be used for relay dials");
     }
 
-    // The same steps `Tunnel::open` composes, exercised the same way the
-    // player uses them — then the loopback bridge and the ordinary API client.
+    // The dial's stages one at a time — the same steps the shared tunnel
+    // client composes — so a hostile network's failure has a name. Then the
+    // whole thing again through that client, loopback bridge included, and
+    // one real request over it.
     let started = std::time::Instant::now();
     let stage = move |what: &str| {
         println!("  {what} after {:.2}s", started.elapsed().as_secs_f64());
     };
-    let opened = crate::runtime::block_on(async move {
+    let staged = crate::runtime::block_on(async move {
         let endpoint = bind_endpoint().await?;
         stage("local endpoint up");
         let relay_online = wait_for_relay(&endpoint).await;
@@ -613,26 +373,29 @@ pub fn probe(code: &str) -> i32 {
         stage("server accepted the connection");
         handshake(&connection, &parsed.secret).await?;
         stage("pairing handshake accepted");
-        let tunnel = Tunnel { connection, _endpoint: endpoint };
-        publish_on_loopback(std::sync::Arc::new(Redialer::new(parsed.clone(), tunnel))).await
+        connection.close(0u32.into(), b"probe done");
+        Ok::<(), String>(())
     })
-    .and_then(|opened| opened);
+    .and_then(|staged| staged);
+    if let Err(e) = staged {
+        eprintln!("FAIL: {e}");
+        return 1;
+    }
 
-    let bridge = match opened {
-        Ok(bridge) => bridge,
+    let opened = crate::runtime::block_on(iroh_tunnel::connect_tunnel(code, 0))
+        .and_then(|dialled| dialled.map_err(|e| e.to_string()));
+    let tunnel = match opened {
+        Ok(tunnel) => tunnel,
         Err(e) => {
             eprintln!("FAIL: {e}");
             return 1;
         }
     };
-    println!(
-        "tunnel up at {} after {:.2}s",
-        bridge.local_url,
-        started.elapsed().as_secs_f64()
-    );
+    let base = local_url(tunnel.local_port);
+    println!("tunnel up at {base} after {:.2}s", started.elapsed().as_secs_f64());
 
-    let client = match crate::api::Client::new(&bridge.local_url) {
-        Ok(client) => client,
+    let client = match crate::api::Client::new(&base) {
+        Ok(client) => client.with_local_token(Some(tunnel.local_token())),
         Err(e) => {
             eprintln!("FAIL: {e}");
             return 1;
@@ -656,26 +419,45 @@ pub fn probe(code: &str) -> i32 {
     }
 }
 
+/// Codes for the tests that need a real-shaped one — the App's and the GUI's
+/// as well as this module's — since a pasted code is parsed for its identity
+/// before anything is dialled.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod testing {
+    use base64::Engine as _;
 
     /// Build a code the way the server does, so the parser is tested against
     /// the real shape rather than a guess.
-    fn encode(version: Option<u32>, ticket: &str, secret: &[u8]) -> String {
+    pub(crate) fn encode(version: Option<u32>, ticket: &str, secret: &[u8]) -> String {
         let payload = serde_json::json!({
             "t": ticket,
             "s": base64::engine::general_purpose::STANDARD.encode(secret),
         });
         let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string());
         match version {
-            Some(v) => format!("{PAIRING_PREFIX}{v}:{body}"),
+            Some(v) => format!("{}{v}:{body}", super::PAIRING_PREFIX),
             None => body,
         }
     }
 
     // A real ticket captured from a running mStream tunnel.
-    const TICKET: &str = "endpointabrraywtjw6g3m7gofwzvgif4t7p7b7olzxcske4lei7axhn53gmkbaaenuhi5dqom5c6l3vonstcljrfzzgk3dbpexg4mbonfzg62bonruw42zof4aqasj432dpvxydaeakyhaaah5n6aybadakqakh7lpqg";
+    pub(crate) const TICKET: &str = "endpointabrraywtjw6g3m7gofwzvgif4t7p7b7olzxcske4lei7axhn53gmkbaaenuhi5dqom5c6l3vonstcljrfzzgk3dbpexg4mbonfzg62bonruw42zof4aqasj432dpvxydaeakyhaaah5n6aybadakqakh7lpqg";
+
+    /// A valid v1 pairing code for [`TICKET`] with a fixed secret.
+    pub(crate) fn sample_code() -> String {
+        encode(Some(1), TICKET, &[9u8; 32])
+    }
+
+    /// The identity [`sample_code`] parses to.
+    pub(crate) fn sample_id() -> String {
+        super::parse_code(&sample_code()).expect("sample code parses").server_id()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::{encode, TICKET};
+    use super::*;
 
     #[test]
     fn parses_a_v1_code() {
@@ -847,13 +629,22 @@ mod tests {
             b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nhi",
         );
         let code = encode(Some(1), &ticket, &SECRET);
-        let bridge = open_bridge(&parse_code(&code).expect("parse")).expect("open bridge");
+        assert!(parse_code(&code).is_ok(), "the code parses to an identity first");
+        let tunnel = crate::runtime::block_on(iroh_tunnel::connect_tunnel(&code, 0))
+            .expect("runtime")
+            .expect("open tunnel");
 
         use std::io::{Read, Write};
-        let target = bridge.local_url.strip_prefix("http://").expect("local url");
-        let mut sock = std::net::TcpStream::connect(target).expect("connect bridge");
-        sock.write_all(b"GET /api/v1/ping HTTP/1.1\r\nhost: tunnel\r\nconnection: close\r\n\r\n")
-            .expect("send request");
+        let target = format!("127.0.0.1:{}", tunnel.local_port);
+        let mut sock = std::net::TcpStream::connect(&target).expect("connect bridge");
+        // The loopback token on the request line: without it the shared
+        // client drops the connection, so another process on this machine
+        // cannot use the bridge as a proxy.
+        let request = format!(
+            "GET /api/v1/ping?__lt={} HTTP/1.1\r\nhost: tunnel\r\nconnection: close\r\n\r\n",
+            tunnel.local_token()
+        );
+        sock.write_all(request.as_bytes()).expect("send request");
         // Mirror what a real HTTP client does at end of request, and what the
         // bridge needs to forward end-of-stream: half-close the write side.
         sock.shutdown(std::net::Shutdown::Write).expect("half-close");
@@ -861,6 +652,16 @@ mod tests {
         let _ = sock.read_to_string(&mut reply);
         assert!(reply.starts_with("HTTP/1.1 200 OK"), "got: {reply}");
         assert!(reply.ends_with("hi"), "got: {reply}");
+
+        // And the gate itself: the same request without the token gets no
+        // answer at all.
+        let mut bare = std::net::TcpStream::connect(&target).expect("connect bridge");
+        bare.write_all(b"GET /api/v1/ping HTTP/1.1\r\nhost: tunnel\r\nconnection: close\r\n\r\n")
+            .expect("send request");
+        bare.shutdown(std::net::Shutdown::Write).expect("half-close");
+        let mut nothing = String::new();
+        let _ = bare.read_to_string(&mut nothing);
+        assert!(nothing.is_empty(), "the gate let a tokenless request through: {nothing}");
     }
 
     /// The probe walks the same stages and comes back green against a healthy

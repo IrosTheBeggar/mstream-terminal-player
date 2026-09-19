@@ -82,7 +82,8 @@ mod quickconnect;
 /// Stand-in for the pure items of [quickconnect.rs] that the app logic
 /// reaches for (tunnel identities appear in saved-server lists, and the
 /// tunnel-path words appear in the header); the tunnel itself is iroh and
-/// stays native. Kept line-for-line identical.
+/// stays native. The shared items are kept identical; the parse is a
+/// refusal.
 #[cfg(target_arch = "wasm32")]
 mod quickconnect {
     /// Marks a remembered server as one reached through a tunnel rather than
@@ -113,10 +114,58 @@ mod quickconnect {
                 TunnelPath::Reconnecting => "reconnecting…",
             }
         }
+
+        pub fn from_kind(kind: u8) -> TunnelPath {
+            match kind {
+                1 => TunnelPath::Direct,
+                2 => TunnelPath::Relay,
+                _ => TunnelPath::Reconnecting,
+            }
+        }
+    }
+
+    /// What a tunnel's supervisor is doing, as the shared client reports it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TunnelStatus {
+        Connecting,
+        Connected,
+        Reconnecting,
+        Rejected,
+        Down,
+    }
+
+    impl TunnelStatus {
+        pub fn from_code(code: u8) -> TunnelStatus {
+            match code {
+                0 => TunnelStatus::Connecting,
+                1 => TunnelStatus::Connected,
+                2 => TunnelStatus::Reconnecting,
+                3 => TunnelStatus::Rejected,
+                _ => TunnelStatus::Down,
+            }
+        }
     }
 
     pub fn is_tunnel_id(server: &str) -> bool {
         server.starts_with(TUNNEL_ID_PREFIX)
+    }
+
+    pub fn local_url(port: u16) -> String {
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// The identity a code names; the browser cannot dial one, and it
+    /// cannot read a ticket either, so a pasted code is refused here.
+    pub struct PairingCode;
+
+    impl PairingCode {
+        pub fn server_id(&self) -> String {
+            String::new()
+        }
+    }
+
+    pub fn parse_code(_raw: &str) -> Result<PairingCode, String> {
+        Err("Quick Connect needs the native player — the tunnel is iroh, not HTTP".to_string())
     }
 
     /// A tunnel identity in a form worth showing someone, since the raw

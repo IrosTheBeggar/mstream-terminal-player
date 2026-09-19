@@ -88,6 +88,12 @@ tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-
 # TLS-inspecting proxy in front of :443 and re-sign with a CA that only the
 # OS keychain knows (the tunnel research round).
 iroh = { version = "1", features = ["platform-verifier"] }
+# The tunnel client shared with the mobile app (and anyone else): dials a
+# Quick Connect code or a federation guest ticket and serves the server on
+# a loopback port, with a reconnect supervisor and an in-place credential
+# swap. By git tag until it is on crates.io; the `iroh` line above stays for
+# the staged `quickconnect-probe`, which drives the dial one step at a time.
+mstream-iroh-tunnel = { git = "https://github.com/IrosTheBeggar/mstream-iroh-tunnel", tag = "v0.1.0" }
 # The optional debug log (MSTREAM_LOG): a fmt subscriber writing to a file,
 # never the terminal. env-filter so RUST_LOG chooses what third-party crates
 # (iroh's relay and holepunch narration above all) get to say.

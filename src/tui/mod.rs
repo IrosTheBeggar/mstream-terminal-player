@@ -246,6 +246,13 @@ pub(crate) fn known_servers(
             token: config::token_for(credentials, &entry.url),
             self_signed: entry.self_signed,
             peer: entry.peer.as_ref().map(|p| (p.parent.clone(), p.id)),
+            // What a queued row on this server is dialled with, when the
+            // session is elsewhere (contract clause 38).
+            pairing: if crate::quickconnect::is_tunnel_id(&entry.url) {
+                config::pairing_for(credentials, &entry.url)
+            } else {
+                None
+            },
         })
         .collect()
 }

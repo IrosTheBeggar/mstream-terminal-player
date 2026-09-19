@@ -75,12 +75,45 @@ pub enum ApiCmd {
     /// `peer` aims the session at that federated peer of the server: every
     /// read rides the parent's proxies with the parent's token (contract
     /// clause 27).
-    Connect { server: String, token: Option<String>, self_signed: bool, peer: Option<i64> },
-    Login { server: String, username: String, password: String, self_signed: bool },
-    /// Dial a Quick Connect pairing code, then treat the resulting loopback
-    /// address as an ordinary server. A token is carried when reconnecting to
-    /// a tunnel server we have already signed in to.
-    QuickConnect { code: String, token: Option<String>, peer: Option<i64> },
+    /// `identity` is what the session is filed under — the server's URL, or
+    /// a tunnel's `mstream+iroh://` id when `server` is that tunnel's
+    /// loopback address — and comes back on [`Event::Connected`] unchanged.
+    /// `local_token` rides every request to a loopback bridge as `__lt=…`,
+    /// the shared tunnel client's gate against other local processes.
+    Connect {
+        server: String,
+        identity: String,
+        token: Option<String>,
+        self_signed: bool,
+        peer: Option<i64>,
+        local_token: Option<String>,
+    },
+    Login {
+        server: String,
+        identity: String,
+        username: String,
+        password: String,
+        self_signed: bool,
+        local_token: Option<String>,
+    },
+    /// Dial `credential` — a Quick Connect pairing code or a federation
+    /// guest ticket — and keep the tunnel under `id` until it is closed,
+    /// whichever session is current (contract clause 38). A no-op while
+    /// `id` is up or dialling; answers [`Event::TunnelUp`] or
+    /// [`Event::TunnelFailed`].
+    TunnelOpen { id: String, credential: String },
+    /// Drop the tunnel under `id`; answers [`Event::TunnelClosed`].
+    // Constructed by the queue's release policy (contract clause 38's grace)
+    // once that lands; the worker's half is here first.
+    #[allow(dead_code)]
+    TunnelClose { id: String },
+    /// Swap what the tunnel under `id` dials with, in place — same port,
+    /// same URLs: a refreshed guest ticket, or a new pairing code for the
+    /// same server. Silent when it takes; [`Event::TunnelFailed`] when not.
+    // Constructed by the guest-ticket refresh (contract clause 27) once that
+    // lands; the worker's half is here first.
+    #[allow(dead_code)]
+    TunnelCredential { id: String, credential: String },
     /// The peers a saved server lists for browsing (contract clause 20),
     /// asked once its ping says `federationBrowse`.
     FederationPeers { parent: String },
@@ -88,7 +121,7 @@ pub enum ApiCmd {
     /// walk's question (contract clause 37): a track that would not open
     /// is skipped when its server answers and held when it does not.
     /// Its own one-shot client: the row's server may not be the session's.
-    Probe { server: String, base: String, self_signed: bool },
+    Probe { server: String, base: String, self_signed: bool, local_token: Option<String> },
     Browse(String),
     /// Fetch a library view for `dest` — the Library tab, or the Search tab
     /// drilling into an artist or album it found. The destination travels
@@ -329,10 +362,22 @@ pub enum Event {
     /// error, a successful move is one line of info. Either way the
     /// engine has already acted; this is narration, not a request.
     AudioDevice(crate::player::DeviceNotice),
-    /// How the Quick Connect tunnel is reaching the server right now —
-    /// direct, through a relay, or between tunnels. Sent on change by a
-    /// sampler that lives exactly as long as the bridge does.
-    TunnelPath(crate::quickconnect::TunnelPath),
+    /// How the tunnel under `id` is reaching its server right now — direct,
+    /// through a relay, or between connections. Sent on change by the
+    /// sampler that watches every open tunnel.
+    TunnelPath { id: String, path: crate::quickconnect::TunnelPath },
+    /// The tunnel under `id` changed state: its supervisor is re-dialling,
+    /// gave up on a refused credential, or is down. Sent on change.
+    TunnelStatus { id: String, status: crate::quickconnect::TunnelStatus },
+    /// The tunnel under `id` is up: its server answers at `local_url`, and
+    /// every request there must carry `local_token` as `__lt=…`.
+    TunnelUp { id: String, local_url: String, local_token: String },
+    /// The dial for `id` (or a credential swap on it) failed. `rejected`
+    /// means the server refused the credential — a rotated pairing code,
+    /// an expired guest token — as opposed to not answering at all.
+    TunnelFailed { id: String, rejected: bool, why: String },
+    /// The tunnel under `id` was closed on request.
+    TunnelClosed { id: String },
     /// One source would not play — wrong format, gone from the server, or
     /// something this decoder doesn't speak. The rest of the queue is fine.
     /// Named for the same reason [`Event::TrackEnded`] is, and more urgently:
@@ -354,9 +399,6 @@ pub enum Event {
     /// We reached this server but it wants credentials. Distinct from
     /// [`Event::Unauthorized`], which means an established session went bad.
     NeedsLogin { server: String },
-    /// The Quick Connect tunnel is up and reachable at `local_url`, but the
-    /// server still wants credentials — the secret gates the pipe, not the API.
-    TunnelReady { local_url: String, id: String },
     Listing(Box<DirListing>),
     /// Contents of a library view, tagged with the node they belong to and
     /// the tab they were fetched for — the same data serves the Library tab
@@ -802,17 +844,38 @@ pub fn spawn_api(events: Sender<Event>) -> Sender<ApiCmd> {
     tx
 }
 
+/// Every open tunnel, by identity — the session's own and the ones the queue
+/// needs — for as long as the api thread lives. One dial in flight per
+/// identity at most; a tunnel stays until it is closed on request, whichever
+/// session is current (contract clause 38).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct Tunnels {
+    slots: std::collections::HashMap<String, TunnelSlot>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct TunnelSlot {
+    tunnel: Option<iroh_tunnel::Tunnel>,
+    dialling: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type TunnelTable = std::sync::Mutex<Tunnels>;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lock(table: &TunnelTable) -> std::sync::MutexGuard<'_, Tunnels> {
+    table.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     let mut client: Option<Arc<Client>> = None;
-    // Held for as long as this thread lives; dropping it closes the tunnel out
-    // from under the client, so it is explicitly dropped on the way out. An
-    // Arc so the path sampler can watch it without owning it.
-    #[allow(unused_assignments)]
-    let mut bridge: Option<Arc<crate::quickconnect::TunnelBridge>> = None;
-    // The tunnel session's two names, once one is open: the loopback address
-    // requests go to, and the identity it is remembered by.
-    let mut tunnel: Option<(String, String)> = None;
+    // The dial threads and the sampler hold the table too; the sampler only
+    // weakly, so it ends with this thread.
+    let tunnels: Arc<TunnelTable> = Arc::new(std::sync::Mutex::new(Tunnels::default()));
+    spawn_tunnel_sampler(Arc::downgrade(&tunnels), events.clone());
     // What the connected server said it can do. Nothing optional is probed
     // before this says so.
     let mut caps = Capabilities::default();
@@ -823,65 +886,30 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
         // contradiction, not a feature. Everything else is a read against
         // the current client and answers on its own thread (audit #63):
         // one stalled search used to block every pane behind a 20-second
-        // timeout, and a tunnel dial held the line for the better part of
-        // a minute.
+        // timeout. A tunnel dial takes up to a minute cold, so it runs on
+        // its own thread as well and reports back through the events.
         let result = match cmd {
             ApiCmd::Shutdown => break,
 
-            ApiCmd::Connect { server, token, self_signed, peer } => {
-                connect(&mut client, &server, &server.clone(), token, self_signed, peer)
+            ApiCmd::Connect { server, identity, token, self_signed, peer, local_token } => {
+                connect(&mut client, &server, &identity, token, self_signed, peer, local_token)
             }
 
-            ApiCmd::Login { server, username, password, self_signed } => {
-                // Signing in to a tunnel server goes over the open bridge, but
-                // is filed under the endpoint id — the loopback port is gone
-                // by the next run.
-                let (endpoint, id) = resolve_target(&server, tunnel.as_ref());
-                login(&mut client, &endpoint, &id, &username, &password, self_signed)
+            ApiCmd::Login { server, identity, username, password, self_signed, local_token } => {
+                login(&mut client, &server, &identity, &username, &password, self_signed, local_token)
             }
 
-            ApiCmd::QuickConnect { code, token, peer } => match quick_connect(&code) {
-                Ok((id, opened)) => {
-                    let url = opened.local_url.clone();
-                    // Dial over the new tunnel while the old one is still up.
-                    // Installing it here would drop the old bridge, and its
-                    // Drop closes the loopback listener the *current* session
-                    // is streaming through — so a code that opens but doesn't
-                    // answer used to leave the UI on a session whose port had
-                    // just been pulled out from under it (finding #20).
-                    // The bridge is plain http on loopback — TLS trust never
-                    // comes up.
-                    let answer = connect(&mut client, &url, &id, token, false, peer);
-                    if !tunnel_answered(&answer) {
-                        // `opened` drops here, closing the tunnel that just
-                        // failed and only that one. `client`, `bridge` and
-                        // `tunnel` are untouched, so the session the user is
-                        // on carries on working while they read the error.
-                        answer
-                    } else {
-                        let opened = Arc::new(opened);
-                        spawn_path_sampler(Arc::downgrade(&opened), events.clone());
-                        bridge = Some(opened);
-                        tunnel = Some((url.clone(), id.clone()));
-                        // A public-mode server answers straight away; anything
-                        // else needs a login over the freshly-opened tunnel.
-                        match answer {
-                            Some(Event::NeedsLogin { .. }) => {
-                                Some(Event::TunnelReady { local_url: url, id })
-                            }
-                            other => other,
-                        }
-                    }
-                }
-                Err(e) => Some(Event::Error(e)),
-            },
-
+            ApiCmd::TunnelOpen { id, credential } => {
+                open_tunnel(&tunnels, id, credential, events.clone());
+                None
+            }
+            ApiCmd::TunnelClose { id } => Some(close_tunnel(&tunnels, id)),
+            ApiCmd::TunnelCredential { id, credential } => swap_credential(&tunnels, id, &credential),
 
             read => {
                 spawn_read(client.clone(), caps, events.clone(), read);
                 None
             }
-
         };
 
         // One place to learn what the server offers, so a new way of
@@ -890,14 +918,23 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
             caps = Capabilities::from(ping.as_ref());
         }
 
-        if let Some(event) = result {
-            if events.send(event).is_err() {
-                break;
-            }
+        if let Some(event) = result
+            && events.send(event).is_err()
+        {
+            break;
         }
     }
 
-    drop(bridge);
+    // Every tunnel goes down gracefully on the way out; a plain drop would
+    // slam the connections shut under whatever was still streaming.
+    let table = std::mem::take(&mut *lock(&tunnels));
+    if let Ok(rt) = crate::runtime::handle() {
+        for slot in table.slots.into_values() {
+            if let Some(tunnel) = slot.tunnel {
+                tunnel.begin_shutdown(rt);
+            }
+        }
+    }
 }
 
 /// Answer one read on its own thread, so a slow server holds up this reply
@@ -927,8 +964,9 @@ fn spawn_read(
 fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
     // The probe needs no session: it asks the row's own server, which may
     // be one the session never reached.
-    if let ApiCmd::Probe { server, base, self_signed } = cmd {
+    if let ApiCmd::Probe { server, base, self_signed, local_token } = cmd {
         let reachable = Client::new_with(&base, self_signed)
+            .map(|c| c.with_local_token(local_token))
             .and_then(|c| c.server_info())
             .is_ok();
         return Event::Reachable { server, reachable };
@@ -1027,7 +1065,9 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         // The probe answered above, before the session client was needed.
         ApiCmd::Connect { .. }
         | ApiCmd::Login { .. }
-        | ApiCmd::QuickConnect { .. }
+        | ApiCmd::TunnelOpen { .. }
+        | ApiCmd::TunnelClose { .. }
+        | ApiCmd::TunnelCredential { .. }
         | ApiCmd::Probe { .. }
         | ApiCmd::Shutdown => return Event::Error("connection change routed as a read".into()),
     };
@@ -1038,64 +1078,139 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
     }
 }
 
-/// Watch how the tunnel is reaching the server and tell the UI when it
-/// changes. Holds only a Weak: when the bridge is dropped (a new session,
-/// shutdown), the next sample fails to upgrade and the thread ends. The
-/// first sample is sent unconditionally so a fresh session shows its state
-/// within a beat of connecting.
+/// Dial `credential` for `id` on its own thread and install the tunnel. A
+/// dial already in flight makes this a no-op; a tunnel already up is simply
+/// reported again. The thread answers `TunnelUp` or `TunnelFailed`. A close that lands while the
+/// dial is out wins: the tunnel is shut down as soon as it arrives.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_path_sampler(
-    bridge: std::sync::Weak<crate::quickconnect::TunnelBridge>,
-    events: Sender<Event>,
-) {
-    let _ = thread::Builder::new().name("mstream-tunnel-path".into()).spawn(move || {
-        let mut last: Option<crate::quickconnect::TunnelPath> = None;
+fn open_tunnel(tunnels: &Arc<TunnelTable>, id: String, credential: String, events: Sender<Event>) {
+    {
+        let mut table = lock(tunnels);
+        let slot = table.slots.entry(id.clone()).or_default();
+        if let Some(tunnel) = &slot.tunnel {
+            // Already up: say so again, so an App whose picture of this
+            // tunnel lagged never waits on a dial that will not happen.
+            let _ = events.send(Event::TunnelUp {
+                id,
+                local_url: crate::quickconnect::local_url(tunnel.local_port),
+                local_token: tunnel.local_token(),
+            });
+            return;
+        }
+        if slot.dialling {
+            return; // the dial in flight will report
+        }
+        slot.dialling = true;
+    }
+    let tunnels = Arc::clone(tunnels);
+    let _ = thread::Builder::new().name("mstream-tunnel-dial".into()).spawn(move || {
+        let dialled = crate::runtime::block_on(iroh_tunnel::connect_tunnel(&credential, 0))
+            .and_then(|dialled| dialled.map_err(|e| e.to_string()));
+        let event = match dialled {
+            Ok(tunnel) => {
+                let local_url = crate::quickconnect::local_url(tunnel.local_port);
+                let local_token = tunnel.local_token();
+                let mut table = lock(&tunnels);
+                match table.slots.get_mut(&id) {
+                    Some(slot) if slot.dialling => {
+                        slot.dialling = false;
+                        slot.tunnel = Some(tunnel);
+                        Event::TunnelUp { id, local_url, local_token }
+                    }
+                    // Closed while the dial was out.
+                    _ => {
+                        drop(table);
+                        if let Ok(rt) = crate::runtime::handle() {
+                            tunnel.begin_shutdown(rt);
+                        }
+                        Event::TunnelClosed { id }
+                    }
+                }
+            }
+            Err(why) => {
+                lock(&tunnels).slots.remove(&id);
+                // The shared client words a refused credential with
+                // "rejected" for both kinds; everything else is a server
+                // that did not answer.
+                Event::TunnelFailed { id, rejected: why.contains("rejected"), why }
+            }
+        };
+        let _ = events.send(event);
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn close_tunnel(tunnels: &Arc<TunnelTable>, id: String) -> Event {
+    let closed = lock(tunnels).slots.remove(&id).and_then(|slot| slot.tunnel);
+    if let Some(tunnel) = closed
+        && let Ok(rt) = crate::runtime::handle()
+    {
+        tunnel.begin_shutdown(rt);
+    }
+    Event::TunnelClosed { id }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn swap_credential(tunnels: &Arc<TunnelTable>, id: String, credential: &str) -> Option<Event> {
+    let failed = |why: String| Some(Event::TunnelFailed { id: id.clone(), rejected: false, why });
+    let table = lock(tunnels);
+    let Some(tunnel) = table.slots.get(&id).and_then(|slot| slot.tunnel.as_ref()) else {
+        return failed("no open tunnel to update".into());
+    };
+    let rt = match crate::runtime::handle() {
+        Ok(rt) => rt,
+        Err(e) => return failed(e),
+    };
+    match tunnel.set_credential(credential, rt) {
+        Ok(()) => None,
+        Err(e) => failed(e.to_string()),
+    }
+}
+
+/// Watch every open tunnel and tell the UI when one changes state or path.
+/// Holds only a Weak: when the api thread drops the table, the next sample
+/// fails to upgrade and this thread ends. The first sample of a tunnel is
+/// sent unconditionally, so a fresh one shows its state within a beat. The
+/// shared client's own event ring is drained into the log on the way.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_tunnel_sampler(tunnels: std::sync::Weak<TunnelTable>, events: Sender<Event>) {
+    let _ = thread::Builder::new().name("mstream-tunnel-watch".into()).spawn(move || {
+        let mut last: std::collections::HashMap<String, (u8, u8)> = Default::default();
         loop {
-            let Some(bridge) = bridge.upgrade() else { return };
-            let path = bridge.path();
-            drop(bridge);
-            if last != Some(path) {
-                last = Some(path);
-                if events.send(Event::TunnelPath(path)).is_err() {
-                    return;
+            let Some(tunnels) = tunnels.upgrade() else { return };
+            let mut seen = Vec::new();
+            {
+                let table = lock(&tunnels);
+                for (id, slot) in &table.slots {
+                    let Some(tunnel) = &slot.tunnel else { continue };
+                    if let Some(lines) = tunnel.drain_events() {
+                        for line in lines.lines() {
+                            tracing::info!("tunnel {}: {line}", crate::quickconnect::display_server(id));
+                        }
+                    }
+                    seen.push((id.clone(), tunnel.status(), tunnel.path_kind()));
+                }
+            }
+            drop(tunnels);
+            last.retain(|id, _| seen.iter().any(|(seen_id, _, _)| seen_id == id));
+            for (id, status, path) in seen {
+                let before = last.insert(id.clone(), (status, path));
+                if before.map(|(s, _)| s) != Some(status) {
+                    let status = crate::quickconnect::TunnelStatus::from_code(status);
+                    if events.send(Event::TunnelStatus { id: id.clone(), status }).is_err() {
+                        return;
+                    }
+                }
+                if before.map(|(_, p)| p) != Some(path) {
+                    let path = crate::quickconnect::TunnelPath::from_kind(path);
+                    if events.send(Event::TunnelPath { id, path }).is_err() {
+                        return;
+                    }
                 }
             }
             thread::sleep(Duration::from_secs(2));
         }
     });
-}
-
-/// Parse a pairing code, bring the tunnel up on loopback, and report the
-/// identity the code names alongside it.
-#[cfg(not(target_arch = "wasm32"))]
-fn quick_connect(code: &str) -> Result<(String, crate::quickconnect::TunnelBridge), String> {
-    let parsed = crate::quickconnect::parse_code(code)?;
-    let id = parsed.server_id();
-    Ok((id, crate::quickconnect::open_bridge(&parsed)?))
-}
-
-/// Split a connect target into (where to send bytes, what to remember it as).
-/// They differ only for a tunnel, which the UI names either way round: by its
-/// identity when reconnecting, by the loopback URL when the login form is
-/// carrying what the tunnel just published.
-#[cfg(not(target_arch = "wasm32"))]
-fn resolve_target(server: &str, tunnel: Option<&(String, String)>) -> (String, String) {
-    match tunnel {
-        Some((local_url, id)) if server == id || server == local_url => {
-            (local_url.clone(), id.clone())
-        }
-        _ => (server.to_string(), server.to_string()),
-    }
-}
-
-/// Whether a dial reached the server it was aimed at.
-///
-/// An allowlist rather than "not an error", because this decides whether a
-/// working tunnel gets torn down: an outcome nobody has thought about yet
-/// should keep the session that is already up, not replace it.
-#[cfg(not(target_arch = "wasm32"))]
-fn tunnel_answered(answer: &Option<Event>) -> bool {
-    matches!(answer, Some(Event::Connected { .. } | Event::NeedsLogin { .. }))
 }
 
 /// The tail both ways in share: ping the server, and only once it answers
@@ -1126,9 +1241,10 @@ fn connect(
     token: Option<String>,
     self_signed: bool,
     peer: Option<i64>,
+    local_token: Option<String>,
 ) -> Option<Event> {
     let c = match Client::new_with(server, self_signed) {
-        Ok(c) => c.with_token(token.clone()).with_peer(peer),
+        Ok(c) => c.with_token(token.clone()).with_peer(peer).with_local_token(local_token),
         Err(e) => return Some(Event::Error(e.to_string())),
     };
     // Taken before the client moves; it is the address that was reached,
@@ -1151,9 +1267,10 @@ fn login(
     username: &str,
     password: &str,
     self_signed: bool,
+    local_token: Option<String>,
 ) -> Option<Event> {
     let mut c = match Client::new_with(server, self_signed) {
-        Ok(c) => c,
+        Ok(c) => c.with_local_token(local_token),
         Err(e) => return Some(Event::Error(e.to_string())),
     };
     let token = match c.login(username, password) {
@@ -1808,59 +1925,6 @@ mod tests {
     }
 
     #[test]
-    fn a_tunnel_login_goes_over_the_bridge_but_is_filed_under_the_identity() {
-        let tunnel = (
-            "http://127.0.0.1:51234".to_string(),
-            "mstream+iroh://endpointabc".to_string(),
-        );
-
-        // The login form carries the loopback URL the tunnel published...
-        assert_eq!(
-            resolve_target("http://127.0.0.1:51234", Some(&tunnel)),
-            (tunnel.0.clone(), tunnel.1.clone())
-        );
-        // ...and a reconnect names the same session by its identity. Both
-        // have to reach the bridge, and both have to be remembered as the id.
-        assert_eq!(
-            resolve_target("mstream+iroh://endpointabc", Some(&tunnel)),
-            (tunnel.0.clone(), tunnel.1.clone())
-        );
-    }
-
-    #[test]
-    fn only_a_tunnel_that_answered_may_replace_the_one_in_use() {
-        // Installing a new bridge drops the old one, and its Drop closes the
-        // loopback listener the current session streams through. So the test
-        // is not "did the code parse" but "did the server on the other end
-        // reply" — a pairing code can dial fine and reach nothing.
-        let ping = || Box::new(crate::api::types::Ping::default());
-        assert!(tunnel_answered(&Some(Event::Connected {
-            server: "http://127.0.0.1:51234".into(),
-            id: "mstream+iroh://endpointabc".into(),
-            username: None,
-            token: None,
-            ping: ping(),
-        })));
-        assert!(
-            tunnel_answered(&Some(Event::NeedsLogin { server: "http://127.0.0.1:51234".into() })),
-            "reached it and was asked to sign in — the tunnel works"
-        );
-
-        assert!(
-            !tunnel_answered(&Some(Event::Error("no route to host".into()))),
-            "the dial failed, so the session already up keeps its bridge"
-        );
-        assert!(!tunnel_answered(&None));
-        // Anything else is not a success either: this decides whether a
-        // working tunnel is torn down, so it lists what may do that.
-        assert!(!tunnel_answered(&Some(Event::Unauthorized)));
-        assert!(!tunnel_answered(&Some(Event::TunnelReady {
-            local_url: "http://127.0.0.1:51234".into(),
-            id: "mstream+iroh://endpointabc".into(),
-        })));
-    }
-
-    #[test]
     fn a_journey_names_the_end_that_is_holding_it_up() {
         use crate::api::types::{JourneyResponse, NotAnalyzed};
         let waiting = |start, end| {
@@ -1896,15 +1960,5 @@ mod tests {
         // …and a four-stop journey that came back whole is not "the same
         // track" just because two of its rows are the seeds.
         assert!(journey_note(&stops(4), 4).is_none());
-    }
-
-    #[test]
-    fn a_direct_server_is_its_own_identity() {
-        let direct = ("http://host:3000".to_string(), "http://host:3000".to_string());
-        assert_eq!(resolve_target("http://host:3000", None), direct);
-
-        // An unrelated server is not swallowed by an open tunnel.
-        let tunnel = ("http://127.0.0.1:1".to_string(), "mstream+iroh://x".to_string());
-        assert_eq!(resolve_target("http://host:3000", Some(&tunnel)), direct);
     }
 }

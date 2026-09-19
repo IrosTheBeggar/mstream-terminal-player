@@ -306,6 +306,9 @@ pub struct Client {
     /// parent's browse proxy, art onto its art proxy (contract clause 27).
     /// `base` and `token` are then the parent's.
     peer: Option<i64>,
+    /// Aimed at a tunnel's loopback bridge: the token every request must
+    /// carry as `__lt=…`, or the shared tunnel client drops the connection.
+    local_token: Option<String>,
     /// Set once this server has shown it can't answer a listing that asks for
     /// metadata, so the fallback costs one wasted request per session rather
     /// than one per folder.
@@ -361,6 +364,7 @@ impl Client {
             base,
             token: None,
             peer: None,
+            local_token: None,
             plain_listings: AtomicBool::new(false),
             no_waveforms: AtomicBool::new(false),
         })
@@ -381,6 +385,13 @@ impl Client {
 
     pub fn peer(&self) -> Option<i64> {
         self.peer
+    }
+
+    /// Every request to a tunnel bridge carries its loopback token as
+    /// `__lt=…`; `None` for a server reached directly.
+    pub fn with_local_token(mut self, token: Option<String>) -> Self {
+        self.local_token = token;
+        self
     }
 
     /// Build a client from explicit overrides, falling back to the most
@@ -460,9 +471,14 @@ impl Client {
             },
             None => path.to_string(),
         };
-        self.base
+        let mut url = self
+            .base
             .join(&path)
-            .map_err(|e| ApiError::Config(format!("could not build URL for {path}: {e}")))
+            .map_err(|e| ApiError::Config(format!("could not build URL for {path}: {e}")))?;
+        if let Some(token) = &self.local_token {
+            url.query_pairs_mut().append_pair("__lt", token);
+        }
+        Ok(url)
     }
 
     async fn send<T: DeserializeOwned>(
@@ -1152,6 +1168,7 @@ impl Client {
             None => urls::album_art_url(&self.server(), file),
         }
         .map_err(ApiError::Config)?;
+        let url = urls::with_local_token(url, self.local_token.as_deref());
         let mut req = self.http.get(&url);
         if let Some(token) = &self.token {
             req = req.header("x-access-token", token);
@@ -1181,7 +1198,9 @@ impl Client {
 
     /// Direct (untranscoded) stream URL for a track's vpath.
     pub fn media_url(&self, filepath: &str) -> Result<String, ApiError> {
-        urls::media_url(&self.server(), filepath, self.token.as_deref()).map_err(ApiError::Config)
+        urls::media_url(&self.server(), filepath, self.token.as_deref())
+            .map(|url| urls::with_local_token(url, self.local_token.as_deref()))
+            .map_err(ApiError::Config)
     }
 
     /// Transcoded stream URL. The codec is always explicit — see
@@ -1193,6 +1212,7 @@ impl Client {
         bitrate: Option<&str>,
     ) -> Result<String, ApiError> {
         urls::transcode_url(&self.server(), filepath, codec, bitrate, self.token.as_deref())
+            .map(|url| urls::with_local_token(url, self.local_token.as_deref()))
             .map_err(ApiError::Config)
     }
 

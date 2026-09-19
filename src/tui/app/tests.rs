@@ -726,16 +726,20 @@ fn seeking_while_idle_does_nothing() {
 fn the_tunnel_path_reaches_the_header_and_resets_with_the_session() {
     use crate::quickconnect::TunnelPath;
     let mut app = connected_app();
-    // A direct-URL session refuses tunnel verdicts outright: the old
-    // bridge's sampler outlives a server switch, and its reports belong
-    // to nobody here.
-    app.apply_event(Event::TunnelPath(TunnelPath::Relay));
+    let id = format!("{}abc123", crate::quickconnect::TUNNEL_ID_PREFIX);
+    // A direct-URL session refuses tunnel verdicts outright: the tunnels
+    // the queue keeps open report on, and their paths belong to nobody
+    // here.
+    app.apply_event(Event::TunnelPath { id: id.clone(), path: TunnelPath::Relay });
     assert_eq!(app.tunnel_path, None, "a direct session wears no tunnel badge");
 
-    app.session.server_id = format!("{}abc123", crate::quickconnect::TUNNEL_ID_PREFIX);
-    app.apply_event(Event::TunnelPath(TunnelPath::Relay));
+    app.session.server_id = id.clone();
+    app.apply_event(Event::TunnelPath { id: id.clone(), path: TunnelPath::Relay });
     assert_eq!(app.tunnel_path, Some(TunnelPath::Relay));
-    app.apply_event(Event::TunnelPath(TunnelPath::Direct));
+    app.apply_event(Event::TunnelPath { id: id.clone(), path: TunnelPath::Direct });
+    assert_eq!(app.tunnel_path, Some(TunnelPath::Direct));
+    // Another tunnel's verdict is not this session's.
+    app.apply_event(Event::TunnelPath { id: format!("{}other", crate::quickconnect::TUNNEL_ID_PREFIX), path: TunnelPath::Relay });
     assert_eq!(app.tunnel_path, Some(TunnelPath::Direct));
     // The words the header will use.
     assert_eq!(TunnelPath::Direct.label(), "direct");
@@ -1315,8 +1319,11 @@ fn choosing_a_discovered_server_connects_to_it_directly() {
         effects,
         vec![Effect::Api(ApiCmd::Connect {
             server: "http://192.168.1.71:3999".into(),
+            identity: "http://192.168.1.71:3999".into(),
             token: None,
-            self_signed: false, peer: None
+            self_signed: false,
+            peer: None,
+            local_token: None,
         })]
     );
 }
@@ -1330,7 +1337,8 @@ fn late_discovery_results_do_not_move_the_cursor_off_the_paste_row() {
     use crate::discovery::DiscoveredServer;
     let mut app = App::new(None, None, None);
     app.connect.stage = ConnectStage::QuickConnect;
-    for c in "mstr1:abc".chars() {
+    let code = crate::quickconnect::testing::sample_code();
+    for c in code.chars() {
         app.handle_action(Action::Input(c));
     }
     assert!(app.connect.on_paste_row());
@@ -1347,7 +1355,10 @@ fn late_discovery_results_do_not_move_the_cursor_off_the_paste_row() {
     let effects = app.handle_action(Action::Submit);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None , peer: None})]
+        vec![Effect::Api(ApiCmd::TunnelOpen {
+            id: crate::quickconnect::testing::sample_id(),
+            credential: code,
+        })]
     );
 }
 
@@ -1379,13 +1390,17 @@ fn typing_a_code_jumps_past_the_discovered_servers() {
     assert!(app.connect.on_paste_row(), "typing means the user has a code");
 
     // …and Enter now dials rather than connecting to the highlighted server.
-    for c in "str1:abc".chars() {
+    let code = crate::quickconnect::testing::sample_code();
+    for c in code[1..].chars() {
         app.handle_action(Action::Input(c));
     }
     let effects = app.handle_action(Action::Submit);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None , peer: None})]
+        vec![Effect::Api(ApiCmd::TunnelOpen {
+            id: crate::quickconnect::testing::sample_id(),
+            credential: code,
+        })]
     );
 }
 
@@ -1403,15 +1418,101 @@ fn the_selection_cannot_run_past_the_paste_row() {
 fn pasting_a_pairing_code_dials_the_tunnel() {
     let mut app = App::new(None, None, None);
     app.connect.stage = ConnectStage::QuickConnect;
-    for c in "mstr1:abc".chars() {
+    let code = crate::quickconnect::testing::sample_code();
+    let id = crate::quickconnect::testing::sample_id();
+    for c in code.chars() {
         app.handle_action(Action::Input(c));
     }
     let effects = app.handle_action(Action::Submit);
+    assert_eq!(effects, vec![Effect::Api(ApiCmd::TunnelOpen { id: id.clone(), credential: code })]);
+    assert!(app.connecting);
+    assert_eq!(app.pending_tunnel.as_deref(), Some(id.as_str()), "waiting on that tunnel");
+    assert_eq!(app.session.server_id, id, "filed under the code's identity from the start");
+    assert_eq!(app.tunnels.get(&id), Some(&TunnelState::Dialling));
+
+    // The tunnel comes up: the session connects through it, and every
+    // request over the bridge carries its loopback token.
+    let effects = app.apply_event(Event::TunnelUp {
+        id: id.clone(),
+        local_url: "http://127.0.0.1:51234".into(),
+        local_token: "lt".into(),
+    });
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None , peer: None})]
+        vec![Effect::Api(ApiCmd::Connect {
+            server: "http://127.0.0.1:51234".into(),
+            identity: id.clone(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: Some("lt".into()),
+        })]
     );
-    assert!(app.connecting);
+    assert!(app.pending_tunnel.is_none());
+}
+
+#[test]
+fn a_code_that_is_not_one_is_refused_before_any_dial() {
+    let mut app = App::new(None, None, None);
+    app.connect.stage = ConnectStage::QuickConnect;
+    for c in "mstr1:abc".chars() {
+        app.handle_action(Action::Input(c));
+    }
+    assert!(app.handle_action(Action::Submit).is_empty());
+    assert!(!app.connecting);
+    assert!(app.message.as_ref().is_some_and(|m| m.text.contains("pairing code")), "{:?}", app.message);
+}
+
+#[test]
+fn a_tunnel_the_queue_holds_open_is_used_rather_than_dialled_again() {
+    // Contract clause 38: the worker keeps a tunnel for the queue; a code
+    // pasted for that server connects through it at once.
+    let mut app = App::new(None, None, None);
+    app.connect.stage = ConnectStage::QuickConnect;
+    let code = crate::quickconnect::testing::sample_code();
+    let id = crate::quickconnect::testing::sample_id();
+    app.tunnels.insert(
+        id.clone(),
+        TunnelState::Up {
+            local_url: "http://127.0.0.1:4000".into(),
+            local_token: "lt".into(),
+            status: crate::quickconnect::TunnelStatus::Connected,
+            path: None,
+        },
+    );
+    for c in code.chars() {
+        app.handle_action(Action::Input(c));
+    }
+    let effects = app.handle_action(Action::Submit);
+    assert!(
+        matches!(effects.as_slice(), [Effect::Api(ApiCmd::Connect { server, identity, .. })]
+            if server == "http://127.0.0.1:4000" && *identity == id),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn a_dial_that_fails_says_so_and_frees_the_form() {
+    let mut app = App::new(None, None, None);
+    app.connect.stage = ConnectStage::QuickConnect;
+    let code = crate::quickconnect::testing::sample_code();
+    let id = crate::quickconnect::testing::sample_id();
+    for c in code.chars() {
+        app.handle_action(Action::Input(c));
+    }
+    app.handle_action(Action::Submit);
+    app.apply_event(Event::TunnelFailed {
+        id: id.clone(),
+        rejected: true,
+        why: "tunnel handshake rejected — wrong or rotated connect secret".into(),
+    });
+    assert!(!app.connecting);
+    assert!(!app.connect.submitting);
+    assert!(app.message.as_ref().is_some_and(|m| m.text.contains("rejected")), "{:?}", app.message);
+    assert_eq!(
+        app.tunnels.get(&id),
+        Some(&TunnelState::Down { rejected: true, why: "tunnel handshake rejected — wrong or rotated connect secret".into() })
+    );
 }
 
 #[test]
@@ -1421,32 +1522,50 @@ fn a_tunnel_session_is_remembered_by_identity_not_by_its_loopback_port() {
     // was filed under a URL that could never match again.
     let mut app = App::new(None, None, None);
     app.connect.stage = ConnectStage::QuickConnect;
-    for c in "mstr1:abc".chars() {
+    let code = crate::quickconnect::testing::sample_code();
+    let id = crate::quickconnect::testing::sample_id();
+    for c in code.chars() {
         app.handle_action(Action::Input(c));
     }
     app.handle_action(Action::Submit);
 
-    app.apply_event(Event::TunnelReady {
+    app.apply_event(Event::TunnelUp {
+        id: id.clone(),
         local_url: "http://127.0.0.1:51234".into(),
-        id: "mstream+iroh://endpointabc".into(),
+        local_token: "lt".into(),
     });
+    // The server behind the tunnel wants a sign-in: the form aims at the
+    // bridge, the sign-in is filed under the identity and carries the
+    // bridge's token.
+    app.apply_event(Event::NeedsLogin { server: "http://127.0.0.1:51234".into() });
     app.connect.username = "alice".into();
     app.connect.password = "pw".into();
-    app.handle_action(Action::Submit);
+    let effects = app.handle_action(Action::Submit);
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::Login {
+            server: "http://127.0.0.1:51234".into(),
+            identity: id.clone(),
+            username: "alice".into(),
+            password: "pw".into(),
+            self_signed: false,
+            local_token: Some("lt".into()),
+        })]
+    );
     app.apply_event(Event::Connected {
         server: "http://127.0.0.1:51234".into(),
-        id: "mstream+iroh://endpointabc".into(),
+        id: id.clone(),
         username: Some("alice".into()),
         token: Some("tok".into()),
         ping: Box::new(Default::default()),
     });
 
     // What gets written down is the identity...
-    assert_eq!(app.session.server_id, "mstream+iroh://endpointabc");
+    assert_eq!(app.session.server_id, id);
     // ...while requests and stream URLs still go over the bridge.
     assert_eq!(app.session.server, "http://127.0.0.1:51234");
     let kept = app.session.tunnel_code.as_deref();
-    assert_eq!(kept, Some("mstr1:abc"), "kept, or there's no way back");
+    assert_eq!(kept, Some(code.as_str()), "kept, or there's no way back");
 }
 
 #[test]
@@ -1455,14 +1574,14 @@ fn a_public_tunnel_server_is_still_worth_saving() {
     // code stored, the server is unreachable next time.
     let mut app = App::new(None, None, None);
     app.connect.stage = ConnectStage::QuickConnect;
-    for c in "mstr1:pub".chars() {
+    for c in crate::quickconnect::testing::sample_code().chars() {
         app.handle_action(Action::Input(c));
     }
     app.handle_action(Action::Submit);
 
     let effects = app.apply_event(Event::Connected {
         server: "http://127.0.0.1:5000".into(),
-        id: "mstream+iroh://pubserver".into(),
+        id: crate::quickconnect::testing::sample_id(),
         username: None,
         token: None,
         ping: Box::new(Default::default()),
@@ -1482,13 +1601,54 @@ fn reconnecting_to_a_tunnel_server_dials_its_code_again() {
     let effects = app.start();
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::QuickConnect {
-            code: "mstr1:saved".into(),
-            token: Some("tok".into()), peer: None
+        vec![Effect::Api(ApiCmd::TunnelOpen {
+            id: "mstream+iroh://endpointabc".into(),
+            credential: "mstr1:saved".into(),
+        })]
+    );
+    assert!(app.connecting);
+
+    // Up: the saved token rides the connect through the bridge.
+    let effects = app.apply_event(Event::TunnelUp {
+        id: "mstream+iroh://endpointabc".into(),
+        local_url: "http://127.0.0.1:5100".into(),
+        local_token: "lt".into(),
+    });
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::Connect {
+            server: "http://127.0.0.1:5100".into(),
+            identity: "mstream+iroh://endpointabc".into(),
+            token: Some("tok".into()),
+            self_signed: false,
+            peer: None,
+            local_token: Some("lt".into()),
         })],
         "the saved token rides the re-dialled tunnel"
     );
-    assert!(app.connecting);
+}
+
+#[test]
+fn a_remembered_tunnel_server_dials_with_the_code_from_the_book() {
+    // The session may hold no code of its own — a peer's parent, a
+    // server reached from the book — so the saved pairing serves.
+    let mut app = App::new(Some("mstream+iroh://endpointabc".into()), None, None);
+    app.servers.push(KnownServer {
+        id: "mstream+iroh://endpointabc".into(),
+        name: "quick connect · endpointabc".into(),
+        token: None,
+        self_signed: false,
+        peer: None,
+        pairing: Some("mstr1:fromthebook".into()),
+    });
+    let effects = app.start();
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::TunnelOpen {
+            id: "mstream+iroh://endpointabc".into(),
+            credential: "mstr1:fromthebook".into(),
+        })]
+    );
 }
 
 #[test]
@@ -1513,6 +1673,15 @@ fn an_expired_tunnel_session_signs_back_in_over_the_open_bridge() {
     app.session.server = "http://127.0.0.1:51234".into();
     app.session.server_id = "mstream+iroh://endpointabc".into();
     app.session.token = Some("stale".into());
+    app.tunnels.insert(
+        "mstream+iroh://endpointabc".into(),
+        TunnelState::Up {
+            local_url: "http://127.0.0.1:51234".into(),
+            local_token: "lt".into(),
+            status: crate::quickconnect::TunnelStatus::Connected,
+            path: None,
+        },
+    );
 
     app.apply_event(Event::Unauthorized);
     assert_eq!(app.connect.stage, ConnectStage::Direct);
@@ -1527,9 +1696,11 @@ fn an_expired_tunnel_session_signs_back_in_over_the_open_bridge() {
         effects,
         vec![Effect::Api(ApiCmd::Login {
             server: "http://127.0.0.1:51234".into(),
+            identity: "mstream+iroh://endpointabc".into(),
             username: "alice".into(),
             password: "pw".into(),
             self_signed: false,
+            local_token: Some("lt".into()),
         })]
     );
 }
@@ -1564,17 +1735,24 @@ fn an_open_tunnel_leads_to_the_login_form() {
     // means "now sign in", not "you're in".
     let mut app = App::new(None, None, None);
     app.connect.stage = ConnectStage::QuickConnect;
-    app.connecting = true;
-
-    app.apply_event(Event::TunnelReady {
+    let code = crate::quickconnect::testing::sample_code();
+    let id = crate::quickconnect::testing::sample_id();
+    for c in code.chars() {
+        app.handle_action(Action::Input(c));
+    }
+    app.handle_action(Action::Submit);
+    app.apply_event(Event::TunnelUp {
+        id: id.clone(),
         local_url: "http://127.0.0.1:51234".into(),
-        id: "mstream+iroh://abc123".into(),
+        local_token: "lt".into(),
     });
+    app.apply_event(Event::NeedsLogin { server: "http://127.0.0.1:51234".into() });
     assert_eq!(app.connect.stage, ConnectStage::Direct);
     assert_eq!(app.connect.server, "http://127.0.0.1:51234");
     assert_eq!(app.connect.field, 1, "focus lands on the username");
     assert!(!app.connecting);
-    assert_eq!(app.session.server_id, "mstream+iroh://abc123", "already filed under its identity");
+    assert_eq!(app.session.server_id, id, "already filed under its identity");
+    assert!(app.message.as_ref().is_some_and(|m| m.text.contains("tunnel open")), "{:?}", app.message);
 }
 
 #[test]
@@ -1624,8 +1802,11 @@ fn connecting_without_a_username_uses_public_mode() {
         effects,
         vec![Effect::Api(ApiCmd::Connect {
             server: "http://host:3000".into(),
+            identity: "http://host:3000".into(),
             token: None,
-            self_signed: false, peer: None
+            self_signed: false,
+            peer: None,
+            local_token: None,
         })]
     );
 }
@@ -1695,13 +1876,13 @@ fn adopting_a_server_keeps_the_music_and_the_queue() {
             id: "http://attic.local:3000".into(),
             name: "http://attic.local:3000".into(),
             token: Some("attic-token".into()),
-            self_signed: false, peer: None
+            self_signed: false, peer: None, pairing: None
         },
         KnownServer {
             id: "http://office.local:3000".into(),
             name: "http://office.local:3000".into(),
             token: Some("office-token".into()),
-            self_signed: true, peer: None
+            self_signed: true, peer: None, pairing: None
         },
     ];
     app.push_queue(track("music/a.mp3"));
@@ -1755,7 +1936,7 @@ fn a_row_on_a_closed_tunnel_walks_on_like_a_refused_one() {
         id: "mstream+iroh://faraway".into(),
         name: "mstream+iroh://faraway".into(),
         token: Some("t".into()),
-        self_signed: false, peer: None
+        self_signed: false, peer: None, pairing: None
     });
     app.queue.push(at("mstream+iroh://faraway", "music/far.mp3"));
     app.push_queue(track("music/near.mp3"));
@@ -1768,11 +1949,33 @@ fn a_row_on_a_closed_tunnel_walks_on_like_a_refused_one() {
         app.message
     );
 
-    // Once its bridge is open the same row plays through the loopback,
-    // with the token the entry saved.
-    app.open_tunnel = Some(("mstream+iroh://faraway".into(), "http://127.0.0.1:4242".into()));
+    // While its tunnel is being dialled the row is skipped the same way,
+    // with a word that says so. (The skip budget is what a played track
+    // resets; nothing has played here, so it is reset by hand.)
+    app.failures = 0;
+    app.tunnels.insert("mstream+iroh://faraway".into(), TunnelState::Dialling);
     let effects = app.play_index(0);
-    assert_eq!(played_url(&effects), "http://127.0.0.1:4242/media/music/far.mp3?token=t");
+    assert_eq!(played_url(&effects), "http://host:3000/media/music/near.mp3?token=tok");
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text.contains("being dialled")),
+        "said why: {:?}",
+        app.message
+    );
+
+    // Once its tunnel is up the same row plays through the loopback, with
+    // the token the entry saved and the bridge's own loopback token.
+    app.failures = 0;
+    app.tunnels.insert(
+        "mstream+iroh://faraway".into(),
+        TunnelState::Up {
+            local_url: "http://127.0.0.1:4242".into(),
+            local_token: "lt".into(),
+            status: crate::quickconnect::TunnelStatus::Connected,
+            path: None,
+        },
+    );
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://127.0.0.1:4242/media/music/far.mp3?token=t&__lt=lt");
 }
 
 #[test]
@@ -1781,7 +1984,7 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
     // the playing row keeps its place, the position comes back, and
     // nothing plays until asked — then that row, from that second.
     let mut app = connected_app();
-    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: Some("bt".into()), self_signed: false , peer: None}];
+    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: Some("bt".into()), self_signed: false , peer: None, pairing: None}];
     let mut long = at("http://b", "music/2.mp3");
     long.track.metadata.duration = Some(300.0);
     let snapshot = QueueSnapshot {
@@ -1951,7 +2154,7 @@ fn a_peers_rows_play_through_the_parents_stream_proxy() {
         name: "http://attic:3000".into(),
         token: Some("at".into()),
         self_signed: false,
-        peer: None,
+        peer: None, pairing: None
     }];
     app.queue.push(Queued {
         origin: Origin { server: "http://attic:3000".into(), peer: Some(5) },
@@ -1972,7 +2175,7 @@ fn a_peer_session_stamps_its_rows_and_keeps_none_of_the_optional_features() {
         name: "Nas".into(),
         token: None,
         self_signed: false,
-        peer: Some(("http://attic:3000".into(), 3)),
+        peer: Some(("http://attic:3000".into(), 3)), pairing: None
     }];
     let effects = app.adopt_server(
         "http://attic:3000".into(),
@@ -2059,7 +2262,7 @@ fn a_removed_server_takes_its_rows_and_playback_lands_on_the_next_survivor() {
     // Playing row 0 on the session's server; removing that server plays
     // the survivor, which lives on the other one.
     let mut app = connected_app();
-    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: None, self_signed: false , peer: None}];
+    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: None, self_signed: false , peer: None, pairing: None}];
     app.queue.items = vec![at("http://host:3000", "music/1.mp3"), at("http://b", "music/2.mp3")];
     let effects = app.play_index(0);
     app.status = PlayerStatus { playing: true, source: played_url(&effects), ..Default::default() };
@@ -2114,9 +2317,11 @@ fn login_effect_carries_credentials_and_clears_the_password() {
         effects,
         vec![Effect::Api(ApiCmd::Login {
             server: "http://host:3000".into(),
+            identity: "http://host:3000".into(),
             username: "alice".into(),
             password: "secret".into(),
             self_signed: false,
+            local_token: None,
         })]
     );
     assert!(app.connect.password.is_empty(), "password is not kept in memory after use");
@@ -2140,8 +2345,11 @@ fn a_typed_address_is_completed_before_it_is_used() {
         effects,
         vec![Effect::Api(ApiCmd::Connect {
             server: "http://nas:3000".into(),
+            identity: "http://nas:3000".into(),
             token: None,
-            self_signed: false, peer: None
+            self_signed: false,
+            peer: None,
+            local_token: None,
         })]
     );
     assert_eq!(app.connect.server, "http://nas:3000", "the field shows what was assumed");
@@ -2193,9 +2401,11 @@ fn sending_a_password_over_plain_http_asks_first() {
         effects,
         vec![Effect::Api(ApiCmd::Login {
             server: "http://music.example.com".into(),
+            identity: "http://music.example.com".into(),
             username: "alice".into(),
             password: "secret".into(),
             self_signed: false,
+            local_token: None,
         })]
     );
 }

@@ -61,20 +61,27 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
 
         // `self_signed` has no meaning here: the browser owns TLS trust.
         // One server, the page's own: no peers to aim at from here.
-        ApiCmd::Connect { server, token, self_signed: _, peer: _ } => {
-            Some(connect(session, &server, token).await)
+        ApiCmd::Connect { server, identity, token, self_signed: _, peer: _, local_token: _ } => {
+            Some(connect(session, &server, &identity, token).await)
         }
         ApiCmd::FederationPeers { .. } => None,
         // The browser owns the network: a failed open is the source's fault.
         ApiCmd::Probe { server, .. } => Some(Event::Reachable { server, reachable: true }),
 
-        ApiCmd::Login { server, username, password, self_signed: _ } => {
-            Some(login(session, &server, &username, &password).await)
+        ApiCmd::Login { server, identity, username, password, self_signed: _, local_token: _ } => {
+            Some(login(session, &server, &identity, &username, &password).await)
         }
 
-        ApiCmd::QuickConnect { .. } => Some(Event::Error(
-            "Quick Connect needs the native player — the tunnel is iroh, not HTTP".to_string(),
-        )),
+        // The tunnel is iroh, not HTTP: the browser build has none.
+        ApiCmd::TunnelOpen { id, .. } | ApiCmd::TunnelCredential { id, .. } => {
+            Some(Event::TunnelFailed {
+                id,
+                rejected: false,
+                why: "Quick Connect needs the native player — the tunnel is iroh, not HTTP"
+                    .to_string(),
+            })
+        }
+        ApiCmd::TunnelClose { id } => Some(Event::TunnelClosed { id }),
 
         ApiCmd::Browse(path) => {
             with_session(session, async |s| {
@@ -254,6 +261,7 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
 async fn connect(
     session: &Rc<RefCell<Option<Session>>>,
     server: &str,
+    identity: &str,
     token: Option<String>,
 ) -> Event {
     let client = match Client::new(server) {
@@ -266,8 +274,8 @@ async fn connect(
             let caps = Capabilities::from(&ping);
             *session.borrow_mut() = Some(Session { client: Rc::new(client), caps });
             Event::Connected {
-                server: server.clone(),
-                id: server,
+                server,
+                id: identity.to_string(),
                 username: None,
                 token,
                 ping: Box::new(ping),
@@ -284,6 +292,7 @@ async fn connect(
 async fn login(
     session: &Rc<RefCell<Option<Session>>>,
     server: &str,
+    identity: &str,
     username: &str,
     password: &str,
 ) -> Event {
@@ -305,8 +314,8 @@ async fn login(
             let caps = Capabilities::from(&ping);
             *session.borrow_mut() = Some(Session { client: Rc::new(client), caps });
             Event::Connected {
-                server: server.clone(),
-                id: server,
+                server,
+                id: identity.to_string(),
                 username: Some(username.to_string()),
                 token: Some(token),
                 ping: Box::new(ping),

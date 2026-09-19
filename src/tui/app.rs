@@ -605,6 +605,9 @@ pub struct KnownServer {
     /// A federated peer: the parent it is reached through, and its row id
     /// there. Everything else about it is the parent's.
     pub peer: Option<(String, i64)>,
+    /// A tunnel server's pairing code — what a queued row on it is dialled
+    /// with when the session is elsewhere (contract clause 38).
+    pub pairing: Option<String>,
 }
 
 /// How to reach a queued track's server right now: the base its stream URL
@@ -617,6 +620,26 @@ pub struct Reach {
     pub self_signed: bool,
     /// Through the parent's proxies, for this peer of it.
     pub peer: Option<i64>,
+    /// Over a tunnel bridge: the loopback token every request there must
+    /// carry as `__lt=…` (the shared tunnel client's gate).
+    pub local_token: Option<String>,
+}
+
+/// A tunnel as the api worker last reported it — the registry the queue's
+/// rows and the session resolve against (contract clause 38).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TunnelState {
+    /// Being dialled; nothing can be asked of it yet.
+    Dialling,
+    /// Serving at `local_url`; every request carries `local_token`.
+    Up {
+        local_url: String,
+        local_token: String,
+        status: crate::quickconnect::TunnelStatus,
+        path: Option<crate::quickconnect::TunnelPath>,
+    },
+    /// The last dial failed. `rejected`: the server refused the credential.
+    Down { rejected: bool, why: String },
 }
 
 /// The queue without `server`'s rows, and where playback lands afterwards
@@ -1303,10 +1326,13 @@ pub struct App {
     /// Seeded by the shell from the config and the credentials; the
     /// session's own server is answered from `session` first.
     pub servers: Vec<KnownServer>,
-    /// The Quick Connect bridge the api worker holds open, by identity and
-    /// loopback address. One at a time (the worker's rule): a queued track
-    /// on another tunnel is unreachable until that server is dialled again.
-    pub open_tunnel: Option<(String, String)>,
+    /// Every tunnel the api worker holds open, by identity — the session's
+    /// own and the ones the queue needs — as the worker last reported it
+    /// (contract clause 38).
+    pub tunnels: std::collections::BTreeMap<String, TunnelState>,
+    /// The tunnel identity the session is waiting on: `begin` opened it and
+    /// connects through it the moment it comes up.
+    pub pending_tunnel: Option<String>,
     /// Booted with `--bundled-server`: the installer's own server, which the
     /// servers room never offers to remove (contract clauses 50–58).
     pub bundled_server: Option<String>,
@@ -1575,7 +1601,8 @@ impl App {
                 peer: None,
             },
             servers: Vec::new(),
-            open_tunnel: None,
+            tunnels: Default::default(),
+            pending_tunnel: None,
             bundled_server: None,
             resume_queue: true,
             resume_spot: None,
@@ -3512,11 +3539,43 @@ impl App {
         self.queue.push(track);
     }
 
+    /// The identity whose tunnel carries this session's bytes: the session's
+    /// own server, or a peer's parent.
+    pub(crate) fn session_transport(&self) -> &str {
+        match &self.session.peer {
+            Some((parent, _)) => parent,
+            None => &self.session.server_id,
+        }
+    }
+
+    /// The tunnel serving at `base`, if one is — how a loopback address is
+    /// mapped back to the identity it belongs to, and the token requests
+    /// there carry.
+    pub(crate) fn tunnel_at(&self, base: &str) -> Option<(&str, &str)> {
+        self.tunnels.iter().find_map(|(id, state)| match state {
+            TunnelState::Up { local_url, local_token, .. }
+                if crate::config::same_server(local_url, base) =>
+            {
+                Some((id.as_str(), local_token.as_str()))
+            }
+            _ => None,
+        })
+    }
+
+    /// The loopback token the session's own requests carry, when its
+    /// transport is a tunnel that is up.
+    pub(crate) fn session_local_token(&self) -> Option<String> {
+        match self.tunnels.get(self.session_transport()) {
+            Some(TunnelState::Up { local_token, .. }) => Some(local_token.clone()),
+            _ => None,
+        }
+    }
+
     /// How to reach a queued track's server right now (contract clause 30):
     /// the session answers for its own server; a saved standard server
-    /// answers from the book; a tunnel server only while its bridge is
-    /// open — the worker holds one at a time, so a track on another tunnel
-    /// waits for that server to be dialled again.
+    /// answers from the book; a tunnel server through its bridge while the
+    /// worker holds one open (contract clause 38) — a row on a tunnel that
+    /// is closed or still dialling cannot be asked for yet.
     pub(crate) fn reach(&self, origin: &Origin) -> Result<Reach, String> {
         // The session's own rows: whatever it is, it is reached already.
         let mine = self.origin();
@@ -3526,6 +3585,7 @@ impl App {
                 token: self.session.token.clone(),
                 self_signed: self.session.self_signed,
                 peer: origin.peer,
+                local_token: self.session_local_token(),
             });
         }
         // A peer's rows go through its parent, however the parent is
@@ -3540,19 +3600,20 @@ impl App {
             .iter()
             .find(|s| s.peer.is_none() && crate::config::same_server(&s.id, &origin.server));
         if crate::quickconnect::is_tunnel_id(&origin.server) {
-            let open = self
-                .open_tunnel
-                .as_ref()
-                .filter(|(id, _)| crate::config::same_server(id, &origin.server));
-            let Some((_, local_url)) = open else {
-                return Err(format!("{shown} is not connected — its tunnel is closed"));
+            return match self.tunnels.get(&origin.server) {
+                Some(TunnelState::Up { local_url, local_token, .. }) => Ok(Reach {
+                    base: local_url.clone(),
+                    token: known.and_then(|s| s.token.clone()),
+                    // Plain http on loopback: TLS trust never comes up.
+                    self_signed: false,
+                    peer: None,
+                    local_token: Some(local_token.clone()),
+                }),
+                Some(TunnelState::Dialling) => {
+                    Err(format!("{shown} is still connecting — its tunnel is being dialled"))
+                }
+                _ => Err(format!("{shown} is not connected — its tunnel is closed")),
             };
-            return Ok(Reach {
-                base: local_url.clone(),
-                token: known.and_then(|s| s.token.clone()),
-                self_signed: false,
-                peer: None,
-            });
         }
         let Some(known) = known else {
             return Err(format!("{shown} is no longer a saved server"));
@@ -3562,6 +3623,7 @@ impl App {
             token: known.token.clone(),
             self_signed: known.self_signed,
             peer: None,
+            local_token: None,
         })
     }
 
@@ -3574,6 +3636,8 @@ impl App {
             Some(peer) => urls::peer_media_url(&reach.base, peer, &item.filepath, reach.token.as_deref())?,
             None => urls::media_url(&reach.base, &item.filepath, reach.token.as_deref())?,
         };
+        // A bridge answers only requests that carry its loopback token.
+        let url = urls::with_local_token(url, reach.local_token.as_deref());
         Ok((url, reach))
     }
 
@@ -3728,6 +3792,7 @@ impl App {
                 server: item.origin.server.clone(),
                 base: reach.base,
                 self_signed: reach.self_signed,
+                local_token: reach.local_token,
             })];
         }
         self.skip_failed(Some(&error))
@@ -3825,6 +3890,7 @@ impl App {
             server: item.origin.server.clone(),
             base: reach.base,
             self_signed: reach.self_signed,
+            local_token: reach.local_token,
         })]
     }
 
@@ -4353,7 +4419,6 @@ impl App {
             // screen those replies land on (audit #60).
             event @ (Event::Connected { .. }
             | Event::ServersDiscovered(_)
-            | Event::TunnelReady { .. }
             | Event::NeedsLogin { .. }
             | Event::Unauthorized) => self.consume_session(event),
             Event::Listing(listing) => {
@@ -4531,17 +4596,13 @@ impl App {
                 self.message = None;
                 Vec::new()
             }
-            Event::TunnelPath(path) => {
-                // The old bridge outlives a switch to a direct server (its
-                // Drop would cut a session mid-handover), and its sampler
-                // keeps reporting. A verdict about a tunnel this session is
-                // not on belongs to nobody — without this, a direct URL
-                // wore the last tunnel's badge (pre-merge review).
-                if crate::quickconnect::is_tunnel_id(&self.session.server_id) {
-                    self.tunnel_path = Some(path);
-                }
-                Vec::new()
-            }
+            // Every tunnel the worker holds, coming up, going down, changing
+            // state or path: the registry, and the session waiting on one.
+            event @ (Event::TunnelUp { .. }
+            | Event::TunnelFailed { .. }
+            | Event::TunnelClosed { .. }
+            | Event::TunnelStatus { .. }
+            | Event::TunnelPath { .. }) => self.consume_tunnel(event),
             Event::Reachable { server, reachable } => self.probe_answered(&server, reachable),
             Event::FederationPeers { parent, peers } => match peers {
                 Some(peers) => vec![Effect::SavePeers {

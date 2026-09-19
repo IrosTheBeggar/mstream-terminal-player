@@ -111,10 +111,20 @@ impl ConnectForm {
 
 impl App {
     pub(super) fn begin(&mut self) -> Vec<Effect> {
-        // A tunnel server has no address to connect to until its code is
-        // dialled, so reconnecting means opening the tunnel again first.
-        if crate::quickconnect::is_tunnel_id(&self.session.server_id) {
-            let Some(code) = self.session.tunnel_code.clone() else {
+        // A tunnel server — or a peer reached through one — has no address
+        // until its tunnel is up: connect through the bridge when it is,
+        // open it first when it is not. The worker keeps a tunnel open for
+        // as long as it is asked to, whichever session is current
+        // (contract clause 38).
+        let transport = self.session_transport().to_string();
+        if crate::quickconnect::is_tunnel_id(&transport) {
+            let credential = self.session.tunnel_code.clone().or_else(|| {
+                self.servers
+                    .iter()
+                    .find(|s| crate::config::same_server(&s.id, &transport))
+                    .and_then(|s| s.pairing.clone())
+            });
+            let Some(credential) = credential else {
                 // Remembered, but the code that reaches it is gone — deleted
                 // credentials, or a config copied without them.
                 self.session.server_id.clear();
@@ -124,11 +134,7 @@ impl App {
                 return Vec::new();
             };
             self.connecting = true;
-            return vec![Effect::Api(ApiCmd::QuickConnect {
-                code,
-                token: self.session.token.clone(),
-                peer: self.session.peer.as_ref().map(|(_, id)| *id),
-            })];
+            return self.connect_through(&transport, credential);
         }
         if self.session.server.is_empty() {
             return Vec::new(); // connect form is showing
@@ -136,10 +142,69 @@ impl App {
         self.connecting = true;
         vec![Effect::Api(ApiCmd::Connect {
             server: self.session.server.clone(),
+            identity: self.identity_or_server(),
             token: self.session.token.clone(),
             self_signed: self.session.self_signed,
             peer: self.session.peer.as_ref().map(|(_, id)| *id),
+            local_token: None,
         })]
+    }
+
+    /// Connect the session through the tunnel under `transport`: at once
+    /// when it is up, after opening it when it is not — `TunnelUp` then
+    /// finishes the job.
+    fn connect_through(&mut self, transport: &str, credential: String) -> Vec<Effect> {
+        match self.tunnels.get(transport) {
+            Some(super::TunnelState::Up { .. }) => self.connect_over_tunnel(transport),
+            Some(super::TunnelState::Dialling) => {
+                self.pending_tunnel = Some(transport.to_string());
+                Vec::new()
+            }
+            _ => {
+                self.pending_tunnel = Some(transport.to_string());
+                self.tunnels.insert(transport.to_string(), super::TunnelState::Dialling);
+                vec![Effect::Api(ApiCmd::TunnelOpen { id: transport.to_string(), credential })]
+            }
+        }
+    }
+
+    /// The Connect for a session whose transport tunnel is up.
+    fn connect_over_tunnel(&mut self, transport: &str) -> Vec<Effect> {
+        let Some(super::TunnelState::Up { local_url, local_token, .. }) = self.tunnels.get(transport)
+        else {
+            return Vec::new();
+        };
+        let (local_url, local_token) = (local_url.clone(), local_token.clone());
+        self.session.server = local_url.clone();
+        vec![Effect::Api(ApiCmd::Connect {
+            server: local_url,
+            identity: self.identity_or_server(),
+            token: self.session.token.clone(),
+            // Plain http on loopback: TLS trust never comes up.
+            self_signed: false,
+            peer: self.session.peer.as_ref().map(|(_, id)| *id),
+            local_token: Some(local_token),
+        })]
+    }
+
+    /// What the session is filed under: its identity, or its address for a
+    /// server that has no other.
+    fn identity_or_server(&self) -> String {
+        if self.session.server_id.is_empty() {
+            self.session.server.clone()
+        } else {
+            self.session.server_id.clone()
+        }
+    }
+
+    /// What a request to `base` is filed under and must carry: a tunnel's
+    /// identity and loopback token when `base` is its bridge, else the
+    /// address itself and nothing.
+    fn identity_at(&self, base: &str) -> (String, Option<String>) {
+        match self.tunnel_at(base) {
+            Some((id, token)) => (id.to_string(), Some(token.to_string())),
+            None => (base.to_string(), None),
+        }
     }
 
     /// Point the session at another saved server and reconnect — the GUI's
@@ -306,9 +371,12 @@ impl App {
                         self.connect.server = server.base_url.clone();
                         self.info(format!("connecting to {}…", server.name));
                         return vec![Effect::Api(ApiCmd::Connect {
+                            identity: server.base_url.clone(),
                             server: server.base_url,
                             token: None,
-                            self_signed: false, peer: None
+                            self_signed: false,
+                            peer: None,
+                            local_token: None,
                         })];
                     }
                     self.submit_quick_connect()
@@ -324,13 +392,25 @@ impl App {
             self.error("paste a pairing code first");
             return Vec::new();
         }
+        // The identity is in the code — the endpoint id, a public key — so
+        // the session is filed under it before anything is dialled, and a
+        // tunnel the queue already holds open for it is simply used.
+        let id = match crate::quickconnect::parse_code(&code) {
+            Ok(parsed) => parsed.server_id(),
+            Err(e) => {
+                self.error(e);
+                return Vec::new();
+            }
+        };
         self.connecting = true;
         self.connect.submitting = true;
         // Kept from here on: it is the only way back to this server, and
         // nothing is written until the connection actually succeeds.
         self.session.tunnel_code = Some(code.clone());
+        self.session.server_id = id.clone();
+        self.session.peer = None;
         self.info("dialling the tunnel — this can take a few seconds…");
-        vec![Effect::Api(ApiCmd::QuickConnect { code, token: self.session.token.clone() , peer: None})]
+        self.connect_through(&id, code)
     }
 
     fn submit_connect(&mut self) -> Vec<Effect> {
@@ -357,10 +437,14 @@ impl App {
             self.connect.submitting = true;
             self.message = None;
             self.session.server = server.clone();
+            let (identity, local_token) = self.identity_at(&server);
             return vec![Effect::Api(ApiCmd::Connect {
                 server,
+                identity,
                 token: None,
-                self_signed: self.session.self_signed, peer: None
+                self_signed: self.session.self_signed,
+                peer: None,
+                local_token,
             })];
         }
 
@@ -385,11 +469,14 @@ impl App {
         self.connecting = true;
         self.connect.submitting = true;
         self.message = None;
+        let (identity, local_token) = self.identity_at(&server);
         vec![Effect::Api(ApiCmd::Login {
             server,
+            identity,
             username,
             password: std::mem::take(&mut self.connect.password),
             self_signed: self.session.self_signed,
+            local_token,
         })]
     }
 
@@ -410,16 +497,18 @@ impl App {
                 self.connected = true;
                 self.connecting = false;
                 self.connect.submitting = false;
-                // The worker holds one bridge: this one, from now on. Queued
-                // tracks on it resolve through the loopback address.
-                if crate::quickconnect::is_tunnel_id(&id) {
-                    self.open_tunnel = Some((id.clone(), server.clone()));
-                }
                 self.session.server = server;
                 // A peer session is filed under the peer's own identity; the
                 // worker answered with the parent's.
                 if self.session.peer.is_none() {
                     self.session.server_id = id;
+                }
+                // A tunnel the worker already held reports its path only on
+                // change, so the badge is seeded from what is known.
+                if let Some(super::TunnelState::Up { path, .. }) =
+                    self.tunnels.get(self.session_transport())
+                {
+                    self.tunnel_path = *path;
                 }
                 if token.is_some() {
                     self.session.token = token;
@@ -519,20 +608,6 @@ impl App {
                 };
                 Vec::new()
             }
-            Event::TunnelReady { local_url, id } => {
-                self.connecting = false;
-                self.connect.submitting = false;
-                self.open_tunnel = Some((id.clone(), local_url.clone()));
-                // The form carries the loopback address, which is a real,
-                // working endpoint for the sign-in about to happen; the
-                // identity is what the session will be filed under.
-                self.connect.server = local_url;
-                self.session.server_id = id;
-                self.connect.stage = ConnectStage::Direct;
-                self.connect.field = 1; // straight to the username
-                self.info("tunnel open — sign in to continue");
-                Vec::new()
-            }
             Event::NeedsLogin { server } => {
                 // A reply from a connection attempt that has been overtaken —
                 // we already reached somewhere else. Applying it would drag a
@@ -542,10 +617,20 @@ impl App {
                 }
                 self.connecting = false;
                 self.connect.submitting = false;
+                // A tunnel that came up and was asked to sign in: the form
+                // carries the loopback address, a real, working endpoint for
+                // the sign-in about to happen; the identity is what the
+                // session is filed under.
+                match self.tunnel_at(&server).map(|(id, _)| id.to_string()) {
+                    Some(id) => {
+                        self.session.server_id = id;
+                        self.info("tunnel open — sign in to continue");
+                    }
+                    None => self.info("this server needs a sign-in"),
+                }
                 self.connect.server = server;
                 self.connect.stage = ConnectStage::Direct;
                 self.connect.field = 1; // straight to the username
-                self.info("this server needs a sign-in");
                 Vec::new()
             }
             Event::Unauthorized => {
@@ -564,7 +649,73 @@ impl App {
                 self.error("session expired — sign in again");
                 Vec::new()
             }
-            // The caller matches exactly the five arms above.
+            // The caller matches exactly the four arms above.
+            _ => Vec::new(),
+        }
+    }
+
+    /// Every word from the worker about a tunnel: the registry the queue's
+    /// rows resolve against (contract clause 38), and the session waiting on
+    /// one to come up.
+    pub(super) fn consume_tunnel(&mut self, event: Event) -> Vec<Effect> {
+        match event {
+            Event::TunnelUp { id, local_url, local_token } => {
+                self.tunnels.insert(
+                    id.clone(),
+                    super::TunnelState::Up {
+                        local_url,
+                        local_token,
+                        status: crate::quickconnect::TunnelStatus::Connected,
+                        path: None,
+                    },
+                );
+                if self.pending_tunnel.as_deref() != Some(id.as_str()) {
+                    return Vec::new();
+                }
+                self.pending_tunnel = None;
+                self.connect_over_tunnel(&id)
+            }
+            Event::TunnelFailed { id, rejected, why } => {
+                // A failed swap on a tunnel that is up leaves it up.
+                if !matches!(self.tunnels.get(&id), Some(super::TunnelState::Up { .. })) {
+                    self.tunnels.insert(id.clone(), super::TunnelState::Down { rejected, why: why.clone() });
+                }
+                if self.pending_tunnel.as_deref() == Some(id.as_str()) {
+                    self.pending_tunnel = None;
+                    self.connecting = false;
+                    self.connect.submitting = false;
+                    self.error(why);
+                }
+                Vec::new()
+            }
+            Event::TunnelClosed { id } => {
+                self.tunnels.remove(&id);
+                if self.pending_tunnel.as_deref() == Some(id.as_str()) {
+                    self.pending_tunnel = None;
+                    self.connecting = false;
+                }
+                if id == self.session_transport() {
+                    self.tunnel_path = None;
+                }
+                Vec::new()
+            }
+            Event::TunnelStatus { id, status } => {
+                if let Some(super::TunnelState::Up { status: current, .. }) = self.tunnels.get_mut(&id) {
+                    *current = status;
+                }
+                Vec::new()
+            }
+            Event::TunnelPath { id, path } => {
+                if let Some(super::TunnelState::Up { path: current, .. }) = self.tunnels.get_mut(&id) {
+                    *current = Some(path);
+                }
+                // A verdict about a tunnel this session is not on belongs
+                // to nobody: a direct URL must not wear a tunnel's badge.
+                if id == self.session_transport() {
+                    self.tunnel_path = Some(path);
+                }
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }
