@@ -2036,8 +2036,13 @@ selectable through the crate).
   shape and on the api client, a status change reaching the App. The
   envelope, ALPN, handshake and swap tests live in the crate. Size S–M: the
   crate carries the tunnel; what is left is plumbing and the token.
-- **T2 — tunnels follow the queue** (clause 38, and clause 37's tunnel
-  step). `tunnel_targets()` and `reconcile_tunnels(now)` as above;
+- **T2 — tunnels follow the queue ✅ 2026-09-19** (clause 38, and clause 37's
+  tunnel step). As planned; the policy lives in `tick_at` (`reconcile_tunnels`
+  every tick, the stall probe after it), the ladder's bookkeeping sits beside
+  the registry (`tunnel_retry`, `tunnel_release`), and a held row keeps its
+  restored spot for when the tunnel comes up. One settlement: the session's
+  own tunnel is re-dialled on the ladder after a failure, but the browser is
+  not reconnected on its own — the user saw the error. 798 tests. Plan text: `tunnel_targets()` and `reconcile_tunnels(now)` as above;
   `TunnelState::Down` carries the ladder. The failure walk gains a hold
   beside `Stall`: `play_index` on a row whose transport is a tunnel that is
   wanted and not `Rejected` does not skip — it parks on the row, paused,

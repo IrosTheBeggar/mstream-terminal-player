@@ -701,6 +701,42 @@ const STALL_PROBE_EVERY: std::time::Duration = std::time::Duration::from_secs(5)
 /// Transient failures retried on the same row before it is skipped.
 const MAX_RETRIES: u32 = 2;
 
+/// How long a tunnel nobody references stays up before it is released
+/// (contract clause 38): a restore, a clear-then-refill and the launch's
+/// empty queue all pass through "nothing queued" for a moment, and the
+/// record tore a launch tunnel down mid-dial before it had this.
+pub(crate) const TUNNEL_RELEASE_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+/// The cold-dial ladder for a tunnel that would not come up — the record's
+/// `retryDelaySeconds` — then five minutes past the tenth failure.
+const TUNNEL_RETRY_LADDER_SECS: [u64; 5] = [5, 10, 20, 40, 60];
+const TUNNEL_RETRY_LONG_AFTER: u32 = 10;
+const TUNNEL_RETRY_LONG: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// How long after its `failures`th failed dial a tunnel is dialled again.
+pub(crate) fn tunnel_retry_delay(failures: u32) -> std::time::Duration {
+    if failures > TUNNEL_RETRY_LONG_AFTER {
+        return TUNNEL_RETRY_LONG;
+    }
+    let step = (failures.max(1) - 1) as usize;
+    std::time::Duration::from_secs(TUNNEL_RETRY_LADDER_SECS[step.min(TUNNEL_RETRY_LADDER_SECS.len() - 1)])
+}
+
+/// A tunnel's failed dials, for the ladder.
+#[derive(Debug, Clone)]
+pub struct TunnelRetry {
+    pub failed_at: crate::clock::Instant,
+    pub failures: u32,
+}
+
+/// The failure walk's tunnel step (contract clause 37): a row parked on a
+/// tunnel that is not up yet. Nothing skips past it; it starts when the
+/// tunnel does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelWait {
+    pub index: usize,
+    pub id: String,
+}
+
 /// Whether an open failure reads as the network's rather than the file's:
 /// the server never answered, or the connection died on the way. A 4xx,
 /// a format the decoder does not speak, an address that cannot be built
@@ -1333,6 +1369,12 @@ pub struct App {
     /// The tunnel identity the session is waiting on: `begin` opened it and
     /// connects through it the moment it comes up.
     pub pending_tunnel: Option<String>,
+    /// Failed dials per tunnel, for the ladder; cleared when one comes up.
+    pub tunnel_retry: std::collections::BTreeMap<String, TunnelRetry>,
+    /// When each tunnel stopped being referenced, for the release grace.
+    pub tunnel_release: std::collections::BTreeMap<String, crate::clock::Instant>,
+    /// The row parked on a tunnel that is not up yet (contract clause 37).
+    pub tunnel_wait: Option<TunnelWait>,
     /// Booted with `--bundled-server`: the installer's own server, which the
     /// servers room never offers to remove (contract clauses 50–58).
     pub bundled_server: Option<String>,
@@ -1603,6 +1645,9 @@ impl App {
             servers: Vec::new(),
             tunnels: Default::default(),
             pending_tunnel: None,
+            tunnel_retry: Default::default(),
+            tunnel_release: Default::default(),
+            tunnel_wait: None,
             bundled_server: None,
             resume_queue: true,
             resume_spot: None,
@@ -2259,6 +2304,8 @@ impl App {
             Action::ClearQueue => {
                 self.queue.clear();
                 self.now_playing = None;
+                self.stall = None;
+                self.tunnel_wait = None;
                 vec![Effect::Audio(AudioCmd::Stop)]
             }
             Action::ToggleRepeat => {
@@ -3433,6 +3480,8 @@ impl App {
     pub(crate) fn remove_queue_row(&mut self, index: usize) -> Vec<Effect> {
         if self.queue.remove(index) {
             self.now_playing = None;
+            self.stall = None;
+            self.tunnel_wait = None;
             return vec![Effect::Audio(AudioCmd::Stop)];
         }
         Vec::new()
@@ -3571,6 +3620,14 @@ impl App {
         }
     }
 
+    /// Whether a row is the session's own — same server, same peer or none.
+    pub(crate) fn is_session_origin(&self, origin: &Origin) -> bool {
+        let mine = self.origin();
+        !mine.server.is_empty()
+            && crate::config::same_server(&origin.server, &mine.server)
+            && origin.peer == mine.peer
+    }
+
     /// How to reach a queued track's server right now (contract clause 30):
     /// the session answers for its own server; a saved standard server
     /// answers from the book; a tunnel server through its bridge while the
@@ -3578,8 +3635,7 @@ impl App {
     /// is closed or still dialling cannot be asked for yet.
     pub(crate) fn reach(&self, origin: &Origin) -> Result<Reach, String> {
         // The session's own rows: whatever it is, it is reached already.
-        let mine = self.origin();
-        if !mine.server.is_empty() && crate::config::same_server(&origin.server, &mine.server) && origin.peer == mine.peer {
+        if self.is_session_origin(origin) {
             return Ok(Reach {
                 base: self.session.server.clone(),
                 token: self.session.token.clone(),
@@ -3773,8 +3829,44 @@ impl App {
         self.queue.start(index);
         self.now_playing = self.queue.items.get(index).map(|item| item.track.clone());
         self.starting = None;
+        self.tunnel_wait = None;
         // Nothing to probe: the server could not even be named.
         self.skip_failed(Some(&why))
+    }
+
+    /// Park on row `index` until its tunnel is up (contract clause 37's
+    /// tunnel step): the row is current and named, nothing plays, and
+    /// `TunnelUp` for that tunnel starts it — at the restored spot when the
+    /// row is holding one. The reconcile keeps dialling meanwhile.
+    fn hold_for_tunnel(&mut self, index: usize, item: &Queued) -> Vec<Effect> {
+        self.queue.start(index);
+        self.now_playing = Some(item.track.clone());
+        self.starting = None;
+        self.stall = None;
+        self.probing = None;
+        self.announced = None;
+        let id = item.origin.server.clone();
+        self.info(format!("Connecting to {}…", crate::quickconnect::display_server(&id)));
+        self.tunnel_wait = Some(TunnelWait { index, id });
+        // Whatever was on goes quiet until the tunnel answers.
+        vec![Effect::Audio(AudioCmd::Stop)]
+    }
+
+    /// Play row `index`, seeking to the restored position when the row is
+    /// the spot a restore is holding (contract clause 40) — a seek right
+    /// behind the play, which the engine answers once the source is open.
+    /// The spot is spent by the play itself, so a row parked for its tunnel
+    /// keeps it for when the tunnel comes up.
+    pub(crate) fn play_row_resuming(&mut self, index: usize) -> Vec<Effect> {
+        let spot = self.resume_spot.filter(|(row, _)| *row == index);
+        let mut effects = self.play_index(index);
+        if let Some((_, position)) = spot
+            && position > 0.0
+            && effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. })))
+        {
+            effects.push(Effect::Audio(AudioCmd::Seek(position)));
+        }
+        effects
     }
 
     /// One source would not play (contract clause 37). A failure that reads
@@ -3870,6 +3962,13 @@ impl App {
     }
 
     pub fn tick_at(&mut self, now: crate::clock::Instant) -> Vec<Effect> {
+        let mut effects = self.reconcile_tunnels(now);
+        effects.extend(self.probe_stall(now));
+        effects
+    }
+
+    /// A held row's server is asked again on a cadence (contract clause 37).
+    fn probe_stall(&mut self, now: crate::clock::Instant) -> Vec<Effect> {
         let Some(stall) = self.stall.as_mut() else {
             return Vec::new();
         };
@@ -3892,6 +3991,97 @@ impl App {
             self_signed: reach.self_signed,
             local_token: reach.local_token,
         })]
+    }
+
+    /// The tunnels the session and the queue need right now (contract
+    /// clause 38): the session's transport when it is one, and every
+    /// queued row's server that is one — a peer's rows name their parent.
+    pub(crate) fn tunnel_targets(&self) -> std::collections::BTreeSet<String> {
+        let mut wanted = std::collections::BTreeSet::new();
+        let transport = self.session_transport();
+        if crate::quickconnect::is_tunnel_id(transport) {
+            wanted.insert(transport.to_string());
+        }
+        for item in &self.queue.items {
+            if crate::quickconnect::is_tunnel_id(&item.origin.server) {
+                wanted.insert(item.origin.server.clone());
+            }
+        }
+        wanted
+    }
+
+    /// What tunnel `id` is dialled with: the session's own code when the
+    /// session is on it, else the pairing the book saved for it.
+    fn credential_for(&self, id: &str) -> Option<String> {
+        if id == self.session_transport()
+            && let Some(code) = &self.session.tunnel_code
+        {
+            return Some(code.clone());
+        }
+        self.servers
+            .iter()
+            .find(|s| crate::config::same_server(&s.id, id))
+            .and_then(|s| s.pairing.clone())
+    }
+
+    /// Whether a row's tunnel is on its way rather than gone: dialling,
+    /// down but on the ladder, or not yet asked for and dialable. A tunnel
+    /// the server refused, or one with no pairing code to dial, is not.
+    fn tunnel_pending_for(&self, origin: &Origin) -> bool {
+        if !crate::quickconnect::is_tunnel_id(&origin.server) {
+            return false;
+        }
+        match self.tunnels.get(&origin.server) {
+            Some(TunnelState::Dialling) => true,
+            Some(TunnelState::Down { rejected, .. }) => !rejected && self.credential_for(&origin.server).is_some(),
+            Some(TunnelState::Up { .. }) => false,
+            None => self.credential_for(&origin.server).is_some(),
+        }
+    }
+
+    /// Once a tick: the tunnels the session and the queue need are opened —
+    /// a failed one on the ladder, a refused one never on its own — and the
+    /// ones nothing references any more are released once the grace is up
+    /// (contract clause 38). A tunnel wanted again inside the grace simply
+    /// keeps running.
+    pub(crate) fn reconcile_tunnels(&mut self, now: crate::clock::Instant) -> Vec<Effect> {
+        let wanted = self.tunnel_targets();
+        let mut effects = Vec::new();
+        for id in &wanted {
+            self.tunnel_release.remove(id);
+            let due = match self.tunnels.get(id) {
+                Some(TunnelState::Up { .. }) | Some(TunnelState::Dialling) => false,
+                Some(TunnelState::Down { rejected: true, .. }) => false,
+                Some(TunnelState::Down { .. }) => match self.tunnel_retry.get(id) {
+                    Some(retry) => now.duration_since(retry.failed_at) >= tunnel_retry_delay(retry.failures),
+                    None => true,
+                },
+                None => true,
+            };
+            if !due {
+                continue;
+            }
+            let Some(credential) = self.credential_for(id) else { continue };
+            self.tunnels.insert(id.clone(), TunnelState::Dialling);
+            effects.push(Effect::Api(ApiCmd::TunnelOpen { id: id.clone(), credential }));
+        }
+        let idle: Vec<String> = self.tunnels.keys().filter(|id| !wanted.contains(*id)).cloned().collect();
+        for id in idle {
+            match self.tunnel_release.get(&id) {
+                None => {
+                    self.tunnel_release.insert(id, now);
+                }
+                Some(since) if now.duration_since(*since) >= TUNNEL_RELEASE_GRACE => {
+                    self.tunnel_release.remove(&id);
+                    self.tunnels.remove(&id);
+                    self.tunnel_retry.remove(&id);
+                    effects.push(Effect::Api(ApiCmd::TunnelClose { id }));
+                }
+                Some(_) => {}
+            }
+        }
+        self.tunnel_release.retain(|id, _| self.tunnels.contains_key(id));
+        effects
     }
 
     /// The queue row whose media URL is `url`, if any. A scan, but of an
@@ -4063,6 +4253,10 @@ impl App {
         // the engine refused.
         let (url, reach) = match self.stream_url(&item) {
             Ok(built) => built,
+            // A tunnel that is not up yet is waited for, not skipped
+            // (contract clause 37); anything else walks on like a row the
+            // engine refused.
+            Err(_) if self.tunnel_pending_for(&item.origin) => return self.hold_for_tunnel(index, &item),
             Err(why) => return self.unplayable(index, why),
         };
         self.queue.start(index);
@@ -4071,6 +4265,7 @@ impl App {
         // And ends a hold: the user (or the probe) moved things along.
         self.stall = None;
         self.probing = None;
+        self.tunnel_wait = None;
         let hint = item.metadata.duration;
         // Taken before the track moves into `now_playing`; the shape is
         // asked for by path, so nothing else about the track is needed.
@@ -4095,7 +4290,8 @@ impl App {
         }
         effects.push(Effect::Audio(AudioCmd::Play { url, duration_hint: hint }));
         effects.extend(self.fetch_art());
-        effects.extend(self.fetch_waveform(&filepath));
+        let reach_for_shape = self.playing_row_reach();
+        effects.extend(self.fetch_waveform(&filepath, reach_for_shape));
         effects.extend(self.maybe_autodj());
         effects
     }
@@ -4105,7 +4301,25 @@ impl App {
     /// skipping n-n-n through one album costs one request, not five.
     fn fetch_art(&mut self) -> Option<Effect> {
         let file = self.now_playing.as_ref()?.metadata.album_art.clone()?;
-        self.fetch_art_file(&file)
+        let reach = self.playing_row_reach();
+        self.fetch_art_from(&file, reach)
+    }
+
+    /// The playing row's own server when it is not the session's (contract
+    /// clause 30): its cover and its shape come from where the track lives,
+    /// not from the browsed server.
+    fn playing_row_reach(&self) -> Option<Reach> {
+        let item = self.queue.current.and_then(|index| self.queue.items.get(index))?;
+        self.row_reach(&item.origin)
+    }
+
+    /// A row's reach for a read, or `None` for the session's own rows —
+    /// the session client serves those.
+    fn row_reach(&self, origin: &Origin) -> Option<Reach> {
+        if self.is_session_origin(origin) {
+            return None;
+        }
+        self.reach(origin).ok()
     }
 
     /// Ask for one cover by the art file that names it, unless the cache
@@ -4114,6 +4328,10 @@ impl App {
     /// grid asks through here so a page of covers rides the same claim
     /// discipline as the playing track's.
     pub(crate) fn fetch_art_file(&mut self, file: &str) -> Option<Effect> {
+        self.fetch_art_from(file, None)
+    }
+
+    fn fetch_art_from(&mut self, file: &str, reach: Option<Reach>) -> Option<Effect> {
         if self.art.contains_key(file) {
             return None;
         }
@@ -4121,7 +4339,7 @@ impl App {
             self.art.clear();
         }
         self.art.insert(file.to_string(), None);
-        Some(Effect::Api(ApiCmd::AlbumArt { file: file.to_string() }))
+        Some(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach }))
     }
 
     /// Aim the Library drill at `node` and ask for it — the GUI's direct
@@ -4146,7 +4364,12 @@ impl App {
     /// Takes a filepath rather than reading `now_playing`, because the whole
     /// point is that it is also called for the track that has not started
     /// yet (see [`App::prefetch_waveform`]).
-    fn fetch_waveform(&mut self, filepath: &str) -> Option<Effect> {
+    fn fetch_waveform(&mut self, filepath: &str, reach: Option<Reach>) -> Option<Effect> {
+        // Waveforms are off the federation allowlist: a peer's row through
+        // its parent has no shape to ask for.
+        if reach.as_ref().is_some_and(|r| r.peer.is_some()) {
+            return None;
+        }
         if self.waveforms.contains_key(filepath) {
             return None;
         }
@@ -4154,7 +4377,7 @@ impl App {
             self.waveforms.clear();
         }
         self.waveforms.insert(filepath.to_string(), None);
-        Some(Effect::Api(ApiCmd::Waveform { filepath: filepath.to_string() }))
+        Some(Effect::Api(ApiCmd::Waveform { filepath: filepath.to_string(), reach }))
     }
 
     /// Ask for the *next* track's shape while this one is still playing.
@@ -4178,15 +4401,15 @@ impl App {
         // the top of the queue, and asking for it turns every keystroke on a
         // stopped player into a request.
         self.now_playing.as_ref()?;
-        let next = match &self.announced {
-            Some(next) => next.filepath.clone(),
-            None if !self.queue.shuffle => {
-                let index = self.queue.next_index(false)?;
-                self.queue.items.get(index)?.filepath.clone()
-            }
+        let index = match &self.announced {
+            Some(_) => self.announced_still_valid()?,
+            None if !self.queue.shuffle => self.queue.next_index(false)?,
             None => return None,
         };
-        self.fetch_waveform(&next)
+        let item = self.queue.items.get(index)?;
+        let next = item.filepath.clone();
+        let reach = self.row_reach(&item.origin);
+        self.fetch_waveform(&next, reach)
     }
 
     fn play_pause(&mut self) -> Vec<Effect> {
@@ -4194,12 +4417,8 @@ impl App {
             // A restored queue resumes where it was left (contract clause
             // 40): that row, and the seconds into it — a seek right behind
             // the play, which the engine answers once the source is open.
-            if let Some((index, position)) = self.resume_spot.take() {
-                let mut effects = self.play_index(index);
-                if position > 0.0 && effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))) {
-                    effects.push(Effect::Audio(AudioCmd::Seek(position)));
-                }
-                return effects;
+            if let Some((index, _)) = self.resume_spot {
+                return self.play_row_resuming(index);
             }
             // Nothing loaded — start the queue if there is one.
             return match self.queue.next_index(true) {

@@ -669,22 +669,49 @@ impl App {
                         path: None,
                     },
                 );
-                if self.pending_tunnel.as_deref() != Some(id.as_str()) {
-                    return Vec::new();
+                self.tunnel_retry.remove(&id);
+                let mut effects = Vec::new();
+                if self.pending_tunnel.as_deref() == Some(id.as_str()) {
+                    self.pending_tunnel = None;
+                    effects.extend(self.connect_over_tunnel(&id));
                 }
-                self.pending_tunnel = None;
-                self.connect_over_tunnel(&id)
+                // The row parked on it starts — at its restored spot when it
+                // holds one (contract clause 37).
+                if let Some(wait) = self.tunnel_wait.as_ref().filter(|w| w.id == id) {
+                    let index = wait.index;
+                    self.tunnel_wait = None;
+                    effects.extend(self.play_row_resuming(index));
+                }
+                effects
             }
             Event::TunnelFailed { id, rejected, why } => {
                 // A failed swap on a tunnel that is up leaves it up.
                 if !matches!(self.tunnels.get(&id), Some(super::TunnelState::Up { .. })) {
                     self.tunnels.insert(id.clone(), super::TunnelState::Down { rejected, why: why.clone() });
+                    // One more rung on the ladder (contract clause 38).
+                    let now = crate::clock::Instant::now();
+                    let retry = self
+                        .tunnel_retry
+                        .entry(id.clone())
+                        .or_insert(super::TunnelRetry { failed_at: now, failures: 0 });
+                    retry.failures += 1;
+                    retry.failed_at = now;
                 }
                 if self.pending_tunnel.as_deref() == Some(id.as_str()) {
                     self.pending_tunnel = None;
                     self.connecting = false;
                     self.connect.submitting = false;
-                    self.error(why);
+                    self.error(why.clone());
+                }
+                // A row parked on a tunnel the server refused walks on like a
+                // row the engine refused; one whose server did not answer
+                // keeps waiting for the ladder.
+                if rejected
+                    && let Some(wait) = self.tunnel_wait.as_ref().filter(|w| w.id == id)
+                {
+                    let index = wait.index;
+                    self.tunnel_wait = None;
+                    return self.unplayable(index, why);
                 }
                 Vec::new()
             }

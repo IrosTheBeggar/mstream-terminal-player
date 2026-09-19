@@ -218,7 +218,8 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
-        ApiCmd::AlbumArt { file } => {
+        // One server, the page's own: a row's reach is that server anyway.
+        ApiCmd::AlbumArt { file, .. } => {
             // The waveform's rule, exactly as the native worker applies
             // it: a 404 or undecodable bytes settle as "no art"; a
             // transport failure — or no session yet — is not an answer
@@ -237,7 +238,7 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             Some(Event::AlbumArt { file, art, settled })
         }
 
-        ApiCmd::Waveform { filepath } => {
+        ApiCmd::Waveform { filepath, .. } => {
             // Art's rule, for the same reason: a shape nobody could draw is
             // not worth the "not connected" toast `with_session` would raise.
             let client = session.borrow().as_ref().map(|s| s.client.clone());

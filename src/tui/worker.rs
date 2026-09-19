@@ -159,12 +159,14 @@ pub enum ApiCmd {
     DeletePlaylist { name: String },
     Search(String),
     /// Fetch and decode one cover, named by the art file a track's metadata
-    /// carries. The app caches the answer under that name.
-    AlbumArt { file: String },
+    /// carries. The app caches the answer under that name. `reach` names
+    /// the row's own server when it is not the session's (contract clause
+    /// 30); `None` asks the session.
+    AlbumArt { file: String, reach: Option<crate::tui::app::Reach> },
     /// Fetch a track's shape for the progress bar. Keyed by filepath rather
     /// than by an art file: a waveform belongs to one recording, not to an
-    /// album.
-    Waveform { filepath: String },
+    /// album. `reach` as for [`ApiCmd::AlbumArt`].
+    Waveform { filepath: String, reach: Option<crate::tui::app::Reach> },
     Shutdown,
 }
 
@@ -937,6 +939,16 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     }
 }
 
+/// The client for a read aimed at a row's own server. `None` when the base
+/// will not parse — the read then falls back to the session, whose answer
+/// the App's stale-reply guards judge as they would any other.
+#[cfg(not(target_arch = "wasm32"))]
+fn client_for(reach: &crate::tui::app::Reach) -> Option<Client> {
+    Client::new_with(&reach.base, reach.self_signed)
+        .ok()
+        .map(|c| c.with_token(reach.token.clone()).with_peer(reach.peer).with_local_token(reach.local_token.clone()))
+}
+
 /// Answer one read on its own thread, so a slow server holds up this reply
 /// and nothing else. In-flight replies against a client that has since been
 /// replaced still arrive; the app's stale-reply guards are what drop them,
@@ -971,8 +983,20 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
             .is_ok();
         return Event::Reachable { server, reachable };
     }
-    let Some(c) = client else {
-        return Event::Error("not connected to a server".into());
+    // A row's own server when it is not the session's (contract clause 30):
+    // its cover and its shape come from a one-shot client built from the
+    // reach the App resolved — a tunnel's loopback with its token, a saved
+    // server with its own token and trust, a peer through its parent.
+    let own = match &cmd {
+        ApiCmd::AlbumArt { reach: Some(reach), .. } | ApiCmd::Waveform { reach: Some(reach), .. } => {
+            client_for(reach)
+        }
+        _ => None,
+    };
+    let c = match (own.as_ref(), client) {
+        (Some(own), _) => own,
+        (None, Some(session)) => session,
+        (None, None) => return Event::Error("not connected to a server".into()),
     };
     let answered = match cmd {
         ApiCmd::Browse(path) => {
@@ -1037,7 +1061,7 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         ApiCmd::Search(query) => {
             c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r) })
         }
-        ApiCmd::AlbumArt { file } => {
+        ApiCmd::AlbumArt { file, .. } => {
             // The waveform's rule, because this cache burned without it: a
             // 404 and bytes that won't decode are the server's own word
             // that there is no art — settled, remembered, never asked
@@ -1051,7 +1075,7 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
             let art = answer.ok().and_then(|bytes| art::decode(&bytes));
             Ok(Event::AlbumArt { file, art, settled })
         }
-        ApiCmd::Waveform { filepath } => {
+        ApiCmd::Waveform { filepath, .. } => {
             // Same rule as art: a shape nobody could draw is not news. The
             // client already folds the server's four ways of saying "no
             // waveform" into `Ok(None)`; anything left is a real transport

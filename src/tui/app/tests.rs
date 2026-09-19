@@ -812,7 +812,7 @@ fn waveforms_asked(effects: &[Effect]) -> Vec<String> {
     effects
         .iter()
         .filter_map(|e| match e {
-            Effect::Api(ApiCmd::Waveform { filepath }) => Some(filepath.clone()),
+            Effect::Api(ApiCmd::Waveform { filepath, .. }) => Some(filepath.clone()),
             _ => None,
         })
         .collect()
@@ -1651,6 +1651,282 @@ fn a_remembered_tunnel_server_dials_with_the_code_from_the_book() {
     );
 }
 
+// ── Tunnels follow the queue (contract clause 38) ───────────────────────
+
+fn tunnel_up(local_url: &str) -> TunnelState {
+    TunnelState::Up {
+        local_url: local_url.into(),
+        local_token: "lt".into(),
+        status: crate::quickconnect::TunnelStatus::Connected,
+        path: None,
+    }
+}
+
+/// A saved Quick Connect server with a pairing code in the book.
+fn faraway() -> KnownServer {
+    KnownServer {
+        id: "mstream+iroh://faraway".into(),
+        name: "quick connect · faraway".into(),
+        token: Some("t".into()),
+        self_signed: false,
+        peer: None,
+        pairing: Some("mstr1:far".into()),
+    }
+}
+
+const FARAWAY: &str = "mstream+iroh://faraway";
+
+fn secs(n: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(n)
+}
+
+#[test]
+fn a_queued_row_on_a_tunnel_server_has_its_tunnel_dialled() {
+    // Whichever server is browsed: the session is on a standard server.
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    let now = crate::clock::Instant::now();
+    assert!(app.tick_at(now).is_empty(), "nothing queued, nothing to dial");
+
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    let effects = app.tick_at(now);
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::TunnelOpen { id: FARAWAY.into(), credential: "mstr1:far".into() })]
+    );
+    assert_eq!(app.tunnels.get(FARAWAY), Some(&TunnelState::Dialling));
+    assert!(app.tick_at(now + secs(1)).is_empty(), "one dial in flight, not one per tick");
+}
+
+#[test]
+fn a_tunnel_nothing_references_is_released_after_the_grace() {
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    let now = crate::clock::Instant::now();
+    assert!(app.tick_at(now).is_empty(), "wanted and up: nothing to do");
+
+    app.queue.items.clear();
+    assert!(app.tick_at(now).is_empty(), "the grace starts");
+    assert!(app.tick_at(now + secs(9)).is_empty(), "and holds");
+    let effects = app.tick_at(now + secs(10));
+    assert_eq!(effects, vec![Effect::Api(ApiCmd::TunnelClose { id: FARAWAY.into() })]);
+    assert!(!app.tunnels.contains_key(FARAWAY));
+    assert!(app.tick_at(now + secs(20)).is_empty(), "closed once");
+}
+
+#[test]
+fn a_row_arriving_inside_the_grace_keeps_the_tunnel() {
+    // A restore, a clear-then-refill and the launch's empty queue all pass
+    // through "nothing queued" for a moment.
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    let now = crate::clock::Instant::now();
+    assert!(app.tick_at(now).is_empty(), "the grace starts");
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    assert!(app.tick_at(now + secs(5)).is_empty(), "wanted again: the release is cancelled");
+    assert!(app.tick_at(now + secs(30)).is_empty(), "and stays cancelled");
+    assert!(matches!(app.tunnels.get(FARAWAY), Some(TunnelState::Up { .. })));
+}
+
+#[test]
+fn the_ladder_spaces_the_dials_and_a_refused_code_is_never_redialled_on_its_own() {
+    assert_eq!(tunnel_retry_delay(1), secs(5));
+    assert_eq!(tunnel_retry_delay(2), secs(10));
+    assert_eq!(tunnel_retry_delay(3), secs(20));
+    assert_eq!(tunnel_retry_delay(4), secs(40));
+    assert_eq!(tunnel_retry_delay(5), secs(60));
+    assert_eq!(tunnel_retry_delay(10), secs(60));
+    assert_eq!(tunnel_retry_delay(11), secs(300));
+
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    let now = crate::clock::Instant::now();
+    assert!(matches!(app.tick_at(now).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+
+    app.apply_event(Event::TunnelFailed { id: FARAWAY.into(), rejected: false, why: "no answer".into() });
+    let failed = app.tunnel_retry.get(FARAWAY).expect("on the ladder").failed_at;
+    assert!(app.tick_at(failed + secs(4)).is_empty(), "the first rung is five seconds");
+    assert!(matches!(app.tick_at(failed + secs(5)).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+
+    app.apply_event(Event::TunnelFailed { id: FARAWAY.into(), rejected: false, why: "no answer".into() });
+    let failed = app.tunnel_retry.get(FARAWAY).expect("still on the ladder").failed_at;
+    assert_eq!(app.tunnel_retry.get(FARAWAY).unwrap().failures, 2);
+    assert!(app.tick_at(failed + secs(9)).is_empty(), "the second rung is ten");
+    assert!(matches!(app.tick_at(failed + secs(10)).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+
+    // Up: the ladder is forgotten.
+    app.apply_event(Event::TunnelUp {
+        id: FARAWAY.into(),
+        local_url: "http://127.0.0.1:4242".into(),
+        local_token: "lt".into(),
+    });
+    assert!(!app.tunnel_retry.contains_key(FARAWAY));
+
+    // Refused: a rotated code is a re-pair, not a retry.
+    app.tunnels.remove(FARAWAY);
+    assert!(matches!(app.tick_at(failed + secs(60)).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+    app.apply_event(Event::TunnelFailed { id: FARAWAY.into(), rejected: true, why: "rejected".into() });
+    let failed = app.tunnel_retry.get(FARAWAY).unwrap().failed_at;
+    assert!(app.tick_at(failed + secs(3600)).is_empty(), "never on its own");
+    assert!(matches!(app.tunnels.get(FARAWAY), Some(TunnelState::Down { rejected: true, .. })));
+}
+
+#[test]
+fn a_row_on_a_tunnel_not_yet_up_is_held_and_starts_when_it_comes_up() {
+    // Contract clause 37's tunnel step: brought up and re-seeded without
+    // skipping.
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    app.push_queue(track("music/near.mp3"));
+
+    // Not even asked for yet — but dialable, so it is waited for.
+    let effects = app.play_index(0);
+    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.tunnel_wait, Some(TunnelWait { index: 0, id: FARAWAY.into() }));
+    assert_eq!(app.queue.current, Some(0));
+    assert!(app.now_playing.as_ref().is_some_and(|t| t.filepath == "music/far.mp3"));
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text == "Connecting to quick connect · faraway…"),
+        "{:?}",
+        app.message
+    );
+
+    // The reconcile dials it on the next tick.
+    let now = crate::clock::Instant::now();
+    assert!(matches!(app.tick_at(now).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+
+    // Up: the held row plays from the loopback, with both tokens.
+    let effects = app.apply_event(Event::TunnelUp {
+        id: FARAWAY.into(),
+        local_url: "http://127.0.0.1:4242".into(),
+        local_token: "lt".into(),
+    });
+    assert_eq!(played_url(&effects), "http://127.0.0.1:4242/media/music/far.mp3?token=t&__lt=lt");
+    assert!(app.tunnel_wait.is_none());
+}
+
+#[test]
+fn a_held_row_keeps_its_restored_spot_for_when_the_tunnel_comes_up() {
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    app.resume_spot = Some((0, 42.5));
+
+    let effects = app.play_row_resuming(0);
+    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.resume_spot, Some((0, 42.5)), "the spot is spent by a play, not by a wait");
+
+    let effects = app.apply_event(Event::TunnelUp {
+        id: FARAWAY.into(),
+        local_url: "http://127.0.0.1:4242".into(),
+        local_token: "lt".into(),
+    });
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+    assert!(effects.contains(&Effect::Audio(AudioCmd::Seek(42.5))), "{effects:?}");
+    assert_eq!(app.resume_spot, None);
+}
+
+#[test]
+fn a_refused_tunnel_skips_the_held_row_with_a_word_and_an_unanswered_one_keeps_waiting() {
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    app.push_queue(track("music/near.mp3"));
+    app.play_index(0);
+    assert!(app.tunnel_wait.is_some());
+
+    // No answer: the ladder will dial again; the row waits, nothing plays.
+    let effects =
+        app.apply_event(Event::TunnelFailed { id: FARAWAY.into(), rejected: false, why: "no answer".into() });
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))), "{effects:?}");
+    assert!(app.tunnel_wait.is_some());
+    assert_eq!(app.queue.current, Some(0));
+
+    // Refused: nothing will bring it up, so the row walks on.
+    let effects = app.apply_event(Event::TunnelFailed {
+        id: FARAWAY.into(),
+        rejected: true,
+        why: "tunnel handshake rejected — wrong or rotated connect secret".into(),
+    });
+    assert_eq!(played_url(&effects), "http://host:3000/media/music/near.mp3?token=tok");
+    assert!(app.tunnel_wait.is_none());
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text.contains("won’t play") && m.text.contains("rejected")),
+        "{:?}",
+        app.message
+    );
+}
+
+#[test]
+fn a_switch_away_keeps_the_tunnel_the_queue_still_needs() {
+    // Contract clause 11 with clause 38: the session leaves its tunnel
+    // server; the queue's rows keep the tunnel until they leave too.
+    let mut app = App::new(Some(FARAWAY.into()), Some("t".into()), None).with_tunnel(Some("mstr1:far".into()));
+    app.connected = true;
+    app.session.server = "http://127.0.0.1:4242".into();
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    app.servers.push(faraway());
+    app.push_queue(track("music/far.mp3"));
+    assert_eq!(app.queue.items[0].origin.server, FARAWAY);
+
+    app.adopt_server("http://office:3000".into(), "http://office:3000".into(), None, None, None, false, None, None);
+    let now = crate::clock::Instant::now();
+    assert!(app.tick_at(now).is_empty());
+    assert!(app.tick_at(now + secs(60)).is_empty(), "wanted by the queue: never released");
+    assert!(matches!(app.tunnels.get(FARAWAY), Some(TunnelState::Up { .. })));
+
+    // …and released once the last row leaves.
+    app.queue.items.clear();
+    assert!(app.tick_at(now + secs(60)).is_empty());
+    assert_eq!(app.tick_at(now + secs(70)), vec![Effect::Api(ApiCmd::TunnelClose { id: FARAWAY.into() })]);
+}
+
+#[test]
+fn a_playing_row_from_another_server_asks_that_server_for_its_cover_and_shape() {
+    // Contract clause 30: the art URL is built from the row's own server.
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    let mut far = at(FARAWAY, "music/far.mp3");
+    far.track.metadata.album_art = Some("far.jpg".into());
+    app.queue.push(far);
+    let mut near = track("music/near.mp3");
+    near.metadata.album_art = Some("near.jpg".into());
+    app.push_queue(near);
+
+    let effects = app.play_index(0);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Api(ApiCmd::AlbumArt { file, reach: Some(Reach { base, local_token, .. }) })
+                if file == "far.jpg" && base == "http://127.0.0.1:4242" && local_token.as_deref() == Some("lt")
+        )),
+        "the cover comes from the row's server: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Api(ApiCmd::Waveform { filepath, reach: Some(_) }) if filepath == "music/far.mp3"
+        )),
+        "and so does the shape: {effects:?}"
+    );
+
+    // The session's own row asks the session.
+    let effects = app.play_index(1);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Api(ApiCmd::AlbumArt { file, reach: None }) if file == "near.jpg"
+        )),
+        "{effects:?}"
+    );
+}
+
 #[test]
 fn a_remembered_tunnel_with_no_code_says_so_instead_of_hanging() {
     // Credentials deleted, or a config.toml copied to a new machine
@@ -1949,16 +2225,19 @@ fn a_row_on_a_closed_tunnel_walks_on_like_a_refused_one() {
         app.message
     );
 
-    // While its tunnel is being dialled the row is skipped the same way,
-    // with a word that says so. (The skip budget is what a played track
+    // While its tunnel is being dialled the row is held, not skipped
+    // (contract clause 37): nothing plays, the row is current, and the
+    // line says what it waits on. (The skip budget is what a played track
     // resets; nothing has played here, so it is reset by hand.)
     app.failures = 0;
     app.tunnels.insert("mstream+iroh://faraway".into(), TunnelState::Dialling);
     let effects = app.play_index(0);
-    assert_eq!(played_url(&effects), "http://host:3000/media/music/near.mp3?token=tok");
+    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.tunnel_wait, Some(TunnelWait { index: 0, id: "mstream+iroh://faraway".into() }));
+    assert_eq!(app.queue.current, Some(0));
     assert!(
-        app.message.as_ref().is_some_and(|m| m.text.contains("being dialled")),
-        "said why: {:?}",
+        app.message.as_ref().is_some_and(|m| m.text.contains("Connecting to quick connect · faraway")),
+        "said what it waits on: {:?}",
         app.message
     );
 
@@ -4877,7 +5156,7 @@ fn starting_a_track_asks_for_its_cover_once() {
     ]);
 
     let effects = app.play_index(0);
-    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into() });
+    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None });
     assert!(effects.contains(&asked), "got {effects:?}");
 
     // The next track shares the cover and the first ask is still out; the
@@ -4923,7 +5202,7 @@ fn a_cover_nobody_answered_for_is_asked_for_again() {
     // waveform's rule, applied here.
     let mut app = connected_app();
     app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
-    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into() });
+    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None });
     assert!(app.play_index(0).contains(&asked));
 
     // The fetch dies with the network: nothing was learned, so nothing is
