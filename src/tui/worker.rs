@@ -2165,7 +2165,7 @@ mod tests {
             .with_token(Some(ticket.guest_token.clone()))
             .with_local_token(Some(local_token.clone()));
         let info = client.ping_via_info().expect("the peer answers its layered /api to a guest");
-        eprintln!("guest /api: vpaths={:?} browse={}", info.vpaths, info.federation_browse);
+        assert!(info.vpaths.iter().any(|v| v == "demo"), "the granted library is visible: {:?}", info.vpaths);
         let url = crate::api::urls::with_local_token(
             crate::api::urls::media_url(&local_url, "demo/Boukmanflow/6AM.mp3", Some(&ticket.guest_token)).unwrap(),
             Some(&local_token),

@@ -646,7 +646,11 @@ impl Client {
     /// and carries the same keys — the libraries the parent's key may
     /// read, and the flags a peer never gets to keep (contract clause 26).
     pub async fn ping_via_info_async(&self) -> Result<Ping, ApiError> {
-        self.get("api/").await
+        // The layered payload nests the flags and the libraries under
+        // `user` and the transcode under `features`; the ping is composed
+        // from them (mStream #932).
+        let info: crate::api::types::LayeredInfo = self.get("api/").await?;
+        Ok(Ping::from(info))
     }
 
     #[cfg(not(target_arch = "wasm32"))]

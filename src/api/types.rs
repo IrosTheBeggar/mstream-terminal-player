@@ -108,6 +108,64 @@ pub struct Ping {
     pub federation_direct: bool,
 }
 
+/// `GET /api/` — the layered payload (mStream #932): server-wide `features`
+/// and the caller's own `user` block, which is where the ping's flags and
+/// libraries live there. A peer answers this through its parent's proxy and
+/// a guest over the peer's own tunnel, where `/api/v1/ping` is off the
+/// allowlist; a [`Ping`] is composed from the two halves the way the server
+/// composes its own.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LayeredInfo {
+    pub features: LayeredFeatures,
+    pub user: LayeredUser,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LayeredFeatures {
+    #[serde(deserialize_with = "transcode_or_off")]
+    pub transcode: Option<TranscodeInfo>,
+    pub discovery: bool,
+    #[serde(rename = "discoveryP2p")]
+    pub discovery_p2p: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LayeredUser {
+    pub vpaths: Vec<String>,
+    #[serde(rename = "noFileModify")]
+    pub no_file_modify: bool,
+    #[serde(rename = "noUpload")]
+    pub no_upload: bool,
+    #[serde(rename = "federationDiscovery")]
+    pub federation_discovery: bool,
+    #[serde(rename = "federationBrowse")]
+    pub federation_browse: bool,
+    #[serde(rename = "federationDirect")]
+    pub federation_direct: bool,
+}
+
+impl From<LayeredInfo> for Ping {
+    fn from(info: LayeredInfo) -> Ping {
+        Ping {
+            vpaths: info.user.vpaths,
+            transcode: info.features.transcode,
+            no_file_modify: info.user.no_file_modify,
+            no_upload: info.user.no_upload,
+            discovery: info.features.discovery,
+            // The layered payload carries no `discoveryPath`: on any build
+            // that serves `/api/` it equals `discovery` (the server says so).
+            discovery_path: info.features.discovery,
+            discovery_p2p: info.features.discovery_p2p,
+            federation_discovery: info.user.federation_discovery,
+            federation_browse: info.user.federation_browse,
+            federation_direct: info.user.federation_direct,
+        }
+    }
+}
+
 /// `GET /api/v1/federation/peers/:id/access` on the wire: what a device
 /// needs to reach a peer without the parent in the path — or the parent's
 /// word that the peer will not mint (`direct: false`). Tolerant on purpose:
@@ -1399,6 +1457,37 @@ mod tests {
         // The pre-`pullMetadata` shape, which is also what the fallback
         // request gets back: no `metadata` key at all.
         assert!(d.files[0].metadata.is_none());
+    }
+
+    #[test]
+    fn the_layered_payload_composes_a_ping_from_its_two_halves() {
+        // What a rig server answered on `GET /api/` (2026-09-20): the flags
+        // and the libraries sit under `user`, the transcode under `features`.
+        let raw = r#"{
+            "server": "6.28.0", "apiVersions": ["1"],
+            "features": { "discoveryReady": false, "discovery": true, "discoveryP2p": false,
+                          "transcode": { "defaultCodec": "opus", "defaultBitrate": "96k" },
+                          "supportedAudioFiles": ["mp3"], "stats": 2 },
+            "user": { "vpaths": ["demo"], "noMkdir": false, "noUpload": true, "noFileModify": false,
+                      "federationDiscovery": false, "federationBrowse": true, "federationDirect": true,
+                      "federationInbox": 0, "vpathMetaData": {} },
+            "admin": true
+        }"#;
+        let info: LayeredInfo = serde_json::from_str(raw).unwrap();
+        let ping = Ping::from(info);
+        assert_eq!(ping.vpaths, vec!["demo".to_string()]);
+        assert!(ping.federation_browse && ping.federation_direct && !ping.federation_discovery);
+        assert!(ping.discovery && ping.discovery_path && !ping.discovery_p2p);
+        assert!(ping.no_upload && !ping.no_file_modify);
+        assert_eq!(ping.transcode.as_ref().and_then(|t| t.default_codec.clone()).as_deref(), Some("opus"));
+
+        // A guest's answer over the peer's own tunnel: no transcode, one library.
+        let guest: LayeredInfo =
+            serde_json::from_str(r#"{"features":{"transcode":false},"user":{"vpaths":["demo"],"federationGuest":true}}"#)
+                .unwrap();
+        let ping = Ping::from(guest);
+        assert_eq!(ping.vpaths, vec!["demo".to_string()]);
+        assert!(ping.transcode.is_none());
     }
 
     #[test]
