@@ -278,6 +278,7 @@ mod tests {
         server: &str,
     ) -> Queued {
         Queued {
+            dj: None,
             origin: Origin { server: server.to_string(), peer: None },
             track: Track {
                 filepath: filepath.to_string(),
@@ -409,7 +410,7 @@ mod tests {
             token: Some("tok".into()),
             self_signed: false,
             peer: None,
-            pairing: None,
+            pairing: None, dj: Default::default(),
         });
         draw(&mut gui);
         let asks = art_asks(&gui);

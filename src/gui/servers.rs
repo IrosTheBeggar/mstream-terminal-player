@@ -2381,9 +2381,10 @@ mod tests {
             token: None,
             self_signed: false,
             peer: None,
-            pairing: None,
+            pairing: None, dj: Default::default(),
         });
         let row = |path: &str| Queued {
+            dj: None,
             origin: Origin { server: attic.into(), peer: None },
             track: Track { filepath: path.into(), metadata: Default::default() },
         };
@@ -2487,6 +2488,10 @@ mod tests {
                 missing: false,
                 hidden: false,
             }),
+            dj_sources_off: Vec::new(),
+            dj_min_rating: None,
+            dj_genre_mode: None,
+            dj_genres: None,
             extra: Default::default(),
         });
         super::super::refresh_book(&mut gui);

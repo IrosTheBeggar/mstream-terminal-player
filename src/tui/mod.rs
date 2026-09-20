@@ -253,6 +253,13 @@ pub(crate) fn known_servers(
             } else {
                 None
             },
+            // Auto DJ's rules for this library (auto-dj contract, clause 51).
+            dj: config::DjLibraryOverrides {
+                sources_off: entry.dj_sources_off.clone(),
+                min_rating: entry.dj_min_rating,
+                genre_mode: entry.dj_genre_mode.clone(),
+                genres: entry.dj_genres.clone(),
+            },
         })
         .collect()
 }
@@ -786,6 +793,13 @@ pub(crate) fn dispatch(
                     && let Err(e) = config::save(&config)
                 {
                     eprintln!("warning: could not save the peer list: {e}");
+                }
+            }
+            // A server entry's Auto DJ library rules (auto-dj contract,
+            // clause 51).
+            Effect::SaveDjLibrary { server, overrides } => {
+                if let Err(e) = config::save_dj_library(&server, &overrides) {
+                    eprintln!("warning: could not save the Auto DJ sources: {e}");
                 }
             }
             Effect::SaveSession => {

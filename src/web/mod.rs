@@ -76,6 +76,7 @@ impl Shell {
             Effect::Trust(_) => {}
             // One server, no saved list to fold peers into.
             Effect::SavePeers { .. } => {}
+            Effect::SaveDjLibrary { .. } => {}
         }
     }
 }

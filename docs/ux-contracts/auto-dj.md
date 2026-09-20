@@ -558,3 +558,11 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
   surface; it shares the App, so it cannot be left on the old model.
 - **2026-09-20 — The badge glyphs**: `∞` and `≈`, dim, before the title;
   the record's icons are its own.
+- **2026-09-20 — Slices A1 and A2 landed** in the shared App and the api
+  worker: the record's toggle, the lane and its epoch, the DJ's own server
+  with its probe and tunnel target, the composition of clauses 20–27, the
+  learner and the failure taxonomy, the openers and the chooser, batches
+  and the badge field, the migration. The TUI's tab carries the new rows;
+  its keyword entry waits on the GUI room (the tab says so). The room, the
+  bar's wording, the queue's badge glyph and empty state, and the locales
+  are slice A3; the rig is A5.

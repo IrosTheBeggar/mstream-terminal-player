@@ -178,6 +178,8 @@ impl Action {
             Action::ToggleRepeat => "repeat",
             Action::ToggleShuffle => "shuffle",
             Action::ToggleAutoDj => "auto-dj",
+            Action::DjSurprise => "dj-surprise",
+            Action::DjPick => "dj-pick",
             Action::StartJourney => "sonic-path",
             Action::ToggleHelp => "help",
             // Nameable because the browser binds it: it is what Esc means

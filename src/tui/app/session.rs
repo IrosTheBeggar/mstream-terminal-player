@@ -599,7 +599,7 @@ impl App {
                 }
                 // The Auto-DJ rows and the Sonic Path tab both turn on what
                 // the ping just said; a reconnect can be a different server.
-                self.dj_panel.rebuild(self.capabilities);
+                self.dj_panel.rebuild(&self.dj, self.dj_info.as_ref(), self.dj_is_peer());
                 self.reset_sonic_path();
                 // A tab this server cannot serve is off the strip, so being
                 // left standing on one is being on a tab with no number.
@@ -618,17 +618,9 @@ impl App {
                     if libraries == 1 { "y" } else { "ies" }
                 ));
 
-                // A remembered mode can outlive the server that supported it —
-                // preferences are global, capabilities are per-server. Say so
-                // rather than leaving a mode selected that quietly does
-                // something else.
-                if !self.autodj.available(self.capabilities) {
-                    self.autodj = self.autodj.next_available(self.capabilities);
-                    self.info(format!(
-                        "this server has no similarity index — auto-dj is on {}",
-                        self.autodj.label()
-                    ));
-                }
+                // A DJ armed on this very server learns what it offers from
+                // this ping until its probe answers (auto-dj contract, 19).
+                let dj_effects = self.dj_session_connected();
 
                 // Opening the browser again: whatever this browse comes back
                 // with is where we are, since neither `~` nor a remembered
@@ -642,6 +634,7 @@ impl App {
                     Effect::Audio(AudioCmd::SetBlendSkips(self.blend_skips)),
                     Effect::Audio(AudioCmd::SetPauseFade(self.pause_fade)),
                 ];
+                effects.extend(dj_effects);
                 // Worth persisting when we hold a token we logged in for — or
                 // a pairing code, which is the only way back to this server
                 // even when it needs no login at all. A peer session holds
@@ -779,6 +772,9 @@ impl App {
                     self.tunnel_wait = None;
                     effects.extend(self.play_row_resuming(index));
                 }
+                // A DJ armed on this tunnel probes and asks for an owed
+                // turn (auto-dj contract, clause 35).
+                effects.extend(self.dj_tunnel_up(&id));
                 // The browsed peer's own tunnel: the session moves onto it,
                 // browse stack and all (contract clause 27).
                 if self.connected

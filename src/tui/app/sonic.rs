@@ -532,6 +532,9 @@ impl App {
             Capture::Sonic(side) => self.capture_sonic_side(side, track),
             // Back to the tab that asked, on the two ways of looking.
             Capture::Discover => self.seed_discover(track),
+            // The opening song: the DJ arms for the server it was chosen
+            // from and the session starts there (auto-dj contract, clause 4).
+            Capture::DjSeed => self.dj_seed_chosen(track),
         }
     }
 

@@ -135,7 +135,16 @@ pub struct PlayerPrefs {
     /// "off", "all" or "one".
     pub repeat: String,
     pub shuffle: bool,
-    /// "off", "similar" or "tempo+key".
+    /// The server Auto DJ is armed FOR — a URL, a tunnel id or a peer
+    /// identity — absent when it is off (auto-dj contract, clause 19).
+    /// Remembered as on brings it back ARMED at launch, never playing
+    /// (clause 61).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autodj_server: Option<String>,
+    /// The old mode — "off", "similar" or "tempo+key" — read once for the
+    /// migration (a mode other than off arms the DJ on the remembered
+    /// session's server) and never written again.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub autodj: String,
     /// Seconds of blend when one track ends and the next begins; 0 is off.
     /// Also adjustable live from the Settings tab (Phase C5).
@@ -167,7 +176,8 @@ impl Default for PlayerPrefs {
             volume: 1.0,
             repeat: "off".to_string(),
             shuffle: false,
-            autodj: "off".to_string(),
+            autodj_server: None,
+            autodj: String::new(),
             crossfade_seconds: 0.0,
             gapless: true,
             blend_skips: false,
@@ -196,33 +206,61 @@ impl PlayerPrefs {
     }
 }
 
-/// `[player.dj]` — the Auto-DJ panel's settings.
+/// `[player.dj]` — Auto DJ's session-wide settings (auto-dj contract,
+/// clause 51), plus the library rules that stand behind a server entry
+/// that carries none of its own (`ServerEntry::dj_*`).
 ///
 /// Kept as plain scalars and strings rather than enums so an unrecognised
 /// value from a newer player degrades to the default instead of failing the
-/// whole config load; the app parses each one leniently.
+/// whole config load; the app parses each one leniently. The three legacy
+/// keys are read for the migration and never written again.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutoDjPrefs {
-    /// Percent either side of the seed tempo for the tight window. The wide
-    /// window the server falls back to is twice this.
-    pub tempo_tolerance: u32,
-    /// "off", "compatible" (Camelot neighbours) or "strict" (the same key).
-    pub key_matching: String,
-    /// Minimum rating, 1–10. Zero means no floor, which is also what the
-    /// server reads a zero as.
-    pub min_rating: u32,
-    /// How many recently-played artists to keep out of the next pick.
-    pub artist_cooldown: u32,
-    /// Perceptual 1–100 slider onto a cosine threshold; 0 switches the sonic
-    /// pool off entirely. See `dj::sonic_threshold`.
-    pub sonic_tightness: u32,
-    /// "current" (just what's playing) or "session" (recent picks averaged
-    /// into a centroid, so a set drifts as a whole rather than song by song).
+    /// How many songs one turn asks for — random-songs' `limit`, 1–25.
+    pub songs_per_fetch: u32,
+    /// Sonic similarity: only songs that sound like the session.
+    pub sonic: bool,
+    /// The raw cosine floor the pool is drawn at, .30–.80.
+    pub sonic_min_similarity: f64,
+    /// "rolling" (follow the vibe) or "locked" (stay on seed).
     pub sonic_anchor: String,
-    /// "off", "whitelist" (only these) or "blacklist" (anything but these).
+    /// What switching on with nothing queued does: "ask", "random", "pick".
+    pub empty_queue: String,
+    /// BPM continuity around the playing track.
+    pub bpm: bool,
+    /// ± BPM, 1–20; the wide set the server relaxes to is this plus two.
+    pub bpm_tolerance: u32,
+    /// Harmonic mixing on the session's Camelot anchor.
+    pub harmonic: bool,
+    /// How many recently-played artists to keep out of the next pick;
+    /// zero is off. Kept from the player's own panel (decision 9).
+    pub artist_cooldown: u32,
+    /// The track-length window, in seconds; a bound on its rail (0 below,
+    /// 1200 above) is not sent.
+    pub length: bool,
+    pub min_seconds: u32,
+    pub max_seconds: u32,
+    pub allow_unknown_length: bool,
+    /// The client-side keyword filter over title, artist, album, filepath.
+    pub keyword_filter: bool,
+    pub keywords: Vec<String>,
+    /// Minimum rating, 1–10; zero means no floor. A server entry's own
+    /// `dj_min_rating` overrides it.
+    pub min_rating: u32,
+    /// "off", "whitelist" (only these) or "blacklist" (anything but these);
+    /// a server entry's own `dj_genre_mode` / `dj_genres` override.
     pub genre_mode: String,
     pub genres: Vec<String>,
+    /// Legacy (the three-mode panel): a percent, "off" / "compatible" /
+    /// "strict", and the perceptual 1–100 slider. Read for the migration,
+    /// dropped on the next write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tempo_tolerance: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_matching: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sonic_tightness: Option<u32>,
     #[serde(flatten)]
     pub extra: Keep,
 }
@@ -230,19 +268,46 @@ pub struct AutoDjPrefs {
 impl Default for AutoDjPrefs {
     fn default() -> Self {
         AutoDjPrefs {
-            tempo_tolerance: crate::dj::DEFAULT_TEMPO_TOLERANCE,
-            key_matching: "compatible".to_string(),
-            min_rating: 0,
+            songs_per_fetch: crate::dj::DEFAULT_SONGS_PER_FETCH,
+            // On by default: it is what makes a DJ more than shuffle, and
+            // safe because a failing pool degrades instead of stopping
+            // (contract clauses 30 and 43).
+            sonic: true,
+            sonic_min_similarity: crate::dj::DEFAULT_SONIC_MIN_SIMILARITY,
+            sonic_anchor: "rolling".to_string(),
+            empty_queue: "ask".to_string(),
+            bpm: false,
+            bpm_tolerance: crate::dj::DEFAULT_BPM_TOLERANCE,
+            harmonic: false,
             // A little variety by default; a session that repeats an artist
             // immediately reads as broken even when the pick was legitimate.
             artist_cooldown: 3,
-            sonic_tightness: 0,
-            sonic_anchor: "session".to_string(),
+            length: false,
+            min_seconds: 0,
+            max_seconds: crate::dj::LENGTH_RAIL_SECONDS,
+            allow_unknown_length: false,
+            keyword_filter: false,
+            keywords: Vec::new(),
+            min_rating: 0,
             genre_mode: "off".to_string(),
             genres: Vec::new(),
+            tempo_tolerance: None,
+            key_matching: None,
+            sonic_tightness: None,
             extra: Keep::new(),
         }
     }
+}
+
+/// A server entry's own Auto DJ library rules, as the App's book carries
+/// them (contract clause 51): the libraries switched off, and the rating
+/// floor and genre filter when set here rather than in `[player.dj]`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DjLibraryOverrides {
+    pub sources_off: Vec<String>,
+    pub min_rating: Option<u32>,
+    pub genre_mode: Option<String>,
+    pub genres: Option<Vec<String>>,
 }
 
 /// `[cache]` — where scratch data lives. Today that is only the streaming
@@ -482,6 +547,17 @@ pub struct ServerEntry {
     /// entry's `url` is then the synthetic identity [`peer_identity`] mints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<PeerEntry>,
+    /// Auto DJ's rules for this library (auto-dj contract, clause 51): the
+    /// sources switched OFF, and — when set here rather than in
+    /// `[player.dj]` — the rating floor and the genre filter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dj_sources_off: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dj_min_rating: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dj_genre_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dj_genres: Option<Vec<String>>,
     #[serde(flatten)]
     pub extra: Keep,
 }
@@ -961,6 +1037,21 @@ pub fn load() -> Result<Config, String> {
         // upgrade doesn't forget the server you were using.
         None => Ok(migrate_legacy_session()?.unwrap_or_default()),
     }
+}
+
+/// Write a server entry's Auto DJ library rules (auto-dj contract, clause
+/// 51): the sources switched off, and the rating floor and genre filter
+/// when the entry has its own. A server not in the file is nothing to save.
+pub fn save_dj_library(identity: &str, overrides: &DjLibraryOverrides) -> Result<(), String> {
+    let mut config = load()?;
+    let Some(entry) = config.servers.iter_mut().find(|e| same_server(&e.url, identity)) else {
+        return Ok(());
+    };
+    entry.dj_sources_off = overrides.sources_off.clone();
+    entry.dj_min_rating = overrides.min_rating;
+    entry.dj_genre_mode = overrides.genre_mode.clone();
+    entry.dj_genres = overrides.genres.clone();
+    save(&config)
 }
 
 pub fn save(config: &Config) -> Result<(), String> {

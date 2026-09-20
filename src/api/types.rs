@@ -117,6 +117,9 @@ pub struct Ping {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct LayeredInfo {
+    /// The server's own version, e.g. `"6.28.0"` — what the version floors
+    /// of the auto-dj contract (clause 50) are judged against.
+    pub server: Option<String>,
     pub features: LayeredFeatures,
     pub user: LayeredUser,
 }
@@ -127,6 +130,11 @@ pub struct LayeredFeatures {
     #[serde(deserialize_with = "transcode_or_off")]
     pub transcode: Option<TranscodeInfo>,
     pub discovery: bool,
+    /// Whether the discovery scan has produced vectors yet (mStream #879).
+    /// `None` on a server that does not say — which holds nothing back
+    /// (auto-dj contract, clause 36).
+    #[serde(rename = "discoveryReady")]
+    pub discovery_ready: Option<bool>,
     #[serde(rename = "discoveryP2p")]
     pub discovery_p2p: bool,
 }
@@ -956,13 +964,36 @@ pub struct RandomSongRequest {
     pub bpm_ranges: Vec<BpmWindow>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub bpm_ranges_wide: Vec<BpmWindow>,
+    /// Tagged tracks only, so the waterfall never falls back to untagged
+    /// picks when the windows return nothing (auto-dj contract, clause 21).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_bpm: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub musical_keys: Vec<String>,
+    /// Keyed tracks only, even before the anchor is locked (clause 22).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_musical_key: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignore_artists: Vec<String>,
+    /// The libraries switched OFF for the DJ (clause 20). Named by hand:
+    /// the server spells it `ignoreVPaths`, which camelCase would not.
+    #[serde(rename = "ignoreVPaths", skip_serializing_if = "Vec::is_empty")]
+    pub ignore_vpaths: Vec<String>,
     /// 1–10. Omitted when zero, which the server also reads as "no floor".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_rating: Option<u32>,
+    /// The track-length window in seconds; a rail is not sent, and
+    /// `allowUnknownDuration` only rides beside a real bound (clause 20).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_duration: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_duration: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_unknown_duration: Option<bool>,
+    /// How many songs this turn asks for, 1–25; absent at one, the
+    /// pre-batch wire shape (clause 27).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub genres: Vec<String>,
     /// Only meaningful alongside `genres`: "whitelist" (default) or

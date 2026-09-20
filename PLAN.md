@@ -1854,7 +1854,7 @@ a LATER secondary screen (party view), Columns retired.
   recorded and confirmed 2026-09-20 — decision 10 rewritten to the
   record's model: the DJ is armed FOR a server and the session browses
   freely). Slices, each citing its clauses:
-  - **A1 — the shared model**: `player.autodj` becomes `autodj_server`
+  - **A1 — the shared model ✅ 2026-09-20**: `player.autodj` becomes `autodj_server`
     (the identity the DJ is armed for) and `[player.dj]` the record's
     toggles (the migration table in the contract); `Similar` retired; the
     DJ's server apart from the session with its probe (clause 19), the
@@ -1865,18 +1865,20 @@ a LATER secondary screen (party view), Columns retired.
     the one-shot seed (5), the empty-queue answer and `Capture::DjSeed`
     (2, 4, 16), disarm on removal. Pure tests on the request JSON and the
     lane.
-  - **A2 — the worker**: every pick through `client_for(reach)` for the
+  - **A2 — the worker ✅ 2026-09-20** (landed with A1): every pick through `client_for(reach)` for the
     DJ's server, the tunnel-target set grown by it while armed (19), the
     capability learner keyed by server identity with the version
     pre-filter from the probe (25, 50), the failure taxonomy (30–34), the
     tunnel defer and owed pick (33, 35), readiness from
     `features.discoveryReady` (36), the `[dj]` log lines (63).
-  - **A3 — the GUI**: the Settings doorway and the room (40–53), the
+  - **A3 — the GUI** (next): the Settings doorway and the room (40–53), the
     start chooser and the capture banner, the bar's on/off wording, the
     queue panel's badge and empty-state openers (16, 60, 62), ten locales
     of `gui.dj.*` carried from the record's `autoDj*`.
-  - **A4 — the TUI and the web shell follow**: `A` on/off, the tab's rows
-    reshaped (the deviations log), the wasm check.
+  - **A4 — the TUI and the web shell follow** (mostly with A1: `A` arms /
+    switches off / moves, the tab's rows are the contract's, the choosers
+    draw over both screens, the wasm check passes; left: keyword entry in
+    the TUI — the tab says to use the GUI's room for now).
   - **A5 — the rig**: a peer-hosted lane through the proxy and direct,
     `discovery is disabled` degrading once, a batch landing, Preview; the
     contract's status row and deviations updated with what it showed.

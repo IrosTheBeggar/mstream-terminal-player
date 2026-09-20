@@ -52,7 +52,7 @@ use crate::kit::theme::{self, legacy_conhost, th};
 use crate::tui::app::{
     Action, App, Effect, Entry, MessageKind, SEARCH_CLASSES, SearchClass, SearchNode, Tab,
 };
-use crate::tui::worker::{AudioCmd, AutoDjMode, Event};
+use crate::tui::worker::{AudioCmd, Event};
 use crate::tui::{self, worker};
 
 use bar::{BarView, Now};
@@ -1033,7 +1033,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         volume: gui.app.volume,
         shuffle: gui.app.queue.shuffle,
         repeat: gui.app.queue.repeat != crate::tui::app::Repeat::Off,
-        autodj: gui.app.autodj != AutoDjMode::Off,
+        autodj: gui.app.dj_armed(),
         queue_open: gui.queue_open,
         has_art,
     };
@@ -1930,7 +1930,7 @@ fn event_loop(
         let saving = gui
             .pending
             .iter()
-            .any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. }));
+            .any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. } | Effect::SaveDjLibrary { .. }));
         tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
         saver.tick(&gui.app);
         let ticked = gui.app.tick();

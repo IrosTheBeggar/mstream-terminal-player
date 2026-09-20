@@ -10,7 +10,7 @@ fn track(path: &str) -> Track {
 
 /// A queue row from the test server, for tests that build a `Queue` by hand.
 fn item(path: &str) -> Queued {
-    Queued { origin: Origin { server: "http://host:3000".into(), peer: None }, track: track(path) }
+    Queued { dj: None, origin: Origin { server: "http://host:3000".into(), peer: None }, track: track(path) }
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn connected_app() -> App {
         federation_direct: false,
     };
     // What a real ping does on the way in: the Auto-DJ rows depend on it.
-    app.dj_panel.rebuild(app.capabilities);
+    app.dj_panel.rebuild(&app.dj, None, false);
     app
 }
 
@@ -528,23 +528,6 @@ fn the_jump_keys_follow_the_fullscreen_view_like_the_arrows_do() {
     app.handle_action(Action::First);
     assert_eq!(app.queue.state.selected(), Some(0), "g comes back to the top");
     assert_eq!(app.files.state.selected(), browser_at, "the hidden browser never moved");
-}
-
-#[test]
-fn the_dj_mode_row_steps_left_even_when_the_ring_is_two_long() {
-    // Stepping back by going forward twice assumed all three modes were
-    // on offer. Without a similarity index the ring is Off and BpmKey,
-    // and two steps forward is a lap: left looked dead on a default
-    // server while right worked.
-    let mut app = connected_app();
-    app.capabilities = crate::api::types::Capabilities::default();
-    app.dj_panel = Default::default();
-    on_the_dj_tab(&mut app);
-
-    app.handle_action(Action::NowLeft); // left on the Mode row
-    assert_eq!(app.autodj, AutoDjMode::BpmKey, "left from Off reaches the other mode");
-    app.handle_action(Action::NowLeft);
-    assert_eq!(app.autodj, AutoDjMode::Off, "and left again comes back round");
 }
 
 /// Put the cursor on the Auto-DJ tab of the full-screen view, which is the
@@ -1641,6 +1624,7 @@ fn a_remembered_tunnel_server_dials_with_the_code_from_the_book() {
         self_signed: false,
         peer: None,
         pairing: Some("mstr1:fromthebook".into()),
+        dj: Default::default(),
     });
     let effects = app.start();
     assert_eq!(
@@ -1678,7 +1662,7 @@ fn granted(name: &str) -> Event {
 }
 
 fn nas_row(path: &str) -> Queued {
-    Queued { origin: Origin { server: ATTIC.into(), peer: Some(3) }, track: track(path) }
+    Queued { dj: None, origin: Origin { server: ATTIC.into(), peer: Some(3) }, track: track(path) }
 }
 
 /// Connected to the parent, which offers direct access; the peer is in the book.
@@ -1692,7 +1676,7 @@ fn federated_app() -> App {
             token: Some("at".into()),
             self_signed: false,
             peer: None,
-            pairing: None,
+            pairing: None, dj: Default::default(),
         },
         KnownServer {
             id: nas(),
@@ -1700,7 +1684,7 @@ fn federated_app() -> App {
             token: None,
             self_signed: false,
             peer: Some((ATTIC.into(), 3)),
-            pairing: None,
+            pairing: None, dj: Default::default(),
         },
     ];
     app.direct_offered.insert(ATTIC.into());
@@ -2086,9 +2070,9 @@ fn a_tunnel_parent_is_kept_for_the_access_call_and_let_go_once_the_peer_is_direc
     let parent = "mstream+iroh://faraway";
     let pid = crate::config::peer_identity(parent, 7);
     app.servers.push(faraway());
-    app.servers.push(KnownServer { id: pid.clone(), name: "Shed".into(), token: None, self_signed: false, peer: Some((parent.into(), 7)), pairing: None });
+    app.servers.push(KnownServer { id: pid.clone(), name: "Shed".into(), token: None, self_signed: false, peer: Some((parent.into(), 7)), pairing: None, dj: Default::default() });
     app.direct_offered.insert(parent.into());
-    app.queue.push(Queued { origin: Origin { server: parent.into(), peer: Some(7) }, track: track("music/s.mp3") });
+    app.queue.push(Queued { dj: None, origin: Origin { server: parent.into(), peer: Some(7) }, track: track("music/s.mp3") });
 
     // No ticket yet: the parent is wanted (the proxy, and the access call).
     assert!(app.tunnel_targets().contains(parent));
@@ -2125,6 +2109,7 @@ fn faraway() -> KnownServer {
         self_signed: false,
         peer: None,
         pairing: Some("mstr1:far".into()),
+        dj: Default::default(),
     }
 }
 
@@ -2577,7 +2562,7 @@ fn a_self_signed_session_carries_its_trust_into_every_connect() {
 
 /// A queue row from a named server, for the cross-server tests.
 fn at(server: &str, path: &str) -> Queued {
-    Queued { origin: Origin { server: server.to_string(), peer: None }, track: track(path) }
+    Queued { dj: None, origin: Origin { server: server.to_string(), peer: None }, track: track(path) }
 }
 
 #[test]
@@ -2606,14 +2591,12 @@ fn adopting_a_server_keeps_the_music_and_the_queue() {
             id: "http://attic.local:3000".into(),
             name: "http://attic.local:3000".into(),
             token: Some("attic-token".into()),
-            self_signed: false, peer: None, pairing: None
-        },
+            self_signed: false, peer: None, pairing: None, dj: Default::default() },
         KnownServer {
             id: "http://office.local:3000".into(),
             name: "http://office.local:3000".into(),
             token: Some("office-token".into()),
-            self_signed: true, peer: None, pairing: None
-        },
+            self_signed: true, peer: None, pairing: None, dj: Default::default() },
     ];
     app.push_queue(track("music/a.mp3"));
     app.push_queue(track("music/b.mp3"));
@@ -2666,8 +2649,7 @@ fn a_row_on_a_closed_tunnel_walks_on_like_a_refused_one() {
         id: "mstream+iroh://faraway".into(),
         name: "mstream+iroh://faraway".into(),
         token: Some("t".into()),
-        self_signed: false, peer: None, pairing: None
-    });
+        self_signed: false, peer: None, pairing: None, dj: Default::default() });
     app.queue.push(at("mstream+iroh://faraway", "music/far.mp3"));
     app.push_queue(track("music/near.mp3"));
 
@@ -2717,7 +2699,7 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
     // the playing row keeps its place, the position comes back, and
     // nothing plays until asked — then that row, from that second.
     let mut app = connected_app();
-    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: Some("bt".into()), self_signed: false , peer: None, pairing: None}];
+    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: Some("bt".into()), self_signed: false , peer: None, pairing: None, dj: Default::default() }];
     let mut long = at("http://b", "music/2.mp3");
     long.track.metadata.duration = Some(300.0);
     let snapshot = QueueSnapshot {
@@ -2869,6 +2851,7 @@ fn a_peers_rows_play_through_the_parents_stream_proxy() {
     // its bytes come through the parent's proxy with the parent's token.
     let mut app = connected_app();
     app.queue.push(Queued {
+        dj: None,
         origin: Origin { server: "http://host:3000".into(), peer: Some(3) },
         track: track("music/x.mp3"),
     });
@@ -2887,9 +2870,9 @@ fn a_peers_rows_play_through_the_parents_stream_proxy() {
         name: "http://attic:3000".into(),
         token: Some("at".into()),
         self_signed: false,
-        peer: None, pairing: None
-    }];
+        peer: None, pairing: None, dj: Default::default() }];
     app.queue.push(Queued {
+        dj: None,
         origin: Origin { server: "http://attic:3000".into(), peer: Some(5) },
         track: track("music/y.mp3"),
     });
@@ -2908,8 +2891,7 @@ fn a_peer_session_stamps_its_rows_and_keeps_none_of_the_optional_features() {
         name: "Nas".into(),
         token: None,
         self_signed: false,
-        peer: Some(("http://attic:3000".into(), 3)), pairing: None
-    }];
+        peer: Some(("http://attic:3000".into(), 3)), pairing: None, dj: Default::default() }];
     let effects = app.adopt_server(
         "http://attic:3000".into(),
         "mstream+peer://3@http://attic:3000".into(),
@@ -2995,7 +2977,7 @@ fn a_removed_server_takes_its_rows_and_playback_lands_on_the_next_survivor() {
     // Playing row 0 on the session's server; removing that server plays
     // the survivor, which lives on the other one.
     let mut app = connected_app();
-    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: None, self_signed: false , peer: None, pairing: None}];
+    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: None, self_signed: false , peer: None, pairing: None, dj: Default::default() }];
     app.queue.items = vec![at("http://host:3000", "music/1.mp3"), at("http://b", "music/2.mp3")];
     let effects = app.play_index(0);
     app.status = PlayerStatus { playing: true, source: played_url(&effects), ..Default::default() };
@@ -3557,20 +3539,14 @@ fn recently_added_lists_tracks_directly() {
     assert!(matches!(app.library.entries[1], Entry::Track { .. }));
 }
 
-fn autodj_effect(effects: &[Effect]) -> Option<&ApiCmd> {
-    effects.iter().find_map(|e| match e {
-        Effect::Api(cmd @ ApiCmd::AutoDj { .. }) => Some(cmd),
-        _ => None,
-    })
-}
-
 #[test]
 fn remembered_preferences_are_applied_and_handed_back() {
     let saved = crate::config::PlayerPrefs {
         volume: 0.35,
         repeat: "all".into(),
         shuffle: true,
-        autodj: "tempo+key".into(),
+        autodj_server: Some("http://host:3000".into()),
+        autodj: String::new(),
         crossfade_seconds: 4.5,
         gapless: true,
         blend_skips: true,
@@ -3583,7 +3559,7 @@ fn remembered_preferences_are_applied_and_handed_back() {
     assert_eq!(app.volume, 0.35);
     assert_eq!(app.queue.repeat, Repeat::All);
     assert!(app.queue.shuffle);
-    assert_eq!(app.autodj, AutoDjMode::BpmKey);
+    assert_eq!(app.dj_server.as_deref(), Some("http://host:3000"), "remembered as on comes back armed");
     assert_eq!(app.crossfade, 4.5);
     assert!(app.gapless);
     assert!(app.blend_skips);
@@ -3600,6 +3576,7 @@ fn nonsense_preferences_fall_back_rather_than_refusing_to_start() {
         volume: 9.0,
         repeat: "sideways".into(),
         shuffle: false,
+        autodj_server: None,
         autodj: "disco".into(),
         crossfade_seconds: f32::NAN,
         gapless: false,
@@ -3612,20 +3589,8 @@ fn nonsense_preferences_fall_back_rather_than_refusing_to_start() {
     let app = App::new(None, None, None).with_prefs(&saved);
     assert_eq!(app.volume, 1.0, "volume is clamped");
     assert_eq!(app.queue.repeat, Repeat::Off);
-    assert_eq!(app.autodj, AutoDjMode::Off);
+    assert!(app.dj_server.is_none());
     assert_eq!(app.crossfade, 0.0, "a NaN blend is no blend");
-}
-
-#[test]
-fn autodj_cycles_through_its_modes() {
-    let mut app = connected_app();
-    assert_eq!(app.autodj, AutoDjMode::Off);
-    app.handle_action(Action::ToggleAutoDj);
-    assert_eq!(app.autodj, AutoDjMode::Similar);
-    app.handle_action(Action::ToggleAutoDj);
-    assert_eq!(app.autodj, AutoDjMode::BpmKey);
-    app.handle_action(Action::ToggleAutoDj);
-    assert_eq!(app.autodj, AutoDjMode::Off);
 }
 
 /// A browser pane holding tracks, with one highlighted.
@@ -4809,23 +4774,6 @@ fn a_path_reply_that_arrives_after_start_over_is_dropped() {
     assert_eq!(app.queue.items.len(), 1, "and nothing is queued behind the user's back");
 }
 
-#[test]
-fn the_dj_tab_only_offers_rows_the_server_can_honour() {
-    let app = connected_app();
-    let rows = &app.dj_panel.rows;
-    assert!(rows.contains(&DjRow::Tightness), "this server has the index");
-    assert!(rows.contains(&DjRow::Anchor));
-
-    // Without it, a row promising a sonic pool would be a lie.
-    let mut app = connected_app();
-    app.capabilities = Default::default();
-    app.dj_panel.rebuild(app.capabilities);
-    let rows = &app.dj_panel.rows;
-    assert!(!rows.contains(&DjRow::Tightness));
-    assert!(!rows.contains(&DjRow::Anchor));
-    assert!(rows.contains(&DjRow::Tempo), "the rest is still there");
-}
-
 /// A `[keys]` section from a config file.
 fn keys(pairs: &[(&str, &[&str])]) -> std::collections::BTreeMap<String, Vec<String>> {
     pairs
@@ -5091,9 +5039,10 @@ fn the_arrows_belong_to_the_tab_and_the_numbers_do_the_navigating() {
     assert_eq!(map_key(press(KeyCode::Char('1')), InputMode::Normal), Some(Action::SelectTab(0)));
 
     let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
     on_the_dj_tab(&mut app);
     app.handle_action(Action::NowRight);
-    assert_eq!(app.autodj, AutoDjMode::Similar, "→ adjusted the Mode row");
+    assert!(app.dj_armed(), "→ toggled the Auto DJ row");
     assert_eq!(app.now_tab(), NowTab::AutoDj, "and did not leave the tab");
 
     // The way out is the same key it is on every other tab.
@@ -5126,56 +5075,6 @@ fn the_genre_chooser_owns_the_keyboard_while_it_is_open() {
 
     app.handle_action(Action::Cancel);
     assert_eq!(app.input_mode(), InputMode::Now);
-}
-
-#[test]
-fn adjusting_a_row_changes_the_setting_it_names() {
-    let mut app = connected_app();
-    on_the_dj_tab(&mut app);
-
-    // Row 0 is the mode; stepping right cycles it.
-    app.handle_action(Action::NowRight);
-    assert_eq!(app.autodj, AutoDjMode::Similar);
-
-    // Tightness moves in useful steps and stops at the ends rather than
-    // wrapping — a slider that wraps loses your place.
-    app.dj_panel.row = 1;
-    assert_eq!(app.dj_panel.selected(), DjRow::Tightness);
-    app.handle_action(Action::NowRight);
-    assert_eq!(app.dj.sonic_tightness, 5);
-    for _ in 0..40 {
-        app.handle_action(Action::NowRight);
-    }
-    assert_eq!(app.dj.sonic_tightness, 100, "clamped at the top");
-    for _ in 0..40 {
-        app.handle_action(Action::NowLeft);
-    }
-    assert_eq!(app.dj.sonic_tightness, 0, "and at the bottom, which is off");
-}
-
-#[test]
-fn dj_tab_settings_are_remembered() {
-    let mut app = connected_app();
-    on_the_dj_tab(&mut app);
-    app.dj_panel.row = 1;
-    app.handle_action(Action::NowRight); // tightness 5
-
-    let saved = app.prefs();
-    assert_eq!(saved.dj.sonic_tightness, 5);
-    let restored = App::new(None, None, None).with_prefs(&saved);
-    assert_eq!(restored.dj, app.dj);
-}
-
-#[test]
-fn g_and_shift_g_jump_to_the_ends_of_the_dj_tab() {
-    // Found live: both keys were bound but the settings list ignored them,
-    // so `G` silently did nothing.
-    let mut app = connected_app();
-    on_the_dj_tab(&mut app);
-    app.handle_action(Action::Last);
-    assert_eq!(app.dj_panel.selected(), DjRow::Sample, "the last row");
-    app.handle_action(Action::First);
-    assert_eq!(app.dj_panel.selected(), DjRow::Mode);
 }
 
 #[test]
@@ -5357,34 +5256,6 @@ fn a_wait_nothing_will_answer_is_given_up_on() {
 }
 
 #[test]
-fn a_request_carries_the_session_the_panel_is_tuning() {
-    let mut app = connected_app();
-    app.autodj = AutoDjMode::BpmKey;
-    app.dj.sonic_tightness = 50;
-    app.dj.artist_cooldown = 2;
-
-    // Two tracks played, newest first, with the artist of each.
-    app.replace_queue(vec![
-        track_by("a", "Alpha"),
-        track_by("b", "Beta"),
-        track_by("c", "Gamma"),
-    ]);
-    app.play_index(0);
-    app.play_index(1);
-    let effects = app.play_index(2);
-
-    match autodj_effect(&effects).expect("the queue ran out") {
-        ApiCmd::AutoDj(request) => {
-            assert_eq!(request.anchors, vec!["c", "b", "a"], "newest first");
-            assert_eq!(request.recent_artists, vec!["Gamma", "Beta", "Alpha"]);
-            assert!(request.sonic_available, "this server has the index");
-            assert_eq!(request.settings.sonic_tightness, 50);
-        }
-        other => panic!("unexpected {other:?}"),
-    }
-}
-
-#[test]
 fn the_cooldown_list_does_not_repeat_an_artist() {
     // Three tracks by the same artist should not spend the whole cooldown.
     let mut app = connected_app();
@@ -5397,177 +5268,6 @@ fn the_cooldown_list_does_not_repeat_an_artist() {
     app.play_index(1);
     app.play_index(2);
     assert_eq!(app.recent_artists(), vec!["Beta", "Alpha"]);
-}
-
-#[test]
-fn autodj_skips_a_mode_the_server_cannot_serve() {
-    // Default install: no embedding index. Offering "similar" would spend
-    // a keystroke and a round trip to land on tempo+key anyway.
-    let mut app = connected_app();
-    app.capabilities = Default::default();
-
-    app.handle_action(Action::ToggleAutoDj);
-    assert_eq!(app.autodj, AutoDjMode::BpmKey, "straight past similar");
-    app.handle_action(Action::ToggleAutoDj);
-    assert_eq!(app.autodj, AutoDjMode::Off, "and the cycle still closes");
-}
-
-#[test]
-fn a_remembered_similar_mode_is_dropped_on_a_server_without_the_index() {
-    // Preferences are global; capabilities are per-server. Reconnecting
-    // elsewhere must not leave a mode selected that does something else.
-    let saved = crate::config::PlayerPrefs {
-        volume: 1.0,
-        repeat: "off".into(),
-        shuffle: false,
-        autodj: "similar".into(),
-        crossfade_seconds: 0.0,
-        gapless: false,
-        blend_skips: false,
-        pause_fade: false,
-        resume_queue: true,
-        dj: Default::default(),
-        extra: Default::default(),
-    };
-    let mut app = App::new(None, None, None).with_prefs(&saved);
-    assert_eq!(app.autodj, AutoDjMode::Similar);
-
-    app.apply_event(Event::Connected {
-        server: "http://plain:3000".into(),
-        id: "http://plain:3000".into(),
-        username: None,
-        token: None,
-        ping: Box::new(Default::default()),
-    });
-    assert_eq!(app.autodj, AutoDjMode::BpmKey);
-    assert!(app.message.as_ref().unwrap().text.contains("similarity index"));
-
-    // On a server that has one, the remembered mode is left alone.
-    let mut app = App::new(None, None, None).with_prefs(&saved);
-    app.apply_event(Event::Connected {
-        server: "http://rich:3000".into(),
-        id: "http://rich:3000".into(),
-        username: None,
-        token: None,
-        ping: Box::new(crate::api::types::Ping {
-            discovery: true,
-            ..Default::default()
-        }),
-    });
-    assert_eq!(app.autodj, AutoDjMode::Similar);
-    assert!(app.capabilities.discovery);
-}
-
-#[test]
-fn switching_autodj_on_with_an_empty_queue_starts_it() {
-    let mut app = connected_app();
-    let effects = app.handle_action(Action::ToggleAutoDj);
-    match autodj_effect(&effects).expect("a request goes out") {
-        ApiCmd::AutoDj(request) => {
-            assert_eq!(request.mode, AutoDjMode::Similar);
-            assert!(request.seed.is_none());
-            assert!(request.ignore_list.is_empty());
-        }
-        other => panic!("unexpected command {other:?}"),
-    }
-}
-
-#[test]
-fn switching_autodj_on_does_not_jump_a_queue_the_user_built() {
-    let mut app = connected_app();
-    app.replace_queue(vec![track("a"), track("b")]);
-    let effects = app.handle_action(Action::ToggleAutoDj);
-    assert!(autodj_effect(&effects).is_none(), "there are tracks waiting already");
-}
-
-#[test]
-fn autodj_requests_only_once_the_queue_has_nothing_after_the_current_track() {
-    let mut app = connected_app();
-    app.autodj = AutoDjMode::BpmKey;
-    app.replace_queue(vec![track("a"), track("b")]);
-
-    let effects = app.play_index(0);
-    assert!(autodj_effect(&effects).is_none(), "one track still waiting");
-
-    let effects = app.play_index(1);
-    let cmd = autodj_effect(&effects).expect("the last track should pull in another");
-    match cmd {
-        ApiCmd::AutoDj(request) => {
-            assert_eq!(request.mode, AutoDjMode::BpmKey);
-            assert_eq!(
-                request.seed.as_ref().unwrap().filepath,
-                "b",
-                "seeded on what's playing"
-            );
-        }
-        other => panic!("unexpected command {other:?}"),
-    }
-
-    // A second trigger while the first is unanswered must not pile on.
-    assert!(app.maybe_autodj().is_empty());
-}
-
-#[test]
-fn autodj_picks_are_appended_and_deduped() {
-    let mut app = connected_app();
-    app.autodj = AutoDjMode::Similar;
-    app.replace_queue(vec![track("a")]);
-    app.play_index(0);
-
-    app.apply_event(Event::AutoDjPick {
-        // The first candidate is already queued, so the second wins.
-        candidates: vec![track("a"), track("b")],
-        ignore_list: vec![7],
-        note: None,
-    });
-    assert_eq!(app.queue.items.len(), 2);
-    assert_eq!(app.queue.items[1].filepath, "b");
-    assert_eq!(app.autodj_ignore, vec![7], "the cursor is kept for the next request");
-    assert!(!app.autodj_pending);
-}
-
-#[test]
-fn an_autodj_pick_starts_playing_when_the_queue_ran_dry() {
-    let mut app = connected_app();
-    app.autodj = AutoDjMode::Similar;
-    // Nothing playing, nothing queued.
-    let effects = app.apply_event(Event::AutoDjPick {
-        candidates: vec![track("fresh")],
-        ignore_list: Vec::new(),
-        note: None,
-    });
-    assert_eq!(app.queue.items.len(), 1);
-    assert!(matches!(effects[0], Effect::Audio(AudioCmd::Play { .. })));
-    assert_eq!(app.queue.current, Some(0));
-}
-
-#[test]
-fn a_pick_arriving_after_autodj_is_switched_off_is_dropped() {
-    let mut app = connected_app();
-    app.autodj = AutoDjMode::Similar;
-    app.autodj_pending = true;
-    app.autodj = AutoDjMode::Off;
-
-    let effects = app.apply_event(Event::AutoDjPick {
-        candidates: vec![track("late")],
-        ignore_list: Vec::new(),
-        note: None,
-    });
-    assert!(app.queue.items.is_empty());
-    assert!(effects.is_empty());
-}
-
-#[test]
-fn a_fallback_note_is_surfaced_instead_of_the_track_name() {
-    let mut app = connected_app();
-    app.autodj = AutoDjMode::Similar;
-    app.apply_event(Event::AutoDjPick {
-        candidates: vec![track("x")],
-        ignore_list: Vec::new(),
-        note: Some("this track hasn't been analysed yet — matching tempo and key".into()),
-    });
-    let message = app.message.as_ref().unwrap();
-    assert!(message.text.contains("analysed"), "the user learns why it fell back");
 }
 
 #[test]
@@ -6311,4 +6011,466 @@ fn the_connect_screen_swallows_playback_only_where_a_shell_shows_one() {
     app.connect_screen = false;
     app.handle_action(Action::ToggleShuffle);
     assert!(app.queue.shuffle, "a shell without the screen lets it through");
+}
+
+// ── Auto DJ (docs/ux-contracts/auto-dj.md) ──────────────────────────────────
+
+const HOST: &str = "http://host:3000";
+
+fn dj_probe_effect(effects: &[Effect]) -> Option<(&str, &Option<crate::tui::app::Reach>)> {
+    effects.iter().find_map(|e| match e {
+        Effect::Api(ApiCmd::DjProbe { identity, reach }) => Some((identity.as_str(), reach)),
+        _ => None,
+    })
+}
+
+fn dj_request(effects: &[Effect]) -> Option<&crate::tui::worker::DjRequest> {
+    effects.iter().find_map(|e| match e {
+        Effect::Api(ApiCmd::AutoDj(request)) => Some(request.as_ref()),
+        _ => None,
+    })
+}
+
+fn pick(epoch: u64, songs: Vec<Track>) -> Event {
+    Event::AutoDjPick { epoch, songs, ignore_list: vec![7], sonic: true, note: None, failure: None }
+}
+
+/// A session that is really playing something, as the top-up rule wants.
+fn playing(app: &mut App) {
+    app.status.source = "http://host:3000/media/x".into();
+}
+
+#[test]
+fn the_old_mode_arms_on_the_remembered_server_at_start() {
+    // The three-mode panel's "on" never named a server (the contract's
+    // migration table): it arms on the remembered session's, and the file
+    // is written the new way from then on.
+    let saved = crate::config::PlayerPrefs { autodj: "tempo+key".into(), ..Default::default() };
+    let mut app = App::new(Some(HOST.into()), Some("tok".into()), None).with_prefs(&saved);
+    assert!(app.dj_server.is_none(), "nothing is known until the session is");
+    app.start();
+    assert_eq!(app.dj_server.as_deref(), Some(HOST));
+    let out = app.prefs();
+    assert_eq!(out.autodj_server.as_deref(), Some(HOST));
+    assert!(out.autodj.is_empty(), "the old key is never written again");
+}
+
+#[test]
+fn the_toggle_arms_here_switches_off_here_and_moves_elsewhere() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a"), track("b")]);
+
+    let effects = app.handle_action(Action::ToggleAutoDj);
+    assert_eq!(app.dj_server.as_deref(), Some(HOST), "armed for the session's server");
+    assert!(app.message.as_ref().unwrap().text.contains("Auto DJ on"));
+    let (identity, reach) = dj_probe_effect(&effects).expect("the server is probed");
+    assert_eq!(identity, HOST);
+    assert!(reach.is_none(), "the session's own server rides its client");
+    assert!(dj_request(&effects).is_none(), "two rows waiting: nothing to top up yet (clause 1)");
+    assert!(app.dj_info.is_some(), "and the session's ping stands in until the probe answers");
+    let first_lane = app.lane.epoch;
+
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(app.dj_server.is_none(), "on here means off");
+    assert!(app.message.as_ref().unwrap().text.contains("Auto DJ off"));
+
+    // Armed on one server, the toggle on another moves it there and starts
+    // a new lane; browsing does not.
+    app.handle_action(Action::ToggleAutoDj);
+    let armed_lane = app.lane.epoch;
+    app.session.server = "http://other:3000".into();
+    app.session.server_id = "http://other:3000".into();
+    assert_eq!(app.dj_server.as_deref(), Some(HOST), "a switch of the browsed server moves nothing");
+    app.handle_action(Action::ToggleAutoDj);
+    assert_eq!(app.dj_server.as_deref(), Some("http://other:3000"));
+    assert!(app.lane.epoch > armed_lane && armed_lane > first_lane, "each arm elsewhere is a new lane");
+}
+
+#[test]
+fn the_top_up_fires_only_on_a_live_last_row() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a"), track("b")]);
+    app.handle_action(Action::ToggleAutoDj);
+    playing(&mut app);
+
+    let effects = app.play_index(0);
+    assert!(dj_request(&effects).is_none(), "one track still waiting");
+    let effects = app.play_index(1);
+    let request = dj_request(&effects).expect("the last row pulls in a turn");
+    assert_eq!(request.identity, HOST);
+    assert_eq!(request.epoch, app.lane.epoch);
+    assert!(app.lane.pending);
+    // A second trigger while the first is unanswered must not pile on.
+    assert!(app.maybe_autodj().is_empty());
+
+    // Idle index emissions never top up (clause 13); nor does a failure walk.
+    app.lane.pending = false;
+    app.status.source.clear();
+    assert!(app.maybe_autodj().is_empty(), "idle");
+    playing(&mut app);
+    app.failures = 1;
+    assert!(app.maybe_autodj().is_empty(), "walking failed tracks");
+    app.failures = 0;
+    assert!(!app.maybe_autodj().is_empty());
+}
+
+#[test]
+fn a_turn_carries_the_lane_and_the_playing_track() {
+    let mut app = connected_app();
+    app.dj.artist_cooldown = 2;
+    app.replace_queue(vec![track_by("a", "Alpha"), track_by("b", "Beta"), track_by("c", "Gamma")]);
+    app.handle_action(Action::ToggleAutoDj);
+    playing(&mut app);
+    app.play_index(0);
+    app.play_index(1);
+    let effects = app.play_index(2);
+    let request = dj_request(&effects).expect("the queue ran out");
+    assert!(request.reach.is_none(), "the session's own client");
+    assert_eq!(request.ask.recent_artists, vec!["Gamma", "Beta", "Alpha"], "newest first");
+    assert_eq!(request.ask.settings.artist_cooldown, 2);
+    // Rolling anchor, no history yet: the playing track seeds, since it
+    // lives on the DJ's server (clause 23).
+    assert_eq!(request.ask.sonic_seeds, vec!["c"]);
+    assert!(!request.ask.opener);
+}
+
+#[test]
+fn a_batch_lands_in_order_wears_the_badge_and_plays_when_the_queue_ran_dry() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.queue.current = Some(0);
+    app.lane.pending = true;
+
+    // The first song is already queued and is skipped; the rest land in order.
+    let effects = app.apply_event(pick(app.lane.epoch, vec![track("a"), track("b"), track("c")]));
+    let paths: Vec<&str> = app.queue.items.iter().map(|t| t.filepath.as_str()).collect();
+    assert_eq!(paths, ["a", "b", "c"]);
+    assert!(app.queue.items[0].dj.is_none(), "the user's row wears no badge");
+    assert_eq!(app.queue.items[1].dj, Some(crate::tui::app::DjMark { sonic: true }));
+    assert_eq!(app.lane.ignore, vec![7], "the cursor is kept for the next turn");
+    assert!(!app.lane.pending);
+    assert_eq!(app.lane.history, vec!["b", "c"], "every pick joins the rolling anchor");
+    // Idle on the last row: the first new row plays at once (clause 14).
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+    assert_eq!(app.queue.current, Some(1));
+}
+
+#[test]
+fn a_reply_from_another_lane_is_dropped_and_so_is_one_after_off() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.lane.pending = true;
+    let stale = app.lane.epoch;
+    app.lane.reset(); // a queue clear, say
+    app.lane.pending = true;
+    let effects = app.apply_event(pick(stale, vec![track("late")]));
+    assert_eq!(app.queue.items.len(), 1, "the dead lane's track stays out");
+    assert!(effects.is_empty());
+    assert!(app.lane.pending, "and the live lane's own wait stands");
+
+    let epoch = app.lane.epoch;
+    app.handle_action(Action::ToggleAutoDj); // off
+    let effects = app.apply_event(pick(epoch + 1, vec![track("later")]));
+    assert_eq!(app.queue.items.len(), 1);
+    assert!(effects.is_empty());
+}
+
+#[test]
+fn a_degrade_is_said_once_per_lane_and_an_auth_failure_too() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    let epoch = app.lane.epoch;
+    app.message = None;
+    app.apply_event(Event::AutoDjPick {
+        epoch,
+        songs: vec![track("b")],
+        ignore_list: vec![],
+        sonic: false,
+        note: Some(crate::tui::worker::DJ_NOTE_RANGE.into()),
+        failure: None,
+    });
+    assert!(app.message.as_ref().unwrap().text.contains("similarity range"));
+    app.message = None;
+    app.apply_event(Event::AutoDjPick {
+        epoch,
+        songs: vec![track("c")],
+        ignore_list: vec![],
+        sonic: false,
+        note: Some(crate::tui::worker::DJ_NOTE_RANGE.into()),
+        failure: None,
+    });
+    // The second turn is announced as a pick, not as the note again.
+    assert!(!app.message.as_ref().unwrap().text.contains("similarity range"), "once per lane");
+
+    app.apply_event(Event::AutoDjPick {
+        epoch,
+        songs: vec![],
+        ignore_list: vec![],
+        sonic: false,
+        note: None,
+        failure: Some(crate::tui::worker::DjFailure::Auth),
+    });
+    assert!(app.message.as_ref().unwrap().text.contains("session expired"));
+    assert!(app.dj_armed(), "the DJ stays armed for the next queue end");
+    app.message = None;
+    app.apply_event(Event::AutoDjPick {
+        epoch,
+        songs: vec![],
+        ignore_list: vec![],
+        sonic: false,
+        note: None,
+        failure: Some(crate::tui::worker::DjFailure::Network("down".into())),
+    });
+    assert!(app.message.is_none(), "an offline queue end is normal");
+    assert!(app.lane.owed, "and the turn is owed");
+}
+
+#[test]
+fn switching_on_with_an_empty_queue_asks_and_the_opener_seeds_the_session() {
+    let mut app = connected_app();
+    let effects = app.handle_action(Action::ToggleAutoDj);
+    assert!(effects.is_empty() && app.dj_chooser.is_some(), "the opening question");
+    assert!(app.dj_server.is_none(), "not armed until it is answered");
+    assert_eq!(app.input_mode(), InputMode::Panel);
+
+    // Surprise me: the filtered opener, one song, nothing else.
+    let effects = app.handle_action(Action::Activate);
+    assert!(app.dj_chooser.is_none());
+    let request = dj_request(&effects).expect("the opener goes out");
+    assert!(request.ask.opener);
+    assert!(request.ask.ignore_list.is_empty());
+    assert_eq!(request.identity, HOST);
+    let body = serde_json::to_value(request.ask.request()).unwrap();
+    assert!(body.get("limit").is_none() && body.get("similarTo").is_none());
+
+    let effects = app.apply_event(pick(request.epoch, vec![track("opener")]));
+    assert_eq!(app.dj_server.as_deref(), Some(HOST), "the seed arms the DJ");
+    assert_eq!(app.queue.items.len(), 1);
+    assert_eq!(app.queue.items[0].filepath, "opener");
+    assert!(app.queue.items[0].dj.is_some(), "the DJ chose it");
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+    assert!(dj_request(&effects).is_some(), "and the followers are asked for (clause 7)");
+    assert!(app.lane.followers);
+}
+
+#[test]
+fn the_openers_failure_leaves_the_dj_off_in_the_records_words() {
+    let mut app = connected_app();
+    app.dj.empty_queue = dj::EmptyQueueStart::Random;
+    let effects = app.handle_action(Action::ToggleAutoDj);
+    let request = dj_request(&effects).expect("remembered: no question asked");
+    app.apply_event(Event::AutoDjPick {
+        epoch: request.epoch,
+        songs: vec![],
+        ignore_list: vec![],
+        sonic: false,
+        note: None,
+        failure: Some(crate::tui::worker::DjFailure::NoMatch),
+    });
+    assert!(app.dj_server.is_none());
+    assert!(app.message.as_ref().unwrap().text.contains("No songs match your Auto DJ filters"));
+}
+
+#[test]
+fn the_chooser_remembers_when_asked_and_esc_leaves_the_dj_off() {
+    let mut app = connected_app();
+    app.handle_action(Action::ToggleAutoDj);
+    app.handle_action(Action::Cancel);
+    assert!(app.dj_chooser.is_none() && app.dj_server.is_none(), "dismissed: off");
+
+    app.handle_action(Action::ToggleAutoDj);
+    app.handle_action(Action::Down); // Let me choose
+    app.handle_action(Action::PlayPause); // remember this
+    app.handle_action(Action::Activate);
+    assert_eq!(app.dj.empty_queue, dj::EmptyQueueStart::Pick, "remembered");
+    assert_eq!(app.capture, Some(Capture::DjSeed), "the library, under the banner");
+    assert!(app.message.as_ref().unwrap().text.contains("Pick the opening song"));
+    assert!(app.dj_server.is_none(), "not before a row lands");
+    // Esc on the road leaves it off.
+    app.handle_action(Action::Cancel);
+    assert!(app.capture.is_none() && app.dj_server.is_none());
+}
+
+#[test]
+fn let_me_choose_arms_on_the_row_that_lands() {
+    let mut app = connected_app();
+    app.dj.empty_queue = dj::EmptyQueueStart::Pick;
+    app.handle_action(Action::ToggleAutoDj);
+    assert_eq!(app.capture, Some(Capture::DjSeed));
+    browsing(&mut app, &["one", "two"], 1);
+    let effects = app.handle_action(Action::Activate);
+    assert_eq!(app.dj_server.as_deref(), Some(HOST));
+    assert_eq!(app.queue.items.len(), 1);
+    assert_eq!(app.queue.items[0].filepath, "two");
+    assert!(app.queue.items[0].dj.is_none(), "the user chose it");
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+    assert!(app.capture.is_none());
+}
+
+#[test]
+fn a_removed_server_takes_its_dj_with_it() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.drop_server_items(HOST);
+    assert!(app.dj_server.is_none());
+}
+
+#[test]
+fn the_djs_tunnel_server_is_a_target_while_armed_and_its_turn_is_owed_until_it_serves() {
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.replace_queue(vec![track("a")]);
+    app.dj_server = Some("mstream+iroh://faraway".into());
+    assert!(app.tunnel_targets().contains("mstream+iroh://faraway"), "tunnel follows the DJ");
+
+    playing(&mut app);
+    app.queue.current = Some(0);
+    app.tunnels.insert("mstream+iroh://faraway".into(), crate::tui::app::TunnelState::Dialling);
+    assert!(app.maybe_autodj().is_empty(), "nothing to ask while it dials");
+    assert!(app.lane.owed);
+
+    let effects = app.apply_event(Event::TunnelUp {
+        id: "mstream+iroh://faraway".into(),
+        local_url: "http://127.0.0.1:5555".into(),
+        local_token: "lt".into(),
+    });
+    let request = dj_request(&effects).expect("the owed turn goes out");
+    let reach = request.reach.as_ref().expect("over the tunnel's bridge");
+    assert_eq!(reach.base, "http://127.0.0.1:5555");
+    assert_eq!(reach.local_token.as_deref(), Some("lt"));
+    assert!(dj_probe_effect(&effects).is_some(), "and the server is probed");
+    assert!(!app.lane.owed);
+}
+
+#[test]
+fn the_dj_tab_only_offers_rows_the_settings_and_the_server_allow() {
+    let mut app = connected_app();
+    let rows = app.dj_panel.rows.clone();
+    assert!(rows.contains(&DjRow::Strictness) && rows.contains(&DjRow::Anchor), "sonic is on by default");
+    assert!(rows.contains(&DjRow::Bpm) && !rows.contains(&DjRow::Tolerance), "a switch off hides its detail");
+    assert!(rows.contains(&DjRow::Rating) && !rows.contains(&DjRow::Sources));
+
+    app.dj.sonic = false;
+    app.dj.bpm = true;
+    app.dj_panel.rebuild(&app.dj, None, false);
+    let rows = &app.dj_panel.rows;
+    assert!(!rows.contains(&DjRow::Strictness) && rows.contains(&DjRow::Tolerance));
+
+    // A server known to predate the filters hides them; two libraries want
+    // a Sources row; a peer has no rating.
+    let info = crate::tui::worker::DjServerInfo {
+        version: Some("6.6.0".into()),
+        discovery: false,
+        discovery_ready: None,
+        libraries: vec!["Music".into(), "Audiobooks".into()],
+    };
+    app.dj_panel.rebuild(&app.dj, Some(&info), true);
+    let rows = &app.dj_panel.rows;
+    assert!(!rows.contains(&DjRow::Bpm) && !rows.contains(&DjRow::Harmonic) && !rows.contains(&DjRow::Genres));
+    assert!(rows.contains(&DjRow::Sources) && !rows.contains(&DjRow::Rating));
+    assert!(rows.contains(&DjRow::Sample), "Preview stays");
+}
+
+#[test]
+fn adjusting_a_row_changes_the_setting_it_names() {
+    let mut app = connected_app();
+    on_the_dj_tab(&mut app);
+    let go = |app: &mut App, row: DjRow| {
+        app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == row).unwrap();
+    };
+    go(&mut app, DjRow::SongsPerFetch);
+    app.handle_action(Action::NowRight);
+    assert_eq!(app.dj.songs_per_fetch, 5);
+    for _ in 0..40 {
+        app.handle_action(Action::NowRight);
+    }
+    assert_eq!(app.dj.songs_per_fetch, dj::SONGS_PER_FETCH_MAX, "clamped at the top");
+    for _ in 0..40 {
+        app.handle_action(Action::NowLeft);
+    }
+    assert_eq!(app.dj.songs_per_fetch, 1, "and at the bottom");
+
+    go(&mut app, DjRow::Strictness);
+    app.handle_action(Action::NowRight);
+    assert_eq!(app.dj.sonic_min_similarity, 0.6, "a step of .05");
+    for _ in 0..20 {
+        app.handle_action(Action::NowRight);
+    }
+    assert_eq!(app.dj.sonic_min_similarity, dj::SONIC_MAX_SIMILARITY);
+
+    go(&mut app, DjRow::Bpm);
+    app.handle_action(Action::NowRight);
+    assert!(app.dj.bpm && app.dj_panel.rows.contains(&DjRow::Tolerance), "the switch reveals its detail");
+    go(&mut app, DjRow::Tolerance);
+    app.handle_action(Action::NowLeft);
+    assert_eq!(app.dj.bpm_tolerance, 7);
+
+    go(&mut app, DjRow::Length);
+    app.handle_action(Action::Activate);
+    assert!(app.dj.length);
+    go(&mut app, DjRow::Shortest);
+    app.handle_action(Action::NowRight);
+    assert_eq!(app.dj.min_seconds, 15, "fifteen-second steps");
+    assert!(app.dj_panel.rows.contains(&DjRow::UnknownLength), "a real bound reveals the unknown row");
+}
+
+#[test]
+fn dj_tab_settings_are_remembered() {
+    let mut app = connected_app();
+    on_the_dj_tab(&mut app);
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::SongsPerFetch).unwrap();
+    app.handle_action(Action::NowRight); // five songs a turn
+    let saved = app.prefs();
+    assert_eq!(saved.dj.songs_per_fetch, 5);
+    let restored = App::new(None, None, None).with_prefs(&saved);
+    assert_eq!(restored.dj, app.dj);
+}
+
+#[test]
+fn g_and_shift_g_jump_to_the_ends_of_the_dj_tab() {
+    let mut app = connected_app();
+    on_the_dj_tab(&mut app);
+    app.handle_action(Action::Last);
+    assert_eq!(app.dj_panel.selected(), DjRow::Sample, "the last row");
+    app.handle_action(Action::First);
+    assert_eq!(app.dj_panel.selected(), DjRow::Armed);
+}
+
+#[test]
+fn the_sources_chooser_keeps_one_library_on() {
+    let mut app = connected_app();
+    app.servers.push(KnownServer {
+        id: HOST.into(),
+        name: "host".into(),
+        token: None,
+        self_signed: false,
+        peer: None,
+        pairing: None,
+        dj: Default::default(),
+    });
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.dj_info = Some(crate::tui::worker::DjServerInfo {
+        version: Some("6.28.0".into()),
+        discovery: true,
+        discovery_ready: Some(true),
+        libraries: vec!["Music".into(), "Audiobooks".into()],
+    });
+    app.dj_panel.rebuild(&app.dj, app.dj_info.as_ref(), false);
+    on_the_dj_tab(&mut app);
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Sources).unwrap();
+    app.handle_action(Action::Activate);
+    assert!(app.dj_panel.sources.is_some());
+    let effects = app.handle_action(Action::PlayPause); // Music off
+    assert_eq!(app.dj_sources_off(), vec!["Music"]);
+    assert!(matches!(effects.as_slice(), [Effect::SaveDjLibrary { server, .. }] if server == HOST));
+    app.handle_action(Action::Down);
+    let effects = app.handle_action(Action::PlayPause); // Audiobooks off too?
+    assert!(effects.is_empty());
+    assert_eq!(app.dj_sources_off(), vec!["Music"], "the last source stays on");
+    assert!(app.message.as_ref().unwrap().text.contains("At least one source"));
 }

@@ -206,25 +206,44 @@ pub fn dj(args: DjArgs) -> i32 {
 
             // One session's worth of history is what the player would pass;
             // a command that runs once has none, so the cooldown and the
-            // session anchor have nothing to work from here.
-            let (mut request, tag_note) = crate::dj::build_random_request(
-                &settings,
-                seed_meta.as_ref(),
-                Vec::new(),
-                &[],
-                &[],
-                sonic_available,
-            );
-
-            print_dj_request(&settings, &request);
-            if let Some(note) = tag_note {
-                println!("note: {note}");
+            // session anchor have nothing to work from here. The seed stands
+            // in for the playing track — its tempo and key, and the pool's
+            // one seed when the server has the index and the switch is on.
+            let ask = crate::dj::Ask {
+                library: crate::dj::LibraryFilters::resolve(&settings, &Default::default(), false),
+                playing_bpm: seed_meta.as_ref().and_then(|t| t.metadata.bpm),
+                playing_key: seed_meta.as_ref().and_then(|t| t.metadata.musical_key.clone()),
+                camelot_anchor: seed_meta
+                    .as_ref()
+                    .and_then(|t| t.metadata.musical_key.as_deref())
+                    .and_then(crate::dj::to_camelot)
+                    .map(|c| c.code()),
+                sonic_seeds: if sonic_available && settings.sonic {
+                    seed_meta.iter().map(|t| t.filepath.clone()).collect()
+                } else {
+                    Vec::new()
+                },
+                ignore_list: Vec::new(),
+                recent_artists: Vec::new(),
+                opener: false,
+                settings,
+            };
+            let mut request = ask.request();
+            print_dj_request(&ask, &request);
+            if ask.settings.sonic && !sonic_available {
+                println!("note: this server has no similarity index — the pool is not asked for");
             }
 
             // The endpoint returns one track per call, so ask repeatedly and
             // echo the cursor back the way the player does.
             for _ in 0..args.count {
                 match client.random_song(&request) {
+                    // Nothing left in the waterfall is an answer, and the
+                    // server says which filter ran dry.
+                    Err(crate::api::ApiError::Server { status: 400, message }) => {
+                        println!("(no more matches — {message})");
+                        break;
+                    }
                     Ok(response) if response.songs.is_empty() => {
                         println!("(no more matches)");
                         break;
@@ -258,10 +277,7 @@ pub fn dj(args: DjArgs) -> i32 {
 /// The point of this command is to be the scriptable view of the player's
 /// pick, so what it prints has to be the request that goes out — including
 /// the constraints that come from saved settings rather than from the seed.
-fn print_dj_request(
-    settings: &crate::dj::Settings,
-    request: &crate::api::types::RandomSongRequest,
-) {
+fn print_dj_request(ask: &crate::dj::Ask, request: &crate::api::types::RandomSongRequest) {
     let windows: Vec<String> =
         request.bpm_ranges.iter().map(|w| format!("{:.1}-{:.1}", w.min, w.max)).collect();
     let list = |items: &[String]| {
@@ -273,11 +289,17 @@ fn print_dj_request(
         list(&request.musical_keys)
     );
 
+    let s = &ask.settings;
     let mut filters: Vec<String> = Vec::new();
-    if settings.tempo_tolerance > 0 {
-        filters.push(format!("tolerance ±{}%", settings.tempo_tolerance));
+    if s.bpm {
+        filters.push(format!("tolerance ± {} BPM", s.bpm_tolerance));
     }
-    filters.push(format!("key matching {}", settings.key_matching.label()));
+    if s.harmonic {
+        filters.push(match &ask.camelot_anchor {
+            Some(anchor) => format!("harmonic around {anchor}"),
+            None => "harmonic (keyed tracks)".to_string(),
+        });
+    }
     if let Some(rating) = request.min_rating {
         filters.push(format!("rating ≥{rating}"));
     }
@@ -287,11 +309,15 @@ fn print_dj_request(
     if let Some(mode) = &request.genre_mode {
         filters.push(format!("genres {mode} [{}]", list(&request.genres)));
     }
+    if let Some(limit) = request.limit {
+        filters.push(format!("{limit} songs a turn"));
+    }
+    if request.min_duration.is_some() || request.max_duration.is_some() {
+        filters.push(format!("length {}", s.length_words()));
+    }
     match request.min_similarity {
-        Some(threshold) => filters.push(format!("sonic pool ≥{threshold:.3}")),
-        None if settings.sonic_tightness > 0 => {
-            filters.push("sonic pool off (this server has no index)".to_string());
-        }
+        Some(threshold) => filters.push(format!("sonic pool ≥{threshold:.2}")),
+        None if s.sonic => filters.push("sonic pool off (no seed, or no index)".to_string()),
         None => {}
     }
     println!("settings: {}", filters.join("  ·  "));

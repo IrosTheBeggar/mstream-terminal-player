@@ -793,20 +793,34 @@ impl Client {
 
     /// Ask the Auto-DJ picker for one track matching the given constraints.
     ///
-    /// The server answers 400 when nothing survives its fallback waterfall;
-    /// that's an ordinary "no pick", so it comes back as an empty `songs`
-    /// list rather than an error.
+    /// The server answers 400 when nothing survives its fallback waterfall,
+    /// when a sonic pool is empty or unanalysed, and when a key it does not
+    /// know is sent — each with its own words in the body, and the DJ's
+    /// failure taxonomy turns on them (auto-dj contract, clauses 25 and
+    /// 30), so the error comes back whole rather than as an empty answer.
     pub async fn random_song_async(
         &self,
         request: &RandomSongRequest,
     ) -> Result<RandomSongsResponse, ApiError> {
         let body = serde_json::to_value(request)
             .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?;
-        match self.post("api/v1/db/random-songs", body).await {
-            Ok(response) => Ok(response),
-            Err(ApiError::Server { status: 400, .. }) => Ok(RandomSongsResponse::default()),
-            Err(e) => Err(e),
-        }
+        self.random_songs_raw_async(body).await
+    }
+
+    /// The body as JSON, for the DJ's capability filter (auto-dj contract,
+    /// clause 25): the keys a server will not take are dropped before it
+    /// is sent, and a rejection comes back whole to be learned from.
+    pub async fn random_songs_raw_async(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<RandomSongsResponse, ApiError> {
+        self.post("api/v1/db/random-songs", body).await
+    }
+
+    /// The layered `/api/` payload whole — the DJ's probe reads a server's
+    /// version, its discovery readiness and its libraries off it (clause 19).
+    pub async fn layered_info_async(&self) -> Result<LayeredInfo, ApiError> {
+        self.get("api/").await
     }
 
     #[cfg(not(target_arch = "wasm32"))]

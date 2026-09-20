@@ -19,8 +19,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::types::{
-    Album, Capabilities, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults,
-    SimilarArtist, Track,
+    Album, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults, SimilarArtist,
+    Track,
 };
 use crate::api::{ApiError, Client};
 use crate::discovery::DiscoveredServer;
@@ -150,6 +150,10 @@ pub enum ApiCmd {
     /// Ask for several picks at once without queueing any of them, so the
     /// panel can show what the current settings actually produce.
     AutoDjSample { request: Box<DjRequest>, count: usize },
+    /// What the DJ's server offers, asked off-session: its version, its
+    /// discovery flags and its libraries (auto-dj contract, clause 19).
+    /// `reach` as for [`ApiCmd::AlbumArt`]; `None` asks the session's server.
+    DjProbe { identity: String, reach: Option<crate::tui::app::Reach> },
     /// Every genre in the library, for the Auto-DJ genre filter.
     Genres,
     /// Walk from one track to another through the embedding space.
@@ -187,21 +191,63 @@ pub enum ApiCmd {
     Shutdown,
 }
 
-/// Everything needed to ask the server for an Auto-DJ pick: the mode, the
-/// panel's settings, and the shape of the session so far.
+/// One Auto DJ turn, as the App composed it (auto-dj contract, clause 19):
+/// the DJ's server, how to reach it when it is not the session's, the lane
+/// the ask belongs to, and everything the body is built from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DjRequest {
-    pub mode: AutoDjMode,
-    pub settings: dj::Settings,
-    pub seed: Option<Box<Track>>,
-    pub ignore_list: Vec<u32>,
-    /// Recent track paths, newest first — what the sonic pool measures from.
-    pub anchors: Vec<String>,
-    /// Recently-played artists, newest first, for the cooldown.
-    pub recent_artists: Vec<String>,
-    /// Whether the server has the embedding index at all. Without it the
-    /// sonic pool must not be requested: the whole call would 403.
-    pub sonic_available: bool,
+    /// The DJ server's identity — the learner's key, and the log's name.
+    pub identity: String,
+    /// The reach the App resolved for it; `None` rides the session's client.
+    pub reach: Option<crate::tui::app::Reach>,
+    /// The lane this ask belongs to: a reply under another is dropped
+    /// (clause 11), and the pool a lane let go of stays down for it alone.
+    pub epoch: u64,
+    pub ask: dj::Ask,
+}
+
+/// Why a turn came back empty-handed (clauses 30–34) — the App's to say
+/// once per lane, and to park the queue on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DjFailure {
+    /// A 401, or a 403 that was not a schema rejection.
+    Auth,
+    /// The server could not be reached; the pick is owed.
+    Network(String),
+    /// Nothing survived the server's waterfall.
+    NoMatch,
+    Server(String),
+}
+
+impl DjFailure {
+    /// The failure in the Preview row's words.
+    pub fn words(&self) -> String {
+        match self {
+            DjFailure::Auth => "the server session expired".to_string(),
+            DjFailure::Network(_) => "could not reach the server".to_string(),
+            DjFailure::NoMatch => "nothing matched the filters".to_string(),
+            DjFailure::Server(message) => message.clone(),
+        }
+    }
+}
+
+/// What the DJ's server offers, from its `/api/` — or its flat ping, which
+/// carries no version and no readiness (clause 19).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DjServerInfo {
+    pub version: Option<String>,
+    pub discovery: bool,
+    /// `None` when the server does not say, which holds nothing back.
+    pub discovery_ready: Option<bool>,
+    pub libraries: Vec<String>,
+}
+
+impl DjServerInfo {
+    /// Whether a sonic pool may be asked of this server at all (clauses 23
+    /// and 36): discovery on, and the scan not reported unfinished.
+    pub fn sonic_usable(&self) -> bool {
+        self.discovery && self.discovery_ready != Some(false)
+    }
 }
 
 /// A view in the Discover tab. Like [`LibraryNode`], it is both the request
@@ -280,86 +326,8 @@ pub enum LibraryData {
 }
 
 /// How Auto-DJ chooses what comes next.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AutoDjMode {
-    #[default]
-    Off,
-    /// Nearest neighbours in the server's audio-embedding space.
-    Similar,
-    /// Harmonically and rhythmically compatible: Camelot-adjacent keys and
-    /// tempo windows around the current track (including half/double time).
-    BpmKey,
-}
-
-impl AutoDjMode {
-    /// Cycle to the next mode this server can actually deliver.
-    ///
-    /// Offering a mode that would immediately fall back to a different one
-    /// wastes a keystroke and misreports what the player is doing.
-    pub fn next_available(self, caps: Capabilities) -> Self {
-        let next = self.next();
-        if next == AutoDjMode::Similar && !caps.discovery {
-            // Only ever one hop: Off and BpmKey need nothing from the server.
-            return next.next();
-        }
-        next
-    }
-
-    /// The same ring, leftwards. Walks forward until the lap closes rather
-    /// than hopping twice: two hops is only "back" when all three modes are
-    /// on offer, and without discovery the ring is two long.
-    pub fn prev_available(self, caps: Capabilities) -> Self {
-        let mut at = self;
-        // Bounded by the number of modes rather than by getting home, so a
-        // mode this server cannot offer — which nothing walks back round
-        // to — settles on something available instead of spinning.
-        for _ in 0..3 {
-            let next = at.next_available(caps);
-            if next == self {
-                break;
-            }
-            at = next;
-        }
-        at
-    }
-
-    /// Whether this mode can work against the given server.
-    pub fn available(self, caps: Capabilities) -> bool {
-        self != AutoDjMode::Similar || caps.discovery
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            AutoDjMode::Off => AutoDjMode::Similar,
-            AutoDjMode::Similar => AutoDjMode::BpmKey,
-            AutoDjMode::BpmKey => AutoDjMode::Off,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            AutoDjMode::Off => "off",
-            AutoDjMode::Similar => "similar",
-            AutoDjMode::BpmKey => "tempo+key",
-        }
-    }
-
-    /// Anything unrecognised falls back to off rather than refusing to start.
-    pub fn from_label(label: &str) -> Self {
-        match label {
-            "similar" => AutoDjMode::Similar,
-            "tempo+key" => AutoDjMode::BpmKey,
-            _ => AutoDjMode::Off,
-        }
-    }
-}
-
 /// How many tracks "Recently Added" asks for.
 const RECENT_LIMIT: u32 = 100;
-
-/// Candidates to request from the similarity index. More than one because the
-/// nearest neighbour is often already sitting in the queue.
-const SIMILAR_LIMIT: u32 = 15;
 
 #[derive(Debug)]
 pub enum Event {
@@ -430,9 +398,19 @@ pub enum Event {
     /// and a drill out of the search results, and carrying the destination
     /// is what replaced a wholesale second command and event (audit #64).
     Library { node: LibraryNode, dest: Tab, data: LibraryData },
-    /// Auto-DJ candidates, best first. `note` explains any fallback that had
-    /// to happen so the UI can say so out loud.
-    AutoDjPick { candidates: Vec<Track>, ignore_list: Vec<u32>, note: Option<String> },
+    /// One Auto DJ turn's answer: the songs that passed, in the server's
+    /// order, the cursor to round-trip, whether the pool shaped them, the
+    /// degrade to say once per lane, and the failure when there is one.
+    AutoDjPick {
+        epoch: u64,
+        songs: Vec<Track>,
+        ignore_list: Vec<u32>,
+        sonic: bool,
+        note: Option<String>,
+        failure: Option<DjFailure>,
+    },
+    /// What the DJ's server offers; `None` when it could not be asked.
+    DjProbed { identity: String, info: Option<DjServerInfo> },
     /// What the current Auto-DJ settings produce, for the panel. Carries the
     /// sonic report when there was one — the pool size is the number that
     /// makes the tightness slider tunable.
@@ -901,10 +879,6 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     // weakly, so it ends with this thread.
     let tunnels: Arc<TunnelTable> = Arc::new(std::sync::Mutex::new(Tunnels::default()));
     spawn_tunnel_sampler(Arc::downgrade(&tunnels), events.clone());
-    // What the connected server said it can do. Nothing optional is probed
-    // before this says so.
-    let mut caps = Capabilities::default();
-
     while let Ok(cmd) = rx.recv() {
         // Connection commands change who `client` *is*, so they stay
         // serialized here — reaching a different server mid-dial is a
@@ -939,16 +913,10 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
             }
 
             read => {
-                spawn_read(client.clone(), caps, events.clone(), read);
+                spawn_read(client.clone(), events.clone(), read);
                 None
             }
         };
-
-        // One place to learn what the server offers, so a new way of
-        // connecting can't forget to ask.
-        if let Some(Event::Connected { ping, .. }) = &result {
-            caps = Capabilities::from(ping.as_ref());
-        }
 
         if let Some(event) = result
             && events.send(event).is_err()
@@ -984,16 +952,11 @@ fn client_for(reach: &crate::tui::app::Reach) -> Option<Client> {
 /// replaced still arrive; the app's stale-reply guards are what drop them,
 /// the same as any other answer about somewhere the user no longer is.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_read(
-    client: Option<Arc<Client>>,
-    caps: Capabilities,
-    events: Sender<Event>,
-    cmd: ApiCmd,
-) {
+fn spawn_read(client: Option<Arc<Client>>, events: Sender<Event>, cmd: ApiCmd) {
     thread::Builder::new()
         .name("mstream-api-read".into())
         .spawn(move || {
-            let event = answer(client.as_deref(), caps, cmd);
+            let event = answer(client.as_deref(), cmd);
             let _ = events.send(event);
         })
         .ok();
@@ -1003,7 +966,7 @@ fn spawn_read(
 /// session is no good; 403 is a permission or feature-flag answer that
 /// shouldn't bounce the user to a login form.
 #[cfg(not(target_arch = "wasm32"))]
-fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
+fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
     // Direct access is asked of the parent as the App reached it — never
     // through a peer client's rewrite, and not necessarily the session.
     if let ApiCmd::DirectAccess { parent, id, reach, refresh } = cmd {
@@ -1027,8 +990,12 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
     // reach the App resolved — a tunnel's loopback with its token, a saved
     // server with its own token and trust, a peer through its parent.
     let own = match &cmd {
-        ApiCmd::AlbumArt { reach: Some(reach), .. } | ApiCmd::Waveform { reach: Some(reach), .. } => {
-            client_for(reach)
+        ApiCmd::AlbumArt { reach: Some(reach), .. }
+        | ApiCmd::Waveform { reach: Some(reach), .. }
+        | ApiCmd::DjProbe { reach: Some(reach), .. } => client_for(reach),
+        // The DJ's turns go to ITS server (auto-dj contract, clause 19).
+        ApiCmd::AutoDj(request) | ApiCmd::AutoDjSample { request, .. } => {
+            request.reach.as_ref().and_then(client_for)
         }
         _ => None,
     };
@@ -1043,15 +1010,17 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         }
         ApiCmd::Library { node, dest } => crate::api::wait(load_library(c, &node))
             .map(|data| Event::Library { node, dest, data }),
+        // Neither turn nor probe fails as an error: the App reads the answer.
         ApiCmd::AutoDj(request) => {
-            crate::api::wait(autodj_pick(c, caps, &request)).map(|picked| Event::AutoDjPick {
-                candidates: picked.tracks,
-                ignore_list: picked.ignore_list,
-                note: picked.note,
-            })
+            crate::api::wait(async { Ok::<_, ApiError>(autodj_pick(c, &request).await) })
+                .map(|picked| pick_event(picked, &request))
         }
         ApiCmd::AutoDjSample { request, count } => {
-            crate::api::wait(autodj_sample(c, caps, &request, count))
+            crate::api::wait(autodj_sample(c, &request, count))
+        }
+        ApiCmd::DjProbe { identity, .. } => {
+            crate::api::wait(async { Ok::<_, ApiError>(dj_probe(c).await) })
+                .map(|info| Event::DjProbed { identity, info })
         }
         ApiCmd::Genres => c.genres().map(Event::Genres),
         ApiCmd::Journey { start, end, length } => {
@@ -1477,178 +1446,352 @@ pub(crate) async fn load_library(
     })
 }
 
-/// One answer from the picker.
+// ── Auto DJ ─────────────────────────────────────────────────────────────────
+
+/// One turn's answer, whatever happened: the songs that passed, the cursor
+/// to round-trip, and the failure or degrade the App may say out loud once
+/// per lane (auto-dj contract, clauses 26 and 30–34).
+#[derive(Debug, Clone)]
 pub(crate) struct Picked {
-    pub(crate) tracks: Vec<Track>,
+    pub(crate) songs: Vec<Track>,
     pub(crate) ignore_list: Vec<u32>,
+    /// Whether the pool shaped these picks — the badge's second glyph.
+    pub(crate) sonic: bool,
     pub(crate) note: Option<String>,
-    pool: Option<crate::api::types::SonicReport>,
+    pub(crate) pool: Option<crate::api::types::SonicReport>,
+    pub(crate) failure: Option<DjFailure>,
 }
 
-type AutoDjResult = Result<Picked, ApiError>;
+impl Picked {
+    fn failed(ignore_list: Vec<u32>, failure: DjFailure) -> Picked {
+        Picked { songs: Vec::new(), ignore_list, sonic: false, note: None, pool: None, failure: Some(failure) }
+    }
+}
 
-/// Choose what Auto-DJ should play next.
-///
-/// Similarity is best-effort: the server may have discovery switched off, or
-/// simply not have embedded this track yet. Rather than stalling, both cases
-/// fall through to tempo/key matching and say why.
-pub(crate) async fn autodj_pick(
-    client: &Client,
-    caps: Capabilities,
-    request: &DjRequest,
-) -> AutoDjResult {
-    let ignore_list = request.ignore_list.clone();
-    match request.mode {
-        AutoDjMode::Off => {
-            Ok(Picked { tracks: Vec::new(), ignore_list, note: None, pool: None })
-        }
+/// The DJ's second voice (clause 63): the shell's log on the native build;
+/// the browser build has none. This picker is shared by both.
+fn dj_log(line: String) {
+    #[cfg(not(target_arch = "wasm32"))]
+    tracing::info!("{line}");
+    #[cfg(target_arch = "wasm32")]
+    let _ = line;
+}
 
-        AutoDjMode::BpmKey => pick_by_tempo_and_key(client, request, None).await,
+/// The DJ server's name in the log: the tunnel's short form on the native
+/// build, the identity itself in the browser, which has no tunnels.
+fn dj_log_name(identity: &str) -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tunnel_log_name(identity)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        identity.to_string()
+    }
+}
 
-        AutoDjMode::Similar => {
-            let Some(seed) = request.seed.as_deref() else {
-                return pick_by_tempo_and_key(client, request, None).await;
-            };
-            // No flag, no probe: ping already said there is no index here, so
-            // asking would spend a round trip to be told 403.
-            if !caps.discovery {
-                return pick_by_tempo_and_key(
-                    client,
-                    request,
-                    Some("this server has no similarity index — matching tempo and key"),
-                )
-                .await;
+/// The two keys a pool is asked with, let go of together (clause 30).
+const SONIC_KEYS: [&str; 2] = ["similarTo", "minSimilarity"];
+
+/// What the App says when a lane's pool is let go of (clause 30) — once per
+/// lane, its budget; and when the session behind the DJ expired (clause 32).
+pub(crate) const DJ_NOTE_RANGE: &str = "Auto DJ: nothing is within the similarity range, so it is playing without that filter. Loosen the match slider to use it again.";
+pub(crate) const DJ_NOTE_UNSCANNED: &str = "Auto DJ: the discovery scan hasn't reached these tracks yet, so it is playing without sonic similarity.";
+pub(crate) const DJ_NOTE_AUTH: &str = "Auto DJ stopped — the server session expired. Sign in again in Manage servers.";
+
+/// Which keys a server will not take — learned from a `"<key>" is not
+/// allowed` rejection for the rest of the process (clause 25) — and which a
+/// lane has let go of after its pool failed (clause 30), by epoch, so a new
+/// lane asks again. In memory only, by design: persisting "this server
+/// rejected X" would outlive the upgrade that fixes it, where a process
+/// lifetime is long enough to stop repeated failures and short enough to
+/// notice an upgrade.
+#[derive(Default)]
+struct DjLearner {
+    rejected: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    suppressed: std::collections::HashMap<String, (u64, std::collections::HashSet<String>)>,
+}
+
+fn learner() -> std::sync::MutexGuard<'static, DjLearner> {
+    static LEARNER: std::sync::OnceLock<std::sync::Mutex<DjLearner>> = std::sync::OnceLock::new();
+    LEARNER.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl DjLearner {
+    /// Strip what this server is known not to take, saying what went.
+    fn filter(&self, identity: &str, epoch: u64, body: &mut serde_json::Value) -> Vec<String> {
+        let mut dropped = Vec::new();
+        let Some(map) = body.as_object_mut() else { return dropped };
+        let rejected = self.rejected.get(identity);
+        let suppressed =
+            self.suppressed.get(identity).filter(|(e, _)| *e == epoch).map(|(_, keys)| keys);
+        map.retain(|key, _| {
+            let gone = rejected.is_some_and(|r| r.contains(key))
+                || suppressed.is_some_and(|s| s.contains(key));
+            if gone {
+                dropped.push(key.clone());
             }
-            match client.similar_tracks_async(&seed.filepath, SIMILAR_LIMIT).await? {
-                // Backstop for a server reconfigured mid-session; the flag
-                // above is what normally keeps us out of here.
-                None => {
-                    pick_by_tempo_and_key(
-                        client,
-                        request,
-                        Some("similarity was switched off on this server — matching tempo and key"),
-                    )
-                    .await
+            !gone
+        });
+        dropped
+    }
+
+    /// A key the server named in a rejection: never sent to it again this
+    /// process. True when it is news.
+    fn learn(&mut self, identity: &str, key: &str) -> bool {
+        self.rejected.entry(identity.to_string()).or_default().insert(key.to_string())
+    }
+
+    /// Keys a lane lets go of — valid, but the server cannot act on them
+    /// now (a pool with nothing in range, a library not yet scanned).
+    fn suppress(&mut self, identity: &str, epoch: u64, keys: &[&str]) {
+        let entry = self.suppressed.entry(identity.to_string()).or_insert((epoch, Default::default()));
+        if entry.0 != epoch {
+            *entry = (epoch, Default::default());
+        }
+        for key in keys {
+            entry.1.insert((*key).to_string());
+        }
+    }
+
+    fn all_suppressed(&self, identity: &str, epoch: u64, keys: &[&str]) -> bool {
+        self.suppressed
+            .get(identity)
+            .filter(|(e, _)| *e == epoch)
+            .is_some_and(|(_, set)| keys.iter().all(|k| set.contains(*k)))
+    }
+}
+
+/// The key a Joi rejection names — `"<key>" is not allowed`, its quotes
+/// escaped or not, since callers may pass the raw JSON body or the message
+/// already read out of it. `None` for any other message: the request then
+/// failed for some other reason, and resending a smaller body would only
+/// fail again with less information.
+pub(crate) fn not_allowed_key(message: &str) -> Option<String> {
+    let at = message.find(" is not allowed")?;
+    let head = message[..at].trim_end().trim_end_matches(['"', '\\']);
+    let key: String = head
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let quoted = head[..head.len() - key.len()].ends_with(['"', '\\']);
+    (!key.is_empty() && quoted).then_some(key)
+}
+
+/// What a refused turn means, read off the status and the body (clauses
+/// 25 and 30–32).
+#[derive(Debug, Clone, PartialEq)]
+enum Refusal {
+    /// A schema rejection naming a key: learn it and go again.
+    Learn(String),
+    /// The pool cannot be honoured: let it go for the lane, and say so —
+    /// or not, when the user switched discovery off themselves.
+    Degrade(Option<&'static str>),
+    Auth,
+    Network(String),
+    NoMatch,
+    Other(String),
+}
+
+fn classify(err: &ApiError, sonic_asked: bool) -> Refusal {
+    match err {
+        ApiError::Unauthorized => Refusal::Auth,
+        ApiError::Network(message) => Refusal::Network(message.clone()),
+        ApiError::Decode { .. } | ApiError::Config(_) => Refusal::Other(err.to_string()),
+        ApiError::Forbidden(message) | ApiError::NotFound(message) | ApiError::Server { message, .. } => {
+            // The body is the signal, not the status: mStream answered a
+            // schema rejection with 403 up to 6.11.0 and 400 since.
+            if let Some(key) = not_allowed_key(message) {
+                return Refusal::Learn(key);
+            }
+            if sonic_asked {
+                let lower = message.to_lowercase();
+                if lower.contains("similarity range") {
+                    return Refusal::Degrade(Some(DJ_NOTE_RANGE));
                 }
-                Some(found) if found.not_analyzed => {
-                    pick_by_tempo_and_key(
-                        client,
-                        request,
-                        Some("this track hasn't been analysed yet — matching tempo and key"),
-                    )
-                    .await
+                if lower.contains("analyzed") {
+                    return Refusal::Degrade(Some(DJ_NOTE_UNSCANNED));
                 }
-                Some(found) if found.results.is_empty() => {
-                    pick_by_tempo_and_key(
-                        client,
-                        request,
-                        Some("nothing sounded similar — matching tempo and key"),
-                    )
-                    .await
+                // Switched off server-side since the probe — the user's own
+                // change, so being told is noise; a 404 is a dead seed path.
+                if lower.contains("discovery is disabled") || matches!(err, ApiError::NotFound(_)) {
+                    return Refusal::Degrade(None);
                 }
-                Some(found) => Ok(Picked {
-                    tracks: found.results.into_iter().map(|r| r.into_track()).collect(),
-                    ignore_list,
-                    note: None,
-                    pool: None,
-                }),
+            }
+            match err {
+                ApiError::Forbidden(_) => Refusal::Auth,
+                ApiError::Server { status: 400, .. } => Refusal::NoMatch,
+                _ => Refusal::Other(err.to_string()),
             }
         }
     }
 }
 
-async fn pick_by_tempo_and_key(
-    client: &Client,
-    request: &DjRequest,
-    note: Option<&str>,
-) -> AutoDjResult {
-    let (body, tag_note) = dj::build_random_request(
-        &request.settings,
-        request.seed.as_deref(),
-        request.ignore_list.clone(),
-        &request.anchors,
-        &request.recent_artists,
-        request.sonic_available,
-    );
-    let sonic_asked = body.min_similarity.is_some();
-
-    let response = match client.random_song_async(&body).await {
-        Ok(response) => response,
-        // A hard sonic pool fails loudly by design — the server would rather
-        // say "nothing is that similar" than quietly play something that
-        // isn't. It answers 400 for both an empty pool and a seed it hasn't
-        // analysed. Retry once without the pool so the session keeps moving,
-        // and say what happened rather than leaving the queue to run dry.
-        Err(ApiError::Server { status: 400, message }) if sonic_asked => {
-            let (relaxed, _) = dj::build_random_request(
-                &request.settings,
-                request.seed.as_deref(),
-                request.ignore_list.clone(),
-                &request.anchors,
-                &request.recent_artists,
-                false,
-            );
-            let response = client.random_song_async(&relaxed).await?;
-            return Ok(Picked {
-                tracks: response.songs,
-                ignore_list: response.ignore_list,
-                note: Some(format!("{} — loosen the sonic pool", trim_period(&message))),
-                pool: None,
-            });
+/// One Auto DJ turn against the DJ's server: the ask, less whatever the
+/// server is known not to take; a schema rejection learned and retried; a
+/// failing pool let go of for the lane and the same pick taken without it;
+/// the keyword filter over the answer, re-asked with the fresh cursor when
+/// it blocked everything, five times, then the last answer whole (clauses
+/// 25, 26, 30). Never an error: the App reads the failure and speaks.
+pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked {
+    let identity = request.identity.as_str();
+    let epoch = request.epoch;
+    let name = dj_log_name(identity);
+    let mut ask = request.ask.clone();
+    if ask.sonic_asked() && learner().all_suppressed(identity, epoch, &SONIC_KEYS) {
+        ask = ask.without_sonic();
+    }
+    let mut note: Option<String> = None;
+    let mut last: Option<crate::api::types::RandomSongsResponse> = None;
+    let mut attempts = 0;
+    while attempts < 5 {
+        attempts += 1;
+        let mut body = match serde_json::to_value(ask.request()) {
+            Ok(body) => body,
+            Err(e) => return Picked::failed(ask.ignore_list, DjFailure::Server(e.to_string())),
+        };
+        let dropped = learner().filter(identity, epoch, &mut body);
+        if !dropped.is_empty() {
+            dj_log(format!("[dj] {name}: dropped for this server: {}", dropped.join(", ")));
         }
-        Err(e) => return Err(e),
-    };
+        let mut answer = client.random_songs_raw_async(body).await;
+        // The learner's loop: every pass removes one key for good, so it
+        // ends by construction. Only a not-allowed body retries here.
+        while let Err(err) = &answer {
+            let Refusal::Learn(key) = classify(err, ask.sonic_asked()) else { break };
+            if learner().learn(identity, &key) {
+                dj_log(format!("[dj] {name}: rejected \"{key}\" — dropping it for the rest of this session"));
+            }
+            let mut body = serde_json::to_value(ask.request()).unwrap_or_default();
+            learner().filter(identity, epoch, &mut body);
+            answer = client.random_songs_raw_async(body).await;
+        }
+        match answer {
+            Ok(response) => {
+                let sonic = ask.sonic_asked();
+                if response.songs.is_empty() {
+                    return Picked { failure: Some(DjFailure::NoMatch), ..Picked { songs: Vec::new(), ignore_list: response.ignore_list, sonic, note, pool: response.sonic, failure: None } };
+                }
+                let accepted: Vec<Track> =
+                    response.songs.iter().filter(|t| !ask.keyword_blocked(t)).cloned().collect();
+                if !accepted.is_empty() {
+                    return Picked { songs: accepted, ignore_list: response.ignore_list, sonic, note, pool: response.sonic, failure: None };
+                }
+                // Blocked in full: the fresh cursor means the next answer
+                // is different candidates.
+                dj_log(format!("[dj] {name}: every song of the answer was a keyword hit — asking again"));
+                ask.ignore_list = response.ignore_list.clone();
+                last = Some(response);
+            }
+            Err(err) => match classify(&err, ask.sonic_asked()) {
+                Refusal::Degrade(say) => {
+                    dj_log(format!("[dj] {name}: the pool cannot be honoured ({err}) — playing without it this lane"));
+                    learner().suppress(identity, epoch, &SONIC_KEYS);
+                    if let Some(say) = say {
+                        note = Some(say.to_string());
+                    }
+                    ask = ask.without_sonic();
+                }
+                Refusal::Auth => {
+                    dj_log(format!("[dj] {name}: {err} — the session behind the DJ is no good"));
+                    return Picked::failed(ask.ignore_list, DjFailure::Auth);
+                }
+                Refusal::Network(message) => {
+                    return Picked::failed(ask.ignore_list, DjFailure::Network(message));
+                }
+                Refusal::NoMatch => return Picked::failed(ask.ignore_list, DjFailure::NoMatch),
+                Refusal::Learn(_) | Refusal::Other(_) => {
+                    dj_log(format!("[dj] {name}: random-songs failed: {err}"));
+                    return Picked::failed(ask.ignore_list, DjFailure::Server(err.to_string()));
+                }
+            },
+        }
+    }
+    // Every try was blocked in full: the last answer whole, rather than a
+    // queue stalled forever by an over-eager filter (clause 26).
+    match last {
+        Some(response) => Picked {
+            songs: response.songs,
+            ignore_list: response.ignore_list,
+            sonic: ask.sonic_asked(),
+            note,
+            pool: response.sonic,
+            failure: None,
+        },
+        None => Picked::failed(ask.ignore_list, DjFailure::NoMatch),
+    }
+}
 
-    Ok(Picked {
-        tracks: response.songs,
-        ignore_list: response.ignore_list,
-        note: note.map(str::to_string).or(tag_note),
-        pool: response.sonic,
-    })
+/// The turn's answer as the event the App consumes.
+pub(crate) fn pick_event(picked: Picked, request: &DjRequest) -> Event {
+    Event::AutoDjPick {
+        epoch: request.epoch,
+        songs: picked.songs,
+        ignore_list: picked.ignore_list,
+        sonic: picked.sonic,
+        note: picked.note,
+        failure: picked.failure,
+    }
 }
 
 /// Take several picks in a row without committing to any of them, feeding
-/// each back into the next call's cooldown so the sample shows variety rather
-/// than the same track three times.
+/// each back into the next call's cooldown and cursor so the sample shows
+/// variety rather than the same track three times (clause 53).
 pub(crate) async fn autodj_sample(
     client: &Client,
-    caps: Capabilities,
     request: &DjRequest,
     count: usize,
 ) -> Result<Event, ApiError> {
     let mut scratch = request.clone();
-    // Always sample through the random-songs path: it is the one the panel's
-    // settings actually drive, and the only one that reports a pool size.
-    scratch.mode = AutoDjMode::BpmKey;
-
+    scratch.ask.opener = false;
     let mut tracks: Vec<Track> = Vec::new();
     let mut pool = None;
     let mut note = None;
     for _ in 0..count {
-        let picked = match autodj_pick(client, caps, &scratch).await {
-            Ok(picked) => picked,
+        let picked = autodj_pick(client, &scratch).await;
+        pool = picked.pool.clone().or(pool);
+        note = note.or(picked.note.clone());
+        if let Some(failure) = picked.failure {
             // A sample that finds nothing is an answer, not an error: it is
             // exactly what a too-tight setting looks like.
-            Err(ApiError::Server { status: 400, message }) => {
-                note = Some(trim_period(&message));
-                break;
-            }
-            Err(e) => return Err(e),
-        };
-        pool = picked.pool.or(pool);
-        note = note.or(picked.note);
-        let Some(track) = picked.tracks.into_iter().next() else { break };
-        scratch.ignore_list = picked.ignore_list;
+            note = note.or(Some(failure.words()));
+            break;
+        }
+        let Some(track) = picked.songs.into_iter().next() else { break };
+        scratch.ask.ignore_list = picked.ignore_list;
         if let Some(artist) = track.metadata.artist.clone() {
-            scratch.recent_artists.insert(0, artist);
+            scratch.ask.recent_artists.insert(0, artist);
         }
         if tracks.iter().any(|t: &Track| t.filepath == track.filepath) {
             break; // the pool is exhausted; more calls would repeat
         }
         tracks.push(track);
     }
-
     Ok(Event::AutoDjSample { tracks, pool, note })
+}
+
+/// What the DJ's server offers (clause 19): its layered `/api/` — version,
+/// discovery and readiness, libraries — or, on a server that answers only
+/// the flat ping, the flags and libraries alone.
+pub(crate) async fn dj_probe(client: &Client) -> Option<DjServerInfo> {
+    match client.layered_info_async().await {
+        Ok(info) => Some(DjServerInfo {
+            version: info.server,
+            discovery: info.features.discovery,
+            discovery_ready: info.features.discovery_ready,
+            libraries: info.user.vpaths,
+        }),
+        Err(_) => client.ping_async().await.ok().map(|ping| DjServerInfo {
+            version: None,
+            discovery: ping.discovery,
+            discovery_ready: None,
+            libraries: ping.vpaths,
+        }),
+    }
 }
 
 /// How many neighbours a Discover view asks for. Deep enough to browse,
@@ -1805,10 +1948,6 @@ pub(crate) fn journey_note(
         return Some(format!("the library ran out at {got} of {asked} stops"));
     }
     None
-}
-
-fn trim_period(message: &str) -> String {
-    message.trim().trim_end_matches('.').to_string()
 }
 
 #[cfg(test)]
@@ -2069,18 +2208,47 @@ mod tests {
     }
 
     #[test]
-    fn the_mode_ring_steps_back_one_whatever_its_length() {
-        let all = Capabilities { discovery: true, ..Default::default() };
-        for mode in [AutoDjMode::Off, AutoDjMode::Similar, AutoDjMode::BpmKey] {
-            assert_eq!(mode.next_available(all).prev_available(all), mode);
-        }
-        // Without discovery the ring is two long, where "forward twice" —
-        // the old way back — is a lap.
-        let few = Capabilities::default();
-        for mode in [AutoDjMode::Off, AutoDjMode::BpmKey] {
-            assert_eq!(mode.next_available(few).prev_available(few), mode);
-            assert_ne!(mode.prev_available(few), mode, "left always moves");
-        }
+    fn a_joi_rejection_names_its_key_escaped_or_not() {
+        assert_eq!(not_allowed_key(r#"{"error":"\"minSimilarity\" is not allowed"}"#).as_deref(), Some("minSimilarity"));
+        assert_eq!(not_allowed_key(r#""limit" is not allowed"#).as_deref(), Some("limit"));
+        assert_eq!(not_allowed_key("No songs match criteria").as_deref(), None);
+        assert_eq!(not_allowed_key("is not allowed").as_deref(), None, "no key, no lesson");
+    }
+
+    #[test]
+    fn refusals_are_sorted_into_learn_degrade_auth_and_the_rest() {
+        let server = |status: u16, message: &str| ApiError::Server { status, message: message.into() };
+        assert_eq!(classify(&server(400, r#""limit" is not allowed"#), true), Refusal::Learn("limit".into()));
+        assert_eq!(classify(&ApiError::Forbidden(r#""requireBpm" is not allowed"#.into()), false), Refusal::Learn("requireBpm".into()), "the body is the signal, not the status");
+        assert_eq!(classify(&server(400, "No songs within the similarity range match criteria"), true), Refusal::Degrade(Some(DJ_NOTE_RANGE)));
+        assert_eq!(classify(&server(400, "Sonic seed track has not been analyzed yet"), true), Refusal::Degrade(Some(DJ_NOTE_UNSCANNED)));
+        assert_eq!(classify(&ApiError::Forbidden("discovery is disabled".into()), true), Refusal::Degrade(None));
+        assert_eq!(classify(&ApiError::NotFound("Track not found".into()), true), Refusal::Degrade(None), "a dead pin");
+        // The same words without a pool asked are not a degrade.
+        assert_eq!(classify(&server(400, "No songs match criteria"), false), Refusal::NoMatch);
+        assert_eq!(classify(&ApiError::Forbidden("discovery is disabled".into()), false), Refusal::Auth);
+        assert_eq!(classify(&ApiError::Unauthorized, true), Refusal::Auth);
+        assert!(matches!(classify(&ApiError::Network("refused".into()), true), Refusal::Network(_)));
+    }
+
+    #[test]
+    fn the_learner_forgets_a_lanes_pool_with_the_lane_but_never_a_rejected_key() {
+        let mut learned = DjLearner::default();
+        let body = || serde_json::json!({"limit": 4, "similarTo": ["a"], "minSimilarity": 0.55, "ignoreList": []});
+        assert!(learned.learn("http://s", "limit"));
+        assert!(!learned.learn("http://s", "limit"), "not news twice");
+        learned.suppress("http://s", 7, &SONIC_KEYS);
+        let mut lane7 = body();
+        let mut dropped = learned.filter("http://s", 7, &mut lane7);
+        dropped.sort();
+        assert_eq!(dropped, ["limit", "minSimilarity", "similarTo"]);
+        assert!(lane7.get("ignoreList").is_some());
+        let mut lane8 = body();
+        assert_eq!(learned.filter("http://s", 8, &mut lane8), ["limit"], "a new lane asks for its pool again");
+        let mut other = body();
+        assert!(learned.filter("http://other", 7, &mut other).is_empty(), "keyed by server");
+        assert!(learned.all_suppressed("http://s", 7, &SONIC_KEYS));
+        assert!(!learned.all_suppressed("http://s", 8, &SONIC_KEYS));
     }
 
     /// The rig leg (plan T4): the real api thread against two live mStream

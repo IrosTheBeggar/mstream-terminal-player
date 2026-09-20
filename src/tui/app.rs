@@ -21,7 +21,8 @@ use crate::player::PlayerStatus;
 use crate::tui::art::Art;
 
 use super::worker::{
-    ApiCmd, AudioCmd, AutoDjMode, DiscoverData, DiscoverDest, DiscoverNode, DjRequest, Event,
+    ApiCmd, AudioCmd, DiscoverData, DiscoverDest, DiscoverNode, DjFailure, DjRequest,
+    DjServerInfo, Event,
     LibraryData,
     LibraryNode,
 };
@@ -67,6 +68,10 @@ pub enum Effect {
     /// 20–23): the shell reconciles the config and saves it when anything
     /// changed. An empty list marks every peer of that parent missing.
     SavePeers { parent: String, listed: Vec<(i64, String)> },
+    /// Write a server entry's Auto DJ library rules — its sources switched
+    /// off, its own rating floor and genre filter (auto-dj contract, clause
+    /// 51): the shell puts them on the entry and saves.
+    SaveDjLibrary { server: String, overrides: crate::config::DjLibraryOverrides },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,6 +336,13 @@ pub enum Action {
     ToggleRepeat,
     ToggleShuffle,
     ToggleAutoDj,
+    /// The empty-queue openers (auto-dj contract, clauses 3, 4 and 16):
+    /// the filtered random song, or the library under a banner — the GUI's
+    /// empty-state buttons and chooser send these (slice A3).
+    #[allow(dead_code)]
+    DjSurprise,
+    #[allow(dead_code)]
+    DjPick,
     /// `J` — open the Sonic Path tab aimed at the highlighted track.
     StartJourney,
     StartSearch,
@@ -575,11 +587,21 @@ pub struct Origin {
     pub peer: Option<i64>,
 }
 
-/// One queue row: the track, and where it came from. Derefs to the track
-/// so every reader that only wants its tags keeps reading them.
+/// Why Auto DJ picked a row, for the queue's badge (auto-dj contract,
+/// clause 60): a sonic pick and a classic random one wear it differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DjMark {
+    pub sonic: bool,
+}
+
+/// One queue row: the track, where it came from, and whether the DJ chose
+/// it. Derefs to the track so every reader that only wants its tags keeps
+/// reading them.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Queued {
     pub origin: Origin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dj: Option<DjMark>,
     pub track: Track,
 }
 
@@ -608,6 +630,8 @@ pub struct KnownServer {
     /// A tunnel server's pairing code — what a queued row on it is dialled
     /// with when the session is elsewhere (contract clause 38).
     pub pairing: Option<String>,
+    /// Auto DJ's rules for this library (auto-dj contract, clause 51).
+    pub dj: crate::config::DjLibraryOverrides,
 }
 
 /// How to reach a queued track's server right now: the base its stream URL
@@ -1044,50 +1068,71 @@ const RECENT_MEMORY: usize = 20;
 /// enough to show the character of the settings and no more.
 const DJ_SAMPLE_COUNT: usize = 3;
 
-/// One adjustable line in the Auto-DJ panel.
+/// One adjustable line in the Auto-DJ tab (docs/ux-contracts/auto-dj.md,
+/// clauses 40–53), in the room's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DjRow {
-    Mode,
-    Tightness,
+    /// On or off — and where it is picking from.
+    Armed,
+    SongsPerFetch,
+    Sonic,
+    Strictness,
     Anchor,
-    Tempo,
-    Key,
-    Rating,
+    EmptyQueue,
+    Bpm,
+    Tolerance,
+    Harmonic,
     Cooldown,
+    Rating,
+    Length,
+    Shortest,
+    Longest,
+    UnknownLength,
     Genres,
-    /// Not a setting — the row that asks what these settings actually pick.
-    /// A row rather than a key of its own, because in a tab (as opposed to
-    /// the modal this used to be) every key that means something has to be
-    /// one the rest of the player is not already using.
+    Keywords,
+    Sources,
+    /// Preview: three picks, none of them queued.
     Sample,
 }
 
 impl DjRow {
     pub fn label(self) -> &'static str {
         match self {
-            DjRow::Mode => "Mode",
-            DjRow::Tightness => "Sonic pool",
+            DjRow::Armed => "Auto DJ",
+            DjRow::SongsPerFetch => "Songs per fetch",
+            DjRow::Sonic => "Sonic similarity",
+            DjRow::Strictness => "Match strictness",
             DjRow::Anchor => "Anchor",
-            DjRow::Tempo => "Tempo window",
-            DjRow::Key => "Key matching",
-            DjRow::Rating => "Rating floor",
+            DjRow::EmptyQueue => "On an empty queue",
+            DjRow::Bpm => "BPM continuity",
+            DjRow::Tolerance => "Tolerance",
+            DjRow::Harmonic => "Harmonic mixing",
             DjRow::Cooldown => "Artist cooldown",
-            DjRow::Genres => "Genres",
-            DjRow::Sample => "Sample",
+            DjRow::Rating => "Minimum rating",
+            DjRow::Length => "Track length",
+            DjRow::Shortest => "Shortest",
+            DjRow::Longest => "Longest",
+            DjRow::UnknownLength => "Unknown length",
+            DjRow::Genres => "Genre filter",
+            DjRow::Keywords => "Keyword filter",
+            DjRow::Sources => "Sources",
+            DjRow::Sample => "Preview",
         }
     }
 }
 
-/// The Auto-DJ tab's own state. Rows shown depend on what the server can do,
-/// so they are rebuilt when a ping says what that is.
+/// The Auto-DJ tab's own state. The rows shown depend on the settings and
+/// on what the DJ's server offers, so they are rebuilt when either changes.
 #[derive(Debug)]
 pub struct DjPanel {
     pub rows: Vec<DjRow>,
     pub row: usize,
-    /// Genre chooser, when open over the tab. The one modal left in Auto-DJ:
-    /// a list you toggle through needs the keyboard to itself.
+    /// The genre chooser, when open over the tab: a list you toggle
+    /// through needs the keyboard to itself.
     pub genres: Option<GenrePicker>,
-    /// Sample picks from the current settings, and what the pool looked like.
+    /// The sources chooser (clause 42), when open — the same shape.
+    pub sources: Option<GenrePicker>,
+    /// Preview's picks, and what the pool looked like.
     pub sample: Vec<Track>,
     pub sample_pending: bool,
     pub pool: Option<crate::api::types::SonicReport>,
@@ -1096,9 +1141,10 @@ pub struct DjPanel {
 impl Default for DjPanel {
     fn default() -> Self {
         DjPanel {
-            rows: DjPanel::rows_for(crate::api::types::Capabilities::default()),
+            rows: DjPanel::rows_for(&dj::Settings::default(), None, false),
             row: 0,
             genres: None,
+            sources: None,
             sample: Vec::new(),
             sample_pending: false,
             pool: None,
@@ -1107,34 +1153,67 @@ impl Default for DjPanel {
 }
 
 impl DjPanel {
-    fn rows_for(capabilities: crate::api::types::Capabilities) -> Vec<DjRow> {
-        let mut rows = vec![DjRow::Mode];
-        // No index, no pool — and no row promising one.
-        if capabilities.discovery {
-            rows.push(DjRow::Tightness);
-            rows.push(DjRow::Anchor);
+    /// The rows these settings and this server give (clauses 43–50): a
+    /// switch's details show while it is on; a server KNOWN to predate a
+    /// floor hides what it cannot take; a peer has no rating row (a key
+    /// has no stars); the sources row wants more than one library.
+    fn rows_for(settings: &dj::Settings, info: Option<&DjServerInfo>, is_peer: bool) -> Vec<DjRow> {
+        let version = info.and_then(|i| i.version.as_deref());
+        let filters = !dj::known_older(version, dj::FLOOR_FILTERS);
+        let mut rows = vec![DjRow::Armed];
+        if !dj::known_older(version, dj::FLOOR_BATCH) {
+            rows.push(DjRow::SongsPerFetch);
         }
-        rows.extend([
-            DjRow::Tempo,
-            DjRow::Key,
-            DjRow::Rating,
-            DjRow::Cooldown,
-            DjRow::Genres,
-            DjRow::Sample,
-        ]);
+        rows.push(DjRow::Sonic);
+        if settings.sonic {
+            rows.extend([DjRow::Strictness, DjRow::Anchor]);
+        }
+        rows.push(DjRow::EmptyQueue);
+        if filters {
+            rows.push(DjRow::Bpm);
+            if settings.bpm {
+                rows.push(DjRow::Tolerance);
+            }
+            rows.push(DjRow::Harmonic);
+        }
+        rows.push(DjRow::Cooldown);
+        if !is_peer {
+            rows.push(DjRow::Rating);
+        }
+        if !dj::known_older(version, dj::FLOOR_LENGTH) {
+            rows.push(DjRow::Length);
+            if settings.length {
+                rows.extend([DjRow::Shortest, DjRow::Longest]);
+                if settings.min_seconds > 0 || settings.max_seconds < dj::LENGTH_RAIL_SECONDS {
+                    rows.push(DjRow::UnknownLength);
+                }
+            }
+        }
+        if filters {
+            rows.push(DjRow::Genres);
+        }
+        rows.push(DjRow::Keywords);
+        if info.is_some_and(|i| i.libraries.len() > 1) {
+            rows.push(DjRow::Sources);
+        }
+        rows.push(DjRow::Sample);
         rows
     }
 
-    /// Fit the rows to what this server offers, keeping the cursor on screen.
-    /// Called when a ping lands, which is the only thing that can change the
-    /// answer.
-    pub(super) fn rebuild(&mut self, capabilities: crate::api::types::Capabilities) {
-        self.rows = DjPanel::rows_for(capabilities);
-        self.row = self.row.min(self.rows.len().saturating_sub(1));
+    /// Fit the rows to the settings and the server, keeping the cursor on
+    /// the row it was on where that row survives.
+    pub(super) fn rebuild(&mut self, settings: &dj::Settings, info: Option<&DjServerInfo>, is_peer: bool) {
+        let selected = self.selected();
+        self.rows = DjPanel::rows_for(settings, info, is_peer);
+        self.row = self
+            .rows
+            .iter()
+            .position(|r| *r == selected)
+            .unwrap_or_else(|| self.row.min(self.rows.len().saturating_sub(1)));
     }
 
     pub fn selected(&self) -> DjRow {
-        self.rows.get(self.row).copied().unwrap_or(DjRow::Mode)
+        self.rows.get(self.row).copied().unwrap_or(DjRow::Armed)
     }
 }
 
@@ -1152,6 +1231,9 @@ pub enum Capture {
     /// The full-screen Discover panel's seed: what to look around from,
     /// which is how you ask about a track without playing it.
     Discover,
+    /// Auto DJ's opening song, chosen from the library (auto-dj contract,
+    /// clause 4): the DJ switches on when the row lands, not before.
+    DjSeed,
 }
 
 impl Capture {
@@ -1160,6 +1242,7 @@ impl Capture {
         match self {
             Capture::Sonic(side) => side.shout(),
             Capture::Discover => "SEED",
+            Capture::DjSeed => "OPENER",
         }
     }
 }
@@ -1512,8 +1595,20 @@ pub struct App {
     /// The server's libraries, as the ping named them. Empty until it answers,
     /// which is the same as "no reason to stop anywhere in particular".
     pub(crate) libraries: Vec<String>,
-    pub autodj: AutoDjMode,
-    /// How Auto-DJ chooses, beyond the mode.
+    /// The server Auto DJ is armed FOR, apart from the session's (auto-dj
+    /// contract, clause 19); `None` is off.
+    pub dj_server: Option<String>,
+    /// What that server offers, once its probe has answered.
+    pub dj_info: Option<DjServerInfo>,
+    /// The session lane (clause 10).
+    pub(crate) lane: autodj::DjLane,
+    /// The empty-queue chooser, when open (clause 2).
+    pub dj_chooser: Option<autodj::DjChooser>,
+    /// The server an opening question is about, until it is answered.
+    dj_target: Option<String>,
+    /// The old `autodj` mode was on: arm on the session's server at start.
+    dj_migrate: bool,
+    /// How Auto DJ chooses (clause 51).
     pub dj: dj::Settings,
     /// The Auto-DJ tab of the full-screen view: which row the cursor is on,
     /// what a sample produced, the genre chooser when it is open. Always
@@ -1535,10 +1630,6 @@ pub struct App {
     /// the artist cooldown, so the session anchors on where it has been
     /// rather than only on the song currently sounding.
     autodj_recent: Vec<Track>,
-    /// Round-trip cursor the random-songs picker uses to avoid repeats.
-    autodj_ignore: Vec<u32>,
-    /// A request is in flight; don't pile on another.
-    autodj_pending: bool,
     pub status: PlayerStatus,
     /// The source asked for but not yet heard back about.
     ///
@@ -1742,7 +1833,12 @@ impl App {
             queue: Queue::default(),
             capabilities: Default::default(),
             libraries: Vec::new(),
-            autodj: AutoDjMode::Off,
+            dj_server: None,
+            dj_info: None,
+            lane: Default::default(),
+            dj_chooser: None,
+            dj_target: None,
+            dj_migrate: false,
             dj: dj::Settings::default(),
             dj_panel: DjPanel::default(),
             sonic: SonicPath::default(),
@@ -1751,8 +1847,6 @@ impl App {
             capture: None,
             sonic_playlist_name: None,
             autodj_recent: Vec::new(),
-            autodj_ignore: Vec::new(),
-            autodj_pending: false,
             status: PlayerStatus::default(),
             starting: None,
             failures: 0,
@@ -1840,7 +1934,8 @@ impl App {
         self.volume = prefs.volume.clamp(0.0, 1.0);
         self.queue.repeat = Repeat::from_label(&prefs.repeat);
         self.queue.shuffle = prefs.shuffle;
-        self.autodj = AutoDjMode::from_label(&prefs.autodj);
+        self.dj_server = prefs.autodj_server.clone().filter(|s| !s.trim().is_empty());
+        self.dj_migrate = self.dj_server.is_none() && !prefs.autodj.is_empty() && prefs.autodj != "off";
         // The same clamp as the engine's, so the file and the behavior
         // agree; anything unreadable costs the blend and nothing else.
         self.crossfade = if prefs.crossfade_seconds.is_finite() {
@@ -1864,7 +1959,7 @@ impl App {
             volume: (self.volume * 100.0).round() / 100.0,
             repeat: self.queue.repeat.label().to_string(),
             shuffle: self.queue.shuffle,
-            autodj: self.autodj.label().to_string(),
+            autodj_server: self.dj_server.clone(),
             crossfade_seconds: self.crossfade,
             gapless: self.gapless,
             blend_skips: self.blend_skips,
@@ -1879,7 +1974,24 @@ impl App {
 
     /// Effects to run at startup.
     pub fn start(&mut self) -> Vec<Effect> {
-        let effects = self.begin();
+        let mut effects = self.begin();
+        // The three-mode panel's "on" never named a server: it arms on the
+        // remembered session's (the contract's migration table).
+        if std::mem::take(&mut self.dj_migrate) {
+            let id = if self.session.server_id.is_empty() {
+                self.session.server.clone()
+            } else {
+                self.session.server_id.clone()
+            };
+            if !id.is_empty() {
+                self.dj_server = Some(id);
+            }
+        }
+        // Remembered as on comes back ARMED, never playing (clause 61); its
+        // server is probed as soon as it can be reached.
+        if self.dj_armed() {
+            effects.extend(self.probe_dj());
+        }
         self.note_pending(&effects);
         effects
     }
@@ -1891,9 +2003,12 @@ impl App {
             || self.sonic_playlist_name.is_some()
         {
             InputMode::Editing
-        } else if self.dj_panel.genres.is_some() {
-            // The last modal in the player, and it is drawn over the
-            // full-screen view, so it still owns the keyboard there.
+        } else if self.dj_panel.genres.is_some()
+            || self.dj_panel.sources.is_some()
+            || self.dj_chooser.is_some()
+        {
+            // The DJ's choosers are modals drawn over either screen, so they
+            // own the keyboard there.
             InputMode::Panel
         } else if self.fullscreen {
             InputMode::Now
@@ -2186,7 +2301,10 @@ impl App {
         if self.log_view.is_some() {
             return self.handle_log_view_action(action);
         }
-        if self.dj_panel.genres.is_some() {
+        if self.dj_chooser.is_some() {
+            return self.handle_dj_chooser_action(action);
+        }
+        if self.dj_panel.genres.is_some() || self.dj_panel.sources.is_some() {
             return self.handle_genre_action(action);
         }
         if self.sonic_playlist_name.is_some()
@@ -2233,6 +2351,12 @@ impl App {
                     return match who {
                         Capture::Sonic(_) => self.open_sonic_tab(),
                         Capture::Discover => self.open_discover_tab(),
+                        // The DJ was never switched on; it stays off.
+                        Capture::DjSeed => {
+                            self.dj_target = None;
+                            self.info("Auto DJ stays off");
+                            Vec::new()
+                        }
                     };
                 }
                 // The guaranteed way out of the settings value rows, where
@@ -2384,7 +2508,9 @@ impl App {
                 ));
                 Vec::new()
             }
-            Action::ToggleAutoDj => self.cycle_autodj(),
+            Action::ToggleAutoDj => self.toggle_autodj(),
+            Action::DjSurprise => self.dj_surprise(),
+            Action::DjPick => self.dj_pick_from_library(),
             Action::StartJourney => self.start_journey(),
 
             Action::StartSearch => {
@@ -3631,12 +3757,12 @@ impl App {
     /// Stamp a track with where it came from — the session — on its way
     /// into the queue (contract clause 30).
     pub(crate) fn queued(&self, track: Track) -> Queued {
-        Queued { origin: self.origin(), track }
+        Queued { dj: None, origin: self.origin(), track }
     }
 
     pub(crate) fn queued_all(&self, tracks: Vec<Track>) -> Vec<Queued> {
         let origin = self.origin();
-        tracks.into_iter().map(|track| Queued { origin: origin.clone(), track }).collect()
+        tracks.into_iter().map(|track| Queued { dj: None, origin: origin.clone(), track }).collect()
     }
 
     /// Replace the queue with these tracks, stamped as the session's.
@@ -3858,19 +3984,24 @@ impl App {
     /// playback lands on the next survivor — playing when something was —
     /// and a queue that belonged wholly to the server ends as a Clear would.
     pub(crate) fn drop_server_items(&mut self, server: &str) -> Vec<Effect> {
+        // Its DJ goes with it (auto-dj contract, clause 10).
+        let mut effects = self.dj_server_removed(server);
         let sweep = queue_without(&self.queue.items, server, self.queue.current);
-        self.apply_sweep(sweep)
+        effects.extend(self.apply_sweep(sweep));
+        effects
     }
 
     /// A forgotten peer takes its queued rows with it (contract clause
     /// 23), by the same rule as a removed server.
     pub(crate) fn drop_peer_items(&mut self, parent: &str, id: i64) -> Vec<Effect> {
+        let mut effects = self.dj_server_removed(&crate::config::peer_identity(parent, id));
         let sweep = queue_without_by(
             &self.queue.items,
             |origin| crate::config::same_server(&origin.server, parent) && origin.peer == Some(id),
             self.queue.current,
         );
-        self.apply_sweep(sweep)
+        effects.extend(self.apply_sweep(sweep));
+        effects
     }
 
     fn apply_sweep(&mut self, sweep: Option<Sweep>) -> Vec<Effect> {
@@ -4246,6 +4377,8 @@ impl App {
                 }
             }
         }
+        // And the DJ's server while it is armed (auto-dj contract, clause 19).
+        self.dj_tunnel_target(&mut wanted);
         wanted
     }
 
@@ -5037,7 +5170,8 @@ impl App {
             event @ (Event::AutoDjSample { .. }
             | Event::Journey { .. }
             | Event::Genres(_)
-            | Event::AutoDjPick { .. }) => self.consume_dj(event),
+            | Event::AutoDjPick { .. }
+            | Event::DjProbed { .. }) => self.consume_dj(event),
             // A random pick lands on the sonic end that asked for it, the
             // same road a browsed or playing track takes.
             Event::SonicRandom { side, track } => match track {

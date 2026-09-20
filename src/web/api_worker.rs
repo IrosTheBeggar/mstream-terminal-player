@@ -109,22 +109,23 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
+        // The browser build has one client — the session's — so the DJ's
+        // reach is not honoured here: its server is the browsed one.
         ApiCmd::AutoDj(request) => {
             with_session(session, async |s| {
-                worker::autodj_pick(&s.client, s.caps, &request).await.map(|picked| {
-                    Event::AutoDjPick {
-                        candidates: picked.tracks,
-                        ignore_list: picked.ignore_list,
-                        note: picked.note,
-                    }
-                })
+                Ok(worker::pick_event(worker::autodj_pick(&s.client, &request).await, &request))
             })
             .await
         }
 
         ApiCmd::AutoDjSample { request, count } => {
+            with_session(session, async |s| worker::autodj_sample(&s.client, &request, count).await)
+                .await
+        }
+
+        ApiCmd::DjProbe { identity, .. } => {
             with_session(session, async |s| {
-                worker::autodj_sample(&s.client, s.caps, &request, count).await
+                Ok(Event::DjProbed { identity: identity.clone(), info: worker::dj_probe(&s.client).await })
             })
             .await
         }
