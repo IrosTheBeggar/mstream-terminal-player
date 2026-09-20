@@ -1851,20 +1851,26 @@ a LATER secondary screen (party view), Columns retired.
   (docs/ux-contracts/auto-dj.md, re-extracted against the mobile record's
   `439b4de4`: songs per fetch, a peer hosting the DJ, readiness, the
   empty-queue openers; multi-server sessions out of scope; decisions 1–12
-  recorded, two flagged for confirmation — sonic on by default, the DJ
-  following the session). Slices, each citing its clauses:
-  - **A1 — the shared model**: `player.autodj` becomes a switch and
-    `[player.dj]` the record's toggles (the migration table in the
-    contract); `Similar` retired; the lane with its epoch, the top-up
-    guards (clause 13), batches in `consume_dj` (14, 27), the request
+  recorded and confirmed 2026-09-20 — decision 10 rewritten to the
+  record's model: the DJ is armed FOR a server and the session browses
+  freely). Slices, each citing its clauses:
+  - **A1 — the shared model**: `player.autodj` becomes `autodj_server`
+    (the identity the DJ is armed for) and `[player.dj]` the record's
+    toggles (the migration table in the contract); `Similar` retired; the
+    DJ's server apart from the session with its probe (clause 19), the
+    record's toggle semantics (entry point 1), the lane with its epoch,
+    the top-up guards (13), batches in `consume_dj` (14, 27), the request
     builder grown sources / length / keywords / `require*` / `limit` and
-    the peer rule (20–27), the opener (3), the one-shot seed (5), the
-    empty-queue answer and `Capture::DjSeed` (2, 4, 16). Pure tests on the
-    request JSON and the lane.
-  - **A2 — the worker**: the capability learner keyed by server identity
-    with the version pre-filter from `/api/` (25, 50), the failure
-    taxonomy (30–34), the tunnel defer and owed pick (33, 35), readiness
-    from `features.discoveryReady` (36), the `[dj]` log lines (63).
+    the peer rule (20–27), the seed rule by origin (23), the opener (3),
+    the one-shot seed (5), the empty-queue answer and `Capture::DjSeed`
+    (2, 4, 16), disarm on removal. Pure tests on the request JSON and the
+    lane.
+  - **A2 — the worker**: every pick through `client_for(reach)` for the
+    DJ's server, the tunnel-target set grown by it while armed (19), the
+    capability learner keyed by server identity with the version
+    pre-filter from the probe (25, 50), the failure taxonomy (30–34), the
+    tunnel defer and owed pick (33, 35), readiness from
+    `features.discoveryReady` (36), the `[dj]` log lines (63).
   - **A3 — the GUI**: the Settings doorway and the room (40–53), the
     start chooser and the capture banner, the bar's on/off wording, the
     queue panel's badge and empty-state openers (16, 60, 62), ten locales
