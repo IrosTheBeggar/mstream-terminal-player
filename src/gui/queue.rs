@@ -1,9 +1,11 @@
-//! The queue panel: the App's real queue as rows two cells tall — the
-//! cover on the left, the title over the artist, the length on the second
-//! line where the hover [x] lands (contract clauses 32 and 34). The
-//! playing row is told by colour and weight rather than a mark: the column
-//! is thirty cells wide and the ▸ cost two of them, so the title now runs
-//! twenty-five cells where it ran twenty-two. An experiment, 2026-09-20.
+//! The queue panel: the App's real queue as rows three cells tall — the
+//! cover on the left at the card's own size, the title over the artist
+//! over the album, the length on the last line where the hover [x] lands
+//! (contract clauses 32 and 34), and the kit's live scrollbar down the
+//! screen's edge. The playing row is told by colour and weight rather
+//! than a mark: the column is thirty cells wide and the ▸ cost two of
+//! them. An experiment, 2026-09-20; the rows grew from two lines to three
+//! the same day, for a bigger cover.
 //!
 //! Covers ride the wall's discipline: the App's own claim, so a cover is
 //! asked for once and from the row's own server (contract clause 30), and
@@ -19,15 +21,16 @@ use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
 use crate::kit::theme::th;
-use crate::kit::{dim, table_view};
+use crate::kit::{dim, scroll_list, table_view};
 
 use super::cover::{Pace, Slot};
 use super::{Act, Gui, bar, bright_bold, put};
 
-/// The cover's cells: 4x2 is square at the common 10x20 font.
-const COVER_W: u16 = 4;
+/// The cover's cells: 6x3 is square at the common 10x20 font — the
+/// now-playing card's cover, so the panel and the bar agree on a size.
+const COVER_W: u16 = 6;
 /// A row is as tall as its cover.
-const ROW_H: u16 = 2;
+const ROW_H: u16 = 3;
 /// The words start one cell of air past the cover.
 const TEXT_X: u16 = COVER_W + 1;
 /// The panel's width from its left edge to the screen's; the separator
@@ -57,7 +60,7 @@ impl QueueUi {
 }
 
 /// How many rows fit between the panel's head and the note line above
-/// the bar: the single-row panel had `height - 13` lines to spend.
+/// the bar: the single-line panel had `height - 13` lines to spend.
 fn rows_that_fit(height: u16) -> usize {
     (height.saturating_sub(13) / ROW_H) as usize
 }
@@ -151,34 +154,58 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             let title = item.metadata.display_title().unwrap_or_else(|| item.file_name());
             put(frame, x + TEXT_X, y, &bar::clip(title, text_w), title_style);
 
-            // The second line: the artist (the album when there is none)
-            // left, the length right — or the hover [x] in its place
-            // (contract clause 32). The artist's clip leaves the wider of
-            // the two its room, so a hover never moves a word.
+            // Under the title, the artist then the album, each on a line of
+            // its own — a missing one lets the other rise, so the words
+            // stand under the title rather than over a gap. The first of
+            // them follows the row's colour; the second stays dim. The
+            // last line also carries the length, right — or the hover [x]
+            // in its place (contract clause 32) — and whatever word shares
+            // that line is clipped for the wider of the two, so a hover
+            // never moves it.
             let time = item.metadata.duration.map(bar::fmt_time).unwrap_or_default();
             let tail = time.chars().count().max(3) + 1;
-            let sub = item
-                .metadata
-                .artist
-                .as_deref()
-                .filter(|artist| !artist.is_empty())
-                .or(item.metadata.album.as_deref())
-                .unwrap_or_default();
-            if !sub.is_empty() {
-                put(frame, x + TEXT_X, y + 1, &bar::clip(sub, text_w.saturating_sub(tail)), sub_style);
+            let subs = [item.metadata.artist.as_deref(), item.metadata.album.as_deref()]
+                .into_iter()
+                .flatten()
+                .filter(|words| !words.is_empty());
+            for (line, words) in subs.take(usize::from(ROW_H) - 1).enumerate() {
+                let ly = y + 1 + line as u16;
+                let room = if ly == y + ROW_H - 1 { text_w.saturating_sub(tail) } else { text_w };
+                let style = if line == 0 { sub_style } else { dim() };
+                put(frame, x + TEXT_X, ly, &bar::clip(words, room), style);
             }
             // A click anywhere on the row plays it; the [x] on hover wins
             // its own cells (last registered, first hit).
             ui.click(rect, Act::QueueRow(index));
+            let last = y + ROW_H - 1;
             if hover {
-                let cell = Rect { x: area.width - 5, y: y + 1, width: 3, height: 1 };
+                let cell = Rect { x: area.width - 5, y: last, width: 3, height: 1 };
                 put(frame, cell.x, cell.y, "[x]", dim());
                 ui.click(cell, Act::QueueRemove(index));
                 ui.tip(cell, t!("gui.queue.remove_tip").to_string());
             } else if !time.is_empty() {
-                put(frame, area.width - 2 - time.chars().count() as u16, y + 1, &time, dim());
+                put(frame, area.width - 2 - time.chars().count() as u16, last, &time, dim());
             }
         }
+        // The kit's live scrollbar down the screen's last column, the
+        // rows' full height: it draws only when rows overflow, and its
+        // endcaps, track and thumb answer the pointer.
+        scroll_list(
+            frame,
+            ui,
+            Rect {
+                x: area.width - 1,
+                y: TOP,
+                width: 1,
+                height: rows_that_fit(area.height) as u16 * ROW_H,
+            },
+            len,
+            visible,
+            first,
+            Act::QScrollBy(-1),
+            Act::QScrollBy(1),
+            Act::QScrollTo,
+        );
     }
     // Rows the budget turned away want the very next frame, not the next
     // poll tick — the event loop shortens its wait while this stands.
@@ -205,9 +232,11 @@ mod tests {
     use crate::tui::worker::ApiCmd;
 
     const HOME: &str = "http://host:3000";
-    /// The panel's left edge and the words' column on a 100-wide frame.
+    /// The panel's left edge and the words' column on a 100-wide frame;
+    /// the rows start on line 4, three lines apiece.
     const X: usize = 68;
-    const TEXT: usize = 73;
+    const TEXT: usize = 75;
+    const BAR: u16 = 99;
 
     fn queued(
         filepath: &str,
@@ -243,10 +272,10 @@ mod tests {
     }
 
     fn two_rows() -> Gui {
-        gui_with(vec![
-            queued("a.mp3", "Night Drive", Some("Moon Parade"), Some("aa.jpeg"), 252.0, HOME),
-            queued("b.mp3", "Aurora", None, None, 228.0, HOME),
-        ])
+        let mut first =
+            queued("a.mp3", "Night Drive", Some("Moon Parade"), Some("aa.jpeg"), 252.0, HOME);
+        first.track.metadata.album = Some("Late Shift".into());
+        gui_with(vec![first, queued("b.mp3", "Aurora", None, None, 228.0, HOME)])
     }
 
     fn draw(gui: &mut Gui) -> Buffer {
@@ -287,22 +316,35 @@ mod tests {
     }
 
     #[test]
-    fn rows_stand_two_tall_with_the_artist_under_the_title_and_no_mark() {
+    fn rows_stand_three_tall_with_the_artist_and_album_under_the_title_and_no_mark() {
         let mut gui = two_rows();
         gui.app.queue.current = Some(0);
         let rows = lines(&draw(&mut gui));
-        assert!(rows[4][..].chars().skip(TEXT).collect::<String>().starts_with("Night Drive"));
+        assert!(cells(&rows[4], TEXT, 11) == "Night Drive", "the title: {:?}", rows[4]);
         assert!(cells(&rows[5], TEXT, 11) == "Moon Parade", "the artist beneath: {:?}", rows[5]);
-        assert_eq!(cells(&rows[5], 94, 4), "4:12", "the length on the second line");
-        assert!(cells(&rows[6], TEXT, 6) == "Aurora", "the next row two lines down: {:?}", rows[6]);
-        assert_eq!(cells(&rows[7], TEXT, 20).trim(), "", "no artist, no second-line words");
-        assert_eq!(cells(&rows[7], 94, 4), "3:48");
+        assert!(cells(&rows[6], TEXT, 10) == "Late Shift", "the album beneath that: {:?}", rows[6]);
+        assert_eq!(cells(&rows[6], 94, 4), "4:12", "the length on the last line");
+        assert!(cells(&rows[7], TEXT, 6) == "Aurora", "the next row three lines down: {:?}", rows[7]);
+        assert_eq!(cells(&rows[8], TEXT, 20).trim(), "", "no artist, no album: nothing rises");
+        assert_eq!(cells(&rows[9], 94, 4), "3:48");
         for (y, row) in rows.iter().enumerate().take(20).skip(4) {
             let column: String = row.chars().skip(X - 2).collect();
             assert!(!column.contains('▸') && !column.contains('>'), "row {y} wears a mark: {column:?}");
         }
         // The slot frame holds the cover's cells while nothing is decoded.
-        assert!(cells(&rows[4], X, 4).contains('╭'), "the slot frame: {:?}", cells(&rows[4], X, 4));
+        assert!(cells(&rows[4], X, 6).contains('╭'), "the slot frame: {:?}", cells(&rows[4], X, 6));
+        assert_eq!(cells(&rows[4], BAR as usize, 1), " ", "two rows: no scrollbar");
+    }
+
+    #[test]
+    fn a_lone_album_rises_under_the_title() {
+        let mut only_album = queued("c.mp3", "Cassini IV", None, None, 200.0, HOME);
+        only_album.track.metadata.album = Some("Orbital".into());
+        let mut gui = gui_with(vec![only_album]);
+        let rows = lines(&draw(&mut gui));
+        assert!(cells(&rows[5], TEXT, 7) == "Orbital", "the album takes the artist's line: {:?}", rows[5]);
+        assert_eq!(cells(&rows[6], TEXT, 18).trim(), "", "and leaves the last line to the length");
+        assert_eq!(cells(&rows[6], 94, 4), "3:20");
     }
 
     #[test]
@@ -316,7 +358,9 @@ mod tests {
         let artist = &buffer[(TEXT as u16, 5)];
         assert_eq!(artist.fg, th().ok, "its artist line follows the colour");
         assert!(!artist.modifier.contains(Modifier::BOLD), "without the weight");
-        let other = &buffer[(TEXT as u16, 6)];
+        let album = &buffer[(TEXT as u16, 6)];
+        assert_ne!(album.fg, th().ok, "the album line stays dim");
+        let other = &buffer[(TEXT as u16, 7)];
         assert_ne!(other.fg, th().ok, "the row that is not playing does not");
     }
 
@@ -388,29 +432,29 @@ mod tests {
         let mut gui = two_rows();
         gui.app.art.insert("aa.jpeg".into(), Some(solid_cover()));
         let rows = lines(&draw(&mut gui));
-        for y in [4usize, 5] {
-            let cover = cells(&rows[y], X, 4);
+        for y in [4usize, 5, 6] {
+            let cover = cells(&rows[y], X, 6);
             assert!(
                 cover.chars().all(|c| "█▀▄".contains(c)),
                 "the mosaic holds the cells of line {y}: {cover:?}"
             );
         }
         // The row without art keeps the frame.
-        assert!(cells(&rows[6], X, 4).contains('╭'));
+        assert!(cells(&rows[7], X, 6).contains('╭'));
     }
 
     #[test]
-    fn the_hover_x_takes_the_lengths_place_on_the_second_line() {
+    fn the_hover_x_takes_the_lengths_place_on_the_last_line() {
         let mut gui = two_rows();
         gui.ui.pointer = Some(Position { x: 80, y: 4 });
         let rows = lines(&draw(&mut gui));
-        assert_eq!(cells(&rows[5], 95, 3), "[x]", "the [x] on the hovered row's second line");
-        assert!(!rows[5].contains("4:12"), "in the length's place: {:?}", rows[5]);
-        assert!(cells(&rows[5], TEXT, 11) == "Moon Parade", "the artist did not move");
-        assert_eq!(cells(&rows[7], 94, 4), "3:48", "the other row keeps its length");
-        assert_eq!(gui.ui.hit(Position { x: 96, y: 5 }), Some(Act::QueueRemove(0)));
-        assert_eq!(gui.ui.hit(Position { x: 80, y: 5 }), Some(Act::QueueRow(0)), "either line plays");
-        assert_eq!(gui.ui.hit(Position { x: 80, y: 7 }), Some(Act::QueueRow(1)));
+        assert_eq!(cells(&rows[6], 95, 3), "[x]", "the [x] on the hovered row's last line");
+        assert!(!rows[6].contains("4:12"), "in the length's place: {:?}", rows[6]);
+        assert!(cells(&rows[6], TEXT, 10) == "Late Shift", "the album did not move");
+        assert_eq!(cells(&rows[9], 94, 4), "3:48", "the other row keeps its length");
+        assert_eq!(gui.ui.hit(Position { x: 96, y: 6 }), Some(Act::QueueRemove(0)));
+        assert_eq!(gui.ui.hit(Position { x: 80, y: 6 }), Some(Act::QueueRow(0)), "any line plays");
+        assert_eq!(gui.ui.hit(Position { x: 80, y: 8 }), Some(Act::QueueRow(1)));
     }
 
     #[test]
@@ -437,19 +481,51 @@ mod tests {
         assert!(gui.queue.slots[0].key.is_none(), "and down again when it returns");
     }
 
+    fn ten_rows() -> Gui {
+        gui_with(
+            (0..10)
+                .map(|i| queued(&format!("{i}.mp3"), &format!("Track {i:02}"), None, None, 100.0, HOME))
+                .collect(),
+        )
+    }
+
     #[test]
     fn the_view_holds_as_many_rows_as_fit_and_the_wheel_moves_it() {
-        let rows: Vec<Queued> =
-            (0..10).map(|i| queued(&format!("{i}.mp3"), &format!("Track {i:02}"), None, None, 100.0, HOME)).collect();
-        let mut gui = gui_with(rows);
+        let mut gui = ten_rows();
         let all = lines(&draw(&mut gui)).join("\n");
-        assert_eq!(super::rows_that_fit(30), 8);
-        assert!(all.contains("Track 07") && !all.contains("Track 08"), "eight rows fit:\n{all}");
+        assert_eq!(super::rows_that_fit(30), 5);
+        assert!(all.contains("Track 04") && !all.contains("Track 05"), "five rows fit:\n{all}");
 
-        gui.qscroll = 5;
+        gui.qscroll = 7;
         let all = lines(&draw(&mut gui)).join("\n");
-        assert!(all.contains("Track 09") && !all.contains("Track 01"), "the wheel clamps to the end:\n{all}");
-        assert_eq!(gui.qscroll, 2, "and the offset is written back clamped");
+        assert!(all.contains("Track 09") && !all.contains("Track 04"), "the wheel clamps to the end:\n{all}");
+        assert_eq!(gui.qscroll, 5, "and the offset is written back clamped");
+    }
+
+    #[test]
+    fn the_scrollbar_stands_on_overflow_and_its_ends_and_track_answer() {
+        let mut gui = ten_rows();
+        let rows = lines(&draw(&mut gui));
+        // Down the screen's last column, the rows' full height: fifteen
+        // lines for five rows of three.
+        assert_eq!(cells(&rows[4], BAR as usize, 1), "▲", "the top cap: {:?}", rows[4]);
+        assert_eq!(cells(&rows[18], BAR as usize, 1), "▼", "the bottom cap: {:?}", rows[18]);
+        assert_eq!(cells(&rows[5], BAR as usize, 1), "█", "the thumb at the top while first is 0");
+        assert_eq!(gui.ui.hit(Position { x: BAR, y: 18 }), Some(Act::QScrollBy(1)));
+        assert_eq!(gui.ui.hit(Position { x: BAR, y: 4 }), Some(Act::QScrollBy(-1)));
+        assert!(
+            matches!(gui.ui.hit(Position { x: BAR, y: 17 }), Some(Act::QScrollTo(_))),
+            "a track cell jumps"
+        );
+        gui.act(Act::QScrollBy(1));
+        assert_eq!(gui.qscroll, 1);
+        gui.act(Act::QScrollTo(4));
+        let rows = lines(&draw(&mut gui));
+        assert!(rows[4].contains("Track 04"), "the jump landed: {:?}", rows[4]);
+        assert_eq!(cells(&rows[17], BAR as usize, 1), "█", "the thumb rode to the end");
+        // The wheel over the panel rides the same act.
+        gui.wheel(Position { x: 90, y: 10 }, -1);
+        assert_eq!(gui.qscroll, 3);
     }
 
     /// The panel with a cover decoded, same eyeball as the shell's:
@@ -457,10 +533,16 @@ mod tests {
     #[test]
     #[ignore]
     fn dump_queue_panel() {
+        let mut first =
+            queued("a.mp3", "Night Drive", Some("Moon Parade"), Some("aa.jpeg"), 252.0, HOME);
+        first.track.metadata.album = Some("Late Shift".into());
         let mut gui = gui_with(vec![
-            queued("a.mp3", "Night Drive", Some("Moon Parade"), Some("aa.jpeg"), 252.0, HOME),
+            first,
             queued("b.mp3", "Aurora Over the Long Meadow Road", Some("The Very Long Band Name Ensemble"), None, 228.0, HOME),
             queued("c.mp3", "Cassini IV", Some("Orbital Drift"), Some("aa.jpeg"), 3725.0, HOME),
+            queued("d.mp3", "Fourth", None, None, 100.0, HOME),
+            queued("e.mp3", "Fifth", None, None, 100.0, HOME),
+            queued("f.mp3", "Sixth, off the end", None, None, 100.0, HOME),
         ]);
         gui.app.queue.current = Some(1);
         gui.app.art.insert("aa.jpeg".into(), Some(solid_cover()));

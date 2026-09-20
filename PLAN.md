@@ -1798,19 +1798,22 @@ a LATER secondary screen (party view), Columns retired.
   peer landed 2026-09-19 on the shared tunnel crate — T1–T3 below — and
   T4's two-server rig proved them live on 2026-09-20. A drag grip for
   reorder stays deferred.
-- **Queue rows two cells tall — an experiment (2026-09-20)**: the panel's
-  rows carry a 4×2 cover on the left (the wall's per-slot pixel/mosaic
-  machinery, moved to `src/gui/cover.rs` and shared), the title over the
-  artist, the length on the second line where the hover [x] lands; the ▸
-  is gone and the playing row is told by colour and weight, so the title
-  gained three cells. Covers are claimed through `App::fetch_queue_art` —
+- **Queue rows three cells tall — an experiment (2026-09-20)**: the
+  panel's rows carry a 6×3 cover on the left — the card's own cover size;
+  the wall's per-slot pixel/mosaic machinery, moved to `src/gui/cover.rs`
+  and shared — the title over the artist over the album, the length on
+  the last line where the hover [x] lands, and the kit's live scrollbar
+  (`Act::QScrollBy`/`QScrollTo`, the wheel riding the same act) down the
+  screen's last column; the ▸ is gone and the playing row is told by
+  colour and weight. Covers are claimed through `App::fetch_queue_art` —
   once, from the row's own server, a row on a closed tunnel waiting
   unclaimed — and pixels stand down under any overlay (the dropdown, a
-  modal). `src/gui/queue.rs` with nine tests, `smoke/gui/scenario_queue.py`
-  against Rig B. Costs to weigh: half the rows fit (eight at 30 lines);
-  a scroll re-encodes every visible cover on a pixel terminal (paced, as
-  the wall's page turn is). A drag grip would take the cover's column or a
-  fourth cell of air; still deferred.
+  modal). Began as two lines with a 4×2 cover, grown the same day for a
+  bigger picture. `src/gui/queue.rs` with eleven tests,
+  `smoke/gui/scenario_queue.py` against Rig B. Costs to weigh: a third of
+  the rows fit (five at 30 lines); a scroll re-encodes every visible cover
+  on a pixel terminal (paced, as the wall's page turn is). A drag grip
+  would take the cover's column or a cell of the air; still deferred.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
   of the Library tab views (Artists/Genres/Recent — the wall's drill

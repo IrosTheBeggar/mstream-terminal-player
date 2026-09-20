@@ -57,10 +57,11 @@ url = "http://127.0.0.1:3041"
   closed` on A, `tunnel connection closed` on B, the room's mark gone.
 
 - `queue` — B alone: queue a folder, hover a row, play. The panel's rows are
-  two cells tall — the cover (the ▀-mosaic on this pty, which negotiates no
-  pixel protocol), the title over the artist, the length on the second line
-  where the hover `[x]` lands, the playing row in colour rather than marked.
-  Prints the covers the api worker asked for.
+  three cells tall — the cover (the ▀-mosaic on this pty, which negotiates no
+  pixel protocol), the title over the artist over the album, the length on
+  the last line where the hover `[x]` lands, the playing row in colour rather
+  than marked, the scrollbar down the last column. Counts the rows wearing a
+  cover and checks the bar's caps off the screen.
 
 ```sh
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py direct

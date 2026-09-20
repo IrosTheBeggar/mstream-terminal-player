@@ -539,21 +539,25 @@ additions to drawn idioms. Revisit if discussion disagrees.
   reconnected on its own (the user sees the error and chooses); and a
   row's cover and shape are fetched from the row's own server, which
   clause 30 asked for and the first implementation did not do.
-- **2026-09-20 — Queue rows two cells tall, an experiment** (clause 34): the
-  GUI's panel now gives each row two lines — the cover on the left (4×2
-  cells, pixels where the terminal draws them, the ▀-mosaic elsewhere; the
-  empty slot frame until it arrives), the title over the artist (the album
-  when there is none), the length on the second line where the hover [x]
-  lands (clause 32's rule kept: the [x] takes the length's place, so no
-  word moves under the pointer). The playing row is "marked" by colour and
-  weight rather than a glyph: the ▸ cost two of the column's thirty cells,
-  and the title now runs twenty-five where it ran twenty-two. Covers are
-  claimed through the App's own fetch — once, and from the row's own
-  server (clause 30), a row on a tunnel that is not up waiting unclaimed
-  rather than asking the wrong server — and stand down to the mosaic under
-  the dropdown or a modal, because a picture's cells are skipped by the
-  terminal writer. Half as many rows fit (eight on a 30-line window). If
-  the experiment stays, clause 34's "marked" reads as colour.
+- **2026-09-20 — Queue rows three cells tall, an experiment** (clause 34):
+  the GUI's panel now gives each row three lines — the cover on the left
+  (6×3 cells, the now-playing card's own size; pixels where the terminal
+  draws them, the ▀-mosaic elsewhere; the empty slot frame until it
+  arrives), the title over the artist over the album (a missing one lets
+  the other rise), the length on the last line where the hover [x] lands
+  (clause 32's rule kept: the [x] takes the length's place, so no word
+  moves under the pointer), and the kit's live scrollbar down the screen's
+  last column once the rows overflow. The playing row is "marked" by
+  colour and weight rather than a glyph: the ▸ cost two of the column's
+  thirty cells, and the title runs twenty-three cells where it ran
+  twenty-two. Covers are claimed through the App's own fetch — once, and
+  from the row's own server (clause 30), a row on a tunnel that is not up
+  waiting unclaimed rather than asking the wrong server — and stand down
+  to the mosaic under the dropdown or a modal, because a picture's cells
+  are skipped by the terminal writer. A third as many rows fit (five on a
+  30-line window; the bar and the wheel carry the rest). Began the same
+  day at two lines and a 4×2 cover; grown for a bigger picture. If the
+  experiment stays, clause 34's "marked" reads as colour.
 - **2026-09-20 — Verified on the rig, with two corrections**: two scratch
   servers paired over federation, the player connected to one and reached
   the other through the parent's proxy, then over the peer's own tunnel

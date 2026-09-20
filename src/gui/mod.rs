@@ -157,6 +157,9 @@ pub(crate) enum Act {
     /// A queue row: click plays it, its hover [x] removes it.
     QueueRow(usize),
     QueueRemove(usize),
+    /// The queue panel's scrollbar and wheel: a step, a proportional jump.
+    QScrollBy(i32),
+    QScrollTo(usize),
     /// Whichever level is on screen scrolls.
     PlScrollBy(i32),
     PlScrollTo(usize),
@@ -745,6 +748,11 @@ impl Gui {
                 let effects = self.app.play_index(i);
                 self.pend(effects);
             }
+            Act::QScrollBy(delta) => {
+                self.qscroll =
+                    if delta < 0 { self.qscroll.saturating_sub(1) } else { self.qscroll + 1 };
+            }
+            Act::QScrollTo(first) => self.qscroll = first,
             Act::QueueRemove(i) => {
                 let effects = self.app.remove_queue_row(i);
                 self.pend(effects);
@@ -2076,8 +2084,7 @@ impl Gui {
     fn wheel(&mut self, at: Position, delta: i32) {
         self.ui.pointer = Some(at);
         if self.queue_open && at.x >= self.queue_panel_x() {
-            self.qscroll =
-                if delta < 0 { self.qscroll.saturating_sub(1) } else { self.qscroll + 1 };
+            self.act(Act::QScrollBy(delta));
             return;
         }
         // The nav column scrolls nothing.
