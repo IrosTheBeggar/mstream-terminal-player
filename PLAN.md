@@ -1809,7 +1809,7 @@ a LATER secondary screen (party view), Columns retired.
   once, from the row's own server, a row on a closed tunnel waiting
   unclaimed — and pixels stand down under any overlay (the dropdown, a
   modal). Began as two lines with a 4×2 cover, grown the same day for a
-  bigger picture. `src/gui/queue.rs` with eleven tests,
+  bigger picture. `src/gui/queue.rs` with thirteen tests,
   `smoke/gui/scenario_queue.py` against Rig B. Costs to weigh: a third of
   the rows fit (five at 30 lines). A drag grip would take the cover's
   column or a cell of the air; still deferred.
@@ -1829,7 +1829,11 @@ a LATER secondary screen (party view), Columns retired.
   gives huge covers that kept no source bytes their pixels at small
   sizes. Pinned by `a_scroll_moves_the_covers_with_their_rows_and_encodes_only_the_new_one`
   and `a_small_box_draws_from_the_thumbnail_and_a_moved_box_re_encodes_nothing`;
-  `cover_encode_costs` (ignored) prints the numbers.
+  `cover_encode_costs` (ignored) prints the numbers: a 400 px jpeg's
+  decode alone was 35 ms in debug and 2.8 ms in release; the 6×3 encode
+  from the thumbnail is 4 / 13 / 5 ms in debug (kitty / sixel / iTerm2)
+  and 0.28 / 0.56 / 0.22 ms in release, and a redraw microseconds — so a
+  wheel tick now costs one of those, not seven of the old.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
   of the Library tab views (Artists/Genres/Recent — the wall's drill
