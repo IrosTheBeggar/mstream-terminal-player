@@ -1834,6 +1834,33 @@ a LATER secondary screen (party view), Columns retired.
   from the thumbnail is 4 / 13 / 5 ms in debug (kitty / sixel / iTerm2)
   and 0.28 / 0.56 / 0.22 ms in release, and a redraw microseconds — so a
   wheel tick now costs one of those, not seven of the old.
+- **Auto DJ — contract settled 2026-09-20, implementation next**
+  (docs/ux-contracts/auto-dj.md, re-extracted against the mobile record's
+  `439b4de4`: songs per fetch, a peer hosting the DJ, readiness, the
+  empty-queue openers; multi-server sessions out of scope; decisions 1–12
+  recorded, two flagged for confirmation — sonic on by default, the DJ
+  following the session). Slices, each citing its clauses:
+  - **A1 — the shared model**: `player.autodj` becomes a switch and
+    `[player.dj]` the record's toggles (the migration table in the
+    contract); `Similar` retired; the lane with its epoch, the top-up
+    guards (clause 13), batches in `consume_dj` (14, 27), the request
+    builder grown sources / length / keywords / `require*` / `limit` and
+    the peer rule (20–27), the opener (3), the one-shot seed (5), the
+    empty-queue answer and `Capture::DjSeed` (2, 4, 16). Pure tests on the
+    request JSON and the lane.
+  - **A2 — the worker**: the capability learner keyed by server identity
+    with the version pre-filter from `/api/` (25, 50), the failure
+    taxonomy (30–34), the tunnel defer and owed pick (33, 35), readiness
+    from `features.discoveryReady` (36), the `[dj]` log lines (63).
+  - **A3 — the GUI**: the Settings doorway and the room (40–53), the
+    start chooser and the capture banner, the bar's on/off wording, the
+    queue panel's badge and empty-state openers (16, 60, 62), ten locales
+    of `gui.dj.*` carried from the record's `autoDj*`.
+  - **A4 — the TUI and the web shell follow**: `A` on/off, the tab's rows
+    reshaped (the deviations log), the wasm check.
+  - **A5 — the rig**: a peer-hosted lane through the proxy and direct,
+    `discovery is disabled` degrading once, a batch landing, Preview; the
+    contract's status row and deviations updated with what it showed.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
   of the Library tab views (Artists/Genres/Recent — the wall's drill
