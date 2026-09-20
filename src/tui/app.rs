@@ -4588,6 +4588,27 @@ impl App {
         self.fetch_art_from(file, None)
     }
 
+    /// Ask for a queue row's cover, unless the cache holds it or a claim is
+    /// out — from the row's own server when that is not the session's
+    /// (contract clause 30), the way the playing row's is fetched. A row
+    /// on a tunnel that is not up is NOT claimed: the ask would have
+    /// nowhere to go, and the placeholder a claim leaves would stand in
+    /// the picture's way for the rest of the session. The GUI's queue
+    /// panel asks through here for every row it shows.
+    pub(crate) fn fetch_queue_art(&mut self, index: usize) -> Option<Effect> {
+        let item = self.queue.items.get(index)?;
+        let file = item.metadata.album_art.clone()?;
+        if self.art.contains_key(&file) {
+            return None;
+        }
+        let reach = if self.is_session_origin(&item.origin) {
+            None
+        } else {
+            Some(self.reach(&item.origin).ok()?)
+        };
+        self.fetch_art_from(&file, reach)
+    }
+
     fn fetch_art_from(&mut self, file: &str, reach: Option<Reach>) -> Option<Effect> {
         if self.art.contains_key(file) {
             return None;

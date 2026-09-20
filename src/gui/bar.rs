@@ -150,7 +150,7 @@ fn tall_compact(
 
 /// The empty cover slot: a DIM rounded frame holding the cells real pixels
 /// will take once art plays (kit rule: images are for album art only).
-fn cover_slot(frame: &mut Frame, x: u16, y: u16, width: u16, height: u16) {
+pub(super) fn cover_slot(frame: &mut Frame, x: u16, y: u16, width: u16, height: u16) {
     frame.render_widget(
         Block::default()
             .borders(Borders::ALL)

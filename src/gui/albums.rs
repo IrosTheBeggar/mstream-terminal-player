@@ -3,19 +3,9 @@
 //! drills into its tracks through the App's own Library drill, so
 //! playing, queueing and Back are the shared state machine's.
 //!
-//! Feasibility (2026-08-29, measured by the tests at the bottom): a page
-//! of fifteen covers renders fine down both paths. The ▀-mosaic path is
-//! character cells — a full page costs tens of milliseconds a frame with
-//! a `CoverPane` per slot (the pane caches ONE resampled grid, so slots
-//! may not share). The pixel path forks `Graphics` per slot the same way
-//! (its cache holds ONE encoded picture) — but encoding is render-time
-//! work on the thread the keyboard waits on, and a debug-build sixel
-//! page measured two whole seconds. So encodes are PACED: each frame
-//! spends at most [`ENCODE_BUDGET`] starting new encodes, the mosaic
-//! stands in for slots not yet paid for, and a page turn upgrades to
-//! pixels over a few frames instead of freezing on the first.
-
-use std::time::{Duration, Instant};
+//! Covers draw through `cover::Slot`, one per grid cell, paced by the
+//! frame's encode budget — the feasibility story and the pacing live
+//! there, measured by the tests at the bottom of this file.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -25,16 +15,10 @@ use rust_i18n::t;
 use crate::kit::{dim, scroll_list, table_view};
 use crate::kit::theme::{legacy_conhost, th};
 use crate::tui::app::{Action, Tab};
-use crate::tui::art::Art;
 use crate::tui::worker::LibraryNode;
 
+use super::cover::{Pace, Slot};
 use super::{Act, Gui, accent, bright_bold, put, sel};
-
-/// How long one frame may spend STARTING cover encodes. Kitty pays ~1 ms
-/// a grid-sized cover in release and the whole page lands in one frame;
-/// debug-build sixel pays ~140 ms each and fills in one or two a frame —
-/// which is the point: the budget bounds the frame, not the page.
-const ENCODE_BUDGET: Duration = Duration::from_millis(40);
 
 /// The cover's cells: 12x6 is square at the common 10x20 font.
 const COVER_W: u16 = 12;
@@ -46,78 +30,6 @@ const STRIDE_X: u16 = COVER_W + 2;
 const STRIDE_Y: u16 = CELL_H + 1;
 
 // ── State ───────────────────────────────────────────────────────────────────
-
-/// One grid slot's drawing state: its own pixel-protocol cache and its
-/// own mosaic grid, so neither thrashes when a whole page draws in one
-/// frame.
-struct Slot {
-    graphics: crate::tui::graphics::Graphics,
-    pane: crate::tui::viz::CoverPane,
-    /// What this slot last drew as pixels — (art id, cell size). Matching
-    /// means the protocol cache below is warm and drawing is free; a
-    /// mismatch is an encode, which only the frame's budget may buy.
-    key: Option<(u64, u16, u16)>,
-}
-
-impl Slot {
-    fn new(graphics: crate::tui::graphics::Graphics) -> Slot {
-        Slot { graphics, pane: Default::default(), key: None }
-    }
-
-    /// The cover, pixels where the terminal draws them and the budget
-    /// allows, the ▀-mosaic otherwise — the card cover's two paths, paced.
-    fn draw_paced(&mut self, frame: &mut Frame, rect: Rect, art: &Art, pace: &Pace) {
-        let want = (art.id(), rect.width, rect.height);
-        if self.key == Some(want) {
-            // Warm: drawing is the cached protocol entry, microseconds.
-            if self.graphics.draw(frame, rect, art) {
-                return;
-            }
-            self.key = None;
-        } else if pace.allows() {
-            if self.graphics.draw(frame, rect, art) {
-                self.key = Some(want);
-                return;
-            }
-            self.key = None;
-        } else {
-            // Starving only happens once real encode time has been spent
-            // this frame — a mosaic-only terminal never elapses the
-            // budget, so this can't spin an idle session hot.
-            pace.starved.set(true);
-        }
-        let mut canvas = crate::tui::canvas::Canvas::new(rect);
-        if !canvas.is_empty() {
-            self.pane.draw(&mut canvas, art);
-            frame.render_widget(ratatui::widgets::Paragraph::new(canvas.into_lines()), rect);
-        }
-    }
-}
-
-/// One frame's encode allowance, shared by every slot it draws. A slot
-/// the budget turned away marks it STARVED — the caller's cue to run the
-/// next frame promptly instead of idling out the poll, so a page turn
-/// finishes upgrading in tens of milliseconds of wall clock rather than
-/// one encode per 100 ms tick.
-struct Pace {
-    start: Instant,
-    budget: Duration,
-    starved: std::cell::Cell<bool>,
-}
-
-impl Pace {
-    fn frame() -> Pace {
-        Pace { start: Instant::now(), budget: ENCODE_BUDGET, starved: std::cell::Cell::new(false) }
-    }
-
-    fn allows(&self) -> bool {
-        self.start.elapsed() < self.budget
-    }
-
-    fn starved(&self) -> bool {
-        self.starved.get()
-    }
-}
 
 pub(crate) struct AlbumsUi {
     slots: Vec<Slot>,
@@ -140,8 +52,7 @@ impl AlbumsUi {
     /// terminal — the card cover's rule, per slot.
     pub(crate) fn on_resize(&mut self) {
         for slot in &mut self.slots {
-            slot.graphics.refresh();
-            slot.key = None;
+            slot.on_resize();
         }
     }
 }
@@ -896,7 +807,10 @@ mod tests {
 
 #[cfg(test)]
 mod feasibility {
+    use std::time::{Duration, Instant};
+
     use super::*;
+    use crate::tui::art::Art;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 

@@ -20,7 +20,9 @@
 
 mod albums;
 mod bar;
+mod cover;
 mod playlists;
+mod queue;
 mod servers;
 mod sonic;
 mod torrent;
@@ -410,6 +412,8 @@ pub(crate) struct Gui {
     servers: servers::ServersUi,
     /// The album wall: its page, cell cursor, and per-slot cover caches.
     albums: albums::AlbumsUi,
+    /// The queue panel: its per-row cover caches.
+    queue: queue::QueueUi,
     /// The sonic path room: its menu, setup cursor and results wheel.
     sonic: sonic::SonicUi,
     /// The playlists room: its dialogs and the two levels' wheels.
@@ -449,6 +453,7 @@ impl Gui {
             last_height: MIN_H,
             servers: servers::ServersUi::new(),
             albums: albums::AlbumsUi::new(),
+            queue: queue::QueueUi::new(),
             sonic: sonic::SonicUi::new(),
             playlists: playlists::PlaylistsUi::new(),
             torrent: torrent::TorrentUi::new(),
@@ -877,6 +882,18 @@ fn content_rect(width: u16, height: u16, queue_open: bool) -> Rect {
     Rect { x: 17, y: 2, width: right - 17, height: height - 10 }
 }
 
+/// Whether anything stands over the base layer this frame — the header
+/// dropdown, a room's modal, the pairing QR. Pixel covers stand down
+/// under it: ratatui-image marks a picture's cells skipped for the
+/// terminal writer, so a modal's text written over them would never land.
+fn overlay_open(gui: &Gui) -> bool {
+    gui.servers.drop_open
+        || gui.servers.modal_open()
+        || gui.torrent.modal_open()
+        || sonic::modal_open(gui)
+        || playlists::modal_open(gui)
+}
+
 /// A path clipped LEADING, so the leaf stays visible (the kit's path law:
 /// ten identical prefixes say nothing).
 fn clip_lead(text: &str, max: usize) -> String {
@@ -929,7 +946,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     }
 
     if gui.queue_open {
-        draw_queue(frame, gui, area);
+        queue::draw(frame, gui, area);
     }
 
     // The note sits above the bar (gui's own first, else the App's words);
@@ -1596,75 +1613,6 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     );
 }
 
-/// The queue panel: the App's real queue, the playing row marked. Rows are
-/// not yet clickable — jumping the queue lands with the queue slice.
-fn draw_queue(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    let x = area.width - 32;
-    for y in 2..area.height - 8 {
-        put(frame, area.width - 34, y, "│", dim());
-    }
-    put(frame, x, 2, &t!("gui.queue.title"), dim());
-    put(frame, x, 3, &"─".repeat(31), dim());
-    let items = &gui.app.queue.items;
-    if items.is_empty() {
-        put(frame, x, 4, &t!("gui.queue.empty"), dim());
-        return;
-    }
-    let total: f64 = items.iter().filter_map(|t| t.metadata.duration).sum();
-    let count = if items.len() == 1 {
-        t!("gui.queue.one").to_string()
-    } else {
-        t!("gui.queue.many", n = items.len()).to_string()
-    };
-    let head = if total > 0.0 { format!("{count} · {}", bar::fmt_time(total)) } else { count };
-    put(frame, area.width - 2 - head.chars().count() as u16, 2, &head, dim());
-
-    let avail = (area.height - 13) as usize;
-    let current = gui.app.queue.current;
-    let reveal = (current != gui.last_current).then_some(current).flatten();
-    gui.last_current = current;
-    let (first, visible) = table_view(items.len(), reveal, gui.qscroll, avail);
-    gui.qscroll = first;
-    let rows: Vec<(usize, String, Option<f64>)> = items
-        .iter()
-        .enumerate()
-        .skip(first)
-        .take(visible)
-        .map(|(i, t)| {
-            let title = t.metadata.display_title().unwrap_or_else(|| t.file_name()).to_string();
-            (i, title, t.metadata.duration)
-        })
-        .collect();
-    for (row, (index, title, duration)) in rows.into_iter().enumerate() {
-        let y = 4 + row as u16;
-        let is_current = gui.app.queue.current == Some(index);
-        let rect = Rect { x, y, width: area.width - 1 - x, height: 1 };
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
-        let style = match (is_current, hover) {
-            (true, _) => Style::default().fg(th().ok).add_modifier(Modifier::BOLD),
-            (false, true) => bright_bold(),
-            (false, false) => Style::default(),
-        };
-        if is_current {
-            let mark = if legacy_conhost() { ">" } else { "▸" };
-            put(frame, x, y, mark, style);
-        }
-        put(frame, x + 2, y, &bar::clip(&title, 22), style);
-        // A click plays the row; hovering offers to take it out (contract
-        // clause 32); otherwise the length sits where the [x] would.
-        gui.ui.click(rect, Act::QueueRow(index));
-        if hover {
-            let cell = Rect { x: area.width - 5, y, width: 3, height: 1 };
-            put(frame, cell.x, y, "[x]", dim());
-            gui.ui.click(cell, Act::QueueRemove(index));
-            gui.ui.tip(cell, t!("gui.queue.remove_tip").to_string());
-        } else {
-            let time = duration.map(bar::fmt_time).unwrap_or_default();
-            put(frame, area.width - 2 - time.chars().count() as u16, y, &time, dim());
-        }
-    }
-}
-
 fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if gui.servers.room {
         return servers::draw_room(frame, gui, content);
@@ -2088,11 +2036,12 @@ fn event_loop(
                     }
                 }
                 // A resized window changes the cell-to-pixel mapping the
-                // cover encodes against — the card's and every album
-                // slot's alike.
+                // cover encodes against — the card's, every album slot's
+                // and every queue row's alike.
                 TermEvent::Resize(..) => {
                     gui.app.graphics.refresh();
                     gui.albums.on_resize();
+                    gui.queue.on_resize();
                 }
                 _ => {}
             }
@@ -2374,7 +2323,7 @@ mod tests {
     }
 
     #[test]
-    fn the_queue_panel_shows_the_real_queue_with_the_playing_marker() {
+    fn the_queue_panel_shows_the_real_queue_headed_by_its_count() {
         let mut gui = browsing_gui();
         gui.act(Act::FileQueue(2));
         gui.act(Act::FileQueue(3));

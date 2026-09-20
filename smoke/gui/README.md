@@ -56,6 +56,12 @@ url = "http://127.0.0.1:3041"
   `tunnel …: closing — nothing references it` in the log, `guest connection
   closed` on A, `tunnel connection closed` on B, the room's mark gone.
 
+- `queue` — B alone: queue a folder, hover a row, play. The panel's rows are
+  two cells tall — the cover (the ▀-mosaic on this pty, which negotiates no
+  pixel protocol), the title over the artist, the length on the second line
+  where the hover `[x]` lands, the playing row in colour rather than marked.
+  Prints the covers the api worker asked for.
+
 ```sh
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py direct
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py mixed
