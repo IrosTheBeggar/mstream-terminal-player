@@ -314,6 +314,14 @@ gates (the public-mode modal) get NO `[X]` — they force an explicit
 choice.
 A modal whose height varies (the suggestion list) anchors as if always
 at full height: title and input hold one spot, the list grows DOWNWARD.
+**Over pixels**: on a screen that draws real pixels (the queue's and the
+wall's covers), every overlay — a modal frame (`modal_frame_on`), the
+header dropdown, the tooltip — registers its footprint with the surface
+(`Surface::overlay`), and a cover the footprint touched LAST frame draws
+as the ▀-mosaic for that frame. The terminal writer skips a picture's
+cells, so the overlay's edge and the frame after it leaves need plain
+cells to repaint; a cover no overlay touches never blurs, and one frame
+behind on the way in costs nothing because `Clear` resets what it covers.
 
 ### Tooltip
 A dwell of ~500ms on a tip target shows a floating box: a miniature of

@@ -14,7 +14,7 @@ use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{dim, input_display, modal_frame, scroll_list, table_view};
+use crate::kit::{dim, input_display, modal_frame_on, scroll_list, table_view};
 use crate::tui::app::{Action, Entry};
 use crate::tui::worker::{ApiCmd, LibraryNode};
 
@@ -309,7 +309,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         };
         let name = dialog.name.clone();
         gui.ui.click(area, Act::PlCancel);
-        let inner = modal_frame(frame, area, 52, 7, th().accent);
+        let inner = modal_frame_on(frame, &mut gui.ui, area, 52, 7, th().accent);
         put(frame, inner.x + 1, inner.y, &title, accent().add_modifier(Modifier::BOLD));
         crate::kit::modal_close(frame, &mut gui.ui, inner, Act::PlCancel, t!("gui.srv.close_tip").to_string());
         put(
@@ -341,7 +341,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         // The delete gate: a warning modal — gold border, no [X], the safe
         // choice wearing the primary color (clause 30; the kit's law).
         gui.ui.click(area, Act::PlCancel);
-        let inner = modal_frame(frame, area, 52, 6, th().gold);
+        let inner = modal_frame_on(frame, &mut gui.ui, area, 52, 6, th().gold);
         put(
             frame,
             inner.x + 1,

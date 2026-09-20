@@ -22,7 +22,7 @@ use rust_i18n::t;
 
 use crate::api::{ApiError, Client};
 use crate::config::{self, Config};
-use crate::kit::{dim, input_display, modal_frame, modal_close, tall_button, tall_secondary};
+use crate::kit::{dim, input_display, modal_frame_on, modal_close, tall_button, tall_secondary};
 use crate::kit::theme::{legacy_conhost, th};
 use crate::tui::worker::{ApiCmd, Event};
 use crate::tui::app::Effect;
@@ -1450,6 +1450,9 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let height = entries.len() as u16 + 3;
     let x = area.width.saturating_sub(width + 1);
     let rect = Rect { x, y: 1, width, height: height.min(area.height.saturating_sub(8)) };
+    // Over the queue's first rows: the covers it touches draw as text
+    // next frame (`Surface::overlay`), the rest stay pixels.
+    gui.ui.overlay(rect);
 
     frame.render_widget(ratatui::widgets::Clear, rect);
     if let Some(ground) = th().ground.filter(|_| crate::kit::theme::ground_owned()) {
@@ -1790,7 +1793,7 @@ fn draw_form(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 /// modal. The focused way is the primary button; ↑↓ or Tab flips.
 fn draw_choose(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     gui.ui.click(area, Act::Guard);
-    let inner = modal_frame(frame, area, 60, 12, th().accent);
+    let inner = modal_frame_on(frame, &mut gui.ui, area, 60, 12, th().accent);
     put(frame, inner.x + 1, inner.y, &t!("gui.srv.form_add"), bright_bold());
     modal_close(frame, &mut gui.ui, inner, Act::FormCancel, t!("gui.srv.close_tip").to_string());
 
@@ -1823,7 +1826,7 @@ fn draw_choose(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 /// pairing code paste for everywhere else.
 fn draw_quick_connect(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     gui.ui.click(area, Act::Guard);
-    let inner = modal_frame(frame, area, 60, 20, th().accent);
+    let inner = modal_frame_on(frame, &mut gui.ui, area, 60, 20, th().accent);
     put(frame, inner.x + 1, inner.y, &t!("gui.srv.form_qc"), bright_bold());
     modal_close(frame, &mut gui.ui, inner, Act::FormCancel, t!("gui.srv.close_tip").to_string());
 
@@ -1937,7 +1940,7 @@ fn draw_quick_connect(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 
 fn draw_direct(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     gui.ui.click(area, Act::Guard);
-    let inner = modal_frame(frame, area, 60, 20, th().accent);
+    let inner = modal_frame_on(frame, &mut gui.ui, area, 60, 20, th().accent);
     let view = {
         let Some(form) = gui.servers.form.as_ref() else { return };
         FormView {
@@ -2134,7 +2137,7 @@ fn draw_confirm(frame: &mut Frame, gui: &mut Gui, area: Rect, index: usize) {
     let url = entry.url.clone();
     let shown = config::display_name(entry);
     let tunnel = crate::quickconnect::is_tunnel_id(&url);
-    let inner = modal_frame(frame, area, 56, if tunnel { 11 } else { 9 }, th().danger);
+    let inner = modal_frame_on(frame, &mut gui.ui, area, 56, if tunnel { 11 } else { 9 }, th().danger);
     put(frame, inner.x + 1, inner.y, &t!("gui.srv.remove_title"), bright_bold());
     modal_close(frame, &mut gui.ui, inner, Act::SrvConfirm(false), t!("gui.srv.close_tip").to_string());
 
@@ -2177,7 +2180,7 @@ fn draw_qr(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     };
     let height = area.height.saturating_sub(2).min(line_count.max(16) + 6);
     let width = (line_count.max(24) + 8).clamp(40, area.width.saturating_sub(4));
-    let inner = modal_frame(frame, area, width, height, th().accent);
+    let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
     put(frame, inner.x + 1, inner.y, &t!("gui.srv.qr_title"), bright_bold());
     modal_close(frame, &mut gui.ui, inner, Act::QrClose, t!("gui.srv.close_tip").to_string());
     put(

@@ -895,18 +895,6 @@ fn content_rect(width: u16, height: u16, queue_open: bool) -> Rect {
     Rect { x: 17, y: 2, width: right - 17, height: height - 10 }
 }
 
-/// Whether anything stands over the base layer this frame — the header
-/// dropdown, a room's modal, the pairing QR. Pixel covers stand down
-/// under it: ratatui-image marks a picture's cells skipped for the
-/// terminal writer, so a modal's text written over them would never land.
-fn overlay_open(gui: &Gui) -> bool {
-    gui.servers.drop_open
-        || gui.servers.modal_open()
-        || gui.torrent.modal_open()
-        || sonic::modal_open(gui)
-        || playlists::modal_open(gui)
-}
-
 /// A path clipped LEADING, so the leaf stays visible (the kit's path law:
 /// ten identical prefixes say nothing).
 fn clip_lead(text: &str, max: usize) -> String {
@@ -1064,7 +1052,8 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     // The tooltip draws over everything, once the dwell matures — the
     // wizard's order.
     if let Some((target, text)) = gui.ui.ripe_tooltip() {
-        crate::kit::draw_tooltip(frame, area, target, text);
+        let footprint = crate::kit::draw_tooltip(frame, area, target, text);
+        gui.ui.overlay(footprint);
     }
 }
 

@@ -21,7 +21,7 @@ use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{dim, input_display, modal_close, modal_frame, scroll_list, table_view, tall_button, tall_secondary};
+use crate::kit::{dim, input_display, modal_close, modal_frame_on, scroll_list, table_view, tall_button, tall_secondary};
 use crate::tui::app::{Action, Capture, SonicEmpty, SonicSide, SonicView, Tab};
 use crate::tui::worker::ApiCmd;
 
@@ -612,7 +612,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     if let Some(side) = gui.sonic.menu {
         gui.ui.click(area, Act::SonMenuClose);
-        let inner = modal_frame(frame, area, 44, 7, th().accent);
+        let inner = modal_frame_on(frame, &mut gui.ui, area, 44, 7, th().accent);
         put(
             frame,
             inner.x + 1,
@@ -663,7 +663,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 
     if let Some(name) = gui.app.sonic_playlist_name.clone() {
         gui.ui.click(area, Act::SonSaveCancel);
-        let inner = modal_frame(frame, area, 52, 7, th().accent);
+        let inner = modal_frame_on(frame, &mut gui.ui, area, 52, 7, th().accent);
         put(
             frame,
             inner.x + 1,

@@ -1835,6 +1835,13 @@ a LATER secondary screen (party view), Columns retired.
   gives huge covers that kept no source bytes their pixels at small
   sizes. Pinned by `a_scroll_moves_the_covers_with_their_rows_and_encodes_only_the_new_one`
   and `a_small_box_draws_from_the_thumbnail_and_a_moved_box_re_encodes_nothing`;
+  **Overlays no longer blur the whole panel (2026-09-20)**: the first
+  gate stood every cover down to the mosaic while any dropdown or modal
+  was open (reported: the covers "turn blurry" and the picture's extent
+  shifts). Overlays now register their footprint with the kit's
+  `Surface` (`modal_frame_on`, the dropdown, the tooltip), and only a
+  cover a footprint touched last frame draws as text — for that frame and
+  the one after the overlay leaves, which is what repaints its cells.
   `cover_encode_costs` (ignored) prints the numbers: a 400 px jpeg's
   decode alone was 35 ms in debug and 2.8 ms in release; the 6×3 encode
   from the thumbnail is 4 / 13 / 5 ms in debug (kitty / sixel / iTerm2)

@@ -413,6 +413,11 @@ fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 .and_then(|file| app.art.get(file))
                 .and_then(|art| art.as_ref());
             match art {
+                // Text where an overlay stood last frame (the header
+                // dropdown reaches the wall's first row), pixels elsewhere.
+                Some(art) if ui.covered_last_frame(cover) => {
+                    wall.slots[i].draw_mosaic(frame, cover, art)
+                }
                 Some(art) => wall.slots[i].draw_paced(frame, cover, art, &pace),
                 None => {
                     // No cover (yet): the empty slot frame, the card's own

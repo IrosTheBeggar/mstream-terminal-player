@@ -42,7 +42,7 @@ use crate::api::types::{
 };
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{
-    dim, input_display, modal_close, modal_frame, modal_frame_anchored, scroll_list, table_view,
+    dim, input_display, modal_close, modal_frame_on, modal_frame_anchored_on, scroll_list, table_view,
     tall_button,
 };
 use crate::tui::worker::Event;
@@ -1627,7 +1627,7 @@ fn modal_row(frame: &mut Frame, gui: &mut Gui, inner: Rect, y: u16, label: &str,
 pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     if let Some(chooser) = gui.torrent.chooser.clone() {
         gui.ui.click(area, Act::TorChooseClose);
-        let inner = modal_frame(frame, area, 60, 10, th().accent);
+        let inner = modal_frame_on(frame, &mut gui.ui, area, 60, 10, th().accent);
         put(frame, inner.x + 1, inner.y, &t!("gui.tor.received_title"), accent().add_modifier(Modifier::BOLD));
         modal_close(frame, &mut gui.ui, inner, Act::TorChooseClose, t!("gui.srv.close_tip").to_string());
         let what = match &chooser.incoming {
@@ -1656,7 +1656,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let shown = suggestions.len().min(6) as u16;
         // Anchored as if always full: the title and input hold one spot
         // and the suggestion list grows DOWNWARD beneath them.
-        let inner = modal_frame_anchored(frame, area, 66, 7 + shown, 13, th().accent);
+        let inner = modal_frame_anchored_on(frame, &mut gui.ui, area, 66, 7 + shown, 13, th().accent);
         put(frame, inner.x, inner.y, &t!("gui.tor.picker_title"), accent().add_modifier(Modifier::BOLD));
         modal_close(frame, &mut gui.ui, inner, Act::TorPickerClose, t!("gui.srv.close_tip").to_string());
         put(
@@ -1716,7 +1716,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     if let Some(matches) = gui.torrent.matches.clone() {
         gui.ui.click(area, Act::TorMatchClose);
         let n = matches.list.len().min(8) as u16;
-        let inner = modal_frame(frame, area, 72, 7 + n, th().accent);
+        let inner = modal_frame_on(frame, &mut gui.ui, area, 72, 7 + n, th().accent);
         put(frame, inner.x + 1, inner.y, &t!("gui.tor.partial_title"), accent().add_modifier(Modifier::BOLD));
         modal_close(frame, &mut gui.ui, inner, Act::TorMatchClose, t!("gui.srv.close_tip").to_string());
         for (i, line) in wrap(&t!("gui.tor.partial_body"), inner.width as usize - 2).into_iter().take(2).enumerate() {

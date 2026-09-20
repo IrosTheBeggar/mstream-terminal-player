@@ -99,6 +99,16 @@ pub struct Surface<A> {
     /// A soft capture left behind by a phantom release: hover stays
     /// suppressed near this press until the pointer genuinely leaves.
     soft_origin: Option<Position>,
+    /// The footprints of everything drawn OVER the base layer this frame —
+    /// modal frames, the header dropdown, the tooltip — and last frame's.
+    /// A pixel surface beneath (a cover) consults last frame's, because
+    /// the overlays draw after it: the terminal writer skips a picture's
+    /// cells, so a cover an overlay touched draws as text until the frame
+    /// after the overlay leaves, which repaints every cell it wrote. One
+    /// frame behind on the way in is harmless — the overlay's `Clear`
+    /// resets what it covers. Covers an overlay never touches stay pixels.
+    overlays: Vec<Rect>,
+    covered: Vec<Rect>,
 }
 
 impl<A> Default for Surface<A> {
@@ -113,6 +123,8 @@ impl<A> Default for Surface<A> {
             arrow_hold: None,
             armed: None,
             soft_origin: None,
+            overlays: Vec::new(),
+            covered: Vec::new(),
         }
     }
 }
@@ -122,9 +134,24 @@ impl<A: Clone> Surface<A> {
         Self::default()
     }
 
-    /// Start a render pass: the registries empty, the input state stays.
+    /// Start a render pass: the registries empty, the input state stays,
+    /// and last frame's overlay footprints become the ones to draw under.
     pub fn begin_frame(&mut self) {
+        self.covered = std::mem::take(&mut self.overlays);
         self.clear_registries();
+    }
+
+    /// Register something drawn over the base layer — its whole footprint,
+    /// border included. Not cleared by [`Self::clear_registries`]: an
+    /// overlay registers after the base layer's controls are dropped.
+    pub fn overlay(&mut self, rect: Rect) {
+        self.overlays.push(rect);
+    }
+
+    /// Whether an overlay stood over any part of `rect` LAST frame — the
+    /// question a pixel surface asks before drawing pixels there.
+    pub fn covered_last_frame(&self, rect: Rect) -> bool {
+        self.covered.iter().any(|over| over.intersects(rect))
     }
 
     /// Drop every registered rect — the modal-inertness move: a screen
@@ -405,6 +432,43 @@ pub fn modal_frame(
     modal_frame_anchored(frame, area, width, height, height, title_color)
 }
 
+/// [`modal_frame`] on a screen with pixel surfaces beneath: the frame's
+/// footprint is registered with the surface, so a cover it touches draws
+/// as text (see [`Surface::overlay`]) and every other cover stays pixels.
+pub fn modal_frame_on<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    area: Rect,
+    width: u16,
+    height: u16,
+    title_color: Color,
+) -> Rect {
+    modal_frame_anchored_on(frame, s, area, width, height, height, title_color)
+}
+
+/// [`modal_frame_anchored`], registering its footprint like [`modal_frame_on`].
+pub fn modal_frame_anchored_on<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    area: Rect,
+    width: u16,
+    height: u16,
+    max_height: u16,
+    title_color: Color,
+) -> Rect {
+    s.overlay(modal_rect(area, width, height, max_height));
+    modal_frame_anchored(frame, area, width, height, max_height, title_color)
+}
+
+/// Where a modal of this size sits: centred, and vertically as if
+/// `max_height` tall, so one that grows keeps its top edge.
+fn modal_rect(area: Rect, width: u16, height: u16, max_height: u16) -> Rect {
+    let width = width.min(area.width.saturating_sub(4));
+    let height = height.min(area.height.saturating_sub(2));
+    let max_height = max_height.max(height).min(area.height.saturating_sub(2));
+    Rect { x: (area.width - width) / 2, y: (area.height - max_height) / 2, width, height }
+}
+
 /// Like [`modal_frame`], but vertically positioned as if the modal were
 /// `max_height` tall: a modal whose height varies (a suggestion list)
 /// keeps a FIXED top edge and grows downward — its input line never
@@ -417,15 +481,7 @@ pub fn modal_frame_anchored(
     max_height: u16,
     title_color: Color,
 ) -> Rect {
-    let width = width.min(area.width.saturating_sub(4));
-    let height = height.min(area.height.saturating_sub(2));
-    let max_height = max_height.max(height).min(area.height.saturating_sub(2));
-    let rect = Rect {
-        x: (area.width - width) / 2,
-        y: (area.height - max_height) / 2,
-        width,
-        height,
-    };
+    let rect = modal_rect(area, width, height, max_height);
     frame.render_widget(Clear, rect);
     // Clear resets cells to the terminal default — repaint the ground so
     // the modal interior matches the fixed scheme (when it is owned).
@@ -636,10 +692,12 @@ pub fn caret_cell(rect: Rect, target: Rect) -> Option<(u16, u16, &'static str)> 
 /// A miniature of the neutral modal, anchored to its target: Clear +
 /// ground repaint beneath, Rounded DIM border with a caret stem pointing
 /// at the target, wrapped default-fg text. Draw LAST — over everything.
-pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) {
+/// Returns its footprint, for a screen with pixel surfaces to register
+/// (see [`Surface::overlay`]).
+pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) -> Rect {
     let lines = wrap_tip(text);
     if lines.is_empty() {
-        return;
+        return Rect::default();
     }
     let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
     let h = lines.len() as u16 + 2;
@@ -665,6 +723,7 @@ pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) {
     }
     let body: Vec<Line> = lines.into_iter().map(|l| Line::from(format!(" {l}"))).collect();
     frame.render_widget(Paragraph::new(body), inner);
+    rect
 }
 
 // ── Text input display ───────────────────────────────────────────────────────
@@ -764,6 +823,23 @@ impl Drop for GroundGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_footprints_are_the_next_frames_cover_to_draw_under() {
+        let mut s: Surface<u8> = Surface::new();
+        s.begin_frame();
+        s.overlay(Rect { x: 0, y: 0, width: 10, height: 10 });
+        let inside = Rect { x: 2, y: 2, width: 3, height: 3 };
+        let outside = Rect { x: 20, y: 20, width: 3, height: 3 };
+        assert!(!s.covered_last_frame(inside), "this frame's overlays draw after the base layer");
+        s.begin_frame();
+        assert!(s.covered_last_frame(inside), "last frame's footprint stands for one frame");
+        assert!(!s.covered_last_frame(outside));
+        s.clear_registries();
+        assert!(s.covered_last_frame(inside), "the modal-inertness clear keeps the footprints");
+        s.begin_frame();
+        assert!(!s.covered_last_frame(inside), "and the frame after it leaves is clear");
+    }
 
     #[test]
     fn pointer_shapes_speak_both_name_families_and_reset_is_empty() {

@@ -14,10 +14,11 @@
 //! place: an encoded picture draws anywhere for free, so a scroll moves
 //! each row's cover with it and only a cover newly revealed pays an
 //! encode — from the thumbnail, which has every pixel a 6x3 box can show.
-//! Pixels stand down under anything drawn over the column
-//! — the header dropdown, a modal, the pairing QR — because a picture's
-//! cells are skipped by the terminal writer and a modal's text over them
-//! would never land; the ▀-mosaic is plain cells and layers like any text.
+//! A cover an overlay touched last frame — the header dropdown, a modal,
+//! the tooltip — draws as the ▀-mosaic for that frame (the kit's
+//! `Surface::overlay`): a picture's cells are skipped by the terminal
+//! writer, so the overlay's edge and the frame after it leaves need plain
+//! cells to repaint. Every other cover stays pixels.
 
 use std::collections::{HashMap, HashSet};
 
@@ -121,8 +122,6 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
     gui.pend(fetches);
 
-    // Pixels only while nothing stands over the column.
-    let pixels = !super::overlay_open(gui);
 
     // Split borrows: the rows are READ from the App while each slot's
     // caches are written — disjoint fields of the one Gui, the wall's
@@ -166,10 +165,12 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                         .entry(art.id())
                         .or_insert_with(|| Slot::new(app.graphics.fork()));
                     on_view.insert(art.id());
-                    if pixels {
-                        slot.draw_paced(frame, cover, art, &pace);
-                    } else {
+                    // Text where an overlay stood last frame — the dropdown,
+                    // a modal, the tooltip — pixels everywhere else.
+                    if ui.covered_last_frame(cover) {
                         slot.draw_mosaic(frame, cover, art);
+                    } else {
+                        slot.draw_paced(frame, cover, art, &pace);
                     }
                 }
                 None => bar::cover_slot(frame, x, y, COVER_W, ROW_H),
@@ -488,27 +489,45 @@ mod tests {
     }
 
     #[test]
-    fn pixels_stand_down_while_an_overlay_is_up() {
+    fn a_cover_stands_down_only_under_an_overlay_and_only_while_it_stands() {
         use ratatui_image::picker::ProtocolType;
-        let mut gui = two_rows();
+        // Two rows with covers of their own; two saved servers, so the
+        // header dropdown is tall enough (five lines from line 1) to stand
+        // over the first row's cover and not the second's.
+        let mut gui = gui_with(vec![
+            queued("a.mp3", "First", None, Some("aa.jpeg"), 200.0, HOME),
+            queued("b.mp3", "Second", None, Some("bb.jpeg"), 200.0, HOME),
+        ]);
+        gui.config.servers = vec![
+            crate::config::ServerEntry { url: "http://attic.local:3000".into(), ..Default::default() },
+            crate::config::ServerEntry { url: "http://office.local:3000".into(), ..Default::default() },
+        ];
         gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
         gui.app.art.insert("aa.jpeg".into(), Some(solid_cover()));
+        gui.app.art.insert("bb.jpeg".into(), Some(solid_cover()));
+        let placeholders = |buffer: &Buffer, y: u16| buffer[(X as u16, y)].symbol().contains('\u{10EEEE}');
+        let mosaic = |buffer: &Buffer, y: u16| "█▀▄".contains(buffer[(X as u16, y)].symbol());
 
-        let slot_key = |gui: &Gui| gui.queue.slots.values().next().map(|slot| slot.key);
+        settle(&mut gui);
+        assert_eq!(gui.queue.encodes(), 2, "both covers encoded");
+
+        // The dropdown opens: this frame draws before it and does not know
+        // yet; the frame after, the first row's uncovered line is text and
+        // the second row is still pixels.
         gui.servers.drop_open = true;
         draw(&mut gui);
-        assert_eq!(slot_key(&gui), Some(None), "no pixels under the dropdown");
+        let buffer = draw(&mut gui);
+        assert!(mosaic(&buffer, 6), "the touched cover's free line is text: {:?}", buffer[(X as u16, 6)].symbol());
+        assert!(placeholders(&buffer, 7), "the cover below the dropdown keeps its pixels");
 
+        // It closes: one more frame of text repaints what it wrote, then
+        // the pixels return — from the warm cache, no encode.
         gui.servers.drop_open = false;
-        draw(&mut gui);
-        assert!(slot_key(&gui).flatten().is_some(), "pixels once the column is clear");
-        assert_eq!(gui.queue.encodes(), 1);
-
-        gui.servers.drop_open = true;
-        draw(&mut gui);
-        gui.servers.drop_open = false;
-        draw(&mut gui);
-        assert_eq!(gui.queue.encodes(), 1, "the overlay's passing cost no second encode");
+        let buffer = draw(&mut gui);
+        assert!(mosaic(&buffer, 4), "the frame after the overlay leaves is text");
+        let buffer = draw(&mut gui);
+        assert!(placeholders(&buffer, 4), "then pixels again");
+        assert_eq!(gui.queue.encodes(), 2, "the overlay's passing cost no encode");
     }
 
     fn ten_rows() -> Gui {
