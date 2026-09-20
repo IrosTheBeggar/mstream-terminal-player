@@ -2002,6 +2002,7 @@ fn event_loop(
         gui.pend(ticked);
         if saving && let Ok(fresh) = config::load() {
             gui.config = fresh;
+            refresh_book(gui);
         }
         terminal.draw(|frame| render(frame, gui))?;
 
@@ -2157,6 +2158,14 @@ impl Gui {
 /// `torrent` is the `--torrent` seam: a `.torrent` path or a magnet link
 /// the player was opened WITH, the way the OS hands one to the app it
 /// registered for them (docs/ux-contracts/add-torrent.md, entry point 2).
+/// The App's book of saved servers follows the config: a peer the reconcile
+/// just wrote, a token a sign-in just saved, a pairing code — the queue's
+/// rows and the header name servers from it (contract clauses 20, 30).
+pub(crate) fn refresh_book(gui: &mut Gui) {
+    let credentials = config::load_credentials().unwrap_or_default();
+    gui.app.servers = tui::known_servers(&gui.config, &credentials);
+}
+
 pub fn run(
     server: Option<String>,
     token: Option<String>,

@@ -529,7 +529,14 @@ fn event_loop(
     let mut spun = Instant::now();
     let mut saver = QueueSaver::new(app);
     loop {
+        // A save changes what the book knows — a peer just reconciled, a
+        // token just signed in for — and the queue's rows resolve against it.
+        let saving = pending.iter().any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. }));
         dispatch(app, &mut pending, audio_tx, api_tx, event_tx);
+        if saving && let Ok(fresh) = config::load() {
+            let credentials = config::load_credentials().unwrap_or_default();
+            app.servers = known_servers(&fresh, &credentials);
+        }
         saver.tick(app);
         pending.extend(app.tick());
 

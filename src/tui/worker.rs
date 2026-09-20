@@ -925,10 +925,14 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
             }
 
             ApiCmd::TunnelOpen { id, credential } => {
+                tracing::info!("tunnel {}: dialling", tunnel_log_name(&id));
                 open_tunnel(&tunnels, id, credential, events.clone());
                 None
             }
-            ApiCmd::TunnelClose { id } => Some(close_tunnel(&tunnels, id)),
+            ApiCmd::TunnelClose { id } => {
+                tracing::info!("tunnel {}: closing — nothing references it", tunnel_log_name(&id));
+                Some(close_tunnel(&tunnels, id))
+            }
             ApiCmd::TunnelCredential { id, credential } => swap_credential(&tunnels, id, &credential),
             ApiCmd::Retarget { identity, server, token, self_signed, peer, local_token } => {
                 Some(retarget(&mut client, &server, &identity, token, self_signed, peer, local_token))
@@ -1230,6 +1234,17 @@ fn swap_credential(tunnels: &Arc<TunnelTable>, id: String, credential: &str) -> 
     }
 }
 
+/// A tunnel identity as the log should show it. A peer's identity carries
+/// `id@parent`, which the log's scrubber would read as a URL's userinfo and
+/// redact; spelled out, it is just a row number.
+#[cfg(not(target_arch = "wasm32"))]
+fn tunnel_log_name(id: &str) -> String {
+    match id.strip_prefix(crate::config::PEER_ID_PREFIX).and_then(|rest| rest.split_once('@')) {
+        Some((row, parent)) => format!("peer {row} of {}", crate::quickconnect::display_server(parent)),
+        None => crate::quickconnect::display_server(id),
+    }
+}
+
 /// Watch every open tunnel and tell the UI when one changes state or path.
 /// Holds only a Weak: when the api thread drops the table, the next sample
 /// fails to upgrade and this thread ends. The first sample of a tunnel is
@@ -1247,8 +1262,9 @@ fn spawn_tunnel_sampler(tunnels: std::sync::Weak<TunnelTable>, events: Sender<Ev
                 for (id, slot) in &table.slots {
                     let Some(tunnel) = &slot.tunnel else { continue };
                     if let Some(lines) = tunnel.drain_events() {
+                        let shown = tunnel_log_name(id);
                         for line in lines.lines() {
-                            tracing::info!("tunnel {}: {line}", crate::quickconnect::display_server(id));
+                            tracing::info!("tunnel {shown}: {line}");
                         }
                     }
                     seen.push((id.clone(), tunnel.status(), tunnel.path_kind()));
@@ -2065,6 +2081,115 @@ mod tests {
             assert_eq!(mode.next_available(few).prev_available(few), mode);
             assert_ne!(mode.prev_available(few), mode, "left always moves");
         }
+    }
+
+    /// The rig leg (plan T4): the real api thread against two live mStream
+    /// servers paired over federation. Run with the parent's address in
+    /// `MSTREAM_RIG_PARENT` (the server that lists the other as a peer):
+    ///
+    /// ```sh
+    /// MSTREAM_RIG_PARENT=http://127.0.0.1:3041 cargo test -- --ignored rig
+    /// ```
+    ///
+    /// Connect to the parent, read its peer list, ask for direct access to
+    /// the first peer, dial the peer's own tunnel with the guest ticket,
+    /// fetch a byte range of a track from the peer's loopback with the
+    /// guest token and the loopback token, then close the tunnel.
+    #[test]
+    #[ignore = "needs the two-server rig; see the doc comment"]
+    fn rig_a_peer_is_reached_directly_with_a_guest_ticket() {
+        use crate::api::types::DirectAnswer;
+        use std::time::Duration;
+        let Ok(parent) = std::env::var("MSTREAM_RIG_PARENT") else {
+            eprintln!("MSTREAM_RIG_PARENT not set — skipping");
+            return;
+        };
+        let (events_tx, events) = mpsc::channel();
+        let api = spawn_api(events_tx);
+        let wait = |what: &str, pick: &dyn Fn(&Event) -> bool| -> Event {
+            let deadline = std::time::Instant::now() + Duration::from_secs(90);
+            loop {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                let event = events.recv_timeout(left).unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+                if pick(&event) {
+                    return event;
+                }
+                eprintln!("  (skipping {event:?})");
+            }
+        };
+
+        api.send(ApiCmd::Connect {
+            server: parent.clone(),
+            identity: parent.clone(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        })
+        .unwrap();
+        let connected = wait("Connected", &|e| matches!(e, Event::Connected { .. } | Event::NeedsLogin { .. } | Event::Error(_)));
+        let Event::Connected { ping, .. } = connected else { panic!("the rig's parent must be public: {connected:?}") };
+        assert!(ping.federation_direct, "the parent offers direct access");
+        assert!(ping.federation_browse);
+
+        api.send(ApiCmd::FederationPeers { parent: parent.clone() }).unwrap();
+        let listed = wait("FederationPeers", &|e| matches!(e, Event::FederationPeers { .. }));
+        let Event::FederationPeers { peers: Some(peers), .. } = listed else { panic!("{listed:?}") };
+        let peer = peers.first().expect("the parent lists a peer").clone();
+        eprintln!("peer {} (id {})", peer.name, peer.id);
+
+        let reach = crate::tui::app::Reach {
+            base: parent.clone(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        };
+        api.send(ApiCmd::DirectAccess { parent: parent.clone(), id: peer.id, reach, refresh: false }).unwrap();
+        let answer = wait("DirectAccess", &|e| matches!(e, Event::DirectAccess { .. }));
+        let Event::DirectAccess { answer: DirectAnswer::Granted(ticket), .. } = answer else {
+            panic!("the parent grants a ticket: {answer:?}")
+        };
+        assert!(ticket.ticket.starts_with("mstrfedg1:"));
+        assert!(ticket.expires_at.is_some(), "the guest JWT carries its times");
+
+        let pid = crate::config::peer_identity(&parent, peer.id);
+        api.send(ApiCmd::TunnelOpen { id: pid.clone(), credential: ticket.ticket.clone() }).unwrap();
+        let up = wait("TunnelUp", &|e| matches!(e, Event::TunnelUp { .. } | Event::TunnelFailed { .. }));
+        let Event::TunnelUp { local_url, local_token, .. } = up else { panic!("the peer's tunnel comes up: {up:?}") };
+        eprintln!("peer tunnel at {local_url}");
+
+        // The peer's own `/api` answers the guest, and its bytes come plain.
+        let client = Client::new(&local_url)
+            .unwrap()
+            .with_token(Some(ticket.guest_token.clone()))
+            .with_local_token(Some(local_token.clone()));
+        let info = client.ping_via_info().expect("the peer answers its layered /api to a guest");
+        eprintln!("guest /api: vpaths={:?} browse={}", info.vpaths, info.federation_browse);
+        let url = crate::api::urls::with_local_token(
+            crate::api::urls::media_url(&local_url, "demo/Boukmanflow/6AM.mp3", Some(&ticket.guest_token)).unwrap(),
+            Some(&local_token),
+        );
+        let bytes = crate::runtime::block_on(async {
+            let resp = reqwest::Client::new()
+                .get(&url)
+                .header("range", "bytes=0-99")
+                .send()
+                .await
+                .expect("the range request reaches the peer");
+            assert_eq!(resp.status().as_u16(), 206, "{url}");
+            resp.bytes().await.unwrap().len()
+        })
+        .unwrap();
+        assert_eq!(bytes, 100);
+
+        // A second peer tunnel request for the same identity re-reports it.
+        api.send(ApiCmd::TunnelOpen { id: pid.clone(), credential: ticket.ticket.clone() }).unwrap();
+        wait("TunnelUp again", &|e| matches!(e, Event::TunnelUp { .. }));
+
+        api.send(ApiCmd::TunnelClose { id: pid.clone() }).unwrap();
+        wait("TunnelClosed", &|e| matches!(e, Event::TunnelClosed { .. }));
+        api.send(ApiCmd::Shutdown).unwrap();
     }
 
     #[test]

@@ -4548,8 +4548,7 @@ impl App {
         }
         effects.push(Effect::Audio(AudioCmd::Play { url, duration_hint: hint }));
         effects.extend(self.fetch_art());
-        let reach_for_shape = self.playing_row_reach();
-        effects.extend(self.fetch_waveform(&filepath, reach_for_shape));
+        effects.extend(self.fetch_waveform(&filepath, &item.origin));
         effects.extend(self.maybe_autodj());
         effects
     }
@@ -4622,12 +4621,14 @@ impl App {
     /// Takes a filepath rather than reading `now_playing`, because the whole
     /// point is that it is also called for the track that has not started
     /// yet (see [`App::prefetch_waveform`]).
-    fn fetch_waveform(&mut self, filepath: &str, reach: Option<Reach>) -> Option<Effect> {
-        // Waveforms are off the federation allowlist: a peer's row through
-        // its parent has no shape to ask for.
-        if reach.as_ref().is_some_and(|r| r.peer.is_some()) {
+    fn fetch_waveform(&mut self, filepath: &str, origin: &Origin) -> Option<Effect> {
+        // Waveforms are off the federation allowlist: a peer's row has no
+        // shape to ask for, through its parent or over its own tunnel (the
+        // rig showed the peer's wall refusing the ask).
+        if origin.peer.is_some() {
             return None;
         }
+        let reach = self.row_reach(origin);
         if self.waveforms.contains_key(filepath) {
             return None;
         }
@@ -4666,8 +4667,8 @@ impl App {
         };
         let item = self.queue.items.get(index)?;
         let next = item.filepath.clone();
-        let reach = self.row_reach(&item.origin);
-        self.fetch_waveform(&next, reach)
+        let origin = item.origin.clone();
+        self.fetch_waveform(&next, &origin)
     }
 
     fn play_pause(&mut self) -> Vec<Effect> {

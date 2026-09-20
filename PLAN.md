@@ -1795,8 +1795,9 @@ a LATER secondary screen (party view), Columns retired.
   it in the room and the dropdown, hidden or forgotten from there; the
   failure walk probes a row's server, retries, holds and resumes.
   Per-server tunnels (clause 38) and the guest-ticket direct path to a
-  peer landed 2026-09-19 on the shared tunnel crate — T1–T3 below; T4's
-  two-server rig is still to run. A drag grip for reorder stays deferred.
+  peer landed 2026-09-19 on the shared tunnel crate — T1–T3 below — and
+  T4's two-server rig proved them live on 2026-09-20. A drag grip for
+  reorder stays deferred.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
   of the Library tab views (Artists/Genres/Recent — the wall's drill
@@ -2126,7 +2127,33 @@ selectable through the crate).
   session; refused → one refresh then the proxy; the two reach shapes;
   `Retarget` keeps the browse stack; the 401 path. Size L — most of it
   policy, all of it testable offline.
-- **T4 — the rig and the docs.** Two scratch servers from the
+- **T4 — the rig and the docs ✅ 2026-09-20.** Run as planned on two scratch
+  servers (:3040 Rig A, :3041 Rig B; iroh and federation on; paired with
+  two curls in public mode — the recipe is in the memory note), four legs:
+  the shared crate's dev client dialled A's federation endpoint with B's
+  guest ticket (path direct, mode guest; playlists 403 off the allowlist; a
+  request without `__lt` dropped); `quickconnect-probe` passed against B's
+  code through the crate; the `#[ignore]` worker test
+  `rig_a_peer_is_reached_directly_with_a_guest_ticket`
+  (`MSTREAM_RIG_PARENT=… cargo test -- --ignored rig`) ran the real api
+  thread from connect to a 206 byte range off A's loopback with the guest
+  token; and the GUI on a pty (`scratchpad/ptygui.py`, two scenarios)
+  switched to Rig A, went direct within a tick or two ("Rig A · direct ·
+  via …", A's log `authorized (guest, key 'rig-b')`), played "6AM" from A's
+  own tunnel, paired B a second time over Quick Connect, queued rows from
+  both servers, kept the tunnel-server row playing across two switches,
+  kept both tunnels up on the standard server, and released each ~10 s
+  after its last row left — `tunnel …: closing — nothing references it` in
+  the ring, `guest connection closed` on A, `tunnel connection closed` on
+  B, the room's mark gone. Two bugs the rig found, fixed in the same
+  commit: the App's book of servers was not refreshed when the peer
+  reconcile wrote the config (the header showed the peer's raw identity),
+  and a peer's row asked its direct tunnel for a waveform, which the
+  allowlist refuses (the rule now keys on the row's origin, not its
+  transport). Cosmetic: the dropdown clipped the mark at 44 columns (now
+  60, mark first); the "reaching…" note outlived the switch; the log
+  scrubber redacted `id@parent` in a peer identity as if it were userinfo
+  (spelled out now). Not run: a Netskope-shaped network. Plan text: Two scratch servers from the
   `local-mstream-scratch-server` recipe with `iroh.enabled` and
   `federation.enabled` on both (the secrets self-generate;
   `federation.serverName` for labels); pair them with the player's own
@@ -2171,9 +2198,9 @@ strip and Repair sheet (the servers room's re-pair path stands); the wasm
 build (no iroh — the stubs say so).
 
 **Risks.** The guest handshake is no longer this player's to prove: the
-crate's harness GUEST phase covers it against `@number0/iroh`, and the
-mobile rig covered it live; T4's rig still proves the whole path from this
-player. What the switch does put at risk: the crate's supervisor replaces
+crate's harness GUEST phase covers it against `@number0/iroh`, the mobile
+rig covered it live, and T4's rig (2026-09-20) proved the whole path from
+this player. What the switch does put at risk: the crate's supervisor replaces
 the `Redialer` whose single-flight re-dial and 4 s cooldown fixed requests
 stacking up behind a dead link — read `supervise` and the bridges' wait on
 the status watch before deleting the old code, and keep the "tunnel is

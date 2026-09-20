@@ -6,7 +6,7 @@
 | **Server API** | `GET /api/` (capabilities — `federationBrowse`, `federationDirect`, transcode, discovery) with `GET /api/v1/ping` as the older fallback; `POST /api/v1/auth/login`; `GET /api/v1/federation/peers` (a parent's peer list, caller-scoped); the parent's proxies for a peer — `/api/v1/federation/peers/:id/api/*` (browse), `/api/v1/federation/peers/:id/stream/*path` (bytes, Range forwarded, no transcode), `/api/v1/federation/peers/:id/art/*path`; `GET /api/v1/federation/peers/:id/access` (a direct guest ticket, mStream #943); `GET /api/v1/iroh/code` (LAN Quick Connect). Checked against mStream 6.28.0 (`c791799a`). |
 | **Already in this repo** | Config: `ServerEntry` (url, username, last_path, per-entry `self_signed`), `default_server` outranking most-recently-used, `Credentials` (tokens + Quick Connect pairing codes), `preferred_server` / `set_default_server` / `remove_server` (the ONE flow that drops a pairing code) / `touch_server`. Session: `Session { server, server_id, tunnel_code, token, self_signed }`, `App::adopt_server` (a switch keeps what is streaming and sheds the queue — see clause 11). The GUI's servers room (`src/gui/servers.rs`): the header dropdown, the add chooser (Standard connect · Quick Connect with mDNS rows), Manage Servers with switch · edit · make default · pair phone · remove, a one-shot validation client, sign-in-needed answers opening the form. Engine: per-host TLS trust. The queue: `Queue` of `Track { filepath, metadata }` — **no origin** — with `Queue` / `QueueAll` / `RemoveFromQueue` / `ClearQueue` / `ToggleRepeat` / `ToggleShuffle`, `play_listing` / `queue_listing`. **Missing**: federated peers as browsable entries, queue items that carry their server, cross-server playback and per-server tunnels, the failure walk, queue persistence across launches, and the bundled-server mode. |
 | **Target surface** | the GUI player — the servers room and the queue panel — with the origin-carrying queue landing in the shared App so the TUI follows |
-| **Status** | contract extracted 2026-09-17; **one addition beyond the record** (§ The bundled server, clauses 50–58) requested for the installers. **Implemented 2026-09-18** in the shared App and the GUI (six commits on the PR branch), open questions 1–5 settled on their leans; **clause 38 and clause 27's direct sentence implemented 2026-09-19** on the shared `mstream-iroh-tunnel` crate (tunnels kept by identity, the grace, the ladder, the hold; guest tickets, a peer over a tunnel of its own) — see the deviations log |
+| **Status** | contract extracted 2026-09-17; **one addition beyond the record** (§ The bundled server, clauses 50–58) requested for the installers. **Implemented 2026-09-18** in the shared App and the GUI (six commits on the PR branch), open questions 1–5 settled on their leans; **clause 38 and clause 27's direct sentence implemented 2026-09-19** on the shared `mstream-iroh-tunnel` crate (tunnels kept by identity, the grace, the ladder, the hold; guest tickets, a peer over a tunnel of its own), **verified live 2026-09-20** on a two-server rig — see the deviations log |
 
 ## Intent
 
@@ -357,7 +357,7 @@ already exists (`gui.srv.*`).
 | Skipping a track that won’t play. | *(no key — an English literal in the record)* | — |
 | Connecting to {server}… *(the row parked on a tunnel that is not up yet, clause 37)* | *(no key — the record parks silently and shows the strip)* | — |
 | Renewing access to {peer}… *(a direct peer refused its guest token; the parent re-mints, clause 27)* | *(no key — the record logs it)* | — |
-| · direct *(a peer reached over a tunnel of its own, beside "via {parent}")* | *(no key — the record's strip follows the tunnel)* | gui.srv.direct |
+| direct · via {parent} *(a peer reached over a tunnel of its own; the mark leads so a clipped row keeps it)* | *(no key — the record's strip follows the tunnel)* | gui.srv.direct |
 | Lost the connection — paused. Resumes when you’re back online. | *(no key)* | — |
 | Can't play these tracks — check the files or server. | *(no key)* | — |
 | The queue mixes songs from {count} servers ({names}). Sharing only works when every song comes from a single server. | shareMultiServerBody | (kept for a share feature) |
@@ -539,6 +539,17 @@ additions to drawn idioms. Revisit if discussion disagrees.
   reconnected on its own (the user sees the error and chooses); and a
   row's cover and shape are fetched from the row's own server, which
   clause 30 asked for and the first implementation did not do.
+- **2026-09-20 — Verified on the rig, with two corrections**: two scratch
+  servers paired over federation, the player connected to one and reached
+  the other through the parent's proxy, then over the peer's own tunnel
+  with a guest ticket, played from it, paired the parent a second time over
+  Quick Connect, mixed a queue from both, switched across all three
+  entries with the tunnel server's row still playing, and saw each tunnel
+  released ten seconds after its last row left. Fixed on the way: the
+  App's book of servers now follows every config save (a reconciled peer
+  had no name in the header), and a peer's row asks for no waveform over
+  either transport (the allowlist refuses it on the direct path too —
+  clause 26's list of what a peer lacks includes the shape).
 - **2026-09-18 — The skip toast names the track and keeps the reason**
   ("Skipping a track that won’t play — {track}: {reason}"): the record's
   literal, with the two facts a terminal user can act on.

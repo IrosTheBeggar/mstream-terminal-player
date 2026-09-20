@@ -927,7 +927,10 @@ fn apply_outcome(gui: &mut Gui, outcome: Outcome) {
 pub(crate) fn observe(gui: &mut Gui, event: &Event) {
     match event {
         Event::Connected { .. } => {
-            gui.servers.switching = None;
+            // The switch landed: its "reaching…" note has nothing more to say.
+            if gui.servers.switching.take().is_some() {
+                gui.note = None;
+            }
             // A pairing-code dial just answered: the session about to be
             // seated by this event is the tunnel's, so the code goes in
             // now — nothing later knows it — and the old server's browse
@@ -1366,16 +1369,18 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 .is_some_and(|d| config::same_server(d, &s.url));
             let label = match &s.peer {
                 Some(peer) => {
-                    let mut label = format!(
-                        "{branch} {} · {}",
+                    // Reached over a tunnel of its own (contract clause 27):
+                    // the mark comes first, so a clipped row still shows it.
+                    let direct = if peer_is_direct(gui, &s.url) {
+                        format!("{} · ", t!("gui.srv.direct"))
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "{branch} {} · {direct}{}",
                         peer.name,
                         t!("gui.srv.via", parent = parent_label(gui, &peer.parent))
-                    );
-                    // Reached over a tunnel of its own (contract clause 27).
-                    if peer_is_direct(gui, &s.url) {
-                        label.push_str(&format!(" · {}", t!("gui.srv.direct")));
-                    }
-                    label
+                    )
                 }
                 None => config::display_name(s),
             };
@@ -1389,7 +1394,9 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         .chain([add_label.chars().count() + 2])
         .max()
         .unwrap_or(20);
-    let width = (widest as u16 + 4).clamp(24, 44).min(area.width.saturating_sub(2));
+    // Wide enough for a peer's row with its marks; the 100-column floor
+    // still leaves the files pane's crumb visible beside it.
+    let width = (widest as u16 + 4).clamp(24, 60).min(area.width.saturating_sub(2));
     let height = entries.len() as u16 + 3;
     let x = area.width.saturating_sub(width + 1);
     let rect = Rect { x, y: 1, width, height: height.min(area.height.saturating_sub(8)) };
@@ -1493,11 +1500,12 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 let via = if peer.missing {
                     t!("gui.srv.no_longer_shared", parent = parent_label(gui, &peer.parent)).to_string()
                 } else if peer_is_direct(gui, &entry.url) {
-                    // Reached over a tunnel of its own (contract clause 27).
+                    // Reached over a tunnel of its own (contract clause 27);
+                    // the mark first, so the clip never hides it.
                     format!(
                         "{} · {}",
-                        t!("gui.srv.via", parent = parent_label(gui, &peer.parent)),
-                        t!("gui.srv.direct")
+                        t!("gui.srv.direct"),
+                        t!("gui.srv.via", parent = parent_label(gui, &peer.parent))
                     )
                 } else {
                     t!("gui.srv.via", parent = parent_label(gui, &peer.parent)).to_string()
@@ -2323,6 +2331,40 @@ mod tests {
         assert_eq!(gui.servers.form.as_ref().unwrap().stage, FormStage::Choosing);
         form_back(&mut gui);
         assert!(gui.servers.form.is_none());
+    }
+
+    #[test]
+    fn the_book_follows_the_config_so_a_reconciled_peer_has_its_name() {
+        // The rig found this: a peer written by the reconcile was in the
+        // config but not in the App's book, so the header showed its raw
+        // identity instead of its name.
+        let mut gui = two_server_gui();
+        let parent = gui.config.servers[0].url.clone();
+        gui.config.servers.push(config::ServerEntry {
+            url: config::peer_identity(&parent, 3),
+            username: None,
+            last_path: None,
+            self_signed: false,
+            peer: Some(config::PeerEntry {
+                parent: parent.clone(),
+                id: 3,
+                name: "Nas".into(),
+                missing: false,
+                hidden: false,
+            }),
+            extra: Default::default(),
+        });
+        super::super::refresh_book(&mut gui);
+        let book = gui
+            .app
+            .servers
+            .iter()
+            .find(|s| s.peer == Some((parent.clone(), 3)))
+            .expect("the peer is in the book");
+        assert_eq!(book.name, "Nas");
+        gui.app.session.server_id = config::peer_identity(&parent, 3);
+        gui.app.session.peer = Some((parent.clone(), 3));
+        assert!(gui.app.server_display().starts_with("Nas via "), "{}", gui.app.server_display());
     }
 
     #[test]

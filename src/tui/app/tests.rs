@@ -1799,6 +1799,23 @@ fn a_granted_ticket_dials_the_peer_and_its_rows_play_from_its_own_tunnel() {
 }
 
 #[test]
+fn a_peer_row_asks_for_no_shape_over_either_transport() {
+    // Waveforms are off the federation allowlist; the rig showed the peer's
+    // wall refusing the ask over the direct tunnel.
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    let effects = app.play_index(0);
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Waveform { .. }))), "proxy: {effects:?}");
+
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+    app.waveforms.clear();
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://127.0.0.1:5000/media/music/y.mp3?token=guest-T1&__lt=lt");
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Waveform { .. }))), "direct: {effects:?}");
+}
+
+#[test]
 fn a_parent_that_declines_keeps_the_peer_on_the_proxy_for_the_session() {
     let mut app = federated_app();
     app.queue.push(nas_row("music/y.mp3"));
