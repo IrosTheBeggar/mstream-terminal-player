@@ -47,6 +47,12 @@ impl Slot {
         Slot { graphics, pane: Default::default(), key: None }
     }
 
+    /// How many covers this slot has encoded — tests only.
+    #[cfg(test)]
+    pub(super) fn encodes(&self) -> u32 {
+        self.graphics.encodes()
+    }
+
     /// A resize changes the cell-to-pixel mapping the slot encoded
     /// against, and kitty forgets its transmitted images with the old
     /// terminal — the card cover's rule, per slot.
@@ -84,11 +90,9 @@ impl Slot {
     /// over them the way text does. What a slot draws while an overlay
     /// stands over its column — a picture's cells are marked skipped for
     /// the terminal writer (ratatui-image's rule), so a modal's text over
-    /// them would never land.
+    /// them would never land. The encoded picture stays good for the
+    /// frame the overlay leaves: drawing it again is the warm cache.
     pub(super) fn draw_mosaic(&mut self, frame: &mut Frame, rect: Rect, art: &Art) {
-        // The pixel path's cache is stale once cells were drawn over it;
-        // the next pixel draw must transmit again.
-        self.key = None;
         let mut canvas = crate::tui::canvas::Canvas::new(rect);
         if !canvas.is_empty() {
             self.pane.draw(&mut canvas, art);

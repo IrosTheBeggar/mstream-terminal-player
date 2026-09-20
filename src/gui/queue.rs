@@ -9,11 +9,17 @@
 //!
 //! Covers ride the wall's discipline: the App's own claim, so a cover is
 //! asked for once and from the row's own server (contract clause 30), and
-//! a [`Slot`] per visible row with caches of its own, paced by the frame's
-//! encode budget. Pixels stand down under anything drawn over the column
+//! a [`Slot`] per cover on view with caches of its own, paced by the
+//! frame's encode budget. The slots are keyed by the cover, not the row's
+//! place: an encoded picture draws anywhere for free, so a scroll moves
+//! each row's cover with it and only a cover newly revealed pays an
+//! encode — from the thumbnail, which has every pixel a 6x3 box can show.
+//! Pixels stand down under anything drawn over the column
 //! — the header dropdown, a modal, the pairing QR — because a picture's
 //! cells are skipped by the terminal writer and a modal's text over them
 //! would never land; the ▀-mosaic is plain cells and layers like any text.
+
+use std::collections::{HashMap, HashSet};
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -39,23 +45,34 @@ const TEXT_X: u16 = COVER_W + 1;
 const PANEL_W: u16 = 32;
 const TOP: u16 = 4;
 
+/// How many covers past the view stay encoded, so a wheel back finds
+/// them warm.
+const SLACK: usize = 8;
+
 pub(crate) struct QueueUi {
-    /// One per visible row position, forked from the probed answer so each
-    /// has caches of its own.
-    slots: Vec<Slot>,
+    /// A slot per cover on view, keyed by the art's id, each forked from
+    /// the probed answer so it has caches of its own. A whole album shares
+    /// one slot — one transmission, drawn on every row that wears it.
+    slots: HashMap<u64, Slot>,
 }
 
 impl QueueUi {
     pub(crate) fn new() -> QueueUi {
-        QueueUi { slots: Vec::new() }
+        QueueUi { slots: HashMap::new() }
     }
 
     /// A resize changes the cell-to-pixel mapping every slot encoded
-    /// against — the wall's rule, per row.
+    /// against — the wall's rule, per cover.
     pub(crate) fn on_resize(&mut self) {
-        for slot in &mut self.slots {
+        for slot in self.slots.values_mut() {
             slot.on_resize();
         }
+    }
+
+    /// Every encode the panel's slots have paid — tests only.
+    #[cfg(test)]
+    fn encodes(&self) -> u32 {
+        self.slots.values().map(Slot::encodes).sum()
     }
 }
 
@@ -106,15 +123,12 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 
     // Pixels only while nothing stands over the column.
     let pixels = !super::overlay_open(gui);
-    while gui.queue.slots.len() < visible {
-        let fork = gui.app.graphics.fork();
-        gui.queue.slots.push(Slot::new(fork));
-    }
 
     // Split borrows: the rows are READ from the App while each slot's
     // caches are written — disjoint fields of the one Gui, the wall's
     // move, so a frame never clones a row or its decoded cover.
     let pace = Pace::frame();
+    let mut on_view: HashSet<u64> = HashSet::new();
     {
         let Gui { app, queue: panel, ui, .. } = &mut *gui;
         // The words run from the cover's air to the column's last cell,
@@ -146,8 +160,18 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 .and_then(|file| app.art.get(file))
                 .and_then(|art| art.as_ref());
             match art {
-                Some(art) if pixels => panel.slots[row].draw_paced(frame, cover, art, &pace),
-                Some(art) => panel.slots[row].draw_mosaic(frame, cover, art),
+                Some(art) => {
+                    let slot = panel
+                        .slots
+                        .entry(art.id())
+                        .or_insert_with(|| Slot::new(app.graphics.fork()));
+                    on_view.insert(art.id());
+                    if pixels {
+                        slot.draw_paced(frame, cover, art, &pace);
+                    } else {
+                        slot.draw_mosaic(frame, cover, art);
+                    }
+                }
                 None => bar::cover_slot(frame, x, y, COVER_W, ROW_H),
             }
 
@@ -206,6 +230,12 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             Act::QScrollBy(1),
             Act::QScrollTo,
         );
+    }
+    // Slots for covers that have left the view are let go once the pool
+    // outgrows the view by its slack — not before, so a wheel back finds
+    // the last few still encoded.
+    if gui.queue.slots.len() > on_view.len() + SLACK {
+        gui.queue.slots.retain(|id, _| on_view.contains(id));
     }
     // Rows the budget turned away want the very next frame, not the next
     // poll tick — the event loop shortens its wait while this stands.
@@ -464,21 +494,21 @@ mod tests {
         gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
         gui.app.art.insert("aa.jpeg".into(), Some(solid_cover()));
 
+        let slot_key = |gui: &Gui| gui.queue.slots.values().next().map(|slot| slot.key);
         gui.servers.drop_open = true;
-        let rows = lines(&draw(&mut gui));
-        assert!(gui.queue.slots[0].key.is_none(), "no pixels under the dropdown");
-        // The dropdown itself stands over the column's first rows, so the
-        // mosaic is read where the dropdown ends — its rule stands in the
-        // frame; what matters is that no picture was placed.
-        assert!(rows.len() == 30);
+        draw(&mut gui);
+        assert_eq!(slot_key(&gui), Some(None), "no pixels under the dropdown");
 
         gui.servers.drop_open = false;
         draw(&mut gui);
-        assert!(gui.queue.slots[0].key.is_some(), "pixels once the column is clear");
+        assert!(slot_key(&gui).flatten().is_some(), "pixels once the column is clear");
+        assert_eq!(gui.queue.encodes(), 1);
 
         gui.servers.drop_open = true;
         draw(&mut gui);
-        assert!(gui.queue.slots[0].key.is_none(), "and down again when it returns");
+        gui.servers.drop_open = false;
+        draw(&mut gui);
+        assert_eq!(gui.queue.encodes(), 1, "the overlay's passing cost no second encode");
     }
 
     fn ten_rows() -> Gui {
@@ -526,6 +556,80 @@ mod tests {
         // The wheel over the panel rides the same act.
         gui.wheel(Position { x: 90, y: 10 }, -1);
         assert_eq!(gui.qscroll, 3);
+    }
+
+    /// Ten rows, each with a cover of its own decoded and waiting.
+    fn ten_covered_rows() -> Gui {
+        use ratatui_image::picker::ProtocolType;
+        let mut gui = gui_with(
+            (0..10)
+                .map(|i| {
+                    queued(&format!("{i}.mp3"), &format!("Track {i:02}"), None, Some(&format!("c{i}.jpeg")), 100.0, HOME)
+                })
+                .collect(),
+        );
+        gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
+        for i in 0..10 {
+            gui.app.art.insert(format!("c{i}.jpeg"), Some(solid_cover()));
+        }
+        gui
+    }
+
+    /// Frames until the budget has let every cover on view upgrade.
+    fn settle(gui: &mut Gui) -> Buffer {
+        let mut buffer = draw(gui);
+        for _ in 0..10 {
+            if !gui.hot {
+                break;
+            }
+            buffer = draw(gui);
+        }
+        buffer
+    }
+
+    #[test]
+    fn a_scroll_moves_the_covers_with_their_rows_and_encodes_only_the_new_one() {
+        let mut gui = ten_covered_rows();
+        settle(&mut gui);
+        assert_eq!(gui.queue.encodes(), 5, "five covers on view, five encodes");
+
+        gui.act(Act::QScrollBy(1));
+        settle(&mut gui);
+        assert_eq!(gui.queue.encodes(), 6, "one row came into view: one encode, four covers moved");
+
+        gui.act(Act::QScrollBy(-1));
+        settle(&mut gui);
+        assert_eq!(gui.queue.encodes(), 6, "and back: the cover that left was still warm");
+
+        // The pool holds the view plus its slack, then lets the rest go.
+        for _ in 0..5 {
+            gui.act(Act::QScrollBy(1));
+            settle(&mut gui);
+        }
+        assert_eq!(gui.queue.encodes(), 10, "every cover encoded once on its way through");
+        assert!(gui.queue.slots.len() <= 5 + super::SLACK, "{} slots", gui.queue.slots.len());
+    }
+
+    #[test]
+    fn rows_sharing_a_cover_share_one_slot_and_one_encode() {
+        use ratatui_image::picker::ProtocolType;
+        let mut gui = gui_with(
+            (0..5)
+                .map(|i| queued(&format!("{i}.mp3"), &format!("Track {i}"), None, Some("aa.jpeg"), 100.0, HOME))
+                .collect(),
+        );
+        gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
+        gui.app.art.insert("aa.jpeg".into(), Some(solid_cover()));
+        let buffer = settle(&mut gui);
+        assert_eq!(gui.queue.slots.len(), 1, "one album, one slot");
+        assert_eq!(gui.queue.encodes(), 1, "transmitted once");
+        for row in 0..5u16 {
+            let y = 4 + row * 3;
+            assert!(
+                buffer[(X as u16, y)].symbol().contains('\u{10EEEE}'),
+                "row {row} wears the picture by reference"
+            );
+        }
     }
 
     /// The panel with a cover decoded, same eyeball as the shell's:

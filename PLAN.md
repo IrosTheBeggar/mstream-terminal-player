@@ -1811,9 +1811,25 @@ a LATER secondary screen (party view), Columns retired.
   modal). Began as two lines with a 4×2 cover, grown the same day for a
   bigger picture. `src/gui/queue.rs` with eleven tests,
   `smoke/gui/scenario_queue.py` against Rig B. Costs to weigh: a third of
-  the rows fit (five at 30 lines); a scroll re-encodes every visible cover
-  on a pixel terminal (paced, as the wall's page turn is). A drag grip
-  would take the cover's column or a cell of the air; still deferred.
+  the rows fit (five at 30 lines). A drag grip would take the cover's
+  column or a cell of the air; still deferred.
+- **A scroll no longer re-encodes the covers (2026-09-20)**: the first cut
+  keyed the panel's slots by row position, so every wheel tick re-encoded
+  every visible cover — and each encode decoded the full source jpeg,
+  tens of milliseconds apiece in a debug build, paced one per frame: a
+  second of mosaic before the pictures returned. Two fixes. The slots
+  are keyed by the cover (`QueueUi.slots: HashMap<art id, Slot>`, a
+  slack of eight past the view): an encoded picture draws anywhere for
+  free — kitty by reference, sixel and iTerm2 by re-emitting their bytes
+  — so a row's cover moves with it, an album shares one transmission,
+  and only a newly revealed cover encodes. And `Graphics::draw` fits the
+  box from the 128 px thumbnail first and encodes from it when it has
+  every pixel the box can show (a 6×3 cover at 10×20 is 60 px; a 12×6
+  wall cell 120), decoding the source only for a bigger box — which also
+  gives huge covers that kept no source bytes their pixels at small
+  sizes. Pinned by `a_scroll_moves_the_covers_with_their_rows_and_encodes_only_the_new_one`
+  and `a_small_box_draws_from_the_thumbnail_and_a_moved_box_re_encodes_nothing`;
+  `cover_encode_costs` (ignored) prints the numbers.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
   of the Library tab views (Artists/Genres/Recent — the wall's drill
