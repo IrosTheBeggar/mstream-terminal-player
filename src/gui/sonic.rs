@@ -585,7 +585,7 @@ fn draw_results(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 
 /// Greedy word wrap for the failure sentences — the kit tooltip's habit,
 /// simplified: these notes are one or two lines at any sane width.
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {

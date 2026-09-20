@@ -93,6 +93,9 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let len = gui.app.queue.items.len();
     if len == 0 {
         put(frame, x, TOP, &t!("gui.queue.empty"), dim());
+        // While the DJ is armed, the ways to give it an opening song (auto-dj
+        // contract, clause 16).
+        super::dj::draw_empty_queue(frame, gui, x, TOP, 31);
         return;
     }
     let total: f64 = gui.app.queue.items.iter().filter_map(|t| t.metadata.duration).sum();
@@ -177,7 +180,19 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             }
 
             let title = item.metadata.display_title().unwrap_or_else(|| item.file_name());
-            put(frame, x + TEXT_X, y, &bar::clip(title, text_w), title_style);
+            // The DJ's rows wear a badge before the title (auto-dj contract,
+            // clause 60): a classic pick and a sonic one differently.
+            let badge = match (item.dj, crate::kit::theme::legacy_conhost()) {
+                (None, _) => "",
+                (Some(_), true) => "* ",
+                (Some(mark), false) if mark.sonic => "≈ ",
+                (Some(_), false) => "∞ ",
+            };
+            if !badge.is_empty() {
+                put(frame, x + TEXT_X, y, badge, dim());
+            }
+            let shift = badge.chars().count();
+            put(frame, x + TEXT_X + shift as u16, y, &bar::clip(title, text_w.saturating_sub(shift)), title_style);
 
             // Under the title, the artist then the album, each on a line of
             // its own — a missing one lets the other rise, so the words

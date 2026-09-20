@@ -1301,7 +1301,7 @@ fn draw_text_row(
 
 /// A 1-row text button: dim at rest, bright under the pointer; the
 /// accent when it is the row's one way forward. Returns its width.
-fn text_button(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, label: &str, lead: bool, act: Act) -> u16 {
+pub(super) fn text_button(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, label: &str, lead: bool, act: Act) -> u16 {
     let rect = Rect { x, y, width: label.chars().count() as u16, height: 1 };
     let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
     let style = match (hover, lead) {

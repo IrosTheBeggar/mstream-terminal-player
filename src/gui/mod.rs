@@ -21,6 +21,7 @@
 mod albums;
 mod bar;
 mod cover;
+mod dj;
 mod playlists;
 mod queue;
 mod servers;
@@ -160,6 +161,13 @@ pub(crate) enum Act {
     /// The queue panel's scrollbar and wheel: a step, a proportional jump.
     QScrollBy(i32),
     QScrollTo(usize),
+    /// Auto DJ's empty-queue chooser (contract clause 2) and the empty
+    /// queue's openers (clause 16).
+    DjChoose(usize),
+    DjRemember,
+    DjCancel,
+    DjSurprise,
+    DjPick,
     /// Whichever level is on screen scrolls.
     PlScrollBy(i32),
     PlScrollTo(usize),
@@ -576,6 +584,9 @@ impl Gui {
 
     /// Everything a click or key resolved to. Returns true to quit.
     fn act(&mut self, act: Act) -> bool {
+        if dj::act(self, &act) {
+            return false;
+        }
         if servers::act(self, &act) {
             return false;
         }
@@ -953,11 +964,16 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     // The note sits above the bar (gui's own first, else the App's words);
     // the keyboard tips take the very bottom row. An armed pick outranks
     // both: the banner is the mode, not news (clauses 4, 10–13).
-    if let Some(crate::tui::app::Capture::Sonic(side)) = gui.app.capture {
-        let banner = match side {
-            crate::tui::app::SonicSide::Start => t!("gui.sonic.pick_banner_start"),
-            crate::tui::app::SonicSide::End => t!("gui.sonic.pick_banner_end"),
-        };
+    let pick_banner = match gui.app.capture {
+        Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::Start)) => {
+            Some(t!("gui.sonic.pick_banner_start").to_string())
+        }
+        Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::End)) => {
+            Some(t!("gui.sonic.pick_banner_end").to_string())
+        }
+        _ => dj::banner(gui),
+    };
+    if let Some(banner) = pick_banner {
         put(
             frame,
             1,
@@ -974,7 +990,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         put(frame, 1, area.height - 7, &bar::clip(&text, area.width as usize - 2), style);
     }
-    let tips = if gui.servers.modal_open() {
+    let tips = if dj::modal_open(gui) {
+        t!("gui.dj.start_keys")
+    } else if gui.servers.modal_open() {
         t!("gui.tips.form")
     } else if gui.torrent.modal_open() {
         std::borrow::Cow::from(torrent::tips(gui))
@@ -984,6 +1002,8 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         std::borrow::Cow::from(playlists::tips(gui))
     } else if matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_))) {
         t!("gui.tips.sonic_pick")
+    } else if gui.app.capture == Some(crate::tui::app::Capture::DjSeed) {
+        t!("gui.tips.dj_pick")
     } else if gui.servers.room && gui.active == SETTINGS_NAV {
         // The bundled server's row has no remove key to name; a peer's row
         // has its own verbs.
@@ -1048,6 +1068,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     torrent::draw_modals(frame, gui, area);
     servers::draw_dropdown(frame, gui, area);
     servers::draw_modals(frame, gui, area);
+    dj::draw_modals(frame, gui, area);
 
     // The tooltip draws over everything, once the dwell matures — the
     // wizard's order.
@@ -1715,9 +1736,13 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return true;
     }
-    // The servers surfaces answer first: an open modal owns the keyboard
-    // outright, the room takes its row keys, and everything else falls
-    // through untouched.
+    // Auto DJ's chooser owns the keyboard while it is up, and Esc leaves the
+    // opening-song road; then the servers surfaces: an open modal owns the
+    // keyboard outright, the room takes its row keys, and everything else
+    // falls through untouched.
+    if let Some(quit) = dj::handle_key(gui, key) {
+        return quit;
+    }
     if let Some(quit) = servers::handle_key(gui, key) {
         return quit;
     }
@@ -1728,6 +1753,7 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     }
     let browse = gui.browse_room()
         && gui.app.connected
+        && !dj::modal_open(gui)
         && !sonic::modal_open(gui)
         && !playlists::modal_open(gui);
     // The bar's filter owns the keyboard while it is taking text (the
