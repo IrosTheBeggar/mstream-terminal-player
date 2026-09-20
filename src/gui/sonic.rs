@@ -101,7 +101,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         Style::default().add_modifier(Modifier::BOLD),
     );
     if !gui.app.connected {
-        put(frame, content.x, content.y + 2, &t!("gui.no_server"), dim());
+        super::servers::draw_disconnected(frame, gui, content, 2);
         return;
     }
     match gui.app.sonic.view {

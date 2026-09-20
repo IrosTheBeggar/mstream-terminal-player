@@ -1439,6 +1439,13 @@ pub struct App {
     pub resume_spot: Option<(usize, f64)>,
     pub connected: bool,
     pub connecting: bool,
+    /// Whether this shell draws the App's own connect screen while no
+    /// session is up. The TUI does, and the keys typed into its fields
+    /// must not fire playback — so [`App::act`] routes everything there.
+    /// The GUI has forms of its own and shows the room's words instead, so
+    /// its transport stays live for the queue's rows from other servers
+    /// (multi-server contract, clauses 11 and 13); it switches this off.
+    pub connect_screen: bool,
     pub connect: ConnectForm,
 
     pub tab: Tab,
@@ -1706,6 +1713,7 @@ impl App {
             resume_spot: None,
             connected: false,
             connecting: false,
+            connect_screen: true,
             connect: ConnectForm::default(),
             tab: Tab::Files,
             focus: Focus::Browser,
@@ -2165,8 +2173,10 @@ impl App {
     }
 
     fn act(&mut self, action: Action) -> Vec<Effect> {
-        // The connect screen swallows everything except quit.
-        if !self.connected {
+        // The connect screen swallows everything except quit — where a
+        // shell shows one. A shell without it keeps the queue's transport
+        // working while the session is down (see `connect_screen`).
+        if !self.connected && self.connect_screen {
             return self.handle_connect_action(action);
         }
         // Panels are modal: they own the arrow keys and the letters they use,

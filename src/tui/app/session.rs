@@ -156,6 +156,18 @@ impl App {
         })]
     }
 
+    /// Try the session's server again — the GUI's "Try again" on a server
+    /// that would not answer (multi-server contract, clause 13: the
+    /// selection stood, the server is the thing that failed, so nothing is
+    /// re-adopted). A no-op while a session is up or a connect is out.
+    pub(crate) fn reconnect(&mut self) -> Vec<Effect> {
+        if self.connected || self.connecting {
+            return Vec::new();
+        }
+        self.message = None;
+        self.begin()
+    }
+
     /// The Connect for a peer session whose own tunnel is up and whose
     /// guest ticket is in hand; `None` when it rides the parent instead.
     fn connect_direct(&mut self) -> Option<Vec<Effect>> {

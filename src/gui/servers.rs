@@ -593,6 +593,19 @@ pub(crate) fn switch_to(gui: &mut Gui, index: usize) {
     gui.note = Some((t!("gui.srv.reaching", server = shown).to_string(), false));
 }
 
+/// The room's "Try again": the same server, asked once more — the switch's
+/// own note and marker, so the answer lands the way a switch's does.
+fn retry(gui: &mut Gui) {
+    let effects = gui.app.reconnect();
+    if effects.is_empty() {
+        return;
+    }
+    gui.servers.switching = Some(gui.app.session.server_id.clone());
+    let shown = gui.app.server_display();
+    gui.note = Some((t!("gui.srv.reaching", server = shown).to_string(), false));
+    gui.pend(effects);
+}
+
 // ── The form's submit ───────────────────────────────────────────────────────
 
 pub(crate) fn submit_form(gui: &mut Gui) {
@@ -1029,6 +1042,12 @@ pub(crate) fn observe(gui: &mut Gui, event: &Event) {
 /// A dial (or a connect) that failed leaves the session exactly as it was —
 /// the code never reached it. The error lands on the form.
 fn dial_failed(gui: &mut Gui, message: &str) {
+    // A switch (or a retry) whose server would not answer: its "reaching…"
+    // note has nothing more to say — the App's own error takes the line,
+    // and the room says the server is offline (contract clause 13).
+    if gui.servers.switching.take().is_some() {
+        gui.note = None;
+    }
     let dialling = gui.servers.pending_code.is_some();
     if let Some(form) = gui.servers.form.as_mut()
         && (form.session_login || dialling)
@@ -1052,6 +1071,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::SrvMenu => gui.servers.drop_open = !gui.servers.drop_open,
         Act::SrvCloseDrop => gui.servers.drop_open = false,
         Act::SrvDrop(i) => switch_to(gui, *i),
+        Act::SrvRetry => retry(gui),
         Act::SrvAdd => open_add(gui),
         Act::SrvRow(i) => gui.servers.cursor = *i,
         Act::SrvSwitch(i) => switch_to(gui, *i),
@@ -1319,7 +1339,10 @@ pub(crate) fn draw_header(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     gui.ui.click(plus, Act::SrvAdd);
     gui.ui.tip(plus, t!("gui.srv.add").to_string());
 
-    if !gui.app.connected {
+    // The label names the session's server whether or not it answered: a
+    // server that would not connect keeps its place here, and the picker
+    // with it, so there is always a way to another (contract clause 13).
+    if gui.app.session.server_id.is_empty() && gui.app.session.server.is_empty() {
         return;
     }
     let server = gui.app.server_display();
@@ -1337,6 +1360,33 @@ pub(crate) fn draw_header(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         // No dwell tooltip here: it matured right where the dropdown
         // opens and sat on top of the first rows.
         gui.ui.click(rect, Act::SrvMenu);
+    }
+}
+
+/// What a room shows while no session is up, `gap` rows under `content`'s
+/// top: "reaching…" while a connect is out; the server that would not
+/// answer, in words, with a way to try again — the selection stands and the
+/// header keeps the picker (contract clause 13); or, with no server at all,
+/// the way in. The queue's transport keeps working throughout (clause 11):
+/// its rows carry their own servers.
+pub(crate) fn draw_disconnected(frame: &mut Frame, gui: &mut Gui, content: Rect, gap: u16) {
+    let (x, y, width) = (content.x, content.y + gap, content.width as usize);
+    if gui.app.connecting {
+        put(frame, x, y, &super::bar::clip(&t!("busy.reaching"), width), accent());
+        return;
+    }
+    let named = !gui.app.session.server_id.is_empty() || !gui.app.session.server.is_empty();
+    let at = Rect { x, y: y + 3, width: content.width, height: 3 };
+    if named {
+        let server = gui.app.server_display();
+        let line = t!("gui.srv.offline", server = server).to_string();
+        put(frame, x, y, &super::bar::clip(&line, width), Style::default().fg(th().gold));
+        put(frame, x, y + 1, &super::bar::clip(&t!("gui.srv.offline_hint"), width), dim());
+        crate::kit::tall_button(frame, &mut gui.ui, at, &t!("gui.srv.retry"), true, Act::SrvRetry);
+    } else {
+        put(frame, x, y, &super::bar::clip(&t!("gui.no_server"), width), dim());
+        // The way in, right where the absence is explained.
+        crate::kit::tall_button(frame, &mut gui.ui, at, &t!("gui.srv.add"), true, Act::SrvAdd);
     }
 }
 
@@ -1360,8 +1410,8 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             if !config::selectable(s) {
                 return None;
             }
-            let current =
-                gui.app.connected && config::same_server(&gui.app.session.server_id, &s.url);
+            // The session's server, answering or not — the choice stands.
+            let current = config::same_server(&gui.app.session.server_id, &s.url);
             let default = gui
                 .config
                 .default_server
@@ -2304,6 +2354,88 @@ mod tests {
             },
         );
         assert!(gui.servers.switching.is_none());
+    }
+
+    #[test]
+    fn an_unreachable_server_keeps_the_picker_says_so_and_leaves_the_transport_live() {
+        use crate::api::types::Track;
+        use crate::tui::app::{KnownServer, Origin, Queued};
+        use crate::tui::worker::AudioCmd;
+        use ratatui::layout::Position;
+
+        // Two rows from the working server, the first playing. The switch
+        // saves the outgoing session and reloads the config, so the two
+        // servers are on disk in a scratch dir — not the user's, and not
+        // whatever another test's scratch dir holds.
+        let scratch = Scratch::new("gui-offline");
+        let _ = &scratch;
+        let mut gui = two_server_gui();
+        config::save(&gui.config).unwrap();
+        let attic = "http://attic.local:3000";
+        gui.app.servers.push(KnownServer {
+            id: attic.into(),
+            name: "attic".into(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            pairing: None,
+        });
+        let row = |path: &str| Queued {
+            origin: Origin { server: attic.into(), peer: None },
+            track: Track { filepath: path.into(), metadata: Default::default() },
+        };
+        gui.app.queue.items = vec![row("music/a.mp3"), row("music/b.mp3")];
+        gui.app.queue.current = Some(0);
+        gui.app.now_playing = Some(row("music/a.mp3").track);
+
+        // The switch goes out, and the server does not answer — the event
+        // reaches the shell's observer and the App, as the loop delivers it.
+        switch_to(&mut gui, 1);
+        assert!(!gui.app.connected);
+        let failed = Event::Error("connection refused".into());
+        observe(&mut gui, &failed);
+        let effects = gui.app.apply_event(failed);
+        gui.pend(effects);
+        assert!(!gui.app.connecting, "the attempt is over");
+        assert!(gui.servers.switching.is_none(), "the switch is over");
+        assert!(gui.note.is_none(), "its reaching… note is gone");
+
+        // The header keeps the label and the picker; the room says so.
+        let rows = draw(&mut gui);
+        let chevron = if crate::kit::theme::legacy_conhost() { " v" } else { " ▾" };
+        assert!(
+            rows[0].contains("office.local:3000") && rows[0].contains(chevron),
+            "the label and the picker stay: {:?}",
+            rows[0]
+        );
+        let label_x =
+            rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with("office.local")).unwrap();
+        assert_eq!(gui.ui.hit(Position { x: label_x as u16, y: 0 }), Some(Act::SrvMenu));
+        let all = rows.join("\n");
+        assert!(all.contains("office.local:3000 is offline"), "the room names it:\n{all}");
+        assert!(all.contains("Try again"), "and offers another go:\n{all}");
+
+        // The transport is live: Next plays the queue's row from ITS server.
+        gui.pending.clear();
+        gui.act(Act::Next);
+        assert!(
+            gui.pending.iter().any(|e| matches!(
+                e,
+                Effect::Audio(AudioCmd::Play { url, .. }) if url.contains("attic.local")
+            )),
+            "next plays from the row's own server: {:?}",
+            gui.pending
+        );
+
+        // Try again asks the same server once more, the switch's way.
+        gui.pending.clear();
+        gui.act(Act::SrvRetry);
+        assert!(gui.pending.iter().any(|e| matches!(
+            e,
+            Effect::Api(ApiCmd::Connect { server, .. }) if server == "http://office.local:3000"
+        )));
+        assert_eq!(gui.servers.switching.as_deref(), Some("http://office.local:3000"));
+        assert!(gui.note.as_ref().is_some_and(|(text, _)| text.contains("office.local")));
     }
 
     #[test]

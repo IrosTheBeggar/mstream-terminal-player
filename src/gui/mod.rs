@@ -194,6 +194,8 @@ pub(crate) enum Act {
     // ── Servers (see gui::servers) ──────────────────────────────────────
     /// The header's server label: toggle the switcher dropdown.
     SrvMenu,
+    /// The room's "Try again" on a server that would not answer.
+    SrvRetry,
     /// A dropdown row: switch the session to saved server `i`.
     SrvDrop(usize),
     /// Open the add-server form (the header [+], the dropdown's last row,
@@ -430,7 +432,10 @@ pub(crate) struct Gui {
 }
 
 impl Gui {
-    fn new(config: Config, config_ok: bool, app: App) -> Self {
+    fn new(config: Config, config_ok: bool, mut app: App) -> Self {
+        // No connect screen here: the servers surfaces are this shell's own,
+        // and the transport keeps working while a session is down.
+        app.connect_screen = false;
         Gui {
             app,
             pending: Vec::new(),
@@ -1149,17 +1154,7 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
 
     if !gui.app.connected {
-        let text = if gui.app.connecting {
-            (t!("busy.reaching").to_string(), accent())
-        } else {
-            (t!("gui.no_server").to_string(), dim())
-        };
-        put(frame, content.x, content.y + 2, &bar::clip(&text.0, content.width as usize), text.1);
-        if !gui.app.connecting {
-            // The way in, right where the absence is explained.
-            let at = Rect { x: content.x, y: content.y + 4, width: content.width, height: 3 };
-            crate::kit::tall_button(frame, &mut gui.ui, at, &t!("gui.srv.add"), true, Act::SrvAdd);
-        }
+        servers::draw_disconnected(frame, gui, content, 2);
         return;
     }
     if gui.app.files.loading {
@@ -1488,12 +1483,7 @@ fn draw_pane_rows(
 /// the shared state machine.
 fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if !gui.app.connected {
-        let text = if gui.app.connecting {
-            (t!("busy.reaching").to_string(), accent())
-        } else {
-            (t!("gui.no_server").to_string(), dim())
-        };
-        put(frame, content.x, content.y, &bar::clip(&text.0, content.width as usize), text.1);
+        servers::draw_disconnected(frame, gui, content, 0);
         return;
     }
 

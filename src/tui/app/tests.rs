@@ -6297,3 +6297,18 @@ fn connecting_tells_the_engine_the_blend_length() {
         "the C6 pair travel with it"
     );
 }
+
+#[test]
+fn the_connect_screen_swallows_playback_only_where_a_shell_shows_one() {
+    // The TUI draws the App's connect screen while no session is up, and a
+    // Space typed into it must not toggle anything; the GUI has no such
+    // screen and keeps the queue's transport live (multi-server contract,
+    // clauses 11 and 13).
+    let mut app = App::new(Some("http://host:3000".into()), None, None);
+    assert!(!app.connected);
+    app.handle_action(Action::ToggleShuffle);
+    assert!(!app.queue.shuffle, "the connect screen swallows the key");
+    app.connect_screen = false;
+    app.handle_action(Action::ToggleShuffle);
+    assert!(app.queue.shuffle, "a shell without the screen lets it through");
+}

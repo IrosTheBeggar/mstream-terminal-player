@@ -1797,7 +1797,13 @@ a LATER secondary screen (party view), Columns retired.
   Per-server tunnels (clause 38) and the guest-ticket direct path to a
   peer landed 2026-09-19 on the shared tunnel crate — T1–T3 below — and
   T4's two-server rig proved them live on 2026-09-20. A drag grip for
-  reorder stays deferred.
+  reorder stays deferred. **Offline switch (2026-09-20)**: a switch to a
+  server that will not answer used to hide the header's picker and route
+  every action into the TUI's connect screen (the GUI's transport died
+  while queue clicks still played); now the label and picker stay, the
+  rooms say the server is offline with "Try again", and the App gates on
+  a `connect_screen` flag the GUI switches off — contract clause 13's
+  deviation entry has the details.
 - **Queue rows three cells tall — an experiment (2026-09-20)**: the
   panel's rows carry a 6×3 cover on the left — the card's own cover size;
   the wall's per-slot pixel/mosaic machinery, moved to `src/gui/cover.rs`

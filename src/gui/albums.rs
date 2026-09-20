@@ -278,12 +278,7 @@ fn page_len(gui: &Gui, capacity: usize) -> usize {
 
 pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if !gui.app.connected {
-        let text = if gui.app.connecting {
-            (t!("busy.reaching").to_string(), accent())
-        } else {
-            (t!("gui.no_server").to_string(), dim())
-        };
-        put(frame, content.x, content.y, &super::bar::clip(&text.0, content.width as usize), text.1);
+        super::servers::draw_disconnected(frame, gui, content, 0);
         return;
     }
     if let Some((name, artist)) = drilled_album(gui) {

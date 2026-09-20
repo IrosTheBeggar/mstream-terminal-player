@@ -63,6 +63,13 @@ url = "http://127.0.0.1:3041"
   than marked, the scrollbar down the last column. Counts the rows wearing a
   cover and checks the bar's caps off the screen.
 
+- `offline` — B alone, with a dead server added to a copy of the seed config:
+  queue a folder (playback starts), pick the dead server from the header. The
+  header keeps its label and picker, the room says "{server} is offline —
+  couldn't connect" with "Try again", Space pauses and resumes the queue
+  while no session is up, and the picker leads back to B (multi-server
+  contract, clause 13).
+
 ```sh
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py direct
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py mixed

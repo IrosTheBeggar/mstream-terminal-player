@@ -335,7 +335,7 @@ already exists (`gui.srv.*`).
 | Connection timed out. / Could not connect: {error} | testTimedOut / testConnectFailed | — |
 | Could not reach server. If it requires login, turn off "Public access" and add credentials. | couldNotReachServer | gui.srv.public_auth (partial) |
 | Failed to Login | failedToLogin | gui.srv.bad_login |
-| Failed To Connect To Server | mainFailedToConnect | — |
+| Failed To Connect To Server | mainFailedToConnect | `gui.srv.offline` "{server} is offline — couldn't connect", `gui.srv.offline_hint` "Try again, or pick another server.", `gui.srv.retry` "Try again" (in the room, with the App's own error on the note line) |
 | Server URL / Quick Connect (the add tabs) | addServerTabUrl / addServerTabQuickConnect | gui.srv.method_direct / method_qc |
 | Show pairing code | irohShowPairingCode | gui.srv.act_qr |
 | Direct / Relay | irohPathDirect / irohPathRelay | — |
@@ -558,6 +558,18 @@ additions to drawn idioms. Revisit if discussion disagrees.
   30-line window; the bar and the wheel carry the rest). Began the same
   day at two lines and a 4×2 cover; grown for a bigger picture. If the
   experiment stays, clause 34's "marked" reads as colour.
+- **2026-09-20 — A switch to a server that will not answer** (clause 13,
+  reported live: picking a stopped localhost server hid the header's
+  picker and dead-ended the shell): the selection stands and the header
+  keeps the label and the picker whenever the session names a server,
+  answering or not; every room says "{server} is offline — couldn't
+  connect" with "Try again" where it said "No server" before; the
+  switch's "reaching…" note clears on the failure so the App's own error
+  takes the line; and the transport stays live — the App routes actions
+  into its connect screen only for the shell that draws one (the TUI),
+  so the GUI's queue rows keep playing from their own servers (clause 11)
+  while the session is down. "No server" and the way in remain for a
+  player with no server at all.
 - **2026-09-20 — Verified on the rig, with two corrections**: two scratch
   servers paired over federation, the player connected to one and reached
   the other through the parent's proxy, then over the peer's own tunnel
