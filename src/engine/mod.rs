@@ -12,6 +12,7 @@
 //! a costly second fetch to probe duration.
 
 pub(crate) mod fade;
+pub(crate) mod formats;
 pub(crate) mod http;
 pub(crate) mod output;
 pub(crate) mod tap;
@@ -176,6 +177,41 @@ pub struct Status {
 pub struct QueueSnapshot {
     pub queue: Vec<String>,
     pub current_index: usize,
+}
+
+/// How tracks hand over to each other, as one value: what `GET /settings`
+/// answers, and what a driver reads back after changing any of it. Not part
+/// of the rust-server-audio wire — that engine had one way to change track.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct PlaybackSettings {
+    /// Seconds of blend when a track ends on its own; 0 is off.
+    pub crossfade: f32,
+    /// Sample-tight boundaries when no blend is set. A crossfade outranks it.
+    pub gapless: bool,
+    /// Manual skips blend for a second instead of cutting.
+    pub blend_skips: bool,
+    /// Pause and resume ride a short ramp instead of landing mid-wave.
+    pub pause_fade: bool,
+}
+
+/// The longest blend the engine will carry. Past any musical use already;
+/// `--crossfade` and `POST /settings` refuse more, and the setters clamp to
+/// it, so the three agree.
+pub const MAX_CROSSFADE: f32 = 30.0;
+
+fn clamp_crossfade(seconds: f32) -> f32 {
+    if seconds.is_finite() { seconds.clamp(0.0, MAX_CROSSFADE) } else { 0.0 }
+}
+
+/// Where the sound is going, for a driver with a status page to fill.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OutputStatus {
+    /// The device the stream is open on, as the system names it. During an
+    /// outage this is the device that was lost — the last one that worked.
+    pub device: String,
+    /// False while no usable output exists: the device died and nothing has
+    /// opened in its place yet. The engine keeps its state and keeps trying.
+    pub available: bool,
 }
 
 // ── Player state ────────────────────────────────────────────────────────────
@@ -1488,8 +1524,7 @@ impl Engine {
     /// (Phase C3). Turning it off mid-flight abandons any preparation on
     /// the next tick; a blend already sounding finishes on its own.
     pub fn set_crossfade(&self, seconds: f32) {
-        let mut s = self.state.lock().unwrap();
-        s.crossfade = if seconds.is_finite() { seconds.clamp(0.0, 30.0) } else { 0.0 };
+        self.state.lock().unwrap().crossfade = clamp_crossfade(seconds);
     }
 
     /// Sample-tight transitions when no blend is configured (C4): the
@@ -1507,6 +1542,41 @@ impl Engine {
     /// Pause and resume ride a short ramp instead of landing mid-wave (C6).
     pub fn set_pause_fade(&self, on: bool) {
         self.state.lock().unwrap().pause_fade = on;
+    }
+
+    /// The four transition settings as they stand.
+    pub fn settings(&self) -> PlaybackSettings {
+        let s = self.state.lock().unwrap();
+        PlaybackSettings {
+            crossfade: s.crossfade,
+            gapless: s.gapless,
+            blend_skips: s.blend_skips,
+            pause_fade: s.pause_fade,
+        }
+    }
+
+    /// All four at once, under one lock: the tick reads crossfade and
+    /// gapless together to pick a transition, and must never catch a change
+    /// half made. What each one does mid-flight is what its own setter
+    /// documents — nothing here restarts anything; the queue, the position
+    /// and a blend already sounding are left alone.
+    pub fn apply_settings(&self, settings: PlaybackSettings) {
+        let mut s = self.state.lock().unwrap();
+        s.crossfade = clamp_crossfade(settings.crossfade);
+        s.gapless = settings.gapless;
+        s.blend_skips = settings.blend_skips;
+        s.pause_fade = settings.pause_fade;
+    }
+
+    /// Where the sound is going, and whether it can get there.
+    pub fn output_status(&self) -> OutputStatus {
+        let w = self.output.lock().unwrap();
+        OutputStatus {
+            device: w.out.name().to_string(),
+            // Dead but not yet rebuilt (the tick is at most a poll away), or
+            // rebuilt-and-failed: either way nothing is sounding.
+            available: !w.out.is_dead() && !w.outage_told,
+        }
     }
 
     pub fn status(&self) -> Status {

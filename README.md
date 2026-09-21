@@ -240,9 +240,9 @@ walk the blend length, and Enter toggles the rest — **Gapless**, **Blend
 skips** (a manual skip crosses in a second instead of cutting), and **Pause
 fade** (pause and resume ride a short ramp instead of landing mid-note). What
 you set there is what config.toml remembers. The tab's other room is
-**Logs** — see Diagnostics below. The jukebox has the first pair as
-`mstream-player serve --crossfade 6` / `--gapless`; the legacy spawn contract
-keeps all of it off.
+**Logs** — see Diagnostics below. The jukebox starts with the first pair as
+`mstream-player serve --crossfade 6` / `--gapless` (the legacy spawn contract
+keeps all of it off) and takes all four, while it plays, over `POST /settings`.
 
 ### Output devices
 
@@ -252,8 +252,8 @@ track back up at the position it stood — paused stays paused, the volume
 stays yours. Pull the device it was playing on and it hops to whatever the
 system falls back to; when there is nothing to fall back to (the only
 headset switched off), it holds the moment and resumes as soon as any
-output returns. Each move is one line in the message bar, or on stderr in
-`serve` mode.
+output returns. Each move is one line in the message bar, or — in `serve`
+mode — on stderr and in `GET /output`.
 
 ## The progress bar
 
@@ -827,7 +827,8 @@ legacy alias for the old spawn contract. Changes from the original engine:
 - Binds `127.0.0.1` by default (`--host 0.0.0.0` restores the old LAN-exposed behavior)
 - Optional auth: `--auth-token <t>` or env `MSTREAM_AUDIO_TOKEN` (checked as `x-auth-token`
   header on every route except `GET /version`)
-- `GET /version` → `{"name", "version", "apiVersion"}`
+- `GET /version` → `{"name", "version", "apiVersion"}`, plus what else this build has and what it
+  can decode (see *Configuring a running jukebox* below)
 - `--exit-with-parent`: exit when stdin closes (pass only when the parent holds stdin open)
 - `--crossfade <seconds>`: blend each track into the next when one ends on its own (equal-power,
   prepared ahead so the blend never waits on the network). 0 — the default — keeps the original
@@ -860,6 +861,66 @@ rebound.) The other habit this breaks is `curl -d`, which sends form-encoded by 
 ```bash
 curl -sX POST -H 'Content-Type: application/json' -d '{"file":"/music/a.flac"}' http://127.0.0.1:3333/play
 ```
+
+### Configuring a running jukebox
+
+The routes above drive the jukebox; these are for whoever sets it up — mStream's admin panel.
+They are additions to v1, so ask `GET /version` what is there before relying on one: a build
+that has them lists `"settings"` and `"output"` under `capabilities`, and an older pinned build
+simply has no such key.
+
+**`GET /settings`** answers how tracks hand over to each other, and **`POST /settings`** changes
+it while the music plays — nothing restarts, the queue and the position stay where they are:
+
+```json
+{ "crossfade": 0.0, "gapless": false, "blend_skips": false, "pause_fade": false }
+```
+
+They are the same four the player's Settings tab has (see *Crossfade* above). Send any subset;
+what you leave out stays as it was, and the answer is the settings as they now stand. A
+`crossfade` outside 0–30 seconds is refused rather than clamped, and so is a key that isn't one
+of the four — a misspelled toggle should say so, not do nothing. `--crossfade` and `--gapless`
+are only where the engine *starts*.
+
+```bash
+curl -sX POST -H 'Content-Type: application/json' -d '{"crossfade":6,"pause_fade":true}' http://127.0.0.1:3333/settings
+```
+
+**`GET /output`** says where the sound is going: the device's name as the system gives it,
+whether it is usable right now, and the device news (see *Output devices* above) that otherwise
+only stderr hears — the last 16 lines, oldest first:
+
+```json
+{
+  "device": "Speakers (Realtek(R) Audio)",
+  "available": true,
+  "notices": [
+    { "seq": 1, "at": 1790000000, "text": "audio moved to Headphones (WH-1000XM4)", "lost": false }
+  ]
+}
+```
+
+`available` is false while the device is gone and nothing has opened in its place; the engine
+holds the moment and keeps trying, and `device` then names the one that was lost. `seq` counts up
+for the life of the process, so a client that polls can tell new from seen; `at` is Unix seconds;
+`lost` marks the lines that mean *nothing can play*.
+
+**`GET /version`** also says what this build can decode, read out of the decoder itself:
+
+```json
+{
+  "name": "mstream-player", "version": "x.y.z", "apiVersion": 1,
+  "capabilities": ["settings", "output"],
+  "formats": {
+    "codecs": ["aac", "adpcm", "alac", "flac", "mp1", "mp2", "mp3", "pcm", "vorbis"],
+    "containers": ["adts", "aiff", "caf", "flac", "isomp4", "mkv", "mpa", "ogg", "wav"]
+  }
+}
+```
+
+A container says where the audio sits, not what it is: `ogg` means Ogg Vorbis plays, and an Ogg
+**Opus** file still fails on its codec — `opus` is not in the list, which is the thing a client
+should check instead of guessing.
 
 ## Build
 

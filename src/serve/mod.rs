@@ -8,17 +8,35 @@
 //! cap (findings #27/#28/#30). A legitimate client never notices the
 //! hygiene: correct Host and application/json are what every HTTP library
 //! sends anyway, and no page in a browser has any business here.
+//!
+//! The second round of additions is for whoever CONFIGURES the jukebox
+//! rather than drives it — mStream's admin panel. Still additive, still v1:
+//! GET/POST /settings (how tracks hand over, changed while the music
+//! plays), GET /output (which device, whether it is there, and the device
+//! news that until now only stderr heard), and /version growing a
+//! `capabilities` list and the formats this build decodes. A client asks
+//! /version what exists before it asks for it; the legacy wire is untouched
+//! — /status in particular gains nothing, because it is polled twice a
+//! second by clients that were written against the original.
 
+use std::collections::VecDeque;
 use std::io::Read;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde::Serialize;
 use tiny_http::{Header, Method, Response, Server};
 
-use crate::engine::{Engine, EngineError};
+use crate::engine::{Engine, EngineError, MAX_CROSSFADE, PlaybackSettings, formats};
+use crate::player::DeviceNotice;
 
 pub const API_VERSION: u32 = 1;
+
+/// The optional parts of the API this build has, by the name a client
+/// checks for in `GET /version` before relying on one. A route that is part
+/// of v1 proper is never listed — only what arrived after a release a
+/// client may still be pinned to.
+pub const CAPABILITIES: &[&str] = &["settings", "output"];
 
 pub struct ServeOptions {
     pub host: String,
@@ -30,10 +48,11 @@ pub struct ServeOptions {
     /// `--port N` spawn contract, which is deliberate — the wire and the
     /// queue behavior never change unasked. (The C4 soft cuts on manual
     /// /next and /stop are the one global departure: 150/80 ms fade tails
-    /// where the original clicked.)
+    /// where the original clicked.) This is only where the engine STARTS:
+    /// POST /settings moves it later, which is still being asked.
     pub crossfade: f32,
     /// Sample-tight transitions when no blend is configured. Same legacy
-    /// stance: unreachable from `--port N`.
+    /// stance: unreachable from `--port N`, reachable from POST /settings.
     pub gapless: bool,
 }
 
@@ -69,9 +88,116 @@ struct BoolRequest {
     value: bool,
 }
 
+/// Any subset of the settings; what is absent stays as it was. An unknown
+/// key is refused rather than ignored — a client that misspells `gapless`
+/// should hear about it, not watch nothing happen.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SettingsPatch {
+    crossfade: Option<f32>,
+    gapless: Option<bool>,
+    blend_skips: Option<bool>,
+    pause_fade: Option<bool>,
+}
+
 #[derive(Serialize)]
 struct OkResponse {
     ok: bool,
+}
+
+// ── Settings ────────────────────────────────────────────────────────────────
+
+/// `current` with `patch` laid over it, or the sentence to send back. The
+/// blend length gets the same bounds `--crossfade` enforces: the engine
+/// would clamp a wild number quietly, and a settings page that was told
+/// "ok" would then be showing a value the engine is not using.
+fn patched(current: PlaybackSettings, patch: SettingsPatch) -> Result<PlaybackSettings, String> {
+    let crossfade = match patch.crossfade {
+        None => current.crossfade,
+        Some(s) if !s.is_finite() || s < 0.0 => {
+            return Err("crossfade must be a length of time in seconds, 0 or more".to_string());
+        }
+        Some(s) if s > MAX_CROSSFADE => {
+            return Err(format!("crossfade cannot be longer than {MAX_CROSSFADE} seconds"));
+        }
+        Some(s) => s,
+    };
+    Ok(PlaybackSettings {
+        crossfade,
+        gapless: patch.gapless.unwrap_or(current.gapless),
+        blend_skips: patch.blend_skips.unwrap_or(current.blend_skips),
+        pause_fade: patch.pause_fade.unwrap_or(current.pause_fade),
+    })
+}
+
+// ── Device news ─────────────────────────────────────────────────────────────
+
+/// How much device news GET /output remembers. A headset that flaps all
+/// evening must not grow a list, and a status page has no use for more.
+const NOTICE_LOG_CAP: usize = 16;
+
+/// One line of device news, as GET /output reports it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+struct LoggedNotice {
+    /// Counts up from 1 for the life of the process and never repeats, so a
+    /// client that polls can tell "new" from "seen" without comparing text.
+    seq: u64,
+    /// When it happened, in Unix seconds.
+    at: u64,
+    text: String,
+    /// True when the news is that no output device is usable.
+    lost: bool,
+}
+
+/// The device news the loop has drained from the engine, kept for clients.
+/// stderr has always carried these lines (mStream relays them into its
+/// log); this is the same news for someone who was not reading stderr.
+#[derive(Default)]
+struct NoticeLog {
+    last_seq: u64,
+    entries: VecDeque<LoggedNotice>,
+}
+
+impl NoticeLog {
+    fn push(&mut self, notice: DeviceNotice, at: u64) {
+        self.last_seq += 1;
+        if self.entries.len() >= NOTICE_LOG_CAP {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(LoggedNotice {
+            seq: self.last_seq,
+            at,
+            text: notice.text,
+            lost: notice.lost,
+        });
+    }
+
+    /// Oldest first, the order they happened in.
+    fn snapshot(&self) -> Vec<LoggedNotice> {
+        self.entries.iter().cloned().collect()
+    }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+// ── /version ────────────────────────────────────────────────────────────────
+
+/// Who this is and what it can do. The first three keys are v1's and never
+/// move; the rest let a client that may be talking to an older pinned build
+/// find out what is there instead of finding out by a 404.
+fn version_payload() -> serde_json::Value {
+    serde_json::json!({
+        "name": "mstream-player",
+        "version": env!("CARGO_PKG_VERSION"),
+        "apiVersion": API_VERSION,
+        "capabilities": CAPABILITIES,
+        "formats": {
+            "codecs": formats::codecs(),
+            "containers": formats::CONTAINERS,
+        },
+    })
 }
 
 #[derive(Serialize)]
@@ -337,13 +463,17 @@ pub fn run(opts: ServeOptions) -> Result<(), String> {
 
     println!("mstream-player serve listening on http://{}", addr);
 
+    let mut device_news = NoticeLog::default();
+
     loop {
         // Auto-advance: check if the sink emptied and move to the next track.
         engine.advance_tick();
         // The tick also watches the output device (headphones plugged in,
-        // a Bluetooth speaker dropping); what it did about it prints here.
+        // a Bluetooth speaker dropping); what it did about it prints here,
+        // and is kept for GET /output.
         for notice in engine.take_device_notices() {
             eprintln!("[serve] {}", notice.text);
+            device_news.push(notice, unix_now());
         }
 
         let request = server.recv_timeout(Duration::from_millis(250));
@@ -542,11 +672,35 @@ pub fn run(opts: ServeOptions) -> Result<(), String> {
 
             (Method::Get, "/queue") => json_response(&engine.queue_snapshot()),
 
-            (Method::Get, "/version") => json_response(&serde_json::json!({
-                "name": "mstream-player",
-                "version": env!("CARGO_PKG_VERSION"),
-                "apiVersion": API_VERSION,
-            })),
+            (Method::Get, "/settings") => json_response(&engine.settings()),
+
+            // Applies while the music plays: nothing restarts, the queue
+            // and the position stay put. Answers with the settings as they
+            // now stand, so a settings page needs no second request.
+            (Method::Post, "/settings") => match body.as_deref() {
+                Some(b) => match parse::<SettingsPatch>(b) {
+                    Ok(patch) => match patched(engine.settings(), patch) {
+                        Ok(settings) => {
+                            engine.apply_settings(settings);
+                            json_response(&engine.settings())
+                        }
+                        Err(msg) => error_response(&msg),
+                    },
+                    Err(resp) => resp,
+                },
+                None => error_response("Missing request body"),
+            },
+
+            (Method::Get, "/output") => {
+                let output = engine.output_status();
+                json_response(&serde_json::json!({
+                    "device": output.device,
+                    "available": output.available,
+                    "notices": device_news.snapshot(),
+                }))
+            }
+
+            (Method::Get, "/version") => json_response(&version_payload()),
 
             _ => error_response_with_status("Not found", 404),
         };
@@ -602,5 +756,150 @@ mod tests {
             assert!(!is_json(Some(simple)), "{simple}");
         }
         assert!(!is_json(None));
+    }
+
+    const AS_BOOTED: PlaybackSettings =
+        PlaybackSettings { crossfade: 0.0, gapless: false, blend_skips: false, pause_fade: false };
+
+    fn patch(json: &str) -> SettingsPatch {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn a_settings_patch_changes_only_what_it_names() {
+        let current =
+            PlaybackSettings { crossfade: 6.0, gapless: true, pause_fade: true, ..AS_BOOTED };
+        // Nothing named, nothing moved — a settings page may POST `{}`.
+        assert_eq!(patched(current, patch("{}")).unwrap(), current);
+        // One key: the other three stay where they were.
+        assert_eq!(
+            patched(current, patch(r#"{"gapless": false}"#)).unwrap(),
+            PlaybackSettings { gapless: false, ..current }
+        );
+        // All four, including turning the blend off.
+        assert_eq!(
+            patched(
+                current,
+                patch(r#"{"crossfade":0,"gapless":false,"blend_skips":true,"pause_fade":false}"#)
+            )
+            .unwrap(),
+            PlaybackSettings { blend_skips: true, ..AS_BOOTED }
+        );
+        // The boundary is inclusive, the same as --crossfade.
+        assert_eq!(patched(AS_BOOTED, patch(r#"{"crossfade": 30}"#)).unwrap().crossfade, 30.0);
+        assert_eq!(patched(AS_BOOTED, patch(r#"{"crossfade": 4.5}"#)).unwrap().crossfade, 4.5);
+    }
+
+    #[test]
+    fn a_blend_the_engine_would_clamp_is_refused_instead() {
+        // The engine clamps quietly; a settings page told "ok" would then
+        // show a number the engine is not using.
+        for bad in [r#"{"crossfade": -1}"#, r#"{"crossfade": 30.5}"#, r#"{"crossfade": 1e9}"#] {
+            let err = patched(AS_BOOTED, patch(bad)).unwrap_err();
+            assert!(err.contains("crossfade"), "{bad}: {err}");
+        }
+        // And a refused patch changes nothing: the good keys beside the bad
+        // one are not half-applied, because nothing is applied on Err.
+        assert!(patched(AS_BOOTED, patch(r#"{"gapless": true, "crossfade": 99}"#)).is_err());
+    }
+
+    #[test]
+    fn a_settings_patch_with_a_key_we_do_not_have_is_refused() {
+        // A misspelled key silently ignored is a toggle that does nothing.
+        for bad in [r#"{"gapples": true}"#, r#"{"crossfade": 2, "volume": 0.5}"#] {
+            assert!(serde_json::from_str::<SettingsPatch>(bad).is_err(), "{bad}");
+        }
+        // The wrong type is refused too, not coerced.
+        for bad in [r#"{"crossfade": "4"}"#, r#"{"gapless": 1}"#, r#"[]"#, r#""gapless""#] {
+            assert!(serde_json::from_str::<SettingsPatch>(bad).is_err(), "{bad}");
+        }
+        // A null is a key not named: it leaves the setting where it was.
+        let current = PlaybackSettings { crossfade: 6.0, ..AS_BOOTED };
+        assert_eq!(patched(current, patch(r#"{"crossfade": null}"#)).unwrap(), current);
+    }
+
+    fn news(text: &str, lost: bool) -> DeviceNotice {
+        DeviceNotice { text: text.to_string(), lost }
+    }
+
+    #[test]
+    fn device_news_is_numbered_ordered_and_bounded() {
+        let mut log = NoticeLog::default();
+        assert!(log.snapshot().is_empty());
+
+        log.push(news("audio device lost — playback resumes when one comes back", true), 100);
+        log.push(news("audio is back on Speakers", false), 160);
+        let seen = log.snapshot();
+        assert_eq!(seen.len(), 2);
+        assert_eq!((seen[0].seq, seen[0].at, seen[0].lost), (1, 100, true));
+        assert_eq!((seen[1].seq, seen[1].at, seen[1].lost), (2, 160, false));
+        assert_eq!(seen[1].text, "audio is back on Speakers");
+
+        // A headset flapping all evening: the list stays short, keeps the
+        // newest, and the numbering never restarts — a poller that last saw
+        // seq 2 can still tell everything after it is new.
+        for i in 0..100 {
+            log.push(news(&format!("audio moved to device {i}"), false), 200 + i);
+        }
+        let seen = log.snapshot();
+        assert_eq!(seen.len(), NOTICE_LOG_CAP);
+        assert_eq!(seen.last().unwrap().seq, 102);
+        assert_eq!(seen.first().unwrap().seq, 102 - NOTICE_LOG_CAP as u64 + 1);
+        assert!(seen.windows(2).all(|w| w[0].seq + 1 == w[1].seq), "oldest first, no gaps");
+    }
+
+    #[test]
+    fn device_news_goes_over_the_wire_in_the_documented_shape() {
+        let mut log = NoticeLog::default();
+        log.push(news("audio moved to Headphones", false), 1_790_000_000);
+        assert_eq!(
+            serde_json::to_value(log.snapshot()).unwrap(),
+            serde_json::json!([{
+                "seq": 1,
+                "at": 1_790_000_000u64,
+                "text": "audio moved to Headphones",
+                "lost": false,
+            }])
+        );
+    }
+
+    #[test]
+    fn version_keeps_its_v1_keys_and_says_what_else_is_here() {
+        let v = version_payload();
+        // The three keys mStream and every pinned client already read.
+        assert_eq!(v["name"], "mstream-player");
+        assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(v["apiVersion"], 1);
+        // What arrived since: a client checks here before it calls.
+        let names = |list: &serde_json::Value| -> Vec<String> {
+            list.as_array().unwrap().iter().map(|n| n.as_str().unwrap().to_string()).collect()
+        };
+        assert_eq!(names(&v["capabilities"]), ["settings", "output"]);
+        // And what this build decodes — the question mStream's web remote
+        // has been answering with a hard-coded guess.
+        let codecs = names(&v["formats"]["codecs"]);
+        let has = |codec: &str| codecs.iter().any(|c| c == codec);
+        assert!(has("mp3") && has("flac"), "{codecs:?}");
+        assert!(!has("opus"), "{codecs:?}");
+        assert!(names(&v["formats"]["containers"]).iter().any(|c| c == "isomp4"));
+    }
+
+    #[test]
+    fn settings_go_over_the_wire_under_the_names_the_patch_reads() {
+        // GET /settings and POST /settings must speak the same four keys:
+        // what a client reads, it can send straight back.
+        let set = PlaybackSettings { crossfade: 4.5, gapless: true, pause_fade: true, ..AS_BOOTED };
+        let wire = serde_json::to_value(set).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "crossfade": 4.5,
+                "gapless": true,
+                "blend_skips": false,
+                "pause_fade": true,
+            })
+        );
+        let round_trip: SettingsPatch = serde_json::from_value(wire).unwrap();
+        assert_eq!(patched(AS_BOOTED, round_trip).unwrap(), set);
     }
 }
