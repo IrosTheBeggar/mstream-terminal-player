@@ -442,6 +442,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         }
         Act::PlRow(index) => {
             gui.app.tab = crate::tui::app::Tab::Library;
+            gui.app.focus = crate::tui::app::Focus::Browser;
             gui.app.library.state.select(Some(index));
             gui.playlists.lreveal = true;
             gui.forward(Action::Activate);
@@ -449,22 +450,26 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         }
         Act::PlTrackRow(index) => {
             gui.app.tab = crate::tui::app::Tab::Library;
+            gui.app.focus = crate::tui::app::Focus::Browser;
             gui.app.library.state.select(Some(index));
             gui.playlists.treveal = true;
             gui.forward_capturing(Action::Activate);
         }
         Act::PlTrackQueue(index) => {
             gui.app.tab = crate::tui::app::Tab::Library;
+            gui.app.focus = crate::tui::app::Focus::Browser;
             gui.app.library.state.select(Some(index));
             gui.forward(Action::AddToQueue);
         }
         Act::PlTrackNext(index) => {
             gui.app.tab = crate::tui::app::Tab::Library;
+            gui.app.focus = crate::tui::app::Focus::Browser;
             gui.app.library.state.select(Some(index));
             gui.forward(Action::AddNext);
         }
         Act::PlTrackNow(index) => {
             gui.app.tab = crate::tui::app::Tab::Library;
+            gui.app.focus = crate::tui::app::Focus::Browser;
             gui.app.library.state.select(Some(index));
             gui.forward(Action::PlayNow);
         }

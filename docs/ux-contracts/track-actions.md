@@ -6,7 +6,7 @@
 | **Server API** | `POST /api/v1/db/rate-song {filepath, rating}` — `rating` 0–10 or `null` to clear; 404 for a path the library does not hold · `POST /api/v1/playlist/add-song {playlist, song}` — appends the vpath-relative path, **creating the playlist when it does not exist** · `GET /api/v1/playlist/getall` → `[{name}]` sorted, case-insensitive · `POST /api/v1/db/metadata {filepath}` → the full block for one track · `GET /api/v1/db/rated` → the user's rated tracks (a browse list, not ported here) · `GET /api/v1/lyrics?path=` (not ported here). **Off the federation allowlist**: rate-song, every playlist route, lyrics — a peer's track has no rating, no playlist and no words to open. |
 | **Already in this repo** | The queue's verbs and their meanings are the multi-server contract's clauses 30–34 (Play now, Add next, Add to end, Play from here, Add all, Remove, Reorder, Clear, shuffle and repeat, what starts an empty queue, the panel's head); `Queue::{insert_next, move_row, remove, clear, replace}` and the App's `queue_selected_next`, `remove_queue_row`, `move_queue_row`, `jump_to_playing`, `play_index`; the TUI's keys `N` `P` `d` `C` `<` `>` `i`; the GUI's hover verbs `[▸] [»] [+]` on every track row (`draw_pane_rows`) and the queue panel (`src/gui/queue.rs`: rows three tall with covers, a click plays, a hover `[x]` removes, the DJ badge, the count with the total length); `TrackMetadata` carrying `rating`, `bpm`, `musical_key`, `has_lyrics`, `format`, `bitrate`, `sample_rate`, `bit_depth`, `channels`, `file_size`, `genres`, `track_total`, `disc_total`; the client's `metadata`, `playlists`, `playlist_new`; the playlists room's name dialog. **Missing**: any per-track sheet, a `rate-song` and an `add-song` client call, reorder in the GUI (a grip, or keys), a Clear verb in the panel, keyboard reach into the panel, Song info, a way to open the sheet from the playing track. |
 | **Target surface** | the GUI player — every track row (Files, the albums' tracks, the library rooms, Search, Playlists), the queue panel's rows, and the bar's playing card; the App gains the rating and add-to-playlist plumbing the TUI shares |
-| **Status** | contract extracted 2026-09-21; implementation next (PLAN.md, Phase 10) |
+| **Status** | contract extracted 2026-09-21 and **implemented the same day** — the shared half in `src/tui/app/track.rs` (rating, add to playlist, the block, playlist names), the GUI's in `src/gui/actions.rs` (the sheet, the picker, Song Info, the queue's grip, clear and keys); **checked on the rig the same day** (`smoke/gui/scenario_actions.py`: the sheet from a row's verb, a four-star rating the server kept, Song Info, a playlist created by the add and listed in its room, the header's clear) |
 
 ## Intent
 
@@ -216,6 +216,14 @@ while the queue has focus and stop when a browse click takes it back;
 
 ## Deviations log
 
+- **2026-09-21 — Implemented**, with these differences from the wording
+  above: the notes name the song — "queued {title}" and "{title} — next",
+  the App's standing words — rather than counting ("1 song added to
+  queue"), because a note that says which song did what is worth more
+  than one that counts to one; the record's "Song Info" keeps its
+  capital; a queue row's grip and `[⋯]` share the row's first line and
+  the `[x]` keeps the last; a pane row's own verbs and a click in a browse
+  room both hand the keys back from the queue.
 - **2026-09-21 — Extracted.** Add to end is the row's `[+]` (an empty
   idle queue starts on it; the record's Add to end never starts and is
   hidden under two of its three tap behaviours). Whole stars only. Right

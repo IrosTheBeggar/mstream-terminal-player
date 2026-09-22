@@ -1911,12 +1911,23 @@ a LATER secondary screen (party view), Columns retired.
   A–Z, 25 rows, snapping, following the filter) on Artists, Genres and the
   Albums wall; a wall's card opens through the pane's own row so Back
   restores from the trail. Five GUI tests.
+- **Track actions & the queue ✅ 2026-09-21** (docs/ux-contracts/
+  track-actions.md, extracted from the mobile sheet, its queue and its
+  rating, then built in two commits): the shared App gained rate-song and
+  add-song with a latest-wins revert, the full block and playlist names
+  through the track's own reach (`src/tui/app/track.rs`); the GUI gained
+  the one sheet for a song wherever it is met — a row's `[⋯]`, a right
+  click (the kit's context registry), `m`, the playing card — with its
+  badge row (stars, key, tempo, lyrics), the picker with New playlist,
+  Song Info, and the queue panel's grip drag, `clear` and keyboard reach
+  through the App's focus (`src/gui/actions.rs`). Twelve tests across the
+  App and the GUI.
 - Next slices, in rough order: the Now Playing screen (big art; the
-  per-slot fork pattern from the wall applies), queue clicks and the
-  track-actions contract (rating and add-to-playlist need `rate-song` in
-  the client and `playlist/add-song` on the server), Discover's "Play a
-  path to…" entry (revisits the sonic contract's §5 search-skip), then
-  e2e legs (fake server needs player endpoints).
+  per-slot fork pattern from the wall applies; lyrics and the visualizer
+  tabs), Discover's room and its "Play a path to…" entry (revisits the
+  sonic contract's §5 search-skip; Find similar re-enters the sheet with
+  it), the Rated list (ratings exist now), then e2e legs (fake server
+  needs player endpoints).
 
 #### Per-server tunnels and guest tickets — the plan (2026-09-18)
 

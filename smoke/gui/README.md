@@ -75,6 +75,12 @@ url = "http://127.0.0.1:3041"
   bucket, a card into its tracks with the artist as the way back, Esc up
   twice, Genres with their counts into a genre's tracks under the bar's
   verbs, Recent as a hundred track rows without a strip.
+- `actions` — track actions on B (track-actions contract): a hovered Files
+  row's `[⋯]` opens the sheet naming the track, a star rates it and the
+  server keeps it (Song Info shows the rating back), Song Info lists the
+  facts, Add to playlist through New playlist says "Added to Rig mix" and
+  the Playlists room lists it, and the queue header's `clear` empties a
+  queued folder.
 - `dj` — Auto DJ on the rig (auto-dj contract, slice A5): one row queued
   with `a`, Settings › `Auto DJ ▸`, the room off with the probe's sonic
   reason (the rig has no discovery data), Start — the note names the server,
@@ -91,6 +97,7 @@ MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py direct
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py mixed
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py dj
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py library
+MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py actions
 ```
 
 The worker-level leg of the same rig is the ignored test in `src/tui/worker.rs`:

@@ -2541,8 +2541,10 @@ impl App {
                 self.stall = None;
                 self.tunnel_wait = None;
                 // A cleared queue is somewhere new: the DJ's lane starts over
-                // (auto-dj contract, the flows), the DJ staying armed.
+                // (auto-dj contract, the flows), the DJ staying armed. The
+                // last note was about rows that are gone.
                 self.lane.reset();
+                self.message = None;
                 vec![Effect::Audio(AudioCmd::Stop)]
             }
             Action::ToggleRepeat => {
