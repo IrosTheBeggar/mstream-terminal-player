@@ -22,6 +22,7 @@ mod albums;
 mod bar;
 mod cover;
 mod dj;
+mod library;
 mod playlists;
 mod queue;
 mod servers;
@@ -116,6 +117,8 @@ pub(crate) enum Act {
     // ── Albums (see gui::albums) ────────────────────────────────────────
     /// Turn the album wall a page: -1 back, +1 forward.
     AlbPage(i32),
+    /// The wall's letter strip: the visible album to bring the page to.
+    AlbJump(usize),
     /// A cell on the current page, clicked: open that album.
     AlbCell(usize),
     /// The album track list: select + Activate (row 0 is the Parent row,
@@ -168,6 +171,16 @@ pub(crate) enum Act {
     DjCancel,
     DjSurprise,
     DjPick,
+    /// The Library rooms (library-rooms contract): the pane's rows and
+    /// their verbs, the list's scrollbar, the strip's jump, the way back.
+    LibRow(usize),
+    LibQueue(usize),
+    LibNext(usize),
+    LibNow(usize),
+    LibScrollBy(i32),
+    LibScrollTo(usize),
+    LibJump(usize),
+    LibBack,
     /// The Auto DJ room (auto-dj contract, clauses 40–53): its rows, bars,
     /// radios, chips, the keyword field, the genre and server pickers.
     DjBack,
@@ -349,6 +362,9 @@ impl NavId {
 
 const FILES_NAV: usize = 0;
 const ALBUMS_NAV: usize = 1;
+const ARTISTS_NAV: usize = 2;
+const GENRES_NAV: usize = 3;
+const RECENT_NAV: usize = 4;
 const SEARCH_NAV: usize = 6;
 const PLAYLISTS_NAV: usize = 5;
 const SETTINGS_NAV: usize = 7;
@@ -465,6 +481,8 @@ pub(crate) struct Gui {
     torrent: torrent::TorrentUi,
     /// The Auto DJ room: its cursor, scroll, inputs and pickers.
     dj: dj::DjUi,
+    /// The Library rooms: the list's scroll and the artist wall's state.
+    library: library::LibraryUi,
     /// The last frame left paced work unfinished (covers still waiting to
     /// upgrade to pixels): the event loop shortens its idle wait so the
     /// next frame comes promptly instead of a poll tick later.
@@ -506,6 +524,7 @@ impl Gui {
             playlists: playlists::PlaylistsUi::new(),
             torrent: torrent::TorrentUi::new(),
             dj: dj::DjUi::new(),
+            library: library::LibraryUi::new(),
             hot: false,
         }
     }
@@ -627,6 +646,9 @@ impl Gui {
         if albums::act(self, &act) {
             return false;
         }
+        if library::act(self, &act) {
+            return false;
+        }
         if sonic::act(self, &act) {
             return false;
         }
@@ -665,10 +687,17 @@ impl Gui {
                 self.dj.room = false;
                 self.note = (!matches!(
                     i,
-                    FILES_NAV | ALBUMS_NAV | SEARCH_NAV | SETTINGS_NAV | SONIC_NAV
-                        | PLAYLISTS_NAV
+                    FILES_NAV | ALBUMS_NAV | ARTISTS_NAV | GENRES_NAV | RECENT_NAV | SEARCH_NAV
+                        | SETTINGS_NAV | SONIC_NAV | PLAYLISTS_NAV
                 ))
                 .then(|| (t!("gui.coming", name = NAV[i].label()).to_string(), false));
+                // The Library rooms open their root list fresh on every
+                // visit (library-rooms contract, entry point 1).
+                if let Some(root) = library::root_of(i)
+                    && self.app.connected
+                {
+                    library::open(self, root);
+                }
                 if i != SETTINGS_NAV {
                     self.cursor = None;
                 }
@@ -982,6 +1011,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     match gui.active {
         FILES_NAV => draw_files(frame, gui, content),
         ALBUMS_NAV => albums::draw(frame, gui, content),
+        ARTISTS_NAV | GENRES_NAV | RECENT_NAV => library::draw(frame, gui, content),
         SEARCH_NAV => draw_search(frame, gui, content),
         SETTINGS_NAV => draw_settings(frame, gui, content),
         SONIC_NAV => sonic::draw(frame, gui, content),
@@ -1498,7 +1528,19 @@ fn draw_pane_rows(
                     (false, false) if matches!(other, Entry::Parent) => dim(),
                     (false, false) => Style::default(),
                 };
-                put(frame, list.x + 2, y, &bar::clip(other.label(), name_width), style);
+                // A drill row's trailing count or year — "Ambient (12)",
+                // "Dummy (1994)" — reads dim (library-rooms contract, clause 2).
+                let label = other.label();
+                let (main, suffix) = match (matches!(other, Entry::Node { .. }), label.rfind(" (")) {
+                    (true, Some(at)) if label.ends_with(')') => (&label[..at], &label[at..]),
+                    _ => (label, ""),
+                };
+                let shown = bar::clip(main, name_width.saturating_sub(suffix.chars().count()));
+                put(frame, list.x + 2, y, &shown, style);
+                if !suffix.is_empty() {
+                    let sstyle = if is_sel { sel() } else { dim() };
+                    put(frame, list.x + 2 + shown.chars().count() as u16, y, suffix, sstyle);
+                }
                 // Drill rows carry a dim right-hand column — a hit count,
                 // a closeness — the kit table's detail spot.
                 let detail = match other {
@@ -1843,6 +1885,9 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     {
         return quit;
     }
+    if let Some(quit) = library::handle_key(gui, key) {
+        return quit;
+    }
     if let Some(quit) = sonic::handle_key(gui, key) {
         return quit;
     }
@@ -2119,7 +2164,7 @@ impl Gui {
 
     /// Whether the active room wears the browse bar at all.
     fn browse_room(&self) -> bool {
-        matches!(self.active, FILES_NAV | ALBUMS_NAV | PLAYLISTS_NAV)
+        matches!(self.active, FILES_NAV | ALBUMS_NAV | ARTISTS_NAV | GENRES_NAV | RECENT_NAV | PLAYLISTS_NAV)
     }
 
     /// The wheel scrolls the view under the pointer, never the selection
@@ -2155,9 +2200,7 @@ impl Gui {
                     torrent::wheel(self, delta);
                 }
             }
-            // Nothing scrollable in these rooms — said here, on the
-            // record, rather than by falling through a router.
-            NavId::Artists | NavId::Genres | NavId::Recent => {}
+            NavId::Artists | NavId::Genres | NavId::Recent => library::wheel(self, delta),
         }
     }
 }

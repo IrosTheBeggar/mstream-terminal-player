@@ -6,7 +6,7 @@
 | **Server API** | `GET/POST /api/v1/db/artists` → `{artists: [name…]}`, the server's order (A–Z, case-insensitive) · `POST /api/v1/db/artists-albums {artist}` → `{albums: [{name, artist, year, album_art_file}]}` in the server's order — every album the artist is on, compilations and features included (V17), plus one **name-less bucket** for the artist's loose tracks · `GET/POST /api/v1/db/genres` → `{genres: [{name, track_count}]}` · `POST /api/v1/db/genre-songs {genre, limit?, offset?}` → tracks (everything when unpaged) · `POST /api/v1/db/recent/added {limit}` (required) → tracks newest first (`created_at DESC`), each carrying `created-at` · `POST /api/v1/db/album-songs {album, artist}` — `album: null` is the singles bucket (the webapp sends `album: null, artist: null`). All take `ignoreVPaths`; all answer through a federated peer's parent (the webapp's `peerReq` variants). |
 | **Already in this repo** | `LibraryNode::{Artists, Artist, Genres, Genre, Recent}` and `load_library` (`src/tui/worker.rs`, `RECENT_LIMIT = 100`); `entries_from_library` (`src/tui/app/entries.rs`: an artist row is its name, an album row `album_label` "Artist — Name (year)", a genre row `genre_label` "Name (count)", a track row `display_name`); the Library pane (`App.library`) with its `Drill` stack and the pane's **trail** — Back restores the parent listing and its cursor from the trail without asking again; `open_library_node`; the TUI's Library tab, which walks all five nodes today; the GUI's album wall (`src/gui/albums.rs`: cells, pages, per-slot covers, the drilled album's track list through `draw_pane_rows`) with `App.albums` as its cache; the browse top bar (docs/ux-contracts/browser-top-bar.md); the GUI nav rows Artists · Genres · Recent, placeholders that say the browse slice is coming. |
 | **Target surface** | the GUI player — three left-nav rooms (digits 3, 4, 5) over the shared App's Library pane; the artist's albums as the wall; the TUI changes nothing |
-| **Status** | contract extracted 2026-09-21; implementation next (PLAN.md, Phase 10) |
+| **Status** | contract extracted 2026-09-21 and **implemented the same day** in the GUI (`src/gui/library.rs`, the wall generalized in `src/gui/albums.rs`, the kit's `letter_strip`); rig check pending |
 
 ## Intent
 
@@ -169,6 +169,11 @@ tracks.
 
 ## Deviations log
 
+- **2026-09-21 — Implemented**: a wall's card opens through the pane's own
+  row (an Activate) rather than the wall's direct door, so the Albums
+  room's drill also keeps its trail now and Back restores its list without
+  a request — the drilled album no longer re-asks for the wall. The Albums
+  wall gained the strip with it (clause 10 names it).
 - **2026-09-21 — Extracted.** Genres take the webapp as their record (the
   mobile app has no genres browse). The strip is horizontal here. The
   three rooms share one pane, so a room restarts at its root when

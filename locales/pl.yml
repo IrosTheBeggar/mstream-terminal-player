@@ -1207,6 +1207,10 @@ gui:
     loading: "wczytywanie albumów…"
     empty: "(brak albumów w bibliotece)"
     count: "%{count} albumów"
+  lib:
+    empty: "Jeszcze nic tu nie ma"
+    singles: "Single"
+    jump_tip: "Skocz do %{letter}"
   srv:
     add: "Dodaj serwer"
     title: "SERWERY"

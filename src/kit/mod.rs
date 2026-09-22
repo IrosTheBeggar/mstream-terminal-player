@@ -612,6 +612,78 @@ pub fn scroll_list<A: Clone>(
     s.register_bar(bar, max_scroll, step_back, step_fwd, Box::new(jump));
 }
 
+// ── Letter strip ─────────────────────────────────────────────────────────────
+
+/// The strip's buckets: `#` then A–Z (library-rooms contract, clause 10).
+pub const STRIP_BUCKETS: usize = 27;
+/// Rows an alphabetical list needs before the strip shows — the record's
+/// default threshold.
+pub const STRIP_MIN_ROWS: usize = 25;
+
+/// Which bucket a label files under: its first character uppercased when
+/// that is A–Z, else `#` — digits, punctuation and any non-Latin initial,
+/// the record's rule.
+pub fn letter_bucket(label: &str) -> usize {
+    match label.trim_start().chars().next().map(|c| c.to_ascii_uppercase()) {
+        Some(c @ 'A'..='Z') => (c as u8 - b'A') as usize + 1,
+        _ => 0,
+    }
+}
+
+pub fn bucket_glyph(bucket: usize) -> char {
+    if bucket == 0 { '#' } else { (b'A' + (bucket - 1) as u8) as char }
+}
+
+/// The nearest present bucket to `wanted` — itself when present — so a
+/// click on a dim letter still lands somewhere; `None` when nothing is.
+pub fn snap_bucket(present: &[bool; STRIP_BUCKETS], wanted: usize) -> Option<usize> {
+    if present.get(wanted).copied().unwrap_or(false) {
+        return Some(wanted);
+    }
+    (1..STRIP_BUCKETS as i32).find_map(|d| {
+        let below = wanted as i32 - d;
+        let above = wanted as i32 + d;
+        if below >= 0 && present[below as usize] {
+            Some(below as usize)
+        } else if (above as usize) < STRIP_BUCKETS && present[above as usize] {
+            Some(above as usize)
+        } else {
+            None
+        }
+    })
+}
+
+/// A row of `# A B … Z`: present letters live, absent ones dim, each a click
+/// target whose jump snaps to the nearest present letter. Spaced when the
+/// row has the width, packed otherwise.
+pub fn letter_strip<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    at: Rect,
+    present: &[bool; STRIP_BUCKETS],
+    jump: impl Fn(usize) -> A,
+) {
+    let step: u16 = if at.width >= (STRIP_BUCKETS * 2 - 1) as u16 { 2 } else { 1 };
+    for bucket in 0..STRIP_BUCKETS {
+        let x = at.x + bucket as u16 * step;
+        if x >= at.right() {
+            break;
+        }
+        let cell = Rect { x, y: at.y, width: 1, height: 1 };
+        let hover = s.pointer.is_some_and(|p| cell.contains(p));
+        let style = match (present[bucket], hover) {
+            (_, true) => Style::default().fg(th().bright).add_modifier(Modifier::BOLD),
+            (true, false) => Style::default().fg(th().text),
+            (false, false) => dim(),
+        };
+        frame.render_widget(Paragraph::new(Span::styled(bucket_glyph(bucket).to_string(), style)), cell);
+        if let Some(target) = snap_bucket(present, bucket) {
+            s.click(cell, jump(target));
+            s.tip(cell, rust_i18n::t!("gui.lib.jump_tip", letter = bucket_glyph(target)).to_string());
+        }
+    }
+}
+
 // ── Tooltips ─────────────────────────────────────────────────────────────────
 
 /// Greedy word wrap for tooltip copy, at [`TIP_WRAP`] cells.

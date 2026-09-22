@@ -1901,13 +1901,22 @@ a LATER secondary screen (party view), Columns retired.
     lane and the `discovery is disabled` degrade — the rig has no
     discovery data at all, so sonic is never asked; both remain a manual
     check against a server with discovery on.
+- **The Library rooms ✅ 2026-09-21** (docs/ux-contracts/library-rooms.md,
+  extracted from the mobile browser and the webapp's genres, then built):
+  Artists · Genres · Recent as rooms over the shared App's Library pane
+  under the browse bar (`src/gui/library.rs`); an artist opens as the
+  wall — `albums.rs` generalized over a `WallState` per room and the App's
+  `artist_albums` beside `albums` — with the singles bucket as a card; the
+  drilled album's Back names the artist; the kit's `letter_strip` (`#`
+  A–Z, 25 rows, snapping, following the filter) on Artists, Genres and the
+  Albums wall; a wall's card opens through the pane's own row so Back
+  restores from the trail. Five GUI tests.
 - Next slices, in rough order: the Now Playing screen (big art; the
-  per-slot fork pattern from the wall applies), queue clicks + the rest
-  of the Library tab views (Artists/Genres/Recent — the wall's drill
-  door generalizes), Discover's "Play a path to…" entry (revisits the
-  sonic contract's §5 search-skip), track-level add-to-playlist (its
-  own contract; `playlist/add-song` awaits), then e2e legs (fake server
-  needs player endpoints).
+  per-slot fork pattern from the wall applies), queue clicks and the
+  track-actions contract (rating and add-to-playlist need `rate-song` in
+  the client and `playlist/add-song` on the server), Discover's "Play a
+  path to…" entry (revisits the sonic contract's §5 search-skip), then
+  e2e legs (fake server needs player endpoints).
 
 #### Per-server tunnels and guest tickets — the plan (2026-09-18)
 

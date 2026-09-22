@@ -1207,6 +1207,10 @@ gui:
     loading: "正在加载专辑…"
     empty: "（曲库中没有专辑）"
     count: "%{count} 张专辑"
+  lib:
+    empty: "这里还没有内容"
+    singles: "单曲"
+    jump_tip: "跳到 %{letter}"
   srv:
     add: "添加服务器"
     title: "服务器"

@@ -1207,6 +1207,10 @@ gui:
     loading: "アルバムを読み込み中…"
     empty: "（ライブラリにアルバムがありません）"
     count: "%{count} 枚のアルバム"
+  lib:
+    empty: "まだ何もありません"
+    singles: "シングル"
+    jump_tip: "%{letter} へ移動"
   srv:
     add: "サーバーを追加"
     title: "サーバー"

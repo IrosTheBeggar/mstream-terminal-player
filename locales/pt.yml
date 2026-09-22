@@ -1207,6 +1207,10 @@ gui:
     loading: "carregando álbuns…"
     empty: "(nenhum álbum na biblioteca)"
     count: "%{count} álbuns"
+  lib:
+    empty: "Nada aqui ainda"
+    singles: "Singles"
+    jump_tip: "Ir para %{letter}"
   srv:
     add: "Adicionar um servidor"
     title: "SERVIDORES"

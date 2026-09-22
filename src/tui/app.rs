@@ -1559,6 +1559,11 @@ pub struct App {
     /// away. Same bargain as `search_hits`. Cleared with the session — the
     /// list belongs to one server.
     pub albums: Option<Vec<crate::api::types::Album>>,
+    /// The drilled artist's albums, kept whole for the GUI's artist wall the
+    /// way `albums` is kept for the root wall (library-rooms contract,
+    /// clause 7): the pane holds them as text rows, the wall wants the
+    /// covers and years.
+    pub artist_albums: Option<(String, Vec<crate::api::types::Album>)>,
     /// The whole search reply, kept rather than flattened. Every class comes
     /// back in one response, so moving between them costs nothing.
     pub search_hits: Option<Box<crate::api::types::SearchResults>>,
@@ -1821,6 +1826,7 @@ impl App {
             library: Pane::default(),
             library_stack: Drill::new(LibraryNode::Root),
             albums: None,
+            artist_albums: None,
             search_hits: None,
             search_stack: Drill::new(SearchNode::Root),
             queue_column: false,
@@ -5114,6 +5120,11 @@ impl App {
                     (&node, dest, &data)
                 {
                     self.albums = Some(albums.clone());
+                }
+                if let (LibraryNode::Artist(artist), Tab::Library, LibraryData::Albums(albums)) =
+                    (&node, dest, &data)
+                {
+                    self.artist_albums = Some((artist.clone(), albums.clone()));
                 }
                 self.pane_for_mut(dest).set(entries_from_library(data));
                 self.message = None;

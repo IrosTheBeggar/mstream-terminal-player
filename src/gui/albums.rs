@@ -14,7 +14,8 @@ use rust_i18n::t;
 
 use crate::kit::{dim, scroll_list, table_view};
 use crate::kit::theme::{legacy_conhost, th};
-use crate::tui::app::{Action, Tab};
+use crate::tui::app::{Action, Entry, Tab};
+use crate::api::types::Album;
 use crate::tui::worker::LibraryNode;
 
 use super::cover::{Pace, Slot};
@@ -31,20 +32,28 @@ const STRIDE_Y: u16 = CELL_H + 1;
 
 // ── State ───────────────────────────────────────────────────────────────────
 
-pub(crate) struct AlbumsUi {
-    slots: Vec<Slot>,
+/// A wall's own state. The Albums room keeps one and the library room
+/// keeps another for its artist wall (library-rooms contract, clause 7), so
+/// leaving one for the other finds each standing where it was.
+#[derive(Debug, Default)]
+pub(crate) struct WallState {
     pub page: usize,
     /// The cell cursor within the page — the keyboard's hand on the grid.
     pub cursor: usize,
     /// The track view's wheel offset and reveal flag (the kit's table
     /// contract, same as Files).
-    tscroll: usize,
-    treveal: bool,
+    pub tscroll: usize,
+    pub treveal: bool,
+}
+
+pub(crate) struct AlbumsUi {
+    slots: Vec<Slot>,
+    pub wall: WallState,
 }
 
 impl AlbumsUi {
     pub(crate) fn new() -> AlbumsUi {
-        AlbumsUi { slots: Vec::new(), page: 0, cursor: 0, tscroll: 0, treveal: false }
+        AlbumsUi { slots: Vec::new(), wall: WallState::default() }
     }
 
     /// A resize changes the cell-to-pixel mapping every slot encoded
@@ -91,6 +100,34 @@ impl GridShape {
 
 // ── Acting ──────────────────────────────────────────────────────────────────
 
+/// Whether the wall on screen is the Albums room's own (the library room's
+/// artist wall otherwise).
+fn on_root_wall(gui: &Gui) -> bool {
+    gui.active == super::ALBUMS_NAV
+}
+
+fn wall(gui: &mut Gui) -> &mut WallState {
+    if gui.active == super::ALBUMS_NAV { &mut gui.albums.wall } else { &mut gui.library.wall }
+}
+
+fn wall_ref(gui: &Gui) -> &WallState {
+    if gui.active == super::ALBUMS_NAV { &gui.albums.wall } else { &gui.library.wall }
+}
+
+/// The albums the wall on screen shows: the Albums room's list, or the
+/// drilled artist's, which the App keeps beside it.
+pub(crate) fn wall_albums(gui: &Gui) -> Option<&Vec<Album>> {
+    if on_root_wall(gui) {
+        return gui.app.albums.as_ref();
+    }
+    match gui.app.library_stack.here() {
+        LibraryNode::Artist(artist) => {
+            gui.app.artist_albums.as_ref().filter(|(name, _)| name == artist).map(|(_, albums)| albums)
+        }
+        _ => None,
+    }
+}
+
 /// Whether the Library drill is standing inside one album — the track
 /// view. Anything else shows the wall.
 fn drilled_album(gui: &Gui) -> Option<(String, Option<String>)> {
@@ -109,7 +146,7 @@ fn page_count(albums: usize, capacity: usize) -> usize {
 /// pane's own rows use (the bar contract's clause 13: what you see is
 /// what the wall shows).
 fn visible_albums(gui: &Gui) -> Option<Vec<usize>> {
-    let albums = gui.app.albums.as_ref()?;
+    let albums = wall_albums(gui)?;
     let needle = gui.app.library.filter.trim().to_lowercase();
     Some(if needle.is_empty() {
         (0..albums.len()).collect()
@@ -136,31 +173,69 @@ fn shape(gui: &Gui) -> GridShape {
 fn turn_page(gui: &mut Gui, delta: i32) {
     let Some(visible) = visible_albums(gui) else { return };
     let pages = page_count(visible.len(), shape(gui).capacity());
-    let page = gui.albums.page as i32 + delta;
-    gui.albums.page = page.clamp(0, pages as i32 - 1) as usize;
-    gui.albums.cursor = 0;
+    let w = wall(gui);
+    let page = w.page as i32 + delta;
+    w.page = page.clamp(0, pages as i32 - 1) as usize;
+    w.cursor = 0;
+}
+
+/// The strip's jump (library-rooms contract, clause 10): the page that
+/// holds the visible album at `at`, with the cursor on it.
+fn jump_wall(gui: &mut Gui, at: usize) {
+    let capacity = shape(gui).capacity().max(1);
+    let total = visible_albums(gui).map_or(0, |v| v.len());
+    if at >= total {
+        return;
+    }
+    let w = wall(gui);
+    w.page = at / capacity;
+    w.cursor = at % capacity;
 }
 
 fn open_album(gui: &mut Gui, index_on_page: usize) {
     let capacity = shape(gui).capacity();
-    let at = gui.albums.page * capacity + index_on_page;
+    let at = wall_ref(gui).page * capacity + index_on_page;
     let Some(album) = visible_albums(gui)
         .as_deref()
         .and_then(|v| v.get(at))
-        .and_then(|&i| gui.app.albums.as_ref().and_then(|a| a.get(i)))
+        .and_then(|&i| wall_albums(gui).and_then(|a| a.get(i)))
         .cloned()
     else {
         return;
     };
-    gui.albums.cursor = index_on_page;
-    gui.albums.tscroll = 0;
-    gui.albums.treveal = false;
+    {
+        let w = wall(gui);
+        w.cursor = index_on_page;
+        w.tscroll = 0;
+        w.treveal = false;
+    }
     let node = LibraryNode::Album {
         name: album.name.clone().unwrap_or_default(),
         artist: album.artist.clone(),
     };
-    let effects = gui.app.open_library_node(node, false);
-    gui.pend(effects);
+    // Through the pane's own row when the pane holds this wall's albums,
+    // so the drill keeps its trail and Back restores the wall's list
+    // without asking again (library-rooms contract, clause 6); the wall's
+    // direct door when the pane holds something else (a return to the
+    // Albums nav after browsing elsewhere).
+    let on_wall = matches!(gui.app.library_stack.here(), LibraryNode::Albums | LibraryNode::Artist(_));
+    let row = gui
+        .app
+        .library
+        .entries
+        .iter()
+        .position(|e| matches!(e, Entry::Node { node: n, .. } if *n == node));
+    match row {
+        Some(row) if on_wall => {
+            gui.app.tab = Tab::Library;
+            gui.app.library.state.select(Some(row));
+            gui.forward(Action::Activate);
+        }
+        _ => {
+            let effects = gui.app.open_library_node(node, false);
+            gui.pend(effects);
+        }
+    }
 }
 
 /// The albums side of [`Gui::act`]. Returns true when the act was ours.
@@ -171,9 +246,10 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::AlbTrackRow(i) => {
             gui.app.tab = Tab::Library;
             gui.app.library.state.select(Some(*i));
-            gui.albums.treveal = true;
+            wall(gui).treveal = true;
             gui.forward_capturing(Action::Activate);
         }
+        Act::AlbJump(at) => jump_wall(gui, *at),
         Act::AlbTrackQueue(i) => {
             gui.app.tab = Tab::Library;
             gui.app.library.state.select(Some(*i));
@@ -190,13 +266,10 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             gui.forward(Action::PlayNow);
         }
         Act::AlbScrollBy(delta) => {
-            gui.albums.tscroll = if *delta < 0 {
-                gui.albums.tscroll.saturating_sub(1)
-            } else {
-                gui.albums.tscroll + 1
-            };
+            let w = wall(gui);
+            w.tscroll = if *delta < 0 { w.tscroll.saturating_sub(1) } else { w.tscroll + 1 };
         }
-        Act::AlbScrollTo(first) => gui.albums.tscroll = *first,
+        Act::AlbScrollTo(first) => wall(gui).tscroll = *first,
         _ => return false,
     }
     true
@@ -211,19 +284,19 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
     if drilled_album(gui).is_some() {
         match key.code {
             KeyCode::Down => {
-                gui.albums.treveal = true;
+                wall(gui).treveal = true;
                 gui.forward(Action::Down);
             }
             KeyCode::Up => {
-                gui.albums.treveal = true;
+                wall(gui).treveal = true;
                 gui.forward(Action::Up);
             }
             KeyCode::PageDown => {
-                gui.albums.treveal = true;
+                wall(gui).treveal = true;
                 gui.forward(Action::PageDown);
             }
             KeyCode::PageUp => {
-                gui.albums.treveal = true;
+                wall(gui).treveal = true;
                 gui.forward(Action::PageUp);
             }
             KeyCode::Enter => gui.forward_capturing(Action::Activate),
@@ -246,13 +319,22 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
         KeyCode::Right | KeyCode::PageDown => turn_page(gui, 1),
         KeyCode::Down => {
             if on_page > 0 {
-                gui.albums.cursor = (gui.albums.cursor + cols).min(on_page - 1);
+                let w = wall(gui);
+                w.cursor = (w.cursor + cols).min(on_page - 1);
             }
         }
-        KeyCode::Up => gui.albums.cursor = gui.albums.cursor.saturating_sub(cols),
+        KeyCode::Up => {
+            let w = wall(gui);
+            w.cursor = w.cursor.saturating_sub(cols);
+        }
         KeyCode::Enter => {
-            let cursor = gui.albums.cursor;
+            let cursor = wall_ref(gui).cursor;
             open_album(gui, cursor);
+        }
+        // The artist wall climbs back to the artists; the root wall has
+        // nowhere to go.
+        KeyCode::Char('h') | KeyCode::Backspace | KeyCode::Esc if !on_root_wall(gui) => {
+            gui.forward(Action::Back);
         }
         _ => return None,
     }
@@ -271,7 +353,7 @@ pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
 /// How many albums the current page actually shows.
 fn page_len(gui: &Gui, capacity: usize) -> usize {
     let total = visible_albums(gui).map_or(0, |v| v.len());
-    total.saturating_sub(gui.albums.page * capacity).min(capacity)
+    total.saturating_sub(wall_ref(gui).page * capacity).min(capacity)
 }
 
 // ── Drawing ─────────────────────────────────────────────────────────────────
@@ -288,15 +370,40 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
 }
 
-fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
-    let heading = t!("gui.nav.albums").to_string();
-    put(frame, content.x, content.y, &heading, Style::default().add_modifier(Modifier::BOLD));
+/// The wall's heading: the room's name on the Albums wall; on an artist's
+/// wall the way back to the artists, then the artist (library-rooms
+/// contract, clause 7). Returns where the count may start.
+fn draw_wall_heading(frame: &mut Frame, gui: &mut Gui, content: Rect) -> u16 {
+    let artist = match gui.app.library_stack.here() {
+        LibraryNode::Artist(artist) if !on_root_wall(gui) => Some(artist.clone()),
+        _ => None,
+    };
+    let Some(artist) = artist else {
+        let heading = t!("gui.nav.albums").to_string();
+        put(frame, content.x, content.y, &heading, Style::default().add_modifier(Modifier::BOLD));
+        return content.x + heading.chars().count() as u16 + 2;
+    };
+    let (back_glyph, forward) = if legacy_conhost() { ("<", ">") } else { ("◂", "▸") };
+    let back_label = format!("{back_glyph} {}", t!("gui.nav.artists"));
+    let back = Rect { x: content.x, y: content.y, width: back_label.chars().count() as u16, height: 1 };
+    let hover = gui.ui.pointer.is_some_and(|p| back.contains(p));
+    put(frame, content.x, content.y, &back_label, if hover { bright_bold() } else { dim() });
+    gui.ui.click(back, Act::LibBack);
+    let title = format!("{forward} {artist}");
+    let x = back.right() + 1;
+    let shown = super::bar::clip(&title, content.width.saturating_sub(back.width + 18) as usize);
+    put(frame, x, content.y, &shown, Style::default().add_modifier(Modifier::BOLD));
+    x + shown.chars().count() as u16 + 2
+}
+
+pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
+    let count_x = draw_wall_heading(frame, gui, content);
 
     let Some(visible) = visible_albums(gui) else {
         put(frame, content.x, content.y + 3, &t!("gui.alb.loading"), accent());
         return;
     };
-    let all = gui.app.albums.as_ref().map_or(0, Vec::len);
+    let all = wall_albums(gui).map_or(0, Vec::len);
     super::draw_bar_controls(frame, gui, content, content.y + 1);
     if all == 0 {
         put(frame, content.x, content.y + 3, &t!("gui.alb.empty"), dim());
@@ -321,19 +428,43 @@ fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let shape = GridShape::for_content(content);
     let capacity = shape.capacity();
     let pages = page_count(total, capacity);
-    gui.albums.page = gui.albums.page.min(pages - 1);
-    let page = gui.albums.page;
+    {
+        let w = wall(gui);
+        w.page = w.page.min(pages - 1);
+    }
+    let page = wall_ref(gui).page;
     let start = page * capacity;
     let shown = page_len(gui, capacity);
-    gui.albums.cursor = gui.albums.cursor.min(shown.saturating_sub(1));
+    {
+        let w = wall(gui);
+        w.cursor = w.cursor.min(shown.saturating_sub(1));
+    }
 
     put(
         frame,
-        content.x + heading.chars().count() as u16 + 2,
+        count_x,
         content.y,
         &super::bar_count(gui, t!("gui.alb.count", count = all).to_string()),
         dim(),
     );
+
+    // The strip (library-rooms contract, clause 10): the root wall is
+    // alphabetical; an artist's albums are in the server's order.
+    if on_root_wall(gui) && total >= crate::kit::STRIP_MIN_ROWS {
+        let mut present = [false; crate::kit::STRIP_BUCKETS];
+        let mut first_of = [0usize; crate::kit::STRIP_BUCKETS];
+        if let Some(albums) = wall_albums(gui) {
+            for (pos, &at) in visible.iter().enumerate() {
+                let bucket = crate::kit::letter_bucket(albums.get(at).and_then(|a| a.name.as_deref()).unwrap_or(""));
+                if !present[bucket] {
+                    present[bucket] = true;
+                    first_of[bucket] = pos;
+                }
+            }
+        }
+        let strip = Rect { x: content.x, y: content.y + 2, width: content.width, height: 1 };
+        crate::kit::letter_strip(frame, &mut gui.ui, strip, &present, move |bucket| Act::AlbJump(first_of[bucket]));
+    }
 
     // The pager: two arrows around "page/pages", each end dim when there
     // is nothing further that way.
@@ -364,7 +495,7 @@ fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     // App's own fetch. Only the missing ones allocate anything — after
     // the first frame of a page this whole scan is hashmap lookups.
     let missing: Vec<String> = {
-        let Some(albums) = gui.app.albums.as_ref() else { return };
+        let Some(albums) = wall_albums(gui) else { return };
         visible
             .iter()
             .skip(start)
@@ -389,6 +520,8 @@ fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         let fork = gui.app.graphics.fork();
         gui.albums.slots.push(Slot::new(fork));
     }
+    // A cover per cell whichever wall is up: the slots are the room's, keyed
+    // by what they last drew.
 
     // Split borrows: the page's rows are READ from the App while each
     // slot's caches are written — disjoint fields of the one Gui. This is
@@ -397,8 +530,21 @@ fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     // ten times a second, for nothing).
     let pace = Pace::frame();
     {
-        let Gui { app, albums: wall, ui, .. } = &mut *gui;
-        let Some(albums) = app.albums.as_ref() else { return };
+        let root = on_root_wall(gui);
+        let Gui { app, albums: albums_ui, library, ui, .. } = &mut *gui;
+        let AlbumsUi { slots, wall: root_wall } = albums_ui;
+        let wall: &WallState = if root { root_wall } else { &library.wall };
+        let albums: Option<&Vec<Album>> = if root {
+            app.albums.as_ref()
+        } else {
+            match app.library_stack.here() {
+                LibraryNode::Artist(artist) => {
+                    app.artist_albums.as_ref().filter(|(name, _)| name == artist).map(|(_, a)| a)
+                }
+                _ => None,
+            }
+        };
+        let Some(albums) = albums else { return };
         for (i, album) in
             visible.iter().skip(start).take(shown).filter_map(|&at| albums.get(at)).enumerate()
         {
@@ -416,9 +562,9 @@ fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 // Text where an overlay stood last frame (the header
                 // dropdown reaches the wall's first row), pixels elsewhere.
                 Some(art) if ui.covered_last_frame(cover) => {
-                    wall.slots[i].draw_mosaic(frame, cover, art)
+                    slots[i].draw_mosaic(frame, cover, art)
                 }
-                Some(art) => wall.slots[i].draw_paced(frame, cover, art, &pace),
+                Some(art) => slots[i].draw_paced(frame, cover, art, &pace),
                 None => {
                     // No cover (yet): the empty slot frame, the card's own
                     // idiom.
@@ -430,7 +576,10 @@ fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 }
             }
 
-            let name = album.name.as_deref().unwrap_or("—");
+            // The server's name-less bucket is the artist's loose tracks
+            // (library-rooms contract, clause 8).
+            let name = album.name.clone().unwrap_or_else(|| t!("gui.lib.singles").to_string());
+            let name = name.as_str();
             let name_y = cell.y + COVER_H;
             let selected = wall.cursor == i;
             let cell_hover = ui.pointer.is_some_and(|p| cell.contains(p));
@@ -471,10 +620,16 @@ fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
 }
 
-fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str, artist: Option<&str>) {
-    // The way back leads the header, then the album's own name.
+pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str, artist: Option<&str>) {
+    // The way back leads the header — named for where it goes: the artist
+    // when the album was reached through one (library-rooms contract,
+    // clause 9), the wall otherwise — then the album's own name.
     let back_glyph = if legacy_conhost() { "<" } else { "◂" };
-    let back_label = format!("{back_glyph} {}", t!("gui.nav.albums"));
+    let back_name = match gui.app.library_stack.parent() {
+        Some(LibraryNode::Artist(artist)) => artist.clone(),
+        _ => t!("gui.nav.albums").to_string(),
+    };
+    let back_label = format!("{back_glyph} {back_name}");
     let back = Rect {
         x: content.x,
         y: content.y,
@@ -486,9 +641,10 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str, arti
     gui.ui.click(back, Act::AlbTrackRow(0)); // row 0 is the Parent row: Back
 
     let title_x = back.right() + 2;
+    let name = if name.is_empty() { t!("gui.lib.singles").to_string() } else { name.to_string() };
     let title = match artist {
         Some(artist) => format!("{name} — {artist}"),
-        None => name.to_string(),
+        None => name,
     };
     let count =
         super::bar_count(gui, t!("gui.files.items", count = gui.app.library.counts().1).to_string());
@@ -503,8 +659,8 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str, arti
     );
     super::draw_bar_controls(frame, gui, content, content.y + 1);
 
-    let entries = &gui.app.library.entries;
-    if entries.len() <= 1 {
+    let len = gui.app.library.entries.len();
+    if len <= 1 {
         put(frame, content.x, content.y + 3, &t!("busy.listing"), accent());
         return;
     }
@@ -516,10 +672,15 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str, arti
         height: content.height - 3,
     };
     let selected = gui.app.library.state.selected();
-    let reveal = gui.albums.treveal.then_some(selected).flatten();
-    gui.albums.treveal = false;
-    let (first, visible) = table_view(entries.len(), reveal, gui.albums.tscroll, list.height as usize);
-    gui.albums.tscroll = first;
+    let reveal = wall_ref(gui).treveal.then_some(selected).flatten();
+    let tscroll = wall_ref(gui).tscroll;
+    let (first, visible) = table_view(len, reveal, tscroll, list.height as usize);
+    {
+        let w = wall(gui);
+        w.treveal = false;
+        w.tscroll = first;
+    }
+    let entries = &gui.app.library.entries;
 
     let rows: Vec<(usize, &crate::tui::app::Entry)> =
         entries.iter().enumerate().skip(first).take(visible).collect();
@@ -547,7 +708,7 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str, arti
         first,
         Act::AlbScrollBy(-1),
         Act::AlbScrollBy(1),
-        |first| Act::AlbScrollTo(first),
+        Act::AlbScrollTo,
     );
 }
 
@@ -674,11 +835,11 @@ mod tests {
 
         turn_page(&mut gui, 1);
         turn_page(&mut gui, 1);
-        assert_eq!(gui.albums.page, 2, "the last page is the floor of forward");
+        assert_eq!(gui.albums.wall.page, 2, "the last page is the floor of forward");
         turn_page(&mut gui, -1);
         turn_page(&mut gui, -1);
         turn_page(&mut gui, -1);
-        assert_eq!(gui.albums.page, 0, "and the first of back");
+        assert_eq!(gui.albums.wall.page, 0, "and the first of back");
     }
 
     #[test]
@@ -701,7 +862,9 @@ mod tests {
         assert!(drilled_album(&gui).is_some(), "the view is the track list now");
 
         // The reply lands: rows on screen, and the Parent row is the way
-        // back — its Activate pops the drill and re-asks for the wall.
+        // back — its Activate pops the drill and the wall's list comes back
+        // from the trail, without a request (library-rooms contract,
+        // clause 6).
         let effects = gui.app.apply_event(Event::Library {
             node: LibraryNode::Album { name: "Album 11".into(), artist: Some("Artist 11".into()) },
             dest: Tab::Library,
@@ -719,14 +882,17 @@ mod tests {
         assert!(all.contains("Album 11 — Artist 11"), "the header names the album");
         assert!(all.contains("Opening Night"), "its tracks are rows");
 
+        gui.pending.clear();
         let _ = act(&mut gui, &Act::AlbTrackRow(0));
         assert!(drilled_album(&gui).is_none(), "the Parent row walks back to the wall");
         assert!(
-            gui.pending
+            !gui.pending
                 .iter()
                 .any(|e| matches!(e, Effect::Api(ApiCmd::Library { node: LibraryNode::Albums, .. }))),
-            "and the wall re-asks for its list"
+            "the wall's list is back from the trail, not re-asked: {:?}",
+            gui.pending
         );
+        assert!(gui.app.library.entries.len() > 1, "the pane holds the album rows again");
     }
 
     #[test]
