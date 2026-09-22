@@ -1861,7 +1861,8 @@ fn draw_quick_connect(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let label = format!("{} — {}", server.name, server.base_url);
         put(frame, rect.x + 1, y, &super::bar::clip(&label, rect.width as usize - 12), style);
         if let Some(version) = &server.version {
-            let shown = super::bar::clip(&format!("v{version}"), 9);
+            let words = format!("v{version}");
+            let shown = super::bar::clip(&words, 9);
             let vstyle = if selected { sel() } else { dim() };
             put(frame, rect.right().saturating_sub(1 + shown.chars().count() as u16), y, &shown, vstyle);
         }

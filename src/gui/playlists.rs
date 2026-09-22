@@ -126,15 +126,16 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 
     // entries[0] is the pane's Parent row — the way back to a Library root
     // this room's nav replaces, so the list starts at 1.
-    let entries = &gui.app.library.entries;
-    let names: Vec<(usize, String)> = entries
+    // The playlist rows by pane index; their labels are read in place when
+    // drawn, so a long list costs nothing per frame beyond its window.
+    let names: Vec<usize> = gui
+        .app
+        .library
+        .entries
         .iter()
         .enumerate()
         .skip(1)
-        .filter_map(|(i, entry)| match entry {
-            Entry::Node { label, .. } => Some((i, label.clone())),
-            _ => None,
-        })
+        .filter_map(|(i, entry)| matches!(entry, Entry::Node { .. }).then_some(i))
         .collect();
 
     let list = Rect {
@@ -164,13 +165,14 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         .lreveal
         .then_some(selected)
         .flatten()
-        .and_then(|sel| names.iter().position(|(i, _)| *i == sel));
+        .and_then(|sel| names.iter().position(|i| *i == sel));
     gui.playlists.lreveal = false;
     let (first, visible) = table_view(names.len(), reveal, gui.playlists.lscroll, list.height as usize);
     gui.playlists.lscroll = first;
 
     let rename_label = t!("gui.pl.rename_verb").to_string();
-    for (row, (index, name)) in names.iter().skip(first).take(visible).enumerate() {
+    for (row, index) in names.iter().skip(first).take(visible).enumerate() {
+        let Entry::Node { label: name, .. } = &gui.app.library.entries[*index] else { continue };
         let y = list.y + row as u16;
         let rect = Rect { x: list.x, y, width: list.width, height: 1 };
         let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));

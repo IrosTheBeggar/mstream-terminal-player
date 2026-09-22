@@ -581,6 +581,12 @@ impl Pane {
         }
         (tracks, offset)
     }
+
+    /// Whether the listing holds a playable row at all — the browse bar's
+    /// gate, asked every frame, so no track is copied to answer it.
+    pub fn has_tracks(&self) -> bool {
+        self.entries.iter().any(|entry| matches!(entry, Entry::Track { .. }))
+    }
 }
 
 /// Where a queued track lives: the saved server's identity — the string the

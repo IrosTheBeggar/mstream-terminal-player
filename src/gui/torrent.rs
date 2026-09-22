@@ -132,7 +132,16 @@ pub(crate) struct Chooser {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PickEntry {
     pub name: String,
+    /// The name lowercased once, for the match the picker runs every frame.
+    lower: String,
     pub dir: bool,
+}
+
+impl PickEntry {
+    fn new(name: String, dir: bool) -> Self {
+        let lower = name.to_lowercase();
+        Self { name, lower, dir }
+    }
 }
 
 /// The typed file picker (clause 2), the wizard's path modal worn for
@@ -161,7 +170,7 @@ impl Picker {
         self.entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.name.to_lowercase().starts_with(&partial))
+            .filter(|(_, e)| e.lower.starts_with(&partial))
             .map(|(i, _)| i)
             .collect()
     }
@@ -414,8 +423,8 @@ fn list_dir(dir: &str) -> Result<Vec<PickEntry>, String> {
     files.sort_by_key(|a| a.to_lowercase());
     Ok(dirs
         .into_iter()
-        .map(|name| PickEntry { name, dir: true })
-        .chain(files.into_iter().map(|name| PickEntry { name, dir: false }))
+        .map(|name| PickEntry::new(name, true))
+        .chain(files.into_iter().map(|name| PickEntry::new(name, false)))
         .collect())
 }
 
@@ -1259,6 +1268,7 @@ fn draw_text_row(
     frame: &mut Frame,
     gui: &mut Gui,
     content: Rect,
+    lw: u16,
     y: u16,
     row: Row,
     label: &str,
@@ -1269,7 +1279,6 @@ fn draw_text_row(
     let focused = gui.torrent.cursor == Some(row);
     let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
     put(frame, content.x, y, label, label_style(focused, hover));
-    let lw = label_width();
     let trailing_w = trailing.as_ref().map_or(0, |(t, _)| t.chars().count() as u16 + 2);
     let vx = content.x + lw;
     let avail = content.width.saturating_sub(lw + trailing_w + 1);
@@ -1387,7 +1396,9 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
                 put(frame, content.x, y, &t!("gui.tor.source"), label_style(focused, hover));
                 gui.ui.click(rect, Act::TorRow(Row::File));
-                match gui.torrent.file.clone() {
+                // The name alone: the loaded file carries the torrent's
+                // bytes, and a clone per frame copied them to draw a chip.
+                match gui.torrent.file.as_ref().map(|f| f.name.clone()) {
                     None => {
                         // The one way in for a file: a text button, the
                         // accent so the empty form has a lead.
@@ -1412,11 +1423,11 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                         let w = text_button(frame, gui, x, y, &typed, false, Act::TorType);
                         gui.ui.tip(Rect { x, y, width: w, height: 1 }, format!("{typed} — t"));
                     }
-                    Some(file) => {
+                    Some(name) => {
                         // The chip (clause 5): the name, its [X], and on
                         // the line beneath the hand-off and auto-detect.
                         let name_w = content.width.saturating_sub(lw + 5) as usize;
-                        let shown = super::bar::clip(&file.name, name_w);
+                        let shown = super::bar::clip(&name, name_w);
                         let nrect = Rect { x: content.x + lw, y, width: shown.chars().count() as u16, height: 1 };
                         let nhover = gui.ui.pointer.is_some_and(|p| nrect.contains(p));
                         put(frame, nrect.x, y, &shown, if nhover { bright_bold() } else { Style::default().add_modifier(Modifier::BOLD) });
@@ -1460,13 +1471,13 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 let value = gui.torrent.magnet.value().trim().to_string();
                 let invalid = !value.is_empty() && !meta::is_valid_magnet(&value);
                 let trailing = invalid.then(|| (t!("gui.tor.magnet_invalid").to_string(), Style::default().fg(th().gold)));
-                draw_text_row(frame, gui, content, y, Row::Magnet, &t!("gui.tor.magnet"), Some("magnet:?xt=urn:btih:…"), trailing);
+                draw_text_row(frame, gui, content, lw, y, Row::Magnet, &t!("gui.tor.magnet"), Some("magnet:?xt=urn:btih:…"), trailing);
             }
-            Row::Artist => draw_text_row(frame, gui, content, y, Row::Artist, &t!("gui.tor.artist"), None, None),
-            Row::Album => draw_text_row(frame, gui, content, y, Row::Album, &t!("gui.tor.album"), None, None),
-            Row::Year => draw_text_row(frame, gui, content, y, Row::Year, &t!("gui.tor.year"), None, None),
+            Row::Artist => draw_text_row(frame, gui, content, lw, y, Row::Artist, &t!("gui.tor.artist"), None, None),
+            Row::Album => draw_text_row(frame, gui, content, lw, y, Row::Album, &t!("gui.tor.album"), None, None),
+            Row::Year => draw_text_row(frame, gui, content, lw, y, Row::Year, &t!("gui.tor.year"), None, None),
             Row::Path => {
-                draw_text_row(frame, gui, content, y, Row::Path, &t!("gui.tor.path"), Some("Artist/Album"), None);
+                draw_text_row(frame, gui, content, lw, y, Row::Path, &t!("gui.tor.path"), Some("Artist/Album"), None);
                 gui.ui.tip(Rect { x: content.x, y, width: lw, height: 1 }, t!("gui.tor.path_tip").to_string());
                 // The preview line (clause 14): the real landing spot.
                 y += 1;
@@ -1610,40 +1621,48 @@ fn modal_row(frame: &mut Frame, gui: &mut Gui, inner: Rect, y: u16, label: &str,
 /// after the base screen so their rects win the pointer; a whole-screen
 /// guard makes the room beneath inert.
 pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    if let Some(chooser) = gui.torrent.chooser.clone() {
+    // Read off the chooser first: what arrived can be a whole .torrent's
+    // bytes, and a clone per frame copied them to draw a name.
+    let chooser = gui.torrent.chooser.as_ref().map(|c| {
+        let what = match &c.incoming {
+            Incoming::File(f) => f.name.clone(),
+            Incoming::Magnet(link) => meta::magnet_display_name(link).unwrap_or_else(|| t!("gui.tor.magnet_link").to_string()),
+        };
+        (what, c.row, c.dont_ask)
+    });
+    if let Some((what, chooser_row, dont_ask)) = chooser {
         gui.ui.click(area, Act::TorChooseClose);
         let inner = modal_frame_on(frame, &mut gui.ui, area, 60, 10, th().accent);
         put(frame, inner.x + 1, inner.y, &t!("gui.tor.received_title"), accent().add_modifier(Modifier::BOLD));
         modal_close(frame, &mut gui.ui, inner, Act::TorChooseClose);
-        let what = match &chooser.incoming {
-            Incoming::File(f) => f.name.clone(),
-            Incoming::Magnet(link) => meta::magnet_display_name(link).unwrap_or_else(|| t!("gui.tor.magnet_link").to_string()),
-        };
         put(frame, inner.x + 1, inner.y + 1, &super::bar::clip(&what, inner.width as usize - 2), dim());
         for (i, line) in wrap(&t!("gui.tor.received_body"), inner.width as usize - 2).into_iter().take(2).enumerate() {
             put(frame, inner.x + 1, inner.y + 2 + i as u16, &line, Style::default());
         }
         let (check_on, check_off) = if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") };
-        let ask = format!("{} {}", if chooser.dont_ask { check_on } else { check_off }, t!("gui.tor.received_dont_ask"));
+        let ask = format!("{} {}", if dont_ask { check_on } else { check_off }, t!("gui.tor.received_dont_ask"));
         let rows: [(String, Act); 3] = [
             (t!("gui.tor.received_add").to_string(), Act::TorChooseAdd),
             (t!("gui.tor.open_with").to_string(), Act::TorChooseHandOff),
             (ask, Act::TorChooseAsk),
         ];
         for (i, (label, act)) in rows.into_iter().enumerate() {
-            modal_row(frame, gui, inner, inner.y + 5 + i as u16, &label, None, chooser.row == i, i == 0, act);
+            modal_row(frame, gui, inner, inner.y + 5 + i as u16, &label, None, chooser_row == i, i == 0, act);
         }
     }
 
-    if let Some(picker) = gui.torrent.picker.clone() {
-        gui.ui.click(area, Act::TorPickerClose);
+    // The picker draws from its listing in place: that is every entry of
+    // the folder, and a clone per frame copied them all to show six.
+    let Gui { torrent, ui, .. } = &mut *gui;
+    if let Some(picker) = torrent.picker.as_mut() {
+        ui.click(area, Act::TorPickerClose);
         let suggestions = picker.suggestions();
         let shown = suggestions.len().min(6) as u16;
         // Anchored as if always full: the title and input hold one spot
         // and the suggestion list grows DOWNWARD beneath them.
-        let inner = modal_frame_anchored_on(frame, &mut gui.ui, area, 66, 7 + shown, 13, th().accent);
+        let inner = modal_frame_anchored_on(frame, ui, area, 66, 7 + shown, 13, th().accent);
         put(frame, inner.x, inner.y, &t!("gui.tor.picker_title"), accent().add_modifier(Modifier::BOLD));
-        modal_close(frame, &mut gui.ui, inner, Act::TorPickerClose);
+        modal_close(frame, ui, inner, Act::TorPickerClose);
         put(
             frame,
             inner.x,
@@ -1654,10 +1673,8 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let sel_moved = picker.sel != picker.sel_anchor;
         let reveal = if sel_moved { picker.sel } else { None };
         let (first, visible) = table_view(suggestions.len(), reveal, picker.scroll, 6);
-        if let Some(p) = gui.torrent.picker.as_mut() {
-            p.scroll = first;
-            p.sel_anchor = p.sel;
-        }
+        picker.scroll = first;
+        picker.sel_anchor = picker.sel;
         let overflow = suggestions.len() > visible;
         let row_width = if overflow { inner.width.saturating_sub(1) } else { inner.width };
         let forward = if legacy_conhost() { ">" } else { "▸" };
@@ -1665,7 +1682,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             let entry = &picker.entries[suggestions[i]];
             let selected = picker.sel == Some(i);
             let rect = Rect { x: inner.x, y: inner.y + 4 + row as u16, width: row_width, height: 1 };
-            let hovered = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+            let hovered = ui.pointer.is_some_and(|p| rect.contains(p));
             let style = match (selected, hovered, entry.dir) {
                 (true, _, _) => sel(),
                 (false, true, _) => Style::default().fg(th().bright),
@@ -1678,11 +1695,11 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 format!("  {}", entry.name)
             };
             put(frame, rect.x, rect.y, &super::bar::clip(&text, row_width as usize), style);
-            gui.ui.click(rect, Act::TorPickerSuggest(i));
+            ui.click(rect, Act::TorPickerSuggest(i));
         }
         scroll_list(
             frame,
-            &mut gui.ui,
+            ui,
             Rect { x: inner.x + inner.width.saturating_sub(1), y: inner.y + 4, width: 1, height: visible as u16 },
             suggestions.len(),
             visible,

@@ -13,8 +13,8 @@ use tui_input::backend::crossterm::EventHandler;
 
 use crate::api::types::Track;
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{dim, input_display, modal_close, modal_frame_on};
-use crate::tui::app::{Action, Entry, Focus, Origin, Tab};
+use crate::kit::{Surface, dim, input_display, modal_close, modal_frame_on};
+use crate::tui::app::{Action, App, Entry, Focus, Origin, Tab};
 
 use super::cover::Slot;
 use super::{Act, Gui, SEARCH_NAV, accent, bright_bold, put, sel};
@@ -163,10 +163,10 @@ fn open_by_key(gui: &mut Gui) {
 
 /// The track the sheet shows: the server's full block once it landed, the
 /// row's own until then.
-fn current_track(gui: &Gui, sheet: &Sheet) -> Track {
-    match &gui.app.track_info {
-        Some(info) if info.filepath == sheet.track.filepath => info.clone(),
-        _ => sheet.track.clone(),
+fn current_track<'a>(app: &'a App, sheet: &'a Sheet) -> &'a Track {
+    match &app.track_info {
+        Some(info) if info.filepath == sheet.track.filepath => info,
+        _ => &sheet.track,
     }
 }
 
@@ -295,32 +295,35 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 }
 
 fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    let Some(sheet) = gui.actions.sheet.clone() else { return };
-    gui.ui.click(area, Act::SheetClose);
-    let track = current_track(gui, &sheet);
-    let own = gui.app.track_is_own(&sheet.origin);
-    let actions = actions_for(&sheet, own);
-    let art = track.metadata.album_art.as_deref().and_then(|file| gui.app.art.get(file)).and_then(|a| a.clone());
+    // Drawn from the sheet in place: the track and its decoded cover are
+    // read each frame, not copied.
+    let Gui { app, actions, ui, .. } = &mut *gui;
+    let Some(sheet) = actions.sheet.as_ref() else { return };
+    ui.click(area, Act::SheetClose);
+    let track = current_track(app, sheet);
+    let own = app.track_is_own(&sheet.origin);
+    let rows = actions_for(sheet, own);
+    let art = track.metadata.album_art.as_deref().and_then(|file| app.art.get(file)).and_then(|a| a.as_ref());
     let width: u16 = 66.min(area.width.saturating_sub(2)).max(44);
-    let height = (3 + 1 + 1 + actions.len() + 1) as u16 + 2;
-    let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
-    modal_close(frame, &mut gui.ui, inner, Act::SheetClose);
+    let height = (3 + 1 + 1 + rows.len() + 1) as u16 + 2;
+    let inner = modal_frame_on(frame, ui, area, width, height, th().accent);
+    modal_close(frame, ui, inner, Act::SheetClose);
 
     // The header (clause 2): the cover when there is one, the words beside.
     let mut tx = inner.x + 1;
     if let Some(art) = art {
         let cover = Rect { x: inner.x + 1, y: inner.y, width: 6, height: 3 };
-        let slot = gui.actions.slot.get_or_insert_with(|| Slot::new(gui.app.graphics.fork()));
-        slot.draw_mosaic(frame, cover, &art);
+        let slot = actions.slot.get_or_insert_with(|| Slot::new(app.graphics.fork()));
+        slot.draw_mosaic(frame, cover, art);
         tx = inner.x + 8;
     }
     let text_w = inner.right().saturating_sub(tx + 4) as usize;
-    put(frame, tx, inner.y, &super::bar::clip(&title_of(&track), text_w), Style::default().add_modifier(Modifier::BOLD));
-    let byline = byline_of(&track);
+    put(frame, tx, inner.y, &super::bar::clip(&title_of(track), text_w), Style::default().add_modifier(Modifier::BOLD));
+    let byline = byline_of(track);
     if !byline.is_empty() {
         put(frame, tx, inner.y + 1, &super::bar::clip(&byline, text_w), dim());
     }
-    let spec = spec_of(&track);
+    let spec = spec_of(track);
     if !spec.is_empty() {
         put(frame, tx, inner.y + 2, &super::bar::clip(&spec, text_w), dim());
     }
@@ -336,7 +339,7 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             let cell = Rect { x: bx + i as u16, y: by, width: 1, height: 1 };
             let full = 2 * (i as u32 + 1);
             let lit = v >= full - 1;
-            let hover = gui.ui.pointer.is_some_and(|p| cell.contains(p));
+            let hover = ui.pointer.is_some_and(|p| cell.contains(p));
             let style = match (hover, lit) {
                 (true, _) => bright_bold(),
                 (false, true) => Style::default().fg(th().gold),
@@ -344,8 +347,8 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             };
             put(frame, cell.x, by, &glyph.to_string(), style);
             // The star that is the rating clears it; any other sets it.
-            gui.ui.click(cell, Act::Rate(if v == full { 0 } else { full }));
-            gui.ui.tip(cell, t!("gui.act.rate").to_string());
+            ui.click(cell, Act::Rate(if v == full { 0 } else { full }));
+            ui.tip(cell, t!("gui.act.rate").to_string());
         }
         bx += 6;
         let words = rating_words(rating);
@@ -375,11 +378,11 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 
     // The actions (clause 4), one row each; a click acts, as the record's
     // rows do.
-    for (i, action) in actions.iter().enumerate() {
+    for (i, action) in rows.iter().enumerate() {
         let y = inner.y + 5 + i as u16;
         let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
         let is_sel = sheet.row == i;
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = ui.pointer.is_some_and(|p| rect.contains(p));
         if is_sel {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
         }
@@ -390,45 +393,46 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             (false, false, _) => Style::default(),
         };
         put(frame, inner.x + 1, y, &action.label(), style);
-        gui.ui.click(rect, Act::SheetVerb(*action));
+        ui.click(rect, Act::SheetVerb(*action));
     }
 }
 
 fn draw_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    let Some(sheet) = gui.actions.sheet.clone() else { return };
-    let (row, naming) = match &gui.actions.picker {
+    let Gui { app, actions, ui, .. } = &mut *gui;
+    let Some(sheet) = actions.sheet.as_ref() else { return };
+    let (row, naming) = match &actions.picker {
         Some(p) => (p.row, p.naming.as_ref().map(|i| (i.value().to_string(), i.cursor()))),
         None => return,
     };
-    gui.ui.click(area, Act::PickClose);
-    let names: Option<Vec<String>> = match &gui.app.playlist_names {
-        Some(Some(names)) => Some(names.clone()),
+    ui.click(area, Act::PickClose);
+    let names: Option<&[String]> = match &app.playlist_names {
+        Some(Some(names)) => Some(names.as_slice()),
         _ => None,
     };
-    let failed = matches!(gui.app.playlist_names, Some(None));
+    let failed = matches!(app.playlist_names, Some(None));
     let width: u16 = 52.min(area.width.saturating_sub(2)).max(36);
     if let Some((name, cursor)) = naming {
         // New playlist: the name, then the add (clause 12).
-        let inner = modal_frame_on(frame, &mut gui.ui, area, width, 7, th().accent);
+        let inner = modal_frame_on(frame, ui, area, width, 7, th().accent);
         put(frame, inner.x + 1, inner.y, &t!("gui.pl.new"), accent().add_modifier(Modifier::BOLD));
-        modal_close(frame, &mut gui.ui, inner, Act::PickClose);
+        modal_close(frame, ui, inner, Act::PickClose);
         put(frame, inner.x + 1, inner.y + 2, &input_display(&name, cursor, inner.width.saturating_sub(2)), Style::default());
         put(frame, inner.x + 1, inner.y + 4, &t!("gui.act.name_hint", title = title_of(&sheet.track)), dim());
         return;
     }
-    let listed = names.as_ref().map_or(0, Vec::len);
+    let listed = names.map_or(0, <[String]>::len);
     let rows = 1 + listed;
     let max_rows = area.height.saturating_sub(8) as usize;
     let shown_rows = rows.min(max_rows.max(1));
     let height = (shown_rows + 2 + usize::from(listed == 0)) as u16 + 2;
-    let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
+    let inner = modal_frame_on(frame, ui, area, width, height, th().accent);
     put(frame, inner.x + 1, inner.y, &t!("gui.act.add_playlist"), accent().add_modifier(Modifier::BOLD));
-    modal_close(frame, &mut gui.ui, inner, Act::PickClose);
+    modal_close(frame, ui, inner, Act::PickClose);
     let mut y = inner.y + 2;
-    let mut line = |frame: &mut Frame, gui: &mut Gui, index: usize, label: &str, act: Act, lead: bool| {
+    let mut line = |frame: &mut Frame, ui: &mut Surface<Act>, index: usize, label: &str, act: Act, lead: bool| {
         let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
         let is_sel = row == index;
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = ui.pointer.is_some_and(|p| rect.contains(p));
         if is_sel {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
         }
@@ -439,17 +443,17 @@ fn draw_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             (false, false, false) => Style::default(),
         };
         put(frame, inner.x + 1, y, &super::bar::clip(label, inner.width as usize - 2), style);
-        gui.ui.click(rect, act);
+        ui.click(rect, act);
         y += 1;
     };
-    line(frame, gui, 0, &format!("+ {}", t!("gui.pl.new")), Act::PickNew, true);
+    line(frame, ui, 0, &format!("+ {}", t!("gui.pl.new")), Act::PickNew, true);
     match names {
         Some(names) => {
             // The window keeps the cursor's row in view.
             let visible = shown_rows.saturating_sub(1);
             let first = row.saturating_sub(1).saturating_sub(visible.saturating_sub(1)).min(names.len().saturating_sub(visible));
             for (i, name) in names.iter().enumerate().skip(first).take(visible) {
-                line(frame, gui, i + 1, name, Act::PickPlaylist(name.clone()), false);
+                line(frame, ui, i + 1, name, Act::PickPlaylist(name.clone()), false);
             }
             if names.is_empty() {
                 put(frame, inner.x + 1, y, &super::bar::clip(&t!("gui.act.no_playlists"), inner.width as usize - 2), dim());
@@ -463,15 +467,16 @@ fn draw_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 }
 
 fn draw_info(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    let Some(sheet) = gui.actions.sheet.clone() else { return };
-    gui.ui.click(area, Act::InfoClose);
-    let track = current_track(gui, &sheet);
-    let rows = info_rows(&track);
+    let Gui { app, actions, ui, .. } = &mut *gui;
+    let Some(sheet) = actions.sheet.as_ref() else { return };
+    ui.click(area, Act::InfoClose);
+    let track = current_track(app, sheet);
+    let rows = info_rows(track);
     let width: u16 = 70.min(area.width.saturating_sub(2)).max(40);
     let height = (rows.len() as u16 + 2 + 2).min(area.height.saturating_sub(2));
-    let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
+    let inner = modal_frame_on(frame, ui, area, width, height, th().accent);
     put(frame, inner.x + 1, inner.y, &t!("gui.act.info"), accent().add_modifier(Modifier::BOLD));
-    modal_close(frame, &mut gui.ui, inner, Act::InfoClose);
+    modal_close(frame, ui, inner, Act::InfoClose);
     let label_w: u16 = 14;
     for (i, (label, value)) in rows.iter().enumerate() {
         let y = inner.y + 2 + i as u16;
@@ -494,7 +499,7 @@ fn close(gui: &mut Gui) {
 
 fn run(gui: &mut Gui, action: SheetAction) {
     let Some(sheet) = gui.actions.sheet.clone() else { return };
-    let track = current_track(gui, &sheet);
+    let track = current_track(&gui.app, &sheet).clone();
     match action {
         SheetAction::PlayNow => {
             let effects = gui.app.queue_track_next(&sheet.origin, track, true);

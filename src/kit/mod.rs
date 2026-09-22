@@ -688,7 +688,11 @@ pub fn letter_strip<A: Clone>(
         frame.render_widget(Paragraph::new(Span::styled(bucket_glyph(bucket).to_string(), style)), cell);
         if let Some(target) = snap_bucket(present, bucket) {
             s.click(cell, jump(target));
-            s.tip(cell, rust_i18n::t!("gui.lib.jump_tip", letter = bucket_glyph(target)).to_string());
+            // The dwell reads one rect; 27 formatted tips a frame said
+            // nothing the one under the pointer does not.
+            if hover {
+                s.tip(cell, rust_i18n::t!("gui.lib.jump_tip", letter = bucket_glyph(target)).to_string());
+            }
         }
     }
 }

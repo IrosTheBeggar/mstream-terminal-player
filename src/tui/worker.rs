@@ -957,11 +957,28 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
 /// The client for a read aimed at a row's own server. `None` when the base
 /// will not parse — the read then falls back to the session, whose answer
 /// the App's stale-reply guards judge as they would any other.
+///
+/// Kept, one per reach: a client is a connection pool, and building one
+/// per read meant a fresh handshake for every cover, waveform and DJ turn
+/// aimed away from the session. A handful of servers is all a queue ever
+/// mixes; the oldest goes when the shelf is full.
 #[cfg(not(target_arch = "wasm32"))]
-fn client_for(reach: &crate::tui::app::Reach) -> Option<Client> {
-    Client::new_with(&reach.base, reach.self_signed)
+fn client_for(reach: &crate::tui::app::Reach) -> Option<Arc<Client>> {
+    static KEPT: std::sync::Mutex<Vec<(crate::tui::app::Reach, Arc<Client>)>> = std::sync::Mutex::new(Vec::new());
+    const SHELF: usize = 16;
+    let mut kept = KEPT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((_, client)) = kept.iter().find(|(known, _)| known == reach) {
+        return Some(client.clone());
+    }
+    let client = Client::new_with(&reach.base, reach.self_signed)
         .ok()
         .map(|c| c.with_token(reach.token.clone()).with_peer(reach.peer).with_local_token(reach.local_token.clone()))
+        .map(Arc::new)?;
+    if kept.len() >= SHELF {
+        kept.remove(0);
+    }
+    kept.push((reach.clone(), client.clone()));
+    Some(client)
 }
 
 /// Answer one read on its own thread, so a slow server holds up this reply
@@ -1020,7 +1037,7 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         }
         _ => None,
     };
-    let c = match (own.as_ref(), client) {
+    let c = match (own.as_deref(), client) {
         (Some(own), _) => own,
         (None, Some(session)) => session,
         (None, None) => return Event::Error("not connected to a server".into()),

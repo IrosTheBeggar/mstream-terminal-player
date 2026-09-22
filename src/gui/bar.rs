@@ -9,6 +9,8 @@
 //! often for tooltips to earn their draw. (A waveform-seek style existed
 //! through 2026-08-29 and was retired to focus this one.)
 
+use std::borrow::Cow;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -344,15 +346,18 @@ fn chevron_glyph(queue_open: bool) -> &'static str {
     }
 }
 
-/// Truncate at the cell edge with the kit's clip mark.
-pub(super) fn clip(text: &str, max: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max {
-        return text.to_string();
+/// Truncate at the cell edge with the kit's clip mark. Borrowed when it
+/// fits — the common case, and it is asked for every label on every frame.
+pub(super) fn clip(text: &str, max: usize) -> Cow<'_, str> {
+    // A char past the limit is what makes the text too long.
+    if text.char_indices().nth(max).is_none() {
+        return Cow::Borrowed(text);
     }
-    let mut out: String = chars[..max.saturating_sub(1)].iter().collect();
+    let cut = text.char_indices().nth(max.saturating_sub(1)).map_or(0, |(i, _)| i);
+    let mut out = String::with_capacity(cut + 3);
+    out.push_str(&text[..cut]);
     out.push(if legacy_conhost() { '»' } else { '…' });
-    out
+    Cow::Owned(out)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

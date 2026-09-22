@@ -42,7 +42,6 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use rust_i18n::t;
 
@@ -973,12 +972,16 @@ fn demo_now() -> Now {
 
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
+/// One run of text at a cell, clipped at the frame's edge — written into
+/// the buffer directly: the hub's primitive runs a few hundred times a
+/// frame, and a `Paragraph` per call was a handful of allocations each.
 fn put(frame: &mut Frame, x: u16, y: u16, text: &str, style: Style) {
-    let width = text.chars().count() as u16;
-    frame.render_widget(
-        Paragraph::new(Span::styled(text.to_string(), style)),
-        Rect { x, y, width, height: 1 },
-    );
+    let buf = frame.buffer_mut();
+    if !buf.area.contains(Position { x, y }) {
+        return;
+    }
+    let width = text.chars().count();
+    buf.set_stringn(x, y, text, width, style);
 }
 
 fn bright_bold() -> Style {
@@ -1417,7 +1420,7 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
 
     // Right: the verbs, dropped from the tail when the room is squeezed
     // (shuffle first, then queue all — play holds out longest).
-    if gui.app.pane().tracks_with_offset().0.is_empty() {
+    if !gui.app.pane().has_tracks() {
         return;
     }
     let forward_glyph = if legacy_conhost() { ">" } else { "▸" };

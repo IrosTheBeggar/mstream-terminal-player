@@ -438,7 +438,7 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
     let page = wall_ref(gui).page;
     let start = page * capacity;
-    let shown = page_len(gui, capacity);
+    let shown = total.saturating_sub(start).min(capacity);
     {
         let w = wall(gui);
         w.cursor = w.cursor.min(shown.saturating_sub(1));
