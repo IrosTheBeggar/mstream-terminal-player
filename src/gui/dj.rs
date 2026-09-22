@@ -60,6 +60,9 @@ pub(crate) struct DjUi {
     /// The body's height and window from the last draw, for the wheel.
     lines: usize,
     visible: usize,
+    /// How many Preview picks the last draw saw: new ones scroll into view
+    /// under their row, which is the body's last.
+    samples_seen: usize,
 }
 
 impl DjUi {
@@ -510,10 +513,22 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         total += line.height();
     }
     let visible = region.height as usize;
+    // Preview's picks land after the click, under the body's last row:
+    // they come into view on their own while the cursor is on the row.
+    let samples = gui.app.dj_panel.sample.len();
+    if samples != gui.dj.samples_seen {
+        gui.dj.samples_seen = samples;
+        if gui.dj.cursor == Some(Item::Row(DjRow::Sample)) {
+            gui.dj.reveal = true;
+        }
+    }
     if std::mem::take(&mut gui.dj.reveal)
         && let Some(i) = lines.iter().position(|l| l.item().is_some() && l.item() == gui.dj.cursor)
     {
-        let (top, h) = (tops[i], lines[i].height());
+        let (top, mut h) = (tops[i], lines[i].height());
+        if lines[i].item() == Some(Item::Row(DjRow::Sample)) {
+            h += lines[i + 1..].iter().take_while(|l| matches!(l, L::Sample(_))).count();
+        }
         if top < gui.dj.scroll {
             gui.dj.scroll = top;
         } else if top + h > gui.dj.scroll + visible {
@@ -580,10 +595,10 @@ fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
             let armed = gui.app.dj_armed();
             let at = Rect { x, y, width: w, height: 3 };
             let rect = if armed {
-                tall_danger(frame, &mut gui.ui, at, &t!("gui.dj.stop"), Act::AutoDj)
+                tall_danger(frame, &mut gui.ui, at, &t!("gui.dj.stop"), Act::DjStartStop)
             } else {
                 let label = format!("{} {forward}", t!("gui.dj.start"));
-                tall_button(frame, &mut gui.ui, at, &label, true, Act::AutoDj)
+                tall_button(frame, &mut gui.ui, at, &label, true, Act::DjStartStop)
             };
             if gui.dj.cursor == Some(Item::Toggle) {
                 frame.render_widget(
@@ -1398,7 +1413,7 @@ fn room_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
                 let act = match item {
-                    Item::Toggle => Act::AutoDj,
+                    Item::Toggle => Act::DjStartStop,
                     Item::Server => Act::DjServerPick,
                     Item::Row(DjRow::Sample) => Act::DjPreview,
                     Item::Row(row) => Act::DjStep(row, 1),
@@ -1467,6 +1482,21 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::DjBack => {
             gui.dj.room = false;
             gui.dj.cursor = None;
+        }
+        // Start rides the toggle (the opening question, the seed rule);
+        // Stop stops wherever the DJ is armed — the toggle's "on elsewhere
+        // → move here" is the bar's rule, not a Stop button's.
+        Act::DjStartStop => {
+            gui.dj.cursor = Some(Item::Toggle);
+            if gui.app.dj_armed() {
+                let mut effects = gui.app.disarm_dj();
+                // Off, the room describes the session's server again.
+                effects.extend(gui.app.dj_room_opened());
+                gui.pend(effects);
+                gui.save_now();
+            } else {
+                gui.forward(Action::ToggleAutoDj);
+            }
         }
         Act::DjFocus(item) => {
             gui.dj.cursor = Some(item);
@@ -1829,16 +1859,21 @@ mod tests {
         gui.app.servers.push(known(HOST, "host"));
         gui.app.queue.items = vec![queued("a.mp3", None)];
         let rows = draw(&mut gui);
-        assert_eq!(hit_text(&gui, &rows, "Start Auto DJ"), Some(Act::AutoDj));
-        gui.act(Act::AutoDj);
+        assert_eq!(hit_text(&gui, &rows, "Start Auto DJ"), Some(Act::DjStartStop));
+        gui.act(Act::DjStartStop);
         assert!(gui.app.dj_armed());
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(all.contains("• on · picking from host"), "{all}");
         assert!(all.contains("Auto DJ is on") && all.contains("Stop Auto DJ"), "{all}");
-        assert_eq!(hit_text(&gui, &rows, "Stop Auto DJ"), Some(Act::AutoDj));
-        gui.act(Act::AutoDj);
-        assert!(!gui.app.dj_armed());
+        assert_eq!(hit_text(&gui, &rows, "Stop Auto DJ"), Some(Act::DjStartStop));
+        // Armed elsewhere, Stop still stops (the bar's toggle would move it).
+        gui.app.servers.push(known(ATTIC, "attic"));
+        let effects = gui.app.dj_move_to(ATTIC.into());
+        gui.pend(effects);
+        assert_eq!(gui.app.dj_server.as_deref(), Some(ATTIC));
+        gui.act(Act::DjStartStop);
+        assert!(!gui.app.dj_armed(), "off, not moved");
     }
 
     #[test]

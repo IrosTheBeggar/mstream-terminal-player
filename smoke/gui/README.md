@@ -70,9 +70,19 @@ url = "http://127.0.0.1:3041"
   while no session is up, and the picker leads back to B (multi-server
   contract, clause 13).
 
+- `dj` — Auto DJ on the rig (auto-dj contract, slice A5): one row queued
+  with `a`, Settings › `Auto DJ ▸`, the room off with the probe's sonic
+  reason (the rig has no discovery data), Start — the note names the server,
+  a batch of four badged rows lands (songs per fetch 4), Preview lists three
+  picks under its row without queueing, a click on the songs-per-fetch bar's
+  first cell sets "1 song", the Server row's picker moves the DJ to Rig A (the
+  peer through B) and the next turn is picked from there, Stop leaves the
+  rows and their badges. Prints the run's `[dj]` log lines at the end.
+
 ```sh
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py direct
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py mixed
+MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py dj
 ```
 
 The worker-level leg of the same rig is the ignored test in `src/tui/worker.rs`:

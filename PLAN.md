@@ -1892,9 +1892,15 @@ a LATER secondary screen (party view), Columns retired.
     Keywords row now types a word on Enter — Enter adds it and clears for
     the next, Esc or Enter on nothing leaves, `x` on the row takes the
     last word back — through the same `DjEdit` as the room).
-  - **A5 — the rig**: a peer-hosted lane through the proxy and direct,
-    `discovery is disabled` degrading once, a batch landing, Preview; the
-    contract's status row and deviations updated with what it showed.
+  - **A5 — the rig ✅ 2026-09-21** (`smoke/gui/scenario_dj.py`): the room
+    off with the probe's sonic reason (no discovery data on the rig), Start
+    on a one-row queue landing a batch of four badged rows, Preview's three
+    picks, a bar set by a cell click live, the server picker moving the DJ
+    to Rig A through B's proxy with the next turn picked from there, Stop
+    leaving the rows. Not exercised on this rig: a direct (tunnel) peer
+    lane and the `discovery is disabled` degrade — the rig has no
+    discovery data at all, so sonic is never asked; both remain a manual
+    check against a server with discovery on.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies), queue clicks + the rest
   of the Library tab views (Artists/Genres/Recent — the wall's drill

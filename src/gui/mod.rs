@@ -171,6 +171,9 @@ pub(crate) enum Act {
     /// The Auto DJ room (auto-dj contract, clauses 40–53): its rows, bars,
     /// radios, chips, the keyword field, the genre and server pickers.
     DjBack,
+    /// The room's one primary: Start through the toggle (the opening
+    /// question included), Stop wherever the DJ is armed.
+    DjStartStop,
     DjFocus(dj::Item),
     DjStep(crate::tui::app::DjRow, i32),
     DjSet(crate::tui::app::DjRow, u32),

@@ -6,7 +6,7 @@
 | **Server API** | `POST /api/v1/db/random-songs` — one call, every knob (mStream `src/api/random.js`, Joi-validated with no unknown keys): `limit` (1–25, default 1; 6.26.0) · `ignoreList` (round-trip cursor, ≤ 500 ids; the server keeps the last 50) · `ignoreVPaths` (≤ 50) · `minRating` (0–10; ignored for a caller with no user — a federation key or guest) · `genres` (≤ 200) + `genreMode` (`whitelist` default / `blacklist`) · `bpmRanges` + `bpmRangesWide` (≤ 16 windows each, 0–1000) + `requireBpm` · `musicalKeys` (≤ 24 Camelot codes) + `requireMusicalKey` · `ignoreArtists` (≤ 100) · `similarTo` (1–8 paths) + `minSimilarity` (both or neither) · `similarToVector` + `similarToModelId` (6.26.0, out of scope) · `minDuration` + `maxDuration` (seconds, ≤ 86400) + `allowUnknownDuration` (6.25.0). Answers `{songs: [..], ignoreList, sonic?: {similarity, similarities, poolSize}}`. Its refusals, all as `{"error": "..."}`: a **schema rejection** `"<key>" is not allowed` (400 from 6.12.0, 403 before — the body is the signal); nothing left in a sonic pool → 400 `No songs within the similarity range match criteria`; an unanalysed seed → 400 `Sonic seed track has not been analyzed yet`, an unscanned library → 400 `No tracks have been analyzed yet`; discovery switched off → 403 containing `discovery is disabled`; an expired token → 401/403 without a not-allowed body. `GET /api/v1/db/genres`. `GET /api/` is the capability source: `server` (the version), `features.discovery`, `features.discoveryReady` (whether the scan has produced vectors — `/api/v1/ping` never carries it), `user.vpaths`. Version floors the record keeps: 4.6.0 `ignoreVPaths` · 6.7.1 the BPM / key / genre / cooldown block · 6.15.2 the sonic pair · 6.25.0 the length window · 6.26.0 `limit`. random-songs is on the federation allowlist (mStream #946): a peer session — through the parent's proxy or over the peer's own tunnel with a guest token — can run the DJ. |
 | **Already in this repo** | Most of a DJ, in the older three-mode shape: `src/dj.rs` (Camelot math, same/half/double windows, the perceptual sonic slider, `build_random_request`, `Settings`), `[player.dj]` prefs and `player.autodj`, `AutoDjMode` and the `A` cycle, `maybe_autodj` (the queue-end top-up), `consume_dj` (queue the pick, start it if idle, the cursor), `autodj_pick` (`Similar` via nearest neighbours, `BpmKey` via random-songs, the sonic 400 retried once without the pool), `autodj_sample` (three picks without queueing), the TUI's Auto-DJ tab (`DjPanel` / `DjRow`) with its genre picker, `Event::{AutoDjPick, AutoDjSample, Genres}`, and the GUI bar's `auto-dj` toggle. Since 2026-09-06 the multi-server contract landed and gives this one its footing: every queued row carries its `Origin` and plays from its own server (`Reach`, `reach()`), federated peers are sessions of their own (proxied or direct), tunnels follow the queue with a hold for a row whose tunnel is down, the layered `/api/` payload is parsed (`LayeredInfo`), and the GUI queue panel has rows of its own to badge. **Missing**: the on/off-plus-toggles model, sources (`ignoreVPaths`), the length window, the keyword filter, `requireBpm` / `requireMusicalKey`, the session-locked Camelot anchor, the rolling / locked sonic anchors as the record defines them, songs per fetch, the readiness gate, the one-shot seed and the start chooser, the empty-queue openers, lane resets with in-flight discards, the capability learner, the failure taxonomy, the queue badge, the armed-not-playing restore, and the room itself. |
 | **Target surface** | the GUI player — the bar toggle, the queue panel (its badge and its empty state), and an **Auto DJ room** under Settings; the TUI's `A` and Auto-DJ tab follow through the shared App |
-| **Status** | contract extracted 2026-09-06; **re-extracted against the moved record and settled 2026-09-20** — the open questions are decided below, and decision 10 was rewritten the same day to the record's model (the DJ is armed FOR a server, the session browses where it likes); implementation began 2026-09-20 (PLAN.md, Phase 10): **slices A1–A3 landed 2026-09-20/21** (the model, the worker, the GUI room and its surfaces); A4's TUI keyword entry and A5's rig verification remain |
+| **Status** | contract extracted 2026-09-06; **re-extracted against the moved record and settled 2026-09-20** — the open questions are decided below, and decision 10 was rewritten the same day to the record's model (the DJ is armed FOR a server, the session browses where it likes); implementation began 2026-09-20 (PLAN.md, Phase 10): **slices A1–A5 landed 2026-09-20/21** — the model, the worker, the GUI room and its surfaces, the TUI's keyword entry, and the rig run (`smoke/gui/scenario_dj.py`: the room, a batch, Preview, the server picker moving the DJ to a proxied peer with the next turn picked from there). Left for a server with discovery data: the sonic path end to end (a pool answered, clause 30's degrade) and a direct-tunnel peer lane |
 
 ## Intent
 
@@ -594,6 +594,28 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
 - **2026-09-21 — Sources inline**: a `[✓]` row per library under SOURCES
   rather than a picker; the TUI keeps its picker. The refusal for the last
   source is the App's note (clause 42).
+- **2026-09-21 — Verified on the rig** (Rig A :3040 and Rig B :3041,
+  mStream 6.29.0, no discovery data): the room opens off with "This server
+  doesn't have discovery data — picks stay random." on the sonic row from
+  the opening probe; Start on a one-row queue lands a batch of four `∞`
+  rows and the note names the server ("Auto DJ on — picking from …", four
+  servers saved); Preview lists three picks under its row and queues none;
+  a click on the songs-per-fetch bar's first cell reads "1 song" at once;
+  the Server row's picker lists B, Rig A via B, B's Quick Connect tunnel
+  and Rig A via it; choosing Rig A via B moves the DJ ("picking from Rig
+  A", a fresh probe) and the next turn's one pick comes from Rig A through
+  the proxy; Stop leaves the rows and their badges. The sonic path (a pool
+  answered, clause 30) and a direct-tunnel peer lane still want a server
+  with discovery data.
+- **2026-09-21 — The room's Stop stops** (clause 40 says the button rides
+  the same toggle as every entry point): Start does — the opening question
+  and the seed rule included — but the toggle's "on elsewhere → move here"
+  is the bar's rule, and the rig showed Stop pressed with the DJ armed on
+  Rig A while the session browsed B *moving* the DJ to B. So the button
+  disarms wherever the DJ is armed; only Start goes through the toggle.
+- **2026-09-21 — Preview's picks scroll into view**: they land after the
+  click under the body's last row, so while the cursor is on Preview the
+  room reveals them as they arrive.
 - **2026-09-21 — Long sentences wrap**: the status detail, the gate
   sentence and the hints wrap to the room's width; a row's description
   clips at the cell edge (the Settings rows' rule) and comes back whole
