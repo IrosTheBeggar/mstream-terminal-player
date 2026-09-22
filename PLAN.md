@@ -1847,7 +1847,7 @@ a LATER secondary screen (party view), Columns retired.
   from the thumbnail is 4 / 13 / 5 ms in debug (kitty / sixel / iTerm2)
   and 0.28 / 0.56 / 0.22 ms in release, and a redraw microseconds — so a
   wheel tick now costs one of those, not seven of the old.
-- **Auto DJ — contract settled 2026-09-20, implementation next**
+- **Auto DJ — contract settled 2026-09-20, implemented 2026-09-20/21 (slices A1–A5)**
   (docs/ux-contracts/auto-dj.md, re-extracted against the mobile record's
   `439b4de4`: songs per fetch, a peer hosting the DJ, readiness, the
   empty-queue openers; multi-server sessions out of scope; decisions 1–12

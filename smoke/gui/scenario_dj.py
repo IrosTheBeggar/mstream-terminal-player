@@ -136,8 +136,13 @@ def run(Gui):
         raise SystemExit("FAIL: the rows or their badges went with the DJ")
     g.dump("stopped")
     g.quit()
+    # The DJ's second voice (clause 63) speaks only when something is
+    # dropped, learned, degraded, deferred or failed — a clean run says
+    # nothing.
     print("───── [dj] log lines ─────", flush=True)
     with open(log) as f:
-        for line in f:
-            if "[dj]" in line:
-                print(line.rstrip()[:200], flush=True)
+        lines = [line.rstrip()[:200] for line in f if "[dj]" in line]
+    for line in lines:
+        print(line, flush=True)
+    if not lines:
+        print("(none — nothing was dropped, learned, degraded, deferred or failed)", flush=True)

@@ -77,7 +77,9 @@ url = "http://127.0.0.1:3041"
   picks under its row without queueing, a click on the songs-per-fetch bar's
   first cell sets "1 song", the Server row's picker moves the DJ to Rig A (the
   peer through B) and the next turn is picked from there, Stop leaves the
-  rows and their badges. Prints the run's `[dj]` log lines at the end.
+  rows and their badges. Prints the run's `[dj]` log lines at the end — none
+  on a clean run: the DJ's log speaks only for a dropped key, a learned
+  rejection, a degraded constraint, a deferred pick or a failed fetch.
 
 ```sh
 MSTREAM_RIG_DIR=/path/to/rig python3 -u smoke/gui/ptygui.py direct
