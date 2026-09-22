@@ -1086,6 +1086,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             SETTINGS_NAV if gui.cursor.is_some() => t!("gui.tips.rows"),
             FILES_NAV if gui.app.filtering => t!("gui.tips.filter"),
             FILES_NAV => t!("gui.tips.files"),
+            ARTISTS_NAV | GENRES_NAV | RECENT_NAV if gui.app.connected => library::tips(gui),
             ALBUMS_NAV if gui.app.connected => {
                 if matches!(
                     gui.app.library_stack.here(),

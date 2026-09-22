@@ -332,6 +332,17 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     Some(false)
 }
 
+/// The footer's keys for whichever view is up: the wall's, the drilled
+/// album's, or a list's — the Files room's line, since the keys are its.
+pub(crate) fn tips(gui: &Gui) -> std::borrow::Cow<'static, str> {
+    match gui.app.library_stack.here() {
+        LibraryNode::Artist(_) => t!("gui.tips.albums"),
+        LibraryNode::Album { .. } => t!("gui.tips.album_tracks"),
+        _ if gui.app.filtering => t!("gui.tips.filter"),
+        _ => t!("gui.tips.files"),
+    }
+}
+
 /// The wheel: the wall turns pages and the track list scrolls (the Albums
 /// room's rule); a list scrolls its view.
 pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
@@ -470,6 +481,17 @@ mod tests {
         assert!(matches!(gui.app.library_stack.here(), LibraryNode::Genres), "Back climbs to the genres");
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("Ambient (4)"), "the parent comes back from the trail: {all}");
+    }
+
+    #[test]
+    fn the_footer_names_the_keys_of_the_view_that_is_up() {
+        let mut gui = artists_gui(&["Bassnectar", "Portishead"]);
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("h back · a queue"), "a list has the Files keys: {all}");
+        gui.act(Act::LibRow(2));
+        land(&mut gui, LibraryNode::Artist("Portishead".into()), LibraryData::Albums(vec![album(Some("Dummy"), "Portishead", Some(1994))]));
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("← → page"), "the wall has the wall's keys: {all}");
     }
 
     #[test]
