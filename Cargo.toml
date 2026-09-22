@@ -12,6 +12,11 @@ repository = "https://github.com/IrosTheBeggar/mstream-terminal-player"
 # out. Everything in plain [dependencies] must build for both.
 
 [dependencies]
+# i18n: compile-time-embedded YAML locales (locales/*.yml), t!() with
+# interpolation and per-call locale. Every target: the shared App's Auto
+# DJ notes are keys, and the browser build shows them too (in English
+# until the web shell sets a locale).
+rust-i18n = "3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 fastrand = "2"
@@ -65,10 +70,9 @@ ratatui = { version = "0.30.2", features = ["crossterm"] }
 # arrives regardless — icy_sixel quantises through quantette, which brings
 # it — so the trim's win is the codec and C-library weight, not rayon.
 ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
-# Wizard i18n: compile-time-embedded YAML locales (locales/*.yml), t!()
-# with interpolation and per-call locale; sys-locale answers "what
-# language is this machine?". Native-only — the wasm build has no wizard.
-rust-i18n = "3"
+# sys-locale answers "what language is this machine?" for the wizard.
+# Native-only — the wasm build has no wizard (rust-i18n itself is a plain
+# dependency: the shared App's notes go through t!() on every target).
 sys-locale = "0.3"
 rodio = { version = "0.22", features = ["symphonia-all"] }
 tiny_http = "0.12"

@@ -179,9 +179,9 @@ mod quickconnect {
     }
 }
 
-// The wizard's locale table, embedded at compile time from locales/*.yml.
+// The locale table, embedded at compile time from locales/*.yml: the
+// wizard's, the GUI's, and the shared App's own notes — every target.
 // Crate root because t!() resolves crate::_rust_i18n_translate.
-#[cfg(not(target_arch = "wasm32"))]
 rust_i18n::i18n!("locales", fallback = "en");
 
 #[cfg(not(target_arch = "wasm32"))]
