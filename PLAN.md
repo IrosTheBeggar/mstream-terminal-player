@@ -1871,10 +1871,21 @@ a LATER secondary screen (party view), Columns retired.
     pre-filter from the probe (25, 50), the failure taxonomy (30–34), the
     tunnel defer and owed pick (33, 35), readiness from
     `features.discoveryReady` (36), the `[dj]` log lines (63).
-  - **A3 — the GUI** (next): the Settings doorway and the room (40–53), the
-    start chooser and the capture banner, the bar's on/off wording, the
-    queue panel's badge and empty-state openers (16, 60, 62), ten locales
-    of `gui.dj.*` carried from the record's `autoDj*`.
+  - **A3 — the GUI ✅ 2026-09-21** (two commits): the start chooser as a
+    kit modal, the opening-song banner, the queue panel's badge and
+    empty-state openers (2, 4, 16, 60, 62); then the Settings doorway
+    (`Auto DJ ▸`, a LISTEN group) and the room (40–53) — the state line
+    and Start/Stop, QUEUE · CONTINUITY · FILTERS · SOURCES as `[✓]` rows,
+    ten-cell bars that set by cell and step by ←→, `(•)` radio rows, chips
+    with a remove, the keyword field, the genre picker with its search
+    line, the server picker that moves the DJ (41), the version gates and
+    the sonic reasons (43, 50), Preview (53); a scrolling body with the kit
+    scrollbar. One `DjEdit` on the App that both shells edit through;
+    rating and genres written to the target server's own entry (51); the
+    room probes the session's server when opened with the DJ off. Ten
+    locales of `gui.dj.*` carried from the record's `autoDj*` (the
+    `mstream_music` worktree's ARB files), the terminal's own strings
+    beside them. 11 GUI tests; `dump_dj` (ignored) renders it all.
   - **A4 — the TUI and the web shell follow** (mostly with A1: `A` arms /
     switches off / moves, the tab's rows are the contract's, the choosers
     draw over both screens, the wasm check passes; left: keyword entry in

@@ -1048,6 +1048,8 @@ pub struct Message {
 // screen, and the [`Session`] it produces — lives in `session` (audit #56),
 // re-exported so every caller keeps saying `app::ConnectForm`.
 mod autodj;
+#[allow(unused_imports)] // the browser shell has no room yet
+pub use autodj::DjEdit;
 pub(crate) mod entries;
 mod nav;
 mod session;
@@ -1451,7 +1453,7 @@ pub struct NowDiscover {
 }
 
 /// Choosing which genres the filter applies to.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct GenrePicker {
     /// Every genre the server knows, alphabetical as it sent them.
     pub all: Vec<String>,

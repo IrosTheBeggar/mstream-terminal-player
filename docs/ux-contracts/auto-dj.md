@@ -6,7 +6,7 @@
 | **Server API** | `POST /api/v1/db/random-songs` — one call, every knob (mStream `src/api/random.js`, Joi-validated with no unknown keys): `limit` (1–25, default 1; 6.26.0) · `ignoreList` (round-trip cursor, ≤ 500 ids; the server keeps the last 50) · `ignoreVPaths` (≤ 50) · `minRating` (0–10; ignored for a caller with no user — a federation key or guest) · `genres` (≤ 200) + `genreMode` (`whitelist` default / `blacklist`) · `bpmRanges` + `bpmRangesWide` (≤ 16 windows each, 0–1000) + `requireBpm` · `musicalKeys` (≤ 24 Camelot codes) + `requireMusicalKey` · `ignoreArtists` (≤ 100) · `similarTo` (1–8 paths) + `minSimilarity` (both or neither) · `similarToVector` + `similarToModelId` (6.26.0, out of scope) · `minDuration` + `maxDuration` (seconds, ≤ 86400) + `allowUnknownDuration` (6.25.0). Answers `{songs: [..], ignoreList, sonic?: {similarity, similarities, poolSize}}`. Its refusals, all as `{"error": "..."}`: a **schema rejection** `"<key>" is not allowed` (400 from 6.12.0, 403 before — the body is the signal); nothing left in a sonic pool → 400 `No songs within the similarity range match criteria`; an unanalysed seed → 400 `Sonic seed track has not been analyzed yet`, an unscanned library → 400 `No tracks have been analyzed yet`; discovery switched off → 403 containing `discovery is disabled`; an expired token → 401/403 without a not-allowed body. `GET /api/v1/db/genres`. `GET /api/` is the capability source: `server` (the version), `features.discovery`, `features.discoveryReady` (whether the scan has produced vectors — `/api/v1/ping` never carries it), `user.vpaths`. Version floors the record keeps: 4.6.0 `ignoreVPaths` · 6.7.1 the BPM / key / genre / cooldown block · 6.15.2 the sonic pair · 6.25.0 the length window · 6.26.0 `limit`. random-songs is on the federation allowlist (mStream #946): a peer session — through the parent's proxy or over the peer's own tunnel with a guest token — can run the DJ. |
 | **Already in this repo** | Most of a DJ, in the older three-mode shape: `src/dj.rs` (Camelot math, same/half/double windows, the perceptual sonic slider, `build_random_request`, `Settings`), `[player.dj]` prefs and `player.autodj`, `AutoDjMode` and the `A` cycle, `maybe_autodj` (the queue-end top-up), `consume_dj` (queue the pick, start it if idle, the cursor), `autodj_pick` (`Similar` via nearest neighbours, `BpmKey` via random-songs, the sonic 400 retried once without the pool), `autodj_sample` (three picks without queueing), the TUI's Auto-DJ tab (`DjPanel` / `DjRow`) with its genre picker, `Event::{AutoDjPick, AutoDjSample, Genres}`, and the GUI bar's `auto-dj` toggle. Since 2026-09-06 the multi-server contract landed and gives this one its footing: every queued row carries its `Origin` and plays from its own server (`Reach`, `reach()`), federated peers are sessions of their own (proxied or direct), tunnels follow the queue with a hold for a row whose tunnel is down, the layered `/api/` payload is parsed (`LayeredInfo`), and the GUI queue panel has rows of its own to badge. **Missing**: the on/off-plus-toggles model, sources (`ignoreVPaths`), the length window, the keyword filter, `requireBpm` / `requireMusicalKey`, the session-locked Camelot anchor, the rolling / locked sonic anchors as the record defines them, songs per fetch, the readiness gate, the one-shot seed and the start chooser, the empty-queue openers, lane resets with in-flight discards, the capability learner, the failure taxonomy, the queue badge, the armed-not-playing restore, and the room itself. |
 | **Target surface** | the GUI player — the bar toggle, the queue panel (its badge and its empty state), and an **Auto DJ room** under Settings; the TUI's `A` and Auto-DJ tab follow through the shared App |
-| **Status** | contract extracted 2026-09-06; **re-extracted against the moved record and settled 2026-09-20** — the open questions are decided below, and decision 10 was rewritten the same day to the record's model (the DJ is armed FOR a server, the session browses where it likes); implementation began 2026-09-20 (PLAN.md, Phase 10, slices A1–A5) |
+| **Status** | contract extracted 2026-09-06; **re-extracted against the moved record and settled 2026-09-20** — the open questions are decided below, and decision 10 was rewritten the same day to the record's model (the DJ is armed FOR a server, the session browses where it likes); implementation began 2026-09-20 (PLAN.md, Phase 10): **slices A1–A3 landed 2026-09-20/21** (the model, the worker, the GUI room and its surfaces); A4's TUI keyword entry and A5's rig verification remain |
 
 ## Intent
 
@@ -402,6 +402,7 @@ room, the chooser and the panel, and `dj.<name>` for the shared App's notes
 | Segmented buttons (empty queue · anchor · whitelist/blacklist) | `(•)` radio rows, one per option, chosen label BOLD, `— hint` dim |
 | Chips (genres, keywords) | An inline comma list on the row with a hover `[x]` per item; the keyword input as a 1-row text field (the kit's), Enter adds, at most 50 |
 | The genre picker sheet | A kit modal list with a filter line (the path modal's shape): "{count} selected" in the title row, Space toggles, Enter and Esc close — the App's `GenrePicker` already exists |
+| The multi-server body's server choice | The room's Server row (armed, several servers saved) opens a kit modal list of every selectable saved server, peers under their parent and named through it, the DJ's own marked; Enter or a click moves the DJ (clause 41), re-selecting it is a no-op |
 | The start sheet | A kit modal (the torrent chooser's shape): the title and subtitle, two option rows with their descriptions, the `[ ] Remember this` row, Esc dismisses and leaves the DJ off |
 | "Let me choose" / "Choose a song" | The App's `Capture` machinery grown a `DjSeed` variant — the sonic pick's road, banner and Esc included; the pick lands, the DJ arms (or opens on the armed DJ), the user stays put |
 | Snackbars / toasts | The note line; the once-per-lane budgets kept; every one also a `[dj]` log line |
@@ -566,3 +567,32 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
   its keyword entry waits on the GUI room (the tab says so). The room, the
   bar's wording, the queue's badge glyph and empty state, and the locales
   are slice A3; the rig is A5.
+- **2026-09-21 — Slice A3 landed** in the GUI shell: the chooser, the
+  banner, the openers and the badge (part 1), then the Settings doorway
+  and the room (part 2) — every control an edit through one `DjEdit` on
+  the App, so the TUI's tab and the room change one model. Per-library
+  rules (rating, genre mode and genres) are written to the **target
+  server's own entry**: the DJ's server while armed, the session's while
+  off (the one Start would use); a server with no saved entry falls back
+  to `[player.dj]`. The room probes the session's server when opened with
+  the DJ off, so the version gates and the sonic reasons apply before
+  Start.
+- **2026-09-21 — The sonic switch stays live under its reason** (clause 43
+  says disabled): the reason shows in gold where the description would be
+  and as the row's tip, and the switch still toggles — sonic is on by
+  default, and a switch that could not be switched off would pin the
+  strictness and anchor rows on screen for a server that cannot use them.
+- **2026-09-21 — Bars set by cell**: a click on one of the ten cells sets
+  one of ten values across the bar's range (a length bar snaps to 15 s);
+  ←→ reach every step. The record's sliders are continuous.
+- **2026-09-21 — Chips on the keyboard**: ←→ walk a chips row, `x` (or
+  Delete) removes the chip under the cursor, Enter opens the genre picker
+  or focuses the keyword field; the record removes by each chip's ×.
+- **2026-09-21 — Sources inline**: a `[✓]` row per library under SOURCES
+  rather than a picker; the TUI keeps its picker. The refusal for the last
+  source is the App's note (clause 42).
+- **2026-09-21 — Long sentences wrap**: the status detail, the gate
+  sentence and the hints wrap to the room's width; a row's description
+  clips at the cell edge (the Settings rows' rule) and comes back whole
+  when the queue panel folds away; a bar's note shows whole or not at all
+  (a cosine clipped mid-number would read as another number).

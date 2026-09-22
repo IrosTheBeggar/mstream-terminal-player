@@ -2752,11 +2752,13 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
             }
             vec![value(format!("{} artists", s.artist_cooldown)), note("recently played, skipped".into())]
         }
+        // The library rows read the target server's own rules (clause 51).
         DjRow::Rating => {
-            if s.min_rating == 0 {
+            let library = app.dj_library();
+            if library.min_rating == 0 {
                 return vec![value("Any".into())];
             }
-            vec![value(format!("{:.1} ★ or above", f64::from(s.min_rating) / 2.0))]
+            vec![value(format!("{:.1} ★ or above", f64::from(library.min_rating) / 2.0))]
         }
         DjRow::Length => vec![switch(s.length), note(s.length_words())],
         DjRow::Shortest => {
@@ -2775,19 +2777,20 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
             vec![switch(s.allow_unknown_length), note("include tracks with no length read".into())]
         }
         DjRow::Genres => {
-            let mode = s.genre_mode.label().to_string();
-            if s.genre_mode == crate::dj::GenreMode::Off {
+            let library = app.dj_library();
+            let mode = library.genre_mode.label().to_string();
+            if library.genre_mode == crate::dj::GenreMode::Off {
                 return vec![value(mode), note("Enter to choose".into())];
             }
-            let chosen = if s.genres.is_empty() {
+            let chosen = if library.genres.is_empty() {
                 "none chosen — Enter to pick".to_string()
             } else {
-                s.genres.join(", ")
+                library.genres.join(", ")
             };
             let mut spans = vec![value(format!("{mode}  ")), Span::styled(chosen, faint)];
             // The asymmetry bites people: "only these" is a stricter promise
             // than "anything but these", and it drops untagged tracks.
-            if s.genre_mode == crate::dj::GenreMode::Whitelist && !s.genres.is_empty() {
+            if library.genre_mode == crate::dj::GenreMode::Whitelist && !library.genres.is_empty() {
                 spans.push(Span::styled("  (untagged excluded)", faint));
             }
             spans

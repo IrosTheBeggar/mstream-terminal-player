@@ -67,6 +67,26 @@ impl DjLane {
     }
 }
 
+/// One edit from a room's control, in either shell (clause 51). A step on
+/// a switch toggles it, on a radio cycles it, on a number moves it by a
+/// useful increment; the GUI's bars and radios also set outright.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DjEdit {
+    Step(DjRow, i32),
+    /// A bar's absolute value — songs, BPM, artists, a rating in halves,
+    /// seconds — and hundredths of cosine for the strictness bar.
+    Set(DjRow, u32),
+    Anchor(dj::SonicAnchor),
+    EmptyQueue(dj::EmptyQueueStart),
+    /// Whitelist or blacklist; Off is the switch (a step on the Genres row
+    /// cycles all three, the TUI's habit).
+    GenreMode(dj::GenreMode),
+    /// A genre in or out of the chosen set.
+    Genre(String),
+    AddKeyword(String),
+    RemoveKeyword(String),
+}
+
 /// The empty-queue chooser (clause 2): "Start Auto DJ with what?" — Surprise
 /// me, Let me choose, and the Remember-this box.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -649,7 +669,9 @@ impl App {
                 Vec::new()
             }
             Event::DjProbed { identity, info } => {
-                if self.dj_server.as_deref().is_some_and(|id| crate::config::same_server(id, &identity))
+                // The DJ's server while armed; with it off, the session's —
+                // the room's target either way (clause 50).
+                if self.dj_library_target().is_some_and(|id| crate::config::same_server(&id, &identity))
                     && let Some(info) = info
                 {
                     self.dj_info = Some(info);
@@ -802,72 +824,252 @@ impl App {
         }
     }
 
-    /// Move the highlighted setting by one step. Numbers move in useful
-    /// increments rather than by one, so a bar crosses its range in a
-    /// handful of presses; switches toggle either way.
+    /// Move the highlighted setting by one step (the TUI's ←→ and Enter):
+    /// the switches toggle either way, the radios cycle, the numbers move
+    /// in useful increments so a bar crosses its range in a handful of
+    /// presses.
     pub(super) fn adjust_dj_row(&mut self, delta: i32) -> Vec<Effect> {
+        match self.dj_panel.selected() {
+            DjRow::Armed => self.toggle_autodj(),
+            // Not values: Enter opens or asks; ←→ have nothing to move.
+            DjRow::Sources | DjRow::Sample => Vec::new(),
+            row => self.dj_edit(DjEdit::Step(row, delta)),
+        }
+    }
+
+    /// One edit from a room's control, in either shell (clause 51): applied
+    /// to the running lane at once, the rows refit, and a per-library rule
+    /// written where it belongs.
+    pub(crate) fn dj_edit(&mut self, edit: DjEdit) -> Vec<Effect> {
         let step = |value: u32, by: i32, lo: u32, hi: u32| -> u32 {
             (value as i32 + by).clamp(lo as i32, hi as i32) as u32
         };
         let mut effects = Vec::new();
-        match self.dj_panel.selected() {
-            DjRow::Armed => effects = self.toggle_autodj(),
-            DjRow::SongsPerFetch => {
-                self.dj.songs_per_fetch = step(self.dj.songs_per_fetch, delta, 1, dj::SONGS_PER_FETCH_MAX);
-            }
-            DjRow::Sonic => {
-                self.dj.sonic = !self.dj.sonic;
-                // Switching off clears the lane's anchors (clause 43).
-                if !self.dj.sonic {
-                    self.lane.history.clear();
+        match edit {
+            DjEdit::Step(row, delta) => match row {
+                DjRow::Armed | DjRow::Sources | DjRow::Sample => {}
+                DjRow::SongsPerFetch => {
+                    self.dj.songs_per_fetch = step(self.dj.songs_per_fetch, delta, 1, dj::SONGS_PER_FETCH_MAX);
+                }
+                DjRow::Sonic => {
+                    self.dj.sonic = !self.dj.sonic;
+                    // Switching off clears the lane's anchors (clause 43).
+                    if !self.dj.sonic {
+                        self.lane.history.clear();
+                        self.lane.locked_pin = None;
+                    }
+                }
+                DjRow::Strictness => {
+                    let raw = self.dj.sonic_min_similarity + f64::from(delta) * dj::SONIC_STEP;
+                    self.dj.sonic_min_similarity = dj::clamp_similarity(raw);
+                }
+                DjRow::Anchor => {
+                    self.dj.sonic_anchor = self.dj.sonic_anchor.next();
+                    self.lane.locked_pin = None;
+                }
+                DjRow::EmptyQueue => self.dj.empty_queue = self.dj.empty_queue.next(),
+                DjRow::Bpm => self.dj.bpm = !self.dj.bpm,
+                DjRow::Tolerance => {
+                    self.dj.bpm_tolerance =
+                        step(self.dj.bpm_tolerance, delta, dj::BPM_TOLERANCE_MIN, dj::BPM_TOLERANCE_MAX);
+                }
+                DjRow::Harmonic => {
+                    self.dj.harmonic = !self.dj.harmonic;
+                    if !self.dj.harmonic {
+                        self.lane.camelot_anchor = None;
+                    }
+                }
+                DjRow::Cooldown => {
+                    self.dj.artist_cooldown = step(self.dj.artist_cooldown, delta, 0, dj::ARTIST_COOLDOWN_MAX);
+                }
+                DjRow::Rating => {
+                    let now = self.dj_library().min_rating;
+                    effects = self.set_dj_rating(step(now, delta, 0, dj::RATING_MAX));
+                }
+                DjRow::Length => self.dj.length = !self.dj.length,
+                DjRow::Shortest => {
+                    let by = delta * dj::LENGTH_STEP_SECONDS as i32;
+                    self.dj.min_seconds = step(self.dj.min_seconds, by, 0, self.dj.max_seconds);
+                }
+                DjRow::Longest => {
+                    let by = delta * dj::LENGTH_STEP_SECONDS as i32;
+                    self.dj.max_seconds =
+                        step(self.dj.max_seconds, by, self.dj.min_seconds, dj::LENGTH_RAIL_SECONDS);
+                }
+                DjRow::UnknownLength => self.dj.allow_unknown_length = !self.dj.allow_unknown_length,
+                DjRow::Genres => {
+                    let mode = self.dj_library().genre_mode.next();
+                    effects = self.set_dj_genre_mode(mode);
+                }
+                DjRow::Keywords => self.dj.keyword_filter = !self.dj.keyword_filter,
+            },
+            DjEdit::Set(row, value) => match row {
+                DjRow::SongsPerFetch => self.dj.songs_per_fetch = value.clamp(1, dj::SONGS_PER_FETCH_MAX),
+                DjRow::Strictness => {
+                    self.dj.sonic_min_similarity = dj::clamp_similarity(f64::from(value) / 100.0);
+                }
+                DjRow::Tolerance => {
+                    self.dj.bpm_tolerance = value.clamp(dj::BPM_TOLERANCE_MIN, dj::BPM_TOLERANCE_MAX);
+                }
+                DjRow::Cooldown => self.dj.artist_cooldown = value.min(dj::ARTIST_COOLDOWN_MAX),
+                DjRow::Rating => effects = self.set_dj_rating(value.min(dj::RATING_MAX)),
+                DjRow::Shortest => self.dj.min_seconds = value.min(self.dj.max_seconds),
+                DjRow::Longest => {
+                    self.dj.max_seconds = value.clamp(self.dj.min_seconds, dj::LENGTH_RAIL_SECONDS);
+                }
+                _ => {}
+            },
+            DjEdit::Anchor(anchor) => {
+                if self.dj.sonic_anchor != anchor {
+                    self.dj.sonic_anchor = anchor;
                     self.lane.locked_pin = None;
                 }
             }
-            DjRow::Strictness => {
-                let raw = self.dj.sonic_min_similarity + f64::from(delta) * dj::SONIC_STEP;
-                self.dj.sonic_min_similarity = dj::clamp_similarity(raw);
-            }
-            DjRow::Anchor => {
-                self.dj.sonic_anchor = self.dj.sonic_anchor.next();
-                self.lane.locked_pin = None;
-            }
-            DjRow::EmptyQueue => self.dj.empty_queue = self.dj.empty_queue.next(),
-            DjRow::Bpm => self.dj.bpm = !self.dj.bpm,
-            DjRow::Tolerance => {
-                self.dj.bpm_tolerance =
-                    step(self.dj.bpm_tolerance, delta, dj::BPM_TOLERANCE_MIN, dj::BPM_TOLERANCE_MAX);
-            }
-            DjRow::Harmonic => {
-                self.dj.harmonic = !self.dj.harmonic;
-                if !self.dj.harmonic {
-                    self.lane.camelot_anchor = None;
+            DjEdit::EmptyQueue(choice) => self.dj.empty_queue = choice,
+            DjEdit::GenreMode(mode) => effects = self.set_dj_genre_mode(mode),
+            DjEdit::Genre(name) => effects = self.toggle_dj_genre(name),
+            DjEdit::AddKeyword(word) => {
+                let word = word.trim().to_string();
+                if word.is_empty() {
+                    return Vec::new();
                 }
+                if self.dj.keywords.iter().any(|k| k.eq_ignore_ascii_case(&word)) {
+                    return Vec::new();
+                }
+                if self.dj.keywords.len() >= dj::KEYWORDS_MAX {
+                    self.info(format!("At most {} keywords.", dj::KEYWORDS_MAX));
+                    return Vec::new();
+                }
+                self.dj.keywords.push(word);
+                // A word added with the filter off is a dead end; switch it
+                // on rather than silently ignoring the word.
+                self.dj.keyword_filter = true;
             }
-            DjRow::Cooldown => {
-                self.dj.artist_cooldown = step(self.dj.artist_cooldown, delta, 0, dj::ARTIST_COOLDOWN_MAX);
-            }
-            DjRow::Rating => self.dj.min_rating = step(self.dj.min_rating, delta, 0, dj::RATING_MAX),
-            DjRow::Length => self.dj.length = !self.dj.length,
-            DjRow::Shortest => {
-                let by = delta * dj::LENGTH_STEP_SECONDS as i32;
-                self.dj.min_seconds = step(self.dj.min_seconds, by, 0, self.dj.max_seconds);
-            }
-            DjRow::Longest => {
-                let by = delta * dj::LENGTH_STEP_SECONDS as i32;
-                self.dj.max_seconds =
-                    step(self.dj.max_seconds, by, self.dj.min_seconds, dj::LENGTH_RAIL_SECONDS);
-            }
-            DjRow::UnknownLength => self.dj.allow_unknown_length = !self.dj.allow_unknown_length,
-            DjRow::Genres => self.dj.genre_mode = self.dj.genre_mode.next(),
-            DjRow::Keywords => self.dj.keyword_filter = !self.dj.keyword_filter,
-            // Not values: Enter opens or asks; ←→ have nothing to move.
-            DjRow::Sources | DjRow::Sample => {}
+            DjEdit::RemoveKeyword(word) => self.dj.keywords.retain(|k| !k.eq_ignore_ascii_case(&word)),
         }
         self.dj_panel.rebuild(&self.dj, self.dj_info.as_ref(), self.dj_is_peer());
         effects
     }
 
-    fn open_genre_picker(&mut self) -> Vec<Effect> {
+    // ── The library's rules (clause 51) ────────────────────────────────────
+
+    /// The library a room edits: the DJ's server while armed, else the
+    /// session's — the one Start would use.
+    pub(crate) fn dj_library_target(&self) -> Option<String> {
+        self.dj_server.clone().or_else(|| self.session_identity())
+    }
+
+    /// That library's rules as the room shows them and the request sends
+    /// them: the server entry's own, with the session-wide fallbacks behind.
+    pub fn dj_library(&self) -> dj::LibraryFilters {
+        match self.dj_library_target() {
+            Some(identity) => self.library_for(&identity),
+            None => dj::LibraryFilters::resolve(&self.dj, &Default::default(), false),
+        }
+    }
+
+    /// The saved entry a per-library rule is written to, when there is one.
+    fn dj_library_entry(&self) -> Option<usize> {
+        let target = self.dj_library_target()?;
+        self.servers.iter().position(|s| crate::config::same_server(&s.id, &target))
+    }
+
+    fn save_dj_library(&self, index: usize) -> Vec<Effect> {
+        let known = &self.servers[index];
+        vec![Effect::SaveDjLibrary { server: known.id.clone(), overrides: known.dj.clone() }]
+    }
+
+    fn set_dj_rating(&mut self, rating: u32) -> Vec<Effect> {
+        match self.dj_library_entry() {
+            Some(i) => {
+                self.servers[i].dj.min_rating = Some(rating);
+                self.save_dj_library(i)
+            }
+            None => {
+                self.dj.min_rating = rating;
+                Vec::new()
+            }
+        }
+    }
+
+    fn set_dj_genre_mode(&mut self, mode: dj::GenreMode) -> Vec<Effect> {
+        match self.dj_library_entry() {
+            Some(i) => {
+                self.servers[i].dj.genre_mode = Some(mode.label().to_string());
+                self.save_dj_library(i)
+            }
+            None => {
+                self.dj.genre_mode = mode;
+                Vec::new()
+            }
+        }
+    }
+
+    /// A genre in or out of the chosen set (clause 48), at most
+    /// [`dj::GENRES_MAX`]; choosing with the filter off switches it on
+    /// rather than silently ignoring the choice.
+    fn toggle_dj_genre(&mut self, name: String) -> Vec<Effect> {
+        let library = self.dj_library();
+        let mut genres = library.genres;
+        if let Some(at) = genres.iter().position(|g| *g == name) {
+            genres.remove(at);
+        } else {
+            if genres.len() >= dj::GENRES_MAX {
+                self.info(format!("At most {} genres.", dj::GENRES_MAX));
+                return Vec::new();
+            }
+            genres.push(name);
+        }
+        let mode = if library.genre_mode == dj::GenreMode::Off && !genres.is_empty() {
+            dj::GenreMode::Whitelist
+        } else {
+            library.genre_mode
+        };
+        match self.dj_library_entry() {
+            Some(i) => {
+                self.servers[i].dj.genres = Some(genres);
+                self.servers[i].dj.genre_mode = Some(mode.label().to_string());
+                self.save_dj_library(i)
+            }
+            None => {
+                self.dj.genres = genres;
+                self.dj.genre_mode = mode;
+                Vec::new()
+            }
+        }
+    }
+
+    /// The room's server picker (clause 41): re-selecting the DJ's server is
+    /// a no-op (a restart would drop the lane for nothing); another moves the
+    /// DJ there and starts a new lane.
+    pub(crate) fn dj_move_to(&mut self, identity: String) -> Vec<Effect> {
+        if self.dj_server.as_deref().is_some_and(|s| crate::config::same_server(s, &identity)) {
+            return Vec::new();
+        }
+        self.arm_dj(identity)
+    }
+
+    /// Either picker closed, whichever shell drew it.
+    pub(crate) fn close_dj_picker(&mut self) {
+        self.dj_panel.genres = None;
+        self.dj_panel.sources = None;
+    }
+
+    /// The room opened with the DJ off: what the session's server offers
+    /// decides which rows show (clause 50), so it is probed like the DJ's
+    /// own would be.
+    pub(crate) fn dj_room_opened(&mut self) -> Vec<Effect> {
+        if self.dj_server.is_some() || self.dj_info.is_some() {
+            return Vec::new();
+        }
+        let Some(identity) = self.session_identity() else { return Vec::new() };
+        match self.reach_for(&identity) {
+            Ok(reach) => vec![Effect::Api(ApiCmd::DjProbe { identity, reach })],
+            Err(_) => Vec::new(),
+        }
+    }
+
+    pub(crate) fn open_genre_picker(&mut self) -> Vec<Effect> {
         self.dj_panel.genres = Some(GenrePicker { loading: true, ..Default::default() });
         vec![Effect::Api(ApiCmd::Genres)]
     }
@@ -939,16 +1141,7 @@ impl App {
                 if sources {
                     return self.toggle_dj_source(&name);
                 }
-                if let Some(at) = self.dj.genres.iter().position(|g| *g == name) {
-                    self.dj.genres.remove(at);
-                } else {
-                    self.dj.genres.push(name);
-                }
-                // Choosing genres with the filter off is a dead end;
-                // switch it on rather than silently ignoring the choice.
-                if self.dj.genre_mode == dj::GenreMode::Off && !self.dj.genres.is_empty() {
-                    self.dj.genre_mode = dj::GenreMode::Whitelist;
-                }
+                return self.dj_edit(DjEdit::Genre(name));
             }
             _ => {}
         }
@@ -957,7 +1150,7 @@ impl App {
 
     /// Preview (clause 53): three picks with the current settings, none of
     /// them queued.
-    fn sample_dj(&mut self) -> Vec<Effect> {
+    pub(crate) fn sample_dj(&mut self) -> Vec<Effect> {
         if self.dj_panel.sample_pending {
             return Vec::new();
         }

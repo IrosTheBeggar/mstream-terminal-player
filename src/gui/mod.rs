@@ -168,6 +168,30 @@ pub(crate) enum Act {
     DjCancel,
     DjSurprise,
     DjPick,
+    /// The Auto DJ room (auto-dj contract, clauses 40–53): its rows, bars,
+    /// radios, chips, the keyword field, the genre and server pickers.
+    DjBack,
+    DjFocus(dj::Item),
+    DjStep(crate::tui::app::DjRow, i32),
+    DjSet(crate::tui::app::DjRow, u32),
+    DjAnchor(crate::dj::SonicAnchor),
+    DjEmpty(crate::dj::EmptyQueueStart),
+    DjGenreMode(crate::dj::GenreMode),
+    DjGenre(String),
+    DjPickGenres,
+    DjGenresClose,
+    DjGenresScrollBy(i32),
+    DjGenresScrollTo(usize),
+    DjKeywordFocus,
+    DjKeywordAdd,
+    DjKeywordRemove(String),
+    DjSource(String),
+    DjPreview,
+    DjServerPick,
+    DjServer(usize),
+    DjServerClose,
+    DjScrollBy(i32),
+    DjScrollTo(usize),
     /// Whichever level is on screen scrolls.
     PlScrollBy(i32),
     PlScrollTo(usize),
@@ -353,12 +377,15 @@ const ROW_BLEND_SKIPS: usize = 2;
 const ROW_PAUSE_FADE: usize = 3;
 /// The queue and the place in it come back on launch (contract clause 39).
 const ROW_RESUME: usize = 4;
-const ROW_MANAGE: usize = 5;
+/// The LISTEN group: the Auto DJ room's doorway (auto-dj contract, entry
+/// point 2).
+const ROW_DJ: usize = 5;
+const ROW_MANAGE: usize = 6;
 /// The torrents group: the Add-torrent doorway (the room, like Manage
 /// servers) and the ask-me switch for torrents arriving from outside.
-const ROW_TORRENT: usize = 6;
-const ROW_ASK: usize = 7;
-const SET_ROWS: usize = 8;
+const ROW_TORRENT: usize = 7;
+const ROW_ASK: usize = 8;
+const SET_ROWS: usize = 9;
 
 /// Seconds of blend as a person reads them (the TUI's own spelling).
 fn fmt_blend(seconds: f32) -> String {
@@ -433,6 +460,8 @@ pub(crate) struct Gui {
     playlists: playlists::PlaylistsUi,
     /// The Add-torrent room: its form, picker, chooser and threads.
     torrent: torrent::TorrentUi,
+    /// The Auto DJ room: its cursor, scroll, inputs and pickers.
+    dj: dj::DjUi,
     /// The last frame left paced work unfinished (covers still waiting to
     /// upgrade to pixels): the event loop shortens its idle wait so the
     /// next frame comes promptly instead of a poll tick later.
@@ -473,6 +502,7 @@ impl Gui {
             sonic: sonic::SonicUi::new(),
             playlists: playlists::PlaylistsUi::new(),
             torrent: torrent::TorrentUi::new(),
+            dj: dj::DjUi::new(),
             hot: false,
         }
     }
@@ -539,6 +569,7 @@ impl Gui {
         match row {
             // ← on a doorway row would "adjust" into the room; only an
             // activation (Enter, click, →) opens it.
+            ROW_DJ if delta > 0 => dj::open_room(self),
             ROW_MANAGE if delta > 0 => servers::open_room(self),
             ROW_TORRENT if delta > 0 => torrent::open_room(self),
             ROW_ASK => {
@@ -628,6 +659,7 @@ impl Gui {
                 self.servers.drop_open = false;
                 self.servers.room = false;
                 self.torrent.room = false;
+                self.dj.room = false;
                 self.note = (!matches!(
                     i,
                     FILES_NAV | ALBUMS_NAV | SEARCH_NAV | SETTINGS_NAV | SONIC_NAV
@@ -990,8 +1022,8 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         put(frame, 1, area.height - 7, &bar::clip(&text, area.width as usize - 2), style);
     }
-    let tips = if dj::modal_open(gui) {
-        t!("gui.dj.start_keys")
+    let tips = if let Some(tip) = dj::tips(gui) {
+        std::borrow::Cow::from(tip)
     } else if gui.servers.modal_open() {
         t!("gui.tips.form")
     } else if gui.torrent.modal_open() {
@@ -1002,8 +1034,6 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         std::borrow::Cow::from(playlists::tips(gui))
     } else if matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_))) {
         t!("gui.tips.sonic_pick")
-    } else if gui.app.capture == Some(crate::tui::app::Capture::DjSeed) {
-        t!("gui.tips.dj_pick")
     } else if gui.servers.room && gui.active == SETTINGS_NAV {
         // The bundled server's row has no remove key to name; a peer's row
         // has its own verbs.
@@ -1628,10 +1658,14 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if gui.torrent.room {
         return torrent::draw_room(frame, gui, content);
     }
+    if gui.dj.room {
+        return dj::draw_room(frame, gui, content);
+    }
     let (check_on, check_off) = if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") };
     put(frame, content.x, content.y, &t!("gui.set.playback"), dim());
-    put(frame, content.x, content.y + 7, &t!("gui.set.servers_group"), dim());
-    put(frame, content.x, content.y + 10, &t!("gui.set.torrents_group"), dim());
+    put(frame, content.x, content.y + 7, &t!("gui.set.listen_group"), dim());
+    put(frame, content.x, content.y + 10, &t!("gui.set.servers_group"), dim());
+    put(frame, content.x, content.y + 13, &t!("gui.set.torrents_group"), dim());
 
     let rows: [(String, String); SET_ROWS] = [
         (
@@ -1665,6 +1699,10 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 t!("gui.set.resume")
             ),
             t!("gui.set.resume_desc").to_string(),
+        ),
+        (
+            format!("{} {}", t!("gui.set.dj"), if legacy_conhost() { ">" } else { "▸" }),
+            t!("gui.set.dj_desc").to_string(),
         ),
         (
             format!("{} {}", t!("gui.srv.manage"), if legacy_conhost() { ">" } else { "▸" }),
@@ -1721,10 +1759,11 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 /// Where settings row `i` draws, under its section label.
 fn row_y(top: u16, i: usize) -> u16 {
     match i {
-        i if i < ROW_MANAGE => top + 1 + i as u16,
-        ROW_MANAGE => top + 8,
-        ROW_TORRENT => top + 11,
-        _ => top + 12,
+        i if i < ROW_DJ => top + 1 + i as u16,
+        ROW_DJ => top + 8,
+        ROW_MANAGE => top + 11,
+        ROW_TORRENT => top + 14,
+        _ => top + 15,
     }
 }
 
@@ -2106,9 +2145,13 @@ impl Gui {
             }
             NavId::Sonic => sonic::wheel(self, delta),
             NavId::Playlists => playlists::wheel(self, delta),
-            // Settings scrolls nothing itself; its Add-torrent room's
-            // file picker does.
-            NavId::Settings => torrent::wheel(self, delta),
+            // Settings scrolls nothing itself; its Auto DJ room and genre
+            // picker do, and its Add-torrent room's file picker.
+            NavId::Settings => {
+                if !dj::wheel(self, delta) {
+                    torrent::wheel(self, delta);
+                }
+            }
             // Nothing scrollable in these rooms — said here, on the
             // record, rather than by falling through a router.
             NavId::Artists | NavId::Genres | NavId::Recent => {}

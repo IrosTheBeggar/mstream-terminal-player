@@ -301,6 +301,8 @@ pub const SONIC_STEP: f64 = 0.05;
 pub const LENGTH_RAIL_SECONDS: u32 = 1200;
 pub const LENGTH_STEP_SECONDS: u32 = 15;
 pub const KEYWORDS_MAX: usize = 50;
+/// The genre picker's cap (clause 48).
+pub const GENRES_MAX: usize = 200;
 pub const RATING_MAX: u32 = 10;
 pub const ARTIST_COOLDOWN_MAX: u32 = 20;
 /// How many DJ picks the rolling anchor remembers (clause 23).
