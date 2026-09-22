@@ -68,7 +68,6 @@ dj:
 act:
   rating_failed: "Impossibile salvare la valutazione"
   added_to: "Aggiunto a %{name}"
-  add_failed: "Impossibile aggiungere alla playlist."
   add_failed_why: "Impossibile aggiungere alla playlist: %{why}"
 
 login_problem:
@@ -1096,9 +1095,7 @@ gui:
   search:
     placeholder: "(scrivi per cercare)"
     edit_tip: "Modifica la ricerca — /"
-  coming: "%{name} arriva con la parte di navigazione — oggi Impostazioni è la stanza che funziona."
   nothing_playing: "(niente in riproduzione)"
-  audio_failed: "audio: %{error}"
   shuffle_word: "casuale"
   repeat_word: "ripeti"
   queue:
@@ -1292,7 +1289,6 @@ gui:
     form_code: "CODICE DI ASSOCIAZIONE"
     need_code: "incolla prima un codice di associazione"
     dialling: "apertura del tunnel — può richiedere qualche secondo…"
-    close_tip: "Chiudi — Esc"
     reaching: "connessione a %{server}…"
     offline: "%{server} è offline — impossibile connettersi"
     offline_hint: "Riprova, oppure scegli un altro server."

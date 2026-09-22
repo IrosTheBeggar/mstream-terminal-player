@@ -518,14 +518,8 @@ pub fn modal_frame_anchored(
 /// The modal's close control: `[X]` on the title row, right edge. Dim
 /// until hovered, then BRIGHT — dismissal is neutral, unlike a row
 /// remove's destructive red. Esc remains the keyboard path (the tip
-/// says so).
-pub fn modal_close<A: Clone>(
-    frame: &mut Frame,
-    s: &mut Surface<A>,
-    inner: Rect,
-    act: A,
-    tip: impl Into<String>,
-) {
+/// says so — the same words on every modal in the family).
+pub fn modal_close<A: Clone>(frame: &mut Frame, s: &mut Surface<A>, inner: Rect, act: A) {
     let rect = Rect { x: inner.right().saturating_sub(3), y: inner.y, width: 3, height: 1 };
     let hovered = s.pointer.is_some_and(|p| rect.contains(p));
     let style = if hovered {
@@ -535,7 +529,7 @@ pub fn modal_close<A: Clone>(
     };
     frame.render_widget(Paragraph::new(Span::styled("[X]", style)), rect);
     s.click(rect, act);
-    s.tip(rect, tip);
+    s.tip(rect, rust_i18n::t!("path_modal.tip_close").to_string());
 }
 
 // ── Scrolling ────────────────────────────────────────────────────────────────

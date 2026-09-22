@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::api::types::TrackMetadata;
+use crate::tui::worker::dj_log;
 use rust_i18n::t;
 
 /// A rating write that is out, with what it replaced.
@@ -204,12 +205,4 @@ impl App {
         let reach = self.row_reach(origin);
         vec![Effect::Api(ApiCmd::PlaylistNames { reach })]
     }
-}
-
-/// The action's own log line, native only.
-fn dj_log(line: String) {
-    #[cfg(not(target_arch = "wasm32"))]
-    tracing::info!("{line}");
-    #[cfg(target_arch = "wasm32")]
-    let _ = line;
 }

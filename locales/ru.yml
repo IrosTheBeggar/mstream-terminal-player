@@ -68,7 +68,6 @@ dj:
 act:
   rating_failed: "Не удалось сохранить оценку"
   added_to: "Добавлено в %{name}"
-  add_failed: "Не удалось добавить в плейлист."
   add_failed_why: "Не удалось добавить в плейлист — %{why}"
 
 login_problem:
@@ -1096,9 +1095,7 @@ gui:
   search:
     placeholder: "(введите запрос)"
     edit_tip: "Изменить поиск — /"
-  coming: "%{name} появится с частью обзора — сегодня работает комната Настройки."
   nothing_playing: "(ничего не играет)"
-  audio_failed: "аудио: %{error}"
   shuffle_word: "случайно"
   repeat_word: "повтор"
   queue:
@@ -1292,7 +1289,6 @@ gui:
     form_code: "КОД СОПРЯЖЕНИЯ"
     need_code: "сначала вставьте код сопряжения"
     dialling: "открываем туннель — это может занять несколько секунд…"
-    close_tip: "Закрыть — Esc"
     reaching: "подключение к %{server}…"
     offline: "%{server} не в сети — не удалось подключиться"
     offline_hint: "Попробуйте снова или выберите другой сервер."

@@ -68,7 +68,6 @@ dj:
 act:
   rating_failed: "Bewertung konnte nicht gespeichert werden"
   added_to: "Zu %{name} hinzugefügt"
-  add_failed: "Konnte nicht zur Wiedergabeliste hinzugefügt werden."
   add_failed_why: "Konnte nicht zur Wiedergabeliste hinzugefügt werden – %{why}"
 
 login_problem:
@@ -1096,9 +1095,7 @@ gui:
   search:
     placeholder: "(zum Suchen tippen)"
     edit_tip: "Suche bearbeiten — /"
-  coming: "%{name} kommt mit dem Browse-Teil — heute ist Einstellungen der funktionierende Raum."
   nothing_playing: "(nichts spielt)"
-  audio_failed: "Audio: %{error}"
   shuffle_word: "zufall"
   repeat_word: "wiederholen"
   queue:
@@ -1292,7 +1289,6 @@ gui:
     form_code: "KOPPLUNGSCODE"
     need_code: "erst einen Kopplungscode einfügen"
     dialling: "wähle den Tunnel — das kann ein paar Sekunden dauern…"
-    close_tip: "Schließen — Esc"
     reaching: "erreiche %{server}…"
     offline: "%{server} ist offline – keine Verbindung möglich"
     offline_hint: "Versuche es erneut oder wähle einen anderen Server."

@@ -68,7 +68,6 @@ dj:
 act:
   rating_failed: "Could not save rating"
   added_to: "Added to %{name}"
-  add_failed: "Couldn't add to the playlist."
   add_failed_why: "Couldn't add to the playlist — %{why}"
 
 login_problem:
@@ -1096,9 +1095,7 @@ gui:
   search:
     placeholder: "(type to search)"
     edit_tip: "Edit the search — /"
-  coming: "%{name} arrives with the browse slice — Settings is the working room today."
   nothing_playing: "(nothing playing)"
-  audio_failed: "audio: %{error}"
   shuffle_word: "shuffle"
   repeat_word: "repeat"
   queue:
@@ -1292,7 +1289,6 @@ gui:
     form_code: "PAIRING CODE"
     need_code: "paste a pairing code first"
     dialling: "dialling the tunnel — this can take a few seconds…"
-    close_tip: "Close — Esc"
     reaching: "reaching %{server}…"
     offline: "%{server} is offline — couldn't connect"
     offline_hint: "Try again, or pick another server."

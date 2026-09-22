@@ -68,7 +68,6 @@ dj:
 act:
   rating_failed: "无法保存评分"
   added_to: "已添加到 %{name}"
-  add_failed: "无法添加到播放列表。"
   add_failed_why: "无法添加到播放列表 — %{why}"
 
 login_problem:
@@ -1096,9 +1095,7 @@ gui:
   search:
     placeholder: "(输入以搜索)"
     edit_tip: "编辑搜索 — /"
-  coming: "%{name} 将随浏览部分一起到来 — 今天可用的是设置。"
   nothing_playing: "(没有播放内容)"
-  audio_failed: "音频：%{error}"
   shuffle_word: "随机"
   repeat_word: "循环"
   queue:
@@ -1292,7 +1289,6 @@ gui:
     form_code: "配对码"
     need_code: "请先粘贴配对码"
     dialling: "正在连接隧道 — 可能需要几秒…"
-    close_tip: "关闭 — Esc"
     reaching: "正在连接 %{server}…"
     offline: "%{server} 已离线 — 无法连接"
     offline_hint: "请重试，或选择其他服务器。"

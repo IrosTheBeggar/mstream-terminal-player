@@ -312,7 +312,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         gui.ui.click(area, Act::PlCancel);
         let inner = modal_frame_on(frame, &mut gui.ui, area, 52, 7, th().accent);
         put(frame, inner.x + 1, inner.y, &title, accent().add_modifier(Modifier::BOLD));
-        crate::kit::modal_close(frame, &mut gui.ui, inner, Act::PlCancel, t!("gui.srv.close_tip").to_string());
+        crate::kit::modal_close(frame, &mut gui.ui, inner, Act::PlCancel);
         put(
             frame,
             inner.x + 1,

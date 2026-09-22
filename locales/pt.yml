@@ -68,7 +68,6 @@ dj:
 act:
   rating_failed: "Não foi possível salvar a avaliação"
   added_to: "Adicionado a %{name}"
-  add_failed: "Não foi possível adicionar à playlist."
   add_failed_why: "Não foi possível adicionar à playlist — %{why}"
 
 login_problem:
@@ -1096,9 +1095,7 @@ gui:
   search:
     placeholder: "(digite para buscar)"
     edit_tip: "Editar a busca — /"
-  coming: "%{name} chega com a parte de navegação — hoje Ajustes é a sala que funciona."
   nothing_playing: "(nada tocando)"
-  audio_failed: "áudio: %{error}"
   shuffle_word: "aleatório"
   repeat_word: "repetir"
   queue:
@@ -1292,7 +1289,6 @@ gui:
     form_code: "CÓDIGO DE PAREAMENTO"
     need_code: "cole primeiro um código de pareamento"
     dialling: "discando o túnel — pode levar alguns segundos…"
-    close_tip: "Fechar — Esc"
     reaching: "conectando a %{server}…"
     offline: "%{server} está offline — não foi possível conectar"
     offline_hint: "Tente novamente ou escolha outro servidor."

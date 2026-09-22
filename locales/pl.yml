@@ -68,7 +68,6 @@ dj:
 act:
   rating_failed: "Nie udało się zapisać oceny"
   added_to: "Dodano do %{name}"
-  add_failed: "Nie udało się dodać do playlisty."
   add_failed_why: "Nie udało się dodać do playlisty – %{why}"
 
 login_problem:
@@ -1096,9 +1095,7 @@ gui:
   search:
     placeholder: "(pisz, aby szukać)"
     edit_tip: "Edytuj wyszukiwanie — /"
-  coming: "%{name} pojawi się z częścią przeglądania — dziś działa pokój Ustawienia."
   nothing_playing: "(nic nie gra)"
-  audio_failed: "audio: %{error}"
   shuffle_word: "losowo"
   repeat_word: "powtórz"
   queue:
@@ -1292,7 +1289,6 @@ gui:
     form_code: "KOD PAROWANIA"
     need_code: "najpierw wklej kod parowania"
     dialling: "łączenie z tunelem — to może potrwać kilka sekund…"
-    close_tip: "Zamknij — Esc"
     reaching: "łączenie z %{server}…"
     offline: "%{server} jest offline — nie udało się połączyć"
     offline_hint: "Spróbuj ponownie albo wybierz inny serwer."

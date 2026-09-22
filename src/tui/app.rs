@@ -338,10 +338,8 @@ pub enum Action {
     ToggleAutoDj,
     /// The empty-queue openers (auto-dj contract, clauses 3, 4 and 16):
     /// the filtered random song, or the library under a banner — the GUI's
-    /// empty-state buttons and chooser send these (slice A3).
-    #[allow(dead_code)]
+    /// empty-state buttons and chooser send these.
     DjSurprise,
-    #[allow(dead_code)]
     DjPick,
     /// `J` — open the Sonic Path tab aimed at the highlighted track.
     StartJourney,

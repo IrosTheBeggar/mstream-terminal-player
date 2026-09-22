@@ -11,10 +11,10 @@
 //! `Activate`), which keeps `handle_action`'s follow-up work — waveform
 //! prefetch, the crossfade announcement — running exactly as the TUI's.
 //!
-//! This slice: the left nav with a WORKING Files browser (browse, click to
-//! play, `a` to queue), the live queue panel, both bottom bars against real
-//! playback, and the Settings room. `MSTREAM_GUI_DEMO=1` still seats a
-//! fixed track for looking at the bars with no server at hand.
+//! The shell: the left nav's rooms (each a module of its own under this
+//! one), the live queue panel, both bottom bars against real playback, and
+//! the modals the rooms open. `MSTREAM_GUI_DEMO=1` seats a fixed track for
+//! looking at the bars with no server at hand.
 //!
 //! Design: the "mStream Player GUI" canvas + docs/ui-kit.md.
 
@@ -240,10 +240,9 @@ pub(crate) enum Act {
     SonMenuClose,
     /// A length-bar cell, clicked: the stop count it means.
     SonLen(u32),
+    /// Build the journey — also the results' Regenerate and the failure
+    /// states' Retry, which are Build by other names.
     SonBuild,
-    SonRegen,
-    /// The failure states' Retry — Build by another name.
-    SonRetry,
     SonStartOver,
     /// A stop row: play the journey from there. The hover [+] queues it.
     SonRow(usize),
@@ -261,26 +260,26 @@ pub(crate) enum Act {
     SrvMenu,
     /// The room's "Try again" on a server that would not answer.
     SrvRetry,
-    /// A dropdown row: switch the session to saved server `i`.
-    SrvDrop(usize),
     /// Open the add-server form (the header [+], the dropdown's last row,
     /// the room's add row, the no-server screen's button).
     SrvAdd,
     SrvCloseDrop,
-    /// Room rows: select, and the selected row's action words.
+    /// Room rows: select, and the selected row's action words. Switch is
+    /// also what a dropdown row means.
     SrvRow(usize),
     SrvSwitch(usize),
     SrvEdit(usize),
     SrvDefault(usize),
     SrvQr(usize),
-    /// Opens the remove confirmation; the bool answers it.
+    /// Opens the remove confirmation — for a saved server, and for a
+    /// peer's record once its parent stopped listing it, where the word
+    /// is Forget (contract clause 25); the bool answers it.
     SrvRemove(usize),
     SrvConfirm(bool),
-    /// A federated peer's verbs: park it, offer it again, drop a record
-    /// its parent stopped listing (contract clauses 23–25).
+    /// A federated peer's verbs: park it, offer it again (contract clauses
+    /// 23–24).
     SrvHide(usize),
     SrvShow(usize),
-    SrvForget(usize),
     /// The form's fields, checkboxes and buttons.
     FormFocus(usize),
     FormToggle(usize),
@@ -330,9 +329,7 @@ pub(crate) enum Act {
 
 // ── Navigation ──────────────────────────────────────────────────────────────
 
-/// The sidebar, in draw order. Files and Settings are the working rooms
-/// this slice; the rest name where the tag-based browse lands and say so
-/// when asked.
+/// The sidebar, in draw order — every row is a room of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NavId {
     Files,
@@ -711,12 +708,8 @@ impl Gui {
                 self.servers.room = false;
                 self.torrent.room = false;
                 self.dj.room = false;
-                self.note = (!matches!(
-                    i,
-                    FILES_NAV | ALBUMS_NAV | ARTISTS_NAV | GENRES_NAV | RECENT_NAV | SEARCH_NAV
-                        | SETTINGS_NAV | SONIC_NAV | PLAYLISTS_NAV
-                ))
-                .then(|| (t!("gui.coming", name = NAV[i].label()).to_string(), false));
+                // The shell's own note was about the room being left.
+                self.note = None;
                 // The Library rooms open their root list fresh on every
                 // visit (library-rooms contract, entry point 1).
                 if let Some(root) = library::root_of(i)
@@ -992,6 +985,21 @@ fn bright_bold() -> Style {
     Style::default().fg(th().bright).add_modifier(Modifier::BOLD)
 }
 
+/// A 1-row text button: dim at rest, bright under the pointer; the
+/// accent when it is the row's one way forward. Returns its width.
+fn text_button(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, label: &str, lead: bool, act: Act) -> u16 {
+    let rect = Rect { x, y, width: label.chars().count() as u16, height: 1 };
+    let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+    let style = match (hover, lead) {
+        (true, _) => bright_bold(),
+        (false, true) => accent(),
+        (false, false) => dim(),
+    };
+    put(frame, x, y, label, style);
+    gui.ui.click(rect, act);
+    rect.width
+}
+
 fn sel() -> Style {
     Style::default().bg(th().accent).fg(th().on_accent)
 }
@@ -1046,18 +1054,16 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
 
     // The content column, between the nav rule and the queue (when open).
     let content = content_rect(area.width, area.height, gui.queue_open);
-    match gui.active {
-        FILES_NAV => draw_files(frame, gui, content),
-        ALBUMS_NAV => albums::draw(frame, gui, content),
-        ARTISTS_NAV | GENRES_NAV | RECENT_NAV => library::draw(frame, gui, content),
-        SEARCH_NAV => draw_search(frame, gui, content),
-        SETTINGS_NAV => draw_settings(frame, gui, content),
-        SONIC_NAV => sonic::draw(frame, gui, content),
-        PLAYLISTS_NAV => playlists::draw(frame, gui, content),
-        i => {
-            put(frame, content.x, content.y, &NAV[i].label(), Style::default().add_modifier(Modifier::BOLD));
-            put(frame, content.x, content.y + 2, &t!("gui.coming", name = NAV[i].label()), dim());
-        }
+    // Exhaustive over the nav, like the wheel: a room cannot ship without
+    // a body.
+    match NAV[gui.active] {
+        NavId::Files => draw_files(frame, gui, content),
+        NavId::Albums => albums::draw(frame, gui, content),
+        NavId::Artists | NavId::Genres | NavId::Recent => library::draw(frame, gui, content),
+        NavId::Search => draw_search(frame, gui, content),
+        NavId::Settings => draw_settings(frame, gui, content),
+        NavId::Sonic => sonic::draw(frame, gui, content),
+        NavId::Playlists => playlists::draw(frame, gui, content),
     }
 
     if gui.queue_open {

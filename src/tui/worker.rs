@@ -102,17 +102,13 @@ pub enum ApiCmd {
     /// `id` is up or dialling; answers [`Event::TunnelUp`] or
     /// [`Event::TunnelFailed`].
     TunnelOpen { id: String, credential: String },
-    /// Drop the tunnel under `id`; answers [`Event::TunnelClosed`].
-    // Constructed by the queue's release policy (contract clause 38's grace)
-    // once that lands; the worker's half is here first.
-    #[allow(dead_code)]
+    /// Drop the tunnel under `id`; answers [`Event::TunnelClosed`]. Sent by
+    /// the queue's release policy (contract clause 38's grace).
     TunnelClose { id: String },
     /// Swap what the tunnel under `id` dials with, in place — same port,
     /// same URLs: a refreshed guest ticket, or a new pairing code for the
     /// same server. Silent when it takes; [`Event::TunnelFailed`] when not.
-    // Constructed by the guest-ticket refresh (contract clause 27) once that
-    // lands; the worker's half is here first.
-    #[allow(dead_code)]
+    /// Sent by the guest-ticket refresh (contract clause 27).
     TunnelCredential { id: String, credential: String },
     /// Ask `parent` — reached as `reach` says — for direct access to its
     /// peer `id` (contract clause 27): a guest ticket, or its refusal.
@@ -1519,9 +1515,11 @@ impl Picked {
     }
 }
 
-/// The DJ's second voice (clause 63): the shell's log on the native build;
-/// the browser build has none. This picker is shared by both.
-fn dj_log(line: String) {
+/// The DJ's second voice (clause 63): the shell's log on the native build,
+/// where a filter that quietly does nothing would otherwise be
+/// indistinguishable from one that works; the browser build has none. The
+/// App's DJ and track modules log through here too.
+pub(crate) fn dj_log(line: String) {
     #[cfg(not(target_arch = "wasm32"))]
     tracing::info!("{line}");
     #[cfg(target_arch = "wasm32")]

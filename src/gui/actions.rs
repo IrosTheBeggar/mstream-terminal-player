@@ -304,7 +304,7 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let width: u16 = 66.min(area.width.saturating_sub(2)).max(44);
     let height = (3 + 1 + 1 + actions.len() + 1) as u16 + 2;
     let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
-    modal_close(frame, &mut gui.ui, inner, Act::SheetClose, t!("gui.srv.close_tip").to_string());
+    modal_close(frame, &mut gui.ui, inner, Act::SheetClose);
 
     // The header (clause 2): the cover when there is one, the words beside.
     let mut tx = inner.x + 1;
@@ -411,7 +411,7 @@ fn draw_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         // New playlist: the name, then the add (clause 12).
         let inner = modal_frame_on(frame, &mut gui.ui, area, width, 7, th().accent);
         put(frame, inner.x + 1, inner.y, &t!("gui.pl.new"), accent().add_modifier(Modifier::BOLD));
-        modal_close(frame, &mut gui.ui, inner, Act::PickClose, t!("gui.srv.close_tip").to_string());
+        modal_close(frame, &mut gui.ui, inner, Act::PickClose);
         put(frame, inner.x + 1, inner.y + 2, &input_display(&name, cursor, inner.width.saturating_sub(2)), Style::default());
         put(frame, inner.x + 1, inner.y + 4, &t!("gui.act.name_hint", title = title_of(&sheet.track)), dim());
         return;
@@ -423,7 +423,7 @@ fn draw_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let height = (shown_rows + 2 + usize::from(listed == 0)) as u16 + 2;
     let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
     put(frame, inner.x + 1, inner.y, &t!("gui.act.add_playlist"), accent().add_modifier(Modifier::BOLD));
-    modal_close(frame, &mut gui.ui, inner, Act::PickClose, t!("gui.srv.close_tip").to_string());
+    modal_close(frame, &mut gui.ui, inner, Act::PickClose);
     let mut y = inner.y + 2;
     let mut line = |frame: &mut Frame, gui: &mut Gui, index: usize, label: &str, act: Act, lead: bool| {
         let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
@@ -471,7 +471,7 @@ fn draw_info(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let height = (rows.len() as u16 + 2 + 2).min(area.height.saturating_sub(2));
     let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
     put(frame, inner.x + 1, inner.y, &t!("gui.act.info"), accent().add_modifier(Modifier::BOLD));
-    modal_close(frame, &mut gui.ui, inner, Act::InfoClose, t!("gui.srv.close_tip").to_string());
+    modal_close(frame, &mut gui.ui, inner, Act::InfoClose);
     let label_w: u16 = 14;
     for (i, (label, value)) in rows.iter().enumerate() {
         let y = inner.y + 2 + i as u16;

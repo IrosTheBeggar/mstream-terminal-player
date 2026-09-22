@@ -14,7 +14,7 @@
 //! hand means its request is no longer in flight, decided in one place.
 
 use super::*;
-use crate::tui::worker::DjNote;
+use crate::tui::worker::{DjNote, dj_log};
 use rust_i18n::t;
 
 /// The one-shot opening seed (clause 5): the track that opens a session,
@@ -1241,16 +1241,6 @@ fn dj_failure_words(failure: &DjFailure) -> String {
         DjFailure::NoMatch => t!("dj.fail_no_match").to_string(),
         DjFailure::Server(message) => message.clone(),
     }
-}
-
-/// The DJ's second voice (clause 63): the shell's log on the native build,
-/// where a filter that quietly does nothing would otherwise be
-/// indistinguishable from one that works. The browser build has no log.
-fn dj_log(line: String) {
-    #[cfg(not(target_arch = "wasm32"))]
-    tracing::info!("{line}");
-    #[cfg(target_arch = "wasm32")]
-    let _ = line;
 }
 
 /// Whether two origins name the same server and place.

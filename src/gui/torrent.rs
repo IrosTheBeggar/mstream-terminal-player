@@ -48,7 +48,7 @@ use crate::kit::{
 use crate::tui::worker::Event;
 
 use super::torrent_meta::{self as meta, Confidence, TorrentMeta};
-use super::{Act, Gui, accent, bright_bold, put, sel};
+use super::{Act, Gui, accent, bright_bold, put, sel, text_button};
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -1299,21 +1299,6 @@ fn draw_text_row(
     gui.ui.click(rect, Act::TorRow(row));
 }
 
-/// A 1-row text button: dim at rest, bright under the pointer; the
-/// accent when it is the row's one way forward. Returns its width.
-pub(super) fn text_button(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, label: &str, lead: bool, act: Act) -> u16 {
-    let rect = Rect { x, y, width: label.chars().count() as u16, height: 1 };
-    let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
-    let style = match (hover, lead) {
-        (true, _) => bright_bold(),
-        (false, true) => accent(),
-        (false, false) => dim(),
-    };
-    put(frame, x, y, label, style);
-    gui.ui.click(rect, act);
-    rect.width
-}
-
 /// The room (entry point 1's screen): the gate's banner, then the form
 /// revealed in steps — source, metadata, destination, options, submit.
 pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
@@ -1629,7 +1614,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         gui.ui.click(area, Act::TorChooseClose);
         let inner = modal_frame_on(frame, &mut gui.ui, area, 60, 10, th().accent);
         put(frame, inner.x + 1, inner.y, &t!("gui.tor.received_title"), accent().add_modifier(Modifier::BOLD));
-        modal_close(frame, &mut gui.ui, inner, Act::TorChooseClose, t!("gui.srv.close_tip").to_string());
+        modal_close(frame, &mut gui.ui, inner, Act::TorChooseClose);
         let what = match &chooser.incoming {
             Incoming::File(f) => f.name.clone(),
             Incoming::Magnet(link) => meta::magnet_display_name(link).unwrap_or_else(|| t!("gui.tor.magnet_link").to_string()),
@@ -1658,7 +1643,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         // and the suggestion list grows DOWNWARD beneath them.
         let inner = modal_frame_anchored_on(frame, &mut gui.ui, area, 66, 7 + shown, 13, th().accent);
         put(frame, inner.x, inner.y, &t!("gui.tor.picker_title"), accent().add_modifier(Modifier::BOLD));
-        modal_close(frame, &mut gui.ui, inner, Act::TorPickerClose, t!("gui.srv.close_tip").to_string());
+        modal_close(frame, &mut gui.ui, inner, Act::TorPickerClose);
         put(
             frame,
             inner.x,
@@ -1718,7 +1703,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let n = matches.list.len().min(8) as u16;
         let inner = modal_frame_on(frame, &mut gui.ui, area, 72, 7 + n, th().accent);
         put(frame, inner.x + 1, inner.y, &t!("gui.tor.partial_title"), accent().add_modifier(Modifier::BOLD));
-        modal_close(frame, &mut gui.ui, inner, Act::TorMatchClose, t!("gui.srv.close_tip").to_string());
+        modal_close(frame, &mut gui.ui, inner, Act::TorMatchClose);
         for (i, line) in wrap(&t!("gui.tor.partial_body"), inner.width as usize - 2).into_iter().take(2).enumerate() {
             put(frame, inner.x + 1, inner.y + 1 + i as u16, &line, dim());
         }

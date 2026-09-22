@@ -2475,7 +2475,7 @@ fn draw_language(frame: &mut Frame, wizard: &mut Wizard, area: Rect, sel: usize)
         Paragraph::new(Span::styled(t!("lang.modal_title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
-    kit::modal_close(frame, &mut wizard.ui, inner, Act::PathCancel, t!("path_modal.tip_close"));
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::PathCancel);
     for (i, (code, autonym)) in LANGS.iter().enumerate() {
         let y = inner.y + 2 + i as u16;
         let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
@@ -3068,7 +3068,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 
 fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
     let inner = kit::modal_frame(frame, area, 62, 15, th().gold);
-    kit::modal_close(frame, &mut wizard.ui, inner, Act::SkipCancel, t!("path_modal.tip_close"));
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::SkipCancel);
     let lines = vec![
         Line::from(Span::styled(t!("skip_modal.title").to_string(), Style::default().fg(th().gold).add_modifier(Modifier::BOLD))),
         Line::from(""),
@@ -3117,7 +3117,7 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
         Paragraph::new(Span::styled(t!("browse.title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
-    kit::modal_close(frame, &mut wizard.ui, inner, Act::BrowseCancel, t!("path_modal.tip_close"));
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::BrowseCancel);
     frame.render_widget(
         Paragraph::new(Span::styled(browse.path.clone(), dim())),
         Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
@@ -3171,7 +3171,7 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
         Paragraph::new(Span::styled(t!("path_modal.title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
-    kit::modal_close(frame, &mut wizard.ui, inner, Act::PathCancel, t!("path_modal.tip_close"));
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::PathCancel);
     frame.render_widget(
         Paragraph::new(Span::raw(kit::input_display(
             draft.text.value(),

@@ -1025,7 +1025,7 @@ fn draw_browser(frame: &mut Frame, room: &mut Room, area: Rect, browse: &Browse)
         Paragraph::new(Span::styled(t!("browse.title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::BrowseCancel, t!("path_modal.tip_close"));
+    kit::modal_close(frame, &mut room.ui, inner, Act::BrowseCancel);
     frame.render_widget(
         Paragraph::new(Span::styled(browse.path.clone(), dim())),
         Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
@@ -1094,7 +1094,7 @@ fn draw_path_entry(frame: &mut Frame, room: &mut Room, area: Rect, draft: &PathD
         Paragraph::new(Span::styled(t!("path_modal.title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::PathCancel, t!("path_modal.tip_close"));
+    kit::modal_close(frame, &mut room.ui, inner, Act::PathCancel);
     frame.render_widget(
         Paragraph::new(Span::raw(kit::input_display(
             draft.text.value(),
@@ -1167,7 +1167,7 @@ fn draw_name(frame: &mut Frame, room: &mut Room, area: Rect, draft: &NameDraft) 
         )),
         line(inner.y),
     );
-    kit::modal_close(frame, &mut room.ui, inner, Act::NameCancel, t!("path_modal.tip_close"));
+    kit::modal_close(frame, &mut room.ui, inner, Act::NameCancel);
 
     frame.render_widget(
         Paragraph::new(Span::styled(t!("admin.name_folder").to_string(), dim())),

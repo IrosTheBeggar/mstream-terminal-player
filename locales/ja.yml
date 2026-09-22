@@ -68,7 +68,6 @@ dj:
 act:
   rating_failed: "評価を保存できませんでした"
   added_to: "%{name} に追加しました"
-  add_failed: "プレイリストに追加できませんでした。"
   add_failed_why: "プレイリストに追加できませんでした — %{why}"
 
 login_problem:
@@ -1096,9 +1095,7 @@ gui:
   search:
     placeholder: "(入力して検索)"
     edit_tip: "検索を編集 — /"
-  coming: "%{name} はブラウズ編で登場 — 今日は設定だけが動きます。"
   nothing_playing: "(再生していません)"
-  audio_failed: "オーディオ: %{error}"
   shuffle_word: "シャッフル"
   repeat_word: "リピート"
   queue:
@@ -1292,7 +1289,6 @@ gui:
     form_code: "ペアリングコード"
     need_code: "先にペアリングコードを貼り付けてください"
     dialling: "トンネルに接続中 — 数秒かかることがあります…"
-    close_tip: "閉じる — Esc"
     reaching: "%{server} に接続中…"
     offline: "%{server} はオフラインです — 接続できませんでした"
     offline_hint: "再試行するか、別のサーバーを選んでください。"

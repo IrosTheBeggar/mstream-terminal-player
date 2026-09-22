@@ -31,7 +31,7 @@ use crate::kit::theme::th;
 use crate::kit::{dim, scroll_list, table_view};
 
 use super::cover::{Pace, Slot};
-use super::{Act, Gui, bar, bright_bold, put, sel};
+use super::{Act, Gui, bar, bright_bold, put, sel, text_button};
 
 /// The cover's cells: 6x3 is square at the common 10x20 font — the
 /// now-playing card's cover, so the panel and the bar agree on a size.
@@ -105,7 +105,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         // The header's clear (track-actions contract, clause 20): a small
         // dim word, no confirmation.
         let cx = x + t!("gui.queue.title").chars().count() as u16 + 2;
-        let w = super::torrent::text_button(frame, gui, cx, 2, &t!("gui.queue.clear"), false, Act::QueueClear);
+        let w = text_button(frame, gui, cx, 2, &t!("gui.queue.clear"), false, Act::QueueClear);
         gui.ui.tip(Rect { x: cx, y: 2, width: w, height: 1 }, t!("gui.queue.clear_tip").to_string());
     }
     if len == 0 {

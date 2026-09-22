@@ -68,7 +68,6 @@ dj:
 act:
   rating_failed: "Note non enregistrée"
   added_to: "Ajouté à %{name}"
-  add_failed: "Impossible d'ajouter à la playlist."
   add_failed_why: "Impossible d'ajouter à la playlist : %{why}"
 
 login_problem:
@@ -1096,9 +1095,7 @@ gui:
   search:
     placeholder: "(tapez pour chercher)"
     edit_tip: "Modifier la recherche — /"
-  coming: "%{name} arrive avec la partie navigation — aujourd'hui, Réglages est la pièce qui fonctionne."
   nothing_playing: "(rien en lecture)"
-  audio_failed: "audio : %{error}"
   shuffle_word: "aléatoire"
   repeat_word: "répéter"
   queue:
@@ -1292,7 +1289,6 @@ gui:
     form_code: "CODE D'APPAIRAGE"
     need_code: "collez d'abord un code d'appairage"
     dialling: "ouverture du tunnel — cela peut prendre quelques secondes…"
-    close_tip: "Fermer — Esc"
     reaching: "connexion à %{server}…"
     offline: "%{server} est hors ligne — connexion impossible"
     offline_hint: "Réessayez, ou choisissez un autre serveur."

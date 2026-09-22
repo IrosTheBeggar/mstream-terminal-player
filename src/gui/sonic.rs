@@ -258,7 +258,7 @@ fn draw_length(frame: &mut Frame, gui: &mut Gui, at: Rect, in_results: bool) {
         let hover = !busy && gui.ui.pointer.is_some_and(|p| rect.contains(p));
         put(frame, x, at.y, &tail, if hover { bright_bold() } else { dim() });
         if !busy {
-            gui.ui.click(rect, Act::SonRegen);
+            gui.ui.click(rect, Act::SonBuild);
         }
     } else {
         put(frame, x, at.y, &tail, dim());
@@ -449,7 +449,7 @@ fn draw_results(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                     accent().add_modifier(Modifier::BOLD)
                 },
             );
-            gui.ui.click(rect, Act::SonRetry);
+            gui.ui.click(rect, Act::SonBuild);
         }
         return;
     }
@@ -620,7 +620,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             &label_for(side),
             accent().add_modifier(Modifier::BOLD),
         );
-        modal_close(frame, &mut gui.ui, inner, Act::SonMenuClose, t!("gui.srv.close_tip").to_string());
+        modal_close(frame, &mut gui.ui, inner, Act::SonMenuClose);
         let playing = gui
             .app
             .now_playing
@@ -671,7 +671,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             &t!("gui.sonic.save_title"),
             accent().add_modifier(Modifier::BOLD),
         );
-        modal_close(frame, &mut gui.ui, inner, Act::SonSaveCancel, t!("gui.srv.close_tip").to_string());
+        modal_close(frame, &mut gui.ui, inner, Act::SonSaveCancel);
         // The prompt rides the App's own line state: keys forward to it,
         // so the TUI and GUI share one editing truth.
         put(
@@ -744,7 +744,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             let effects = gui.app.adjust_sonic_length(delta);
             gui.pend(effects);
         }
-        Act::SonBuild | Act::SonRegen | Act::SonRetry => {
+        Act::SonBuild => {
             if gui.app.sonic.ready() {
                 let effects = gui.app.build_sonic_path();
                 gui.pend(effects);
@@ -930,7 +930,7 @@ pub(crate) fn handle_key(
             }
             KeyCode::Char('e') => return Some(gui.act(Act::SonMenu(SonicSide::End))),
             KeyCode::Char('E') => return Some(gui.act(Act::SonMenu(SonicSide::Start))),
-            KeyCode::Char('r') => return Some(gui.act(Act::SonRegen)),
+            KeyCode::Char('r') => return Some(gui.act(Act::SonBuild)),
             KeyCode::Char('s') => return Some(gui.act(Act::SonSave)),
             KeyCode::Char('o') => return Some(gui.act(Act::SonStartOver)),
             KeyCode::Left => {

@@ -432,8 +432,9 @@ pub(crate) fn cursor_entry(gui: &Gui) -> Option<&config::ServerEntry> {
     stored_at(gui, gui.servers.cursor).and_then(|i| gui.config.servers.get(i))
 }
 
-/// The parent's display name for a peer row's "via" line.
-fn parent_label(gui: &Gui, parent: &str) -> String {
+/// The parent's display name for a peer's "via" line — here and in the
+/// Auto DJ room's server picker.
+pub(crate) fn parent_label(gui: &Gui, parent: &str) -> String {
     gui.config
         .servers
         .iter()
@@ -1070,14 +1071,12 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
     match act {
         Act::SrvMenu => gui.servers.drop_open = !gui.servers.drop_open,
         Act::SrvCloseDrop => gui.servers.drop_open = false,
-        Act::SrvDrop(i) => switch_to(gui, *i),
         Act::SrvRetry => retry(gui),
         Act::SrvAdd => open_add(gui),
         Act::SrvRow(i) => gui.servers.cursor = *i,
         Act::SrvSwitch(i) => switch_to(gui, *i),
         Act::SrvHide(i) => set_hidden(gui, *i, true),
         Act::SrvShow(i) => set_hidden(gui, *i, false),
-        Act::SrvForget(i) => gui.servers.confirm = Some(*i),
         Act::SrvEdit(i) => open_edit(gui, *i),
         Act::SrvDefault(i) => make_default(gui, *i),
         Act::SrvQr(i) => open_qr(gui, *i),
@@ -1312,10 +1311,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
             KeyCode::Char('x') => match (stored, peer.as_ref()) {
                 // A listed peer is the parent admin's data: no removal.
                 (Some(_), Some(peer)) if !peer.missing => {}
-                (Some(index), Some(_)) => {
-                    gui.act(Act::SrvForget(index));
-                }
-                (Some(index), None) => {
+                (Some(index), _) => {
                     gui.act(Act::SrvRemove(index));
                 }
                 (None, _) => {}
@@ -1488,7 +1484,7 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         if *default {
             put(frame, inner.right().saturating_sub(1), y, star, Style::default().fg(th().gold));
         }
-        gui.ui.click(row, Act::SrvDrop(*i));
+        gui.ui.click(row, Act::SrvSwitch(*i));
     }
     let add_y = inner.y + entries.len() as u16;
     if add_y < inner.bottom() {
@@ -1674,7 +1670,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 t!("gui.srv.act_forget").to_string(),
                 Style::default().fg(th().danger),
                 Style::default().fg(th().danger).add_modifier(Modifier::BOLD),
-                Some(Act::SrvForget(index)),
+                Some(Act::SrvRemove(index)),
             );
         } else if peer.hidden {
             word(
@@ -1795,7 +1791,7 @@ fn draw_choose(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     gui.ui.click(area, Act::Guard);
     let inner = modal_frame_on(frame, &mut gui.ui, area, 60, 12, th().accent);
     put(frame, inner.x + 1, inner.y, &t!("gui.srv.form_add"), bright_bold());
-    modal_close(frame, &mut gui.ui, inner, Act::FormCancel, t!("gui.srv.close_tip").to_string());
+    modal_close(frame, &mut gui.ui, inner, Act::FormCancel);
 
     let focus = gui.servers.form.as_ref().map_or(0, |f| f.focus.min(1));
     for (i, (label, desc)) in [
@@ -1828,7 +1824,7 @@ fn draw_quick_connect(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     gui.ui.click(area, Act::Guard);
     let inner = modal_frame_on(frame, &mut gui.ui, area, 60, 20, th().accent);
     put(frame, inner.x + 1, inner.y, &t!("gui.srv.form_qc"), bright_bold());
-    modal_close(frame, &mut gui.ui, inner, Act::FormCancel, t!("gui.srv.close_tip").to_string());
+    modal_close(frame, &mut gui.ui, inner, Act::FormCancel);
 
     let (found, row, searching, code, submitting, error) = {
         let Some(form) = gui.servers.form.as_ref() else { return };
@@ -1966,7 +1962,7 @@ fn draw_direct(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         t!("gui.srv.form_add").to_string()
     };
     put(frame, inner.x + 1, inner.y, &title, bright_bold());
-    modal_close(frame, &mut gui.ui, inner, Act::FormCancel, t!("gui.srv.close_tip").to_string());
+    modal_close(frame, &mut gui.ui, inner, Act::FormCancel);
 
     let (check_on, check_off) = if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") };
     let field_w = inner.width.saturating_sub(2);
@@ -2139,7 +2135,7 @@ fn draw_confirm(frame: &mut Frame, gui: &mut Gui, area: Rect, index: usize) {
     let tunnel = crate::quickconnect::is_tunnel_id(&url);
     let inner = modal_frame_on(frame, &mut gui.ui, area, 56, if tunnel { 11 } else { 9 }, th().danger);
     put(frame, inner.x + 1, inner.y, &t!("gui.srv.remove_title"), bright_bold());
-    modal_close(frame, &mut gui.ui, inner, Act::SrvConfirm(false), t!("gui.srv.close_tip").to_string());
+    modal_close(frame, &mut gui.ui, inner, Act::SrvConfirm(false));
 
     put(
         frame,
@@ -2182,7 +2178,7 @@ fn draw_qr(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let width = (line_count.max(24) + 8).clamp(40, area.width.saturating_sub(4));
     let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
     put(frame, inner.x + 1, inner.y, &t!("gui.srv.qr_title"), bright_bold());
-    modal_close(frame, &mut gui.ui, inner, Act::QrClose, t!("gui.srv.close_tip").to_string());
+    modal_close(frame, &mut gui.ui, inner, Act::QrClose);
     put(
         frame,
         inner.x + 1,

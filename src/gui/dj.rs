@@ -21,7 +21,7 @@ use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{Surface, dim, input_display, modal_close, modal_frame_on, scroll_list, tall_button};
 use crate::tui::app::{Action, Capture, DjEdit, DjRow};
 
-use super::{Act, Gui, SETTINGS_NAV, accent, bright_bold, put, sel};
+use super::{Act, Gui, SETTINGS_NAV, accent, bright_bold, put, sel, text_button};
 
 /// The chooser's three rows: the two answers, then the remember box.
 const ROWS: usize = 3;
@@ -213,11 +213,7 @@ fn pickable_servers(gui: &Gui) -> Vec<PickServer> {
             }
             let label = match &entry.peer {
                 Some(peer) => {
-                    let parent = servers
-                        .iter()
-                        .find(|e| config::same_server(&e.url, &peer.parent))
-                        .map(config::display_name)
-                        .unwrap_or_else(|| crate::quickconnect::display_server(&peer.parent));
+                    let parent = super::servers::parent_label(gui, &peer.parent);
                     format!("{} · {}", peer.name, t!("gui.srv.via", parent = parent))
                 }
                 None => config::display_name(entry),
@@ -1045,7 +1041,7 @@ fn draw_keyword_input(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, 
     gui.ui.click(field, Act::DjKeywordFocus);
     let add = format!("{} {forward}", t!("gui.dj.add"));
     let ready = !value.trim().is_empty();
-    super::torrent::text_button(frame, gui, fx + fw + 2, y, &add, ready, Act::DjKeywordAdd);
+    text_button(frame, gui, fx + fw + 2, y, &add, ready, Act::DjKeywordAdd);
 }
 
 /// The destructive tall button (Stop Auto DJ): the kit's primary frame in
@@ -1109,7 +1105,7 @@ fn draw_chooser(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let height = (1 + subtitle.len() + 1 + rows_h + 1) as u16 + 2;
     let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
     put(frame, inner.x + 1, inner.y, &t!("gui.dj.start_title"), accent().add_modifier(Modifier::BOLD));
-    modal_close(frame, &mut gui.ui, inner, Act::DjCancel, t!("gui.srv.close_tip").to_string());
+    modal_close(frame, &mut gui.ui, inner, Act::DjCancel);
     let mut y = inner.y + 1;
     for line in &subtitle {
         put(frame, inner.x + 1, y, line, dim());
@@ -1164,7 +1160,7 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
     let title = format!("{} · {}", t!("gui.dj.pick_genres"), t!("gui.dj.selected_count", count = library.genres.len()));
     put(frame, inner.x + 1, inner.y, &title, accent().add_modifier(Modifier::BOLD));
-    modal_close(frame, &mut gui.ui, inner, Act::DjGenresClose, t!("gui.srv.close_tip").to_string());
+    modal_close(frame, &mut gui.ui, inner, Act::DjGenresClose);
 
     let query = gui.dj.filter.value().to_string();
     let fy = inner.y + 2;
@@ -1261,7 +1257,7 @@ fn draw_server_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let height = (servers.len() as u16 + 5).min(area.height.saturating_sub(2)).max(6);
     let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
     put(frame, inner.x + 1, inner.y, &t!("gui.dj.server_title"), accent().add_modifier(Modifier::BOLD));
-    modal_close(frame, &mut gui.ui, inner, Act::DjServerClose, t!("gui.srv.close_tip").to_string());
+    modal_close(frame, &mut gui.ui, inner, Act::DjServerClose);
     let marker = if legacy_conhost() { ">" } else { "▸" };
     let branch = if legacy_conhost() { "+" } else { "└" };
     for (i, server) in servers.iter().enumerate() {
@@ -1651,8 +1647,8 @@ pub(crate) fn draw_empty_queue(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16,
     }
     let random = format!("{} {forward}", t!("gui.queue.empty_dj_random"));
     let choose = format!("{} {forward}", t!("gui.queue.empty_dj_choose"));
-    super::torrent::text_button(frame, gui, x, y + 1, &random, true, Act::DjSurprise);
-    super::torrent::text_button(frame, gui, x, y + 2, &choose, false, Act::DjPick);
+    text_button(frame, gui, x, y + 1, &random, true, Act::DjSurprise);
+    text_button(frame, gui, x, y + 2, &choose, false, Act::DjPick);
 }
 
 #[cfg(test)]

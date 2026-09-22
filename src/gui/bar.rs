@@ -19,7 +19,7 @@ use crate::kit::{Surface, dim};
 use crate::kit::theme::{legacy_conhost, th};
 use rust_i18n::t;
 
-use super::Act;
+use super::{Act, bright_bold, put};
 
 /// Rows the bar region owns at the bottom of the screen. The bar draws the
 /// first five; the sixth (the very last row) is the screen's tips line.
@@ -84,14 +84,6 @@ pub(super) fn volume_cells(volume: f32) -> usize {
 }
 
 // ── Small drawing helpers ───────────────────────────────────────────────────
-
-fn put(frame: &mut Frame, x: u16, y: u16, text: &str, style: Style) {
-    let width = text.chars().count() as u16;
-    frame.render_widget(
-        Paragraph::new(Span::styled(text.to_string(), style)),
-        Rect { x, y, width, height: 1 },
-    );
-}
 
 fn hovered(s: &Surface<Act>, rect: Rect) -> bool {
     s.pointer.is_some_and(|p| rect.contains(p))
@@ -182,10 +174,6 @@ fn draw_volume(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, volume: 
     put(frame, x + 13, y, "+", if hovered(s, plus) { bright_bold() } else { dim() });
     s.click(plus, Act::VolUp);
     put(frame, x + 15, y, &format!("{:3}%", (volume * 100.0).round() as u32), dim());
-}
-
-fn bright_bold() -> Style {
-    Style::default().fg(th().bright).add_modifier(Modifier::BOLD)
 }
 
 /// The play/pause slot glyphs: a fixed two cells, so ▮▮ swaps in place and
