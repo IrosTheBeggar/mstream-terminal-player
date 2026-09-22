@@ -284,6 +284,7 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str) {
         Act::PlTrackQueue,
         Act::PlTrackNext,
         Act::PlTrackNow,
+        super::more_library,
         gui.app.capture.is_none(),
     );
     scroll_list(

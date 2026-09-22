@@ -109,6 +109,9 @@ pub struct Surface<A> {
     /// resets what it covers. Covers an overlay never touches stay pixels.
     overlays: Vec<Rect>,
     covered: Vec<Rect>,
+    /// What a right click means where — a row's context verb (the
+    /// track-actions contract's sheet). Rebuilt each frame like `clicks`.
+    contexts: Vec<(Rect, A)>,
 }
 
 impl<A> Default for Surface<A> {
@@ -125,6 +128,7 @@ impl<A> Default for Surface<A> {
             soft_origin: None,
             overlays: Vec::new(),
             covered: Vec::new(),
+            contexts: Vec::new(),
         }
     }
 }
@@ -161,6 +165,17 @@ impl<A: Clone> Surface<A> {
         self.clicks.clear();
         self.tips.clear();
         self.bars.clear();
+        self.contexts.clear();
+    }
+
+    /// Register what a right click on `rect` does. The last registered
+    /// wins a hit, as with clicks.
+    pub fn context(&mut self, rect: Rect, act: A) {
+        self.contexts.push((rect, act));
+    }
+
+    pub fn hit_context(&self, at: Position) -> Option<A> {
+        self.contexts.iter().rev().find(|(rect, _)| rect.contains(at)).map(|(_, act)| act.clone())
     }
 
     /// Register a clickable rect.

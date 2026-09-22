@@ -2540,6 +2540,9 @@ impl App {
                 self.now_playing = None;
                 self.stall = None;
                 self.tunnel_wait = None;
+                // A cleared queue is somewhere new: the DJ's lane starts over
+                // (auto-dj contract, the flows), the DJ staying armed.
+                self.lane.reset();
                 vec![Effect::Audio(AudioCmd::Stop)]
             }
             Action::ToggleRepeat => {
@@ -3816,6 +3819,49 @@ impl App {
     pub(crate) fn replace_queue(&mut self, tracks: Vec<Track>) {
         let tracks = self.queued_all(tracks);
         self.queue.replace(tracks);
+    }
+
+    /// Stamp a track with an origin it already has — a queue row's, the
+    /// playing track's — on its way back into the queue.
+    pub(crate) fn queued_from(&self, origin: &Origin, track: Track) -> Queued {
+        Queued { dj: None, origin: origin.clone(), track }
+    }
+
+    /// Add next and Play now for a track named outright — the sheet's
+    /// verbs (track-actions contract, clause 5): after the playing row, at
+    /// the end when nothing plays; waiting its turn or starting at once.
+    pub(crate) fn queue_track_next(&mut self, origin: &Origin, track: Track, play: bool) -> Vec<Effect> {
+        let label = track.display_name();
+        let item = self.queued_from(origin, track);
+        let index = self.queue.insert_next(item);
+        self.announced = None;
+        if play {
+            return self.play_index(index);
+        }
+        self.info(format!("{label} — next"));
+        Vec::new()
+    }
+
+    /// Add to end for a track named outright (clause 6): appends, and an
+    /// empty, idle queue starts on it.
+    pub(crate) fn queue_track_end(&mut self, origin: &Origin, track: Track) -> Vec<Effect> {
+        let label = track.display_name();
+        let was_empty = self.queue.items.is_empty();
+        let item = self.queued_from(origin, track);
+        self.queue.push(item);
+        self.info(format!("queued {label}"));
+        if was_empty && self.status.is_idle() {
+            return self.play_index(0);
+        }
+        Vec::new()
+    }
+
+    /// A grip drag crossing a row (clause 18): the row moves, the cursor
+    /// follows it, and what was announced as next is re-made.
+    pub(crate) fn drag_queue_row(&mut self, from: usize, to: usize) {
+        self.queue.move_row(from, to);
+        self.queue.state.select(Some(to));
+        self.announced = None;
     }
 
     /// Append one track, stamped as the session's.

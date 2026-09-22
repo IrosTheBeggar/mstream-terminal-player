@@ -20,6 +20,7 @@
 
 mod albums;
 mod bar;
+mod actions;
 mod cover;
 mod dj;
 mod library;
@@ -171,6 +172,22 @@ pub(crate) enum Act {
     DjCancel,
     DjSurprise,
     DjPick,
+    /// Track actions (track-actions contract): a pane row's, a queue row's
+    /// or the playing card's sheet; its rows, its stars, its picker and
+    /// Song info; the queue's grip and clear.
+    More(crate::tui::app::Tab, usize),
+    QueueMore(usize),
+    QueueGrip(usize),
+    QueueClear,
+    NowMore,
+    MoreKey,
+    SheetVerb(actions::SheetAction),
+    Rate(u32),
+    SheetClose,
+    PickPlaylist(String),
+    PickNew,
+    PickClose,
+    InfoClose,
     /// The Library rooms (library-rooms contract): the pane's rows and
     /// their verbs, the list's scrollbar, the strip's jump, the way back.
     LibRow(usize),
@@ -483,6 +500,10 @@ pub(crate) struct Gui {
     dj: dj::DjUi,
     /// The Library rooms: the list's scroll and the artist wall's state.
     library: library::LibraryUi,
+    /// Track actions: the sheet, its picker and info, a grip drag.
+    actions: actions::ActionsUi,
+    /// The queue's highlighted row last drawn, so a new one is revealed.
+    last_qsel: Option<usize>,
     /// The last frame left paced work unfinished (covers still waiting to
     /// upgrade to pixels): the event loop shortens its idle wait so the
     /// next frame comes promptly instead of a poll tick later.
@@ -525,6 +546,8 @@ impl Gui {
             torrent: torrent::TorrentUi::new(),
             dj: dj::DjUi::new(),
             library: library::LibraryUi::new(),
+            actions: actions::ActionsUi::new(),
+            last_qsel: None,
             hot: false,
         }
     }
@@ -637,6 +660,9 @@ impl Gui {
 
     /// Everything a click or key resolved to. Returns true to quit.
     fn act(&mut self, act: Act) -> bool {
+        if actions::act(self, &act) {
+            return false;
+        }
         if dj::act(self, &act) {
             return false;
         }
@@ -805,26 +831,34 @@ impl Gui {
             }
             Act::FileRow(i) => {
                 self.app.tab = Tab::Files;
+                self.app.focus = crate::tui::app::Focus::Browser;
                 self.app.files.state.select(Some(i));
                 self.freveal = true;
                 self.forward_capturing(Action::Activate);
             }
             Act::FileQueue(i) => {
                 self.app.tab = Tab::Files;
+                self.app.focus = crate::tui::app::Focus::Browser;
                 self.app.files.state.select(Some(i));
                 self.forward(Action::AddToQueue);
             }
             Act::FileNext(i) => {
                 self.app.tab = Tab::Files;
+                self.app.focus = crate::tui::app::Focus::Browser;
                 self.app.files.state.select(Some(i));
                 self.forward(Action::AddNext);
             }
             Act::FileNow(i) => {
                 self.app.tab = Tab::Files;
+                self.app.focus = crate::tui::app::Focus::Browser;
                 self.app.files.state.select(Some(i));
                 self.forward(Action::PlayNow);
             }
             Act::QueueRow(i) => {
+                // A click plays the row and hands the panel the keys
+                // (track-actions contract, clauses 17 and 19).
+                self.app.focus = crate::tui::app::Focus::Queue;
+                self.app.queue.state.select(Some(i));
                 let effects = self.app.play_index(i);
                 self.pend(effects);
             }
@@ -844,22 +878,26 @@ impl Gui {
             Act::FScrollTo(first) => self.fscroll = first,
             Act::SearchRow(i) => {
                 self.app.tab = Tab::Search;
+                self.app.focus = crate::tui::app::Focus::Browser;
                 self.app.search.state.select(Some(i));
                 self.sreveal = true;
                 self.forward_capturing(Action::Activate);
             }
             Act::SearchQueue(i) => {
                 self.app.tab = Tab::Search;
+                self.app.focus = crate::tui::app::Focus::Browser;
                 self.app.search.state.select(Some(i));
                 self.forward(Action::AddToQueue);
             }
             Act::SearchNext(i) => {
                 self.app.tab = Tab::Search;
+                self.app.focus = crate::tui::app::Focus::Browser;
                 self.app.search.state.select(Some(i));
                 self.forward(Action::AddNext);
             }
             Act::SearchNow(i) => {
                 self.app.tab = Tab::Search;
+                self.app.focus = crate::tui::app::Focus::Browser;
                 self.app.search.state.select(Some(i));
                 self.forward(Action::PlayNow);
             }
@@ -1055,7 +1093,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         put(frame, 1, area.height - 7, &bar::clip(&text, area.width as usize - 2), style);
     }
-    let tips = if let Some(tip) = dj::tips(gui) {
+    let tips = if let Some(tip) = actions::tips(gui) {
+        std::borrow::Cow::from(tip)
+    } else if let Some(tip) = dj::tips(gui) {
         std::borrow::Cow::from(tip)
     } else if gui.servers.modal_open() {
         t!("gui.tips.form")
@@ -1133,6 +1173,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     servers::draw_dropdown(frame, gui, area);
     servers::draw_modals(frame, gui, area);
     dj::draw_modals(frame, gui, area);
+    actions::draw_modals(frame, gui, area);
 
     // The tooltip draws over everything, once the dwell matures — the
     // wizard's order.
@@ -1269,6 +1310,7 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         Act::FileQueue,
         Act::FileNext,
         Act::FileNow,
+        more_files,
         gui.app.capture.is_none(),
     );
     scroll_list(
@@ -1470,6 +1512,7 @@ fn draw_pane_rows(
     queue_act: fn(usize) -> Act,
     next_act: fn(usize) -> Act,
     now_act: fn(usize) -> Act,
+    more_act: fn(usize) -> Act,
     // An armed pick consumes the next activation outright (clause 10) —
     // the hover verbs must not offer to queue what a click would capture.
     queue_plus: bool,
@@ -1496,15 +1539,20 @@ fn draw_pane_rows(
                     let mark = if legacy_conhost() { ">" } else { "▸" };
                     put(frame, list.x, y, mark, if is_sel { sel().add_modifier(Modifier::BOLD) } else { Style::default().fg(th().ok).add_modifier(Modifier::BOLD) });
                 }
+                // A right click opens the row's sheet (track-actions
+                // contract, entry point 1).
+                ui.context(rect, more_act(*index));
                 if hover && !is_sel && queue_plus {
                     // Play now · Add next · Add to the end (contract clause
-                    // 32), each with the key its dwell tooltip names.
+                    // 32) · the sheet, each with the key its dwell tooltip
+                    // names.
                     let verbs = [
                         (if legacy_conhost() { "[>]" } else { "[▸]" }, now_act(*index), t!("gui.files.now_tip")),
                         (if legacy_conhost() { "[^]" } else { "[»]" }, next_act(*index), t!("gui.files.next_tip")),
                         ("[+]", queue_act(*index), t!("gui.files.queue_tip")),
+                        (if legacy_conhost() { "[.]" } else { "[⋯]" }, more_act(*index), t!("gui.act.more_tip")),
                     ];
-                    put(frame, list.x + 2, y, &bar::clip(label, name_width.saturating_sub(8)), style);
+                    put(frame, list.x + 2, y, &bar::clip(label, name_width.saturating_sub(12)), style);
                     ui.click(rect, row_act(*index));
                     let mut x = rect.right() - 3;
                     for (glyph, act, tip) in verbs.into_iter().rev() {
@@ -1682,6 +1730,7 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         Act::SearchQueue,
         Act::SearchNext,
         Act::SearchNow,
+        more_search,
         gui.app.capture.is_none(),
     );
     scroll_list(
@@ -1802,6 +1851,18 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
 }
 
+/// The sheet's door on each pane's rows (track-actions contract, entry
+/// point 1): the App's pane, by tab, and the row.
+fn more_files(i: usize) -> Act {
+    Act::More(Tab::Files, i)
+}
+pub(crate) fn more_library(i: usize) -> Act {
+    Act::More(Tab::Library, i)
+}
+fn more_search(i: usize) -> Act {
+    Act::More(Tab::Search, i)
+}
+
 /// Where settings row `i` draws, under its section label.
 fn row_y(top: u16, i: usize) -> u16 {
     match i {
@@ -1825,6 +1886,9 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     // opening-song road; then the servers surfaces: an open modal owns the
     // keyboard outright, the room takes its row keys, and everything else
     // falls through untouched.
+    if let Some(quit) = actions::handle_key(gui, key) {
+        return quit;
+    }
     if let Some(quit) = dj::handle_key(gui, key) {
         return quit;
     }
@@ -1838,6 +1902,7 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     }
     let browse = gui.browse_room()
         && gui.app.connected
+        && !actions::modal_open(gui)
         && !dj::modal_open(gui)
         && !sonic::modal_open(gui)
         && !playlists::modal_open(gui);
@@ -1887,6 +1952,11 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         return quit;
     }
     if let Some(quit) = library::handle_key(gui, key) {
+        return quit;
+    }
+    // The queue panel while it has the keys (track-actions contract,
+    // clause 19).
+    if let Some(quit) = actions::queue_key(gui, key) {
         return quit;
     }
     if let Some(quit) = sonic::handle_key(gui, key) {
@@ -2016,6 +2086,7 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Char('s') => return gui.act(Act::Shuffle),
         KeyCode::Char('r') => return gui.act(Act::Repeat),
         KeyCode::Char('A') => return gui.act(Act::AutoDj),
+        KeyCode::Char('m') => return gui.act(Act::MoreKey),
         KeyCode::Char('-') => return gui.act(Act::VolDown),
         KeyCode::Char('+') | KeyCode::Char('=') => return gui.act(Act::VolUp),
         _ => {}
@@ -2113,6 +2184,15 @@ fn event_loop(
                             if !gui.ui.begin_press(at) {
                                 continue;
                             }
+                            // A click in the content column hands the keys
+                            // back from the queue (track-actions contract,
+                            // clause 19).
+                            if gui.app.focus == crate::tui::app::Focus::Queue
+                                && !actions::modal_open(gui)
+                                && !(gui.queue_open && at.x >= gui.queue_panel_x())
+                            {
+                                gui.app.focus = crate::tui::app::Focus::Browser;
+                            }
                             if let Some(act) = gui.ui.hit(at) {
                                 if gui.act(act) {
                                     saver.flush(&gui.app);
@@ -2121,14 +2201,28 @@ fn event_loop(
                             }
                             gui.ui.arm_bars(at);
                         }
+                        // A right click on a row is its sheet (entry point 1).
+                        MouseEventKind::Down(MouseButton::Right) => {
+                            if let Some(act) = gui.ui.hit_context(at)
+                                && gui.act(act)
+                            {
+                                saver.flush(&gui.app);
+                                return Ok(());
+                            }
+                        }
                         MouseEventKind::Moved => gui.ui.motion(at),
                         MouseEventKind::Drag(_) => {
                             gui.ui.motion(at);
-                            if let Some(act) = gui.ui.drag_action(at) {
+                            if gui.actions.drag.is_some() {
+                                actions::drag_to(gui, at);
+                            } else if let Some(act) = gui.ui.drag_action(at) {
                                 gui.act(act);
                             }
                         }
-                        MouseEventKind::Up(_) => gui.ui.release(),
+                        MouseEventKind::Up(_) => {
+                            gui.ui.release();
+                            actions::drop(gui);
+                        }
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                             let delta = if mouse.kind == MouseEventKind::ScrollUp { -1 } else { 1 };
                             gui.wheel(at, delta);
@@ -2153,7 +2247,7 @@ fn event_loop(
 impl Gui {
     /// Where the queue panel begins, matched to `draw_queue`'s separator
     /// on the last drawn frame — the wheel's queue-vs-content split.
-    fn queue_panel_x(&self) -> u16 {
+    pub(crate) fn queue_panel_x(&self) -> u16 {
         self.last_width.saturating_sub(34)
     }
 

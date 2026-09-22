@@ -31,7 +31,7 @@ use crate::kit::theme::th;
 use crate::kit::{dim, scroll_list, table_view};
 
 use super::cover::{Pace, Slot};
-use super::{Act, Gui, bar, bright_bold, put};
+use super::{Act, Gui, bar, bright_bold, put, sel};
 
 /// The cover's cells: 6x3 is square at the common 10x20 font — the
 /// now-playing card's cover, so the panel and the bar agree on a size.
@@ -44,7 +44,7 @@ const TEXT_X: u16 = COVER_W + 1;
 /// stands two cells further left, and the rows begin under the title and
 /// its rule on rows 2 and 3.
 const PANEL_W: u16 = 32;
-const TOP: u16 = 4;
+pub(crate) const TOP: u16 = 4;
 
 /// How many covers past the view stay encoded, so a wheel back finds
 /// them warm.
@@ -83,6 +83,16 @@ fn rows_that_fit(height: u16) -> usize {
     (height.saturating_sub(13) / ROW_H) as usize
 }
 
+/// The queue row under screen row `y`, in the panel's current window —
+/// what a grip drag is over (track-actions contract, clause 18).
+pub(crate) fn row_at(gui: &Gui, y: u16) -> Option<usize> {
+    if y < TOP {
+        return None;
+    }
+    let index = gui.qscroll + usize::from((y - TOP) / ROW_H);
+    (index < gui.app.queue.items.len()).then_some(index)
+}
+
 pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let x = area.width - PANEL_W;
     for y in 2..area.height - 8 {
@@ -91,6 +101,13 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     put(frame, x, 2, &t!("gui.queue.title"), dim());
     put(frame, x, 3, &"─".repeat(31), dim());
     let len = gui.app.queue.items.len();
+    if len > 0 {
+        // The header's clear (track-actions contract, clause 20): a small
+        // dim word, no confirmation.
+        let cx = x + t!("gui.queue.title").chars().count() as u16 + 2;
+        let w = super::torrent::text_button(frame, gui, cx, 2, &t!("gui.queue.clear"), false, Act::QueueClear);
+        gui.ui.tip(Rect { x: cx, y: 2, width: w, height: 1 }, t!("gui.queue.clear_tip").to_string());
+    }
     if len == 0 {
         put(frame, x, TOP, &t!("gui.queue.empty"), dim());
         // While the DJ is armed, the ways to give it an opening song (auto-dj
@@ -110,8 +127,14 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // The view: the playing row is revealed only when it CHANGES, so the
     // wheel roams freely in between (the kit's table contract).
     let current = gui.app.queue.current;
-    let reveal = (current != gui.last_current).then_some(current).flatten();
+    let focused = gui.app.focus == crate::tui::app::Focus::Queue;
+    let selected = focused.then_some(gui.app.queue.state.selected()).flatten();
+    let reveal = (current != gui.last_current)
+        .then_some(current)
+        .flatten()
+        .or_else(|| (selected != gui.last_qsel).then_some(selected).flatten());
     gui.last_current = current;
+    gui.last_qsel = selected;
     let (first, visible) = table_view(len, reveal, gui.qscroll, rows_that_fit(area.height));
     gui.qscroll = first;
 
@@ -140,16 +163,24 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             let Some(item) = app.queue.items.get(index) else { break };
             let y = TOP + row as u16 * ROW_H;
             let is_current = current == Some(index);
+            let is_sel = selected == Some(index);
             let rect = Rect { x, y, width: area.width - 1 - x, height: ROW_H };
             let hover = ui.pointer.is_some_and(|p| rect.contains(p));
-            let (title_style, sub_style) = match (is_current, hover) {
-                (true, _) => (
+            let (title_style, sub_style) = match (is_sel, is_current, hover) {
+                // The panel's keyboard cursor (track-actions contract,
+                // clause 19): the title line takes the selection colour.
+                (true, _, _) => (sel().add_modifier(Modifier::BOLD), sel()),
+                (false, true, _) => (
                     Style::default().fg(th().ok).add_modifier(Modifier::BOLD),
                     Style::default().fg(th().ok),
                 ),
-                (false, true) => (bright_bold(), dim()),
-                (false, false) => (Style::default(), dim()),
+                (false, false, true) => (bright_bold(), dim()),
+                (false, false, false) => (Style::default(), dim()),
             };
+            if is_sel {
+                let line = Rect { x: x + TEXT_X, y, width: (area.width - 2 - x - TEXT_X).max(1), height: 1 };
+                frame.render_widget(ratatui::widgets::Block::default().style(sel()), line);
+            }
 
             // The cover: the picture once it is decoded; the empty slot
             // frame — the card's idiom — until then, or for a track with
@@ -192,7 +223,10 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 put(frame, x + TEXT_X, y, badge, dim());
             }
             let shift = badge.chars().count();
-            put(frame, x + TEXT_X + shift as u16, y, &bar::clip(title, text_w.saturating_sub(shift)), title_style);
+            // On hover the title yields its tail to the grip and the sheet's
+            // verb on this line (clauses 17–18).
+            let title_w = if hover { text_w.saturating_sub(shift + 7) } else { text_w.saturating_sub(shift) };
+            put(frame, x + TEXT_X + shift as u16, y, &bar::clip(title, title_w), title_style);
 
             // Under the title, the artist then the album, each on a line of
             // its own — a missing one lets the other rise, so the words
@@ -217,8 +251,19 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             // A click anywhere on the row plays it; the [x] on hover wins
             // its own cells (last registered, first hit).
             ui.click(rect, Act::QueueRow(index));
+            ui.context(rect, Act::QueueMore(index));
             let last = y + ROW_H - 1;
             if hover {
+                // The grip and the sheet's verb on the first line (clauses
+                // 17–18), registered after the row so they win their cells.
+                let grip = Rect { x: area.width - 7, y, width: 1, height: 1 };
+                put(frame, grip.x, y, if crate::kit::theme::legacy_conhost() { "=" } else { "≡" }, dim());
+                ui.click(grip, Act::QueueGrip(index));
+                ui.tip(grip, t!("gui.queue.grip_tip").to_string());
+                let more = Rect { x: area.width - 5, y, width: 3, height: 1 };
+                put(frame, more.x, y, if crate::kit::theme::legacy_conhost() { "[.]" } else { "[⋯]" }, dim());
+                ui.click(more, Act::QueueMore(index));
+                ui.tip(more, t!("gui.act.more_tip").to_string());
                 let cell = Rect { x: area.width - 5, y: last, width: 3, height: 1 };
                 put(frame, cell.x, cell.y, "[x]", dim());
                 ui.click(cell, Act::QueueRemove(index));

@@ -272,7 +272,9 @@ fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &Ba
     let (title_style, sub_style) = card_styles(hover, v.now.is_some());
     match v.now {
         Some(now) => {
-            put(frame, x + 8, y, &clip(&now.title, 20), title_style);
+            // On hover the title yields its tail to the sheet's verb
+            // (track-actions contract, entry point 2).
+            put(frame, x + 8, y, &clip(&now.title, if hover { 16 } else { 20 }), title_style);
             put(frame, x + 8, y + 1, &clip(&now.artist, 20), sub_style);
         }
         None => put(frame, x + 8, y, &t!("gui.nothing_playing"), sub_style),
@@ -280,6 +282,15 @@ fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &Ba
     let chevron = chevron_glyph(v.queue_open);
     put(frame, area.width - 3, y, chevron, if hover { bright_bold() } else { dim() });
     s.click(rect, Act::ToggleQueue);
+    if v.now.is_some() {
+        s.context(rect, Act::NowMore);
+        if hover {
+            let cell = Rect { x: area.width - 7, y, width: 3, height: 1 };
+            put(frame, cell.x, y, if crate::kit::theme::legacy_conhost() { "[.]" } else { "[⋯]" }, dim());
+            s.click(cell, Act::NowMore);
+            s.tip(cell, t!("gui.act.more_tip").to_string());
+        }
+    }
 }
 
 /// The rule is the seek bar; the tall controls beneath it with the volume

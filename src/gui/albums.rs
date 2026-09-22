@@ -245,6 +245,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::AlbCell(i) => open_album(gui, *i),
         Act::AlbTrackRow(i) => {
             gui.app.tab = Tab::Library;
+            gui.app.focus = crate::tui::app::Focus::Browser;
             gui.app.library.state.select(Some(*i));
             wall(gui).treveal = true;
             gui.forward_capturing(Action::Activate);
@@ -252,16 +253,19 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::AlbJump(at) => jump_wall(gui, *at),
         Act::AlbTrackQueue(i) => {
             gui.app.tab = Tab::Library;
+            gui.app.focus = crate::tui::app::Focus::Browser;
             gui.app.library.state.select(Some(*i));
             gui.forward(Action::AddToQueue);
         }
         Act::AlbTrackNext(i) => {
             gui.app.tab = Tab::Library;
+            gui.app.focus = crate::tui::app::Focus::Browser;
             gui.app.library.state.select(Some(*i));
             gui.forward(Action::AddNext);
         }
         Act::AlbTrackNow(i) => {
             gui.app.tab = Tab::Library;
+            gui.app.focus = crate::tui::app::Focus::Browser;
             gui.app.library.state.select(Some(*i));
             gui.forward(Action::PlayNow);
         }
@@ -697,6 +701,7 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
         Act::AlbTrackQueue,
         Act::AlbTrackNext,
         Act::AlbTrackNow,
+        super::more_library,
         gui.app.capture.is_none(),
     );
     scroll_list(

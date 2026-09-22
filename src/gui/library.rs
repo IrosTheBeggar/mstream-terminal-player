@@ -219,6 +219,7 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         Act::LibQueue,
         Act::LibNext,
         Act::LibNow,
+        super::more_library,
         gui.app.capture.is_none(),
     );
     scroll_list(
@@ -240,6 +241,7 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 /// forwarded action lands on it.
 fn select_row(gui: &mut Gui, index: usize) {
     gui.app.tab = Tab::Library;
+    gui.app.focus = crate::tui::app::Focus::Browser;
     gui.app.library.state.select(Some(index));
     gui.library.reveal = true;
 }
