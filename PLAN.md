@@ -1886,10 +1886,12 @@ a LATER secondary screen (party view), Columns retired.
     locales of `gui.dj.*` carried from the record's `autoDj*` (the
     `mstream_music` worktree's ARB files), the terminal's own strings
     beside them. 11 GUI tests; `dump_dj` (ignored) renders it all.
-  - **A4 — the TUI and the web shell follow** (mostly with A1: `A` arms /
-    switches off / moves, the tab's rows are the contract's, the choosers
-    draw over both screens, the wasm check passes; left: keyword entry in
-    the TUI — the tab says to use the GUI's room for now).
+  - **A4 — the TUI and the web shell follow ✅ 2026-09-21** (mostly with
+    A1: `A` arms / switches off / moves, the tab's rows are the contract's,
+    the choosers draw over both screens, the wasm check passes; the tab's
+    Keywords row now types a word on Enter — Enter adds it and clears for
+    the next, Esc or Enter on nothing leaves, `x` on the row takes the
+    last word back — through the same `DjEdit` as the room).
   - **A5 — the rig**: a peer-hosted lane through the proxy and direct,
     `discovery is disabled` degrading once, a batch landing, Preview; the
     contract's status row and deviations updated with what it showed.

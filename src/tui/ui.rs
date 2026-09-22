@@ -2796,11 +2796,14 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
             spans
         }
         DjRow::Keywords => {
+            if let Some(text) = &app.dj_keyword {
+                return vec![value(format!("{text}▏")), note("Enter adds the word · Esc done".into())];
+            }
             let mut spans = vec![switch(s.keyword_filter)];
             if s.keywords.is_empty() {
-                spans.push(note("no keywords".into()));
+                spans.push(note("no keywords · Enter types one".into()));
             } else {
-                spans.push(note(format!("{}: {}", s.keywords.len(), s.keywords.join(", "))));
+                spans.push(note(format!("{}: {} · x removes the last", s.keywords.len(), s.keywords.join(", "))));
             }
             spans
         }

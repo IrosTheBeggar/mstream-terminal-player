@@ -6376,6 +6376,31 @@ fn the_dj_tab_only_offers_rows_the_settings_and_the_server_allow() {
 }
 
 #[test]
+fn the_tabs_keyword_row_takes_typed_words_and_x_removes_the_last() {
+    let mut app = connected_app();
+    on_the_dj_tab(&mut app);
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Keywords).unwrap();
+    app.handle_action(Action::Activate);
+    assert_eq!(app.dj_keyword.as_deref(), Some(""), "Enter opens the entry");
+    assert_eq!(app.input_mode(), InputMode::Editing, "and the keys are letters");
+    for c in "live".chars() {
+        app.handle_action(Action::Input(c));
+    }
+    app.handle_action(Action::Submit);
+    assert_eq!(app.dj.keywords, vec!["live"]);
+    assert!(app.dj.keyword_filter, "a word switches the filter on");
+    assert_eq!(app.dj_keyword.as_deref(), Some(""), "ready for the next word");
+    app.handle_action(Action::Submit);
+    assert!(app.dj_keyword.is_none(), "Enter on nothing leaves");
+    app.handle_action(Action::Activate);
+    app.handle_action(Action::Cancel);
+    assert!(app.dj_keyword.is_none(), "Esc leaves");
+    app.handle_action(Action::RemoveFromQueue);
+    assert!(app.dj.keywords.is_empty(), "x takes the last word back");
+    assert_eq!(app.now_tab(), NowTab::AutoDj, "still on the tab");
+}
+
+#[test]
 fn adjusting_a_row_changes_the_setting_it_names() {
     let mut app = connected_app();
     on_the_dj_tab(&mut app);

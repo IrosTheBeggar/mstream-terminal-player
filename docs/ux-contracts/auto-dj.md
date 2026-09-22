@@ -556,7 +556,10 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
   become this contract's (the Mode row goes, Sonic becomes a switch and a
   band, Tempo reads in BPM, Key becomes Harmonic, Genres and Preview stay,
   Sources and Length and Keywords arrive). The TUI is not the target
-  surface; it shares the App, so it cannot be left on the old model.
+  surface; it shares the App, so it cannot be left on the old model. Its
+  Keywords row types a word on Enter (2026-09-21): Enter adds it and
+  clears for the next, Esc or Enter on nothing leaves, `x` on the row
+  takes the last word back.
 - **2026-09-20 — The badge glyphs**: `∞` and `≈`, dim, before the title;
   the record's icons are its own.
 - **2026-09-20 — Slices A1 and A2 landed** in the shared App and the api

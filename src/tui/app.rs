@@ -1606,6 +1606,9 @@ pub struct App {
     pub(crate) lane: autodj::DjLane,
     /// The empty-queue chooser, when open (clause 2).
     pub dj_chooser: Option<autodj::DjChooser>,
+    /// The Auto-DJ tab's keyword entry (clause 49): the word being typed,
+    /// while Enter on the Keywords row has it open.
+    pub dj_keyword: Option<String>,
     /// The server an opening question is about, until it is answered.
     dj_target: Option<String>,
     /// The old `autodj` mode was on: arm on the session's server at start.
@@ -1839,6 +1842,7 @@ impl App {
             dj_info: None,
             lane: Default::default(),
             dj_chooser: None,
+            dj_keyword: None,
             dj_target: None,
             dj_migrate: false,
             dj: dj::Settings::default(),
@@ -2003,6 +2007,7 @@ impl App {
             || self.editing_query
             || self.filtering
             || self.sonic_playlist_name.is_some()
+            || self.dj_keyword.is_some()
         {
             InputMode::Editing
         } else if self.dj_panel.genres.is_some()
@@ -2303,6 +2308,9 @@ impl App {
         if self.log_view.is_some() {
             return self.handle_log_view_action(action);
         }
+        if self.dj_keyword.is_some() {
+            return self.handle_dj_keyword_action(action);
+        }
         if self.dj_chooser.is_some() {
             return self.handle_dj_chooser_action(action);
         }
@@ -2489,6 +2497,10 @@ impl App {
             Action::VolumeUp => self.change_volume(VOLUME_STEP),
             Action::VolumeDown => self.change_volume(-VOLUME_STEP),
 
+            // On the Auto-DJ tab's Keywords row, x takes the last word back.
+            Action::RemoveFromQueue if self.on_dj_tab() && self.dj_panel.selected() == DjRow::Keywords => {
+                self.dj_remove_last_keyword()
+            }
             Action::RemoveFromQueue => self.remove_from_queue(),
             Action::ClearQueue => {
                 self.queue.clear();

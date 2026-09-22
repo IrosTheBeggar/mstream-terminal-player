@@ -817,10 +817,52 @@ impl App {
             DjRow::Sources => self.open_sources_picker(),
             DjRow::Sample => self.sample_dj(),
             DjRow::Keywords => {
-                self.info("keywords are edited in the GUI's Auto DJ room for now");
+                self.dj_keyword = Some(String::new());
                 Vec::new()
             }
             _ => self.adjust_dj_row(1),
+        }
+    }
+
+    /// The tab's keyword entry (clause 49, the TUI's half): Enter on the row
+    /// opens it, typed characters build a word, Enter adds the word and
+    /// clears for the next, Enter on nothing or Esc leaves, Backspace past
+    /// the start leaves too.
+    pub(super) fn handle_dj_keyword_action(&mut self, action: Action) -> Vec<Effect> {
+        if action == Action::Quit {
+            self.should_quit = true;
+            return vec![Effect::Audio(AudioCmd::Shutdown), Effect::Api(ApiCmd::Shutdown)];
+        }
+        match action {
+            Action::Input(c) => {
+                if let Some(text) = self.dj_keyword.as_mut() {
+                    text.push(c);
+                }
+            }
+            Action::Backspace => {
+                if self.dj_keyword.as_mut().is_none_or(|text| text.pop().is_none()) {
+                    self.dj_keyword = None;
+                }
+            }
+            Action::Cancel => self.dj_keyword = None,
+            Action::Submit => {
+                let word = self.dj_keyword.take().unwrap_or_default();
+                if word.trim().is_empty() {
+                    return Vec::new();
+                }
+                self.dj_keyword = Some(String::new());
+                return self.dj_edit(DjEdit::AddKeyword(word));
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// x on the Keywords row: the last word goes.
+    pub(super) fn dj_remove_last_keyword(&mut self) -> Vec<Effect> {
+        match self.dj.keywords.last().cloned() {
+            Some(word) => self.dj_edit(DjEdit::RemoveKeyword(word)),
+            None => Vec::new(),
         }
     }
 
