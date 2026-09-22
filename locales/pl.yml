@@ -64,6 +64,13 @@ dj:
   fail_network: "nie udało się połączyć z serwerem"
   fail_no_match: "nic nie pasowało do filtrów"
 
+# The shared App's track-action notes (track-actions contract, Wording).
+act:
+  rating_failed: "Nie udało się zapisać oceny"
+  added_to: "Dodano do %{name}"
+  add_failed: "Nie udało się dodać do playlisty."
+  add_failed_why: "Nie udało się dodać do playlisty – %{why}"
+
 login_problem:
   username: "wybierz nazwę użytkownika"
   password: "wybierz hasło"

@@ -64,6 +64,13 @@ dj:
   fail_network: "サーバーに到達できませんでした"
   fail_no_match: "フィルターに合う曲がありませんでした"
 
+# The shared App's track-action notes (track-actions contract, Wording).
+act:
+  rating_failed: "評価を保存できませんでした"
+  added_to: "%{name} に追加しました"
+  add_failed: "プレイリストに追加できませんでした。"
+  add_failed_why: "プレイリストに追加できませんでした — %{why}"
+
 login_problem:
   username: "ユーザー名を入力してください"
   password: "パスワードを入力してください"

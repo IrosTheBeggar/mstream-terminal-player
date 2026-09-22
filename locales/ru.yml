@@ -64,6 +64,13 @@ dj:
   fail_network: "не удалось связаться с сервером"
   fail_no_match: "ничего не подошло под фильтры"
 
+# The shared App's track-action notes (track-actions contract, Wording).
+act:
+  rating_failed: "Не удалось сохранить оценку"
+  added_to: "Добавлено в %{name}"
+  add_failed: "Не удалось добавить в плейлист."
+  add_failed_why: "Не удалось добавить в плейлист — %{why}"
+
 login_problem:
   username: "укажите имя пользователя"
   password: "укажите пароль"

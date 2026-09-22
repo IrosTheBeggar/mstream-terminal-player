@@ -64,6 +64,13 @@ dj:
   fail_network: "could not reach the server"
   fail_no_match: "nothing matched the filters"
 
+# The shared App's track-action notes (track-actions contract, Wording).
+act:
+  rating_failed: "Could not save rating"
+  added_to: "Added to %{name}"
+  add_failed: "Couldn't add to the playlist."
+  add_failed_why: "Couldn't add to the playlist — %{why}"
+
 login_problem:
   username: "pick a username"
   password: "pick a password"

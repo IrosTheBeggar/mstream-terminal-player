@@ -64,6 +64,13 @@ dj:
   fail_network: "der Server war nicht erreichbar"
   fail_no_match: "nichts passte zu den Filtern"
 
+# The shared App's track-action notes (track-actions contract, Wording).
+act:
+  rating_failed: "Bewertung konnte nicht gespeichert werden"
+  added_to: "Zu %{name} hinzugefügt"
+  add_failed: "Konnte nicht zur Wiedergabeliste hinzugefügt werden."
+  add_failed_why: "Konnte nicht zur Wiedergabeliste hinzugefügt werden – %{why}"
+
 login_problem:
   username: "Benutzernamen wählen"
   password: "Passwort wählen"

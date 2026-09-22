@@ -1009,6 +1009,25 @@ impl Client {
 
     /// Create an EMPTY playlist. The server answers 400 when the name is
     /// already taken; the error carries its words.
+    /// Rate a track on the server's 0–10 scale, `None` to clear
+    /// (track-actions contract, clause 10). The path is the vpath-relative
+    /// one a listing carries.
+    pub async fn rate_song_async(&self, filepath: &str, rating: Option<u32>) -> Result<(), ApiError> {
+        let _: serde_json::Value = self
+            .post("api/v1/db/rate-song", serde_json::json!({ "filepath": filepath, "rating": rating }))
+            .await?;
+        Ok(())
+    }
+
+    /// Append a track to a playlist — the server creates the playlist when
+    /// it does not exist yet (track-actions contract, clause 12).
+    pub async fn playlist_add_song_async(&self, playlist: &str, song: &str) -> Result<(), ApiError> {
+        let _: serde_json::Value = self
+            .post("api/v1/playlist/add-song", serde_json::json!({ "playlist": playlist, "song": song }))
+            .await?;
+        Ok(())
+    }
+
     pub async fn playlist_new_async(&self, title: &str) -> Result<(), ApiError> {
         let _: serde_json::Value =
             self.post("api/v1/playlist/new", serde_json::json!({ "title": title })).await?;

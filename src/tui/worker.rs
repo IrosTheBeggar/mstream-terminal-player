@@ -188,6 +188,16 @@ pub enum ApiCmd {
     /// than by an art file: a waveform belongs to one recording, not to an
     /// album. `reach` as for [`ApiCmd::AlbumArt`].
     Waveform { filepath: String, reach: Option<crate::tui::app::Reach> },
+    /// Rate a track on its own server (track-actions contract, clause 11);
+    /// `seq` comes back so the App can tell a stale refusal from the latest
+    /// write. `reach` as for [`ApiCmd::AlbumArt`].
+    RateSong { filepath: String, rating: Option<u32>, seq: u64, reach: Option<crate::tui::app::Reach> },
+    /// Add a track to a playlist on its own server (clause 12).
+    AddToPlaylist { playlist: String, song: String, reach: Option<crate::tui::app::Reach> },
+    /// A track's full block, for the sheet and Song info (clause 8).
+    TrackInfo { filepath: String, reach: Option<crate::tui::app::Reach> },
+    /// A server's playlist names, for the picker (clause 12).
+    PlaylistNames { reach: Option<crate::tui::app::Reach> },
     Shutdown,
 }
 
@@ -453,6 +463,15 @@ pub enum Event {
     PlaylistCreated,
     PlaylistRenamed,
     PlaylistDeleted,
+    /// A rating landed — or, with `error`, did not (track-actions contract,
+    /// clause 11); `seq` names the write.
+    Rated { filepath: String, rating: Option<u32>, seq: u64, error: Option<String> },
+    /// A track went into a playlist, or the server's words for why not.
+    AddedToPlaylist { playlist: String, error: Option<String> },
+    /// A track's full block; `None` when the server would not say.
+    TrackInfo { filepath: String, track: Option<Box<Track>> },
+    /// A server's playlist names for the picker; `None` when the ask failed.
+    PlaylistNames { names: Option<Vec<String>> },
     /// `query` is the search these results answer — replies can pass each
     /// other now, and the box's contents name the one still wanted.
     SearchResults { query: String, results: Box<SearchResults> },
@@ -994,7 +1013,11 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
     let own = match &cmd {
         ApiCmd::AlbumArt { reach: Some(reach), .. }
         | ApiCmd::Waveform { reach: Some(reach), .. }
-        | ApiCmd::DjProbe { reach: Some(reach), .. } => client_for(reach),
+        | ApiCmd::DjProbe { reach: Some(reach), .. }
+        | ApiCmd::RateSong { reach: Some(reach), .. }
+        | ApiCmd::AddToPlaylist { reach: Some(reach), .. }
+        | ApiCmd::TrackInfo { reach: Some(reach), .. }
+        | ApiCmd::PlaylistNames { reach: Some(reach) } => client_for(reach),
         // The DJ's turns go to ITS server (auto-dj contract, clause 19).
         ApiCmd::AutoDj(request) | ApiCmd::AutoDjSample { request, .. } => {
             request.reach.as_ref().and_then(client_for)
@@ -1023,6 +1046,26 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::DjProbe { identity, .. } => {
             crate::api::wait(async { Ok::<_, ApiError>(dj_probe(c).await) })
                 .map(|info| Event::DjProbed { identity, info })
+        }
+        // The track verbs answer with their outcome rather than an error
+        // event: the App reverts a rating, words a failed add, or shows a
+        // sheet without its block (track-actions contract).
+        ApiCmd::RateSong { filepath, rating, seq, .. } => {
+            let error = crate::api::wait(c.rate_song_async(&filepath, rating)).err().map(|e| e.to_string());
+            Ok(Event::Rated { filepath, rating, seq, error })
+        }
+        ApiCmd::AddToPlaylist { playlist, song, .. } => {
+            let error =
+                crate::api::wait(c.playlist_add_song_async(&playlist, &song)).err().map(|e| e.to_string());
+            Ok(Event::AddedToPlaylist { playlist, error })
+        }
+        ApiCmd::TrackInfo { filepath, .. } => {
+            let track = c.metadata(&filepath).ok().map(Box::new);
+            Ok(Event::TrackInfo { filepath, track })
+        }
+        ApiCmd::PlaylistNames { .. } => {
+            let names = c.playlists().ok().map(|list| list.into_iter().map(|p| p.name).collect());
+            Ok(Event::PlaylistNames { names })
         }
         // A dead session is the session's business; anything else is the
         // picker's to say (auto-dj contract, clause 48).

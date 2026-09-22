@@ -139,6 +139,37 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
                 .await
         }
 
+        // The track verbs (track-actions contract): the browser build has one
+        // client, so a reach is the session's here too.
+        ApiCmd::RateSong { filepath, rating, seq, .. } => {
+            with_session(session, async |s| {
+                let error = s.client.rate_song_async(&filepath, rating).await.err().map(|e| e.to_string());
+                Ok(Event::Rated { filepath: filepath.clone(), rating, seq, error })
+            })
+            .await
+        }
+        ApiCmd::AddToPlaylist { playlist, song, .. } => {
+            with_session(session, async |s| {
+                let error = s.client.playlist_add_song_async(&playlist, &song).await.err().map(|e| e.to_string());
+                Ok(Event::AddedToPlaylist { playlist: playlist.clone(), error })
+            })
+            .await
+        }
+        ApiCmd::TrackInfo { filepath, .. } => {
+            with_session(session, async |s| {
+                let track = s.client.metadata_async(&filepath).await.ok().map(Box::new);
+                Ok(Event::TrackInfo { filepath: filepath.clone(), track })
+            })
+            .await
+        }
+        ApiCmd::PlaylistNames { .. } => {
+            with_session(session, async |s| {
+                let names = s.client.playlists_async().await.ok().map(|l| l.into_iter().map(|p| p.name).collect());
+                Ok(Event::PlaylistNames { names })
+            })
+            .await
+        }
+
         ApiCmd::Journey { start, end, length } => {
             with_session(session, async |s| {
                 worker::journey(&s.client, &start, &end, length).await

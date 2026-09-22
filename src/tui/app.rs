@@ -526,6 +526,16 @@ impl Pane {
 
     /// How many rows are on screen, and how many there would be with no
     /// filter. `..` counts as neither: it is the way out, not a result.
+    /// Visit every track row this pane holds — the shown ones and the ones
+    /// a filter is hiding — so a patch reaches them all.
+    pub(crate) fn for_each_track_mut(&mut self, mut f: impl FnMut(&mut Track)) {
+        for entry in self.entries.iter_mut().chain(self.unfiltered.iter_mut().flatten()) {
+            if let Entry::Track { track, .. } = entry {
+                f(track);
+            }
+        }
+    }
+
     pub fn counts(&self) -> (usize, usize) {
         let real = |list: &[Entry]| list.iter().filter(|e| !matches!(e, Entry::Parent)).count();
         let shown = real(&self.entries);
@@ -1048,6 +1058,8 @@ pub struct Message {
 // screen, and the [`Session`] it produces — lives in `session` (audit #56),
 // re-exported so every caller keeps saying `app::ConnectForm`.
 mod autodj;
+mod track;
+pub use track::RatingWrite;
 #[allow(unused_imports)] // the browser shell has no room yet
 pub use autodj::DjEdit;
 pub(crate) mod entries;
@@ -1564,6 +1576,15 @@ pub struct App {
     /// clause 7): the pane holds them as text rows, the wall wants the
     /// covers and years.
     pub artist_albums: Option<(String, Vec<crate::api::types::Album>)>,
+    /// The full block the sheet or Song info asked for last (track-actions
+    /// contract, clause 8), by the track's path.
+    pub track_info: Option<Track>,
+    /// A server's playlist names for the add-to-playlist picker: `None`
+    /// while unasked or out, `Some(None)` when the ask failed.
+    pub playlist_names: Option<Option<Vec<String>>>,
+    /// The rating writes out, for the latest-wins revert (clause 11).
+    pub(crate) rating_writes: Vec<RatingWrite>,
+    rating_seq: u64,
     /// The whole search reply, kept rather than flattened. Every class comes
     /// back in one response, so moving between them costs nothing.
     pub search_hits: Option<Box<crate::api::types::SearchResults>>,
@@ -1827,6 +1848,10 @@ impl App {
             library_stack: Drill::new(LibraryNode::Root),
             albums: None,
             artist_albums: None,
+            track_info: None,
+            playlist_names: None,
+            rating_writes: Vec::new(),
+            rating_seq: 0,
             search_hits: None,
             search_stack: Drill::new(SearchNode::Root),
             queue_column: false,
@@ -5243,6 +5268,16 @@ impl App {
             Event::PlaylistSaved { name, count } => self.consume_playlist_saved(name, count),
             Event::PlaylistCreated | Event::PlaylistRenamed | Event::PlaylistDeleted => {
                 self.consume_playlist_changed()
+            }
+            Event::Rated { filepath, rating, seq, error } => self.consume_rated(filepath, rating, seq, error),
+            Event::AddedToPlaylist { playlist, error } => self.consume_added_to_playlist(playlist, error),
+            Event::TrackInfo { filepath, track } => {
+                self.consume_track_info(filepath, track.map(|t| *t));
+                Vec::new()
+            }
+            Event::PlaylistNames { names } => {
+                self.playlist_names = Some(names);
+                Vec::new()
             }
             Event::SearchResults { query, results } => {
                 // Replies can pass each other now that each answers on its

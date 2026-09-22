@@ -6375,6 +6375,70 @@ fn the_dj_tab_only_offers_rows_the_settings_and_the_server_allow() {
     assert!(rows.contains(&DjRow::Sample), "Preview stays");
 }
 
+// ── Track actions ───────────────────────────────────────────────────────────
+
+fn rated(path: &str, rating: Option<u32>) -> Track {
+    let mut t = track(path);
+    t.metadata.rating = rating;
+    t
+}
+
+#[test]
+fn a_rating_patches_every_copy_at_once_and_a_refusal_reverts_it() {
+    let mut app = connected_app();
+    let t = rated("lib/a.mp3", Some(4));
+    app.push_queue(t.clone());
+    app.files.set(vec![Entry::Track { label: "a".into(), track: Box::new(t.clone()) }]);
+    let origin = app.origin();
+    let effects = app.rate_track(&origin, "lib/a.mp3", Some(8));
+    assert!(
+        matches!(effects.as_slice(), [Effect::Api(ApiCmd::RateSong { filepath, rating: Some(8), seq: 1, .. })] if filepath == "lib/a.mp3"),
+        "{effects:?}"
+    );
+    assert_eq!(app.queue.items[0].metadata.rating, Some(8), "the queue's copy changed at once");
+    assert!(matches!(&app.files.entries[0], Entry::Track { track, .. } if track.metadata.rating == Some(8)), "the pane's too");
+    app.apply_event(Event::Rated { filepath: "lib/a.mp3".into(), rating: Some(8), seq: 1, error: Some("boom".into()) });
+    assert_eq!(app.queue.items[0].metadata.rating, Some(4), "refused: the previous value is back");
+    assert!(app.message.as_ref().unwrap().text.contains("Could not save rating"));
+}
+
+#[test]
+fn the_latest_rating_wins_over_an_older_refusal() {
+    let mut app = connected_app();
+    app.push_queue(rated("lib/a.mp3", Some(2)));
+    let origin = app.origin();
+    app.rate_track(&origin, "lib/a.mp3", Some(6));
+    app.rate_track(&origin, "lib/a.mp3", Some(10));
+    app.apply_event(Event::Rated { filepath: "lib/a.mp3".into(), rating: Some(6), seq: 1, error: Some("late".into()) });
+    assert_eq!(app.queue.items[0].metadata.rating, Some(10), "the newer write stands");
+    app.apply_event(Event::Rated { filepath: "lib/a.mp3".into(), rating: Some(10), seq: 2, error: None });
+    assert_eq!(app.queue.items[0].metadata.rating, Some(10));
+    assert!(app.rating_writes.is_empty(), "both writes are accounted for");
+}
+
+#[test]
+fn a_peers_track_takes_no_rating_and_no_playlist() {
+    let mut app = connected_app();
+    let peer = Origin { server: "http://parent:3000".into(), peer: Some(3) };
+    assert!(app.rate_track(&peer, "lib/a.mp3", Some(8)).is_empty());
+    assert!(app.add_to_playlist(&peer, "lib/a.mp3", "Mix").is_empty());
+}
+
+#[test]
+fn adding_to_a_playlist_asks_the_tracks_server_and_says_so() {
+    let mut app = connected_app();
+    let origin = app.origin();
+    let effects = app.add_to_playlist(&origin, "lib/a.mp3", " Mix ");
+    assert!(
+        matches!(effects.as_slice(), [Effect::Api(ApiCmd::AddToPlaylist { playlist, song, .. })] if playlist == "Mix" && song == "lib/a.mp3"),
+        "{effects:?}"
+    );
+    app.apply_event(Event::AddedToPlaylist { playlist: "Mix".into(), error: None });
+    assert_eq!(app.message.as_ref().unwrap().text, "Added to Mix");
+    app.apply_event(Event::AddedToPlaylist { playlist: "Mix".into(), error: Some("boom".into()) });
+    assert!(app.message.as_ref().unwrap().text.starts_with("Couldn't add to the playlist"));
+}
+
 #[test]
 fn the_tabs_keyword_row_takes_typed_words_and_x_removes_the_last() {
     let mut app = connected_app();

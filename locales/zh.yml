@@ -64,6 +64,13 @@ dj:
   fail_network: "无法连接服务器"
   fail_no_match: "没有曲目符合筛选"
 
+# The shared App's track-action notes (track-actions contract, Wording).
+act:
+  rating_failed: "无法保存评分"
+  added_to: "已添加到 %{name}"
+  add_failed: "无法添加到播放列表。"
+  add_failed_why: "无法添加到播放列表 — %{why}"
+
 login_problem:
   username: "请输入用户名"
   password: "请输入密码"
