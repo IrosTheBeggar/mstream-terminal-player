@@ -741,7 +741,7 @@ fn draw_switch(
             s.sonic,
             t!("gui.dj.sonic").to_string(),
             t!("gui.dj.sonic_sub").to_string(),
-            gui.app.dj_sonic_reason().map(str::to_string),
+            gui.app.dj_sonic_reason(),
         ),
         DjRow::Bpm => (s.bpm, t!("gui.dj.bpm").to_string(), t!("gui.dj.bpm_sub").to_string(), None),
         DjRow::Harmonic => {
@@ -1180,6 +1180,11 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let (check_on, check_off) = if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") };
     if picker.loading {
         put(frame, inner.x + 1, list_y, &t!("gui.dj.genres_loading"), dim());
+        return;
+    }
+    if let Some(err) = &picker.failed {
+        put(frame, inner.x + 1, list_y, &t!("gui.dj.genres_failed"), Style::default().fg(th().gold));
+        put(frame, inner.x + 1, list_y + 1, &super::bar::clip(err, field_w as usize), dim());
         return;
     }
     if picker.all.is_empty() {
@@ -1968,6 +1973,24 @@ mod tests {
         let all = rows.join("\n");
         assert!(all.contains("(•) Whitelist") && all.contains("Techno [x]"), "{all}");
         assert_eq!(hit_text(&gui, &rows, "Techno [x]"), Some(Act::DjGenre("Techno".into())));
+    }
+
+    #[test]
+    fn a_failed_genres_load_says_so_in_the_picker_instead_of_loading_forever() {
+        let mut gui = room_gui();
+        gui.act(Act::DjPickGenres);
+        let all = draw_tall(&mut gui).join("\n");
+        assert!(all.contains("loading genres…"), "{all}");
+        let effects = gui.app.apply_event(Event::GenresFailed("boom".into()));
+        gui.pend(effects);
+        let all = draw_tall(&mut gui).join("\n");
+        assert!(all.contains("Could not load genres") && all.contains("boom"), "{all}");
+        assert!(!all.contains("loading genres…"));
+        key(&mut gui, KeyCode::Esc);
+        assert!(gui.app.dj_panel.genres.is_none());
+        // A fresh open asks again, clean.
+        gui.act(Act::DjPickGenres);
+        assert!(gui.app.dj_panel.genres.as_ref().is_some_and(|p| p.loading && p.failed.is_none()));
     }
 
     #[test]

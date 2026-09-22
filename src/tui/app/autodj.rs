@@ -14,6 +14,8 @@
 //! hand means its request is no longer in flight, decided in one place.
 
 use super::*;
+use crate::tui::worker::DjNote;
+use rust_i18n::t;
 
 /// The one-shot opening seed (clause 5): the track that opens a session,
 /// spent by the clear that starts it, so no later empty-queue start can
@@ -98,9 +100,6 @@ pub struct DjChooser {
 /// The chooser's rows: the two answers, then the remember box.
 pub const DJ_CHOOSER_ROWS: usize = 3;
 
-/// The banner the "Let me choose" road wears (clause 4).
-pub const DJ_PICK_BANNER: &str = "Pick the opening song — choose a track anywhere in the library";
-
 impl App {
     // ── Where the DJ stands ─────────────────────────────────────────────────
 
@@ -182,18 +181,16 @@ impl App {
 
     /// Why the sonic row is disabled, in the room's words (clause 43) — or
     /// `None` while it can be honoured.
-    pub fn dj_sonic_reason(&self) -> Option<&'static str> {
+    pub fn dj_sonic_reason(&self) -> Option<String> {
         let info = self.dj_info.as_ref()?;
         if dj::known_older(info.version.as_deref(), dj::FLOOR_SONIC) {
-            return Some("Needs server 6.15.2 or newer");
+            return Some(t!("dj.sonic_needs_newer").to_string());
         }
         if !info.discovery {
-            return Some("This server doesn't have discovery data — picks stay random.");
+            return Some(t!("dj.sonic_unavailable").to_string());
         }
         if info.discovery_ready == Some(false) {
-            return Some(
-                "Discovery is on but the scan hasn't produced data yet — picks stay random until it does.",
-            );
+            return Some(t!("dj.sonic_not_ready").to_string());
         }
         None
     }
@@ -204,7 +201,7 @@ impl App {
     /// off; on elsewhere → move here.
     pub(super) fn toggle_autodj(&mut self) -> Vec<Effect> {
         let Some(here) = self.session_identity() else {
-            self.info("Auto DJ needs a server — connect to one first.");
+            self.info(t!("dj.needs_server"));
             return Vec::new();
         };
         match self.dj_server.clone() {
@@ -234,9 +231,9 @@ impl App {
     fn say_armed(&mut self) {
         let name = self.dj_server_name();
         if self.servers.len() > 1 {
-            self.info(format!("Auto DJ on — picking from {name}"));
+            self.info(t!("dj.on_from", server = name));
         } else {
-            self.info("Auto DJ on");
+            self.info(t!("dj.on"));
         }
     }
 
@@ -266,7 +263,7 @@ impl App {
         if self.capture == Some(Capture::DjSeed) {
             self.capture = None;
         }
-        self.info("Auto DJ off");
+        self.info(t!("dj.off"));
         Vec::new()
     }
 
@@ -314,7 +311,7 @@ impl App {
         let reach = match self.reach_for(&identity) {
             Ok(reach) => reach,
             Err(why) => {
-                self.error(format!("Couldn't fetch a song from the server — {why}"));
+                self.error(t!("dj.fetch_failed_why", why = why));
                 self.dj_target = None;
                 return Vec::new();
             }
@@ -324,7 +321,7 @@ impl App {
         ask.ignore_list.clear();
         self.lane.opener = true;
         self.lane.pending = true;
-        self.info("Auto DJ: picking an opening song…");
+        self.info(t!("dj.picking_opener"));
         vec![Effect::Api(ApiCmd::AutoDj(Box::new(DjRequest {
             identity,
             reach,
@@ -338,7 +335,7 @@ impl App {
     pub(super) fn dj_pick_from_library(&mut self) -> Vec<Effect> {
         self.dj_chooser = None;
         let effects = self.arm_capture(Capture::DjSeed);
-        self.info(DJ_PICK_BANNER);
+        self.info(t!("dj.pick_banner"));
         effects
     }
 
@@ -628,7 +625,7 @@ impl App {
                     && !self.lane.warned_sonic
                 {
                     self.lane.warned_sonic = true;
-                    self.info(note);
+                    self.info(dj_note_words(&note));
                     explained = true;
                 }
                 if let Some(failure) = failure {
@@ -651,7 +648,7 @@ impl App {
                 // it still describes the settings on screen.
                 self.dj_panel.pool = pool.or(self.dj_panel.pool.take());
                 if let Some(note) = note {
-                    self.info(note);
+                    self.info(dj_note_words(&note));
                 }
                 Vec::new()
             }
@@ -663,8 +660,18 @@ impl App {
             Event::Genres(genres) => {
                 if let Some(picker) = self.dj_panel.genres.as_mut() {
                     picker.loading = false;
+                    picker.failed = None;
                     picker.all = genres.into_iter().map(|g| g.name).collect();
                     picker.row = picker.row.min(picker.all.len().saturating_sub(1));
+                }
+                Vec::new()
+            }
+            // The list could not be fetched: the picker says so rather than
+            // loading forever (clause 48's "Could not load genres").
+            Event::GenresFailed(err) => {
+                if let Some(picker) = self.dj_panel.genres.as_mut() {
+                    picker.loading = false;
+                    picker.failed = Some(err);
                 }
                 Vec::new()
             }
@@ -692,12 +699,12 @@ impl App {
             DjFailure::Auth => {
                 if !self.lane.warned_auth {
                     self.lane.warned_auth = true;
-                    self.error(crate::tui::worker::DJ_NOTE_AUTH);
+                    self.error(t!("dj.auth_expired"));
                 }
             }
             DjFailure::Network(why) => {
                 if opener {
-                    self.error("Couldn't fetch a song from the server.");
+                    self.error(t!("dj.fetch_failed"));
                 } else {
                     self.lane.owed = true;
                     if !self.lane.logged_deferred {
@@ -708,14 +715,14 @@ impl App {
             }
             DjFailure::NoMatch => {
                 if opener {
-                    self.error("No songs match your Auto DJ filters — try loosening them");
+                    self.error(t!("dj.no_match"));
                 } else {
-                    self.info("Auto DJ: nothing matches the filters — loosen them to keep going");
+                    self.info(t!("dj.no_match_lane"));
                 }
             }
             DjFailure::Server(message) => {
                 if opener {
-                    self.error("Couldn't fetch a song from the server.");
+                    self.error(t!("dj.fetch_failed"));
                 }
                 dj_log(format!("[dj] random-songs failed: {message}"));
             }
@@ -736,7 +743,7 @@ impl App {
             self.queue.items.iter().map(|t| t.filepath.clone()).collect();
         let fresh: Vec<Track> = songs.into_iter().filter(|t| !already.contains(&t.filepath)).collect();
         if fresh.is_empty() {
-            self.info("Auto DJ: nothing new to add");
+            self.info(t!("dj.nothing_new"));
             return Vec::new();
         }
         let last = self.queue.items.len().saturating_sub(1);
@@ -761,10 +768,11 @@ impl App {
         }
         // The degrade note, when one was just said, outranks the track name.
         if !explained {
-            self.info(match names.len() {
-                1 => format!("Auto DJ: {}", names[0]),
-                n => format!("Auto DJ: {} (and {} more)", names[0], n - 1),
-            });
+            let said = match names.len() {
+                1 => t!("dj.picked", song = names[0]),
+                n => t!("dj.picked_more", song = names[0], count = n - 1),
+            };
+            self.info(said);
         }
         let mut effects = Vec::new();
         if start_it {
@@ -979,7 +987,7 @@ impl App {
                     return Vec::new();
                 }
                 if self.dj.keywords.len() >= dj::KEYWORDS_MAX {
-                    self.info(format!("At most {} keywords.", dj::KEYWORDS_MAX));
+                    self.info(t!("dj.max_keywords", count = dj::KEYWORDS_MAX));
                     return Vec::new();
                 }
                 self.dj.keywords.push(word);
@@ -1057,7 +1065,7 @@ impl App {
             genres.remove(at);
         } else {
             if genres.len() >= dj::GENRES_MAX {
-                self.info(format!("At most {} genres.", dj::GENRES_MAX));
+                self.info(t!("dj.max_genres", count = dj::GENRES_MAX));
                 return Vec::new();
             }
             genres.push(name);
@@ -1146,7 +1154,7 @@ impl App {
             known.dj.sources_off.remove(at);
         } else {
             if all > 0 && known.dj.sources_off.len() + 1 >= all {
-                self.info("At least one source is required.");
+                self.info(t!("dj.one_source"));
                 return Vec::new();
             }
             known.dj.sources_off.push(library.to_string());
@@ -1197,11 +1205,11 @@ impl App {
             return Vec::new();
         }
         let Some(identity) = self.dj_server.clone().or_else(|| self.session_identity()) else {
-            self.info("Auto DJ needs a server — connect to one first.");
+            self.info(t!("dj.needs_server"));
             return Vec::new();
         };
         let Ok(reach) = self.reach_for(&identity) else {
-            self.info("that server is not reachable yet");
+            self.info(t!("dj.not_reachable"));
             return Vec::new();
         };
         self.dj_panel.sample_pending = true;
@@ -1211,6 +1219,27 @@ impl App {
             request: Box::new(DjRequest { identity, reach, epoch: self.lane.epoch, ask }),
             count: DJ_SAMPLE_COUNT,
         })]
+    }
+}
+
+/// A pick's or a preview's note in the user's words (clauses 30, 53).
+fn dj_note_words(note: &DjNote) -> String {
+    match note {
+        DjNote::SonicRange => t!("dj.sonic_range").to_string(),
+        DjNote::SonicUnscanned => t!("dj.sonic_unscanned").to_string(),
+        DjNote::PreviewFailed(failure) => {
+            t!("dj.preview_failed", why = dj_failure_words(failure)).to_string()
+        }
+    }
+}
+
+/// Why a turn came back empty-handed, in the user's words.
+fn dj_failure_words(failure: &DjFailure) -> String {
+    match failure {
+        DjFailure::Auth => t!("dj.fail_auth").to_string(),
+        DjFailure::Network(_) => t!("dj.fail_network").to_string(),
+        DjFailure::NoMatch => t!("dj.fail_no_match").to_string(),
+        DjFailure::Server(message) => message.clone(),
     }
 }
 

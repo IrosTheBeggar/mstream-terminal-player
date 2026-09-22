@@ -131,7 +131,11 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         }
 
         ApiCmd::Genres => {
-            with_session(session, async |s| s.client.genres_async().await.map(Event::Genres))
+            with_session(session, async |s| match s.client.genres_async().await {
+                Ok(genres) => Ok(Event::Genres(genres)),
+                Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+                Err(e) => Ok(Event::GenresFailed(e.to_string())),
+            })
                 .await
         }
 

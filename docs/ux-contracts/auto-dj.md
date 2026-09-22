@@ -364,7 +364,7 @@ room, the chooser and the panel, and `dj.<name>` for the shared App's notes
 | Keyword filter · Skip picks whose title, artist, album, or filepath contains any of these words. · No keywords. Add words below to start filtering. · e.g. "live" or "remix" | autoDjKeyword* · autoDjNoKeywords |
 | BPM continuity, harmonic mixing and the genre filter need a newer server. Update to get them. | autoDjNeedsNewerServer |
 | Add a server first. | autoDjAddServerFirst |
-| Auto DJ: nothing is within the similarity range, so it is playing without that filter. Loosen the match slider to use it again. · Auto DJ: the discovery scan hasn't reached these tracks yet, so it is playing without sonic similarity. · Auto DJ stopped — the server session expired. Sign in again in Manage servers. ⚑ | (the record's literals in its audio handler — keys here: `dj.sonic_range`, `dj.sonic_unscanned`, `dj.auth_expired`) |
+| Auto DJ: nothing is within the similarity range, so it is playing without that filter. Loosen the match slider to use it again. · Auto DJ: the discovery scan hasn't reached these tracks yet, so it is playing without sonic similarity. · Auto DJ stopped — the server session expired. Sign in again in Manage servers. ⚑ | (the record's literals in its audio handler — keys here: `dj.sonic_range`, `dj.sonic_unscanned`, `dj.auth_expired`; the rest of the App's notes are `dj.*` too: `needs_server`, `not_reachable`, `on` / `on_from` / `off`, `one_source`, `max_keywords` / `max_genres`, the three sonic reasons, `fetch_failed` / `fetch_failed_why`, `no_match` / `no_match_lane`, `picking_opener`, `nothing_new`, `picked` / `picked_more`, `preview_failed` with `fail_auth` / `fail_network` / `fail_no_match`) |
 | Preview picks · {n} tracks in the sonic pool · picking… ⚑ (this surface only) | `gui.dj.preview`, `gui.dj.pool`, `gui.dj.picking` |
 | Keep the music going when the queue runs low. ⚑ (the Settings doorway's description) | `gui.set.dj_desc` |
 
@@ -607,6 +607,18 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
   the proxy; Stop leaves the rows and their badges. The sonic path (a pool
   answered, clause 30) and a direct-tunnel peer lane still want a server
   with discovery data.
+- **2026-09-21 — The App's notes speak the ten locales**: every note the
+  shared App says for the DJ is a `dj.*` key (the record's translations
+  where it has them, the terminal's own for the rest), and the worker no
+  longer words anything — a pick or a preview carries a `DjNote` kind
+  (the range or the unscanned degrade, a preview's failure) that the App
+  puts into words. The TUI's tab rows keep their own English, as the rest
+  of that surface does.
+- **2026-09-21 — "Could not load genres" is a state**: a failed genres
+  fetch used to leave the picker on "loading genres…" until Esc; the
+  worker now answers with a failure of its own (a dead session still
+  travels as the session's), the picker shows the record's sentence with
+  the reason under it, and reopening asks again clean.
 - **2026-09-21 — The room's Stop stops** (clause 40 says the button rides
   the same toggle as every entry point): Start does — the opening question
   and the seed rule included — but the toggle's "on elsewhere → move here"

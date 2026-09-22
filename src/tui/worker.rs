@@ -219,16 +219,16 @@ pub enum DjFailure {
     Server(String),
 }
 
-impl DjFailure {
-    /// The failure in the Preview row's words.
-    pub fn words(&self) -> String {
-        match self {
-            DjFailure::Auth => "the server session expired".to_string(),
-            DjFailure::Network(_) => "could not reach the server".to_string(),
-            DjFailure::NoMatch => "nothing matched the filters".to_string(),
-            DjFailure::Server(message) => message.clone(),
-        }
-    }
+/// What a pick or a preview has to say besides its songs — a kind, for the
+/// App to put in the user's words (both shells show it; clauses 30, 53).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DjNote {
+    /// The pool was let go of this lane: nothing within the range.
+    SonicRange,
+    /// The pool was let go of this lane: the scan has not reached these tracks.
+    SonicUnscanned,
+    /// Preview came back empty-handed, and why.
+    PreviewFailed(DjFailure),
 }
 
 /// What the DJ's server offers, from its `/api/` — or its flat ping, which
@@ -406,7 +406,7 @@ pub enum Event {
         songs: Vec<Track>,
         ignore_list: Vec<u32>,
         sonic: bool,
-        note: Option<String>,
+        note: Option<DjNote>,
         failure: Option<DjFailure>,
     },
     /// What the DJ's server offers; `None` when it could not be asked.
@@ -417,10 +417,12 @@ pub enum Event {
     AutoDjSample {
         tracks: Vec<Track>,
         pool: Option<crate::api::types::SonicReport>,
-        note: Option<String>,
+        note: Option<DjNote>,
     },
     /// Every genre in the library.
     Genres(Vec<Genre>),
+    /// The genres could not be fetched — the picker's empty state.
+    GenresFailed(String),
     /// A journey's stops, in order. `note` explains a short or empty arc —
     /// both are answers the server gives deliberately rather than failures.
     /// `length` names the request this answers, since asking for a longer
@@ -1022,7 +1024,13 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
             crate::api::wait(async { Ok::<_, ApiError>(dj_probe(c).await) })
                 .map(|info| Event::DjProbed { identity, info })
         }
-        ApiCmd::Genres => c.genres().map(Event::Genres),
+        // A dead session is the session's business; anything else is the
+        // picker's to say (auto-dj contract, clause 48).
+        ApiCmd::Genres => match c.genres() {
+            Ok(genres) => Ok(Event::Genres(genres)),
+            Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+            Err(e) => Ok(Event::GenresFailed(e.to_string())),
+        },
         ApiCmd::Journey { start, end, length } => {
             crate::api::wait(journey(c, &start, &end, length))
         }
@@ -1457,7 +1465,7 @@ pub(crate) struct Picked {
     pub(crate) ignore_list: Vec<u32>,
     /// Whether the pool shaped these picks — the badge's second glyph.
     pub(crate) sonic: bool,
-    pub(crate) note: Option<String>,
+    pub(crate) note: Option<DjNote>,
     pub(crate) pool: Option<crate::api::types::SonicReport>,
     pub(crate) failure: Option<DjFailure>,
 }
@@ -1493,11 +1501,6 @@ fn dj_log_name(identity: &str) -> String {
 /// The two keys a pool is asked with, let go of together (clause 30).
 const SONIC_KEYS: [&str; 2] = ["similarTo", "minSimilarity"];
 
-/// What the App says when a lane's pool is let go of (clause 30) — once per
-/// lane, its budget; and when the session behind the DJ expired (clause 32).
-pub(crate) const DJ_NOTE_RANGE: &str = "Auto DJ: nothing is within the similarity range, so it is playing without that filter. Loosen the match slider to use it again.";
-pub(crate) const DJ_NOTE_UNSCANNED: &str = "Auto DJ: the discovery scan hasn't reached these tracks yet, so it is playing without sonic similarity.";
-pub(crate) const DJ_NOTE_AUTH: &str = "Auto DJ stopped — the server session expired. Sign in again in Manage servers.";
 
 /// Which keys a server will not take — learned from a `"<key>" is not
 /// allowed` rejection for the rest of the process (clause 25) — and which a
@@ -1590,7 +1593,7 @@ enum Refusal {
     Learn(String),
     /// The pool cannot be honoured: let it go for the lane, and say so —
     /// or not, when the user switched discovery off themselves.
-    Degrade(Option<&'static str>),
+    Degrade(Option<DjNote>),
     Auth,
     Network(String),
     NoMatch,
@@ -1611,10 +1614,10 @@ fn classify(err: &ApiError, sonic_asked: bool) -> Refusal {
             if sonic_asked {
                 let lower = message.to_lowercase();
                 if lower.contains("similarity range") {
-                    return Refusal::Degrade(Some(DJ_NOTE_RANGE));
+                    return Refusal::Degrade(Some(DjNote::SonicRange));
                 }
                 if lower.contains("analyzed") {
-                    return Refusal::Degrade(Some(DJ_NOTE_UNSCANNED));
+                    return Refusal::Degrade(Some(DjNote::SonicUnscanned));
                 }
                 // Switched off server-side since the probe — the user's own
                 // change, so being told is noise; a 404 is a dead seed path.
@@ -1645,7 +1648,7 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
     if ask.sonic_asked() && learner().all_suppressed(identity, epoch, &SONIC_KEYS) {
         ask = ask.without_sonic();
     }
-    let mut note: Option<String> = None;
+    let mut note: Option<DjNote> = None;
     let mut last: Option<crate::api::types::RandomSongsResponse> = None;
     let mut attempts = 0;
     while attempts < 5 {
@@ -1692,7 +1695,7 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
                     dj_log(format!("[dj] {name}: the pool cannot be honoured ({err}) — playing without it this lane"));
                     learner().suppress(identity, epoch, &SONIC_KEYS);
                     if let Some(say) = say {
-                        note = Some(say.to_string());
+                        note = Some(say);
                     }
                     ask = ask.without_sonic();
                 }
@@ -1758,7 +1761,7 @@ pub(crate) async fn autodj_sample(
         if let Some(failure) = picked.failure {
             // A sample that finds nothing is an answer, not an error: it is
             // exactly what a too-tight setting looks like.
-            note = note.or(Some(failure.words()));
+            note = note.or(Some(DjNote::PreviewFailed(failure)));
             break;
         }
         let Some(track) = picked.songs.into_iter().next() else { break };
@@ -2220,8 +2223,8 @@ mod tests {
         let server = |status: u16, message: &str| ApiError::Server { status, message: message.into() };
         assert_eq!(classify(&server(400, r#""limit" is not allowed"#), true), Refusal::Learn("limit".into()));
         assert_eq!(classify(&ApiError::Forbidden(r#""requireBpm" is not allowed"#.into()), false), Refusal::Learn("requireBpm".into()), "the body is the signal, not the status");
-        assert_eq!(classify(&server(400, "No songs within the similarity range match criteria"), true), Refusal::Degrade(Some(DJ_NOTE_RANGE)));
-        assert_eq!(classify(&server(400, "Sonic seed track has not been analyzed yet"), true), Refusal::Degrade(Some(DJ_NOTE_UNSCANNED)));
+        assert_eq!(classify(&server(400, "No songs within the similarity range match criteria"), true), Refusal::Degrade(Some(DjNote::SonicRange)));
+        assert_eq!(classify(&server(400, "Sonic seed track has not been analyzed yet"), true), Refusal::Degrade(Some(DjNote::SonicUnscanned)));
         assert_eq!(classify(&ApiError::Forbidden("discovery is disabled".into()), true), Refusal::Degrade(None));
         assert_eq!(classify(&ApiError::NotFound("Track not found".into()), true), Refusal::Degrade(None), "a dead pin");
         // The same words without a pool asked are not a degrade.

@@ -1459,6 +1459,8 @@ pub struct GenrePicker {
     pub all: Vec<String>,
     pub row: usize,
     pub loading: bool,
+    /// Why the list could not be fetched, when it could not.
+    pub failed: Option<String>,
 }
 
 /// The next track, as announced to the engine for a crossfade — plus
@@ -5184,6 +5186,7 @@ impl App {
             event @ (Event::AutoDjSample { .. }
             | Event::Journey { .. }
             | Event::Genres(_)
+            | Event::GenresFailed(_)
             | Event::AutoDjPick { .. }
             | Event::DjProbed { .. }) => self.consume_dj(event),
             // A random pick lands on the sonic end that asked for it, the

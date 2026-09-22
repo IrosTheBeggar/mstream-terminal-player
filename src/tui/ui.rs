@@ -2691,7 +2691,7 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
         DjRow::Sonic => {
             let mut spans = vec![switch(s.sonic)];
             if let Some(reason) = app.dj_sonic_reason() {
-                spans.push(note(reason.to_string()));
+                spans.push(note(reason));
             }
             spans
         }
@@ -2897,6 +2897,8 @@ fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) {
     let mut lines: Vec<Line> = Vec::new();
     if picker.loading {
         lines.push(Line::from(Span::styled("  loading genres…", Style::new().fg(dim()))));
+    } else if let Some(err) = &picker.failed {
+        lines.push(Line::from(Span::styled(format!("  could not load genres — {err}"), Style::new().fg(dim()))));
     } else if picker.all.is_empty() {
         lines.push(Line::from(Span::styled(empty, Style::new().fg(dim()))));
     } else {

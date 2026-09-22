@@ -6189,7 +6189,7 @@ fn a_degrade_is_said_once_per_lane_and_an_auth_failure_too() {
         songs: vec![track("b")],
         ignore_list: vec![],
         sonic: false,
-        note: Some(crate::tui::worker::DJ_NOTE_RANGE.into()),
+        note: Some(crate::tui::worker::DjNote::SonicRange),
         failure: None,
     });
     assert!(app.message.as_ref().unwrap().text.contains("similarity range"));
@@ -6199,7 +6199,7 @@ fn a_degrade_is_said_once_per_lane_and_an_auth_failure_too() {
         songs: vec![track("c")],
         ignore_list: vec![],
         sonic: false,
-        note: Some(crate::tui::worker::DJ_NOTE_RANGE.into()),
+        note: Some(crate::tui::worker::DjNote::SonicRange),
         failure: None,
     });
     // The second turn is announced as a pick, not as the note again.
@@ -6398,6 +6398,19 @@ fn the_tabs_keyword_row_takes_typed_words_and_x_removes_the_last() {
     app.handle_action(Action::RemoveFromQueue);
     assert!(app.dj.keywords.is_empty(), "x takes the last word back");
     assert_eq!(app.now_tab(), NowTab::AutoDj, "still on the tab");
+}
+
+#[test]
+fn a_failed_genres_load_ends_the_pickers_loading_with_the_reason() {
+    let mut app = connected_app();
+    on_the_dj_tab(&mut app);
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Genres).unwrap();
+    app.handle_action(Action::Activate);
+    assert!(app.dj_panel.genres.as_ref().is_some_and(|p| p.loading), "Enter opens the picker, loading");
+    app.apply_event(Event::GenresFailed("boom".into()));
+    let picker = app.dj_panel.genres.as_ref().unwrap();
+    assert!(!picker.loading, "no longer loading");
+    assert_eq!(picker.failed.as_deref(), Some("boom"));
 }
 
 #[test]
