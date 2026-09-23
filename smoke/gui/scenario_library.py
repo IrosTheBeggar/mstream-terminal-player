@@ -79,4 +79,16 @@ def run(Gui):
     need(g, "▸ play", "the verbs")
     if g.find("# A B C"):
         raise SystemExit("FAIL: Recent wears a strip")
+
+    # The play lists: Recent's siblings, from the stats the server has
+    # counted — this rig may hold none, and then the empty words stand.
+    for label in ("Last played", "Most played"):
+        g.click_text(label, 5)
+        g.wait_for("▸ " + label, 10, f"{label} active in the nav")
+        g.pump(1.5)
+        g.dump(label)
+        if not (g.find("items") or g.find("Nothing here yet")):
+            raise SystemExit(f"FAIL: {label} showed neither a count nor the empty words")
+        if g.find("# A B C"):
+            raise SystemExit(f"FAIL: {label} wears a strip")
     g.quit()

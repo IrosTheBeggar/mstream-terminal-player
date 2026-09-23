@@ -1077,6 +1077,8 @@ gui:
     sonic: "Ścieżka dźwiękowa"
     tools: "NARZĘDZIA"
     dj: "Auto DJ"
+    last_played: "Historia"
+    most_played: "Najczęstsze"
   bar:
     play: "odtwórz"
     queue: "wszystko do kolejki"

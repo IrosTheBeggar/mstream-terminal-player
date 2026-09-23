@@ -1,12 +1,12 @@
-# Library rooms — Artists, Genres, Recent
+# Library rooms — Artists, Genres, Recent, Last played, Most played
 
 | | |
 |---|---|
-| **Design of record** | `mstream_music` @ `a27da385` (2026-09-21) — `lib/singletons/api.dart` (`getArtists`, `getArtistAlbums`, `getRecentlyAdded`: how each answer becomes rows, which lists are pushed *alphabetical*, the `SINGLES` bucket), `lib/singletons/browser_list.dart` (the list stack and its alphabetical cache), `lib/screens/browser.dart` (a list that is all albums becomes the grid; the strip's gutter; the row builders), `lib/widgets/letter_strip.dart` (the `#` + A–Z index, `showsFor` and its threshold, `scrubbableCount`, snapping to the nearest present letter), `lib/widgets/album_grid.dart` (cards, columns by width), `lib/objects/display_item.dart` (`getText`: the title, else the file name; `getSubText`: the artist). **Genres**: the mobile app does not browse them (its genres call feeds Auto DJ only), so the record for that room is the webapp — mStream @ `ccf78c82`, `webapp/alpha/m.js` (`renderGenre` "name (count)", `getAllGenres`, `getGenreSongsList`, `getRecentlyAdded` with its 100). |
-| **Server API** | `GET/POST /api/v1/db/artists` → `{artists: [name…]}`, the server's order (A–Z, case-insensitive) · `POST /api/v1/db/artists-albums {artist}` → `{albums: [{name, artist, year, album_art_file}]}` in the server's order — every album the artist is on, compilations and features included (V17), plus one **name-less bucket** for the artist's loose tracks · `GET/POST /api/v1/db/genres` → `{genres: [{name, track_count}]}` · `POST /api/v1/db/genre-songs {genre, limit?, offset?}` → tracks (everything when unpaged) · `POST /api/v1/db/recent/added {limit}` (required) → tracks newest first (`created_at DESC`), each carrying `created-at` · `POST /api/v1/db/album-songs {album, artist}` — `album: null` is the singles bucket (the webapp sends `album: null, artist: null`). All take `ignoreVPaths`; all answer through a federated peer's parent (the webapp's `peerReq` variants). |
+| **Design of record** | `mstream_music` @ `a27da385` (2026-09-21) — `lib/singletons/api.dart` (`getArtists`, `getArtistAlbums`, `getRecentlyAdded`: how each answer becomes rows, which lists are pushed *alphabetical*, the `SINGLES` bucket), `lib/singletons/browser_list.dart` (the list stack and its alphabetical cache), `lib/screens/browser.dart` (a list that is all albums becomes the grid; the strip's gutter; the row builders), `lib/widgets/letter_strip.dart` (the `#` + A–Z index, `showsFor` and its threshold, `scrubbableCount`, snapping to the nearest present letter), `lib/widgets/album_grid.dart` (cards, columns by width), `lib/objects/display_item.dart` (`getText`: the title, else the file name; `getSubText`: the artist). **Genres**: the mobile app does not browse them (its genres call feeds Auto DJ only), so the record for that room is the webapp — mStream @ `ccf78c82`, `webapp/alpha/m.js` (`renderGenre` "name (count)", `getAllGenres`, `getGenreSongsList`, `getRecentlyAdded` with its 100). **Last played · Most played** (2026-09-23): the webapp again — `webapp/index.html` (the side-nav entries "Recently Played" / "Most Played", `local-only`), `webapp/alpha/m.js` (`getRecentlyPlayed` / `getMostPlayed`: a "Get last [100] songs" box, then the rows as files — the title, else the file name, the artist under it — through the same `createMusicFileHtml` as Recently Added). The mobile app has neither list. |
+| **Server API** | `GET/POST /api/v1/db/artists` → `{artists: [name…]}`, the server's order (A–Z, case-insensitive) · `POST /api/v1/db/artists-albums {artist}` → `{albums: [{name, artist, year, album_art_file}]}` in the server's order — every album the artist is on, compilations and features included (V17), plus one **name-less bucket** for the artist's loose tracks · `GET/POST /api/v1/db/genres` → `{genres: [{name, track_count}]}` · `POST /api/v1/db/genre-songs {genre, limit?, offset?}` → tracks (everything when unpaged) · `POST /api/v1/db/recent/added {limit}` (required) → tracks newest first (`created_at DESC`), each carrying `created-at` · `POST /api/v1/db/album-songs {album, artist}` — `album: null` is the singles bucket (the webapp sends `album: null, artist: null`). All take `ignoreVPaths`; all answer through a federated peer's parent (the webapp's `peerReq` variants). **The play lists** (2026-09-23): `POST /api/v1/db/stats/recently-played {limit}` (required; `ignoreVPaths` optional) → tracks by `last_played DESC` · `POST /api/v1/db/stats/most-played {limit}` → tracks by `play_count DESC` where `play_count > 0`; both read the signed-in user's own `user_metadata`, render like every listing, and answer `[]` for a caller with no user (a federation key, a guest). A play is what the server has counted — the webapp's play sessions (`/api/v1/stats/plays`, 6.27) or the legacy 30-second scrobble; this player reports neither yet. |
 | **Already in this repo** | `LibraryNode::{Artists, Artist, Genres, Genre, Recent}` and `load_library` (`src/tui/worker.rs`, `RECENT_LIMIT = 100`); `entries_from_library` (`src/tui/app/entries.rs`: an artist row is its name, an album row `album_label` "Artist — Name (year)", a genre row `genre_label` "Name (count)", a track row `display_name`); the Library pane (`App.library`) with its `Drill` stack and the pane's **trail** — Back restores the parent listing and its cursor from the trail without asking again; `open_library_node`; the TUI's Library tab, which walks all five nodes today; the GUI's album wall (`src/gui/albums.rs`: cells, pages, per-slot covers, the drilled album's track list through `draw_pane_rows`) with `App.albums` as its cache; the browse top bar (docs/ux-contracts/browser-top-bar.md); the GUI nav rows Artists · Genres · Recent, placeholders that say the browse slice is coming. |
-| **Target surface** | the GUI player — three left-nav rooms (digits 3, 4, 5) over the shared App's Library pane; the artist's albums as the wall; the TUI changes nothing |
-| **Status** | contract extracted 2026-09-21 and **implemented the same day** in the GUI (`src/gui/library.rs`, the wall generalized in `src/gui/albums.rs`, the kit's `letter_strip`); **checked on the rig the same day** (`smoke/gui/scenario_library.py`: the artists list, Boukmanflow's wall with its Singles card, an album with the artist as Back, Esc up twice, chillhop's five tracks under the verbs, Recent's hundred) |
+| **Target surface** | the GUI player — three left-nav rooms (digits 3, 4, 5) over the shared App's Library pane; the artist's albums as the wall; the TUI changes nothing. **2026-09-23**: Last played and Most played as two more rows of the LIBRARY group over the same pane — no digit (the digits end at 9), the pointer's rooms; the TUI's Library root menu gains the two nodes |
+| **Status** | contract extracted 2026-09-21 and **implemented the same day** in the GUI (`src/gui/library.rs`, the wall generalized in `src/gui/albums.rs`, the kit's `letter_strip`); **checked on the rig the same day** (`smoke/gui/scenario_library.py`: the artists list, Boukmanflow's wall with its Singles card, an album with the artist as Back, Esc up twice, chillhop's five tracks under the verbs, Recent's hundred). **2026-09-23**: Last played and Most played added (clauses 21–24), Recent's grammar over the same pane; the rig run opens both |
 
 ## Intent
 
@@ -19,7 +19,9 @@ play.
 
 ## Entry points
 
-1. The left nav: **Artists** (`3`), **Genres** (`4`), **Recent** (`5`).
+1. The left nav: **Artists** (`3`), **Genres** (`4`), **Recent** (`5`),
+   and since 2026-09-23 **Last played** and **Most played** — without a
+   digit (the digits end at 9, `D` is the DJ's): the pointer's rows.
    Each opens its root list; with no session up, the room shows the
    servers room's offline text like every browse room does.
 2. **Search**: an artist hit drills into that artist's albums inside the
@@ -34,7 +36,9 @@ play.
 
 **Artists**: the list of names → an artist → its **albums as a wall** →
 an album → its tracks. **Genres**: the list with counts → a genre → its
-tracks. **Recent**: the newest 100 tracks, no drill. Every step down is a
+tracks. **Recent**: the newest 100 tracks, no drill. **Last played**: the
+last 100 you played, newest first, no drill. **Most played**: the 100 you
+have played most, most first, no drill. Every step down is a
 click or Enter; every step up is Back — `◂` in the header, `h`,
 Backspace, Esc — and the parent comes back with its cursor where it was.
 The three rooms share the App's one Library pane, so choosing a library
@@ -120,11 +124,31 @@ matches nothing keeps the bar contract's rule (the way back is one key).
     allowlist); the header crumb wears the multi-server contract's
     `· read-only`.
 
+### The play lists (2026-09-23)
+
+21. **Last played and Most played are Recent's shape**: the Library pane
+    under the bar, track rows exactly as Recent's (clause 2) with the
+    verbs (clause 1), `n items` in the header (clause 3), the hundred
+    asked on every visit (clause 4) — "played" means now — and no drill.
+22. **The server's order stands**: last played newest first, most played
+    by count, most first. Neither is an alphabet: no strip (clause 12).
+23. **Whose plays**: the signed-in user's own — the server keeps a play
+    count and a last-played time per user. A peer session's caller (a
+    federation key, a guest) has no user there and is answered with an
+    empty list, so the rooms hide for a peer as Playlists do (multi-server
+    clause 26), and their rows go nowhere.
+24. **What counts as a play** is the server's: the webapp's play sessions
+    (6.27) and the legacy 30-second scrobble write the same stats. This
+    player reports neither yet, so until it does the lists show the
+    listening the server has counted from other clients — a slice of its
+    own (play sessions from the shared App, its own contract).
+
 ## Wording
 
 | String | Key |
 |---|---|
 | Artists · Genres · Recent (the nav rows, exist) | `gui.nav.artists` · `gui.nav.genres` · `gui.nav.recent` — the record's `browserArtists` / `browserRecent` |
+| Recently Played · Most Played (the webapp's nav entries) | `gui.nav.last_played` "Last played" · `gui.nav.most_played` "Most played" — the nav column is twelve cells wide, so the record's words shorten in every locale; the TUI's root menu keeps the record's "Recently Played" / "Most Played" |
 | n items · n albums · n of m (exist) | `gui.files.items` · `gui.alb.count` · the bar contract's |
 | listing… (exists) | `busy.listing` |
 | Nothing here yet | `gui.lib.empty` — the record's `browserEmptyList` |
@@ -142,13 +166,13 @@ matches nothing keeps the bar contract's rule (the way back is one key).
 - **Disc headers** in the drilled album (the record's album detail groups
   a multi-disc album under "Disc n") — the Albums room's, not these
   rooms'; logged so it is not forgotten.
-- The webapp's **Recently played** and **Most played** stats lists.
 
 ## Translation notes (terminal GUI)
 
 | Record | Here |
 |---|---|
 | The drawer's Library entries | The nav rows Artists · Genres · Recent; each `Act::Nav` opens the root node fresh (`open_library_node(node, true)`) and points the App's tab at Library, the wall's way |
+| The webapp's side-nav entries Recently Played / Most Played | Two more rows at the LIBRARY group's end, Last played · Most played (2026-09-23), hidden for a peer like Playlists; no digit, so the pointer's; the heading is the nav label; the "Get last [n]" box is not ported — a fixed hundred, as Recent. The column grew to fourteen rows, so Files and Search now stand together at its top |
 | A list of DisplayItems | The App's Library pane drawn by `draw_pane_rows` (rows, cursor, hover verbs, kit scrollbar), under `draw_bar_controls` — the Files room's grammar with the pane swapped |
 | The album grid for an artist | `albums.rs` generalized: the wall draws whichever album list the App holds for the view on screen — `App.albums` for the root wall as today, and the artist's albums kept beside it for the `Artist` node — with the cells, pages, cover slots and keys shared |
 | The vertical letter strip | A one-line `# A B … Z` row under the bar's controls (a 22-row pane cannot stand 27 letters), a kit widget: each letter a click target, dim when absent, the row's tip "Jump to X"; a jump sets the list's first visible row (the pane's scroll) or the wall's page |
@@ -165,7 +189,8 @@ and a card opens the tracks with the artist as Back; the singles card;
 the strip appears at 25 rows and not at 24, dims absent letters, jumps
 the list, snaps from a dim letter, follows the filter, and is absent on
 Recent; the bar's verbs are absent on artists and genres and present on
-tracks.
+tracks. The play lists ask with the limit, draw track rows with the verbs
+and no strip, and hide for a peer.
 
 ## Deviations log
 
@@ -181,3 +206,9 @@ tracks.
   stack per browse session, not per entry). No tap-behaviour setting:
   three verbs on every track row. The singles bucket opens instead of
   erroring.
+- **2026-09-23 — Last played and Most played**: the webapp's two stats
+  lists, ported as Recent's siblings (clauses 21–24). Its "Get last [n]"
+  box is not ported (the fixed hundred, as Recent); the labels shorten to
+  the nav column's twelve cells; both hide for a peer, whose guest has no
+  play counts on the peer. The reporting the lists feed on — a play
+  session posted from the player — is not here yet (clause 24).

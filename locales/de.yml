@@ -1077,6 +1077,8 @@ gui:
     sonic: "Sonic-Pfad"
     tools: "WERKZEUGE"
     dj: "Auto DJ"
+    last_played: "Verlauf"
+    most_played: "Meistgehört"
   bar:
     play: "abspielen"
     queue: "alle einreihen"

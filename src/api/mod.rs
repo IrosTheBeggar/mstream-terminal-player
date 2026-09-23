@@ -940,6 +940,18 @@ impl Client {
         wait(self.recently_added_async(limit))
     }
 
+    /// The signed-in user's play history, newest first — mStream's
+    /// `stats/recently-played`, `limit` required. A caller with no user
+    /// there (a federation key, a guest) is answered with an empty list.
+    pub async fn recently_played_async(&self, limit: u32) -> Result<Vec<Track>, ApiError> {
+        self.post("api/v1/db/stats/recently-played", serde_json::json!({ "limit": limit })).await
+    }
+
+    /// The user's most played tracks, most first — `stats/most-played`.
+    pub async fn most_played_async(&self, limit: u32) -> Result<Vec<Track>, ApiError> {
+        self.post("api/v1/db/stats/most-played", serde_json::json!({ "limit": limit })).await
+    }
+
     /// Metadata for one track — used to fill the engine's duration hint
     /// without making it probe the remote stream.
     pub async fn metadata_async(&self, filepath: &str) -> Result<Track, ApiError> {

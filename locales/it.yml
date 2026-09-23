@@ -1077,6 +1077,8 @@ gui:
     sonic: "Percorso sonoro"
     tools: "STRUMENTI"
     dj: "Auto DJ"
+    last_played: "Cronologia"
+    most_played: "Più suonati"
   bar:
     play: "riproduci"
     queue: "accoda tutto"

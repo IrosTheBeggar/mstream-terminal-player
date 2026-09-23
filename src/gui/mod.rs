@@ -367,9 +367,14 @@ enum NavId {
     /// keep it. The tenth room has no digit — `0` is the Now Playing
     /// screen — and answers `D`.
     Dj,
+    /// The play lists (library-rooms contract, clauses 21–24), drawn at the
+    /// LIBRARY group's end but last in the array: rooms past the digits
+    /// are the pointer's.
+    LastPlayed,
+    MostPlayed,
 }
 
-const NAV: [NavId; 10] = [
+const NAV: [NavId; 12] = [
     NavId::Files,
     NavId::Albums,
     NavId::Artists,
@@ -380,6 +385,8 @@ const NAV: [NavId; 10] = [
     NavId::Settings,
     NavId::Sonic,
     NavId::Dj,
+    NavId::LastPlayed,
+    NavId::MostPlayed,
 ];
 
 impl NavId {
@@ -395,6 +402,8 @@ impl NavId {
             NavId::Settings => t!("gui.nav.settings").to_string(),
             NavId::Sonic => t!("gui.nav.sonic").to_string(),
             NavId::Dj => t!("gui.nav.dj").to_string(),
+            NavId::LastPlayed => t!("gui.nav.last_played").to_string(),
+            NavId::MostPlayed => t!("gui.nav.most_played").to_string(),
         }
     }
 }
@@ -409,6 +418,8 @@ const PLAYLISTS_NAV: usize = 5;
 const SETTINGS_NAV: usize = 7;
 const SONIC_NAV: usize = 8;
 const DJ_NAV: usize = 9;
+const LAST_PLAYED_NAV: usize = 10;
+const MOST_PLAYED_NAV: usize = 11;
 
 /// A class's slot in [`SEARCH_CLASSES`] — the chip order.
 fn class_idx(class: SearchClass) -> usize {
@@ -732,9 +743,10 @@ impl Gui {
                 if i == SONIC_NAV && !self.app.capabilities.discovery_path {
                     return false;
                 }
-                // A peer has no playlists to offer (contract clause 26): the
-                // row is not drawn, and its digit is as dead as the row.
-                if i == PLAYLISTS_NAV && self.app.session.peer.is_some() {
+                // A peer has no playlists to offer (contract clause 26), and
+                // no play counts of its guest's either (library-rooms clause
+                // 23): the rows are not drawn, and their digits are as dead.
+                if matches!(i, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV) && self.app.session.peer.is_some() {
                     return false;
                 }
                 // A filter describes the list it was typed against —
@@ -1135,7 +1147,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             match NAV[gui.active] {
                 NavId::Files => draw_files(frame, gui, content),
                 NavId::Albums => albums::draw(frame, gui, content),
-                NavId::Artists | NavId::Genres | NavId::Recent => library::draw(frame, gui, content),
+                NavId::Artists | NavId::Genres | NavId::Recent | NavId::LastPlayed | NavId::MostPlayed => {
+                    library::draw(frame, gui, content)
+                }
                 NavId::Search => draw_search(frame, gui, content),
                 NavId::Settings => draw_settings(frame, gui, content),
                 NavId::Sonic => sonic::draw(frame, gui, content),
@@ -1204,7 +1218,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             SETTINGS_NAV if gui.cursor.is_some() => t!("gui.tips.rows"),
             FILES_NAV if gui.app.filtering => t!("gui.tips.filter"),
             FILES_NAV => t!("gui.tips.files"),
-            ARTISTS_NAV | GENRES_NAV | RECENT_NAV if gui.app.connected => library::tips(gui),
+            ARTISTS_NAV | GENRES_NAV | RECENT_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV if gui.app.connected => {
+                library::tips(gui)
+            }
             ALBUMS_NAV if gui.app.connected => {
                 if matches!(
                     gui.app.library_stack.here(),
@@ -1336,10 +1352,12 @@ fn draw_capture_banner(frame: &mut Frame, gui: &mut Gui, at: Rect, text: &str) {
 }
 
 fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    put(frame, 1, 4, &t!("gui.nav.library"), dim());
-    // The tools, the record's desktop-rail group: Auto DJ, then the
-    // capability-gated sonic room.
-    put(frame, 1, 13, &t!("gui.nav.tools"), dim());
+    // Files and Search at the top; the LIBRARY group's seven rooms; then
+    // the tools, the record's desktop-rail group: Auto DJ, then the
+    // capability-gated sonic room. Fourteen rows, so the column fits the
+    // 24-row minimum with the footer on and Settings on the last row.
+    put(frame, 1, 5, &t!("gui.nav.library"), dim());
+    put(frame, 1, 14, &t!("gui.nav.tools"), dim());
     let forward = forward_glyph();
     // The Settings row sits on the content's last row, above the bar.
     let set_y = content_rect(area.width, area.height, gui.queue_open, gui.footer()).bottom() - 1;
@@ -1349,15 +1367,19 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         if i == SONIC_NAV && !gui.app.capabilities.discovery_path {
             continue;
         }
-        if i == PLAYLISTS_NAV && gui.app.session.peer.is_some() {
+        // A peer has no playlists, and no play counts for its guest
+        // (library-rooms clause 23): neither row is drawn.
+        if matches!(i, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV) && gui.app.session.peer.is_some() {
             continue;
         }
         let y = match i {
             FILES_NAV => 2,
-            1..=5 => 4 + i as u16,
-            SEARCH_NAV => 11,
-            DJ_NAV => 14,
-            SONIC_NAV => 15,
+            SEARCH_NAV => 3,
+            1..=5 => 5 + i as u16,
+            LAST_PLAYED_NAV => 11,
+            MOST_PLAYED_NAV => 12,
+            DJ_NAV => 15,
+            SONIC_NAV => 16,
             _ => set_y,
         };
         let label = id.label();
@@ -2417,7 +2439,10 @@ impl Gui {
     /// Whether the active room wears the browse bar at all.
     fn browse_room(&self) -> bool {
         self.screen == Screen::Library
-            && matches!(self.active, FILES_NAV | ALBUMS_NAV | ARTISTS_NAV | GENRES_NAV | RECENT_NAV | PLAYLISTS_NAV)
+            && matches!(
+                self.active,
+                FILES_NAV | ALBUMS_NAV | ARTISTS_NAV | GENRES_NAV | RECENT_NAV | PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV
+            )
     }
 
     /// The wheel scrolls the view under the pointer, never the selection
@@ -2452,7 +2477,9 @@ impl Gui {
             NavId::Dj => {
                 dj::wheel(self, delta);
             }
-            NavId::Artists | NavId::Genres | NavId::Recent => library::wheel(self, delta),
+            NavId::Artists | NavId::Genres | NavId::Recent | NavId::LastPlayed | NavId::MostPlayed => {
+                library::wheel(self, delta)
+            }
         }
     }
 }

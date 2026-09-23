@@ -1050,6 +1050,8 @@ pub(crate) fn browser_title(app: &App) -> String {
             LibraryNode::Genres => " Genres ".to_string(),
             LibraryNode::Genre(genre) => format!(" Genre: {genre} "),
             LibraryNode::Recent => " Recently Added ".to_string(),
+            LibraryNode::RecentlyPlayed => " Recently Played ".to_string(),
+            LibraryNode::MostPlayed => " Most Played ".to_string(),
             LibraryNode::Playlists => " Playlists ".to_string(),
             LibraryNode::Playlist(name) => format!(" Playlist: {name} "),
         },

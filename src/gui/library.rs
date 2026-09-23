@@ -16,7 +16,7 @@ use crate::tui::app::{Action, App, Entry, Tab};
 use crate::tui::worker::LibraryNode;
 
 use super::albums::{self, WallState};
-use super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, List, RECENT_NAV, accent, bright_bold, put};
+use super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, LAST_PLAYED_NAV, List, MOST_PLAYED_NAV, RECENT_NAV, accent, bright_bold, put};
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -41,6 +41,8 @@ pub(crate) fn root_of(active: usize) -> Option<LibraryNode> {
         ARTISTS_NAV => Some(LibraryNode::Artists),
         GENRES_NAV => Some(LibraryNode::Genres),
         RECENT_NAV => Some(LibraryNode::Recent),
+        LAST_PLAYED_NAV => Some(LibraryNode::RecentlyPlayed),
+        MOST_PLAYED_NAV => Some(LibraryNode::MostPlayed),
         _ => None,
     }
 }
@@ -67,7 +69,10 @@ fn wall_view(gui: &Gui) -> bool {
 
 /// Whether the view on screen is a root list, whose `..` row leads nowhere.
 fn at_root(gui: &Gui) -> bool {
-    matches!(gui.app.library_stack.here(), LibraryNode::Artists | LibraryNode::Genres | LibraryNode::Recent)
+    matches!(
+        gui.app.library_stack.here(),
+        LibraryNode::Artists | LibraryNode::Genres | LibraryNode::Recent | LibraryNode::RecentlyPlayed | LibraryNode::MostPlayed
+    )
 }
 
 /// The rows the list draws, with their pane indices: everything but the
@@ -307,7 +312,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Position;
 
-    use super::super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, List, RECENT_NAV, RowVerb, render};
+    use super::super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, LAST_PLAYED_NAV, List, MOST_PLAYED_NAV, RECENT_NAV, RowVerb, render};
     use crate::api::types::{Album, Genre, Track};
     use crate::config::Config;
     use crate::tui::app::{App, Effect, Tab};
@@ -456,6 +461,36 @@ mod tests {
         assert!(all.contains("30 items") && all.contains("▸ play"), "{all}");
         assert!(!rows.iter().any(|r| r.contains("# A B C")), "newest first is not an alphabet: {all}");
         assert_eq!(hit_text(&gui, &rows, "A00.mp3"), Some(Act::PaneRow(List::Library, 1, RowVerb::Open)));
+    }
+
+    #[test]
+    fn the_play_lists_ask_the_limit_list_tracks_like_recent_and_hide_for_a_peer() {
+        let mut gui = session_gui();
+        gui.act(Act::Nav(LAST_PLAYED_NAV));
+        assert!(asked(&gui, &LibraryNode::RecentlyPlayed), "asks on every visit");
+        gui.pending.clear();
+        let tracks: Vec<Track> = (0..3).map(|i| track(&format!("p/{i}.mp3"), 100.0)).collect();
+        land(&mut gui, LibraryNode::RecentlyPlayed, LibraryData::Tracks(tracks.clone()));
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(all.contains("▸ Last played") && all.contains("3 items") && all.contains("▸ play"), "{all}");
+        assert!(!rows.iter().any(|r| r.contains("# A B C")), "most recent first is not an alphabet: {all}");
+        gui.act(Act::Nav(MOST_PLAYED_NAV));
+        assert!(asked(&gui, &LibraryNode::MostPlayed));
+        gui.pending.clear();
+        land(&mut gui, LibraryNode::MostPlayed, LibraryData::Tracks(tracks));
+        let rows = draw(&mut gui);
+        assert!(rows.join("\n").contains("▸ Most played"), "{}", rows.join("\n"));
+        assert_eq!(hit_text(&gui, &rows, "0.mp3"), Some(Act::PaneRow(List::Library, 1, RowVerb::Open)), "the first track, after the menu row");
+        // A peer session's guest has no play counts on the peer: the rows
+        // leave the nav column, and their nav index goes nowhere.
+        gui.act(Act::Nav(ARTISTS_NAV));
+        gui.app.session.peer = Some(("http://host:3000".into(), 3));
+        let nav: Vec<String> = draw(&mut gui).iter().map(|r| r.chars().take(15).collect()).collect();
+        let column = nav.join("\n");
+        assert!(!column.contains("Last played") && !column.contains("Most played"), "{column}");
+        gui.act(Act::Nav(LAST_PLAYED_NAV));
+        assert_eq!(gui.active, ARTISTS_NAV, "a hidden room's row goes nowhere");
     }
 
     #[test]

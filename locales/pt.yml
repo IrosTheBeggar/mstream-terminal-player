@@ -1077,6 +1077,8 @@ gui:
     sonic: "Caminho sonoro"
     tools: "FERRAMENTAS"
     dj: "Auto DJ"
+    last_played: "Últ. ouvidas"
+    most_played: "Mais ouvidas"
   bar:
     play: "tocar"
     queue: "enfileirar tudo"

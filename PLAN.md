@@ -2035,6 +2035,15 @@ a LATER secondary screen (party view), Columns retired.
   the accent stands over the room (or the Now Playing stage) with `[X]`
   to let the pick go, and the room steps down a row while the pick is
   armed; the "· Esc cancels" tail is cut when keyboard hints are off.
+- **Last played and Most played ✅ 2026-09-23** — the webapp's two stats
+  lists as two more LIBRARY rooms over the shared pane (library-rooms
+  clauses 21–24): `LibraryNode::{RecentlyPlayed, MostPlayed}` through
+  `stats/recently-played` and `stats/most-played` with the hundred, the
+  TUI's root menu with them too, hidden for a peer, no strip, no digit.
+  The nav grew to fourteen rows (Files and Search together at the top).
+  Open: the player does not report plays yet, so the lists show what the
+  server counted from other clients — play sessions are the next slice
+  (their own contract).
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the

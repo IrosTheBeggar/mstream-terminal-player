@@ -20,9 +20,16 @@ pub(super) fn library_root_entries(peer: bool) -> Vec<Entry> {
         // Last because the four above are ways the tags cut the library and
         // this is the one you cut yourself — not because it matters least.
         ("Playlists", LibraryNode::Playlists),
+        // The play lists: the server's own count of what you played
+        // (library-rooms contract, clauses 21–24); a peer keeps no such
+        // count for a guest, so they hide for one like Playlists.
+        ("Recently Played", LibraryNode::RecentlyPlayed),
+        ("Most Played", LibraryNode::MostPlayed),
     ]
     .into_iter()
-    .filter(|(_, node)| !(peer && *node == LibraryNode::Playlists))
+    .filter(|(_, node)| {
+        !(peer && matches!(node, LibraryNode::Playlists | LibraryNode::RecentlyPlayed | LibraryNode::MostPlayed))
+    })
     .map(|(label, node)| Entry::Node { label: label.to_string(), node })
     .collect()
 }

@@ -1856,9 +1856,10 @@ mod tests {
         let mut gui = session_gui();
         let rows = draw(&mut gui);
         // The TOOLS group under Search: Auto DJ, then the sonic room's slot.
-        assert!(rows[13].contains("TOOLS"), "the group:\n{}", rows[13]);
+        assert!(rows[14].contains("TOOLS"), "the group:\n{}", rows[14]);
         assert_eq!(hit_text(&gui, &rows, "Auto DJ"), Some(Act::Nav(DJ_NAV)));
-        assert!(!rows[14].contains('•'), "off: the row wears no state dot:\n{}", rows[14]);
+        let nav = |r: &String| r.chars().take(15).collect::<String>();
+        assert!(!nav(&rows[15]).contains('•'), "off: the row wears no state dot:\n{}", rows[15]);
         assert!(!rows.iter().any(|r| r.contains("LISTEN")), "Settings has no doorway any more");
         gui.act(Act::Nav(DJ_NAV));
         assert_eq!(gui.active, DJ_NAV);
@@ -1890,12 +1891,13 @@ mod tests {
         assert!(gui.app.dj_armed());
         gui.act(Act::Nav(FILES_NAV));
         let rows = draw(&mut gui);
-        assert!(rows[14].contains("Auto DJ •"), "the dot while armed:\n{}", rows[14]);
+        assert!(rows[15].contains("Auto DJ •"), "the dot while armed:\n{}", rows[15]);
         assert_eq!(hit_text(&gui, &rows, "Auto DJ •"), Some(Act::Nav(DJ_NAV)), "one click target with its dot");
         gui.act(Act::Nav(DJ_NAV));
         gui.act(Act::DjStartStop);
         let rows = draw(&mut gui);
-        assert!(!rows[14].contains('•'), "off again, no dot:\n{}", rows[14]);
+        let nav = |r: &String| r.chars().take(15).collect::<String>();
+        assert!(!nav(&rows[15]).contains('•'), "off again, no dot:\n{}", rows[15]);
     }
 
     #[test]

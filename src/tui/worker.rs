@@ -359,6 +359,10 @@ pub enum LibraryNode {
     Genres,
     Genre(String),
     Recent,
+    /// The play lists (library-rooms contract, clauses 21–24): the user's
+    /// last hundred plays newest first, and the hundred played most.
+    RecentlyPlayed,
+    MostPlayed,
     /// Your own lists, which are a way of browsing the library like any
     /// other — they were a tab of their own until they turned out to need
     /// every machine the Library tab already had.
@@ -1571,6 +1575,10 @@ pub(crate) async fn load_library(
         LibraryNode::Recent => {
             LibraryData::Tracks(client.recently_added_async(RECENT_LIMIT).await?)
         }
+        LibraryNode::RecentlyPlayed => {
+            LibraryData::Tracks(client.recently_played_async(RECENT_LIMIT).await?)
+        }
+        LibraryNode::MostPlayed => LibraryData::Tracks(client.most_played_async(RECENT_LIMIT).await?),
         LibraryNode::Playlists => LibraryData::Playlists(client.playlists_async().await?),
         LibraryNode::Playlist(name) => {
             LibraryData::Tracks(client.playlist_load_async(name).await?)

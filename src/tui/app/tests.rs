@@ -3354,7 +3354,7 @@ fn library_tab_opens_on_a_static_menu_without_a_request() {
     let mut app = connected_app();
     let effects = app.handle_action(Action::SelectTab(1));
     assert!(effects.is_empty(), "the mode menu costs no round-trip");
-    assert_eq!(app.library.entries.len(), 5);
+    assert_eq!(app.library.entries.len(), 7);
     assert_eq!(app.library_node(), &LibraryNode::Root);
 
     let labels: Vec<&str> = app
@@ -3366,7 +3366,7 @@ fn library_tab_opens_on_a_static_menu_without_a_request() {
             _ => "?",
         })
         .collect();
-    assert_eq!(labels, ["Artists", "Albums", "Genres", "Recently Added", "Playlists"]);
+    assert_eq!(labels, ["Artists", "Albums", "Genres", "Recently Added", "Playlists", "Recently Played", "Most Played"]);
 }
 
 #[test]
@@ -3453,7 +3453,7 @@ fn back_walks_the_library_stack_to_the_menu() {
     let effects = app.handle_action(Action::Back);
     assert!(effects.is_empty(), "returning to the static menu needs no request");
     assert_eq!(app.library_node(), &LibraryNode::Root);
-    assert_eq!(app.library.entries.len(), 5);
+    assert_eq!(app.library.entries.len(), 7, "the menu: five ways in and the two play lists");
 
     // Already at the top.
     assert!(app.handle_action(Action::Back).is_empty());
@@ -3472,7 +3472,7 @@ fn a_reply_for_an_abandoned_view_is_discarded() {
         data: LibraryData::Artists(vec!["Ghost".into()]),
     });
     assert_eq!(app.library_node(), &LibraryNode::Root);
-    assert_eq!(app.library.entries.len(), 5, "the menu is untouched by the late reply");
+    assert_eq!(app.library.entries.len(), 7, "the menu is untouched by the late reply");
 }
 
 #[test]

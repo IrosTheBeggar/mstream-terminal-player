@@ -1077,6 +1077,8 @@ gui:
     sonic: "Звуковой путь"
     tools: "ИНСТРУМЕНТЫ"
     dj: "Авто-DJ"
+    last_played: "История"
+    most_played: "Популярные"
   bar:
     play: "играть"
     queue: "всё в очередь"
