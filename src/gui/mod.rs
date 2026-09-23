@@ -2733,6 +2733,32 @@ mod tests {
     }
 
     #[test]
+    fn the_transport_is_one_group_with_a_filled_play_and_heavy_frames() {
+        // The "Player bar options" canvas, F: repeat leads the group beside
+        // prev, play is the kit's fat fill in the accent, prev and next wear
+        // the thick frame in bold, the toggles keep the rounded one.
+        let mut gui = browsing_gui();
+        let buf = draw_buffer(&mut gui);
+        let area = *buf.area();
+        let y = bar::top(area, false) + 2; // the controls' middle row
+        let line: String = (0..area.width).map(|x| buf[(x, y)].symbol()).collect();
+        let at = |needle: &str| line.char_indices().position(|(i, _)| line[i..].starts_with(needle)).map(|p| p as u16);
+        let (repeat, prev, play, next, shuffle) = (at("│ ↻ │"), at("┃ ◂◂ ┃"), at("▮▮"), at("┃ ▸▸ ┃"), at("│ ⇄ │"));
+        assert!(repeat < prev && prev < play && play < next && next < shuffle, "repeat, prev, play, next, shuffle: {line:?}");
+        let play = play.unwrap();
+        assert_eq!(buf[(play, y)].bg, th().accent, "play is the filled slab");
+        assert_eq!(buf[(play, y)].fg, th().on_accent);
+        assert_eq!(buf[(play - 2, y - 1)].symbol(), "▗", "the pill's soft corner above: {:?}", rows_of(&buf, y - 1));
+        // The labels carry the weight; the frames around them do not.
+        assert!(buf[(prev.unwrap() + 2, y)].modifier.contains(Modifier::BOLD), "prev's glyph is bold");
+        assert!(!buf[(shuffle.unwrap() + 2, y)].modifier.contains(Modifier::BOLD), "shuffle off is not");
+    }
+
+    fn rows_of(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buf.area().width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
     fn the_demo_seat_yields_to_real_playback() {
         let mut gui = test_gui();
         assert_eq!(gui.bar_now().unwrap().title, "Cassini IV");

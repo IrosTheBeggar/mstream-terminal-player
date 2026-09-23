@@ -1968,7 +1968,12 @@ a LATER secondary screen (party view), Columns retired.
   line and the stars with key and tempo beside it — the sheet's facts, so
   a song reads the same wherever it is met. The content and the queue
   panel take the three rows back (two with keyboard hints on: the tips
-  line sits under the bar and shifts it up).
+  line sits under the bar and shifts it up). **Then F′, the same day**: play
+  as the kit's fat fill in the accent (`kit::tall_fill`, the sanctioned
+  high-impact form, now a widget), prev and next in the thick frame
+  (`tall_frame_bordered`), and the controls as ONE centred group led by
+  repeat beside prev — the lone toggle at the left edge read as misplaced
+  once the bar was seen whole.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the

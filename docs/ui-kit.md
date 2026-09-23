@@ -9,7 +9,8 @@ The shipped implementation is `src/kit/`: `Surface<A>` (the per-frame
 click/tip/scrollbar registries plus pointer, tooltip dwell, capture and
 hold-repeat, generic over each screen's action enum), the widgets as
 free functions (`tall_button` and `tall_secondary` over one
-`tall_frame`, `button`, `cursor_ring`, `modal_frame(_anchored)`,
+`tall_frame`, `tall_frame_bordered` for the thick border, `tall_fill`,
+`button`, `cursor_ring`, `modal_frame(_anchored)`,
 `modal_close`, `scroll_list`, `letter_strip`, `draw_tooltip`,
 `input_display`), the pure geometry (`table_view` and the `ListView`
 that carries a list's offset and reveal flag across frames, `letter_index`,
@@ -125,7 +126,9 @@ banned.
   where the screen has one).
 - **Alternatives** (sanctioned, deliberate, never a third style on one
   screen): the 1-row filled slab for dense contexts; the fat soft-corner
-  fill for high-impact moments.
+  fill for high-impact moments (`kit::tall_fill` — the GUI player's play
+  button; on legacy conhost, which has no quarter blocks, its corners are
+  square).
 - **Affirmative card** (the wizard's add-folder picker): a 3-row Rounded
   card whose border AND BOLD centered label are fg Green — the add
   action wears the affirmative color. Hover brightens both to Cyan like
@@ -383,10 +386,12 @@ forward action as a tall primary on the right.
 **The GUI player's bar** (the "Player bar options" canvas, A′; `src/gui/bar.rs`):
 five rows at the bottom, the tips line under them only while keyboard hints
 are on. The gold rule is the seek bar (times at its ends, the played part
-gold). Beneath it, three rows of the bar's compact tall frames: repeat
-alone at the left edge, and the transport — prev · play · next, the text
-colour BOLD, play in the accent — with shuffle and auto-dj centred in the
-span before the card. The bottom row holds the volume group at the left,
+gold). Beneath it, three rows of compact tall controls as ONE group
+centred in the span before the card: repeat, then prev · play · next,
+then shuffle and auto-dj. Play is the fat fill in the accent
+(`kit::tall_fill`), prev and next wear the thick frame in the text colour
+BOLD (`tall_frame_bordered`), the toggles the rounded frame in their
+state colours. The bottom row holds the volume group at the left,
 the screen's note (or an armed pick's banner) after it, and the card's
 last line. The card, at the right edge, is an eight-by-four cover with
 four lines beside it: title, artist · year, the spec line, the stars with
