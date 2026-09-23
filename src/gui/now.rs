@@ -136,6 +136,8 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Esc | KeyCode::Char('0') => gui.act(Act::Screen(Screen::Library)),
         KeyCode::Tab => gui.act(Act::ToggleQueue),
         KeyCode::Char(c @ '1'..='9') => gui.act(Act::Nav(c as usize - '1' as usize)),
+        // The tenth room, the Library's Auto DJ, has no digit.
+        KeyCode::Char('D') => gui.act(Act::Nav(super::DJ_NAV)),
         KeyCode::Char(' ') => gui.act(Act::PlayPause),
         KeyCode::Char('p') => gui.act(Act::Prev),
         KeyCode::Char('n') => gui.act(Act::Next),

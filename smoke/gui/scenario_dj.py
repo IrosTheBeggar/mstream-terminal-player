@@ -1,5 +1,5 @@
 import os, shutil
-# Auto DJ on the rig (auto-dj contract, slice A5): the room behind Settings,
+# Auto DJ on the rig (auto-dj contract, slice A5): the room from the nav,
 # Start on a one-row queue, the pick landing with its badge, Preview, and
 # the server picker moving the DJ to the proxied peer (Rig A via B) with the
 # next turn picked from there. The rig's servers have no discovery data, so
@@ -43,10 +43,10 @@ def run(Gui):
         g.dump("after queueing one track")
         raise SystemExit("FAIL: expected a one-row queue")
 
-    # Settings › Auto DJ ▸ — the room, off, then the probe's reason on the
-    # sonic row (the rig has no discovery data).
-    g.key("8"); g.wait_for("LISTEN", 10, "the Settings LISTEN group")
-    g.click_text("Auto DJ ▸", 5)
+    # The nav's Auto DJ row under TOOLS — the room, off, then the probe's
+    # reason on the sonic row (the rig has no discovery data).
+    g.wait_for("TOOLS", 10, "the nav's TOOLS group")
+    g.click_text("Auto DJ", 5)
     g.wait_for("Auto DJ is off", 10, "the room")
     g.wait_for("have discovery", 15, "the sonic reason from the probe")
     g.dump("the room, off")

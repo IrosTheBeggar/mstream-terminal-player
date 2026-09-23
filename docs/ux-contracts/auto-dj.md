@@ -5,8 +5,8 @@
 | **Design of record** | `mstream_music` @ `origin/master` (`439b4de4`, 2026-09-19) — `lib/screens/auto_dj.dart` (the settings screen: status, Queue, Continuity, Filters, Sources, and the multi-server body this surface does not port), `lib/widgets/auto_dj_start_sheet.dart` (the empty-queue chooser), `lib/widgets/queue_list.dart` (`toggleAutoDJ`, `_seedRandom` / `_armLibraryPick`, the `_EmptyQueue` opening-song buttons, the labelled `AutoDjButton`, the queue-row badge), `lib/widgets/player_panel.dart` (the same button on the player), `lib/singletons/auto_dj_manager.dart` (the settings, their persistence, `libraryFilters`, `batchParams`), `lib/media/audio_stuff.dart` (the session: `setAutoDJ`, `startAutoDJFromSeed`, `_startAutoDJFromSeed`, `_autoDJPick`, `sonicParams`, `shouldTopUpAutoDJ`, `shouldDeferDJPick`, `_resetAutoDJSession`, `_queueAutoDJSongs`, `restoreAutoDJ`), `lib/singletons/server_capabilities.dart` + `lib/util/server_version.dart` (the capability learner and the version floors), `lib/singletons/api.dart` (`fetchAutoDjSeed`, the opener). **Re-extracted 2026-09-20** from the 2026-09-06 pin (`695f4d0`); what moved in between: songs per fetch (`limit`, mStream #966), a federated peer hosts the DJ (mStream #946), sonic waits for the discovery scan (`discoveryReady`, mStream #879), opening-song buttons under an empty armed queue, multi-server sessions with vector seeds (out of scope here), and the toasts name the server by its display name. The screen is itself a port of the webapp's panel (`webapp/velvet/app.js viewAutoDJ`; `webapp/alpha/auto-dj.js` for the anchor semantics) — where they disagree, this contract says so. |
 | **Server API** | `POST /api/v1/db/random-songs` — one call, every knob (mStream `src/api/random.js`, Joi-validated with no unknown keys): `limit` (1–25, default 1; 6.26.0) · `ignoreList` (round-trip cursor, ≤ 500 ids; the server keeps the last 50) · `ignoreVPaths` (≤ 50) · `minRating` (0–10; ignored for a caller with no user — a federation key or guest) · `genres` (≤ 200) + `genreMode` (`whitelist` default / `blacklist`) · `bpmRanges` + `bpmRangesWide` (≤ 16 windows each, 0–1000) + `requireBpm` · `musicalKeys` (≤ 24 Camelot codes) + `requireMusicalKey` · `ignoreArtists` (≤ 100) · `similarTo` (1–8 paths) + `minSimilarity` (both or neither) · `similarToVector` + `similarToModelId` (6.26.0, out of scope) · `minDuration` + `maxDuration` (seconds, ≤ 86400) + `allowUnknownDuration` (6.25.0). Answers `{songs: [..], ignoreList, sonic?: {similarity, similarities, poolSize}}`. Its refusals, all as `{"error": "..."}`: a **schema rejection** `"<key>" is not allowed` (400 from 6.12.0, 403 before — the body is the signal); nothing left in a sonic pool → 400 `No songs within the similarity range match criteria`; an unanalysed seed → 400 `Sonic seed track has not been analyzed yet`, an unscanned library → 400 `No tracks have been analyzed yet`; discovery switched off → 403 containing `discovery is disabled`; an expired token → 401/403 without a not-allowed body. `GET /api/v1/db/genres`. `GET /api/` is the capability source: `server` (the version), `features.discovery`, `features.discoveryReady` (whether the scan has produced vectors — `/api/v1/ping` never carries it), `user.vpaths`. Version floors the record keeps: 4.6.0 `ignoreVPaths` · 6.7.1 the BPM / key / genre / cooldown block · 6.15.2 the sonic pair · 6.25.0 the length window · 6.26.0 `limit`. random-songs is on the federation allowlist (mStream #946): a peer session — through the parent's proxy or over the peer's own tunnel with a guest token — can run the DJ. |
 | **Already in this repo** | Most of a DJ, in the older three-mode shape: `src/dj.rs` (Camelot math, same/half/double windows, the perceptual sonic slider, `build_random_request`, `Settings`), `[player.dj]` prefs and `player.autodj`, `AutoDjMode` and the `A` cycle, `maybe_autodj` (the queue-end top-up), `consume_dj` (queue the pick, start it if idle, the cursor), `autodj_pick` (`Similar` via nearest neighbours, `BpmKey` via random-songs, the sonic 400 retried once without the pool), `autodj_sample` (three picks without queueing), the TUI's Auto-DJ tab (`DjPanel` / `DjRow`) with its genre picker, `Event::{AutoDjPick, AutoDjSample, Genres}`, and the GUI bar's `auto-dj` toggle. Since 2026-09-06 the multi-server contract landed and gives this one its footing: every queued row carries its `Origin` and plays from its own server (`Reach`, `reach()`), federated peers are sessions of their own (proxied or direct), tunnels follow the queue with a hold for a row whose tunnel is down, the layered `/api/` payload is parsed (`LayeredInfo`), and the GUI queue panel has rows of its own to badge. **Missing**: the on/off-plus-toggles model, sources (`ignoreVPaths`), the length window, the keyword filter, `requireBpm` / `requireMusicalKey`, the session-locked Camelot anchor, the rolling / locked sonic anchors as the record defines them, songs per fetch, the readiness gate, the one-shot seed and the start chooser, the empty-queue openers, lane resets with in-flight discards, the capability learner, the failure taxonomy, the queue badge, the armed-not-playing restore, and the room itself. |
-| **Target surface** | the GUI player — the bar toggle, the queue panel (its badge and its empty state), and an **Auto DJ room** under Settings; the TUI's `A` and Auto-DJ tab follow through the shared App |
-| **Status** | contract extracted 2026-09-06; **re-extracted against the moved record and settled 2026-09-20** — the open questions are decided below, and decision 10 was rewritten the same day to the record's model (the DJ is armed FOR a server, the session browses where it likes); implementation began 2026-09-20 (PLAN.md, Phase 10): **slices A1–A5 landed 2026-09-20/21** — the model, the worker, the GUI room and its surfaces, the TUI's keyword entry, and the rig run (`smoke/gui/scenario_dj.py`: the room, a batch, Preview, the server picker moving the DJ to a proxied peer with the next turn picked from there). Left for a server with discovery data: the sonic path end to end (a pool answered, clause 30's degrade) and a direct-tunnel peer lane |
+| **Target surface** | the GUI player — the bar toggle, the queue panel (its badge and its empty state), and the **Auto DJ room** — a Library nav room under TOOLS since 2026-09-23 (Settings › `Auto DJ ▸` before); the TUI's `A` and Auto-DJ tab follow through the shared App |
+| **Status** | contract extracted 2026-09-06; **re-extracted against the moved record and settled 2026-09-20** — the open questions are decided below, and decision 10 was rewritten the same day to the record's model (the DJ is armed FOR a server, the session browses where it likes); implementation began 2026-09-20 (PLAN.md, Phase 10): **slices A1–A5 landed 2026-09-20/21** — the model, the worker, the GUI room and its surfaces, the TUI's keyword entry, and the rig run (`smoke/gui/scenario_dj.py`: the room, a batch, Preview, the server picker moving the DJ to a proxied peer with the next turn picked from there). Left for a server with discovery data: the sonic path end to end (a pool answered, clause 30's degrade) and a direct-tunnel peer lane. **2026-09-23** — the room moved from Settings to the Library's nav column, a TOOLS group beside the sonic room, where the record's browse root and desktop rail keep it (decision 5 amended; the deviations log) |
 
 ## Intent
 
@@ -28,9 +28,11 @@ falling silent.
    server it switches it off; with the DJ on another server it moves the
    DJ here. The note line confirms "Auto DJ on" / "Auto DJ off" ("Auto DJ
    on — picking from {server}" when more than one server is saved).
-2. **The room** — Settings › `Auto DJ ▸` (a LISTEN group above SERVERS):
-   the state and Start/Stop at the top, then Queue · Continuity ·
-   Filters · Sources.
+2. **The room** — the Library's nav column, `Auto DJ` under a TOOLS
+   group (the record's browse-root card and its desktop rail's TOOLS
+   item), `D` from the keyboard; the row wears the DJ's live state the
+   way the record's card does. Inside: the state and Start/Stop at the
+   top, then Queue · Continuity · Filters · Sources.
 3. **The queue panel's empty state** while the DJ is armed: "Auto DJ is on
    and needs an opening song." with `Pick a random song` and `Choose a
    song` (clauses 16, 62).
@@ -366,7 +368,7 @@ room, the chooser and the panel, and `dj.<name>` for the shared App's notes
 | Add a server first. | autoDjAddServerFirst |
 | Auto DJ: nothing is within the similarity range, so it is playing without that filter. Loosen the match slider to use it again. · Auto DJ: the discovery scan hasn't reached these tracks yet, so it is playing without sonic similarity. · Auto DJ stopped — the server session expired. Sign in again in Manage servers. ⚑ | (the record's literals in its audio handler — keys here: `dj.sonic_range`, `dj.sonic_unscanned`, `dj.auth_expired`; the rest of the App's notes are `dj.*` too: `needs_server`, `not_reachable`, `on` / `on_from` / `off`, `one_source`, `max_keywords` / `max_genres`, the three sonic reasons, `fetch_failed` / `fetch_failed_why`, `no_match` / `no_match_lane`, `picking_opener`, `nothing_new`, `picked` / `picked_more`, `preview_failed` with `fail_auth` / `fail_network` / `fail_no_match`) |
 | Preview picks · {n} tracks in the sonic pool · picking… ⚑ (this surface only) | `gui.dj.preview`, `gui.dj.pool`, `gui.dj.picking` |
-| Keep the music going when the queue runs low. ⚑ (the Settings doorway's description) | `gui.set.dj_desc` |
+| TOOLS · Auto DJ (the nav group and its row) | `gui.nav.tools`, `gui.nav.dj` — the desktop rail's literal header and the record's autoDjTitle; the card's On/Off line (browserAutoDjOn/Off) is the row's `•` |
 
 ## Out of scope here
 
@@ -394,7 +396,8 @@ room, the chooser and the panel, and `dj.<name>` for the shared App's notes
 | Record | Here |
 |---|---|
 | The labelled Auto DJ button (queue header + player) | The bar's `auto-dj` toggle, lit while the DJ runs anywhere — arm here / off / move here (decision 1, entry point 1); `A` in both shells; the confirmation on the note line names the server when several are saved |
-| The settings screen | The **Auto DJ room** behind Settings › `Auto DJ ▸` (a LISTEN group above SERVERS, description "Keep the music going when the queue runs low."): the torrent room's grammar — `◂` back, BOLD title, the state line at the right of the title row ("• on · picking from {server}" Green / "• off" DarkGray), then 1-row rows under dim UPPERCASE section labels STATUS · QUEUE · CONTINUITY · FILTERS · SOURCES; ↑↓ walk the rows, Esc stows the cursor then leaves, the tips line names the keys |
+| The settings screen | The **Auto DJ room**, a Library nav room (since 2026-09-23; behind Settings › `Auto DJ ▸` with a `◂` back before): a TOOLS group under Search in the nav column — `Auto DJ`, then `Sonic path` — the row dim, bright under the pointer, the accent when active like every nav row, plus a `•` in the ok colour while the DJ is armed (the record's card line "On"/"Off"); `D` from anywhere (the tenth room: digits stop at 9 and `0` is the Now Playing screen). Inside, the sonic room's grammar — BOLD title, the state line at the right of the title row ("• on · picking from {server}" Green / "• off" DarkGray), then 1-row rows under dim UPPERCASE section labels STATUS · QUEUE · CONTINUITY · FILTERS · SOURCES; ↑↓ walk the rows, Esc stows the cursor, the tips line names the keys |
+| The browse-root card's On/Off line and the desktop rail's TOOLS header | The nav row's `•` while armed; the TOOLS label over Auto DJ and Sonic path (the record's rail says TOOLS; its browse root groups the same feature cards after the library's) |
 | Start / Stop button | The room's one primary (3-row Rounded frame) under STATUS: "Start Auto DJ ▸", or "Stop Auto DJ" in the destructive colour |
 | Switches | `[✓]` / `[ ]` rows; Space and Enter toggle under the cursor, a click toggles without selecting |
 | Sliders (strictness, tolerance, songs per fetch) | The sonic room's ten-cell bars with the value beside them (`▓▓▓▓░░░░░░  55% or closer`, `± 8 BPM`, `4 songs`); ←→ step (strictness by .05, tolerance and songs by 1), a click on a cell sets; the raw cosine as a dim trailing detail on the strictness row |
@@ -473,7 +476,7 @@ pass, full block, the fifth-try acceptance); the three degrade strings
 once per lane; the auth note once; an owed pick on a network failure and
 its retry; the migration table above. Worker: the not-allowed parser, the
 retry loop's bound, the version pre-filter. GUI (render tests): the
-doorway, every room row and its gate, the chooser's three answers, the
+nav row (its `•` while armed, `D`), every room row and its gate, the chooser's three answers, the
 capture's banner and Esc, the empty state's buttons following the armed
 state, the badge glyphs, the bar's on/off wording. Rig (the two servers,
 discovery off): the DJ on a peer session through the proxy and direct (a
@@ -503,7 +506,12 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
 5. **Where the room lives** — Settings › `Auto DJ ▸` in a LISTEN group
    above SERVERS; the bar toggle stays the everyday control; the queue
    panel's empty state carries the openers. When the Now Playing screen
-   lands the room may also be reachable as a tab there.
+   lands the room may also be reachable as a tab there. **Amended
+   2026-09-23**: the room is a Library nav room under a TOOLS group,
+   beside the sonic room, where the record's browse root (a feature card
+   with the DJ's On/Off line) and its desktop rail (TOOLS › Auto DJ) keep
+   it; the Settings doorway and its LISTEN group are retired — one door.
+   The nav row wears the DJ's state; `D` opens the room from the keyboard.
 6. **Preview** — kept (clause 53), a logged deviation.
 7. **The new parameters and the learner** — all ported: sources, the
    length window, the keyword filter, `requireBpm` / `requireMusicalKey`,
@@ -633,3 +641,12 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
   clips at the cell edge (the Settings rows' rule) and comes back whole
   when the queue panel folds away; a bar's note shows whole or not at all
   (a cosine clipped mid-number would read as another number).
+- **2026-09-23 — The room moves to the Library nav** (decision 5
+  amended): the record puts Auto DJ among the browse root's feature cards
+  and in the desktop rail's TOOLS group, never under Settings; the
+  Settings › `Auto DJ ▸` doorway was this surface's own translation. It
+  and its LISTEN group are retired, the room's `◂` back with them (a nav
+  room has no way back; Esc stows the cursor). The nav row wears the DJ's
+  state as the record's card does — a `•` in the ok colour while armed.
+  The tenth room has no digit (`0` is the Now Playing screen); `D` opens
+  it, the capital pairing with `A`'s toggle.

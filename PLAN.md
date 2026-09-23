@@ -1989,6 +1989,16 @@ a LATER secondary screen (party view), Columns retired.
   panel and the bar stand under it. Ahead of its contract (the mobile
   record's player panel, lyrics screen, visualizer and More sheet) — see
   the next slice.
+- **The Auto DJ room moves to the Library nav ✅ 2026-09-23** — the
+  record keeps Auto DJ among its browse root's feature cards and in the
+  desktop rail's TOOLS group, never under Settings; the room's Settings
+  doorway (`Auto DJ ▸`, the LISTEN group) was this surface's own
+  translation, and it is retired with the room's `◂` back. The nav grows
+  a TOOLS group under Search — Auto DJ, then Sonic path — and the Auto DJ
+  row wears a `•` in the ok colour while the DJ is armed (the record's
+  card line). The tenth room has no digit; `D` opens it (auto-dj
+  contract: decision 5 amended, entry point 2, the deviations log;
+  `scenario_dj` opens the room from the nav).
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the

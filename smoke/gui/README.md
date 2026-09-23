@@ -82,7 +82,7 @@ url = "http://127.0.0.1:3041"
   the Playlists room lists it, and the queue header's `clear` empties a
   queued folder.
 - `dj` — Auto DJ on the rig (auto-dj contract, slice A5): one row queued
-  with `a`, Settings › `Auto DJ ▸`, the room off with the probe's sonic
+  with `a`, the nav's `Auto DJ` row under TOOLS, the room off with the probe's sonic
   reason (the rig has no discovery data), Start — the note names the server,
   a batch of four badged rows lands (songs per fetch 4), Preview lists three
   picks under its row without queueing, a click on the songs-per-fetch bar's

@@ -384,7 +384,10 @@ forward action as a tall primary on the right.
 **The GUI player's top bar**: two tabs at the left — Library, Now Playing
 — worn as the kit's tab slab for the screen that is up and dim text for
 the other, and the session's server label with `[+]` at the right. The
-Library is the nav column and its rooms; Now Playing is the playing track
+Library is the nav column and its rooms — Files, the LIBRARY group, Search,
+then a TOOLS group (Auto DJ, whose row wears a `•` in the ok colour while
+the DJ is armed, and the capability-gated Sonic path), Settings on the
+column's last row; Now Playing is the playing track
 large (`src/gui/now.rs`), a first cut ahead of its contract. The queue
 panel and the bar stand under both.
 

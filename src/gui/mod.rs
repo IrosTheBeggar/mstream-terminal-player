@@ -167,10 +167,9 @@ pub(crate) enum Act {
     LibJump(usize),
     LibBack,
     /// The Auto DJ room (auto-dj contract, clauses 40–53): its rows, bars,
-    /// radios, chips, the keyword field, the genre and server pickers.
-    DjBack,
-    /// The room's one primary: Start through the toggle (the opening
-    /// question included), Stop wherever the DJ is armed.
+    /// radios, chips, the keyword field, the genre and server pickers —
+    /// starting with its one primary: Start through the toggle (the
+    /// opening question included), Stop wherever the DJ is armed.
     DjStartStop,
     DjFocus(dj::Item),
     DjStep(crate::tui::app::DjRow, i32),
@@ -326,12 +325,11 @@ pub(crate) enum Screen {
 }
 
 /// The sub-view a Settings room shows in place of its rows. At most one is
-/// open, so the three flags this replaces can no longer disagree.
+/// open, so the flags this replaces can no longer disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsRoom {
     Servers,
     Torrent,
-    Dj,
 }
 
 /// What a click on a pane row meant: the row itself, or one of the hover
@@ -358,13 +356,18 @@ enum NavId {
     Playlists,
     Search,
     Settings,
-    /// Capability-gated, drawn under Search but LAST in the array: digits
+    /// Capability-gated, drawn under TOOLS but LAST of the digits: they
     /// assign by index, and a room that comes and goes with the server
     /// must never renumber the rooms that don't (contract §1).
     Sonic,
+    /// The Auto DJ room (auto-dj contract, entry point 2): the first row of
+    /// the TOOLS group, where the record's browse root and desktop rail
+    /// keep it. The tenth room has no digit — `0` is the Now Playing
+    /// screen — and answers `D`.
+    Dj,
 }
 
-const NAV: [NavId; 9] = [
+const NAV: [NavId; 10] = [
     NavId::Files,
     NavId::Albums,
     NavId::Artists,
@@ -374,6 +377,7 @@ const NAV: [NavId; 9] = [
     NavId::Search,
     NavId::Settings,
     NavId::Sonic,
+    NavId::Dj,
 ];
 
 impl NavId {
@@ -388,6 +392,7 @@ impl NavId {
             NavId::Search => t!("gui.nav.search").to_string(),
             NavId::Settings => t!("gui.nav.settings").to_string(),
             NavId::Sonic => t!("gui.nav.sonic").to_string(),
+            NavId::Dj => t!("gui.nav.dj").to_string(),
         }
     }
 }
@@ -401,6 +406,7 @@ const SEARCH_NAV: usize = 6;
 const PLAYLISTS_NAV: usize = 5;
 const SETTINGS_NAV: usize = 7;
 const SONIC_NAV: usize = 8;
+const DJ_NAV: usize = 9;
 
 /// A class's slot in [`SEARCH_CLASSES`] — the chip order.
 fn class_idx(class: SearchClass) -> usize {
@@ -428,16 +434,13 @@ const ROW_BLEND_SKIPS: usize = 2;
 const ROW_PAUSE_FADE: usize = 3;
 /// The queue and the place in it come back on launch (contract clause 39).
 const ROW_RESUME: usize = 4;
-/// The LISTEN group: the Auto DJ room's doorway (auto-dj contract, entry
-/// point 2).
-const ROW_DJ: usize = 5;
-const ROW_MANAGE: usize = 6;
+const ROW_MANAGE: usize = 5;
 /// The torrents group: the Add-torrent doorway (the room, like Manage
 /// servers) and the ask-me switch for torrents arriving from outside.
-const ROW_TORRENT: usize = 7;
-const ROW_ASK: usize = 8;
-const ROW_HINTS: usize = 9;
-const SET_ROWS: usize = 10;
+const ROW_TORRENT: usize = 6;
+const ROW_ASK: usize = 7;
+const ROW_HINTS: usize = 8;
+const SET_ROWS: usize = 9;
 
 /// Seconds of blend as a person reads them (the TUI's own spelling).
 fn fmt_blend(seconds: f32) -> String {
@@ -632,7 +635,6 @@ impl Gui {
         match row {
             // ← on a doorway row would "adjust" into the room; only an
             // activation (Enter, click, →) opens it.
-            ROW_DJ if delta > 0 => dj::open_room(self),
             ROW_MANAGE if delta > 0 => servers::open_room(self),
             ROW_TORRENT if delta > 0 => torrent::open_room(self),
             ROW_ASK => {
@@ -756,6 +758,12 @@ impl Gui {
                 }
                 if i != SETTINGS_NAV {
                     self.cursor = None;
+                }
+                // The Auto DJ room opens with its cursor stowed and, with
+                // the DJ off, asks the session's server what it offers so
+                // the rows fit it (auto-dj contract, clause 50).
+                if i == DJ_NAV {
+                    dj::open_room(self);
                 }
                 // The album wall: fetch the list on the first visit; a
                 // return finds it standing (and a drill left open resumes
@@ -1100,6 +1108,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
                 NavId::Settings => draw_settings(frame, gui, content),
                 NavId::Sonic => sonic::draw(frame, gui, content),
                 NavId::Playlists => playlists::draw(frame, gui, content),
+                NavId::Dj => dj::draw_room(frame, gui, content),
             }
         }
         Screen::NowPlaying => {
@@ -1279,6 +1288,9 @@ fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App) {
 
 fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     put(frame, 1, 4, &t!("gui.nav.library"), dim());
+    // The tools, the record's desktop-rail group: Auto DJ, then the
+    // capability-gated sonic room.
+    put(frame, 1, 13, &t!("gui.nav.tools"), dim());
     let forward = forward_glyph();
     // The Settings row sits on the content's last row, above the bar.
     let set_y = content_rect(area.width, area.height, gui.queue_open, gui.footer()).bottom() - 1;
@@ -1292,17 +1304,23 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             continue;
         }
         let y = match i {
-            0 => 2,
+            FILES_NAV => 2,
             1..=5 => 4 + i as u16,
-            6 => 11,
-            SONIC_NAV => 12,
+            SEARCH_NAV => 11,
+            DJ_NAV => 14,
+            SONIC_NAV => 15,
             _ => set_y,
         };
         let label = id.label();
         let active = i == gui.active;
         let x = if active { 1 } else { 3 };
         let text = if active { format!("{forward} {label}") } else { label };
-        let rect = Rect { x, y, width: text.chars().count() as u16, height: 1 };
+        // The Auto DJ row wears the DJ's live state, the record's card
+        // line: a dot in the ok colour while it is armed anywhere.
+        let dot = (i == DJ_NAV && gui.app.dj_armed()).then_some(" •");
+        let text_w = text.chars().count() as u16;
+        let width = text_w + dot.map_or(0, |d| d.chars().count() as u16);
+        let rect = Rect { x, y, width, height: 1 };
         let hover = gui.ui.hovers(rect);
         let style = match (active, hover) {
             (true, _) => Style::default().fg(th().accent).add_modifier(Modifier::BOLD),
@@ -1310,6 +1328,9 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             (false, false) => dim(),
         };
         put(frame, x, y, &text, style);
+        if let Some(dot) = dot {
+            put(frame, x + text_w, y, dot, Style::default().fg(th().ok));
+        }
         gui.ui.click(rect, Act::Nav(i));
     }
     // The rule between the nav and the content runs down to the bar.
@@ -1797,15 +1818,13 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     match gui.settings_room {
         Some(SettingsRoom::Servers) => return servers::draw_room(frame, gui, content),
         Some(SettingsRoom::Torrent) => return torrent::draw_room(frame, gui, content),
-        Some(SettingsRoom::Dj) => return dj::draw_room(frame, gui, content),
         None => {}
     }
     let (check_on, check_off) = check_glyphs();
     put(frame, content.x, content.y, &t!("gui.set.playback"), dim());
-    put(frame, content.x, content.y + 7, &t!("gui.set.listen_group"), dim());
-    put(frame, content.x, content.y + 10, &t!("gui.set.servers_group"), dim());
-    put(frame, content.x, content.y + 13, &t!("gui.set.torrents_group"), dim());
-    put(frame, content.x, content.y + 17, &t!("gui.set.display_group"), dim());
+    put(frame, content.x, content.y + 7, &t!("gui.set.servers_group"), dim());
+    put(frame, content.x, content.y + 10, &t!("gui.set.torrents_group"), dim());
+    put(frame, content.x, content.y + 14, &t!("gui.set.display_group"), dim());
 
     let rows: [(String, String); SET_ROWS] = [
         (
@@ -1839,10 +1858,6 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 t!("gui.set.resume")
             ),
             t!("gui.set.resume_desc").to_string(),
-        ),
-        (
-            format!("{} {}", t!("gui.set.dj"), forward_glyph()),
-            t!("gui.set.dj_desc").to_string(),
         ),
         (
             format!("{} {}", t!("gui.srv.manage"), forward_glyph()),
@@ -1905,12 +1920,11 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 /// Where settings row `i` draws, under its section label.
 fn row_y(top: u16, i: usize) -> u16 {
     match i {
-        i if i < ROW_DJ => top + 1 + i as u16,
-        ROW_DJ => top + 8,
-        ROW_MANAGE => top + 11,
-        ROW_TORRENT => top + 14,
-        ROW_HINTS => top + 18,
-        _ => top + 15,
+        i if i < ROW_MANAGE => top + 1 + i as u16,
+        ROW_MANAGE => top + 8,
+        ROW_TORRENT => top + 11,
+        ROW_HINTS => top + 15,
+        _ => top + 12,
     }
 }
 
@@ -2050,6 +2064,8 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             return gui.act(Act::Nav(c as usize - '1' as usize));
         }
         KeyCode::Char('0') => return gui.act(Act::Screen(Screen::NowPlaying)),
+        // The tenth room has no digit; `D` is the capital beside `A`'s toggle.
+        KeyCode::Char('D') => return gui.act(Act::Nav(DJ_NAV)),
         // `/` is the search key everywhere, the TUI's own habit: land on
         // Search with the query box open.
         KeyCode::Char('/') => {
@@ -2380,12 +2396,11 @@ impl Gui {
             }
             NavId::Sonic => sonic::wheel(self, delta),
             NavId::Playlists => playlists::wheel(self, delta),
-            // Settings scrolls nothing itself; its Auto DJ room and genre
-            // picker do, and its Add-torrent room's file picker.
-            NavId::Settings => {
-                if !dj::wheel(self, delta) {
-                    torrent::wheel(self, delta);
-                }
+            // Settings scrolls nothing itself; its Add-torrent room's file
+            // picker does. The Auto DJ room's body and genre picker scroll.
+            NavId::Settings => torrent::wheel(self, delta),
+            NavId::Dj => {
+                dj::wheel(self, delta);
             }
             NavId::Artists | NavId::Genres | NavId::Recent => library::wheel(self, delta),
         }

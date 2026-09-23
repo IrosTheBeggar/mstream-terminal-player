@@ -1,5 +1,5 @@
-//! Auto DJ in the GUI shell (docs/ux-contracts/auto-dj.md): the room behind
-//! Settings › `Auto DJ ▸` (clauses 40–53), the empty-queue chooser as a kit
+//! Auto DJ in the GUI shell (docs/ux-contracts/auto-dj.md): the room, a
+//! Library nav room under TOOLS (clauses 40–53), the empty-queue chooser as a kit
 //! modal (clause 2), the opening-song banner (clause 4), and the acts the
 //! queue panel's empty state sends (clause 16). The bar's `auto-dj` toggle
 //! and `A` ride the shared App's toggle (entry point 1); every edit here
@@ -20,7 +20,7 @@ use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{ListView, Surface, cursor_ring, dim, input_display, modal_close, modal_frame_on, scroll_list, table_view, tall_button, tall_frame, wrap_words};
 use crate::tui::app::{Action, Capture, DjEdit, DjRow};
 
-use super::{Act, Gui, List, SettingsRoom, accent, bright_bold, put, sel, text_button};
+use super::{Act, DJ_NAV, Gui, List, Screen, accent, bright_bold, put, sel, text_button};
 
 /// The chooser's three rows: the two answers, then the remember box.
 const ROWS: usize = 3;
@@ -427,11 +427,10 @@ fn items(gui: &Gui) -> Vec<Item> {
 
 // ── The room ────────────────────────────────────────────────────────────────
 
-/// Settings › Auto DJ ▸ (entry point 2): the room opens with its cursor
+/// The nav's Auto DJ row (entry point 2): the room opens with its cursor
 /// stowed and, with the DJ off, asks the session's server what it offers so
-/// the rows fit it (clause 50).
+/// the rows fit it (clause 50). The hub calls this from `Act::Nav`.
 pub(crate) fn open_room(gui: &mut Gui) {
-    gui.settings_room = Some(SettingsRoom::Dj);
     gui.dj.cursor = None;
     gui.dj.body.scroll = 0;
     let effects = gui.app.dj_room_opened();
@@ -443,8 +442,10 @@ pub(crate) fn modal_open(gui: &Gui) -> bool {
     gui.app.dj_chooser.is_some() || gui.app.dj_panel.genres.is_some() || gui.dj.server_pick.is_some()
 }
 
+/// Whether the room is the Library's active one — a nav room, so the
+/// Now Playing screen over it counts as away.
 fn in_room(gui: &Gui) -> bool {
-    gui.in_settings_room(SettingsRoom::Dj)
+    gui.screen == Screen::Library && gui.active == DJ_NAV
 }
 
 /// A row's label: the accent while the keyboard cursor is on it, bright
@@ -464,15 +465,11 @@ fn desc_x(label: &str, indent: u16) -> u16 {
     (indent + label.chars().count() as u16 + 2).max(DESC_X)
 }
 
-/// The room (clauses 40–53): the way back, the name, the state at the
-/// right; then the body, scrolled, with the kit's scrollbar on overflow.
+/// The room (clauses 40–53): the name, the state at the right; then the
+/// body, scrolled, with the kit's scrollbar on overflow. A nav room has no
+/// way back — the nav column is right there.
 pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
-    let back = Rect { x: content.x, y: content.y, width: 1, height: 1 };
-    let bhover = gui.ui.hovers(back);
-    put(frame, back.x, back.y, super::back_glyph(), if bhover { bright_bold() } else { dim() });
-    gui.ui.click(back, Act::DjBack);
-    gui.ui.tip_keyed(back, t!("gui.tor.back_tip").to_string());
-    put(frame, content.x + 2, content.y, &t!("gui.dj.title"), Style::default().add_modifier(Modifier::BOLD));
+    put(frame, content.x, content.y, &t!("gui.dj.title"), Style::default().add_modifier(Modifier::BOLD));
     let (state, style) = if gui.app.dj_armed() {
         (t!("gui.dj.state_on", server = gui.app.dj_server_name()).to_string(), Style::default().fg(th().ok))
     } else {
@@ -1339,7 +1336,6 @@ fn room_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
             KeyCode::Up => move_cursor(gui, -1),
             KeyCode::PageDown => return Some(gui.act(Act::ScrollBy(List::DjRoom, page))),
             KeyCode::PageUp => return Some(gui.act(Act::ScrollBy(List::DjRoom, -page))),
-            KeyCode::Esc => return Some(gui.act(Act::DjBack)),
             _ => return None,
         },
         Some(Item::KeywordInput) => match key.code {
@@ -1437,12 +1433,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         // The empty queue's openers (clause 16).
         Act::DjSurprise => gui.forward(Action::DjSurprise),
         Act::DjPick => gui.forward(Action::DjPick),
-        // The room.
-        Act::DjBack => {
-            gui.settings_room = None;
-            gui.dj.cursor = None;
-        }
-        // Start rides the toggle (the opening question, the seed rule);
+        // The room. Start rides the toggle (the opening question, the seed rule);
         // Stop stops wherever the DJ is armed — the toggle's "on elsewhere
         // → move here" is the bar's rule, not a Stop button's.
         Act::DjStartStop => {
@@ -1607,7 +1598,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Position;
 
-    use super::super::{Act, Gui, ROW_DJ, SETTINGS_NAV, SettingsRoom, render};
+    use super::super::{Act, DJ_NAV, FILES_NAV, Gui, Screen, render};
     use super::Item;
     use crate::api::types::{Genre, Track};
     use crate::config::{self, Config};
@@ -1650,9 +1641,8 @@ mod tests {
     /// The session, with the room open.
     fn room_gui() -> Gui {
         let mut gui = session_gui();
-        gui.act(Act::Nav(SETTINGS_NAV));
-        gui.act(Act::Row(ROW_DJ));
-        assert!(gui.settings_room == Some(SettingsRoom::Dj), "the doorway opens the room");
+        gui.act(Act::Nav(DJ_NAV));
+        assert_eq!(gui.active, DJ_NAV, "the nav row opens the room");
         gui
     }
 
@@ -1729,9 +1719,8 @@ mod tests {
         gui.app.dj_server = Some(HOST.into());
         println!("{}", draw(&mut gui).join("\n"));
         gui.app.dj_server = None;
-        gui.act(Act::Nav(SETTINGS_NAV));
         println!("{}", draw(&mut gui).join("\n"));
-        gui.act(Act::Row(ROW_DJ));
+        gui.act(Act::Nav(DJ_NAV));
         println!("{}", draw_tall(&mut gui).join("\n"));
         gui.app.queue.items = vec![queued("a.mp3", None)];
         gui.app.servers.push(known(HOST, "host"));
@@ -1780,16 +1769,19 @@ mod tests {
     // ── The room ────────────────────────────────────────────────────────
 
     #[test]
-    fn the_doorway_opens_the_room_and_esc_walks_back_in_two_steps() {
+    fn the_nav_row_opens_the_room_and_esc_only_stows_the_cursor() {
         let mut gui = session_gui();
-        gui.act(Act::Nav(SETTINGS_NAV));
         let rows = draw(&mut gui);
-        assert!(rows.iter().any(|r| r.contains("LISTEN")), "the group");
-        assert_eq!(hit_text(&gui, &rows, "Auto DJ ▸"), Some(Act::Row(ROW_DJ)));
-        gui.act(Act::Row(ROW_DJ));
-        assert!(gui.settings_room == Some(SettingsRoom::Dj));
+        // The TOOLS group under Search: Auto DJ, then the sonic room's slot.
+        assert!(rows[13].contains("TOOLS"), "the group:\n{}", rows[13]);
+        assert_eq!(hit_text(&gui, &rows, "Auto DJ"), Some(Act::Nav(DJ_NAV)));
+        assert!(!rows[14].contains('•'), "off: the row wears no state dot:\n{}", rows[14]);
+        assert!(!rows.iter().any(|r| r.contains("LISTEN")), "Settings has no doorway any more");
+        gui.act(Act::Nav(DJ_NAV));
+        assert_eq!(gui.active, DJ_NAV);
         let rows = draw(&mut gui);
         let all = rows.join("\n");
+        assert!(rows[2].starts_with(" ".repeat(17).as_str()) || !rows[2].contains('◂'), "no way back:\n{}", rows[2]);
         assert!(all.contains("• off") && all.contains("Auto DJ is off"), "{all}");
         assert!(all.contains("Start Auto DJ ▸"), "{all}");
         assert!(all.contains("CONTINUITY") && all.contains("Sonic similarity"), "{all}");
@@ -1798,9 +1790,29 @@ mod tests {
         assert_eq!(gui.dj.cursor, Some(Item::Toggle), "↓ picks the cursor up on the button");
         key(&mut gui, KeyCode::Esc);
         assert_eq!(gui.dj.cursor, None, "Esc stows it");
-        assert!(gui.settings_room == Some(SettingsRoom::Dj));
         key(&mut gui, KeyCode::Esc);
-        assert!(gui.settings_room != Some(SettingsRoom::Dj), "and then leaves");
+        assert_eq!(gui.active, DJ_NAV, "and the room stays: a nav room has no back");
+    }
+
+    #[test]
+    fn d_opens_the_room_from_anywhere_and_the_nav_row_wears_the_armed_dot() {
+        let mut gui = session_gui();
+        gui.app.servers.push(known(HOST, "host"));
+        gui.act(Act::Screen(Screen::NowPlaying));
+        key(&mut gui, KeyCode::Char('D'));
+        assert_eq!((gui.screen, gui.active), (Screen::Library, DJ_NAV), "the tenth room's key");
+        // Armed with a queue (no opening question), the nav row says so.
+        gui.app.queue.items = vec![queued("a.mp3", None)];
+        gui.act(Act::DjStartStop);
+        assert!(gui.app.dj_armed());
+        gui.act(Act::Nav(FILES_NAV));
+        let rows = draw(&mut gui);
+        assert!(rows[14].contains("Auto DJ •"), "the dot while armed:\n{}", rows[14]);
+        assert_eq!(hit_text(&gui, &rows, "Auto DJ •"), Some(Act::Nav(DJ_NAV)), "one click target with its dot");
+        gui.act(Act::Nav(DJ_NAV));
+        gui.act(Act::DjStartStop);
+        let rows = draw(&mut gui);
+        assert!(!rows[14].contains('•'), "off again, no dot:\n{}", rows[14]);
     }
 
     #[test]
