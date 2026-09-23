@@ -1061,6 +1061,9 @@ tor:
   hint_disconnect: "y disconnetti · Esc resta"
 
 gui:
+  top:
+    library: "Libreria"
+    now: "In riproduzione"
   nav:
     files: "File"
     library: "LIBRERIA"
@@ -1469,6 +1472,7 @@ gui:
     files: "↑ ↓ muovi · Enter apri/riproduci · h indietro · a in coda · Tab coda · Space riproduci · q esci · f filtra"
     rows: "↑ ↓ righe · ← → regola · Enter attiva · Esc fine · 1-8 sezioni · q esci"
     base: "1-8 sezioni · Tab coda · Space riproduci · -/+ volume · q esci"
+    now: "0 libreria · Tab coda · Spazio riproduci/pausa · -/+ volume · m azioni · q esci"
     servers: "↑ ↓ righe · Enter cambia · e modifica · d predefinito · p associa · x rimuovi · Esc indietro"
     servers_bundled: "↑ ↓ righe · Enter cambia · e modifica · d predefinito · p associa · Esc indietro"
     servers_peer: "↑ ↓ righe · Enter cambia · h nascondi/mostra · d predefinito · Esc indietro"

@@ -1061,6 +1061,9 @@ tor:
   hint_disconnect: "y rozłącz · Esc zostań"
 
 gui:
+  top:
+    library: "Biblioteka"
+    now: "Teraz gra"
   nav:
     files: "Pliki"
     library: "BIBLIOTEKA"
@@ -1469,6 +1472,7 @@ gui:
     files: "↑ ↓ ruch · Enter otwórz/odtwórz · h wstecz · a do kolejki · Tab kolejka · Space odtwarzaj · q wyjdź · f filtruj"
     rows: "↑ ↓ wiersze · ← → zmień · Enter przełącz · Esc gotowe · 1-8 sekcje · q wyjdź"
     base: "1-8 sekcje · Tab kolejka · Space odtwarzaj · -/+ głośność · q wyjdź"
+    now: "0 biblioteka · Tab kolejka · Spacja odtwórz/pauza · -/+ głośność · m akcje · q wyjdź"
     servers: "↑ ↓ wiersze · Enter przełącz · e edytuj · d domyślny · p paruj · x usuń · Esc wstecz"
     servers_bundled: "↑ ↓ wiersze · Enter przełącz · e edytuj · d domyślny · p paruj · Esc wstecz"
     servers_peer: "↑ ↓ wiersze · Enter przełącz · h ukryj/pokaż · d domyślny · Esc wstecz"

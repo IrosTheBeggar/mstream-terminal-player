@@ -1061,6 +1061,9 @@ tor:
   hint_disconnect: "y disconnect · Esc stay"
 
 gui:
+  top:
+    library: "Library"
+    now: "Now Playing"
   nav:
     files: "Files"
     library: "LIBRARY"
@@ -1469,6 +1472,7 @@ gui:
     files: "↑ ↓ move · Enter open/play · h back · a queue · Tab queue panel · Space play/pause · q quit · f filter"
     rows: "↑ ↓ rows · ← → adjust · Enter toggle · Esc done · 1-8 sections · q quit"
     base: "1-8 sections · Tab queue · Space play/pause · -/+ volume · q quit"
+    now: "0 library · Tab queue · Space play/pause · -/+ volume · m actions · q quit"
     servers: "↑ ↓ rows · Enter switch · e edit · d default · p pair · x remove · Esc back"
     servers_bundled: "↑ ↓ rows · Enter switch · e edit · d default · p pair · Esc back"
     servers_peer: "↑ ↓ rows · Enter switch · h hide/show · d default · Esc back"

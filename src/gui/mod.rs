@@ -24,6 +24,7 @@ mod actions;
 mod cover;
 mod dj;
 mod library;
+mod now;
 mod playlists;
 mod queue;
 mod servers;
@@ -98,6 +99,8 @@ pub(crate) enum Act {
     Chip(usize),
     /// The query card: start (or resume) editing the search text.
     EditQuery,
+    /// A top-bar tab: the Library, or Now Playing.
+    Screen(Screen),
     /// A settings row, activated (click, Enter, Space).
     Row(usize),
     BlendDown,
@@ -313,6 +316,15 @@ impl List {
     }
 }
 
+/// The top bar's two screens: the Library — the nav column and its rooms —
+/// and Now Playing, the playing track large. The queue panel and the bar
+/// stand under both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Screen {
+    Library,
+    NowPlaying,
+}
+
 /// The sub-view a Settings room shows in place of its rows. At most one is
 /// open, so the three flags this replaces can no longer disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -481,6 +493,10 @@ pub(crate) struct Gui {
     /// album wall's grid geometry).
     last_width: u16,
     last_height: u16,
+    /// Which of the top bar's screens is up.
+    screen: Screen,
+    /// The Now Playing screen's own state: its cover slot.
+    now: now::NowUi,
     /// The Settings sub-view standing in for its rows, when one is open.
     settings_room: Option<SettingsRoom>,
     /// The saved-server surfaces: dropdown, form, room, pairing QR.
@@ -536,6 +552,8 @@ impl Gui {
             last_current: None,
             last_width: MIN_W,
             last_height: MIN_H,
+            screen: Screen::Library,
+            now: now::NowUi::new(),
             settings_room: None,
             servers: servers::ServersUi::new(),
             albums: albums::AlbumsUi::new(),
@@ -668,7 +686,7 @@ impl Gui {
     }
 
     /// Everything a click or key resolved to. Returns true to quit.
-    fn act(&mut self, act: Act) -> bool {
+    pub(super) fn act(&mut self, act: Act) -> bool {
         if actions::act(self, &act) {
             return false;
         }
@@ -694,7 +712,16 @@ impl Gui {
             return false;
         }
         match act {
+            Act::Screen(screen) => {
+                self.screen = screen;
+                if screen == Screen::NowPlaying {
+                    self.cursor = None;
+                    self.servers.drop_open = false;
+                }
+            }
             Act::Nav(i) => {
+                // A nav row is the Library's: it brings that screen back.
+                self.screen = Screen::Library;
                 // The gated room: with the flag gone the row isn't drawn,
                 // and its digit must be as dead as the row (contract §1).
                 if i == SONIC_NAV && !self.app.capabilities.discovery_path {
@@ -896,6 +923,7 @@ impl Gui {
                 Some(Now {
                     title: track.title_or_file().to_string(),
                     artist: m.artist.clone().unwrap_or_default(),
+                    album: m.album.clone().unwrap_or_default(),
                     elapsed,
                     duration,
                     year: m.year.filter(|y| *y > 0),
@@ -927,6 +955,7 @@ fn demo_now() -> Now {
     Now {
         title: "Cassini IV".to_string(),
         artist: "Vela — Cassini".to_string(),
+        album: "Cassini".to_string(),
         elapsed: 47.0,
         duration: 302.0,
         year: Some(2019),
@@ -942,6 +971,26 @@ fn demo_now() -> Now {
 /// One run of text at a cell, clipped at the frame's edge — written into
 /// the buffer directly: the hub's primitive runs a few hundred times a
 /// frame, and a `Paragraph` per call was a handful of allocations each.
+/// The top bar's tabs at the left: the kit's tab slab for the screen that
+/// is up, dim text for the other, bright under the pointer.
+fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
+    let mut x = 1;
+    for (screen, label) in [(Screen::Library, t!("gui.top.library")), (Screen::NowPlaying, t!("gui.top.now"))] {
+        let text = format!(" {label} ");
+        let rect = Rect { x, y: 0, width: text.chars().count() as u16, height: 1 };
+        let style = if gui.screen == screen {
+            sel().add_modifier(Modifier::BOLD)
+        } else if gui.ui.hovers(rect) {
+            bright_bold()
+        } else {
+            dim()
+        };
+        put(frame, x, 0, &text, style);
+        gui.ui.click(rect, Act::Screen(screen));
+        x += rect.width + 1;
+    }
+}
+
 fn put(frame: &mut Frame, x: u16, y: u16, text: &str, style: Style) {
     let buf = frame.buffer_mut();
     if !buf.area.contains(Position { x, y }) {
@@ -1033,23 +1082,30 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         return;
     }
 
-    put(frame, 1, 0, "mStream", Style::default().fg(th().accent).add_modifier(Modifier::BOLD));
+    draw_top_tabs(frame, gui);
     servers::draw_header(frame, gui, area);
 
-    draw_nav(frame, gui, area);
-
-    // The content column, between the nav rule and the queue (when open).
-    let content = content_rect(area.width, area.height, gui.queue_open, gui.footer());
-    // Exhaustive over the nav, like the wheel: a room cannot ship without
-    // a body.
-    match NAV[gui.active] {
-        NavId::Files => draw_files(frame, gui, content),
-        NavId::Albums => albums::draw(frame, gui, content),
-        NavId::Artists | NavId::Genres | NavId::Recent => library::draw(frame, gui, content),
-        NavId::Search => draw_search(frame, gui, content),
-        NavId::Settings => draw_settings(frame, gui, content),
-        NavId::Sonic => sonic::draw(frame, gui, content),
-        NavId::Playlists => playlists::draw(frame, gui, content),
+    match gui.screen {
+        Screen::Library => {
+            draw_nav(frame, gui, area);
+            // The content column, between the nav rule and the queue (when
+            // open). Exhaustive over the nav, like the wheel: a room cannot
+            // ship without a body.
+            let content = content_rect(area.width, area.height, gui.queue_open, gui.footer());
+            match NAV[gui.active] {
+                NavId::Files => draw_files(frame, gui, content),
+                NavId::Albums => albums::draw(frame, gui, content),
+                NavId::Artists | NavId::Genres | NavId::Recent => library::draw(frame, gui, content),
+                NavId::Search => draw_search(frame, gui, content),
+                NavId::Settings => draw_settings(frame, gui, content),
+                NavId::Sonic => sonic::draw(frame, gui, content),
+                NavId::Playlists => playlists::draw(frame, gui, content),
+            }
+        }
+        Screen::NowPlaying => {
+            let stage = now::stage_rect(area, gui.queue_open, gui.footer());
+            now::draw(frame, gui, stage);
+        }
     }
 
     if gui.queue_open {
@@ -1101,6 +1157,8 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         std::borrow::Cow::from(playlists::tips(gui))
     } else if matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_))) {
         t!("gui.tips.sonic_pick")
+    } else if gui.screen == Screen::NowPlaying {
+        t!("gui.tips.now")
     } else if gui.in_settings_room(SettingsRoom::Servers) {
         // The bundled server's row has no remove key to name; a peer's row
         // has its own verbs.
@@ -1882,6 +1940,14 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if let Some(quit) = torrent::handle_key(gui, key) {
         return quit;
     }
+    // The Now Playing screen has no rooms: the queue's keys when it holds
+    // them, then the screen's own.
+    if gui.screen == Screen::NowPlaying {
+        if let Some(quit) = actions::queue_key(gui, key) {
+            return quit;
+        }
+        return now::handle_key(gui, key);
+    }
     let browse = gui.browse_room()
         && gui.app.connected
         && !actions::modal_open(gui)
@@ -1983,6 +2049,7 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Char(c @ '1'..='9') => {
             return gui.act(Act::Nav(c as usize - '1' as usize));
         }
+        KeyCode::Char('0') => return gui.act(Act::Screen(Screen::NowPlaying)),
         // `/` is the search key everywhere, the TUI's own habit: land on
         // Search with the query box open.
         KeyCode::Char('/') => {
@@ -2221,6 +2288,7 @@ fn event_loop(
                     gui.albums.on_resize();
                     gui.queue.on_resize();
                     gui.actions.on_resize();
+                    gui.now.on_resize();
                 }
                 _ => {}
             }
@@ -2282,7 +2350,8 @@ impl Gui {
 
     /// Whether the active room wears the browse bar at all.
     fn browse_room(&self) -> bool {
-        matches!(self.active, FILES_NAV | ALBUMS_NAV | ARTISTS_NAV | GENRES_NAV | RECENT_NAV | PLAYLISTS_NAV)
+        self.screen == Screen::Library
+            && matches!(self.active, FILES_NAV | ALBUMS_NAV | ARTISTS_NAV | GENRES_NAV | RECENT_NAV | PLAYLISTS_NAV)
     }
 
     /// The wheel scrolls the view under the pointer, never the selection
@@ -2297,8 +2366,8 @@ impl Gui {
             self.act(Act::ScrollBy(List::Queue, delta));
             return;
         }
-        // The nav column scrolls nothing.
-        if at.x < 17 {
+        // The Now Playing screen scrolls nothing yet; the nav column never.
+        if self.screen == Screen::NowPlaying || at.x < 17 {
             return;
         }
         match NAV[self.active] {
@@ -2762,6 +2831,42 @@ mod tests {
 
     fn rows_of(buf: &ratatui::buffer::Buffer, y: u16) -> String {
         (0..buf.area().width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn the_top_bar_switches_between_the_library_and_now_playing() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut gui = browsing_gui();
+        let rows = draw(&mut gui);
+        assert!(!rows[0].contains("mStream"), "no wordmark: {:?}", rows[0]);
+        let lx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Library ")).unwrap() as u16;
+        let nx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Now Playing ")).unwrap() as u16;
+        let buf = draw_buffer(&mut gui);
+        assert_eq!(buf[(lx, 0)].bg, th().accent, "the Library tab wears the slab");
+        assert_ne!(buf[(nx, 0)].bg, th().accent, "the other tab does not");
+        assert!(rows.iter().any(|r| r.contains("Albums")), "the nav column is up");
+        assert_eq!(gui.ui.hit(Position { x: nx + 1, y: 0 }), Some(Act::Screen(Screen::NowPlaying)));
+
+        // Now Playing: the nav and the room go, the demo seat's track stands
+        // large — its title, its byline and its facts under the cover slot.
+        gui.act(Act::Screen(Screen::NowPlaying));
+        let rows = draw(&mut gui);
+        assert!(!rows.iter().any(|r| r.contains("Albums")), "the nav column is gone:\n{}", rows.join("\n"));
+        // The stage's title starts its row (the bar's card has frames before
+        // its own copy).
+        let title = rows.iter().position(|r| r.trim_start().starts_with("Cassini IV")).expect("the title stands on its own row");
+        assert!(rows[title + 1].contains("Vela — Cassini · Cassini · 2019"), "the byline: {:?}", rows[title + 1]);
+        assert!(rows[title + 2].contains("FLAC · 912 kbps"), "the spec: {:?}", rows[title + 2]);
+        assert!(rows[title + 3].contains("★★★★☆") && rows[title + 3].contains("120 BPM"), "the facts: {:?}", rows[title + 3]);
+        assert!(rows[3].contains('╭'), "the cover slot waits for the art: {:?}", rows[3]);
+
+        // Esc and 0 go back and forth; a nav digit is the Library's.
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(gui.screen, Screen::Library);
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
+        assert_eq!(gui.screen, Screen::NowPlaying);
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert_eq!(gui.screen, Screen::Library);
     }
 
     #[test]

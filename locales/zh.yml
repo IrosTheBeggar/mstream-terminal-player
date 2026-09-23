@@ -1061,6 +1061,9 @@ tor:
   hint_disconnect: "y 断开 · Esc 留下"
 
 gui:
+  top:
+    library: "音乐库"
+    now: "正在播放"
   nav:
     files: "文件"
     library: "媒体库"
@@ -1469,6 +1472,7 @@ gui:
     files: "↑ ↓ 移动 · Enter 打开/播放 · h 返回 · a 入队 · Tab 队列 · Space 播放/暂停 · q 退出 · f 筛选"
     rows: "↑ ↓ 行 · ← → 调整 · Enter 切换 · Esc 完成 · 1-8 版块 · q 退出"
     base: "1-8 版块 · Tab 队列 · Space 播放/暂停 · -/+ 音量 · q 退出"
+    now: "0 音乐库 · Tab 队列 · 空格 播放/暂停 · -/+ 音量 · m 操作 · q 退出"
     servers: "↑ ↓ 行 · Enter 切换 · e 编辑 · d 默认 · p 配对 · x 移除 · Esc 返回"
     servers_bundled: "↑ ↓ 行 · Enter 切换 · e 编辑 · d 默认 · p 配对 · Esc 返回"
     servers_peer: "↑ ↓ 行 · Enter 切换 · h 隐藏/显示 · d 默认 · Esc 返回"

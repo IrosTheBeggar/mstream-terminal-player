@@ -46,6 +46,7 @@ pub(super) const DJ_X: u16 = 4;
 pub(crate) struct Now {
     pub title: String,
     pub artist: String,
+    pub album: String,
     pub elapsed: f64,
     pub duration: f64,
     pub year: Option<i32>,

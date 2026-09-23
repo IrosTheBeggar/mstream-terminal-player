@@ -1980,6 +1980,15 @@ a LATER secondary screen (party view), Columns retired.
   play frame in GOLD, and the card's hover `[⋯]` removed — a right click
   or `m` is the playing track's sheet (track-actions deviation logged);
   auto-dj then padded three columns in from the edge.
+- **The top bar and a first Now Playing screen ✅ 2026-09-22** — the
+  wordmark gives way to two tabs, Library and Now Playing (`Screen`,
+  `Act::Screen`, `0`/Esc between them; a nav digit is the Library's). Now
+  Playing (`src/gui/now.rs`) is the slot the contract's tabs will fill: the
+  playing track's cover as large as the stage allows through the cover
+  slot machinery, its title, byline, spec and facts beneath; the queue
+  panel and the bar stand under it. Ahead of its contract (the mobile
+  record's player panel, lyrics screen, visualizer and More sheet) — see
+  the next slice.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the

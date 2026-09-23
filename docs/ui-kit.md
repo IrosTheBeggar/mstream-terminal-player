@@ -381,6 +381,13 @@ rule; screens have no top rule) · the **bottom bar** (3 rows): the scan
 widget on the left (empty until a scan is actually running), the screen's
 forward action as a tall primary on the right.
 
+**The GUI player's top bar**: two tabs at the left — Library, Now Playing
+— worn as the kit's tab slab for the screen that is up and dim text for
+the other, and the session's server label with `[+]` at the right. The
+Library is the nav column and its rooms; Now Playing is the playing track
+large (`src/gui/now.rs`), a first cut ahead of its contract. The queue
+panel and the bar stand under both.
+
 **The GUI player's bar** (the "Player bar options" canvas, A′; `src/gui/bar.rs`):
 five rows at the bottom, the tips line under them only while keyboard hints
 are on. The gold rule is the seek bar (times at its ends, the played part
