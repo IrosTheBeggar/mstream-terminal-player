@@ -2177,6 +2177,7 @@ fn event_loop(
                     gui.app.graphics.refresh();
                     gui.albums.on_resize();
                     gui.queue.on_resize();
+                    gui.actions.on_resize();
                 }
                 _ => {}
             }

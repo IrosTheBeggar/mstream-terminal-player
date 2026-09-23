@@ -16,7 +16,7 @@ use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{Surface, dim, input_display, modal_close, modal_frame_on, table_view};
 use crate::tui::app::{Action, App, Entry, Focus, Origin, PlaylistNames, Tab};
 
-use super::cover::Slot;
+use super::cover::{Pace, Slot};
 use super::{Act, Gui, SEARCH_NAV, accent, bright_bold, put, sel};
 
 // ── State ───────────────────────────────────────────────────────────────────
@@ -30,13 +30,22 @@ pub(crate) struct ActionsUi {
     pub info: bool,
     /// The queue row a grip press is dragging (clause 18).
     pub drag: Option<usize>,
-    /// The sheet's cover, a mosaic (a modal draws no pixels).
+    /// The sheet's cover: a slot of its own, pixels while the sheet is the
+    /// top layer, the mosaic under the picker, Song Info or a tooltip.
     slot: Option<Slot>,
 }
 
 impl ActionsUi {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// A resize changes the cell-to-pixel mapping the slot encoded against
+    /// — the wall's and the queue's rule, for the sheet's one cover.
+    pub(crate) fn on_resize(&mut self) {
+        if let Some(slot) = &mut self.slot {
+            slot.on_resize();
+        }
     }
 }
 
@@ -286,7 +295,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // Drawn from the sheet in place: the track and its decoded cover are
     // read each frame, not copied.
-    let Gui { app, actions, ui, .. } = &mut *gui;
+    let Gui { app, actions, ui, hot, .. } = &mut *gui;
     let Some(sheet) = actions.sheet.as_ref() else { return };
     ui.click(area, Act::SheetClose);
     let track = current_track(app, sheet);
@@ -303,7 +312,23 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     if let Some(art) = art {
         let cover = Rect { x: inner.x + 1, y: inner.y, width: 6, height: 3 };
         let slot = actions.slot.get_or_insert_with(|| Slot::new(app.graphics.fork()));
-        slot.draw_mosaic(frame, cover, art);
+        // Pixels while the sheet is the top layer. Under the picker, Song
+        // Info or a tooltip the mosaic stands in: a picture's cells are
+        // skipped for the terminal writer, so text over them would never
+        // land. The sheet's own frame always covers its cover, which is
+        // why the question excludes it.
+        let own = crate::kit::modal_rect(area, width, height, height);
+        let under = actions.picker.is_some() || actions.info || ui.covered_last_frame_by_another(cover, own);
+        if under {
+            slot.draw_mosaic(frame, cover, art);
+        } else {
+            let pace = Pace::frame();
+            slot.draw_paced(frame, cover, art, &pace);
+            // A slot the budget turned away wants the very next frame.
+            if pace.starved() {
+                *hot = true;
+            }
+        }
         tx = inner.x + 8;
     }
     let text_w = inner.right().saturating_sub(tx + 4) as usize;
@@ -703,6 +728,7 @@ mod tests {
     use ratatui::layout::Position;
 
     use super::super::{Act, FILES_NAV, Gui, render};
+    use ratatui::buffer::Buffer;
     use super::SheetAction;
     use crate::api::types::{Track, TrackMetadata};
     use crate::config::Config;
@@ -756,14 +782,21 @@ mod tests {
         gui
     }
 
-    fn draw(gui: &mut Gui) -> Vec<String> {
+    fn draw_buffer(gui: &mut Gui) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(100, 34)).unwrap();
         terminal.draw(|frame| render(frame, gui)).unwrap();
-        let buffer = terminal.backend().buffer();
+        terminal.backend().buffer().clone()
+    }
+
+    fn lines(buffer: &Buffer) -> Vec<String> {
         let area = *buffer.area();
         (0..area.height)
             .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
             .collect()
+    }
+
+    fn draw(gui: &mut Gui) -> Vec<String> {
+        lines(&draw_buffer(gui))
     }
 
     fn hit_text(gui: &Gui, rows: &[String], needle: &str) -> Option<Act> {
@@ -774,6 +807,46 @@ mod tests {
 
     fn key(gui: &mut Gui, code: KeyCode) {
         super::super::handle_key(gui, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn the_sheets_cover_is_pixels_while_the_sheet_is_the_top_layer() {
+        use ratatui_image::picker::ProtocolType;
+        // The wall's and the queue's rule for the sheet's one cover: real
+        // pixels where the terminal draws them, the mosaic only while
+        // something stands over the sheet (the picker here), and the
+        // pixels back — from the warm cache — once it leaves.
+        let mut gui = files_gui();
+        gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
+        if let Some(Entry::Track { track, .. }) = gui.app.files.entries.get_mut(0) {
+            track.metadata.album_art = Some("aa.jpeg".into());
+        }
+        let png = image::RgbImage::from_pixel(64, 64, image::Rgb([200, 40, 40]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        png.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        gui.app.art.insert("aa.jpeg".into(), Some(crate::tui::art::decode(&bytes.into_inner()).unwrap()));
+
+        gui.act(Act::More(Tab::Files, 0));
+        let buffer = draw_buffer(&mut gui);
+        let rows = lines(&buffer);
+        // The cover's top-left cell sits five rows above "Play now", in its
+        // column — found on a text row, because a kitty placeholder cell's
+        // symbol carries the whole picture and defeats string positions.
+        let py = rows.iter().position(|r| r.contains("Play now")).unwrap();
+        let px = rows[py].char_indices().position(|(i, _)| rows[py][i..].starts_with("Play now")).unwrap() as u16;
+        let cover = (px, py as u16 - 5);
+        let placeholders = |buffer: &Buffer| buffer[cover].symbol().contains('\u{10EEEE}');
+        let mosaic = |buffer: &Buffer| "█▀▄".contains(buffer[cover].symbol());
+        assert!(placeholders(&buffer), "the sheet's cover is pixels: {:?}", buffer[cover].symbol());
+
+        gui.act(Act::SheetVerb(SheetAction::AddPlaylist));
+        let buffer = draw_buffer(&mut gui);
+        assert!(mosaic(&buffer), "under the picker the cover is text: {:?}", buffer[cover].symbol());
+
+        gui.act(Act::PickClose);
+        draw_buffer(&mut gui);
+        let buffer = draw_buffer(&mut gui);
+        assert!(placeholders(&buffer), "the pixels return once nothing stands over the sheet");
     }
 
     /// `cargo test dump_actions -- --ignored --nocapture` to eyeball the

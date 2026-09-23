@@ -158,6 +158,14 @@ impl<A: Clone> Surface<A> {
         self.covered.iter().any(|over| over.intersects(rect))
     }
 
+    /// Whether an overlay OTHER than `own` stood over any part of `rect`
+    /// last frame — the question a pixel surface INSIDE a modal asks: its
+    /// own frame always covers it, and only something drawn over the modal
+    /// (a tooltip, a second modal) makes its picture stand down.
+    pub fn covered_last_frame_by_another(&self, rect: Rect, own: Rect) -> bool {
+        self.covered.iter().any(|over| *over != own && over.intersects(rect))
+    }
+
     /// Drop every registered rect — the modal-inertness move: a screen
     /// clears the base layer's registries before drawing the layer on
     /// top, so only the top layer's controls exist.
@@ -493,7 +501,7 @@ pub fn modal_frame_anchored_on<A: Clone>(
 
 /// Where a modal of this size sits: centred, and vertically as if
 /// `max_height` tall, so one that grows keeps its top edge.
-fn modal_rect(area: Rect, width: u16, height: u16, max_height: u16) -> Rect {
+pub fn modal_rect(area: Rect, width: u16, height: u16, max_height: u16) -> Rect {
     let width = width.min(area.width.saturating_sub(4));
     let height = height.min(area.height.saturating_sub(2));
     let max_height = max_height.max(height).min(area.height.saturating_sub(2));
