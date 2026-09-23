@@ -103,6 +103,24 @@ mdns-sd = "0.20.3"
 qrcode = { version = "0.14", default-features = false }
 terminal-colorsaurus = "1.0.3"
 tui-input = "0.15.4"
+# The window visualizer's renderer (src/shader/render.rs; PLAN.md, Phase
+# 10): the mobile app's shader presets, compiled by the naga inside wgpu to
+# Metal, HLSL, SPIR-V or GLSL. `glsl` is what reads the presets, `wgsl` the
+# one vertex shader of our own — and 30.0.1's GLSL frontend does not build
+# without it. default-features = false only to leave out the browser
+# backends (`webgpu`), which this half of the build never runs. On Linux
+# the backend libraries (libvulkan, libEGL, libGL) are opened at run time,
+# never linked; CI's NEEDED guard holds the binary to that.
+wgpu = { version = "30", default-features = false, features = [
+    "std",
+    "parking_lot",
+    "dx12",
+    "metal",
+    "vulkan",
+    "gles",
+    "wgsl",
+    "glsl",
+] }
 
 # The setup wizard's native folder picker. Split by backend on purpose
 # (the picker spike, mStream-side, 2026-08-21): rfd's Linux portal backend
@@ -202,6 +220,12 @@ alsa-lib = "*"
 [dev-dependencies]
 # The locale-completeness test parses locales/*.yml directly.
 serde_yaml = "0.9"
+# The visualizer presets' compile matrix (src/shader/matrix.rs): every pass
+# through naga's GLSL frontend, its validator, and all four backends wgpu
+# drives — Metal, HLSL, SPIR-V, desktop GLSL — with no GPU, so CI runs it
+# everywhere. The naga wgpu itself uses; they are versioned together.
+# `wgsl-in` because 30.0.1's GLSL frontend does not compile without it.
+naga = { version = "30", features = ["glsl-in", "wgsl-in", "msl-out", "hlsl-out", "spv-out", "glsl-out"] }
 
 [build-dependencies]
 # Windows icon + VersionInfo embedding (build.rs; no-op for other targets).
