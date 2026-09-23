@@ -1539,6 +1539,142 @@ RELEASE exists — so it's merge, then tag, then integrate.
 Phase 8 (the bundled console) stays sequenced AFTER 9c: it upgrades the
 launcher's terminal choice, not the wizard itself.
 
+### Phase 10 — The visualizer window: the mobile app's presets, on the desktop
+
+> **Status 2026-09-22: designed, and 10.0 under way.** Feasibility is probed, not projected:
+> a winit window opened from a terminal-launched process, fronted and drew on macOS 26.6,
+> and every pass of the mobile app's nine shader presets compiled through naga for Metal,
+> HLSL and GL. The scratch prototypes are not in the tree; what they proved is below.
+
+The terminal visualizer (`tui::viz`) tops out at half-block resolution, and a picture that
+fills the panel defeats `Canvas::into_lines`' run merging — every cell its own fg/bg pair,
+~6 MB/s of escape bytes at 30 fps on a 120×40 panel. The mobile app's visualizers are GPU
+fragment shaders, and none of that is a terminal's job. A terminal program can open a window
+the way games do: winit for the window and its input, wgpu for the pixels.
+
+**What the mobile app has** (`IrosTheBeggar/mstream_music`, public, GPL-3.0). Android runs
+two engines: projectM v4 over JNI with 120 bundled `.milk` presets, and a ShaderToy-convention
+ShaderEngine (`android/app/src/main/cpp/shader_engine.cpp`) running nine presets from
+`assets/shaders/*.glsl`. iOS and the Flutter desktop build run SkSL ports of eight of them
+(`shaders/visualizer/*.frag`); 09 is SkSL-infeasible — it passes samplers to functions and
+loops on runtime bounds. The single-file `.glsl` is the canonical format: `// === pass:
+<name> ===` sections (buffers A–D run before `image`; a `common` pass is shared code), `//
+=== channel <pass>.<n> = <source>` and `// === size <pass> = WxH` lines in the header, `//
+param: <name> <min> <max> <default>` tunables (the i-th line is `iParams[i]`, at most eight),
+and title/author/license/description lines. The audio contract is `audio_texture.cpp`: a
+512×2 R8 texture, row 0 the spectrum and row 1 the waveform — mono mix, Hann-1024 normalized
+by 2/Σw, a linear-domain EMA of 0.27, and a dB window of −69.7…−20.7 mapped onto 0..255.
+
+**Decisions.**
+- **The presets are consumed verbatim, not ported.** Parity with mobile means running the same
+  files: vendored, pinned by commit, edited only where a fix belongs upstream anyway.
+- **wgpu, not a CPU framebuffer.** 07/08 are 11 KB raymarchers and 09 is 766 lines. A
+  softbuffer prototype drew 68 fps at 1280×960 — one cheap shader in an unpaced loop pinning
+  a core; it proved the window, not the renderer.
+- **The window is a child process:** `mstream-player viz-window`, a hidden subcommand of the
+  same binary. AppKit demands the process's first thread for the event loop — winit has no
+  `with_any_thread` on macOS — and the TUI owns that thread. The child is also the crash
+  boundary: naga panics are real (below), and one that escapes must cost the window, not the
+  player.
+- **The parent computes the texture and pipes it.** The tap feeds `shader::audio` in the
+  parent; 1 KB frames plus control messages go down the child's stdin, and the child only
+  renders. EOF on stdin means quit, so a parent crash closes the window for free. The child's
+  stderr goes to the log, never to the TUI's terminal (it would scribble over the alternate
+  screen); Windows spawns it with `CREATE_NO_WINDOW`; the feeder drops frames rather than
+  block. `serve` reuses the same host side (10.3).
+- **projectM is not in this binary.** If it comes, it comes as an optional companion speaking
+  the same pipe; mobile has already built `projectM-4.dll` v4.1.6 + GLEW + a WGL render shim
+  on Windows.
+
+**Proven 2026-09-20..22** (scratch prototypes on the dev Mac):
+- **The window.** winit 0.30 + softbuffer from a terminal-launched process: 47 crates, a
+  5.9 s build, 1.0 MB, system frameworks only on macOS. Without `focus_window()` the window
+  opens behind the terminal; with it the process is frontmost on macOS 26.6. The NSOpenPanel
+  lesson in `Cargo.toml`'s picker note does not transfer to a window the process owns.
+- **Linux linkage, on paper.** winit's defaults load everything at runtime: `wayland-dlopen`
+  is a default feature, and the X11 path is `x11-dl` (dlopen) plus `x11rb` (pure-Rust
+  protocol). Unverified on a real ELF — there is no Linux build host here — which is why 10.0
+  puts a NEEDED guard in CI.
+- **naga 30, the compile matrix** — all 15 passes of the nine presets through the frontend,
+  the validator and four backends: **Metal 15/15, HLSL 15/15, GL 15/15, SPIR-V 11/15.** What
+  it took:
+  - Combined `sampler2D` uniforms are rejected outright ("Not implemented: variable
+    qualifier"). Bind separate `texture2D`s and one `sampler`, with `#define iChannelN
+    sampler2D(iChannelN_t, iChannel_s)`.
+  - `sampler2D` function parameters are rejected (09's `hf`, `rayMarch`, `normal`), but
+    separate `texture2D, sampler` parameters work on every backend: an 11-line mechanical
+    split. SkSL's other blocker for 09, runtime-bounded loops, is no blocker here.
+  - `mat2(vec4)` builds an invalid Compose (06). One line, `mat2` from scalars — the same
+    edit the Flutter port made.
+  - The four SPIR-V failures are one naga 30 bug: a swizzle passed to an `inout` parameter
+    (hg_sdf's `mod1(p.x, …)`, in 05/07/08/09) panics the SPIR-V writer with "Expression [N]
+    is not cached!". A plain local works; so does hoisting the swizzle into a temp, which is
+    what `inout` means anyway. wgpu-like robustness policies plus compaction don't avoid it.
+    Related to gfx-rs/naga#1621; the three-line repro is worth filing.
+  - naga 30.0.1 with `glsl-in` alone does not compile — its interpolator module is gated on
+    `spv-in`/`wgsl-in`. wgpu always brings `wgsl-in`, so it never bites here.
+
+**Watch items.**
+- **Mobile has two response curves.** The Dart one (`lib/visualizer/spectrum_source.dart`,
+  iOS and desktop) is a sqrt curve with auto-gain and no smoothing; the C++ one (Android) is
+  the calibrated dB window and EMA, "the convention the bundled shaders were authored
+  against". The same preset reacts differently on an iPhone than on a Pixel. We follow the
+  C++ one; the divergence is mobile's to settle.
+- **Smoothing is per tick there, per second here.** Android's EMA advances once per PCM batch
+  (~30 Hz); `viz.rs`'s rule is rates per second. So α = 0.27^(30·dt), which is exactly 0.27
+  at 30 Hz.
+- **Licenses.** 01–03 MIT, 05–09 CC0, 04 Cyber Fuji CC BY 3.0 (attribution required). The FSF
+  has declared CC BY 4.0 GPLv3-compatible; 3.0 is unconfirmed. mstream_music, also GPL-3.0,
+  already bundles it. Operator call before 04 is embedded in the binary; until then it is
+  vendored as an attributed file and exercised by tests only.
+- **The terminal is the best host in the family.** Flutter desktop captures WASAPI loopback
+  on Windows (other apps' audio mixes in), re-decodes the track keyed to the playback position
+  on macOS and iOS, and synthesizes a signal on Linux. The tap is the signal, everywhere.
+
+**10.0 — Everything risky, no window.**
+1. Vendor the presets into `assets/visualizer/`, pinned to `mstream_music@4ae3dec` (the last
+   commit to touch `assets/shaders/` on master), with an attribution table and 06's one-line
+   edit recorded as local until it lands upstream.
+2. `shader::preset` — the format, a port of Android's `parseShader` (routing lines only
+   before the first marker, unknown passes discarded, sizes clamped to 8192) plus the
+   metadata and `// param:` lines under Dart's `parseShaderParams` rules.
+3. `shader::glsl` — the translation to what naga accepts: the ShaderToy preamble with
+   separate samplers, the `sampler2D`-parameter split, the `inout`-swizzle hoist, and a
+   y-flip on the image pass only (buffer passes keep GL's memory layout, so feedback reads
+   land where they were written). Token-based, not regex: mobile imports user shaders.
+4. The compile matrix as a `cargo test`: every vendored pass × Metal/HLSL/GL/SPIR-V, each
+   backend behind `catch_unwind`. It needs no GPU, so the existing Ubuntu and Windows jobs
+   run it, and a naga bump that regresses a preset fails CI.
+5. `shader::audio` — the texture, pinned by golden vectors from the C++ reference built with
+   the kissfft it ships (±1 LSB, for FFT rounding).
+6. wgpu enters the build with its first real use: `mstream-player viz-probe`, the sibling of
+   `graphics-probe` — list the adapters, build every pass's pipeline on this machine's GPU,
+   render offscreen, report.
+7. CI guards the linkage — no `libvulkan`, `libEGL`, `libGL`, `libX11`, `libxcb`,
+   `libwayland-*` or `libxkbcommon` in NEEDED on the Linux builds — and the binary-size delta
+   against today's is recorded here.
+**Done when:** all seven are green and their numbers are in this section.
+
+**10.1 — The window.** `viz-window` with the six single-pass presets (01, 02, 03, 06, 07, 08):
+winit + a wgpu surface; `PresentMode::Fifo`, never a busy loop; no rendering while occluded or
+minimized; passes at logical resolution and upscaled (mobile's `pixelScale` exists because
+per-device-pixel shading on a 3× phone was 9× the work); borderless fullscreen; the display
+kept awake while fullscreen and playing; `focus_window()` on open; ←/→ between presets like
+mobile's ‹ ›. The Visualizer tab gets the key that opens it. **Done when:** a track playing in
+the TUI moves its window on macOS, Windows and Linux.
+
+**10.2 — Multipass and tunables.** 04, 05 and 09 (ping-pong feedback, 1×1 state buffers);
+`// param:` defaults with config overrides; Android's crossfade between presets
+(`uCurrent`/`uOld`/`uMixT`).
+
+**10.3 — `serve --visualizer`.** The jukebox on a TV. `Engine::attach_tap` already exists, so
+`serve` feeds the same host side and the window opens fullscreen on the jukebox's display.
+
+**10.4 — (optional) Milkdrop.** The projectM companion, only if 10.1–10.3 leave appetite.
+
+**Upstream.** The naga bug (three-line repro); 06's `mat2` fix into the canonical file; the
+mobile response-curve divergence.
+
 ## Smoke testing
 
 `mstream-player replay "<script>"` drives the TUI from a script. Keys go through exactly the path
