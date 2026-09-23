@@ -22,7 +22,7 @@ use rust_i18n::t;
 
 use crate::api::{ApiError, Client};
 use crate::config::{self, Config};
-use crate::kit::{dim, input_display, modal_frame_on, modal_close, tall_button, tall_secondary};
+use crate::kit::{dim, modal_frame_on, modal_close, tall_button, tall_secondary};
 use crate::kit::theme::{legacy_conhost, th};
 use crate::tui::worker::{ApiCmd, Event};
 use crate::tui::app::Effect;
@@ -1890,13 +1890,7 @@ fn draw_quick_connect(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     frame.render_widget(block, rect);
     if on_paste {
         let cursor = code.chars().count();
-        put(
-            frame,
-            body.x + 1,
-            body.y,
-            &input_display(&code, cursor, body.width.saturating_sub(2)),
-            Style::default(),
-        );
+        super::text_field(frame, &mut gui.ui, body.x + 1, body.y, &code, cursor, body.width.saturating_sub(2), Style::default());
     } else {
         put(frame, body.x + 1, body.y, &super::bar::clip(&code, body.width as usize - 2), dim());
     }
@@ -1997,13 +1991,7 @@ fn draw_direct(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let text_style = if enabled { Style::default() } else { dim() };
         if focused && enabled {
             let cursor = shown.chars().count();
-            put(
-                frame,
-                body.x + 1,
-                body.y,
-                &input_display(&shown, cursor, body.width.saturating_sub(2)),
-                text_style,
-            );
+            super::text_field(frame, &mut gui.ui, body.x + 1, body.y, &shown, cursor, body.width.saturating_sub(2), text_style);
         } else {
             put(
                 frame,

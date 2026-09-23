@@ -7,7 +7,7 @@
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Block;
 use rust_i18n::t;
@@ -17,7 +17,7 @@ use tui_input::backend::crossterm::EventHandler;
 use crate::config;
 use crate::dj::{self, EmptyQueueStart, GenreMode, SonicAnchor};
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{ListView, Surface, cursor_ring, dim, input_display, modal_close, modal_frame_on, scroll_list, table_view, tall_button, tall_frame, wrap_words};
+use crate::kit::{ListView, Surface, cursor_ring, dim, modal_close, modal_frame_on, scroll_list, table_view, tall_button, tall_frame, wrap_words};
 use crate::tui::app::{Action, Capture, DjEdit, DjRow};
 
 use super::{Act, DJ_NAV, Gui, List, Screen, accent, bright_bold, put, sel, text_button};
@@ -1010,7 +1010,7 @@ fn draw_keyword_input(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, 
     let under = Style::default().add_modifier(Modifier::UNDERLINED);
     put(frame, fx, y, &" ".repeat(fw as usize), under);
     if focused {
-        put(frame, fx, y, &input_display(&value, cursor, fw), under);
+        super::text_field(frame, &mut gui.ui, fx, y, &value, cursor, fw, under);
     } else if value.is_empty() {
         put(frame, fx, y, &super::bar::clip(&t!("gui.dj.keyword_hint"), fw as usize), dim().add_modifier(Modifier::UNDERLINED));
     } else {
@@ -1129,8 +1129,11 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let field_w = inner.width.saturating_sub(2);
     if query.is_empty() {
         put(frame, inner.x + 1, fy, &super::bar::clip(&t!("gui.dj.search_genres"), field_w as usize), dim());
+        // Typing lands here: the caret stands at the placeholder's head.
+        gui.ui.caret(Position { x: inner.x + 1, y: fy });
     } else {
-        put(frame, inner.x + 1, fy, &input_display(&query, gui.dj.filter.cursor(), field_w), Style::default());
+        let cursor = gui.dj.filter.cursor();
+        super::text_field(frame, &mut gui.ui, inner.x + 1, fy, &query, cursor, field_w, Style::default());
     }
 
     let list_y = fy + 2;

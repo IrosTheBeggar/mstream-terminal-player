@@ -42,7 +42,7 @@ use crate::api::types::{
 };
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{
-    dim, input_display, modal_close, modal_frame_on, modal_frame_anchored_on, scroll_list, table_view,
+    dim, modal_close, modal_frame_on, modal_frame_anchored_on, scroll_list, table_view,
     tall_button,
 };
 use crate::tui::worker::Event;
@@ -1270,7 +1270,7 @@ fn draw_text_row(
         (input.value().to_string(), input.cursor())
     };
     if focused {
-        put(frame, vx, y, &input_display(&value, cursor, avail), Style::default());
+        super::text_field(frame, &mut gui.ui, vx, y, &value, cursor, avail, Style::default());
     } else if value.is_empty() {
         if let Some(placeholder) = placeholder {
             put(frame, vx, y, &super::bar::clip(placeholder, avail as usize), dim());
@@ -1614,13 +1614,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let inner = modal_frame_anchored_on(frame, ui, area, 66, 7 + shown, 13, th().accent);
         put(frame, inner.x, inner.y, &t!("gui.tor.picker_title"), accent().add_modifier(Modifier::BOLD));
         modal_close(frame, ui, inner, Act::TorPickerClose);
-        put(
-            frame,
-            inner.x,
-            inner.y + 2,
-            &input_display(picker.text.value(), picker.text.cursor(), inner.width),
-            Style::default(),
-        );
+        super::text_field(frame, ui, inner.x, inner.y + 2, picker.text.value(), picker.text.cursor(), inner.width, Style::default());
         let sel_moved = picker.sel != picker.sel_anchor;
         let reveal = if sel_moved { picker.sel } else { None };
         let (first, visible) = table_view(suggestions.len(), reveal, picker.scroll, 6);

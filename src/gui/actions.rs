@@ -13,7 +13,7 @@ use tui_input::backend::crossterm::EventHandler;
 
 use crate::api::types::{Track, TrackMetadata};
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{Surface, dim, input_display, modal_close, modal_frame_on, table_view};
+use crate::kit::{Surface, dim, modal_close, modal_frame_on, table_view};
 use crate::tui::app::{Action, App, Entry, Focus, Origin, PlaylistNames, Tab};
 
 use super::cover::{Pace, Slot};
@@ -435,7 +435,7 @@ fn draw_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let inner = modal_frame_on(frame, ui, area, width, 7, th().accent);
         put(frame, inner.x + 1, inner.y, &t!("gui.pl.new"), accent().add_modifier(Modifier::BOLD));
         modal_close(frame, ui, inner, Act::PickClose);
-        put(frame, inner.x + 1, inner.y + 2, &input_display(&name, cursor, inner.width.saturating_sub(2)), Style::default());
+        super::text_field(frame, ui, inner.x + 1, inner.y + 2, &name, cursor, inner.width.saturating_sub(2), Style::default());
         put(frame, inner.x + 1, inner.y + 4, &t!("gui.act.name_hint", title = title_of(&sheet.track)), dim());
         return;
     }

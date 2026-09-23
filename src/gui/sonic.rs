@@ -21,7 +21,7 @@ use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{ListView, dim, input_display, modal_close, modal_frame_on, scroll_list, tall_button, tall_secondary};
+use crate::kit::{ListView, dim, modal_close, modal_frame_on, scroll_list, tall_button, tall_secondary};
 use crate::tui::app::{Action, Capture, SonicEmpty, SonicSide, SonicView, Tab};
 use crate::tui::worker::ApiCmd;
 
@@ -643,13 +643,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         modal_close(frame, &mut gui.ui, inner, Act::SonSaveCancel);
         // The prompt rides the App's own line state: keys forward to it,
         // so the TUI and GUI share one editing truth.
-        put(
-            frame,
-            inner.x + 1,
-            inner.y + 2,
-            &input_display(&name, name.chars().count(), inner.width.saturating_sub(2)),
-            Style::default(),
-        );
+        super::text_field(frame, &mut gui.ui, inner.x + 1, inner.y + 2, &name, name.chars().count(), inner.width.saturating_sub(2), Style::default());
         put(frame, inner.x + 1, inner.y + 4, &t!("gui.sonic.save_hint"), dim());
         let ok = t!("gui.sonic.save_ok").to_string();
         let rect = Rect {

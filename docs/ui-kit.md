@@ -196,6 +196,17 @@ turns LightBlue and the caret appears — and while focused it takes every
 key: the tips line speaks for the field alone, Enter submits, Esc gives
 the keys back to the screen. Unfocused it never steals a letter, so the
 room's single-key actions keep working around it.
+**The caret is the terminal's own cursor in the GUI player** (2026-09-23):
+`kit::input_window` windows the value exactly as `input_display` does —
+the caret's cell stays reserved — but returns the caret's column instead
+of splicing the glyph in, `Surface::caret` records it (one field per
+frame, cleared with the registries), and the frame ends with
+`Frame::set_cursor_position`; with no field focused the cursor stays
+hidden. The shell asks for a blinking bar (DECSCUSR 5) at startup and
+hands the shape back at exit and on a panic, so the terminal blinks the
+caret at the user's own rate and colour — a terminal without DECSCUSR
+keeps its own cursor shape. The wizard, the admin rooms and the web shell
+keep the drawn `▏`.
 
 ### Path input + completion
 Suggestions under the input, max 6 visible — the list WINDOWS around the

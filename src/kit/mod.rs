@@ -116,6 +116,11 @@ pub struct Surface<A> {
     /// [`Surface::tip_keyed`]). On by default — the wizard and the admin
     /// rooms always name theirs; the GUI player has a setting.
     pub key_hints: bool,
+    /// Where the terminal's OWN cursor stands this frame: the caret of the
+    /// one focused text field, lent to the terminal so it blinks at the
+    /// user's rate and colour (see [`input_window`]). Rebuilt each frame
+    /// like `clicks`, and a layer drawn on top clears it with the rest.
+    pub caret: Option<Position>,
 }
 
 impl<A> Default for Surface<A> {
@@ -134,6 +139,7 @@ impl<A> Default for Surface<A> {
             covered: Vec::new(),
             contexts: Vec::new(),
             key_hints: true,
+            caret: None,
         }
     }
 }
@@ -179,6 +185,14 @@ impl<A: Clone> Surface<A> {
         self.tips.clear();
         self.bars.clear();
         self.contexts.clear();
+        self.caret = None;
+    }
+
+    /// Lend the terminal's cursor to a text field: the caret stands at
+    /// `at` until the frame ends. One field at a time — the last
+    /// registered wins, as with clicks.
+    pub fn caret(&mut self, at: Position) {
+        self.caret = Some(at);
     }
 
     /// Register what a right click on `rect` does. The last registered
@@ -946,6 +960,19 @@ fn input_display_with_fancy(value: &str, cursor: usize, width: u16) -> String {
     input_display_with(value, cursor, width, '▏', '…')
 }
 
+/// The input line for a field whose caret is the TERMINAL'S cursor: the
+/// same window as [`input_display`] — the caret's cell stays reserved, so
+/// the text never runs under it and a field reads the same either way —
+/// with the caret left out and its column returned instead, for
+/// [`Surface::caret`]. The terminal then draws and blinks it at the user's
+/// own rate and colour, which no drawn glyph can match.
+pub fn input_window(value: &str, cursor: usize, width: u16) -> (String, u16) {
+    let clip = if crate::kit::theme::legacy_conhost() { '»' } else { '…' };
+    let shown = input_display_with(value, cursor, width, '\0', clip);
+    let col = shown.chars().position(|c| c == '\0').unwrap_or(0);
+    (shown.chars().filter(|c| *c != '\0').collect(), col as u16)
+}
+
 pub fn input_display_with(value: &str, cursor: usize, width: u16, caret: char, clip: char) -> String {
     let w = width as usize;
     if w < 3 {
@@ -1125,6 +1152,20 @@ mod tests {
         assert_eq!(shown.chars().count(), 20);
         assert!(shown.starts_with('…') && shown.ends_with('…') && shown.contains('▏'));
         assert_eq!(input_display_with_fancy("123456789", 4, 10), "1234▏56789");
+    }
+
+    #[test]
+    fn the_terminal_caret_keeps_the_glyphs_window_and_reports_its_column() {
+        assert_eq!(input_window("short", 5, 20), ("short".to_string(), 5));
+        assert_eq!(input_window("123456789", 4, 10), ("123456789".to_string(), 4));
+        let long = "/very/long/path/that/does/not/fit/anywhere/music";
+        let (shown, col) = input_window(long, long.chars().count(), 20);
+        assert_eq!(shown.chars().count(), 19, "the caret's cell stays reserved");
+        assert!(!shown.starts_with('/') && shown.ends_with("music"), "{shown}");
+        assert_eq!(col, 19, "the caret after the text");
+        let (shown, col) = input_window(long, 0, 20);
+        assert!(shown.starts_with("/very") && !shown.ends_with('c'), "{shown}");
+        assert_eq!(col, 0);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
 use crate::kit::theme::th;
-use crate::kit::{ListView, dim, input_display, modal_frame_on, scroll_list};
+use crate::kit::{ListView, dim, modal_frame_on, scroll_list};
 use crate::tui::app::{Action, Entry};
 use crate::tui::worker::{ApiCmd, LibraryNode};
 
@@ -297,13 +297,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let inner = modal_frame_on(frame, &mut gui.ui, area, 52, 7, th().accent);
         put(frame, inner.x + 1, inner.y, &title, accent().add_modifier(Modifier::BOLD));
         crate::kit::modal_close(frame, &mut gui.ui, inner, Act::PlCancel);
-        put(
-            frame,
-            inner.x + 1,
-            inner.y + 2,
-            &input_display(&name, name.chars().count(), inner.width.saturating_sub(2)),
-            Style::default(),
-        );
+        super::text_field(frame, &mut gui.ui, inner.x + 1, inner.y + 2, &name, name.chars().count(), inner.width.saturating_sub(2), Style::default());
         put(frame, inner.x + 1, inner.y + 4, &t!("gui.pl.dialog_hint"), dim());
         let rect = Rect {
             x: inner.right().saturating_sub(action.chars().count() as u16 + 1),

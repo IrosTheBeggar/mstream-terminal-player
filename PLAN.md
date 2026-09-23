@@ -1999,6 +1999,17 @@ a LATER secondary screen (party view), Columns retired.
   card line). The tenth room has no digit; `D` opens it (auto-dj
   contract: decision 5 amended, entry point 2, the deviations log;
   `scenario_dj` opens the room from the nav).
+- **Widget polish — the text caret blinks ✅ 2026-09-23**: the GUI's
+  eleven text fields (the filter line, the search box, the DJ keyword
+  field and genre filter, the pairing code and the server form, the
+  playlist and sonic-save names, the torrent form and its picker) lend
+  their caret to the terminal's own cursor — `kit::input_window` keeps
+  the glyph's window and reports the column, `Surface::caret` carries it
+  to `Frame::set_cursor_position`, the shell asks for a blinking bar at
+  startup and hands the shape back at exit — so the caret blinks at the
+  user's terminal rate and colour with no timer of ours. Hidden while no
+  field is focused. The wizard, admin rooms and web shell keep the drawn
+  `▏`.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the

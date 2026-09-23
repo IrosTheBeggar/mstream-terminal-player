@@ -40,6 +40,7 @@ use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyCode, KeyEvent,
     KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
+use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::execute;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -48,7 +49,7 @@ use rust_i18n::t;
 
 use crate::config::{self, Config};
 use crate::kit::{
-    GroundGuard, ListView, POINTER_RESET, Surface, dim, input_display, scroll_list, set_pointer_shape,
+    GroundGuard, ListView, POINTER_RESET, Surface, dim, input_window, scroll_list, set_pointer_shape,
 };
 use crate::kit::theme::{self, legacy_conhost, th};
 use crate::tui::app::{
@@ -1008,6 +1009,30 @@ fn put(frame: &mut Frame, x: u16, y: u16, text: &str, style: Style) {
     buf.set_stringn(x, y, text, width, style);
 }
 
+/// A text field with the keyboard in it: the value windowed around the
+/// cursor (`kit::input_window`) and the caret lent to the terminal's own
+/// cursor, which blinks at the user's rate — the glyph the kit splices in
+/// elsewhere stays out of this shell. Only the focused field calls this,
+/// so the cursor shows nowhere else.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn text_field(
+    frame: &mut Frame,
+    ui: &mut Surface<Act>,
+    x: u16,
+    y: u16,
+    value: &str,
+    cursor: usize,
+    width: u16,
+    style: Style,
+) {
+    let (shown, col) = input_window(value, cursor, width);
+    put(frame, x, y, &shown, style);
+    let at = Position { x: x + col, y };
+    if frame.area().contains(at) {
+        ui.caret(at);
+    }
+}
+
 fn bright_bold() -> Style {
     Style::default().fg(th().bright).add_modifier(Modifier::BOLD)
 }
@@ -1248,6 +1273,12 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         let footprint = crate::kit::draw_tooltip(frame, area, target, text);
         gui.ui.overlay(footprint);
     }
+
+    // The focused field's caret is the terminal's cursor, which blinks on
+    // its own; with no field focused the cursor stays hidden.
+    if let Some(at) = gui.ui.caret {
+        frame.set_cursor_position(at);
+    }
 }
 
 /// Whether the playing track's cover is decoded and waiting in the cache.
@@ -1448,13 +1479,7 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
         let close_x = content.right().saturating_sub(4);
         close(frame, gui, close_x);
         let width = close_x.saturating_sub(content.x + 3);
-        put(
-            frame,
-            content.x + 2,
-            y,
-            &input_display(&filter, filter.chars().count(), width),
-            Style::default(),
-        );
+        text_field(frame, &mut gui.ui, content.x + 2, y, &filter, filter.chars().count(), width, Style::default());
         return;
     }
 
@@ -1720,7 +1745,7 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let field = inner.width.saturating_sub(2) as usize;
     if editing {
         let cursor = gui.app.query.chars().count();
-        put(frame, inner.x + 1, inner.y, &input_display(&gui.app.query, cursor, field as u16), Style::default());
+        text_field(frame, &mut gui.ui, inner.x + 1, inner.y, &gui.app.query, cursor, field as u16, Style::default());
     } else if gui.app.query.is_empty() {
         put(frame, inner.x + 1, inner.y, &t!("gui.search.placeholder"), dim());
     } else {
@@ -2461,6 +2486,10 @@ pub fn run(
     gui.app.graphics = crate::tui::graphics::Graphics::probe();
     crate::console::claim_terminal();
     let mouse_on = execute!(std::io::stdout(), EnableMouseCapture).is_ok();
+    // The text caret is the terminal's cursor, asked for as a blinking
+    // bar — the kit's `▏`, animated by the terminal itself; one without
+    // DECSCUSR keeps its own shape. Handed back at exit and on a panic.
+    let _ = execute!(std::io::stdout(), SetCursorStyle::BlinkingBar);
     if let Some(seq) = claim {
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(seq));
     }
@@ -2481,6 +2510,7 @@ pub fn run(
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(POINTER_RESET));
     }
+    let _ = execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape);
     ratatui::restore();
     crate::console::release_terminal();
     drop(ground_guard);
@@ -2753,6 +2783,39 @@ mod tests {
         assert_eq!(gui.app.query, "q");
         handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!gui.app.editing_query, "Esc hands the keyboard back");
+    }
+
+    #[test]
+    fn the_focused_field_lends_its_caret_to_the_terminal_cursor() {
+        let mut gui = test_gui();
+        gui.app.connected = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+        assert!(!terminal.backend().cursor_visible(), "no field focused: the cursor stays hidden");
+        // A fresh visit to Search opens the query box; typed text moves the
+        // caret along, and it is the terminal's cursor, not a drawn glyph.
+        gui.act(Act::Nav(SEARCH_NAV));
+        for c in "abc".chars() {
+            handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = *buffer.area();
+        let cells = |y: u16| (0..area.width).map(|x| buffer[(x, y)].symbol().to_string()).collect::<Vec<_>>();
+        let (x, y) = (0..area.height)
+            .flat_map(|y| (0..area.width - 3).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                let row = cells(y);
+                row[x as usize] == "a" && row[x as usize + 1] == "b" && row[x as usize + 2] == "c"
+            })
+            .expect("the query is drawn");
+        assert!(terminal.backend().cursor_visible(), "the box has the keyboard: the cursor shows");
+        assert_eq!(terminal.backend().cursor_position(), Position { x: x + 3, y }, "right after the text");
+        assert!(!cells(y).iter().any(|c| c == "▏"), "no drawn caret beside the terminal's");
+        // Esc hands the keyboard back, and the cursor goes with it.
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+        assert!(!terminal.backend().cursor_visible());
     }
 
     #[test]
