@@ -79,8 +79,10 @@ impl QueueUi {
 
 /// How many rows fit between the panel's head and the note line above
 /// the bar: the single-line panel had `height - 13` lines to spend.
-fn rows_that_fit(height: u16) -> usize {
-    (height.saturating_sub(13) / ROW_H) as usize
+/// How many rows fit between the panel's head and the bar's seek line —
+/// one row fewer while the screen keeps its tips line.
+fn rows_that_fit(height: u16, footer: bool) -> usize {
+    (height.saturating_sub(TOP + bar::BAR_ROWS + u16::from(footer)) / ROW_H) as usize
 }
 
 /// The queue row under screen row `y`, in the panel's current window —
@@ -95,7 +97,8 @@ pub(crate) fn row_at(gui: &Gui, y: u16) -> Option<usize> {
 
 pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let x = area.width - PANEL_W;
-    for y in 2..area.height - 8 {
+    let footer = gui.footer();
+    for y in 2..bar::top(area, footer) {
         put(frame, x - 2, y, "│", dim());
     }
     put(frame, x, 2, &t!("gui.queue.title"), dim());
@@ -135,7 +138,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         .or_else(|| (selected != gui.last_qsel).then_some(selected).flatten());
     gui.last_current = current;
     gui.last_qsel = selected;
-    let (first, visible) = table_view(len, reveal, gui.queue_view.scroll, rows_that_fit(area.height));
+    let (first, visible) = table_view(len, reveal, gui.queue_view.scroll, rows_that_fit(area.height, footer));
     gui.queue_view.scroll = first;
 
     // The covers these rows still owe the cache, claimed through the App's
@@ -292,7 +295,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 x: area.width - 1,
                 y: TOP,
                 width: 1,
-                height: rows_that_fit(area.height) as u16 * ROW_H,
+                height: rows_that_fit(area.height, footer) as u16 * ROW_H,
             },
             len,
             visible,
@@ -626,25 +629,25 @@ mod tests {
     fn the_view_holds_as_many_rows_as_fit_and_the_wheel_moves_it() {
         let mut gui = ten_rows();
         let all = lines(&draw(&mut gui)).join("\n");
-        assert_eq!(super::rows_that_fit(30), 5);
-        assert!(all.contains("Track 04") && !all.contains("Track 05"), "five rows fit:\n{all}");
+        assert_eq!(super::rows_that_fit(30, false), 7);
+        assert!(all.contains("Track 06") && !all.contains("Track 07"), "seven rows fit above the bar:\n{all}");
 
         gui.queue_view.scroll = 7;
         let all = lines(&draw(&mut gui)).join("\n");
-        assert!(all.contains("Track 09") && !all.contains("Track 04"), "the wheel clamps to the end:\n{all}");
-        assert_eq!(gui.queue_view.scroll, 5, "and the offset is written back clamped");
+        assert!(all.contains("Track 09") && !all.contains("Track 02"), "the wheel clamps to the end:\n{all}");
+        assert_eq!(gui.queue_view.scroll, 3, "and the offset is written back clamped");
     }
 
     #[test]
     fn the_scrollbar_stands_on_overflow_and_its_ends_and_track_answer() {
         let mut gui = ten_rows();
         let rows = lines(&draw(&mut gui));
-        // Down the screen's last column, the rows' full height: fifteen
-        // lines for five rows of three.
+        // Down the screen's last column, the rows' full height: twenty-one
+        // lines for seven rows of three, ending on the row above the bar.
         assert_eq!(cells(&rows[4], BAR as usize, 1), "▲", "the top cap: {:?}", rows[4]);
-        assert_eq!(cells(&rows[18], BAR as usize, 1), "▼", "the bottom cap: {:?}", rows[18]);
+        assert_eq!(cells(&rows[24], BAR as usize, 1), "▼", "the bottom cap: {:?}", rows[24]);
         assert_eq!(cells(&rows[5], BAR as usize, 1), "█", "the thumb at the top while first is 0");
-        assert_eq!(gui.ui.hit(Position { x: BAR, y: 18 }), Some(Act::ScrollBy(List::Queue, 1)));
+        assert_eq!(gui.ui.hit(Position { x: BAR, y: 24 }), Some(Act::ScrollBy(List::Queue, 1)));
         assert_eq!(gui.ui.hit(Position { x: BAR, y: 4 }), Some(Act::ScrollBy(List::Queue, -1)));
         assert!(
             matches!(gui.ui.hit(Position { x: BAR, y: 17 }), Some(Act::ScrollTo(List::Queue, _))),
@@ -654,11 +657,12 @@ mod tests {
         assert_eq!(gui.queue_view.scroll, 1);
         gui.act(Act::ScrollTo(List::Queue, 4));
         let rows = lines(&draw(&mut gui));
-        assert!(rows[4].contains("Track 04"), "the jump landed: {:?}", rows[4]);
+        // Ten rows, seven on view: the jump clamps to the last window.
+        assert!(rows[4].contains("Track 03"), "the jump landed, clamped: {:?}", rows[4]);
         assert_eq!(cells(&rows[17], BAR as usize, 1), "█", "the thumb rode to the end");
-        // The wheel over the panel rides the same act.
+        // The wheel over the panel rides the same act, from the clamped 3.
         gui.wheel(Position { x: 90, y: 10 }, -1);
-        assert_eq!(gui.queue_view.scroll, 3);
+        assert_eq!(gui.queue_view.scroll, 2);
     }
 
     /// Ten rows, each with a cover of its own decoded and waiting.
@@ -694,15 +698,15 @@ mod tests {
     fn a_scroll_moves_the_covers_with_their_rows_and_encodes_only_the_new_one() {
         let mut gui = ten_covered_rows();
         settle(&mut gui);
-        assert_eq!(gui.queue.encodes(), 5, "five covers on view, five encodes");
+        assert_eq!(gui.queue.encodes(), 7, "seven covers on view, seven encodes");
 
         gui.act(Act::ScrollBy(List::Queue, 1));
         settle(&mut gui);
-        assert_eq!(gui.queue.encodes(), 6, "one row came into view: one encode, four covers moved");
+        assert_eq!(gui.queue.encodes(), 8, "one row came into view: one encode, six covers moved");
 
         gui.act(Act::ScrollBy(List::Queue, -1));
         settle(&mut gui);
-        assert_eq!(gui.queue.encodes(), 6, "and back: the cover that left was still warm");
+        assert_eq!(gui.queue.encodes(), 8, "and back: the cover that left was still warm");
 
         // The pool holds the view plus its slack, then lets the rest go.
         for _ in 0..5 {

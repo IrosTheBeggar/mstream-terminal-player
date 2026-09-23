@@ -892,11 +892,19 @@ impl Gui {
                     Some((_, position)) if self.app.status.is_idle() => position,
                     _ => self.app.status.position,
                 };
+                let m = &track.metadata;
                 Some(Now {
                     title: track.title_or_file().to_string(),
-                    artist: track.metadata.artist.clone().unwrap_or_default(),
+                    artist: m.artist.clone().unwrap_or_default(),
                     elapsed,
                     duration,
+                    year: m.year.filter(|y| *y > 0),
+                    spec: actions::spec_parts(m).join(" · "),
+                    // The App's copy first: an optimistic rating lands here
+                    // the moment it is given (track-actions clause 11).
+                    rating: self.app.rating_of(&track.filepath).or(m.rating),
+                    key: m.musical_key.clone(),
+                    bpm: m.bpm,
                 })
             }
             None => self.demo.clone(),
@@ -921,6 +929,11 @@ fn demo_now() -> Now {
         artist: "Vela — Cassini".to_string(),
         elapsed: 47.0,
         duration: 302.0,
+        year: Some(2019),
+        spec: "FLAC · 912 kbps · 44.1 kHz".to_string(),
+        rating: Some(8),
+        key: Some("8A".to_string()),
+        bpm: Some(120),
     }
 }
 
@@ -983,9 +996,11 @@ fn accent() -> Style {
 /// The content column's rect for a frame this size — between the nav rule
 /// and the queue (when open). One computation, shared by the draw and by
 /// the key handling that must agree with it about geometry.
-fn content_rect(width: u16, height: u16, queue_open: bool) -> Rect {
+/// The content column: from under the header to the row above the bar's
+/// seek line, and one row shorter when the screen keeps its tips line.
+fn content_rect(width: u16, height: u16, queue_open: bool, footer: bool) -> Rect {
     let right = if queue_open { width - 36 } else { width - 3 };
-    Rect { x: 17, y: 2, width: right - 17, height: height - 10 }
+    Rect { x: 17, y: 2, width: right - 17, height: height - 2 - bar::BAR_ROWS - u16::from(footer) }
 }
 
 /// A path clipped LEADING, so the leaf stays visible (the kit's path law:
@@ -1024,7 +1039,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     draw_nav(frame, gui, area);
 
     // The content column, between the nav rule and the queue (when open).
-    let content = content_rect(area.width, area.height, gui.queue_open);
+    let content = content_rect(area.width, area.height, gui.queue_open, gui.footer());
     // Exhaustive over the nav, like the wheel: a room cannot ship without
     // a body.
     match NAV[gui.active] {
@@ -1041,9 +1056,11 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         queue::draw(frame, gui, area);
     }
 
-    // The note sits above the bar (gui's own first, else the App's words);
-    // the keyboard tips take the very bottom row. An armed pick outranks
-    // both: the banner is the mode, not news (clauses 4, 10–13).
+    // The note rides the bar's bottom row (gui's own first, else the App's
+    // words); the keyboard tips, when shown, take the very last row. An
+    // armed pick outranks both: the banner is the mode, not news (clauses
+    // 4, 10–13).
+    let note = bar::note_rect(area, gui.footer());
     let pick_banner = match gui.app.capture {
         Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::Start)) => {
             Some(t!("gui.sonic.pick_banner_start").to_string())
@@ -1056,9 +1073,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     if let Some(banner) = pick_banner {
         put(
             frame,
-            1,
-            area.height - 7,
-            &bar::clip(&banner, area.width as usize - 2),
+            note.x,
+            note.y,
+            &bar::clip(&banner, note.width as usize),
             Style::default().fg(th().accent).add_modifier(Modifier::BOLD),
         );
     } else if let Some((text, is_err)) = gui.note.clone().or_else(|| {
@@ -1068,7 +1085,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             .map(|m| (m.text.clone(), matches!(m.kind, MessageKind::Error)))
     }) {
         let style = if is_err { Style::default().fg(th().gold) } else { dim() };
-        put(frame, 1, area.height - 7, &bar::clip(&text, area.width as usize - 2), style);
+        put(frame, note.x, note.y, &bar::clip(&text, note.width as usize), style);
     }
     let tips = if let Some(tip) = actions::tips(gui) {
         std::borrow::Cow::from(tip)
@@ -1142,10 +1159,11 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         autodj: gui.app.dj_armed(),
         queue_open: gui.queue_open,
         has_art,
+        footer: gui.footer(),
     };
     bar::draw(frame, &mut gui.ui, area, &view);
     if has_art {
-        draw_card_cover(frame, bar::cover_rect(area), &mut gui.app);
+        draw_card_cover(frame, bar::cover_rect(area, gui.footer()), &mut gui.app);
     }
 
     // Overlays draw (and register) last, so their rects win the pointer.
@@ -1204,7 +1222,8 @@ fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App) {
 fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     put(frame, 1, 4, &t!("gui.nav.library"), dim());
     let forward = forward_glyph();
-    let set_y = area.height - 9;
+    // The Settings row sits on the content's last row, above the bar.
+    let set_y = content_rect(area.width, area.height, gui.queue_open, gui.footer()).bottom() - 1;
     for (i, id) in NAV.iter().enumerate() {
         // The sonic room rides the ping's flag: absent is absent — no
         // placeholder row, and digit 9 goes dead with it (contract §1).
@@ -1235,7 +1254,8 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         put(frame, x, y, &text, style);
         gui.ui.click(rect, Act::Nav(i));
     }
-    for y in 2..area.height - 8 {
+    // The rule between the nav and the content runs down to the bar.
+    for y in 2..bar::top(area, gui.footer()) {
         put(frame, 15, y, "│", dim());
     }
 }
@@ -2243,6 +2263,12 @@ impl Gui {
         self.list_mut(list).reveal = true;
     }
 
+    /// Whether the screen keeps its tips line under the bar — the bar and
+    /// the content sit one row higher while it does.
+    fn footer(&self) -> bool {
+        self.config.gui.key_hints
+    }
+
     /// Whether `room` stands where the Settings rows would be.
     pub(crate) fn in_settings_room(&self, room: SettingsRoom) -> bool {
         self.active == SETTINGS_NAV && self.settings_room == Some(room)
@@ -2537,7 +2563,8 @@ mod tests {
         // tooltip until asked; the classic TUI is the keyboard's room.
         let mut gui = browsing_gui();
         let rows = draw(&mut gui);
-        assert!(rows[29].trim().is_empty(), "no footer of keys: {:?}", rows[29]);
+        assert!(!rows[29].contains("q quit"), "no footer of keys — the bar's bottom row instead: {:?}", rows[29]);
+        assert!(rows[29].contains('%'), "the volume rides the bar's bottom row: {:?}", rows[29]);
         assert!(gui.ui.tips.iter().all(|(_, t)| !t.contains(" — ")), "no key on a tooltip: {:?}", gui.ui.tips);
         assert!(gui.ui.tips.iter().any(|(_, t)| t == "/ filter"), "the filter's tip is its label alone: {:?}", gui.ui.tips);
 
@@ -2681,7 +2708,10 @@ mod tests {
 
         // Nothing fetched yet: the empty slot frame holds the cells.
         let rows = draw(&mut gui);
-        let slot_row: String = rows[26].chars().skip(68).take(6).collect();
+        // The card at the right edge: its cover is eight by four cells,
+        // starting on the row under the seek line.
+        let cover = bar::cover_rect(Rect { x: 0, y: 0, width: 100, height: 30 }, false);
+        let slot_row: String = rows[cover.y as usize].chars().skip(cover.x as usize).take(cover.width as usize).collect();
         assert!(slot_row.contains('╭'), "the slot frame waits for the art: {slot_row:?}");
 
         // A real decode, so the art carries what both draw paths want; the
@@ -2693,7 +2723,7 @@ mod tests {
         gui.app.art.insert("aa.jpeg".into(), Some(art));
 
         let rows = draw(&mut gui);
-        let cover_row: String = rows[26].chars().skip(68).take(6).collect();
+        let cover_row: String = rows[cover.y as usize].chars().skip(cover.x as usize).take(cover.width as usize).collect();
         assert!(!cover_row.contains('╭'), "the frame yields to the picture: {cover_row:?}");
         // A solid test image mosaics as full blocks; a busy one mixes ▀.
         assert!(

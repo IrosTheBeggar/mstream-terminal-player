@@ -43,12 +43,15 @@ def run(Gui):
     # What the rows wear, read off the screen: the panel's left edge is the
     # QUEUE title's column, each row `step` lines from two below it; the
     # scrollbar's caps stand in the last column.
+    # The panel runs down to the bar's seek line: the bar is five rows
+    # (keyboard hints off, the smoke default).
     top = qrow + 2
-    firsts = [g.screen.display[i][qcol:qcol + 6] for i in range(top, len(g.screen.display) - 9, step)]
+    bottom = len(g.screen.display) - 5
+    firsts = [g.screen.display[i][qcol:qcol + 6] for i in range(top, bottom, step)]
     covers = sum(1 for cells in firsts if cells and set(cells) <= set("█▀▄"))
     frames = sum(1 for cells in firsts if cells.startswith("╭"))
     last = len(g.screen.display[0]) - 1
-    caps = "".join(g.screen.display[i][last] for i in range(top, len(g.screen.display) - 9)).replace(" ", "")
+    caps = "".join(g.screen.display[i][last] for i in range(top, bottom)).replace(" ", "")
     print(f"rows visible: {covers} wear a cover, {frames} the empty slot frame; scrollbar column: {caps!r}", flush=True)
     if covers == 0:
         raise SystemExit("FAIL: no row drew its cover")

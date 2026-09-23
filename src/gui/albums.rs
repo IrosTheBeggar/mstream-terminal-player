@@ -165,7 +165,7 @@ fn visible_albums(gui: &Gui) -> Option<Vec<usize>> {
 /// The grid geometry the last frame drew with — recomputed from the same
 /// inputs, so key handling agrees with the pointer about where cells are.
 fn shape(gui: &Gui) -> GridShape {
-    GridShape::for_content(super::content_rect(gui.last_width, gui.last_height, gui.queue_open))
+    GridShape::for_content(super::content_rect(gui.last_width, gui.last_height, gui.queue_open, gui.footer()))
 }
 
 fn turn_page(gui: &mut Gui, delta: i32) {
@@ -853,7 +853,7 @@ mod tests {
     fn a_decoded_cover_replaces_the_empty_slot_frame() {
         let mut gui = wall_gui(1);
         let rows = draw(&mut gui);
-        let cell = GridShape::for_content(super::super::content_rect(100, 30, false)).cell(0);
+        let cell = GridShape::for_content(super::super::content_rect(100, 30, false, false)).cell(0);
         let top: String = rows[cell.y as usize]
             .chars()
             .skip(cell.x as usize)

@@ -1956,6 +1956,19 @@ a LATER secondary screen (party view), Columns retired.
   a DISPLAY row in Settings, the kit's `Surface::tip_keyed` cutting a
   keyed tip at its dash when the surface does not name keys (the wizard
   and the admin rooms always do). The keys keep working either way.
+- **The player bar, A′ ✅ 2026-09-22** — drawn first on the "Player bar
+  options" canvas (six ways to spend the bottom ten rows; A chosen, then
+  the four asks: repeat at the left edge, the transport centred and bold,
+  the card four rows tall). Five rows where there were eight: the seek
+  line, three rows of tall frames — repeat alone at the left, the
+  transport (prev · play · next in the text colour, bold) with shuffle and
+  auto-dj centred in the span before the card — and a bottom row with the
+  volume, the screen's note and the card's fourth line. The card's cover
+  is eight by four cells (square), with title, artist · year, the spec
+  line and the stars with key and tempo beside it — the sheet's facts, so
+  a song reads the same wherever it is met. The content and the queue
+  panel take the three rows back (two with keyboard hints on: the tips
+  line sits under the bar and shifts it up).
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the

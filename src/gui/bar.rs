@@ -22,17 +22,35 @@ use rust_i18n::t;
 
 use super::{Act, bright_bold, put};
 
-/// Rows the bar region owns at the bottom of the screen. The bar draws the
-/// first five; the sixth (the very last row) is the screen's tips line.
-pub(super) const BAR_ROWS: u16 = 6;
+/// Rows the bar owns at the bottom of the screen: the seek line, three
+/// rows of tall frames, and a bottom row holding the volume, the note and
+/// the card's fourth line. The screen's tips line, when it shows, is the
+/// row beneath (the "Player bar options" canvas, A′).
+pub(super) const BAR_ROWS: u16 = 5;
 
-/// What is playing, as the bar needs it.
+/// The card's width, cover included, at the right edge.
+const CARD_W: u16 = 44;
+/// The cover's cells: eight by four, square in terminal cells.
+const COVER_W: u16 = 8;
+const COVER_H: u16 = 4;
+/// Where the note begins on the bottom row, past the volume group.
+const NOTE_X: u16 = 24;
+
+/// What is playing, as the bar needs it: the words beside the cover, and
+/// the facts the card's third and fourth lines wear (the sheet's, so a
+/// song reads the same wherever it is met).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Now {
     pub title: String,
     pub artist: String,
     pub elapsed: f64,
     pub duration: f64,
+    pub year: Option<i32>,
+    /// `FLAC · 912 kbps · 44.1 kHz` — the length is the seek line's.
+    pub spec: String,
+    pub rating: Option<u32>,
+    pub key: Option<String>,
+    pub bpm: Option<u32>,
 }
 
 /// The slice of player state the bar draws from.
@@ -49,6 +67,30 @@ pub(super) struct BarView<'a> {
     /// empty slot frame and the screen paints the art over those cells
     /// after the bar (pixels where the terminal can, the mosaic elsewhere).
     pub has_art: bool,
+    /// The screen keeps its tips line under the bar: the bar sits one row
+    /// higher.
+    pub footer: bool,
+}
+
+/// The bar's first row — the seek line — for this frame.
+pub(super) fn top(area: Rect, footer: bool) -> u16 {
+    area.height - BAR_ROWS - u16::from(footer)
+}
+
+fn card_x(area: Rect) -> u16 {
+    area.width - CARD_W
+}
+
+/// The card's cover cells — where the screen paints the album art after
+/// the bar.
+pub(super) fn cover_rect(area: Rect, footer: bool) -> Rect {
+    Rect { x: card_x(area), y: top(area, footer) + 1, width: COVER_W, height: COVER_H }
+}
+
+/// Where the screen's note (or an armed pick's banner) goes: the bottom
+/// row, between the volume group and the card.
+pub(super) fn note_rect(area: Rect, footer: bool) -> Rect {
+    Rect { x: NOTE_X, y: top(area, footer) + 4, width: card_x(area).saturating_sub(NOTE_X + 2), height: 1 }
 }
 
 // ── Pure geometry ───────────────────────────────────────────────────────────
@@ -90,8 +132,9 @@ pub(super) fn volume_cells(volume: f32) -> usize {
 enum TallKind {
     /// The play/pause slot: ACCENT, always BOLD.
     Primary,
-    /// Prev/next: DIM, BOLD only under the pointer.
-    Secondary,
+    /// Prev/next: the text colour, always BOLD — the transport stands out
+    /// from the toggles beside it.
+    Strong,
     /// A state-wearing toggle: DIM off, OK green on (the toggle-card
     /// colors in button form).
     Toggle(bool),
@@ -113,11 +156,11 @@ fn tall_compact(
         let color = match (&kind, hover) {
             (_, true) => th().bright,
             (TallKind::Primary, false) => th().accent,
-            (TallKind::Secondary, false) => th().dim,
+            (TallKind::Strong, false) => th().text,
             (TallKind::Toggle(true), false) => th().ok,
             (TallKind::Toggle(false), false) => th().dim,
         };
-        (color, hover || matches!(kind, TallKind::Primary | TallKind::Toggle(true)))
+        (color, hover || matches!(kind, TallKind::Primary | TallKind::Strong | TallKind::Toggle(true)))
     };
     let at = Rect { x, y, width: u16::MAX, height: 3 };
     crate::kit::tall_frame(frame, s, at, label, 1, tone, Some(act)).width
@@ -212,43 +255,64 @@ fn draw_seek_cells(
 
 // ── The bar ─────────────────────────────────────────────────────────────────
 
-/// Draw the bar into the bottom [`BAR_ROWS`] rows of `area` (minus the
-/// last row, which the screen keeps for the tips line).
+/// Draw the bar into its rows of `area` (see [`BAR_ROWS`]).
 pub(super) fn draw(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, v: &BarView) {
-    let top = area.height - BAR_ROWS;
+    let top = top(area, v.footer);
     draw_gold_bar(frame, s, area, top, v);
-}
-
-/// The card's cover cells — where the screen paints the album art after
-/// the bar. Identical in both styles.
-pub(super) fn cover_rect(area: Rect) -> Rect {
-    Rect { x: area.width - 32, y: area.height - BAR_ROWS + 2, width: 6, height: 3 }
 }
 
 fn gold_rule(frame: &mut Frame, y: u16, width: u16) {
     put(frame, 0, y, &"─".repeat(width as usize), Style::default().fg(th().gold));
 }
 
-/// The now-playing card: cover slot + title/artist + the ▾/▴ chevron,
-/// spanning exactly the queue's column, three rows tall. One click target.
+/// The now-playing card: the cover, four lines of words beside it —
+/// title, artist and year, the spec line, the rating with key and tempo
+/// — and the ▾/▴ chevron, four rows tall at the right edge. One click
+/// target; a right click is the playing track's sheet.
 fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &BarView) {
-    let x = area.width - 32;
-    let rect = Rect { x, y, width: 31, height: 3 };
+    let x = card_x(area);
+    let rect = Rect { x, y, width: CARD_W, height: COVER_H };
     let hover = s.hovers(rect);
     // With art in hand the frame would only bleed around the picture's
     // edges — the screen paints the cover over these cells after the bar.
     if !v.has_art {
-        cover_slot(frame, x, y, 6, 3);
+        cover_slot(frame, x, y, COVER_W, COVER_H);
     }
+    let tx = x + COVER_W + 2;
+    // The words stop short of the chevron's column.
+    let text_w = (area.width - 4).saturating_sub(tx) as usize;
     let (title_style, sub_style) = card_styles(hover, v.now.is_some());
     match v.now {
         Some(now) => {
             // On hover the title yields its tail to the sheet's verb
             // (track-actions contract, entry point 2).
-            put(frame, x + 8, y, &clip(&now.title, if hover { 16 } else { 20 }), title_style);
-            put(frame, x + 8, y + 1, &clip(&now.artist, 20), sub_style);
+            put(frame, tx, y, &clip(&now.title, if hover { text_w.saturating_sub(4) } else { text_w }), title_style);
+            let byline = match now.year {
+                Some(year) if !now.artist.is_empty() => format!("{} · {year}", now.artist),
+                Some(year) => year.to_string(),
+                None => now.artist.clone(),
+            };
+            put(frame, tx, y + 1, &clip(&byline, text_w), sub_style);
+            put(frame, tx, y + 2, &clip(&now.spec, text_w), dim());
+            let mut fx = tx;
+            if let Some(rating) = now.rating.filter(|r| *r > 0) {
+                let glyphs = super::actions::stars(Some(rating));
+                put(frame, fx, y + 3, &glyphs, Style::default().fg(th().gold));
+                fx += glyphs.chars().count() as u16 + 2;
+            }
+            let mut facts: Vec<String> = Vec::new();
+            if let Some(key) = now.key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+                facts.push(format!("{} {key}", if legacy_conhost() { "key" } else { "♪" }));
+            }
+            if let Some(bpm) = now.bpm.filter(|b| *b > 0) {
+                facts.push(format!("{bpm} BPM"));
+            }
+            if !facts.is_empty() {
+                let room = (area.width - 1).saturating_sub(fx) as usize;
+                put(frame, fx, y + 3, &clip(&facts.join(" · "), room), dim());
+            }
         }
-        None => put(frame, x + 8, y, &t!("gui.nothing_playing"), sub_style),
+        None => put(frame, tx, y, &t!("gui.nothing_playing"), sub_style),
     }
     let chevron = chevron_glyph(v.queue_open);
     put(frame, area.width - 3, y, chevron, if hover { bright_bold() } else { dim() });
@@ -265,13 +329,12 @@ fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &Ba
     }
 }
 
-/// The rule is the seek bar; the tall controls beneath it with the volume
-/// on their center line; the card on the right.
+/// The rule is the seek bar; beneath it the repeat toggle at the left
+/// edge, the transport and the other toggles centred in what is left
+/// before the card, and the bottom row: the volume, then the screen's
+/// note, then the card's last line.
 fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, v: &BarView) {
-    // Row `top` stays blank — the bar's footprint hasn't moved since the
-    // days it shared it with a second style, and the screen above depends
-    // on it.
-    let line = top + 1;
+    let line = top;
     match v.now {
         Some(now) => {
             put(frame, 1, line, &fmt_time(now.elapsed), dim());
@@ -287,24 +350,27 @@ fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, 
         None => gold_rule(frame, line, area.width),
     }
 
-    // The tall controls, one compact frame each, with the volume centered
-    // on their middle row to their left. The play slot's label is two
-    // cells both ways, so the row never re-seats.
+    // The tall controls, one compact frame each. Repeat stands alone at
+    // the left edge; the rest are one group, centred in the span between
+    // it and the card so the group holds the middle at any width.
+    let y = top + 1;
+    let legacy = legacy_conhost();
+    let shuffle_word = t!("gui.shuffle_word").to_string();
+    let repeat_word = t!("gui.repeat_word").to_string();
+    let (shuffle, repeat) = if legacy { (shuffle_word.as_str(), repeat_word.as_str()) } else { ("⇄", "↻") };
+    let repeat_w = tall_compact(frame, s, 1, y, repeat, TallKind::Toggle(v.repeat), Act::Repeat);
     let (prev, play, next) = play_glyphs(v.paused);
-    let y = top + 2;
-    let mut x = 22u16;
-    x += tall_compact(frame, s, x, y, prev, TallKind::Secondary, Act::Prev) + 1;
+    let group = [prev, play, next, shuffle, "auto-dj"];
+    let group_w: u16 = group.iter().map(|l| l.chars().count() as u16 + 4).sum::<u16>() + (group.len() as u16 - 1);
+    let free_from = 1 + repeat_w + 1;
+    let free_to = card_x(area).saturating_sub(1);
+    let mut x = free_from + free_to.saturating_sub(free_from).saturating_sub(group_w) / 2;
+    x += tall_compact(frame, s, x, y, prev, TallKind::Strong, Act::Prev) + 1;
     x += tall_compact(frame, s, x, y, play, TallKind::Primary, Act::PlayPause) + 1;
-    x += tall_compact(frame, s, x, y, next, TallKind::Secondary, Act::Next) + 1;
-    if legacy_conhost() {
-        x += tall_compact(frame, s, x, y, &t!("gui.shuffle_word"), TallKind::Toggle(v.shuffle), Act::Shuffle) + 1;
-        x += tall_compact(frame, s, x, y, &t!("gui.repeat_word"), TallKind::Toggle(v.repeat), Act::Repeat) + 1;
-    } else {
-        x += tall_compact(frame, s, x, y, "⇄", TallKind::Toggle(v.shuffle), Act::Shuffle) + 1;
-        x += tall_compact(frame, s, x, y, "↻", TallKind::Toggle(v.repeat), Act::Repeat) + 1;
-    }
+    x += tall_compact(frame, s, x, y, next, TallKind::Strong, Act::Next) + 1;
+    x += tall_compact(frame, s, x, y, shuffle, TallKind::Toggle(v.shuffle), Act::Shuffle) + 1;
     tall_compact(frame, s, x, y, "auto-dj", TallKind::Toggle(v.autodj), Act::AutoDj);
-    draw_volume(frame, s, 1, y + 1, v.volume);
+    draw_volume(frame, s, 1, top + 4, v.volume);
 
     draw_card(frame, s, area, y, v);
 }

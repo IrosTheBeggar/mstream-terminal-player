@@ -380,6 +380,19 @@ rule; screens have no top rule) · the **bottom bar** (3 rows): the scan
 widget on the left (empty until a scan is actually running), the screen's
 forward action as a tall primary on the right.
 
+**The GUI player's bar** (the "Player bar options" canvas, A′; `src/gui/bar.rs`):
+five rows at the bottom, the tips line under them only while keyboard hints
+are on. The gold rule is the seek bar (times at its ends, the played part
+gold). Beneath it, three rows of the bar's compact tall frames: repeat
+alone at the left edge, and the transport — prev · play · next, the text
+colour BOLD, play in the accent — with shuffle and auto-dj centred in the
+span before the card. The bottom row holds the volume group at the left,
+the screen's note (or an armed pick's banner) after it, and the card's
+last line. The card, at the right edge, is an eight-by-four cover with
+four lines beside it: title, artist · year, the spec line, the stars with
+key and tempo; hover reveals the sheet's `[⋯]`, a right click opens it,
+the chevron folds the queue.
+
 **The Done page owns its frame**: no horizontal gold rule, no bottom
 bar — a full-height VERTICAL gold rule divides its two left-anchored
 columns, the note and key hints sit at the bottom edge, and the scan

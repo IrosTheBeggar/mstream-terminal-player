@@ -11,7 +11,7 @@ use rust_i18n::t;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
 
-use crate::api::types::Track;
+use crate::api::types::{Track, TrackMetadata};
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{Surface, dim, input_display, modal_close, modal_frame_on, table_view};
 use crate::tui::app::{Action, App, Entry, Focus, Origin, PlaylistNames, Tab};
@@ -195,7 +195,16 @@ fn byline_of(track: &Track) -> String {
 
 /// `FLAC · 320 kbps · 44.1 kHz · 4:12`, each part on its own (clause 2).
 fn spec_of(track: &Track) -> String {
-    let m = &track.metadata;
+    let mut parts = spec_parts(&track.metadata);
+    if let Some(seconds) = track.metadata.duration {
+        parts.push(super::bar::fmt_time(seconds));
+    }
+    parts.join(" · ")
+}
+
+/// What the file is — format, bitrate, sample rate — as the sheet and the
+/// bar's card both word it; the length is each surface's own.
+pub(crate) fn spec_parts(m: &TrackMetadata) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(format) = m.format.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
         parts.push(format.to_uppercase());
@@ -206,10 +215,7 @@ fn spec_of(track: &Track) -> String {
     if let Some(khz) = m.khz_words() {
         parts.push(t!("gui.info.khz", n = khz).to_string());
     }
-    if let Some(seconds) = m.duration {
-        parts.push(super::bar::fmt_time(seconds));
-    }
-    parts.join(" · ")
+    parts
 }
 
 /// Five stars in halves from the wire's 0–10 (clause 10).
