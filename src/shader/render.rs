@@ -385,7 +385,11 @@ impl Scene {
 
     /// What a channel reads for the pass `reader`. A buffer that ran earlier
     /// this frame gives this frame's pixels; itself, or one still to run,
-    /// gives last frame's. ShaderToy's rule, and Android's.
+    /// gives last frame's. ShaderToy's rule, which is what an imported shader
+    /// was written against. Android agrees on the first two, but hands a
+    /// buffer still to run over as it was the frame before last — its write
+    /// index flips only once the whole frame is drawn. No bundled preset
+    /// reads a later buffer, so the two never show the difference.
     fn channel<'a>(&'a self, gpu: &'a Gpu, channel: Channel, reader: PassName) -> &'a wgpu::TextureView {
         match channel {
             Channel::Unbound => &gpu.black_view,

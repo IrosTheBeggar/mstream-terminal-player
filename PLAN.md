@@ -1705,7 +1705,11 @@ the TUI moves its window on macOS, Windows and Linux.
 **10.4 — (optional) Milkdrop.** The projectM companion, only if 10.1–10.3 leave appetite.
 
 **Upstream.** The naga bug (three-line repro); 06's `mat2` fix into the canonical file; the
-mobile response-curve divergence.
+mobile response-curve divergence. And two in Android's engine, found porting it: a channel line
+with an index past 2³¹ (`// === channel image.9999999999 = music`) throws out of `std::stoi` on
+the compile worker's bare thread, which ends the app (reproduced off-device with the parser
+copied verbatim; the size line beside it was hardened against exactly this); and a buffer that
+reads a later buffer gets the frame before last, not the last frame.
 
 ## Smoke testing
 
