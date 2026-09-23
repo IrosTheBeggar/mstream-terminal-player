@@ -46,10 +46,16 @@ def run(Gui):
     need(g, "☆", "the stars")
 
     # Rate it four stars: the badge changes at once and no refusal follows.
-    srow, scol = g.find("☆")
+    # The rig keeps ratings between runs, and a click on the star that IS
+    # the rating clears it (clause 10) — so a track already at four stars
+    # clears on the first click and takes the second.
+    srow, scol = g.find("☆") or g.find("★")
     star_row = g.screen.display[srow]
     first = star_row.find("★") if "★" in star_row else star_row.find("☆")
     g.click(srow, first + 3); g.pump(2.0)
+    if g.find("☆☆☆☆☆"):
+        g.dump("cleared a standing rating first")
+        g.click(srow, first + 3); g.pump(2.0)
     g.dump("rated")
     need(g, "★★★★☆ 4", "four stars")
     if g.find("Could not save rating"):

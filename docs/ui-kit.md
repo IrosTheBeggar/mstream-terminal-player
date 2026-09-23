@@ -8,10 +8,14 @@ canvas: <https://claude.ai/code/artifact/8eb74e0a-b721-434c-9ff7-b6f02385aab8>.
 The shipped implementation is `src/kit/`: `Surface<A>` (the per-frame
 click/tip/scrollbar registries plus pointer, tooltip dwell, capture and
 hold-repeat, generic over each screen's action enum), the widgets as
-free functions (`tall_button`, `button`, `modal_frame(_anchored)`,
-`modal_close`, `scroll_list`, `draw_tooltip`, `input_display`), the
-pure geometry (`table_view`, `bar_jump`, `tooltip_rect`, `caret_cell`),
-the pointer contract, and `kit::theme` (the fixed palette + the OSC 11
+free functions (`tall_button` and `tall_secondary` over one
+`tall_frame`, `button`, `cursor_ring`, `modal_frame(_anchored)`,
+`modal_close`, `scroll_list`, `letter_strip`, `draw_tooltip`,
+`input_display`), the pure geometry (`table_view` and the `ListView`
+that carries a list's offset and reveal flag across frames, `letter_index`,
+`wrap_words`, `bar_jump`, `tooltip_rect`, `caret_cell`), the hover test
+(`Surface::hovers`), the pointer contract, and `kit::theme` (the fixed
+palette + the OSC 11
 ground lease). `src/setup/` is the reference consumer — a new screen
 embeds a `Surface`, draws kit widgets, and wires its event loop to the
 surface's `hit`/`arm_bars`/`motion`/`drag_action`/`hold_action`/

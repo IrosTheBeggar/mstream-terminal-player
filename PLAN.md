@@ -1922,6 +1922,34 @@ a LATER secondary screen (party view), Columns retired.
   Song Info, and the queue panel's grip drag, `clear` and keyboard reach
   through the App's focus (`src/gui/actions.rs`). Twelve tests across the
   App and the GUI.
+- **Cleanup pass over the PR ✅ 2026-09-22** — four review lenses (reuse,
+  simplification, efficiency, altitude) run over `main...HEAD`, then seven
+  commits, each green on the suite, the wasm check and the rig: the
+  placeholder remnants, stale allows and alias acts dropped; the frame's
+  per-row copies removed (`put` writes cells, `clip` borrows, the sheet,
+  the torrent room and the playlists list read in place, one client per
+  reach kept in the worker); the shell's idioms as kit helpers
+  (`Surface::hovers`, `wrap_words`, `letter_index`, `tall_frame`,
+  `cursor_ring`, the glyph pairs, a track's facts on the types); one
+  `ListView` + `PaneRow(List, row, verb)` + `ScrollBy/ScrollTo(List)` for
+  every list; the App naming its states (`PlaylistNames`,
+  `adopt_server(Session, ..)`, an exhaustive `ApiCmd::reach`,
+  `for_each_copy`, the library door keeping its trail); one
+  `SettingsRoom`, `bar_now` on demand, the queue's key gate ahead of every
+  room, the path tidy shared with the wizard; the reply shapers shared by
+  both workers. Behaviour changed only where a symptom had been patched:
+  a focused queue no longer loses Esc/Enter to the album or library room,
+  a card opens through the App's door (Activate resolved by focus and
+  played the queue row), a zero bitrate no longer prints as 0 kbps.
+  Follow-ups the review named and this pass left: Arm/Disarm/Move as App
+  actions with prefs persisted as an effect (`autodj_server` from the bar
+  toggle is saved at quit, the room's doors save at once); a note lifetime
+  in place of nineteen hand-placed clears; the connect flow's session
+  writes moving from `servers::observe` into the App; the sonic rebuild
+  after a random pick moving into the App; the servers form on
+  `tui_input::Input`; the DJ room's per-frame line model; the per-room
+  offline gate; a `menu_row` kit widget for the nine hand-rolled
+  selectable rows.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the
