@@ -384,18 +384,17 @@ forward action as a tall primary on the right.
 **The GUI player's bar** (the "Player bar options" canvas, A′; `src/gui/bar.rs`):
 five rows at the bottom, the tips line under them only while keyboard hints
 are on. The gold rule is the seek bar (times at its ends, the played part
-gold). Beneath it, three rows of compact tall controls: auto-dj framed
-at the left edge in its state colour, then ONE group centred in the span
-before the card — prev · play · next in frames, prev and next rounded in
-the text colour BOLD, play THICK in the accent (`tall_frame_bordered`) —
-and shuffle and repeat worn bare after them: the glyph alone on the
-middle row, DIM off, OK green on, a frame-high click target. The bottom
-row holds the volume group at the left,
+gold). Beneath it, three rows of compact tall frames: auto-dj at the
+left edge in its state colour, then ONE group centred in the span before
+the card — repeat, prev, play, next, shuffle: prev and next rounded in
+the text colour BOLD, play THICK in GOLD (`tall_frame_bordered`, the seek
+rule's colour on the one primary action), the toggles rounded in their
+state colours. The bottom row holds the volume group at the left,
 the screen's note (or an armed pick's banner) after it, and the card's
 last line. The card, at the right edge, is an eight-by-four cover with
 four lines beside it: title, artist · year, the spec line, the stars with
-key and tempo; hover reveals the sheet's `[⋯]`, a right click opens it,
-the chevron folds the queue.
+key and tempo; a right click (or `m`) opens the track's sheet, the
+chevron folds the queue.
 
 **The Done page owns its frame**: no horizontal gold rule, no bottom
 bar — a full-height VERTICAL gold rule divides its two left-anchored

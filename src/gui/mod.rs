@@ -2733,29 +2733,31 @@ mod tests {
     }
 
     #[test]
-    fn auto_dj_holds_the_edge_and_the_transport_is_one_group_with_a_thick_play() {
-        // The "Player bar options" canvas, H: auto-dj framed at the left
-        // edge; then prev · play · next centred — play in the thick frame,
-        // prev and next in the rounded one, all bold — and shuffle and
-        // repeat worn bare after them.
+    fn auto_dj_holds_the_edge_and_the_transport_is_one_group_with_a_gold_play() {
+        // The "Player bar options" canvas, I: auto-dj framed at the left
+        // edge; then one centred group of frames — repeat, prev, play, next,
+        // shuffle — play in the thick frame in gold, prev and next bold in
+        // the rounded one, the toggles in their state colours. The card
+        // wears no verb: a right click is its sheet.
         let mut gui = browsing_gui();
         let buf = draw_buffer(&mut gui);
         let area = *buf.area();
         let y = bar::top(area, false) + 2; // the controls' middle row
         let line = rows_of(&buf, y);
         let at = |needle: &str| line.char_indices().position(|(i, _)| line[i..].starts_with(needle)).map(|p| p as u16);
-        let (dj, prev, play, next, shuffle, repeat) =
-            (at("│ auto-dj │"), at("│ ◂◂ │"), at("┃ ▮▮ ┃"), at("│ ▸▸ │"), at("⇄"), at("↻"));
+        let (dj, repeat, prev, play, next, shuffle) =
+            (at("│ auto-dj │"), at("│ ↻ │"), at("│ ◂◂ │"), at("┃ ▮▮ ┃"), at("│ ▸▸ │"), at("│ ⇄ │"));
         assert_eq!(dj, Some(1), "auto-dj at the left edge: {line:?}");
-        assert!(prev < play && play < next && next < shuffle && shuffle < repeat, "prev, play, next, shuffle, repeat: {line:?}");
+        assert!(repeat < prev && prev < play && play < next && next < shuffle, "repeat, prev, play, next, shuffle: {line:?}");
         let play = play.unwrap();
-        assert_eq!(buf[(play, y)].fg, th().accent, "play's frame is the accent");
+        assert_eq!(buf[(play, y)].fg, th().gold, "play's frame is gold");
         assert!(buf[(play + 2, y)].modifier.contains(Modifier::BOLD), "and its glyph bold");
         assert!(buf[(prev.unwrap() + 2, y)].modifier.contains(Modifier::BOLD), "prev's glyph is bold");
-        let shuffle = shuffle.unwrap();
-        assert_eq!(buf[(shuffle - 1, y)].symbol(), " ", "shuffle wears no frame: {line:?}");
-        assert_eq!(buf[(shuffle, y - 1)].symbol(), " ", "nothing above it either");
-        assert!(!buf[(shuffle, y)].modifier.contains(Modifier::BOLD), "off, it is dim");
+        assert!(!buf[(shuffle.unwrap() + 2, y)].modifier.contains(Modifier::BOLD), "shuffle off is dim");
+        gui.ui.pointer = Some(Position { x: area.width - 20, y: y - 1 });
+        let card = rows_of(&draw_buffer(&mut gui), y - 1);
+        assert!(!card.contains("[⋯]"), "the hovered card shows no verb: {card:?}");
+        assert_eq!(gui.ui.hit_context(Position { x: area.width - 20, y: y - 1 }), Some(Act::NowMore), "a right click is its sheet");
     }
 
     fn rows_of(buf: &ratatui::buffer::Buffer, y: u16) -> String {

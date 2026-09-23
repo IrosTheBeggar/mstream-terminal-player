@@ -230,3 +230,8 @@ while the queue has focus and stop when a browse click takes it back;
   click and `m` open the sheet. Download, Find similar, Lyrics and Share
   stay out; the Rated list waits on ratings landing. The queue gains
   keyboard reach through the App's own focus, which the TUI already has.
+- **2026-09-22 — The card's hover `[⋯]` removed** (entry point 2, and the
+  translation table's playing-card row). The bar's design pass (the
+  "Player bar options" canvas, I) took the verb off the card so the title
+  keeps its whole width; the card's ways to the sheet are the right click
+  and `m`, which the contract already names.

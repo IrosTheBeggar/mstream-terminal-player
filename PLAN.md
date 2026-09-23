@@ -1975,6 +1975,10 @@ a LATER secondary screen (party view), Columns retired.
   (`kit::tall_frame_bordered`), all bold; shuffle and repeat worn bare
   after them — the glyph alone on the middle row, a frame-high click
   target. The fat fill went back out of the kit with nothing wearing it.
+  **Then I**: the toggles framed again, repeat moved to the left of prev
+  (repeat · prev · play · next · shuffle, auto-dj still at the edge), the
+  play frame in GOLD, and the card's hover `[⋯]` removed — a right click
+  or `m` is the playing track's sheet (track-actions deviation logged).
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the
