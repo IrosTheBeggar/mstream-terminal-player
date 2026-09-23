@@ -94,10 +94,11 @@ def run(Gui):
     if not g.find("5 tracks"):
         raise SystemExit("FAIL: Preview queued something")
 
-    # Songs per fetch down to 1 by a click on the bar's first cell, live.
+    # Songs per fetch down to 1 by a click on the bar's first cell, live
+    # (the volume widget's cells; four of twenty-five songs fill one).
     for _ in range(3):
         g.key("\x1b[5~"); g.pump(0.3)
-    hit = g.find("▓░░░░░░░░░")
+    hit = g.find("▰▱▱▱▱▱▱▱▱▱")
     if not hit:
         g.dump("looking for the songs-per-fetch bar")
         raise SystemExit("FAIL: no songs-per-fetch bar")

@@ -24,13 +24,20 @@ use super::{Act, DJ_NAV, Gui, List, Screen, accent, bright_bold, put, sel, text_
 
 /// The chooser's three rows: the two answers, then the remember box.
 const ROWS: usize = 3;
-/// A room row's label column, and where its description starts.
-const LABEL_W: u16 = 18;
-const DESC_X: u16 = 28;
-/// The bars' cells — the sonic room's ten.
+/// The value column: where a row's control starts — a bar, the choices,
+/// the keyword field, a value in words — so the eye finds them in one
+/// place (the room's canvas, board E′, 2026-09-23).
+const VALUE_X: u16 = 28;
+/// A sub-row's indent: the strictness bar under its switch, the choices
+/// under their label.
+const SUB_X: u16 = 6;
+/// The bars' cells — the volume widget's ten.
 const CELLS: u16 = 10;
 /// The keyword field's width.
-const FIELD_W: u16 = 24;
+const FIELD_W: u16 = 22;
+/// The help line under the body: a rule and two lines for the description
+/// of the row under the pointer, else the cursor's.
+const HELP_ROWS: u16 = 3;
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -59,6 +66,10 @@ pub(crate) struct DjUi {
     /// How many Preview picks the last draw saw: new ones scroll into view
     /// under their row, which is the body's last.
     samples_seen: usize,
+    /// The help line's text this frame: the row under the pointer's, and
+    /// the cursor's — the pointer wins.
+    help_hover: Option<String>,
+    help_focus: Option<String>,
 }
 
 impl DjUi {
@@ -87,21 +98,25 @@ pub(crate) enum Item {
     Source(usize),
 }
 
-/// One line of the room's body, laid out from the App's rows.
+/// One line of the room's body, laid out from the App's rows: labels in
+/// a column, controls at [`VALUE_X`], no description beside a row — the
+/// row under the pointer or the cursor explains itself in the help line
+/// under the body (the room's canvas, board E′).
 enum L {
     Section(String),
-    /// A label with a dim description, over radio lines.
-    Label(String, String),
     Blank,
-    Text(String, Tone),
+    /// A gold notice under a switch: the server's reason, a version gate.
+    Notice(String),
     /// A dim hint under a switch, indented like the chips it stands for.
     Hint(String),
-    /// Start / Stop: three rows tall.
-    Button,
+    /// The state, its detail, and Start / Stop at the right: three rows.
+    Status,
     Server,
     Switch(DjRow),
     Bar(DjRow),
-    Radio(Item, String, String),
+    /// A sub-label and its `(•)` choices: on one row when they fit at the
+    /// value column, else the choices on the row below (`wrapped`).
+    Choice { label: Option<String>, options: Vec<(Item, String, String)>, wrapped: bool },
     Chips(Item),
     PickGenres,
     KeywordInput,
@@ -110,32 +125,28 @@ enum L {
     Sample(String),
 }
 
-#[derive(Clone, Copy)]
-enum Tone {
-    Bold,
-    Dim,
-    Gold,
-}
-
 impl L {
     fn height(&self) -> usize {
         match self {
-            L::Button => 3,
+            L::Status => 3,
+            L::Choice { wrapped, .. } => 1 + usize::from(*wrapped),
             _ => 1,
         }
     }
 
-    fn item(&self) -> Option<Item> {
+    /// The controls on the line, in order — a choice row carries several.
+    fn items(&self) -> Vec<Item> {
         match self {
-            L::Button => Some(Item::Toggle),
-            L::Server => Some(Item::Server),
-            L::Switch(row) | L::Bar(row) => Some(Item::Row(*row)),
-            L::Radio(item, ..) | L::Chips(item) => Some(*item),
-            L::PickGenres => Some(Item::PickGenres),
-            L::KeywordInput => Some(Item::KeywordInput),
-            L::Source(i, ..) => Some(Item::Source(*i)),
-            L::Preview => Some(Item::Row(DjRow::Sample)),
-            L::Section(_) | L::Label(..) | L::Blank | L::Text(..) | L::Hint(_) | L::Sample(_) => None,
+            L::Status => vec![Item::Toggle],
+            L::Server => vec![Item::Server],
+            L::Switch(row) | L::Bar(row) => vec![Item::Row(*row)],
+            L::Choice { options, .. } => options.iter().map(|(item, ..)| *item).collect(),
+            L::Chips(item) => vec![*item],
+            L::PickGenres => vec![Item::PickGenres],
+            L::KeywordInput => vec![Item::KeywordInput],
+            L::Source(i, ..) => vec![Item::Source(*i)],
+            L::Preview => vec![Item::Row(DjRow::Sample)],
+            L::Section(_) | L::Blank | L::Notice(_) | L::Hint(_) | L::Sample(_) => Vec::new(),
         }
     }
 }
@@ -276,41 +287,65 @@ fn sample_words(track: &crate::api::types::Track) -> String {
 
 /// The room's body, line by line, from the App's rows (which already carry
 /// the version gates, the peer's missing rating row and the sources row —
-/// clauses 42–50): STATUS, then QUEUE · CONTINUITY · FILTERS · SOURCES,
-/// then Preview.
+/// clauses 42–50): the status head, then QUEUE · CONTINUITY · FILTERS ·
+/// SOURCES with a blank row between settings, then Preview. Descriptions
+/// are not laid out here: the help line shows the one that matters.
 fn lines(gui: &Gui, width: usize) -> Vec<L> {
     let app = &gui.app;
     let s = &app.dj;
     let library = app.dj_library();
     let armed = app.dj_armed();
-    let mut v = vec![L::Section(t!("gui.dj.sec_status").to_string())];
-    if armed {
-        v.push(L::Text(t!("gui.dj.status_on").to_string(), Tone::Bold));
-        v.push(L::Text(t!("gui.dj.status_on_detail", server = app.dj_server_name()).to_string(), Tone::Dim));
-    } else {
-        v.push(L::Text(t!("gui.dj.status_off").to_string(), Tone::Bold));
-        v.push(L::Text(t!("gui.dj.status_off_detail").to_string(), Tone::Dim));
-    }
-    v.push(L::Button);
+    let mut v = vec![L::Status];
     if armed && pickable_servers(gui).len() > 1 {
+        v.push(L::Blank);
         v.push(L::Server);
     }
     let version = app.dj_info.as_ref().and_then(|i| i.version.as_deref());
     let gated = dj::known_older(version, dj::FLOOR_FILTERS);
+    // A sub-label's choices sit at the value column when they fit the
+    // body, else on the row below the label.
+    let choice = |label: Option<String>, options: Vec<(Item, String, String)>| -> L {
+        let w: usize = options.iter().map(|(_, name, _)| name.chars().count() + 4).sum::<usize>()
+            + 2 * options.len().saturating_sub(1);
+        let wrapped = label.is_some() && VALUE_X as usize + w > width;
+        L::Choice { label, options, wrapped }
+    };
     let mut section: Option<&str> = None;
+    let mut first = true;
     for row in app.dj_panel.rows.clone() {
         let here = section_of(row);
         if here != section {
             // A server known to predate the filters says so where they
             // would have been (clause 50).
             if section == Some("continuity") && gated {
-                v.push(L::Text(t!("gui.dj.needs_newer").to_string(), Tone::Gold));
+                v.push(L::Notice(t!("gui.dj.needs_newer").to_string()));
             }
             if let Some(key) = here {
                 v.push(L::Blank);
                 v.push(L::Section(section_title(key)));
             }
             section = here;
+            first = true;
+        }
+        // Air between settings: a blank row before each top-level one
+        // after its section's first. The sub-rows stay with their switch.
+        let sub_row = matches!(
+            row,
+            DjRow::Armed
+                | DjRow::Sample
+                | DjRow::Strictness
+                | DjRow::Anchor
+                | DjRow::EmptyQueue
+                | DjRow::Tolerance
+                | DjRow::Shortest
+                | DjRow::Longest
+                | DjRow::UnknownLength
+        );
+        if !sub_row {
+            if !first {
+                v.push(L::Blank);
+            }
+            first = false;
         }
         match row {
             DjRow::Armed => {}
@@ -321,48 +356,66 @@ fn lines(gui: &Gui, width: usize) -> Vec<L> {
             | DjRow::Rating
             | DjRow::Shortest
             | DjRow::Longest => v.push(L::Bar(row)),
-            DjRow::Sonic | DjRow::Bpm | DjRow::Harmonic | DjRow::Length | DjRow::UnknownLength => {
+            DjRow::Sonic => {
                 v.push(L::Switch(row));
+                // The server's reason it cannot honour the switch (clause 43).
+                if let Some(reason) = app.dj_sonic_reason() {
+                    v.push(L::Notice(reason));
+                }
             }
-            DjRow::Anchor => {
-                v.push(L::Label(t!("gui.dj.anchor").to_string(), String::new()));
-                v.push(L::Radio(
-                    Item::Anchor(SonicAnchor::Rolling),
-                    t!("gui.dj.anchor_rolling").to_string(),
-                    t!("gui.dj.anchor_rolling_sub").to_string(),
-                ));
-                v.push(L::Radio(
-                    Item::Anchor(SonicAnchor::Locked),
-                    t!("gui.dj.anchor_locked").to_string(),
-                    t!("gui.dj.anchor_locked_sub").to_string(),
-                ));
-            }
-            DjRow::EmptyQueue => {
-                v.push(L::Label(t!("gui.dj.empty_queue").to_string(), t!("gui.dj.empty_queue_sub").to_string()));
-                v.push(L::Radio(Item::EmptyQueue(EmptyQueueStart::Ask), t!("gui.dj.ask").to_string(), String::new()));
-                v.push(L::Radio(
-                    Item::EmptyQueue(EmptyQueueStart::Random),
-                    t!("gui.dj.surprise").to_string(),
-                    t!("gui.dj.surprise_sub").to_string(),
-                ));
-                v.push(L::Radio(
-                    Item::EmptyQueue(EmptyQueueStart::Pick),
-                    t!("gui.dj.pick").to_string(),
-                    t!("gui.dj.pick_sub").to_string(),
-                ));
-            }
+            DjRow::Bpm | DjRow::Harmonic | DjRow::Length | DjRow::UnknownLength => v.push(L::Switch(row)),
+            DjRow::Anchor => v.push(choice(
+                Some(t!("gui.dj.anchor").to_string()),
+                vec![
+                    (
+                        Item::Anchor(SonicAnchor::Rolling),
+                        t!("gui.dj.anchor_rolling").to_string(),
+                        t!("gui.dj.anchor_rolling_sub").to_string(),
+                    ),
+                    (
+                        Item::Anchor(SonicAnchor::Locked),
+                        t!("gui.dj.anchor_locked").to_string(),
+                        t!("gui.dj.anchor_locked_sub").to_string(),
+                    ),
+                ],
+            )),
+            DjRow::EmptyQueue => v.push(choice(
+                Some(t!("gui.dj.empty_queue").to_string()),
+                vec![
+                    (
+                        Item::EmptyQueue(EmptyQueueStart::Ask),
+                        t!("gui.dj.ask").to_string(),
+                        t!("gui.dj.empty_queue_sub").to_string(),
+                    ),
+                    (
+                        Item::EmptyQueue(EmptyQueueStart::Random),
+                        t!("gui.dj.surprise").to_string(),
+                        t!("gui.dj.surprise_sub").to_string(),
+                    ),
+                    (
+                        Item::EmptyQueue(EmptyQueueStart::Pick),
+                        t!("gui.dj.pick").to_string(),
+                        t!("gui.dj.pick_sub").to_string(),
+                    ),
+                ],
+            )),
             DjRow::Genres => {
                 v.push(L::Switch(row));
                 if library.genre_filter {
-                    v.push(L::Radio(
-                        Item::GenreMode(GenreMode::Whitelist),
-                        t!("gui.dj.whitelist").to_string(),
-                        t!("gui.dj.whitelist_sub").to_string(),
-                    ));
-                    v.push(L::Radio(
-                        Item::GenreMode(GenreMode::Blacklist),
-                        t!("gui.dj.blacklist").to_string(),
-                        t!("gui.dj.blacklist_sub").to_string(),
+                    v.push(choice(
+                        None,
+                        vec![
+                            (
+                                Item::GenreMode(GenreMode::Whitelist),
+                                t!("gui.dj.whitelist").to_string(),
+                                t!("gui.dj.whitelist_sub").to_string(),
+                            ),
+                            (
+                                Item::GenreMode(GenreMode::Blacklist),
+                                t!("gui.dj.blacklist").to_string(),
+                                t!("gui.dj.blacklist_sub").to_string(),
+                            ),
+                        ],
                     ));
                     if library.genres.is_empty() {
                         v.push(L::Hint(t!("gui.dj.no_genres_selected").to_string()));
@@ -401,16 +454,17 @@ fn lines(gui: &Gui, width: usize) -> Vec<L> {
         }
     }
     // A sentence wraps to the body rather than clipping mid-thought.
+    let inner = width.saturating_sub(SUB_X as usize).max(16);
     let mut wrapped = Vec::with_capacity(v.len());
     for line in v {
         match line {
-            L::Text(text, tone) => {
-                for part in wrap_words(&text, width.max(20)) {
-                    wrapped.push(L::Text(part, tone));
+            L::Notice(text) => {
+                for part in wrap_words(&text, inner) {
+                    wrapped.push(L::Notice(part));
                 }
             }
             L::Hint(text) => {
-                for part in wrap_words(&text, width.saturating_sub(4).max(16)) {
+                for part in wrap_words(&text, inner) {
                     wrapped.push(L::Hint(part));
                 }
             }
@@ -422,7 +476,7 @@ fn lines(gui: &Gui, width: usize) -> Vec<L> {
 
 /// The controls in the room's order — what ↑↓ walk.
 fn items(gui: &Gui) -> Vec<Item> {
-    lines(gui, usize::MAX).iter().filter_map(L::item).collect()
+    lines(gui, usize::MAX).iter().flat_map(L::items).collect()
 }
 
 // ── The room ────────────────────────────────────────────────────────────────
@@ -458,16 +512,23 @@ fn row_style(focused: bool, hover: bool) -> Style {
     }
 }
 
-/// Where a row's description starts: the shared column, pushed right by a
-/// label too wide for it (a translation, the unknown-length switch) rather
-/// than written through.
-fn desc_x(label: &str, indent: u16) -> u16 {
-    (indent + label.chars().count() as u16 + 2).max(DESC_X)
+/// Offer a row's description to the help line: the row under the pointer
+/// wins over the cursor's.
+fn help_for(gui: &mut Gui, focused: bool, hover: bool, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    if hover {
+        gui.dj.help_hover = Some(text);
+    } else if focused {
+        gui.dj.help_focus = Some(text);
+    }
 }
 
 /// The room (clauses 40–53): the name, the state at the right; then the
-/// body, scrolled, with the kit's scrollbar on overflow. A nav room has no
-/// way back — the nav column is right there.
+/// body, scrolled, with the kit's scrollbar on overflow; under it the help
+/// line — the row under the pointer, else the cursor's, explained. A nav
+/// room has no way back — the nav column is right there.
 pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     put(frame, content.x, content.y, &t!("gui.dj.title"), Style::default().add_modifier(Modifier::BOLD));
     let (state, style) = if gui.app.dj_armed() {
@@ -477,12 +538,14 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     };
     let shown = super::bar::clip(&state, content.width.saturating_sub(14) as usize);
     put(frame, content.right().saturating_sub(shown.chars().count() as u16), content.y, &shown, style);
+    gui.dj.help_hover = None;
+    gui.dj.help_focus = None;
 
     let region = Rect {
         x: content.x,
         y: content.y + 2,
         width: content.width,
-        height: content.height.saturating_sub(2),
+        height: content.height.saturating_sub(2 + HELP_ROWS),
     };
     // Laid out for the narrower body; a room that fits without a scrollbar
     // wraps a cell or two early, which nobody sees.
@@ -504,10 +567,11 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         }
     }
     if std::mem::take(&mut gui.dj.body.reveal)
-        && let Some(i) = lines.iter().position(|l| l.item().is_some() && l.item() == gui.dj.cursor)
+        && let Some(cursor) = gui.dj.cursor
+        && let Some(i) = lines.iter().position(|l| l.items().contains(&cursor))
     {
         let (top, mut h) = (tops[i], lines[i].height());
-        if lines[i].item() == Some(Item::Row(DjRow::Sample)) {
+        if matches!(lines[i], L::Preview) {
             h += lines[i + 1..].iter().take_while(|l| matches!(l, L::Sample(_))).count();
         }
         if top < gui.dj.body.scroll {
@@ -545,90 +609,48 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         let bar = Rect { x: region.right().saturating_sub(1), y: region.y, width: 1, height: region.height };
         scroll_list(frame, &mut gui.ui, bar, total, visible, scroll, Act::ScrollBy(List::DjRoom, -1), Act::ScrollBy(List::DjRoom, 1), |first| Act::ScrollTo(List::DjRoom, first));
     }
+    // The help line: the row under the pointer, else the cursor's, explained
+    // under the body — where the descriptions live now, whole, instead of
+    // clipped beside every row.
+    if let Some(text) = gui.dj.help_hover.take().or_else(|| gui.dj.help_focus.take()) {
+        let hy = content.bottom().saturating_sub(HELP_ROWS);
+        put(frame, content.x, hy, &"─".repeat(content.width as usize), dim());
+        for (i, part) in wrap_words(&text, content.width as usize).into_iter().take(2).enumerate() {
+            put(frame, content.x, hy + 1 + i as u16, &part, dim());
+        }
+    }
 }
 
 fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
     let (x, w) = (body.x, body.width);
     let forward = super::forward_glyph();
     let (check_on, check_off) = super::check_glyphs();
+    let inner = w.saturating_sub(SUB_X) as usize;
     match line {
         L::Section(text) => put(frame, x, y, text, dim()),
         L::Blank => {}
-        L::Hint(text) => put(frame, x + 4, y, &super::bar::clip(text, w.saturating_sub(4) as usize), dim()),
-        L::Label(label, sub) => {
-            put(frame, x, y, label, Style::default());
-            let dx = desc_x(label, 0);
-            let avail = w.saturating_sub(dx) as usize;
-            if !sub.is_empty() && avail >= 10 {
-                put(frame, x + dx, y, &super::bar::clip(sub, avail), dim());
-            }
-        }
-        L::Text(text, tone) => {
-            let style = match tone {
-                Tone::Bold => Style::default().add_modifier(Modifier::BOLD),
-                Tone::Dim => dim(),
-                Tone::Gold => Style::default().fg(th().gold),
-            };
-            put(frame, x, y, &super::bar::clip(text, w as usize), style);
-        }
-        L::Button => {
-            let armed = gui.app.dj_armed();
-            let at = Rect { x, y, width: w, height: 3 };
-            let rect = if armed {
-                tall_danger(frame, &mut gui.ui, at, &t!("gui.dj.stop"), Act::DjStartStop)
-            } else {
-                let label = format!("{} {forward}", t!("gui.dj.start"));
-                tall_button(frame, &mut gui.ui, at, &label, true, Act::DjStartStop)
-            };
-            if gui.dj.cursor == Some(Item::Toggle) {
-                cursor_ring(frame, rect, Style::default().fg(th().bright).add_modifier(Modifier::BOLD));
-            }
-        }
+        L::Hint(text) => put(frame, x + SUB_X, y, &super::bar::clip(text, inner), dim()),
+        L::Notice(text) => put(frame, x + SUB_X, y, &super::bar::clip(text, inner), Style::default().fg(th().gold)),
+        L::Status => draw_status(frame, gui, x, y, w, forward),
         L::Server => {
             let rect = Rect { x, y, width: w, height: 1 };
             let focused = gui.dj.cursor == Some(Item::Server);
             let hover = gui.ui.hovers(rect);
-            put(frame, x, y, &t!("gui.dj.server"), row_style(focused, hover));
+            put(frame, x + 4, y, &t!("gui.dj.server"), row_style(focused, hover));
             let name = format!("{} {forward}", gui.app.dj_server_name());
-            let shown = super::bar::clip(&name, w.saturating_sub(LABEL_W) as usize);
+            let shown = super::bar::clip(&name, w.saturating_sub(VALUE_X) as usize);
             let style = if hover { bright_bold() } else { Style::default().add_modifier(Modifier::BOLD) };
-            put(frame, x + LABEL_W, y, &shown, style);
+            put(frame, x + VALUE_X, y, &shown, style);
             gui.ui.click(rect, Act::DjServerPick);
-            gui.ui.tip(rect, t!("gui.dj.server_tip").to_string());
+            help_for(gui, focused, hover, t!("gui.dj.server_tip").to_string());
         }
         L::Switch(row) => draw_switch(frame, gui, x, y, w, *row, check_on, check_off),
         L::Bar(row) => draw_bar(frame, gui, x, y, w, *row),
-        L::Radio(item, label, hint) => {
-            let on = radio_on(gui, *item);
-            let rect = Rect { x: x + 2, y, width: w.saturating_sub(2), height: 1 };
-            let focused = gui.dj.cursor == Some(*item);
-            let hover = gui.ui.hovers(rect);
-            let glyph = match (on, legacy_conhost()) {
-                (true, true) => "(*)",
-                (true, false) => "(•)",
-                (false, _) => "( )",
-            };
-            put(frame, x + 2, y, glyph, if on { Style::default().fg(th().ok) } else { dim() });
-            let style = match (focused, hover, on) {
-                (true, _, _) => accent().add_modifier(Modifier::BOLD),
-                (false, true, _) => bright_bold(),
-                (false, false, true) => Style::default().add_modifier(Modifier::BOLD),
-                (false, false, false) => Style::default(),
-            };
-            put(frame, x + 6, y, label, style);
-            if !hint.is_empty() {
-                let hx = x + 6 + label.chars().count() as u16 + 1;
-                let avail = (x + w).saturating_sub(hx) as usize;
-                if avail >= 10 {
-                    put(frame, hx, y, &super::bar::clip(&format!("— {hint}"), avail), dim());
-                }
-            }
-            gui.ui.click(rect, radio_act(*item));
-        }
-        L::Chips(item) => draw_chips(frame, gui, x + 4, y, w.saturating_sub(4), *item),
+        L::Choice { label, options, wrapped } => draw_choice(frame, gui, x, y, w, label.as_deref(), options, *wrapped),
+        L::Chips(item) => draw_chips(frame, gui, x + SUB_X, y, w.saturating_sub(SUB_X), *item),
         L::PickGenres => {
             let label = format!("{} {forward}", t!("gui.dj.pick_genres"));
-            let rect = Rect { x: x + 4, y, width: label.chars().count() as u16, height: 1 };
+            let rect = Rect { x: x + SUB_X, y, width: label.chars().count() as u16, height: 1 };
             let focused = gui.dj.cursor == Some(Item::PickGenres);
             let hover = gui.ui.hovers(rect);
             let style = match (focused, hover) {
@@ -639,7 +661,7 @@ fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
             put(frame, rect.x, y, &label, style);
             gui.ui.click(rect, Act::DjPickGenres);
         }
-        L::KeywordInput => draw_keyword_input(frame, gui, x + 4, y, w.saturating_sub(4), forward),
+        L::KeywordInput => draw_keyword_input(frame, gui, x, y, w, forward),
         L::Source(i, name, on) => {
             let rect = Rect { x, y, width: w, height: 1 };
             let focused = gui.dj.cursor == Some(Item::Source(*i));
@@ -666,13 +688,92 @@ fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
             }
             if let Some(pool) = &gui.app.dj_panel.pool {
                 let words = t!("gui.dj.pool", n = pool.pool_size).to_string();
-                let avail = w.saturating_sub(DESC_X) as usize;
+                let avail = w.saturating_sub(VALUE_X) as usize;
                 if avail >= 10 {
-                    put(frame, x + DESC_X, y, &super::bar::clip(&words, avail), dim());
+                    put(frame, x + VALUE_X, y, &super::bar::clip(&words, avail), dim());
                 }
             }
         }
         L::Sample(text) => put(frame, x + 2, y, &super::bar::clip(text, w.saturating_sub(2) as usize), Style::default()),
+    }
+}
+
+/// The room's head (clause 40): the state with its detail, and Start /
+/// Stop at the right — through the same toggle every entry point uses.
+fn draw_status(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, forward: &str) {
+    let armed = gui.app.dj_armed();
+    let label = if armed { t!("gui.dj.stop").to_string() } else { format!("{} {forward}", t!("gui.dj.start")) };
+    let bw = label.chars().count() as u16 + 6;
+    let at = Rect { x: (x + w).saturating_sub(bw), y, width: bw, height: 3 };
+    let rect = if armed {
+        tall_danger(frame, &mut gui.ui, at, &label, Act::DjStartStop)
+    } else {
+        tall_button(frame, &mut gui.ui, at, &label, true, Act::DjStartStop)
+    };
+    if gui.dj.cursor == Some(Item::Toggle) {
+        cursor_ring(frame, rect, Style::default().fg(th().bright).add_modifier(Modifier::BOLD));
+    }
+    let (dot, state, detail) = if armed {
+        (
+            Style::default().fg(th().ok),
+            t!("gui.dj.status_on").to_string(),
+            t!("gui.dj.status_on_detail", server = gui.app.dj_server_name()).to_string(),
+        )
+    } else {
+        (dim(), t!("gui.dj.status_off").to_string(), t!("gui.dj.status_off_detail").to_string())
+    };
+    put(frame, x, y, if legacy_conhost() { "*" } else { "●" }, dot);
+    put(frame, x + 2, y, &state, Style::default().add_modifier(Modifier::BOLD));
+    let text_w = at.x.saturating_sub(x + 4) as usize;
+    for (i, part) in wrap_words(&detail, text_w.max(16)).into_iter().take(2).enumerate() {
+        put(frame, x + 2, y + 1 + i as u16, &part, dim());
+    }
+}
+
+/// A sub-label's `(•)` choices on one row (clauses 43, 48): at the value
+/// column when they fit, else under the label; a click chooses, ←→ walk
+/// them, the option's hint goes to the help line.
+#[allow(clippy::too_many_arguments)]
+fn draw_choice(
+    frame: &mut Frame,
+    gui: &mut Gui,
+    x: u16,
+    y: u16,
+    w: u16,
+    label: Option<&str>,
+    options: &[(Item, String, String)],
+    wrapped: bool,
+) {
+    let (mut cx, mut cy) = (x + SUB_X, y);
+    if let Some(label) = label {
+        put(frame, x + SUB_X, y, label, Style::default());
+        if wrapped {
+            cy = y + 1;
+        } else {
+            cx = x + VALUE_X;
+        }
+    }
+    let on_glyph = if legacy_conhost() { "(*)" } else { "(•)" };
+    for (item, name, hint) in options {
+        let on = radio_on(gui, *item);
+        let width = name.chars().count() as u16 + 4;
+        if cx + width > x + w {
+            break;
+        }
+        let rect = Rect { x: cx, y: cy, width, height: 1 };
+        let focused = gui.dj.cursor == Some(*item);
+        let hover = gui.ui.hovers(rect);
+        put(frame, cx, cy, if on { on_glyph } else { "( )" }, if on { Style::default().fg(th().ok) } else { dim() });
+        let style = match (focused, hover, on) {
+            (true, _, _) => accent().add_modifier(Modifier::BOLD),
+            (false, true, _) => bright_bold(),
+            (false, false, true) => Style::default().add_modifier(Modifier::BOLD),
+            (false, false, false) => Style::default(),
+        };
+        put(frame, cx + 4, cy, name, style);
+        gui.ui.click(rect, radio_act(*item));
+        help_for(gui, focused, hover, hint.clone());
+        cx += width + 2;
     }
 }
 
@@ -694,10 +795,11 @@ fn radio_act(item: Item) -> Act {
     }
 }
 
-/// A `[✓]` row (clauses 43–49): the glyph, the label, the description
-/// clipped at the right — or, for a sonic row the server cannot honour,
-/// the reason in gold. The switch stays live either way: a default-on
-/// setting that could not be switched off would be a trap.
+/// A `[✓]` row (clauses 43–49): the glyph, the label, a value in words at
+/// the value column where the row has one; the description goes to the
+/// help line. A sonic row the server cannot honour dims its glyph and
+/// says why on the notice under it. The switch stays live either way: a
+/// default-on setting that could not be switched off would be a trap.
 #[allow(clippy::too_many_arguments)]
 fn draw_switch(
     frame: &mut Frame,
@@ -710,64 +812,45 @@ fn draw_switch(
     check_off: &str,
 ) {
     let s = &gui.app.dj;
-    let (on, label, desc, reason): (bool, String, String, Option<String>) = match row {
-        DjRow::Sonic => (
-            s.sonic,
-            t!("gui.dj.sonic").to_string(),
-            t!("gui.dj.sonic_sub").to_string(),
-            gui.app.dj_sonic_reason(),
-        ),
+    let (on, label, help, value): (bool, String, String, Option<String>) = match row {
+        DjRow::Sonic => (s.sonic, t!("gui.dj.sonic").to_string(), t!("gui.dj.sonic_sub").to_string(), None),
         DjRow::Bpm => (s.bpm, t!("gui.dj.bpm").to_string(), t!("gui.dj.bpm_sub").to_string(), None),
         DjRow::Harmonic => {
             let anchored = gui.app.lane.camelot_anchor.as_ref().filter(|_| s.harmonic);
-            let desc = match anchored {
-                Some(anchor) => format!("{} · {}", t!("gui.dj.anchored_on", key = anchor), t!("gui.dj.harmonic_sub")),
-                None => t!("gui.dj.harmonic_sub").to_string(),
-            };
-            (s.harmonic, t!("gui.dj.harmonic").to_string(), desc, None)
+            let value = anchored.map(|anchor| t!("gui.dj.anchored_on", key = anchor).to_string());
+            (s.harmonic, t!("gui.dj.harmonic").to_string(), t!("gui.dj.harmonic_sub").to_string(), value)
         }
-        DjRow::Length => (
-            s.length,
-            t!("gui.dj.length").to_string(),
-            format!("{} · {}", length_words(s), t!("gui.dj.length_sub")),
-            None,
-        ),
+        DjRow::Length => (s.length, t!("gui.dj.length").to_string(), t!("gui.dj.length_sub").to_string(), Some(length_words(s))),
         DjRow::UnknownLength => (
             s.allow_unknown_length,
             t!("gui.dj.unknown_length").to_string(),
             t!("gui.dj.unknown_length_sub").to_string(),
             None,
         ),
-        DjRow::Genres => (
-            gui.app.dj_library().genre_filter,
-            t!("gui.dj.genre").to_string(),
-            t!("gui.dj.genre_sub").to_string(),
-            None,
-        ),
-        DjRow::Keywords => (
-            s.keyword_filter,
-            t!("gui.dj.keyword").to_string(),
-            t!("gui.dj.keyword_sub").to_string(),
-            None,
-        ),
+        DjRow::Genres => (gui.app.dj_library().genre_filter, t!("gui.dj.genre").to_string(), t!("gui.dj.genre_sub").to_string(), None),
+        DjRow::Keywords => (s.keyword_filter, t!("gui.dj.keyword").to_string(), t!("gui.dj.keyword_sub").to_string(), None),
         _ => return,
     };
+    let honoured = row != DjRow::Sonic || gui.app.dj_sonic_reason().is_none();
+    // A sub-switch (the unknown-length one under Track length) steps in.
+    let gx = if row == DjRow::UnknownLength { x + 2 } else { x };
     let rect = Rect { x, y, width: w, height: 1 };
     let focused = gui.dj.cursor == Some(Item::Row(row));
     let hover = gui.ui.hovers(rect);
-    let glyph_style = if on && reason.is_none() { Style::default().fg(th().ok) } else { dim() };
-    put(frame, x, y, if on { check_on } else { check_off }, glyph_style);
-    put(frame, x + 4, y, &label, row_style(focused, hover));
-    let dx = desc_x(&label, 4);
-    let avail = w.saturating_sub(dx) as usize;
-    if avail >= 10 {
-        match &reason {
-            Some(reason) => put(frame, x + dx, y, &super::bar::clip(reason, avail), Style::default().fg(th().gold)),
-            None => put(frame, x + dx, y, &super::bar::clip(&desc, avail), dim()),
+    let glyph_style = if on && honoured { Style::default().fg(th().ok) } else { dim() };
+    put(frame, gx, y, if on { check_on } else { check_off }, glyph_style);
+    // A label stops short of the value column only when a value stands
+    // there; a long one with none (the unknown-length switch) runs on.
+    let label_w = if value.is_some() { (x + VALUE_X).saturating_sub(gx + 5) } else { (x + w).saturating_sub(gx + 4) };
+    put(frame, gx + 4, y, &super::bar::clip(&label, label_w as usize), row_style(focused, hover));
+    if let Some(value) = value {
+        let avail = w.saturating_sub(VALUE_X) as usize;
+        if avail >= 6 {
+            put(frame, x + VALUE_X, y, &super::bar::clip(&value, avail), dim());
         }
     }
     gui.ui.click(rect, Act::DjStep(row, 1));
-    gui.ui.tip(rect, reason.unwrap_or(desc));
+    help_for(gui, focused, hover, help);
 }
 
 /// What a bar row shows and moves within.
@@ -901,45 +984,42 @@ fn filled_cells(spec: &BarSpec) -> u16 {
     ((part * f64::from(CELLS)).round() as u16).min(CELLS)
 }
 
-/// A bar row (clauses 44, 46, 47, 52 and the sonic strictness): the label,
-/// ten cells each a click target, the value in words, a dim note. ←→ step;
-/// a click sets.
+/// A bar row (clauses 44, 46, 47, 52 and the sonic strictness) in the
+/// volume widget's grammar at the value column: `-`, ten cells, `+`, the
+/// value in words. A click on `-` / `+` steps, a click on a cell sets, ←→
+/// step too; the note (the raw cosine, the wide set) goes to the help line
+/// with the description.
 fn draw_bar(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, row: DjRow) {
     let Some(spec) = bar_spec(gui, row) else { return };
+    let sub = matches!(row, DjRow::Strictness | DjRow::Tolerance | DjRow::Shortest | DjRow::Longest);
+    let lx = x + if sub { SUB_X } else { 4 };
     let rect = Rect { x, y, width: w, height: 1 };
     let focused = gui.dj.cursor == Some(Item::Row(row));
     let hover = gui.ui.hovers(rect);
-    put(frame, x, y, &super::bar::clip(&spec.label, LABEL_W as usize - 1), row_style(focused, hover));
-    let bx = x + LABEL_W;
+    put(frame, lx, y, &super::bar::clip(&spec.label, (x + VALUE_X).saturating_sub(lx + 1) as usize), row_style(focused, hover));
+    let bx = x + VALUE_X;
+    let (full, empty) = if legacy_conhost() { ("■", "·") } else { ("▰", "▱") };
+    let minus = Rect { x: bx, y, width: 1, height: 1 };
+    put(frame, bx, y, "-", if gui.ui.hovers(minus) { bright_bold() } else { dim() });
+    gui.ui.click(minus, Act::DjStep(row, -1));
     let filled = filled_cells(&spec);
-    let (full, empty) = if legacy_conhost() { ("#", "-") } else { ("▓", "░") };
-    let bar_rect = Rect { x: bx, y, width: CELLS, height: 1 };
-    let bar_hover = gui.ui.hovers(bar_rect);
+    let cells = Rect { x: bx + 2, y, width: CELLS, height: 1 };
+    let cells_hover = gui.ui.hovers(cells);
     for k in 0..CELLS {
-        let cell = Rect { x: bx + k, y, width: 1, height: 1 };
-        let style = if k < filled {
-            Style::default().fg(if bar_hover { th().bright } else { th().accent })
-        } else {
-            dim()
-        };
-        put(frame, cell.x, y, if k < filled { full } else { empty }, style);
+        let cell = Rect { x: bx + 2 + k, y, width: 1, height: 1 };
+        let on = k < filled;
+        let style = if on { Style::default().fg(if cells_hover { th().bright } else { th().accent }) } else { dim() };
+        put(frame, cell.x, y, if on { full } else { empty }, style);
         gui.ui.click(cell, Act::DjSet(row, cell_value(&spec, k)));
     }
-    let vx = bx + CELLS + 2;
-    put(frame, vx, y, &spec.words, Style::default());
-    // The note is a whole detail or nothing: a cosine clipped mid-number
-    // would read as a different number.
-    if !spec.note.is_empty() {
-        let nx = vx + spec.words.chars().count() as u16 + 2;
-        let avail = (x + w).saturating_sub(nx) as usize;
-        if avail >= spec.note.chars().count() {
-            put(frame, nx, y, &spec.note, dim());
-        }
-    }
-    gui.ui.click(Rect { x, y, width: LABEL_W, height: 1 }, Act::DjFocus(Item::Row(row)));
-    if !spec.tip.is_empty() {
-        gui.ui.tip(Rect { x, y, width: LABEL_W + CELLS, height: 1 }, spec.tip);
-    }
+    let plus = Rect { x: bx + 3 + CELLS, y, width: 1, height: 1 };
+    put(frame, plus.x, y, "+", if gui.ui.hovers(plus) { bright_bold() } else { dim() });
+    gui.ui.click(plus, Act::DjStep(row, 1));
+    let vx = bx + 6 + CELLS;
+    put(frame, vx, y, &super::bar::clip(&spec.words, (x + w).saturating_sub(vx) as usize), Style::default());
+    gui.ui.click(Rect { x, y, width: VALUE_X, height: 1 }, Act::DjFocus(Item::Row(row)));
+    let help = [spec.note, spec.tip].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" · ");
+    help_for(gui, focused, hover, help);
 }
 
 /// The chosen genres or keywords as an inline list, each with its remove
@@ -993,16 +1073,15 @@ fn draw_chips(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, item: It
     }
 }
 
-/// The keyword field and its Add (clause 49): the kit's line editor, Enter
-/// adds, the hint while empty.
+/// The keyword field and its Add (clause 49): the label as a sub-row, the
+/// kit's line editor at the value column, Enter adds, the hint while empty.
 fn draw_keyword_input(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, forward: &str) {
     let focused = gui.dj.cursor == Some(Item::KeywordInput);
-    let label = t!("gui.dj.add_keyword").to_string();
     let row = Rect { x, y, width: w, height: 1 };
     let hover = gui.ui.hovers(row);
-    put(frame, x, y, &super::bar::clip(&label, LABEL_W as usize - 1), row_style(focused, hover));
-    let fx = x + LABEL_W;
-    let fw = FIELD_W.min(w.saturating_sub(LABEL_W + 8)).max(8);
+    put(frame, x + SUB_X, y, &super::bar::clip(&t!("gui.dj.add_keyword"), (VALUE_X - SUB_X - 1) as usize), row_style(focused, hover));
+    let fx = x + VALUE_X;
+    let fw = FIELD_W.min(w.saturating_sub(VALUE_X + 8)).max(8);
     let field = Rect { x: fx, y, width: fw, height: 1 };
     let value = gui.dj.keyword.value().to_string();
     let cursor = gui.dj.keyword.cursor();
@@ -1020,6 +1099,7 @@ fn draw_keyword_input(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, 
     let add = format!("{} {forward}", t!("gui.dj.add"));
     let ready = !value.trim().is_empty();
     text_button(frame, gui, fx + fw + 2, y, &add, ready, Act::DjKeywordAdd);
+    help_for(gui, focused, hover, t!("gui.dj.keyword_sub").to_string());
 }
 
 /// The destructive tall button (Stop Auto DJ): the kit's primary frame in
@@ -1364,6 +1444,8 @@ fn room_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
                         let last = chips_of(gui, item).len().saturating_sub(1) as i32;
                         gui.dj.chip = (gui.dj.chip as i32 + delta).clamp(0, last) as usize;
                     }
+                    // The choices stand side by side: ←→ walk them.
+                    Item::Anchor(_) | Item::EmptyQueue(_) | Item::GenreMode(_) => move_cursor(gui, delta),
                     _ => return None,
                 }
             }
@@ -1845,7 +1927,7 @@ mod tests {
         let rows = draw_tall(&mut gui);
         // The strictness bar: a click on a cell sets, ←→ step by .05.
         let y = rows.iter().position(|r| r.contains("Match strictness")).unwrap();
-        let bx = rows[y].char_indices().position(|(i, _)| rows[y][i..].starts_with('▓') || rows[y][i..].starts_with('░')).unwrap() as u16;
+        let bx = rows[y].chars().position(|c| c == '▰' || c == '▱').unwrap() as u16;
         let last_cell = gui.ui.hit(Position { x: bx + 9, y: y as u16 });
         assert_eq!(last_cell, Some(Act::DjSet(DjRow::Strictness, 80)), "the last cell is the top of the band");
         gui.act(Act::DjSet(DjRow::Strictness, 80));
@@ -1876,6 +1958,48 @@ mod tests {
         let all = draw_tall(&mut gui).join("\n");
         assert!(all.contains("Over 1:30"), "{all}");
         assert!(all.contains("Include tracks of unknown length"), "a real bound reveals the checkbox");
+    }
+
+    #[test]
+    fn the_rows_line_up_at_the_value_column_and_the_help_line_explains_the_row_in_hand() {
+        let mut gui = room_gui();
+        let rows = draw_tall(&mut gui);
+        let cells = |r: &String| r.chars().collect::<Vec<char>>();
+        // The volume widget's grammar: `-`, ten cells, `+`, the words.
+        let y = rows.iter().position(|r| r.contains("Match strictness")).unwrap();
+        let row = cells(&rows[y]);
+        let bx = row.iter().position(|c| *c == '▰' || *c == '▱').unwrap();
+        assert_eq!((row[bx - 2], row[bx + 11]), ('-', '+'), "{}", rows[y]);
+        assert!(rows[y].contains("+  55% or closer"), "{}", rows[y]);
+        assert_eq!(gui.ui.hit(Position { x: bx as u16 - 2, y: y as u16 }), Some(Act::DjStep(DjRow::Strictness, -1)), "- steps down");
+        assert_eq!(gui.ui.hit(Position { x: bx as u16 + 11, y: y as u16 }), Some(Act::DjStep(DjRow::Strictness, 1)), "+ steps up");
+        // One value column for every control.
+        let songs = rows.iter().position(|r| r.contains("Songs per fetch")).unwrap();
+        assert_eq!(cells(&rows[songs]).iter().position(|c| *c == '-'), Some(bx - 2), "{}", rows[songs]);
+        let anchor = rows.iter().position(|r| r.contains("(•) Follow the vibe")).unwrap();
+        assert!(rows[anchor].contains("( ) Stay on seed"), "the choices on one row: {}", rows[anchor]);
+        // Air: a blank row between settings, none inside one.
+        let bpm = rows.iter().position(|r| r.contains("BPM continuity")).unwrap();
+        let column = |r: &String| r.chars().skip(17).take(59).collect::<String>();
+        assert!(column(&rows[bpm + 1]).trim().is_empty(), "{}", rows[bpm + 1]);
+        assert!(column(&rows[bpm - 1]).trim().is_empty(), "{}", rows[bpm - 1]);
+        // No description beside a row; the row under the pointer explains
+        // itself in the help line under the body.
+        let all = rows.join("\n");
+        assert!(!all.contains("Only pick songs"), "{all}");
+        let sonic = rows.iter().position(|r| r.contains("[✓] Sonic similarity")).unwrap();
+        gui.ui.pointer = Some(Position { x: 22, y: sonic as u16 });
+        let rows = draw_tall(&mut gui);
+        let help = rows.iter().position(|r| r.contains("Only pick songs that sound like the session")).expect("the help line");
+        assert!(help > rows.iter().position(|r| r.contains("Preview picks")).unwrap(), "under the body");
+        // The pointer away: the cursor's row explains itself instead.
+        gui.ui.pointer = None;
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Down);
+        assert_eq!(gui.dj.cursor, Some(Item::Row(DjRow::SongsPerFetch)));
+        let all = draw_tall(&mut gui).join("\n");
+        assert!(all.contains("How many songs Auto DJ queues"), "{all}");
+        assert!(!all.contains("Only pick songs"), "{all}");
     }
 
     #[test]

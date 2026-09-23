@@ -396,13 +396,13 @@ room, the chooser and the panel, and `dj.<name>` for the shared App's notes
 | Record | Here |
 |---|---|
 | The labelled Auto DJ button (queue header + player) | The bar's `auto-dj` toggle, lit while the DJ runs anywhere — arm here / off / move here (decision 1, entry point 1); `A` in both shells; the confirmation on the note line names the server when several are saved |
-| The settings screen | The **Auto DJ room**, a Library nav room (since 2026-09-23; behind Settings › `Auto DJ ▸` with a `◂` back before): a TOOLS group under Search in the nav column — `Auto DJ`, then `Sonic path` — the row dim, bright under the pointer, the accent when active like every nav row, plus a `•` in the ok colour while the DJ is armed (the record's card line "On"/"Off"); `D` from anywhere (the tenth room: digits stop at 9 and `0` is the Now Playing screen). Inside, the sonic room's grammar — BOLD title, the state line at the right of the title row ("• on · picking from {server}" Green / "• off" DarkGray), then 1-row rows under dim UPPERCASE section labels STATUS · QUEUE · CONTINUITY · FILTERS · SOURCES; ↑↓ walk the rows, Esc stows the cursor, the tips line names the keys |
+| The settings screen | The **Auto DJ room**, a Library nav room (since 2026-09-23; behind Settings › `Auto DJ ▸` with a `◂` back before): a TOOLS group under Search in the nav column — `Auto DJ`, then `Sonic path` — the row dim, bright under the pointer, the accent when active like every nav row, plus a `•` in the ok colour while the DJ is armed (the record's card line "On"/"Off"); `D` from anywhere (the tenth room: digits stop at 9 and `0` is the Now Playing screen). Inside, the sonic room's grammar — BOLD title, the state line at the right of the title row ("• on · picking from {server}" Green / "• off" DarkGray), then rows under dim UPPERCASE section labels QUEUE · CONTINUITY · FILTERS · SOURCES with a blank row between settings, the status as one line (`● Auto DJ is on`, its detail wrapped under it) with Start / Stop at the right (the canvas "Auto DJ room options", board E′, 2026-09-23); ↑↓ walk the rows, Esc stows the cursor, the tips line names the keys |
 | The browse-root card's On/Off line and the desktop rail's TOOLS header | The nav row's `•` while armed; the TOOLS label over Auto DJ and Sonic path (the record's rail says TOOLS; its browse root groups the same feature cards after the library's) |
 | Start / Stop button | The room's one primary (3-row Rounded frame) under STATUS: "Start Auto DJ ▸", or "Stop Auto DJ" in the destructive colour |
-| Switches | `[✓]` / `[ ]` rows; Space and Enter toggle under the cursor, a click toggles without selecting |
-| Sliders (strictness, tolerance, songs per fetch) | The sonic room's ten-cell bars with the value beside them (`▓▓▓▓░░░░░░  55% or closer`, `± 8 BPM`, `4 songs`); ←→ step (strictness by .05, tolerance and songs by 1), a click on a cell sets; the raw cosine as a dim trailing detail on the strictness row |
+| Switches | `[✓]` / `[ ]` rows; Space and Enter toggle under the cursor, a click toggles without selecting. **2026-09-23**: the label in a column of its own and no description beside it — the help line under the body (a rule and two lines) explains the row under the pointer, else the cursor's; a value in words (the length window's) sits at the value column |
+| Sliders (strictness, tolerance, songs per fetch) | **2026-09-23**: the volume widget's bars at the value column — `- ▰▰▰▰▰▱▱▱▱▱ +  55% or closer`, `± 8 BPM`, `4 songs` — a click on `-` / `+` steps (strictness by .05, tolerance and songs by 1), a click on a cell sets, ←→ step too; the raw cosine, the pool size and the wide set in the help line. (Before: the sonic room's `▓░` cells with the note beside them.) |
 | The two-ended length range | Two rows — Shortest · Longest — on the same 0:00–20:00 bar in 15 s steps, the words summary ("Over 1:30", "1:30 to 8:00") on the switch's row; the unknown-length checkbox appears only once a bound is real |
-| Segmented buttons (empty queue · anchor · whitelist/blacklist) | `(•)` radio rows, one per option, chosen label BOLD, `— hint` dim |
+| Segmented buttons (empty queue · anchor · whitelist/blacklist) | **2026-09-23**: `(•)` radios on ONE row, the chosen label BOLD — at the value column beside their sub-label when they fit the body, else on the row under it; ←→ walk them; the option's hint in the help line while it is under the pointer or the cursor. (Before: one row per option with `— hint` dim beside it.) |
 | Chips (genres, keywords) | An inline comma list on the row with a hover `[x]` per item; the keyword input as a 1-row text field (the kit's), Enter adds, at most 50 |
 | The genre picker sheet | A kit modal list with a filter line (the path modal's shape): "{count} selected" in the title row, Space toggles, Enter and Esc close — the App's `GenrePicker` already exists |
 | The multi-server body's server choice | The room's Server row (armed, several servers saved) opens a kit modal list of every selectable saved server, peers under their parent and named through it, the DJ's own marked; Enter or a click moves the DJ (clause 41), re-selecting it is a no-op |
@@ -668,3 +668,12 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
   blacklist → off as a keyboard idiom (`DjEdit::GenreCycle`), and its
   picker now shows the DJ's library's own genres rather than the
   session-wide fallback.
+- **2026-09-23 — The room re-laid as its canvas's E′** (a canvas after all,
+  superseding the 2026-09-06 note that none was planned: "Auto DJ room
+  options", seven boards, E chosen with two changes): every control at
+  one value column, no description beside a row — the help line under the
+  body explains the row under the pointer, else the cursor's — a blank row
+  between settings, the choices `(•)` side by side on one row, the bars in
+  the volume widget's `- ▰▰▱ +` grammar with a step at each end, the
+  status as one line with Start / Stop at its right. Clauses 40–53 stand;
+  only the room's grammar moved.

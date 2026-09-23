@@ -209,6 +209,16 @@ caret that only sometimes blinks is worse than one that always does. The
 wizard, the admin rooms and the web shell still draw the steady `▏`;
 they can adopt the clock the same way.
 
+**A settings room's rows** (the Auto DJ room, from its canvas's E′ board,
+2026-09-23): the label at the left, indented two cells for a sub-row, and
+every control at one value column — a bar in the volume widget's grammar
+(`- ▰▰▰▰▰▱▱▱▱▱ +  55% or closer`: `-` / `+` step, a cell sets), the `(•)`
+choices side by side, a value in words dim — with a blank row between
+settings and no description beside a row. The row under the pointer, else
+the keyboard cursor's, explains itself in a **help line** under the body:
+a dim rule and two wrapped lines. Descriptions belong there, whole, not
+clipped at the cell edge beside every row.
+
 ### Path input + completion
 Suggestions under the input, max 6 visible — the list WINDOWS around the
 keyboard cursor (the same viewport the folders table uses), with the

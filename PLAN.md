@@ -2020,6 +2020,15 @@ a LATER secondary screen (party view), Columns retired.
   values reading as the switch off; `DjEdit::GenreFilter` / `GenreCycle`
   on the App, the TUI row keeping its three-state ←→ walk, its picker
   reading the DJ library's genres. Tests on the model, the App, the GUI.
+- **The Auto DJ room re-laid ✅ 2026-09-23** — the canvas "Auto DJ room
+  options" drew today's dense form beside six directions (descriptions
+  wrapped, two columns, cards, tabs, quiet aligned columns, trailing
+  controls); E "Quiet" chosen with two changes (a blank row between
+  settings, the volume widget's bars). Built as drawn: every control at a
+  value column, `(•)` choices side by side, `- ▰▰▱ +` bars with a step at
+  each end, the status as one line with Start / Stop at its right, and a
+  help line under the body for the row under the pointer or the cursor in
+  place of the clipped descriptions. The room scrolls above the help line.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the
