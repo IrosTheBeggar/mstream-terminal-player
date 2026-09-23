@@ -131,43 +131,36 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         }
 
         ApiCmd::Genres => {
-            with_session(session, async |s| match s.client.genres_async().await {
-                Ok(genres) => Ok(Event::Genres(genres)),
-                Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
-                Err(e) => Ok(Event::GenresFailed(e.to_string())),
-            })
-                .await
+            with_session(session, async |s| worker::genres_event(s.client.genres_async().await)).await
         }
 
         // The track verbs (track-actions contract): the browser build has one
-        // client, so a reach is the session's here too.
+        // client, so a reach is the session's here too; the words are the
+        // native worker's shapers.
         ApiCmd::RateSong { filepath, rating, seq, .. } => {
             with_session(session, async |s| {
-                let error = s.client.rate_song_async(&filepath, rating).await.err().map(|e| e.to_string());
-                Ok(Event::Rated { filepath: filepath.clone(), rating, seq, error })
+                let result = s.client.rate_song_async(&filepath, rating).await;
+                Ok(worker::rated_event(filepath.clone(), rating, seq, result))
             })
             .await
         }
         ApiCmd::AddToPlaylist { playlist, song, .. } => {
             with_session(session, async |s| {
-                let error = s.client.playlist_add_song_async(&playlist, &song).await.err().map(|e| e.to_string());
-                Ok(Event::AddedToPlaylist { playlist: playlist.clone(), error })
+                let result = s.client.playlist_add_song_async(&playlist, &song).await;
+                Ok(worker::added_to_playlist_event(playlist.clone(), result))
             })
             .await
         }
         ApiCmd::TrackInfo { filepath, .. } => {
             with_session(session, async |s| {
-                let track = s.client.metadata_async(&filepath).await.ok().map(Box::new);
-                Ok(Event::TrackInfo { filepath: filepath.clone(), track })
+                let result = s.client.metadata_async(&filepath).await;
+                Ok(worker::track_info_event(filepath.clone(), result))
             })
             .await
         }
         ApiCmd::PlaylistNames { .. } => {
-            with_session(session, async |s| {
-                let names = s.client.playlists_async().await.ok().map(|l| l.into_iter().map(|p| p.name).collect());
-                Ok(Event::PlaylistNames { names })
-            })
-            .await
+            with_session(session, async |s| Ok(worker::playlist_names_event(s.client.playlists_async().await)))
+                .await
         }
 
         ApiCmd::Journey { start, end, length } => {
@@ -220,36 +213,24 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
 
         ApiCmd::CreatePlaylist { name } => {
             with_session(session, async |s| {
-                match s.client.playlist_new_async(&name).await {
-                    Ok(()) => Ok(Event::PlaylistCreated),
-                    Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
-                    Err(e) => Ok(Event::Error(format!("couldn't create {name}: {e}"))),
-                }
+                worker::playlist_verb_event(worker::PlaylistVerb::Create(&name), s.client.playlist_new_async(&name).await)
             })
             .await
         }
 
         ApiCmd::RenamePlaylist { from, to } => {
             with_session(session, async |s| {
-                match s.client.playlist_rename_async(&from, &to).await {
-                    Ok(()) => Ok(Event::PlaylistRenamed),
-                    Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
-                    Err(ApiError::NotFound(_)) => Ok(Event::Error(
-                        "this server can't rename playlists — it needs mStream 5.16".into(),
-                    )),
-                    Err(e) => Ok(Event::Error(format!("couldn't rename {from}: {e}"))),
-                }
+                worker::playlist_verb_event(
+                    worker::PlaylistVerb::Rename(&from),
+                    s.client.playlist_rename_async(&from, &to).await,
+                )
             })
             .await
         }
 
         ApiCmd::DeletePlaylist { name } => {
             with_session(session, async |s| {
-                match s.client.playlist_delete_async(&name).await {
-                    Ok(()) => Ok(Event::PlaylistDeleted),
-                    Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
-                    Err(e) => Ok(Event::Error(format!("couldn't delete {name}: {e}"))),
-                }
+                worker::playlist_verb_event(worker::PlaylistVerb::Delete(&name), s.client.playlist_delete_async(&name).await)
             })
             .await
         }

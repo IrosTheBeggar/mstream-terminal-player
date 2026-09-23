@@ -998,6 +998,68 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     }
 }
 
+// ── Shapers both workers share ───────────────────────────────────────────────
+//
+// The words a reply becomes live here once: the native worker and the browser
+// build's each drive their own client, and an event a feature lands with on
+// one build must land on the other with the same words.
+
+/// The track verbs answer with their outcome rather than an error event:
+/// the App reverts a rating, words a failed add, or shows a sheet without
+/// its block (track-actions contract).
+pub(crate) fn rated_event(filepath: String, rating: Option<u32>, seq: u64, result: Result<(), ApiError>) -> Event {
+    Event::Rated { filepath, rating, seq, error: result.err().map(|e| e.to_string()) }
+}
+
+pub(crate) fn added_to_playlist_event(playlist: String, result: Result<(), ApiError>) -> Event {
+    Event::AddedToPlaylist { playlist, error: result.err().map(|e| e.to_string()) }
+}
+
+pub(crate) fn track_info_event(filepath: String, result: Result<Track, ApiError>) -> Event {
+    Event::TrackInfo { filepath, track: result.ok().map(Box::new) }
+}
+
+pub(crate) fn playlist_names_event(result: Result<Vec<crate::api::types::PlaylistSummary>, ApiError>) -> Event {
+    Event::PlaylistNames { names: result.ok().map(|list| list.into_iter().map(|p| p.name).collect()) }
+}
+
+/// A dead session is the session's business; anything else is the
+/// picker's to say (auto-dj contract, clause 48).
+pub(crate) fn genres_event(result: Result<Vec<crate::api::types::Genre>, ApiError>) -> Result<Event, ApiError> {
+    match result {
+        Ok(genres) => Ok(Event::Genres(genres)),
+        Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+        Err(e) => Ok(Event::GenresFailed(e.to_string())),
+    }
+}
+
+/// A playlist management verb, with the name its failure is worded around.
+pub(crate) enum PlaylistVerb<'a> {
+    Create(&'a str),
+    Rename(&'a str),
+    Delete(&'a str),
+}
+
+/// The management verbs word their own failures — `<what failed>: <the
+/// server's words>` — so the generic fallthrough never has to guess what
+/// the user was doing (playlists contract, clause 50).
+pub(crate) fn playlist_verb_event(verb: PlaylistVerb<'_>, result: Result<(), ApiError>) -> Result<Event, ApiError> {
+    match (verb, result) {
+        (PlaylistVerb::Create(_), Ok(())) => Ok(Event::PlaylistCreated),
+        (PlaylistVerb::Rename(_), Ok(())) => Ok(Event::PlaylistRenamed),
+        (PlaylistVerb::Delete(_), Ok(())) => Ok(Event::PlaylistDeleted),
+        (_, Err(ApiError::Unauthorized)) => Err(ApiError::Unauthorized),
+        // The route is 5.16.0+: a 404 is the server's age, not a missing
+        // playlist — worded so it reads as old, not broken.
+        (PlaylistVerb::Rename(_), Err(ApiError::NotFound(_))) => {
+            Ok(Event::Error("this server can't rename playlists — it needs mStream 5.16".into()))
+        }
+        (PlaylistVerb::Create(name), Err(e)) => Ok(Event::Error(format!("couldn't create {name}: {e}"))),
+        (PlaylistVerb::Rename(from), Err(e)) => Ok(Event::Error(format!("couldn't rename {from}: {e}"))),
+        (PlaylistVerb::Delete(name), Err(e)) => Ok(Event::Error(format!("couldn't delete {name}: {e}"))),
+    }
+}
+
 /// The client for a read aimed at a row's own server. `None` when the base
 /// will not parse — the read then falls back to the session, whose answer
 /// the App's stale-reply guards judge as they would any other.
@@ -1091,33 +1153,22 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
             crate::api::wait(async { Ok::<_, ApiError>(dj_probe(c).await) })
                 .map(|info| Event::DjProbed { identity, info })
         }
-        // The track verbs answer with their outcome rather than an error
-        // event: the App reverts a rating, words a failed add, or shows a
-        // sheet without its block (track-actions contract).
+        // The track verbs and the genres answer through the shapers both
+        // workers share; their words live there.
         ApiCmd::RateSong { filepath, rating, seq, .. } => {
-            let error = crate::api::wait(c.rate_song_async(&filepath, rating)).err().map(|e| e.to_string());
-            Ok(Event::Rated { filepath, rating, seq, error })
+            let result = crate::api::wait(c.rate_song_async(&filepath, rating));
+            Ok(rated_event(filepath, rating, seq, result))
         }
         ApiCmd::AddToPlaylist { playlist, song, .. } => {
-            let error =
-                crate::api::wait(c.playlist_add_song_async(&playlist, &song)).err().map(|e| e.to_string());
-            Ok(Event::AddedToPlaylist { playlist, error })
+            let result = crate::api::wait(c.playlist_add_song_async(&playlist, &song));
+            Ok(added_to_playlist_event(playlist, result))
         }
         ApiCmd::TrackInfo { filepath, .. } => {
-            let track = c.metadata(&filepath).ok().map(Box::new);
-            Ok(Event::TrackInfo { filepath, track })
+            let result = c.metadata(&filepath);
+            Ok(track_info_event(filepath, result))
         }
-        ApiCmd::PlaylistNames { .. } => {
-            let names = c.playlists().ok().map(|list| list.into_iter().map(|p| p.name).collect());
-            Ok(Event::PlaylistNames { names })
-        }
-        // A dead session is the session's business; anything else is the
-        // picker's to say (auto-dj contract, clause 48).
-        ApiCmd::Genres => match c.genres() {
-            Ok(genres) => Ok(Event::Genres(genres)),
-            Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
-            Err(e) => Ok(Event::GenresFailed(e.to_string())),
-        },
+        ApiCmd::PlaylistNames { .. } => Ok(playlist_names_event(c.playlists())),
+        ApiCmd::Genres => genres_event(c.genres()),
         ApiCmd::Journey { start, end, length } => {
             crate::api::wait(journey(c, &start, &end, length))
         }
@@ -1138,29 +1189,15 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
             let count = files.len();
             c.playlist_save(&name, &files).map(|()| Event::PlaylistSaved { name, count })
         }
-        // The management verbs word their own failures — `<what failed>:
-        // <the server's words>` — so the generic fallthrough never has to
-        // guess what the user was doing (contract clause 50).
-        ApiCmd::CreatePlaylist { name } => match c.playlist_new(&name) {
-            Ok(()) => Ok(Event::PlaylistCreated),
-            Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
-            Err(e) => Ok(Event::Error(format!("couldn't create {name}: {e}"))),
-        },
-        ApiCmd::RenamePlaylist { from, to } => match c.playlist_rename(&from, &to) {
-            Ok(()) => Ok(Event::PlaylistRenamed),
-            Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
-            // The route is 5.16.0+: a 404 is the server's age, not a
-            // missing playlist — worded so it reads as old, not broken.
-            Err(ApiError::NotFound(_)) => Ok(Event::Error(
-                "this server can't rename playlists — it needs mStream 5.16".into(),
-            )),
-            Err(e) => Ok(Event::Error(format!("couldn't rename {from}: {e}"))),
-        },
-        ApiCmd::DeletePlaylist { name } => match c.playlist_delete(&name) {
-            Ok(()) => Ok(Event::PlaylistDeleted),
-            Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
-            Err(e) => Ok(Event::Error(format!("couldn't delete {name}: {e}"))),
-        },
+        ApiCmd::CreatePlaylist { name } => {
+            playlist_verb_event(PlaylistVerb::Create(&name), c.playlist_new(&name))
+        }
+        ApiCmd::RenamePlaylist { from, to } => {
+            playlist_verb_event(PlaylistVerb::Rename(&from), c.playlist_rename(&from, &to))
+        }
+        ApiCmd::DeletePlaylist { name } => {
+            playlist_verb_event(PlaylistVerb::Delete(&name), c.playlist_delete(&name))
+        }
         ApiCmd::Search(query) => {
             c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r) })
         }
