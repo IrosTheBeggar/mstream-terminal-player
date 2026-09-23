@@ -579,14 +579,16 @@ pub(crate) fn switch_to(gui: &mut Gui, index: usize) {
     }
 
     let effects = gui.app.adopt_server(
-        server,
-        entry.url.clone(),
-        reach.username.clone(),
-        token,
-        tunnel_code,
-        reach.self_signed,
+        crate::tui::app::Session {
+            server,
+            server_id: entry.url.clone(),
+            username: reach.username.clone(),
+            token,
+            tunnel_code,
+            self_signed: reach.self_signed,
+            peer,
+        },
         entry.last_path.clone(),
-        peer,
     );
     gui.pend(effects);
     gui.servers.switching = Some(entry.url.clone());

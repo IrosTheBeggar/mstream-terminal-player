@@ -1890,7 +1890,10 @@ fn a_peer_whose_tunnel_is_up_is_browsed_through_it_and_back_when_it_goes() {
     app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
     app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
 
-    let effects = app.adopt_server(ATTIC.into(), nas(), None, Some("at".into()), None, false, Some("music".into()), Some((ATTIC.into(), 3)));
+    let effects = app.adopt_server(
+        Session { server: ATTIC.into(), server_id: nas(), token: Some("at".into()), peer: Some((ATTIC.into(), 3)), ..Default::default() },
+        Some("music".into()),
+    );
     assert_eq!(
         effects,
         vec![Effect::Api(ApiCmd::Connect {
@@ -1948,7 +1951,10 @@ fn a_browsed_peer_goes_direct_when_its_own_tunnel_comes_up() {
     let mut app = federated_app();
     app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
     // Browsing the peer through the parent today.
-    app.adopt_server(ATTIC.into(), nas(), None, Some("at".into()), None, false, None, Some((ATTIC.into(), 3)));
+    app.adopt_server(
+        Session { server: ATTIC.into(), server_id: nas(), token: Some("at".into()), peer: Some((ATTIC.into(), 3)), ..Default::default() },
+        None,
+    );
     app.apply_event(Event::Connected {
         server: ATTIC.into(),
         id: nas(),
@@ -1979,7 +1985,10 @@ fn a_401_on_a_direct_session_renews_the_ticket_instead_of_asking_for_a_sign_in()
     let mut app = federated_app();
     app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
     app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
-    app.adopt_server(ATTIC.into(), nas(), None, Some("at".into()), None, false, None, Some((ATTIC.into(), 3)));
+    app.adopt_server(
+        Session { server: ATTIC.into(), server_id: nas(), token: Some("at".into()), peer: Some((ATTIC.into(), 3)), ..Default::default() },
+        None,
+    );
     app.apply_event(Event::Connected {
         server: "http://127.0.0.1:5000".into(),
         id: nas(),
@@ -2313,7 +2322,10 @@ fn a_switch_away_keeps_the_tunnel_the_queue_still_needs() {
     app.push_queue(track("music/far.mp3"));
     assert_eq!(app.queue.items[0].origin.server, FARAWAY);
 
-    app.adopt_server("http://office:3000".into(), "http://office:3000".into(), None, None, None, false, None, None);
+    app.adopt_server(
+        Session { server: "http://office:3000".into(), server_id: "http://office:3000".into(), ..Default::default() },
+        None,
+    );
     let now = crate::clock::Instant::now();
     assert!(app.tick_at(now).is_empty());
     assert!(app.tick_at(now + secs(60)).is_empty(), "wanted by the queue: never released");
@@ -2542,14 +2554,12 @@ fn a_self_signed_session_carries_its_trust_into_every_connect() {
 
     // And a switch seats it fresh for the next server.
     let effects = app.adopt_server(
-        "http://office.local:3000".into(),
-        "http://office.local:3000".into(),
-        None,
-        None,
-        None,
-        false,
+        Session {
+            server: "http://office.local:3000".into(),
+            server_id: "http://office.local:3000".into(),
+            ..Default::default()
+        },
         Some("music/Ambient".into()),
-        None,
     );
     assert!(!app.session.self_signed, "trust never leaks across servers");
     assert_eq!(app.path, "music/Ambient", "the entry's last path comes along");
@@ -2604,13 +2614,13 @@ fn adopting_a_server_keeps_the_music_and_the_queue() {
     app.now_playing = Some(track("music/a.mp3"));
 
     let effects = app.adopt_server(
-        "http://office.local:3000".into(),
-        "http://office.local:3000".into(),
-        None,
-        Some("office-token".into()),
-        None,
-        true,
-        None,
+        Session {
+            server: "http://office.local:3000".into(),
+            server_id: "http://office.local:3000".into(),
+            token: Some("office-token".into()),
+            self_signed: true,
+            ..Default::default()
+        },
         None,
     );
     assert!(effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Connect { .. }))));
@@ -2893,14 +2903,15 @@ fn a_peer_session_stamps_its_rows_and_keeps_none_of_the_optional_features() {
         self_signed: false,
         peer: Some(("http://attic:3000".into(), 3)), pairing: None, dj: Default::default() }];
     let effects = app.adopt_server(
-        "http://attic:3000".into(),
-        "mstream+peer://3@http://attic:3000".into(),
-        Some("paul".into()),
-        Some("at".into()),
+        Session {
+            server: "http://attic:3000".into(),
+            server_id: "mstream+peer://3@http://attic:3000".into(),
+            username: Some("paul".into()),
+            token: Some("at".into()),
+            peer: Some(("http://attic:3000".into(), 3)),
+            ..Default::default()
+        },
         None,
-        false,
-        None,
-        Some(("http://attic:3000".into(), 3)),
     );
     assert!(effects.iter().any(|e| matches!(
         e,

@@ -17,6 +17,26 @@ pub struct RatingWrite {
     pub seq: u64,
 }
 
+/// The server's playlist names for the add-to-playlist picker (clause 12):
+/// not asked yet (or out), asked and refused, or listed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PlaylistNames {
+    #[default]
+    Unasked,
+    Failed,
+    Listed(Vec<String>),
+}
+
+impl PlaylistNames {
+    /// The names, when the server answered.
+    pub fn listed(&self) -> Option<&[String]> {
+        match self {
+            PlaylistNames::Listed(names) => Some(names),
+            _ => None,
+        }
+    }
+}
+
 impl App {
     /// Whether a track's server takes the user's verbs at all: a peer's
     /// route is off the federation allowlist, and its rating or playlist
@@ -26,31 +46,35 @@ impl App {
     }
 
     /// Every copy of a track the shells draw — the queue's rows, the panes'
-    /// rows shown or filtered, the playing track, the sheet's block — patched
-    /// at once (clause 11).
-    fn patch_rating(&mut self, filepath: &str, rating: Option<u32>) {
+    /// rows shown or filtered, the playing track, the sheet's block — in one
+    /// walk, so a fact learned about one reaches them all (clause 11).
+    fn for_each_copy(&mut self, filepath: &str, mut f: impl FnMut(&mut TrackMetadata)) {
         for item in &mut self.queue.items {
             if item.filepath == filepath {
-                item.track.metadata.rating = rating;
+                f(&mut item.track.metadata);
             }
         }
         for pane in [&mut self.files, &mut self.library, &mut self.search, &mut self.discover] {
             pane.for_each_track_mut(|track| {
                 if track.filepath == filepath {
-                    track.metadata.rating = rating;
+                    f(&mut track.metadata);
                 }
             });
         }
         if let Some(now) = &mut self.now_playing
             && now.filepath == filepath
         {
-            now.metadata.rating = rating;
+            f(&mut now.metadata);
         }
         if let Some(info) = &mut self.track_info
             && info.filepath == filepath
         {
-            info.metadata.rating = rating;
+            f(&mut info.metadata);
         }
+    }
+
+    fn patch_rating(&mut self, filepath: &str, rating: Option<u32>) {
+        self.for_each_copy(filepath, |m| m.rating = rating);
     }
 
     /// The rating a track wears right now, from whichever copy is nearest.
@@ -184,24 +208,13 @@ impl App {
                 m.musical_key = block.musical_key.clone();
             }
         };
-        for item in &mut self.queue.items {
-            if item.filepath == filepath {
-                fill(&mut item.track.metadata);
-            }
-        }
-        for pane in [&mut self.files, &mut self.library, &mut self.search, &mut self.discover] {
-            pane.for_each_track_mut(|t| {
-                if t.filepath == filepath {
-                    fill(&mut t.metadata);
-                }
-            });
-        }
+        self.for_each_copy(&filepath, fill);
         self.track_info = Some(track);
     }
 
     /// Ask a track's server for its playlist names (clause 12).
     pub(crate) fn fetch_playlist_names(&mut self, origin: &Origin) -> Vec<Effect> {
-        self.playlist_names = None;
+        self.playlist_names = PlaylistNames::Unasked;
         let reach = self.row_reach(origin);
         vec![Effect::Api(ApiCmd::PlaylistNames { reach })]
     }

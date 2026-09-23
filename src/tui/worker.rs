@@ -197,6 +197,50 @@ pub enum ApiCmd {
     Shutdown,
 }
 
+impl ApiCmd {
+    /// The reach a command carries for a row's own server; `None` rides the
+    /// session's client. Exhaustive on purpose: a new command must say
+    /// whether it aims away from the session, or it does not compile — the
+    /// silent alternative, a peer's read answered by the session, is what
+    /// the covers did until the 2026-09-20 rig run caught it.
+    pub(crate) fn reach(&self) -> Option<&crate::tui::app::Reach> {
+        match self {
+            ApiCmd::AlbumArt { reach, .. }
+            | ApiCmd::Waveform { reach, .. }
+            | ApiCmd::DjProbe { reach, .. }
+            | ApiCmd::RateSong { reach, .. }
+            | ApiCmd::AddToPlaylist { reach, .. }
+            | ApiCmd::TrackInfo { reach, .. }
+            | ApiCmd::PlaylistNames { reach } => reach.as_ref(),
+            // The DJ's turns go to ITS server (auto-dj contract, clause 19).
+            ApiCmd::AutoDj(request) | ApiCmd::AutoDjSample { request, .. } => request.reach.as_ref(),
+            // Its reach is the parent's and its arm builds the client itself.
+            ApiCmd::DirectAccess { .. }
+            | ApiCmd::Connect { .. }
+            | ApiCmd::Login { .. }
+            | ApiCmd::TunnelOpen { .. }
+            | ApiCmd::TunnelClose { .. }
+            | ApiCmd::TunnelCredential { .. }
+            | ApiCmd::Retarget { .. }
+            | ApiCmd::FederationPeers { .. }
+            | ApiCmd::Probe { .. }
+            | ApiCmd::Browse(_)
+            | ApiCmd::Library { .. }
+            | ApiCmd::Genres
+            | ApiCmd::Journey { .. }
+            | ApiCmd::SonicRandom { .. }
+            | ApiCmd::DiscoveryProbe
+            | ApiCmd::Discover { .. }
+            | ApiCmd::SavePlaylist { .. }
+            | ApiCmd::CreatePlaylist { .. }
+            | ApiCmd::RenamePlaylist { .. }
+            | ApiCmd::DeletePlaylist { .. }
+            | ApiCmd::Search(_)
+            | ApiCmd::Shutdown => None,
+        }
+    }
+}
+
 /// One Auto DJ turn, as the App composed it (auto-dj contract, clause 19):
 /// the DJ's server, how to reach it when it is not the session's, the lane
 /// the ask belongs to, and everything the body is built from.
@@ -1020,23 +1064,10 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         return Event::Reachable { server, reachable };
     }
     // A row's own server when it is not the session's (contract clause 30):
-    // its cover and its shape come from a one-shot client built from the
-    // reach the App resolved — a tunnel's loopback with its token, a saved
-    // server with its own token and trust, a peer through its parent.
-    let own = match &cmd {
-        ApiCmd::AlbumArt { reach: Some(reach), .. }
-        | ApiCmd::Waveform { reach: Some(reach), .. }
-        | ApiCmd::DjProbe { reach: Some(reach), .. }
-        | ApiCmd::RateSong { reach: Some(reach), .. }
-        | ApiCmd::AddToPlaylist { reach: Some(reach), .. }
-        | ApiCmd::TrackInfo { reach: Some(reach), .. }
-        | ApiCmd::PlaylistNames { reach: Some(reach) } => client_for(reach),
-        // The DJ's turns go to ITS server (auto-dj contract, clause 19).
-        ApiCmd::AutoDj(request) | ApiCmd::AutoDjSample { request, .. } => {
-            request.reach.as_ref().and_then(client_for)
-        }
-        _ => None,
-    };
+    // its cover and its shape come from a client built for the reach the
+    // App resolved — a tunnel's loopback with its token, a saved server
+    // with its own token and trust, a peer through its parent.
+    let own = cmd.reach().and_then(client_for);
     let c = match (own.as_deref(), client) {
         (Some(own), _) => own,
         (None, Some(session)) => session,

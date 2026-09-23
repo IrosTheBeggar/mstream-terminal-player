@@ -14,7 +14,7 @@ use tui_input::backend::crossterm::EventHandler;
 use crate::api::types::Track;
 use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{Surface, dim, input_display, modal_close, modal_frame_on, table_view};
-use crate::tui::app::{Action, App, Entry, Focus, Origin, Tab};
+use crate::tui::app::{Action, App, Entry, Focus, Origin, PlaylistNames, Tab};
 
 use super::cover::Slot;
 use super::{Act, Gui, SEARCH_NAV, accent, bright_bold, put, sel};
@@ -321,7 +321,9 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let by = inner.y + 3;
     let mut bx = inner.x + 1;
     if own {
-        let rating = track.metadata.rating;
+        // The App's copy first: a refused write reverts there, and the
+        // sheet's own block is only the optimistic fallback.
+        let rating = app.rating_of(&track.filepath).or(track.metadata.rating);
         let glyphs = stars(rating);
         let v = rating.unwrap_or(0).min(10);
         for (i, glyph) in glyphs.chars().enumerate() {
@@ -394,11 +396,8 @@ fn draw_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         None => return,
     };
     ui.click(area, Act::PickClose);
-    let names: Option<&[String]> = match &app.playlist_names {
-        Some(Some(names)) => Some(names.as_slice()),
-        _ => None,
-    };
-    let failed = matches!(app.playlist_names, Some(None));
+    let names = app.playlist_names.listed();
+    let failed = matches!(app.playlist_names, PlaylistNames::Failed);
     let width: u16 = 52.min(area.width.saturating_sub(2)).max(36);
     if let Some((name, cursor)) = naming {
         // New playlist: the name, then the add (clause 12).
@@ -610,10 +609,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
             }
             return Some(false);
         }
-        let listed = match &gui.app.playlist_names {
-            Some(Some(names)) => names.len(),
-            _ => 0,
-        };
+        let listed = gui.app.playlist_names.listed().map_or(0, <[String]>::len);
         match key.code {
             KeyCode::Esc => gui.actions.picker = None,
             KeyCode::Up => picker.row = picker.row.saturating_sub(1),
@@ -623,10 +619,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
                 if row == 0 {
                     return Some(gui.act(Act::PickNew));
                 }
-                let name = match &gui.app.playlist_names {
-                    Some(Some(names)) => names.get(row - 1).cloned(),
-                    _ => None,
-                };
+                let name = gui.app.playlist_names.listed().and_then(|names| names.get(row - 1).cloned());
                 if let Some(name) = name {
                     return Some(gui.act(Act::PickPlaylist(name)));
                 }

@@ -1063,7 +1063,7 @@ pub struct Message {
 // re-exported so every caller keeps saying `app::ConnectForm`.
 mod autodj;
 mod track;
-pub use track::RatingWrite;
+pub use track::{PlaylistNames, RatingWrite};
 #[allow(unused_imports)] // the browser shell has no room yet
 pub use autodj::DjEdit;
 pub(crate) mod entries;
@@ -1583,9 +1583,9 @@ pub struct App {
     /// The full block the sheet or Song info asked for last (track-actions
     /// contract, clause 8), by the track's path.
     pub track_info: Option<Track>,
-    /// A server's playlist names for the add-to-playlist picker: `None`
-    /// while unasked or out, `Some(None)` when the ask failed.
-    pub playlist_names: Option<Option<Vec<String>>>,
+    /// A server's playlist names for the add-to-playlist picker
+    /// (track-actions contract, clause 12).
+    pub playlist_names: PlaylistNames,
     /// The rating writes out, for the latest-wins revert (clause 11).
     pub(crate) rating_writes: Vec<RatingWrite>,
     rating_seq: u64,
@@ -1853,7 +1853,7 @@ impl App {
             albums: None,
             artist_albums: None,
             track_info: None,
-            playlist_names: None,
+            playlist_names: PlaylistNames::Unasked,
             rating_writes: Vec::new(),
             rating_seq: 0,
             search_hits: None,
@@ -4871,6 +4871,17 @@ impl App {
         self.tab = Tab::Library;
         if fresh {
             self.library_stack = Drill::new(LibraryNode::Root);
+            // A fresh root has no way back: a trail left by an earlier walk
+            // would be an orphan under it.
+            self.library.trail.clear();
+        } else if let Some(row) =
+            self.library.entries.iter().position(|e| matches!(e, Entry::Node { node: n, .. } if *n == node))
+        {
+            // The pane lists the node: drill through its own row, so the
+            // trail keeps the listing and Back restores it without asking
+            // again (library-rooms contract, clause 6).
+            self.library.state.select(Some(row));
+            self.push_trail();
         }
         self.library_stack.enter(node.clone());
         self.library.set(Vec::new());
@@ -5328,7 +5339,7 @@ impl App {
                 Vec::new()
             }
             Event::PlaylistNames { names } => {
-                self.playlist_names = Some(names);
+                self.playlist_names = names.map_or(PlaylistNames::Failed, PlaylistNames::Listed);
                 Vec::new()
             }
             Event::SearchResults { query, results } => {

@@ -14,7 +14,7 @@ use rust_i18n::t;
 
 use crate::kit::{ListView, dim, scroll_list};
 use crate::kit::theme::{legacy_conhost, th};
-use crate::tui::app::{Action, Entry, Tab};
+use crate::tui::app::Action;
 use crate::api::types::Album;
 use crate::tui::worker::LibraryNode;
 
@@ -211,29 +211,11 @@ fn open_album(gui: &mut Gui, index_on_page: usize) {
         name: album.name.clone().unwrap_or_default(),
         artist: album.artist.clone(),
     };
-    // Through the pane's own row when the pane holds this wall's albums,
-    // so the drill keeps its trail and Back restores the wall's list
-    // without asking again (library-rooms contract, clause 6); the wall's
-    // direct door when the pane holds something else (a return to the
-    // Albums nav after browsing elsewhere).
-    let on_wall = matches!(gui.app.library_stack.here(), LibraryNode::Albums | LibraryNode::Artist(_));
-    let row = gui
-        .app
-        .library
-        .entries
-        .iter()
-        .position(|e| matches!(e, Entry::Node { node: n, .. } if *n == node));
-    match row {
-        Some(row) if on_wall => {
-            gui.app.tab = Tab::Library;
-            gui.app.library.state.select(Some(row));
-            gui.forward(Action::Activate);
-        }
-        _ => {
-            let effects = gui.app.open_library_node(node, false);
-            gui.pend(effects);
-        }
-    }
+    // The App's door drills through the pane's own row when the pane lists
+    // this album, so Back restores the wall's list from the trail without
+    // asking again (library-rooms contract, clause 6).
+    let effects = gui.app.open_library_node(node, false);
+    gui.pend(effects);
 }
 
 /// The albums side of [`Gui::act`]. Returns true when the act was ours.
@@ -667,6 +649,7 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::app::{Tab};
     use crate::api::types::Album;
     use crate::config::Config;
     use crate::tui::app::{App, Effect};

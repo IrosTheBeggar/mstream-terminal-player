@@ -55,9 +55,6 @@ pub(crate) fn open(gui: &mut Gui, root: LibraryNode) {
     gui.library.view.scroll = 0;
     gui.library.view.reveal = false;
     gui.library.wall = WallState::default();
-    // A fresh root has no way back: a trail left by another room's drill
-    // would be an orphan under it.
-    gui.app.library.trail.clear();
     let effects = gui.app.open_library_node(root, true);
     gui.pend(effects);
 }

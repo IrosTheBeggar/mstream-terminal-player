@@ -289,29 +289,10 @@ impl App {
     /// every row carries its own server and resolves against it at play
     /// time ([`App::play_index`]), so a switch changes what the browser
     /// shows and nothing else (contract clause 11).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn adopt_server(
-        &mut self,
-        server: String,
-        server_id: String,
-        username: Option<String>,
-        token: Option<String>,
-        tunnel_code: Option<String>,
-        self_signed: bool,
-        last_path: Option<String>,
-        peer: Option<(String, i64)>,
-    ) -> Vec<Effect> {
+    pub(crate) fn adopt_server(&mut self, session: Session, last_path: Option<String>) -> Vec<Effect> {
         self.connected = false;
         self.connect = ConnectForm::default();
-        self.session = Session {
-            server,
-            server_id,
-            tunnel_code,
-            token,
-            username,
-            self_signed,
-            peer,
-        };
+        self.session = session;
         self.shed_server_state();
         self.path = last_path.unwrap_or_default();
         self.begin()
