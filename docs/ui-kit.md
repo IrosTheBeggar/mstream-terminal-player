@@ -196,17 +196,18 @@ turns LightBlue and the caret appears — and while focused it takes every
 key: the tips line speaks for the field alone, Enter submits, Esc gives
 the keys back to the screen. Unfocused it never steals a letter, so the
 room's single-key actions keep working around it.
-**The caret is the terminal's own cursor in the GUI player** (2026-09-23):
-`kit::input_window` windows the value exactly as `input_display` does —
-the caret's cell stays reserved — but returns the caret's column instead
-of splicing the glyph in, `Surface::caret` records it (one field per
-frame, cleared with the registries), and the frame ends with
-`Frame::set_cursor_position`; with no field focused the cursor stays
-hidden. The shell asks for a blinking bar (DECSCUSR 5) at startup and
-hands the shape back at exit and on a panic, so the terminal blinks the
-caret at the user's own rate and colour — a terminal without DECSCUSR
-keeps its own cursor shape. The wizard, the admin rooms and the web shell
-keep the drawn `▏`.
+**The caret blinks in the GUI player** (2026-09-23): the `Surface` keeps a
+blink clock — `caret_touch()` on every key and click, `caret()` answers
+the phase as a field draws (half a second on, half off, `CARET_BLINK`,
+solid from the last touch), `caret_next_flip()` lets the event loop land
+its next frame on the flip — and `kit::input_display_blink` withholds the
+`▏` in the off phase while keeping its cell, so the line never shifts.
+Drawn by the app rather than lent to the terminal's cursor on purpose: a
+terminal profile can veto a DECSCUSR blink (kitty's interval 0, WezTerm's
+rate 0, Alacritty's `Never`, Apple Terminal ignoring the escape), and a
+caret that only sometimes blinks is worse than one that always does. The
+wizard, the admin rooms and the web shell still draw the steady `▏`;
+they can adopt the clock the same way.
 
 ### Path input + completion
 Suggestions under the input, max 6 visible — the list WINDOWS around the

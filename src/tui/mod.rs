@@ -660,7 +660,6 @@ pub(crate) fn install_panic_hook() {
             return;
         }
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
-        let _ = execute!(std::io::stdout(), ratatui::crossterm::cursor::SetCursorStyle::DefaultUserShape);
         pop_window_title();
         crate::console::release_terminal();
         previous(info);

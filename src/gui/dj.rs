@@ -7,7 +7,7 @@
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent};
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Block;
 use rust_i18n::t;
@@ -1129,8 +1129,6 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let field_w = inner.width.saturating_sub(2);
     if query.is_empty() {
         put(frame, inner.x + 1, fy, &super::bar::clip(&t!("gui.dj.search_genres"), field_w as usize), dim());
-        // Typing lands here: the caret stands at the placeholder's head.
-        gui.ui.caret(Position { x: inner.x + 1, y: fy });
     } else {
         let cursor = gui.dj.filter.cursor();
         super::text_field(frame, &mut gui.ui, inner.x + 1, fy, &query, cursor, field_w, Style::default());

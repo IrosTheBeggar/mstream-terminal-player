@@ -2002,14 +2002,15 @@ a LATER secondary screen (party view), Columns retired.
 - **Widget polish — the text caret blinks ✅ 2026-09-23**: the GUI's
   eleven text fields (the filter line, the search box, the DJ keyword
   field and genre filter, the pairing code and the server form, the
-  playlist and sonic-save names, the torrent form and its picker) lend
-  their caret to the terminal's own cursor — `kit::input_window` keeps
-  the glyph's window and reports the column, `Surface::caret` carries it
-  to `Frame::set_cursor_position`, the shell asks for a blinking bar at
-  startup and hands the shape back at exit — so the caret blinks at the
-  user's terminal rate and colour with no timer of ours. Hidden while no
-  field is focused. The wizard, admin rooms and web shell keep the drawn
-  `▏`.
+  playlist and sonic-save names, the torrent form and its picker) blink
+  their caret on the kit's own clock — `Surface::caret_touch` on every key
+  and click, `Surface::caret` for the phase as a field draws,
+  `caret_next_flip` timing the loop's next frame to the flip,
+  `kit::input_display_blink` withholding the `▏` with its cell kept. A
+  first cut lent the caret to the terminal's cursor as a blinking bar
+  (DECSCUSR 5) and was replaced the same day: a terminal profile can veto
+  that blink, and the ask was a caret that always blinks. The wizard,
+  admin rooms and web shell keep the steady `▏` for now.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the

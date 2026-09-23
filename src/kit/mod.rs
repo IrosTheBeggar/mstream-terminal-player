@@ -45,6 +45,10 @@ pub const ARROW_REPEAT: Duration = Duration::from_millis(60);
 /// at the physical release — holds are invisible to it. A phantom
 /// release downgrades the capture to a SOFT one instead of ending it.
 pub const PHANTOM_RELEASE: Duration = Duration::from_millis(150);
+/// The caret's blink: half a second on, half a second off (the desktop
+/// editors' rate), counted from the last key or click so a caret that just
+/// moved is always seen.
+pub const CARET_BLINK: Duration = Duration::from_millis(500);
 /// The soft capture holds while motion stays within this many cells of
 /// the press; travelling beyond it resumes normal hover.
 pub const SOFT_RADIUS: u16 = 2;
@@ -116,11 +120,14 @@ pub struct Surface<A> {
     /// [`Surface::tip_keyed`]). On by default — the wizard and the admin
     /// rooms always name theirs; the GUI player has a setting.
     pub key_hints: bool,
-    /// Where the terminal's OWN cursor stands this frame: the caret of the
-    /// one focused text field, lent to the terminal so it blinks at the
-    /// user's rate and colour (see [`input_window`]). Rebuilt each frame
-    /// like `clicks`, and a layer drawn on top clears it with the rest.
-    pub caret: Option<Position>,
+    /// The caret's blink clock: when a field last took input (the caret
+    /// shows solid from then, the way every editor's does), and whether a
+    /// field drew a caret this frame — the shell times its next frame to
+    /// the flip. Blinking here rather than through the terminal's cursor
+    /// because a terminal profile can veto a DECSCUSR blink, and a caret
+    /// that may or may not blink is worse than one that always does.
+    caret_since: Option<Instant>,
+    caret_drawn: bool,
 }
 
 impl<A> Default for Surface<A> {
@@ -139,7 +146,8 @@ impl<A> Default for Surface<A> {
             covered: Vec::new(),
             contexts: Vec::new(),
             key_hints: true,
-            caret: None,
+            caret_since: None,
+            caret_drawn: false,
         }
     }
 }
@@ -185,14 +193,38 @@ impl<A: Clone> Surface<A> {
         self.tips.clear();
         self.bars.clear();
         self.contexts.clear();
-        self.caret = None;
+        self.caret_drawn = false;
     }
 
-    /// Lend the terminal's cursor to a text field: the caret stands at
-    /// `at` until the frame ends. One field at a time — the last
-    /// registered wins, as with clicks.
-    pub fn caret(&mut self, at: Position) {
-        self.caret = Some(at);
+    /// A field took a key or a click: the caret shows solid from now.
+    pub fn caret_touch(&mut self) {
+        self.caret_since = Some(Instant::now());
+    }
+
+    /// Whether the caret is ON at this instant — a field asks as it draws
+    /// (see [`input_display_blink`]). A caret never touched is on. Marks
+    /// the frame as one with a caret, for [`Self::caret_next_flip`].
+    pub fn caret(&mut self) -> bool {
+        self.caret_drawn = true;
+        self.caret_since.is_none_or(|since| (since.elapsed().as_millis() / CARET_BLINK.as_millis()).is_multiple_of(2))
+    }
+
+    /// How long until the drawn caret flips, if one drew this frame — the
+    /// shell shortens its poll to land the next frame ON the flip, so the
+    /// blink is crisp instead of a poll tick late.
+    pub fn caret_next_flip(&self) -> Option<Duration> {
+        if !self.caret_drawn {
+            return None;
+        }
+        let elapsed = self.caret_since.map_or(0, |since| since.elapsed().as_millis());
+        let into = elapsed % CARET_BLINK.as_millis();
+        Some(Duration::from_millis((CARET_BLINK.as_millis() - into) as u64))
+    }
+
+    /// Age the blink clock, so a test can see the other phase.
+    #[cfg(test)]
+    pub fn caret_backdate(&mut self, by: Duration) {
+        self.caret_since = Instant::now().checked_sub(by);
     }
 
     /// Register what a right click on `rect` does. The last registered
@@ -945,12 +977,19 @@ pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) -> 
 /// cell, so the windowing math is identical (found live: the rename and
 /// directory-modal carets rendered as question marks).
 pub fn input_display(value: &str, cursor: usize, width: u16) -> String {
+    input_display_blink(value, cursor, width, true)
+}
+
+/// [`input_display`] with the caret drawn or withheld — its cell stays
+/// reserved either way, so the line never shifts as it blinks. A shell
+/// asks [`Surface::caret`] for the phase.
+pub fn input_display_blink(value: &str, cursor: usize, width: u16, on: bool) -> String {
     let (caret, clip) = if crate::kit::theme::legacy_conhost() {
         ('│', '»')
     } else {
         ('▏', '…')
     };
-    input_display_with(value, cursor, width, caret, clip)
+    input_display_with(value, cursor, width, if on { caret } else { ' ' }, clip)
 }
 
 /// Pure core - unit-tested with explicit marks so the assertions hold on
@@ -958,19 +997,6 @@ pub fn input_display(value: &str, cursor: usize, width: u16) -> String {
 #[cfg(test)]
 fn input_display_with_fancy(value: &str, cursor: usize, width: u16) -> String {
     input_display_with(value, cursor, width, '▏', '…')
-}
-
-/// The input line for a field whose caret is the TERMINAL'S cursor: the
-/// same window as [`input_display`] — the caret's cell stays reserved, so
-/// the text never runs under it and a field reads the same either way —
-/// with the caret left out and its column returned instead, for
-/// [`Surface::caret`]. The terminal then draws and blinks it at the user's
-/// own rate and colour, which no drawn glyph can match.
-pub fn input_window(value: &str, cursor: usize, width: u16) -> (String, u16) {
-    let clip = if crate::kit::theme::legacy_conhost() { '»' } else { '…' };
-    let shown = input_display_with(value, cursor, width, '\0', clip);
-    let col = shown.chars().position(|c| c == '\0').unwrap_or(0);
-    (shown.chars().filter(|c| *c != '\0').collect(), col as u16)
 }
 
 pub fn input_display_with(value: &str, cursor: usize, width: u16, caret: char, clip: char) -> String {
@@ -1155,17 +1181,33 @@ mod tests {
     }
 
     #[test]
-    fn the_terminal_caret_keeps_the_glyphs_window_and_reports_its_column() {
-        assert_eq!(input_window("short", 5, 20), ("short".to_string(), 5));
-        assert_eq!(input_window("123456789", 4, 10), ("123456789".to_string(), 4));
+    fn the_caret_withheld_leaves_its_cell_so_the_line_never_shifts() {
+        assert_eq!(input_display_blink("1234", 2, 10, false), "12 34");
+        assert_eq!(input_display_blink("1234", 2, 10, true).chars().count(), 5);
         let long = "/very/long/path/that/does/not/fit/anywhere/music";
-        let (shown, col) = input_window(long, long.chars().count(), 20);
-        assert_eq!(shown.chars().count(), 19, "the caret's cell stays reserved");
-        assert!(!shown.starts_with('/') && shown.ends_with("music"), "{shown}");
-        assert_eq!(col, 19, "the caret after the text");
-        let (shown, col) = input_window(long, 0, 20);
-        assert!(shown.starts_with("/very") && !shown.ends_with('c'), "{shown}");
-        assert_eq!(col, 0);
+        let on = input_display_blink(long, 24, 20, true);
+        let off = input_display_blink(long, 24, 20, false);
+        assert_eq!((on.chars().count(), off.chars().count()), (20, 20));
+        let differ: Vec<usize> =
+            on.chars().zip(off.chars()).enumerate().filter(|(_, (a, b))| a != b).map(|(i, _)| i).collect();
+        assert_eq!(differ.len(), 1, "one cell blinks, the rest stand: {on} / {off}");
+        assert_eq!(off.chars().nth(differ[0]), Some(' '));
+    }
+
+    #[test]
+    fn the_surface_blinks_the_caret_half_a_second_at_a_time() {
+        let mut s: Surface<i32> = Surface::new();
+        assert!(s.caret_next_flip().is_none(), "no caret drawn, no flip to time");
+        s.caret_touch();
+        assert!(s.caret(), "solid right after a touch");
+        let flip = s.caret_next_flip().expect("a caret drew this frame");
+        assert!(flip <= CARET_BLINK && flip > Duration::from_millis(400), "{flip:?}");
+        s.caret_backdate(CARET_BLINK + Duration::from_millis(50));
+        assert!(!s.caret(), "off in the second half");
+        s.caret_backdate(2 * CARET_BLINK + Duration::from_millis(50));
+        assert!(s.caret(), "on again in the third");
+        s.clear_registries();
+        assert!(s.caret_next_flip().is_none(), "the frame's mark clears with the registries");
     }
 
     #[test]
