@@ -68,6 +68,9 @@ pub(crate) struct Startup {
     pub username: Option<String>,
     pub last_path: Option<String>,
     pub prefs: config::PlayerPrefs,
+    /// The play reporter's file (play-reporting contract, clause 9): owed
+    /// plays and a session left behind.
+    pub stats: Option<app::stats::StatsSnapshot>,
     /// Pairing code for the remembered server, when it is one reached through
     /// a tunnel. Without it that server cannot be dialled again.
     pub tunnel_code: Option<String>,
@@ -102,15 +105,28 @@ fn load_queue_snapshot() -> Option<app::QueueSnapshot> {
     serde_json::from_str::<app::QueueSnapshot>(&text).ok()
 }
 
+/// The play reporter's file as the config left it — `None` for no file,
+/// another shape, or one that would not parse.
+#[cfg(not(target_arch = "wasm32"))]
+fn load_stats_snapshot() -> Option<app::stats::StatsSnapshot> {
+    let text = config::load_stats_file().ok().flatten()?;
+    serde_json::from_str::<app::stats::StatsSnapshot>(&text).ok()
+}
+
 /// Keeps `queue.json` current for the shell (contract clause 39): a write
 /// 800 ms after the queue last changed, a checkpoint every ten seconds
 /// while playing, a flush on the way out — and the file gone once a queue
-/// that existed this session is cleared, or the setting turned off.
+/// that existed this session is cleared, or the setting turned off. Keeps
+/// `stats.json` beside it the same way (play-reporting contract, clause
+/// 9): the owed plays and the open session, checkpointed.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct QueueSaver {
     signature: u64,
     dirty_since: Option<std::time::Instant>,
     last_write: std::time::Instant,
+    stats_signature: u64,
+    stats_dirty_since: Option<std::time::Instant>,
+    stats_last_write: std::time::Instant,
     /// A queue existed this session: only then does an empty one delete
     /// the file — the empty queue a failed restore leaves behind must not
     /// destroy the snapshot it failed to read.
@@ -129,8 +145,55 @@ impl QueueSaver {
             signature: Self::signature(app),
             dirty_since: None,
             last_write: std::time::Instant::now(),
+            stats_signature: Self::stats_signature(app),
+            stats_dirty_since: None,
+            stats_last_write: std::time::Instant::now(),
             had_queue: !app.queue.items.is_empty(),
             enabled: app.resume_queue,
+        }
+    }
+
+    /// What a change to the reporter looks like: the owed plays and the
+    /// open session's identity.
+    fn stats_signature(app: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for owed in &app.stats.outbox {
+            owed.play.id.hash(&mut h);
+        }
+        app.stats.session.as_ref().map(|s| &s.id).hash(&mut h);
+        h.finish()
+    }
+
+    /// The reporter's file: soon after a change, and every ten seconds
+    /// while a session is open so a crash loses little of it.
+    fn tick_stats(&mut self, app: &App, now: std::time::Instant) {
+        let signature = Self::stats_signature(app);
+        if signature != self.stats_signature {
+            self.stats_signature = signature;
+            self.stats_dirty_since.get_or_insert(now);
+        }
+        let due = match self.stats_dirty_since {
+            Some(since) => now.duration_since(since) >= Self::DEBOUNCE,
+            None => app.stats.session.is_some() && now.duration_since(self.stats_last_write) >= Self::CHECKPOINT,
+        };
+        if due {
+            self.write_stats(app);
+        }
+    }
+
+    fn write_stats(&mut self, app: &App) {
+        self.stats_dirty_since = None;
+        self.stats_last_write = std::time::Instant::now();
+        match app.stats_snapshot() {
+            Some(snapshot) => {
+                if let Ok(body) = serde_json::to_string(&snapshot) {
+                    let _ = config::save_stats_file(&body);
+                }
+            }
+            None => {
+                let _ = config::delete_stats_file();
+            }
         }
     }
 
@@ -154,6 +217,7 @@ impl QueueSaver {
     /// Once per loop iteration.
     pub(crate) fn tick(&mut self, app: &App) {
         let now = std::time::Instant::now();
+        self.tick_stats(app, now);
         if !app.resume_queue {
             if self.enabled {
                 self.enabled = false;
@@ -183,6 +247,7 @@ impl QueueSaver {
 
     /// Write now — quitting, or the debounce that just elapsed.
     pub(crate) fn flush(&mut self, app: &App) {
+        self.write_stats(app);
         if !app.resume_queue {
             return;
         }
@@ -322,6 +387,7 @@ pub(crate) fn startup(
     let servers = known_servers(&config, &credentials);
     let queue = if config.player.resume_queue { load_queue_snapshot() } else { None };
     Startup {
+        stats: load_stats_snapshot(),
         server,
         token,
         username,
@@ -392,6 +458,9 @@ pub(crate) fn app_from(start: Startup) -> App {
     // After the servers, which decide which rows can come back at all.
     if let Some(snapshot) = start.queue {
         app.restore_queue(snapshot);
+    }
+    if let Some(snapshot) = start.stats {
+        app.restore_stats(snapshot);
     }
     if let Some(path) = start.last_path {
         // Pick up where the last session left off; `start` browses this.

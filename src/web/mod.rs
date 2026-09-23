@@ -135,6 +135,7 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("no window.location.origin — not running in a browser?")?;
 
     let start = Startup {
+        stats: None,
         server: Some(origin),
         token: None,
         username: None,

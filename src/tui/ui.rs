@@ -3110,6 +3110,7 @@ mod tests {
             federation_discovery: false,
             federation_browse: false,
             federation_direct: false,
+            stats: true,
         };
         // What a real ping does on the way in: the Auto-DJ rows depend on it.
         app.dj_panel.rebuild(&app.dj, None, false);

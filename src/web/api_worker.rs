@@ -123,6 +123,19 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
                 .await
         }
 
+        // The plays go through the session's client here too (one client
+        // in the browser); the shapers are the worker's.
+        ApiCmd::ReportPlays { body, ids, .. } => {
+            with_session(session, async |s| {
+                Ok(worker::plays_reported_event(ids.clone(), s.client.report_plays_async(body.clone()).await))
+            })
+            .await
+        }
+        ApiCmd::Scrobble { filepath, .. } => {
+            with_session(session, async |s| Ok(worker::scrobbled_event(&filepath, s.client.scrobble_async(&filepath).await)))
+                .await
+        }
+
         ApiCmd::DjProbe { identity, .. } => {
             with_session(session, async |s| {
                 Ok(Event::DjProbed { identity: identity.clone(), info: worker::dj_probe(&s.client).await })

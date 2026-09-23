@@ -2044,6 +2044,18 @@ a LATER secondary screen (party view), Columns retired.
   Open: the player does not report plays yet, so the lists show what the
   server counted from other clients — play sessions are the next slice
   (their own contract).
+- **Play reporting ✅ 2026-09-23** (docs/ux-contracts/play-reporting.md,
+  the webapp's play sessions as the record): one session per song start
+  folded from the engine's status — forward steps under three seconds
+  count, a pause is counted, the end of a known length is a completion —
+  posted to the plays' own servers (a peer's to its parent, with the peer
+  id and a snapshot) from an outbox that persists in `stats.json` with
+  the open session checkpointed, retried a minute after a kept batch and
+  on every connect; a server without the Stats API gets the legacy
+  thirty-second scrobble. `src/tui/app/stats.rs`, the worker's
+  `ReportPlays` / `Scrobble` and its `[stats]` lines, the queue saver
+  grown the second file. Last played and Most played now show this
+  player's own listening (`scenario_stats.py` on the rig).
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the

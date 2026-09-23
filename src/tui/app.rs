@@ -1062,6 +1062,7 @@ pub struct Message {
 // screen, and the [`Session`] it produces — lives in `session` (audit #56),
 // re-exported so every caller keeps saying `app::ConnectForm`.
 mod autodj;
+pub(crate) mod stats;
 mod track;
 pub use track::{PlaylistNames, RatingWrite};
 #[allow(unused_imports)] // the browser shell has no room yet
@@ -1744,6 +1745,9 @@ pub struct App {
     /// re-roll a shuffled pick each time, and to know whether the engine's
     /// announcement is stale without asking it.
     announced: Option<AnnouncedNext>,
+    /// Play reporting (docs/ux-contracts/play-reporting.md): the open
+    /// session, the outbox, the batch in flight.
+    pub stats: stats::Stats,
     pub now_playing: Option<Track>,
     /// Covers fetched this session, keyed by the server's art filename.
     /// `None` records both "asked, nothing there" and "asked, still
@@ -1910,6 +1914,7 @@ impl App {
             blend_skips: false,
             pause_fade: false,
             announced: None,
+            stats: stats::Stats::default(),
             now_playing: None,
             art: HashMap::new(),
             waveforms: HashMap::new(),
@@ -2155,7 +2160,14 @@ impl App {
                             ..PlayerStatus::default()
                         };
                     }
-                    AudioCmd::Stop => self.starting = None,
+                    AudioCmd::Stop => {
+                        self.starting = None;
+                        // Playback stops: the open session closes the way
+                        // the end-of-track path said, else as stopped; the
+                        // next tick posts it (play-reporting clause 5).
+                        let requested = self.stats.ending.take().unwrap_or(stats::Outcome::Stopped);
+                        self.stats_end(requested);
+                    }
                     _ => {}
                 }
                 continue;
@@ -4373,6 +4385,7 @@ impl App {
         let mut effects = self.reconcile_direct(now);
         effects.extend(self.reconcile_tunnels(now));
         effects.extend(self.probe_stall(now));
+        effects.extend(self.stats_flush_due(now));
         effects
     }
 
@@ -4770,6 +4783,9 @@ impl App {
         // Taken before the track moves into `now_playing`; the shape is
         // asked for by path, so nothing else about the track is needed.
         let filepath = item.filepath.clone();
+        // The play's session (play-reporting contract, clause 1) — the one
+        // before it closes as the end-of-track path said, else as a skip.
+        self.stats_begin(&item);
         self.remember_played(&item.track);
         self.now_playing = Some(item.track);
         // Every Play wipes the engine's pending next (play_source clears
@@ -5077,7 +5093,10 @@ impl App {
                     }
                 }
                 self.status = status;
-                Vec::new()
+                // The session folds every status of the track it is on
+                // (play-reporting contract, clauses 2–4).
+                let status = self.status.clone();
+                self.stats_tick(&status)
             }
             Event::TrackEnded { source } => {
                 // The end of a track we are no longer on. Advancing on it
@@ -5085,6 +5104,9 @@ impl App {
                 if !self.is_current_source(&source) {
                     return Vec::new();
                 }
+                // The engine ran out of it: a completed play, whichever
+                // Play or Stop follows (play-reporting contract, clause 5).
+                self.stats.ending = Some(stats::Outcome::Completed);
                 self.skip(false)
             }
             Event::HandedOver { from, to } => {
@@ -5110,6 +5132,11 @@ impl App {
                     Some(index) => {
                         let track = self.queue.items[index].track.clone();
                         self.queue.start(index);
+                        // The blend ran the old track out: its play is
+                        // completed, and the adopted row's session opens.
+                        self.stats.ending = Some(stats::Outcome::Completed);
+                        let adopted = self.queue.items[index].clone();
+                        self.stats_begin(&adopted);
                         self.remember_played(&track);
                         self.now_playing = Some(track);
                         // Spent; the refresh at the end of this dispatch
@@ -5161,6 +5188,9 @@ impl App {
                 // a wait with nothing coming would discard every status after
                 // it. Whatever we move to next sets its own.
                 self.starting = None;
+                // A play that failed mid-way is stopped, not skipped; one
+                // that never played is too short to post.
+                self.stats.ending = Some(stats::Outcome::Stopped);
                 // One bad file used to end the listening session: the message
                 // appeared and the queue simply stopped. Say which track, and
                 // carry on to the next.
@@ -5172,7 +5202,22 @@ impl App {
             event @ (Event::Connected { .. }
             | Event::ServersDiscovered(_)
             | Event::NeedsLogin { .. }
-            | Event::Unauthorized) => self.consume_session(event),
+            | Event::Unauthorized) => {
+                // A connect is when owed plays can go out again
+                // (play-reporting contract, clause 8).
+                let connected = matches!(event, Event::Connected { .. });
+                let effects = self.consume_session(event);
+                if connected {
+                    self.stats.retry_at = None;
+                    self.stats.flush_wanted = true;
+                }
+                effects
+            }
+            Event::PlaysReported { ids, outcome } => {
+                self.stats_reported(ids, outcome);
+                Vec::new()
+            }
+            Event::Scrobbled => Vec::new(),
             Event::Listing(listing) => {
                 let path = listing.path.trim_matches('/');
                 // A reply for a folder we have since left. Taking it would put

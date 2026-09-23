@@ -856,6 +856,35 @@ pub fn save_queue_file(body: &str) -> Result<(), String> {
     write_atomic(&queue_path()?, body, false)
 }
 
+/// `stats.json` — the play reporter's outbox and its checkpointed session
+/// (play-reporting contract, clause 9), beside the queue's file and as
+/// disposable: a corrupt file is ignored, never repaired.
+pub fn stats_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("stats.json"))
+}
+
+pub fn load_stats_file() -> Result<Option<String>, String> {
+    let path = stats_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("could not read {}: {e}", path.display())),
+    }
+}
+
+pub fn save_stats_file(body: &str) -> Result<(), String> {
+    write_atomic(&stats_path()?, body, false)
+}
+
+pub fn delete_stats_file() -> Result<(), String> {
+    let path = stats_path()?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("could not remove {}: {e}", path.display())),
+    }
+}
+
 /// Drop the saved queue: a cleared queue must not come back on the next
 /// launch, and neither may one the setting was turned off for.
 pub fn delete_queue_file() -> Result<(), String> {

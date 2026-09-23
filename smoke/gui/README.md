@@ -81,6 +81,9 @@ url = "http://127.0.0.1:3041"
   facts, Add to playlist through New playlist says "Added to Rig mix" and
   the Playlists room lists it, and the queue header's `clear` empties a
   queued folder.
+- `stats` — play reporting (play-reporting contract): one row queued and
+  played past thirty seconds, then skipped; the `[stats]` log line says the
+  play was posted, and Last played and Most played list the track.
 - `dj` — Auto DJ on the rig (auto-dj contract, slice A5): one row queued
   with `a`, the nav's `Auto DJ` row under TOOLS, the room off with the probe's sonic
   reason (the rig has no discovery data), Start — the note names the server,

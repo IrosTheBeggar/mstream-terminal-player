@@ -139,9 +139,9 @@ matches nothing keeps the bar contract's rule (the way back is one key).
     clause 26), and their rows go nowhere.
 24. **What counts as a play** is the server's: the webapp's play sessions
     (6.27) and the legacy 30-second scrobble write the same stats. This
-    player reports neither yet, so until it does the lists show the
-    listening the server has counted from other clients — a slice of its
-    own (play sessions from the shared App, its own contract).
+    player reports play sessions since 2026-09-23 (its own contract:
+    docs/ux-contracts/play-reporting.md), so what is played here counts
+    here too.
 
 ## Wording
 
@@ -211,4 +211,5 @@ and no strip, and hide for a peer.
   box is not ported (the fixed hundred, as Recent); the labels shorten to
   the nav column's twelve cells; both hide for a peer, whose guest has no
   play counts on the peer. The reporting the lists feed on — a play
-  session posted from the player — is not here yet (clause 24).
+  session posted from the player — landed the same day (clause 24,
+  docs/ux-contracts/play-reporting.md).

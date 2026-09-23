@@ -69,6 +69,7 @@ fn connected_app() -> App {
         federation_discovery: false,
         federation_browse: false,
         federation_direct: false,
+        stats: true,
     };
     // What a real ping does on the way in: the Auto-DJ rows depend on it.
     app.dj_panel.rebuild(&app.dj, None, false);
@@ -6617,4 +6618,197 @@ fn the_sources_chooser_keeps_one_library_on() {
     assert!(effects.is_empty());
     assert_eq!(app.dj_sources_off(), vec!["Music"], "the last source stays on");
     assert!(app.message.as_ref().unwrap().text.contains("At least one source"));
+}
+
+// ── Play reporting (docs/ux-contracts/play-reporting.md) ──────────────────
+
+fn stats_app() -> App {
+    let mut app = connected_app();
+    app.session.server = "http://host:3000".into();
+    app.session.server_id = "http://host:3000".into();
+    app
+}
+
+fn status_at(url: &str, position: f64, paused: bool) -> Event {
+    Event::Status(PlayerStatus { playing: true, paused, position, duration: 200.0, volume: 1.0, source: url.to_string() })
+}
+
+/// The batch a tick sent, if any: its body, its reach and its ids.
+fn reported(effects: &[Effect]) -> Option<(serde_json::Value, Reach, Vec<String>)> {
+    effects.iter().find_map(|e| match e {
+        Effect::Api(ApiCmd::ReportPlays { reach, body, ids }) => Some((body.clone(), reach.clone(), ids.clone())),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_play_that_runs_out_is_reported_completed_with_the_time_listened() {
+    let mut app = stats_app();
+    let mut first = item("a.mp3");
+    first.track.metadata.duration = Some(200.0);
+    app.queue.replace(vec![first, item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    for p in 0..=12 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    let effects = app.apply_event(ended(&effects));
+    assert!(matches!(effects.first(), Some(Effect::Audio(AudioCmd::Play { .. }))), "the queue advances");
+    let effects = app.tick();
+    let (body, reach, ids) = reported(&effects).expect("the finished play goes out on the next tick");
+    assert_eq!(reach.base, "http://host:3000");
+    assert_eq!(ids.len(), 1);
+    let play = &body["plays"][0];
+    assert_eq!(play["filePath"], "a.mp3");
+    assert_eq!(play["outcome"], "completed");
+    assert_eq!(play["playedMs"], 12_000);
+    assert_eq!(play["durationMs"], 200_000);
+    assert_eq!(play["source"], "manual");
+    assert_eq!(body["client"]["name"], "mstream-terminal-player");
+    assert_eq!(app.stats.session.as_ref().map(|s| s.file_path.as_str()), Some("b.mp3"), "the next track's session is open");
+    assert!(reported(&app.tick()).is_none(), "one batch in flight at a time");
+}
+
+#[test]
+fn a_skip_is_reported_skipped_a_seek_adds_no_time_and_a_pause_is_counted() {
+    let mut app = stats_app();
+    app.queue.replace(vec![item("a.mp3"), item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    for p in [0.0, 1.0, 2.0] {
+        app.apply_event(status_at(&url, p, false));
+    }
+    app.apply_event(status_at(&url, 2.0, true)); // paused
+    app.apply_event(status_at(&url, 2.0, true));
+    app.apply_event(status_at(&url, 2.0, false)); // resumed
+    app.apply_event(status_at(&url, 50.0, false)); // a seek: adds nothing
+    app.apply_event(status_at(&url, 51.0, false));
+    app.apply_event(status_at(&url, 52.0, false));
+    app.skip(true);
+    let (body, ..) = reported(&app.tick()).expect("the skipped play goes out");
+    let play = &body["plays"][0];
+    assert_eq!(play["outcome"], "skipped");
+    assert_eq!(play["playedMs"], 4_000, "two seconds before the pause, two after the seek");
+    assert_eq!(play["pauseCount"], 1);
+}
+
+#[test]
+fn a_session_under_a_second_is_never_posted() {
+    let mut app = stats_app();
+    app.queue.replace(vec![item("a.mp3"), item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    app.apply_event(status_at(&url, 0.0, false));
+    app.apply_event(status_at(&url, 0.5, false));
+    app.skip(true);
+    assert!(reported(&app.tick()).is_none());
+    assert!(app.stats.outbox.is_empty());
+}
+
+#[test]
+fn a_kept_batch_waits_a_minute_and_a_settled_or_dropped_one_leaves_the_outbox() {
+    use crate::tui::worker::ReportOutcome;
+    let mut app = stats_app();
+    app.queue.replace(vec![item("a.mp3"), item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    for p in 0..=5 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    let effects = app.skip(true);
+    let (_, _, ids) = reported(&app.tick()).expect("posted");
+    app.apply_event(Event::PlaysReported { ids: ids.clone(), outcome: ReportOutcome::Kept("offline".into()) });
+    assert_eq!(app.stats.outbox.len(), 1, "kept");
+    let now = crate::clock::Instant::now();
+    assert!(reported(&app.tick_at(now)).is_none(), "not before the minute");
+    let (_, _, again) = reported(&app.tick_at(now + std::time::Duration::from_secs(61))).expect("the minute is up");
+    assert_eq!(again, ids);
+    app.apply_event(Event::PlaysReported { ids: ids.clone(), outcome: ReportOutcome::Settled(ids.clone()) });
+    assert!(app.stats.outbox.is_empty(), "settled");
+
+    // The second track, dropped by the server: it leaves too.
+    let url = played_url(&effects);
+    for p in 0..=5 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    // The last row: the skip stops playback, and the Stop the app sends
+    // is what closes the session (the hook the action funnel runs).
+    let effects = app.skip(true);
+    app.note_pending(&effects);
+    let (_, _, ids) = reported(&app.tick()).expect("posted");
+    app.apply_event(Event::PlaysReported { ids, outcome: ReportOutcome::Dropped("malformed".into()) });
+    assert!(app.stats.outbox.is_empty(), "dropped");
+}
+
+#[test]
+fn a_peer_rows_play_goes_to_the_parent_with_the_peer_id_and_a_snapshot() {
+    let mut app = stats_app();
+    let mut row = item("music/peer.mp3");
+    row.origin.peer = Some(3);
+    row.track.metadata.title = Some("Peer song".into());
+    row.track.metadata.artist = Some("Them".into());
+    app.queue.replace(vec![row, item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    for p in 0..=5 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    app.skip(true);
+    let (body, reach, _) = reported(&app.tick()).expect("posted to the parent");
+    assert_eq!(reach.peer, None, "never through the peer proxy");
+    assert_eq!(reach.base, "http://host:3000");
+    let play = &body["plays"][0];
+    assert_eq!(play["peerId"], 3);
+    assert_eq!(play["track"]["title"], "Peer song");
+    assert_eq!(play["track"]["artist"], "Them");
+}
+
+#[test]
+fn a_server_without_the_stats_api_gets_one_legacy_scrobble_at_thirty_seconds_and_no_batch() {
+    let mut app = stats_app();
+    app.capabilities.stats = false;
+    app.queue.replace(vec![item("a.mp3"), item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    let mut scrobbles = 0;
+    for p in 0..=35 {
+        let effects = app.apply_event(status_at(&url, f64::from(p), false));
+        scrobbles += effects.iter().filter(|e| matches!(e, Effect::Api(ApiCmd::Scrobble { .. }))).count();
+        if p < 30 {
+            assert_eq!(scrobbles, 0, "not before thirty seconds");
+        }
+    }
+    assert_eq!(scrobbles, 1, "once");
+    app.skip(true);
+    assert!(reported(&app.tick()).is_none(), "no batch for a server without the Stats API");
+    assert!(app.stats.outbox.is_empty());
+}
+
+#[test]
+fn the_outbox_and_a_checkpointed_session_survive_a_restart() {
+    let mut app = stats_app();
+    app.queue.replace(vec![item("a.mp3"), item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    for p in 0..=5 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    let effects = app.skip(true); // a's play is owed; b's session opens
+    let url = played_url(&effects);
+    for p in 0..=7 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    let snapshot = app.stats_snapshot().expect("something to keep");
+    assert_eq!(snapshot.outbox.len(), 1);
+    assert!(snapshot.inflight.is_some());
+    let text = serde_json::to_string(&snapshot).unwrap();
+    let back: super::stats::StatsSnapshot = serde_json::from_str(&text).unwrap();
+    let mut next = stats_app();
+    next.restore_stats(back);
+    assert_eq!(next.stats.instance_id, app.stats.instance_id, "one id per install");
+    assert_eq!(next.stats.outbox.len(), 2, "the owed play and the session left behind");
+    let recovered = &next.stats.outbox[1].play;
+    assert_eq!((recovered.outcome, recovered.played_ms), (super::stats::Outcome::Stopped, 7_000));
+    let (body, ..) = reported(&next.tick()).expect("owed plays go out on the first tick");
+    assert_eq!(body["plays"].as_array().unwrap().len(), 2);
 }

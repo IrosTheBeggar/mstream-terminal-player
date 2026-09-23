@@ -66,8 +66,29 @@ pub enum AudioCmd {
     Shutdown,
 }
 
+/// How a batch of plays fared, as the App settles its outbox (play-reporting
+/// contract, clause 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportOutcome {
+    /// The ids the server named — accepted, duplicate or rejected — leave
+    /// the outbox.
+    Settled(Vec<String>),
+    /// The whole batch leaves: the server called it malformed, has no
+    /// route for it, or will never take it from this caller.
+    Dropped(String),
+    /// The batch stays for the next try: no network, a server error, an
+    /// expired token.
+    Kept(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApiCmd {
+    /// A batch of finished plays for the server `reach` names — a row's
+    /// own, or a peer's parent (play-reporting contract, clause 8).
+    ReportPlays { reach: crate::tui::app::Reach, body: serde_json::Value, ids: Vec<String> },
+    /// The legacy scrobble, thirty seconds in, for a server without the
+    /// Stats API (clause 10).
+    Scrobble { reach: crate::tui::app::Reach, filepath: String },
     /// Use an existing token (or none, for public-mode servers).
     /// `self_signed` trusts the server's own TLS certificate — carried per
     /// command because the client is built here, from the one entry that
@@ -214,6 +235,8 @@ impl ApiCmd {
             | ApiCmd::PlaylistNames { reach } => reach.as_ref(),
             // The DJ's turns go to ITS server (auto-dj contract, clause 19).
             ApiCmd::AutoDj(request) | ApiCmd::AutoDjSample { request, .. } => request.reach.as_ref(),
+            // A play goes to its row's server, a peer's to the parent.
+            ApiCmd::ReportPlays { reach, .. } | ApiCmd::Scrobble { reach, .. } => Some(reach),
             // Its reach is the parent's and its arm builds the client itself.
             ApiCmd::DirectAccess { .. }
             | ApiCmd::Connect { .. }
@@ -465,6 +488,11 @@ pub enum Event {
     },
     /// What the DJ's server offers; `None` when it could not be asked.
     DjProbed { identity: String, info: Option<DjServerInfo> },
+    /// The server's word on a batch of plays (play-reporting contract,
+    /// clause 8): which ids it settled, or why the batch is dropped or kept.
+    PlaysReported { ids: Vec<String>, outcome: ReportOutcome },
+    /// The legacy thirty-second scrobble went out (clause 10); only logged.
+    Scrobbled,
     /// What the current Auto-DJ settings produce, for the panel. Carries the
     /// sonic report when there was one — the pool size is the number that
     /// makes the tightness slider tunable.
@@ -1157,6 +1185,14 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
             crate::api::wait(async { Ok::<_, ApiError>(dj_probe(c).await) })
                 .map(|info| Event::DjProbed { identity, info })
         }
+        // Neither report fails as an error: the App settles its outbox on
+        // the answer, and a failed scrobble is only logged.
+        ApiCmd::ReportPlays { body, ids, .. } => {
+            Ok(plays_reported_event(ids, crate::api::wait(c.report_plays_async(body))))
+        }
+        ApiCmd::Scrobble { filepath, .. } => {
+            Ok(scrobbled_event(&filepath, crate::api::wait(c.scrobble_async(&filepath))))
+        }
         // The track verbs and the genres answer through the shapers both
         // workers share; their words live there.
         ApiCmd::RateSong { filepath, rating, seq, .. } => {
@@ -1612,6 +1648,66 @@ impl Picked {
 /// where a filter that quietly does nothing would otherwise be
 /// indistinguishable from one that works; the browser build has none. The
 /// App's DJ and track modules log through here too.
+/// The server's word on a batch of plays, as the App settles it
+/// (play-reporting contract, clause 8): a batch the server calls malformed,
+/// has no route for, or will never take from this caller is dropped; a
+/// network failure, a server error or an expired token keeps it for the
+/// next try. Every outcome is a `[stats]` line (clause 12).
+pub(crate) fn plays_reported_event(
+    ids: Vec<String>,
+    result: Result<crate::api::types::PlaysAnswer, ApiError>,
+) -> Event {
+    let outcome = match result {
+        Ok(answer) => {
+            let mut settled: Vec<String> = answer.accepted.clone();
+            settled.extend(answer.duplicates.iter().cloned());
+            settled.extend(answer.rejected.iter().map(|r| r.id.clone()));
+            stats_log(format!(
+                "[stats] {} play(s) posted: {} accepted, {} already known, {} rejected",
+                ids.len(),
+                answer.accepted.len(),
+                answer.duplicates.len(),
+                answer.rejected.len()
+            ));
+            ReportOutcome::Settled(settled)
+        }
+        Err(ApiError::Server { status: 400, message }) => {
+            stats_log(format!("[stats] the server refused a batch of {} play(s) as malformed; dropped: {message}", ids.len()));
+            ReportOutcome::Dropped(message)
+        }
+        Err(ApiError::NotFound(why)) => {
+            stats_log(format!("[stats] the server has no Stats API; {} play(s) dropped: {why}", ids.len()));
+            ReportOutcome::Dropped(why)
+        }
+        Err(ApiError::Forbidden(why)) => {
+            stats_log(format!("[stats] the server takes no plays from this caller; {} dropped: {why}", ids.len()));
+            ReportOutcome::Dropped(why)
+        }
+        Err(e) => {
+            let why = e.to_string();
+            stats_log(format!("[stats] {} play(s) kept for the next try: {why}", ids.len()));
+            ReportOutcome::Kept(why)
+        }
+    };
+    Event::PlaysReported { ids, outcome }
+}
+
+/// The legacy scrobble's answer: logged, never shown (clause 10).
+pub(crate) fn scrobbled_event(filepath: &str, result: Result<(), ApiError>) -> Event {
+    if let Err(e) = &result {
+        stats_log(format!("[stats] the thirty-second scrobble for {filepath} failed: {e}"));
+    }
+    Event::Scrobbled
+}
+
+/// The play reporter's own log line (play-reporting contract, clause 12).
+pub(crate) fn stats_log(line: String) {
+    #[cfg(not(target_arch = "wasm32"))]
+    tracing::info!("{line}");
+    #[cfg(target_arch = "wasm32")]
+    let _ = line;
+}
+
 pub(crate) fn dj_log(line: String) {
     #[cfg(not(target_arch = "wasm32"))]
     tracing::info!("{line}");

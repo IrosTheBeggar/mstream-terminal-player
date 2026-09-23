@@ -106,6 +106,11 @@ pub struct Ping {
     /// cooperates is answered per peer by the access route.
     #[serde(rename = "federationDirect")]
     pub federation_direct: bool,
+    /// The Stats API's version (mStream 6.27): present when the server
+    /// takes play sessions at `POST /api/v1/stats/plays`; absent on an
+    /// older one, which counts the legacy thirty-second scrobble instead
+    /// (play-reporting contract, clause 10).
+    pub stats: Option<u32>,
 }
 
 /// `GET /api/` — the layered payload (mStream #932): server-wide `features`
@@ -137,6 +142,8 @@ pub struct LayeredFeatures {
     pub discovery_ready: Option<bool>,
     #[serde(rename = "discoveryP2p")]
     pub discovery_p2p: bool,
+    /// The Stats API's version, as the ping carries it.
+    pub stats: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -170,6 +177,7 @@ impl From<LayeredInfo> for Ping {
             federation_discovery: info.user.federation_discovery,
             federation_browse: info.user.federation_browse,
             federation_direct: info.user.federation_direct,
+            stats: info.features.stats,
         }
     }
 }
@@ -257,6 +265,8 @@ pub struct Capabilities {
     pub federation_browse: bool,
     /// The parent offers direct access to its peers (the access route).
     pub federation_direct: bool,
+    /// The server takes play sessions (play-reporting contract, clause 10).
+    pub stats: bool,
 }
 
 impl From<&Ping> for Capabilities {
@@ -268,8 +278,27 @@ impl From<&Ping> for Capabilities {
             federation_discovery: ping.federation_discovery,
             federation_browse: ping.federation_browse,
             federation_direct: ping.federation_direct,
+            stats: ping.stats.is_some(),
         }
     }
+}
+
+/// `POST /api/v1/stats/plays` — the server's word on a batch: every id it
+/// names is settled, whichever list it is on (a rejection means "drop it",
+/// by contract).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct PlaysAnswer {
+    pub accepted: Vec<String>,
+    pub duplicates: Vec<String>,
+    pub rejected: Vec<RejectedPlay>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct RejectedPlay {
+    pub id: String,
+    pub reason: String,
 }
 
 impl Capabilities {
@@ -1542,6 +1571,7 @@ mod tests {
         let ping = Ping::from(info);
         assert_eq!(ping.vpaths, vec!["demo".to_string()]);
         assert!(ping.federation_browse && ping.federation_direct && !ping.federation_discovery);
+        assert_eq!(ping.stats, Some(2), "the Stats API's version rides `features`");
         assert!(ping.discovery && ping.discovery_path && !ping.discovery_p2p);
         assert!(ping.no_upload && !ping.no_file_modify);
         assert_eq!(ping.transcode.as_ref().and_then(|t| t.default_codec.clone()).as_deref(), Some("opus"));
@@ -1665,6 +1695,7 @@ mod tests {
                 federation_discovery: false,
                 federation_browse: false,
                 federation_direct: false,
+                stats: false,
             }
         );
         assert_eq!(caps.enabled_names(), vec!["similarity", "sonic journey"]);

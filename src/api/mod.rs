@@ -952,6 +952,24 @@ impl Client {
         self.post("api/v1/db/stats/most-played", serde_json::json!({ "limit": limit })).await
     }
 
+    /// Report a batch of finished plays (play-reporting contract, clause
+    /// 8): the Stats API's write side. A caller with no account there — a
+    /// federation key, a guest — is refused with 403.
+    pub async fn report_plays_async(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<crate::api::types::PlaysAnswer, ApiError> {
+        self.post("api/v1/stats/plays", body).await
+    }
+
+    /// The legacy thirty-second scrobble, for a server without the Stats
+    /// API (clause 10): one play of `filepath`, counted by decree.
+    pub async fn scrobble_async(&self, filepath: &str) -> Result<(), ApiError> {
+        let _: serde_json::Value =
+            self.post("api/v1/lastfm/scrobble-by-filepath", serde_json::json!({ "filePath": filepath })).await?;
+        Ok(())
+    }
+
     /// Metadata for one track — used to fill the engine's duration hint
     /// without making it probe the remote stream.
     pub async fn metadata_async(&self, filepath: &str) -> Result<Track, ApiError> {
