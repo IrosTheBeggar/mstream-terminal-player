@@ -2733,25 +2733,29 @@ mod tests {
     }
 
     #[test]
-    fn the_transport_is_one_group_with_a_filled_play_and_heavy_frames() {
-        // The "Player bar options" canvas, F: repeat leads the group beside
-        // prev, play is the kit's fat fill in the accent, prev and next wear
-        // the thick frame in bold, the toggles keep the rounded one.
+    fn auto_dj_holds_the_edge_and_the_transport_is_one_group_with_a_thick_play() {
+        // The "Player bar options" canvas, H: auto-dj framed at the left
+        // edge; then prev · play · next centred — play in the thick frame,
+        // prev and next in the rounded one, all bold — and shuffle and
+        // repeat worn bare after them.
         let mut gui = browsing_gui();
         let buf = draw_buffer(&mut gui);
         let area = *buf.area();
         let y = bar::top(area, false) + 2; // the controls' middle row
-        let line: String = (0..area.width).map(|x| buf[(x, y)].symbol()).collect();
+        let line = rows_of(&buf, y);
         let at = |needle: &str| line.char_indices().position(|(i, _)| line[i..].starts_with(needle)).map(|p| p as u16);
-        let (repeat, prev, play, next, shuffle) = (at("│ ↻ │"), at("┃ ◂◂ ┃"), at("▮▮"), at("┃ ▸▸ ┃"), at("│ ⇄ │"));
-        assert!(repeat < prev && prev < play && play < next && next < shuffle, "repeat, prev, play, next, shuffle: {line:?}");
+        let (dj, prev, play, next, shuffle, repeat) =
+            (at("│ auto-dj │"), at("│ ◂◂ │"), at("┃ ▮▮ ┃"), at("│ ▸▸ │"), at("⇄"), at("↻"));
+        assert_eq!(dj, Some(1), "auto-dj at the left edge: {line:?}");
+        assert!(prev < play && play < next && next < shuffle && shuffle < repeat, "prev, play, next, shuffle, repeat: {line:?}");
         let play = play.unwrap();
-        assert_eq!(buf[(play, y)].bg, th().accent, "play is the filled slab");
-        assert_eq!(buf[(play, y)].fg, th().on_accent);
-        assert_eq!(buf[(play - 2, y - 1)].symbol(), "▗", "the pill's soft corner above: {:?}", rows_of(&buf, y - 1));
-        // The labels carry the weight; the frames around them do not.
+        assert_eq!(buf[(play, y)].fg, th().accent, "play's frame is the accent");
+        assert!(buf[(play + 2, y)].modifier.contains(Modifier::BOLD), "and its glyph bold");
         assert!(buf[(prev.unwrap() + 2, y)].modifier.contains(Modifier::BOLD), "prev's glyph is bold");
-        assert!(!buf[(shuffle.unwrap() + 2, y)].modifier.contains(Modifier::BOLD), "shuffle off is not");
+        let shuffle = shuffle.unwrap();
+        assert_eq!(buf[(shuffle - 1, y)].symbol(), " ", "shuffle wears no frame: {line:?}");
+        assert_eq!(buf[(shuffle, y - 1)].symbol(), " ", "nothing above it either");
+        assert!(!buf[(shuffle, y)].modifier.contains(Modifier::BOLD), "off, it is dim");
     }
 
     fn rows_of(buf: &ratatui::buffer::Buffer, y: u16) -> String {

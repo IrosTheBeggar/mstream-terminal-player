@@ -130,21 +130,19 @@ pub(super) fn volume_cells(volume: f32) -> usize {
 
 /// What a tall control is, color-wise.
 enum TallKind {
-    /// The play/pause slot: the kit's fat fill in the ACCENT — the one
-    /// primary action on the screen (the "Player bar options" canvas, F).
+    /// The play/pause slot: the THICK frame in the ACCENT, always BOLD —
+    /// the one primary action (the "Player bar options" canvas, H).
     Primary,
-    /// Prev/next: a THICK frame in the text colour, always BOLD — the
-    /// transport stands out from the toggles beside it.
+    /// Prev/next: the rounded frame in the text colour, always BOLD.
     Strong,
     /// A state-wearing toggle in the rounded frame: DIM off, OK green on
-    /// (the toggle-card colors in button form).
+    /// (the toggle-card colors in button form) — auto-dj, at the left edge.
     Toggle(bool),
 }
 
 /// The bar's 3-row control at ONE space of label padding — the bar's dense
-/// form, so six controls, the volume and the card share a hundred columns.
-/// Every kind has the same footprint for the same label, so the group's
-/// width is one sum. Hover brightens the control whole.
+/// form, so the controls, the volume and the card share a hundred columns.
+/// Hover brightens the control whole.
 fn tall_compact(
     frame: &mut Frame,
     s: &mut Surface<Act>,
@@ -157,14 +155,14 @@ fn tall_compact(
     let at = Rect { x, y, width: u16::MAX, height: 3 };
     match kind {
         TallKind::Primary => {
-            let tone = |hover: bool| if hover { th().bright } else { th().accent };
-            crate::kit::tall_fill(frame, s, at, label, 1, tone, Some(act)).width
-        }
-        TallKind::Strong => {
-            let tone = |hover: bool| (if hover { th().bright } else { th().text }, true);
+            let tone = |hover: bool| (if hover { th().bright } else { th().accent }, true);
             // CP437 has the double-line box, not the heavy one.
             let border = if legacy_conhost() { BorderType::Double } else { BorderType::Thick };
             crate::kit::tall_frame_bordered(frame, s, at, label, 1, border, tone, Some(act)).width
+        }
+        TallKind::Strong => {
+            let tone = |hover: bool| (if hover { th().bright } else { th().text }, true);
+            crate::kit::tall_frame(frame, s, at, label, 1, tone, Some(act)).width
         }
         TallKind::Toggle(on) => {
             let tone = |hover: bool| match (on, hover) {
@@ -175,6 +173,23 @@ fn tall_compact(
             crate::kit::tall_frame(frame, s, at, label, 1, tone, Some(act)).width
         }
     }
+}
+
+/// A toggle worn bare: the glyph alone on the controls' middle row, no
+/// frame — DIM off, OK green on, BRIGHT under the pointer. Its click target
+/// is the frames' height and one space either side, so it is no harder to
+/// hit than its framed neighbours. Returns its width.
+fn bare_toggle(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, label: &str, on: bool, act: Act) -> u16 {
+    let width = label.chars().count() as u16 + 2;
+    let rect = Rect { x, y, width, height: 3 };
+    let style = match (on, s.hovers(rect)) {
+        (_, true) => bright_bold(),
+        (true, false) => Style::default().fg(th().ok).add_modifier(Modifier::BOLD),
+        (false, false) => dim(),
+    };
+    put(frame, x + 1, y + 1, label, style);
+    s.click(rect, act);
+    width
 }
 
 /// The empty cover slot: a DIM rounded frame holding the cells real pixels
@@ -340,10 +355,10 @@ fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &Ba
     }
 }
 
-/// The rule is the seek bar; beneath it one centred group — repeat, then
-/// the transport, then shuffle and auto-dj — in the span before the card,
-/// and the bottom row: the volume, then the screen's note, then the card's
-/// last line.
+/// The rule is the seek bar; beneath it auto-dj at the left edge and one
+/// centred group — the framed transport, then shuffle and repeat worn bare
+/// — in the span before the card, and the bottom row: the volume, then the
+/// screen's note, then the card's last line.
 fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, v: &BarView) {
     let line = top;
     match v.now {
@@ -361,27 +376,28 @@ fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, 
         None => gold_rule(frame, line, area.width),
     }
 
-    // The tall controls, one compact control each, as one group: repeat
-    // leads beside prev, the fat-filled play in the middle, shuffle and
-    // auto-dj after next. The group is centred in the span before the
-    // card, so it holds the middle at any width.
+    // Auto DJ stands at the left edge in its frame; the rest is one group
+    // — prev, play, next framed, shuffle and repeat bare — centred in the
+    // span between it and the card, so the group holds the middle at any
+    // width.
     let y = top + 1;
     let legacy = legacy_conhost();
     let shuffle_word = t!("gui.shuffle_word").to_string();
     let repeat_word = t!("gui.repeat_word").to_string();
     let (shuffle, repeat) = if legacy { (shuffle_word.as_str(), repeat_word.as_str()) } else { ("⇄", "↻") };
+    let dj_w = tall_compact(frame, s, 1, y, "auto-dj", TallKind::Toggle(v.autodj), Act::AutoDj);
     let (prev, play, next) = play_glyphs(v.paused);
-    let group = [repeat, prev, play, next, shuffle, "auto-dj"];
-    let group_w: u16 = group.iter().map(|l| l.chars().count() as u16 + 4).sum::<u16>() + (group.len() as u16 - 1);
-    let free_from = 1;
+    let framed: u16 = [prev, play, next].iter().map(|l| l.chars().count() as u16 + 4).sum();
+    let bare: u16 = [shuffle, repeat].iter().map(|l| l.chars().count() as u16 + 2).sum();
+    let group_w = framed + bare + 4;
+    let free_from = 1 + dj_w + 1;
     let free_to = card_x(area).saturating_sub(1);
     let mut x = free_from + free_to.saturating_sub(free_from).saturating_sub(group_w) / 2;
-    x += tall_compact(frame, s, x, y, repeat, TallKind::Toggle(v.repeat), Act::Repeat) + 1;
     x += tall_compact(frame, s, x, y, prev, TallKind::Strong, Act::Prev) + 1;
     x += tall_compact(frame, s, x, y, play, TallKind::Primary, Act::PlayPause) + 1;
     x += tall_compact(frame, s, x, y, next, TallKind::Strong, Act::Next) + 1;
-    x += tall_compact(frame, s, x, y, shuffle, TallKind::Toggle(v.shuffle), Act::Shuffle) + 1;
-    tall_compact(frame, s, x, y, "auto-dj", TallKind::Toggle(v.autodj), Act::AutoDj);
+    x += bare_toggle(frame, s, x, y, shuffle, v.shuffle, Act::Shuffle) + 1;
+    bare_toggle(frame, s, x, y, repeat, v.repeat, Act::Repeat);
     draw_volume(frame, s, 1, top + 4, v.volume);
 
     draw_card(frame, s, area, y, v);

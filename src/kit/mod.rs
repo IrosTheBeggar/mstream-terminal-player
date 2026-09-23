@@ -462,48 +462,6 @@ pub fn tall_frame_bordered<A: Clone>(
     rect
 }
 
-/// The fat fill — the kit's high-impact button, for the one primary action
-/// on a screen: a filled slab with quarter-cell soft corners in the button
-/// colour and the label in the on-accent colour, standing two rows tall in
-/// the middle of the control's three, the same footprint as a
-/// [`tall_frame`] with the same `pad`. `tone` picks the colour from
-/// whether the pointer is in it. Legacy conhost has no quarter blocks, so
-/// its corners are square.
-pub fn tall_fill<A: Clone>(
-    frame: &mut Frame,
-    s: &mut Surface<A>,
-    at: Rect,
-    label: &str,
-    pad: usize,
-    tone: impl Fn(bool) -> Color,
-    act: Option<A>,
-) -> Rect {
-    let text = format!("{:pad$}{label}{:pad$}", "", "");
-    let width = (text.chars().count() as u16 + 2).min(at.width);
-    let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
-    let hovered = act.is_some() && s.hovers(rect);
-    let color = tone(hovered);
-    let w = width as usize;
-    let (top, bottom) = if theme::legacy_conhost() {
-        ("▄".repeat(w), "▀".repeat(w))
-    } else {
-        (format!("▗{}▖", "▄".repeat(w.saturating_sub(2))), format!("▝{}▘", "▀".repeat(w.saturating_sub(2))))
-    };
-    let edge = Style::default().fg(color);
-    let slab = Style::default().bg(color).fg(th().on_accent).add_modifier(Modifier::BOLD);
-    let rows = [(top, edge), (format!("{text:^w$}"), slab), (bottom, edge)];
-    for (i, (line, style)) in rows.into_iter().enumerate() {
-        if (i as u16) < rect.height {
-            let row = Rect { x: rect.x, y: rect.y + i as u16, width, height: 1 };
-            frame.render_widget(Paragraph::new(Span::styled(line, style)), row);
-        }
-    }
-    if let Some(act) = act {
-        s.click(rect, act);
-    }
-    rect
-}
-
 /// The keyboard cursor on a framed control the pointer isn't in: the ring
 /// redrawn in `style`, so the mark never steals the hover contract.
 pub fn cursor_ring(frame: &mut Frame, rect: Rect, style: Style) {
