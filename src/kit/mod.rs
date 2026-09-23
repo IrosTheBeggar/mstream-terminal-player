@@ -112,6 +112,10 @@ pub struct Surface<A> {
     /// What a right click means where — a row's context verb (the
     /// track-actions contract's sheet). Rebuilt each frame like `clicks`.
     contexts: Vec<(Rect, A)>,
+    /// Whether tooltips name the key that does the same (see
+    /// [`Surface::tip_keyed`]). On by default — the wizard and the admin
+    /// rooms always name theirs; the GUI player has a setting.
+    pub key_hints: bool,
 }
 
 impl<A> Default for Surface<A> {
@@ -129,6 +133,7 @@ impl<A> Default for Surface<A> {
             overlays: Vec::new(),
             covered: Vec::new(),
             contexts: Vec::new(),
+            key_hints: true,
         }
     }
 }
@@ -194,6 +199,21 @@ impl<A: Clone> Surface<A> {
     /// Register a tooltip target.
     pub fn tip(&mut self, rect: Rect, text: impl Into<String>) {
         self.tips.push((rect, text.into()));
+    }
+
+    /// A tooltip whose text ends in ` — key`, the key that does the same:
+    /// registered whole while the surface names keys, cut at the dash when
+    /// it does not. The dash is the one this family writes its key tails
+    /// with, so a tip with a sentence after a dash registers through
+    /// [`Surface::tip`] instead.
+    pub fn tip_keyed(&mut self, rect: Rect, text: impl Into<String>) {
+        let text = text.into();
+        let text = if self.key_hints {
+            text
+        } else {
+            text.rsplit_once(" — ").map_or(text.clone(), |(label, _)| label.to_string())
+        };
+        self.tips.push((rect, text));
     }
 
     /// What a press at `at` hits — the last-drawn matching rect.
@@ -553,7 +573,7 @@ pub fn modal_close<A: Clone>(frame: &mut Frame, s: &mut Surface<A>, inner: Rect,
     };
     frame.render_widget(Paragraph::new(Span::styled("[X]", style)), rect);
     s.click(rect, act);
-    s.tip(rect, rust_i18n::t!("path_modal.tip_close").to_string());
+    s.tip_keyed(rect, rust_i18n::t!("path_modal.tip_close").to_string());
 }
 
 // ── Scrolling ────────────────────────────────────────────────────────────────

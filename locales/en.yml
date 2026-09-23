@@ -1345,6 +1345,9 @@ gui:
     listen_group: "LISTEN"
     dj: "Auto DJ"
     dj_desc: "Keep the music going when the queue runs low."
+    display_group: "DISPLAY"
+    key_hints: "Keyboard hints"
+    key_hints_desc: "show the keys in the footer and on the tooltips"
   pl:
     new: "New playlist"
     create: "Create"

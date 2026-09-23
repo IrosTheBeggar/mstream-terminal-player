@@ -424,7 +424,8 @@ const ROW_MANAGE: usize = 6;
 /// servers) and the ask-me switch for torrents arriving from outside.
 const ROW_TORRENT: usize = 7;
 const ROW_ASK: usize = 8;
-const SET_ROWS: usize = 9;
+const ROW_HINTS: usize = 9;
+const SET_ROWS: usize = 10;
 
 /// Seconds of blend as a person reads them (the TUI's own spelling).
 fn fmt_blend(seconds: f32) -> String {
@@ -513,12 +514,14 @@ impl Gui {
         // No connect screen here: the servers surfaces are this shell's own,
         // and the transport keeps working while a session is down.
         app.connect_screen = false;
+        let mut ui = Surface::new();
+        ui.key_hints = config.gui.key_hints;
         Gui {
             app,
             pending: Vec::new(),
             config,
             config_ok,
-            ui: Surface::new(),
+            ui,
             active: FILES_NAV,
             cursor: None,
             queue_open: true,
@@ -587,6 +590,7 @@ impl Gui {
             }
         };
         config.player.adopt(self.app.prefs());
+        config.gui.key_hints = self.config.gui.key_hints;
         match config::save(&config) {
             Ok(()) => self.config = config,
             Err(e) => {
@@ -640,8 +644,17 @@ impl Gui {
                 self.app.resume_queue = !self.app.resume_queue;
                 self.save_now();
             }
+            ROW_HINTS => self.set_key_hints(!self.config.gui.key_hints),
             _ => {}
         }
+    }
+
+    /// Show or hide the keyboard's names — the footer line and the tails
+    /// on tooltips — and remember it in the shell's own section.
+    fn set_key_hints(&mut self, on: bool) {
+        self.config.gui.key_hints = on;
+        self.ui.key_hints = on;
+        self.save_now();
     }
 
     /// Volume set directly (the ten cells) — the one write that goes past
@@ -1110,7 +1123,11 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             _ => t!("gui.tips.base"),
         }
     };
-    put(frame, 1, area.height - 1, &tips, dim());
+    // The footer of keys only when asked for: this surface is the
+    // pointer's, and the classic TUI is the keyboard's room.
+    if gui.config.gui.key_hints {
+        put(frame, 1, area.height - 1, &tips, dim());
+    }
 
     // While the pairing QR is up, the card cover stands down: the graphics
     // encode cache holds ONE image, and two per frame thrash it.
@@ -1304,7 +1321,7 @@ fn draw_bar_back(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16) -> u16 {
     let glyph = back_glyph();
     put(frame, x, y, glyph, if hover { bright_bold() } else { dim() });
     gui.ui.click(back, Act::BarBack);
-    gui.ui.tip(back, t!("gui.bar.back_tip").to_string());
+    gui.ui.tip_keyed(back, t!("gui.bar.back_tip").to_string());
     2
 }
 
@@ -1322,7 +1339,7 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
         let hover = gui.ui.hovers(rect);
         put(frame, x, y, "[X]", if hover { bright_bold() } else { dim() });
         gui.ui.click(rect, Act::BarClear);
-        gui.ui.tip(rect, t!("gui.bar.clear_tip").to_string());
+        gui.ui.tip_keyed(rect, t!("gui.bar.clear_tip").to_string());
     };
 
     if filtering {
@@ -1364,7 +1381,7 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
         let hover = gui.ui.hovers(rect);
         put(frame, content.x, y, &label, if hover { bright_bold() } else { dim() });
         gui.ui.click(rect, Act::BarFilter);
-        gui.ui.tip(rect, format!("{label} — f"));
+        gui.ui.tip_keyed(rect, format!("{label} — f"));
     }
 
     // Right: the verbs, dropped from the tail when the room is squeezed
@@ -1416,7 +1433,7 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
             Act::BarQueueAll => "A",
             _ => "S",
         };
-        gui.ui.tip(rect, format!("{label} — {key}"));
+        gui.ui.tip_keyed(rect, format!("{label} — {key}"));
         vx += rect.width;
     }
 }
@@ -1521,7 +1538,7 @@ fn draw_pane_rows(
                         // button's rule, so the verb about to fire says so.
                         put(frame, x, y, glyph, if ui.hovers(cell) { bright_bold() } else { dim() });
                         ui.click(cell, act);
-                        ui.tip(cell, tip.to_string());
+                        ui.tip_keyed(cell, tip.to_string());
                         x = x.saturating_sub(4);
                     }
                 } else {
@@ -1611,7 +1628,7 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         put(frame, inner.x + 1, inner.y, &bar::clip(&gui.app.query, field), Style::default());
     }
     gui.ui.click(card, Act::EditQuery);
-    gui.ui.tip(card, t!("gui.search.edit_tip").to_string());
+    gui.ui.tip_keyed(card, t!("gui.search.edit_tip").to_string());
 
     // The class chips: toggle words wearing their state (the bar's toggle
     // grammar), the chip cursor as the one selection bg.
@@ -1710,6 +1727,7 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     put(frame, content.x, content.y + 7, &t!("gui.set.listen_group"), dim());
     put(frame, content.x, content.y + 10, &t!("gui.set.servers_group"), dim());
     put(frame, content.x, content.y + 13, &t!("gui.set.torrents_group"), dim());
+    put(frame, content.x, content.y + 17, &t!("gui.set.display_group"), dim());
 
     let rows: [(String, String); SET_ROWS] = [
         (
@@ -1760,6 +1778,10 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             format!("{} {}", if gui.config.torrent.ask { check_on } else { check_off }, t!("gui.set.tor_ask")),
             t!("gui.set.tor_ask_desc").to_string(),
         ),
+        (
+            format!("{} {}", if gui.config.gui.key_hints { check_on } else { check_off }, t!("gui.set.key_hints")),
+            t!("gui.set.key_hints_desc").to_string(),
+        ),
     ];
 
     for (i, (label, desc)) in rows.iter().enumerate() {
@@ -1809,6 +1831,7 @@ fn row_y(top: u16, i: usize) -> u16 {
         ROW_DJ => top + 8,
         ROW_MANAGE => top + 11,
         ROW_TORRENT => top + 14,
+        ROW_HINTS => top + 18,
         _ => top + 15,
     }
 }
@@ -2506,6 +2529,31 @@ mod tests {
         assert_eq!(buf[(col, 7)].fg, th().bright, "the hovered verb brightens");
         assert!(buf[(col, 7)].modifier.contains(Modifier::BOLD), "and takes weight");
         assert_ne!(buf[(col - 4, 7)].fg, th().bright, "the verb beside it stays dim");
+    }
+
+    #[test]
+    fn keyboard_hints_are_off_by_default_and_the_settings_row_brings_them_back() {
+        // This surface is the pointer's: no footer of keys and no key on a
+        // tooltip until asked; the classic TUI is the keyboard's room.
+        let mut gui = browsing_gui();
+        let rows = draw(&mut gui);
+        assert!(rows[29].trim().is_empty(), "no footer of keys: {:?}", rows[29]);
+        assert!(gui.ui.tips.iter().all(|(_, t)| !t.contains(" — ")), "no key on a tooltip: {:?}", gui.ui.tips);
+        assert!(gui.ui.tips.iter().any(|(_, t)| t == "/ filter"), "the filter's tip is its label alone: {:?}", gui.ui.tips);
+
+        gui.act(Act::Nav(SETTINGS_NAV));
+        let rows = draw(&mut gui);
+        let y = rows.iter().position(|r| r.contains("Keyboard hints")).unwrap();
+        assert!(rows[y].contains("[ ]"), "the switch reads off: {:?}", rows[y]);
+        gui.act(Act::Row(ROW_HINTS));
+        assert!(gui.config.gui.key_hints, "the row flips the setting");
+        let rows = draw(&mut gui);
+        assert!(!rows[y].contains("[ ]"), "and reads on: {:?}", rows[y]);
+        assert!(rows[29].contains("q quit"), "the footer names the keys: {:?}", rows[29]);
+
+        gui.act(Act::Nav(FILES_NAV));
+        draw(&mut gui);
+        assert!(gui.ui.tips.iter().any(|(_, t)| t == "/ filter — f"), "the filter's tip names its key: {:?}", gui.ui.tips);
     }
 
     #[test]

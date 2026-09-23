@@ -471,7 +471,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let bhover = gui.ui.hovers(back);
     put(frame, back.x, back.y, super::back_glyph(), if bhover { bright_bold() } else { dim() });
     gui.ui.click(back, Act::DjBack);
-    gui.ui.tip(back, t!("gui.tor.back_tip").to_string());
+    gui.ui.tip_keyed(back, t!("gui.tor.back_tip").to_string());
     put(frame, content.x + 2, content.y, &t!("gui.dj.title"), Style::default().add_modifier(Modifier::BOLD));
     let (state, style) = if gui.app.dj_armed() {
         (t!("gui.dj.state_on", server = gui.app.dj_server_name()).to_string(), Style::default().fg(th().ok))

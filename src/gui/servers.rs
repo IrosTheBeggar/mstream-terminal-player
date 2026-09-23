@@ -2779,6 +2779,8 @@ mod tests {
         gui.app.bundled_server = Some("http://attic.local:3000".into());
         gui.queue_open = false;
         gui.active = SETTINGS_NAV;
+        // The footer is a setting on this surface, off by default.
+        gui.config.gui.key_hints = true;
         open_room(&mut gui);
         gui.servers.cursor = 0;
         let text = draw(&mut gui).join("\n");

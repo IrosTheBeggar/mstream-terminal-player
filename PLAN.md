@@ -1950,6 +1950,12 @@ a LATER secondary screen (party view), Columns retired.
   `tui_input::Input`; the DJ room's per-frame line model; the per-room
   offline gate; a `menu_row` kit widget for the nine hand-rolled
   selectable rows.
+- **Keyboard hints as a setting ✅ 2026-09-22** — this surface is the
+  pointer's, the classic TUI the keyboard's, so the footer of keys and
+  the ` — key` tails on tooltips are off by default: `[gui] key_hints`,
+  a DISPLAY row in Settings, the kit's `Surface::tip_keyed` cutting a
+  keyed tip at its dash when the surface does not name keys (the wizard
+  and the admin rooms always do). The keys keep working either way.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the

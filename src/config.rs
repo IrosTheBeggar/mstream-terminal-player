@@ -486,13 +486,16 @@ impl MousePrefs {
 
 /// `[gui]`. The GUI player surface (`mstream-player gui`) keeps its own
 /// choices here, apart from the classic TUI's — the two are different
-/// rooms. Currently holds nothing of this build's own: the bottom-bar
-/// choice lived here until 2026-08-29, when the waveform bar was retired
-/// and the gold line became THE bar (a leftover `bar` key rides `extra`
-/// harmlessly).
+/// rooms. (The bottom-bar choice lived here until 2026-08-29, when the
+/// waveform bar was retired and the gold line became THE bar; a leftover
+/// `bar` key rides `extra` harmlessly.)
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GuiPrefs {
+    /// Show the keyboard's names: the footer line of keys, and the
+    /// ` — key` tail on a tooltip. Off by default — this surface is the
+    /// pointer's, and the classic TUI is the keyboard's room.
+    pub key_hints: bool,
     #[serde(flatten)]
     pub extra: Keep,
 }

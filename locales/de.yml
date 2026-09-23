@@ -1345,6 +1345,9 @@ gui:
     listen_group: "HÖREN"
     dj: "Auto DJ"
     dj_desc: "Die Musik läuft weiter, wenn die Warteschlange zur Neige geht."
+    display_group: "ANZEIGE"
+    key_hints: "Tastaturhinweise"
+    key_hints_desc: "Tasten in der Fußzeile und in den Tooltips zeigen"
   pl:
     new: "Neue Playlist"
     create: "Erstellen"

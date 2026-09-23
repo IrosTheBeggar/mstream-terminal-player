@@ -1293,7 +1293,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let bhover = gui.ui.hovers(back);
     put(frame, back.x, back.y, super::back_glyph(), if bhover { bright_bold() } else { dim() });
     gui.ui.click(back, Act::TorBack);
-    gui.ui.tip(back, t!("gui.tor.back_tip").to_string());
+    gui.ui.tip_keyed(back, t!("gui.tor.back_tip").to_string());
     put(frame, content.x + 2, content.y, &t!("gui.tor.title"), Style::default().add_modifier(Modifier::BOLD));
     let standing = match &gui.torrent.gate {
         Gate::Pending => Some((t!("gui.tor.checking").to_string(), accent())),
@@ -1388,7 +1388,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                         } else {
                             let label = format!("{} {forward}", t!("gui.tor.choose_file"));
                             let w = text_button(frame, gui, x, y, &label, true, Act::TorPick);
-                            gui.ui.tip(Rect { x, y, width: w, height: 1 }, format!("{} — b", t!("gui.tor.choose_file")));
+                            gui.ui.tip_keyed(Rect { x, y, width: w, height: 1 }, format!("{} — b", t!("gui.tor.choose_file")));
                             x += w;
                         }
                         // The typed road beside the dialog: paths get
@@ -1398,7 +1398,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                         x += 3;
                         let typed = t!("gui.tor.type_path").to_string();
                         let w = text_button(frame, gui, x, y, &typed, false, Act::TorType);
-                        gui.ui.tip(Rect { x, y, width: w, height: 1 }, format!("{typed} — t"));
+                        gui.ui.tip_keyed(Rect { x, y, width: w, height: 1 }, format!("{typed} — t"));
                     }
                     Some(name) => {
                         // The chip (clause 5): the name, its [X], and on
@@ -1418,7 +1418,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                         };
                         put(frame, xrect.x, y, "[X]", xstyle);
                         gui.ui.click(xrect, Act::TorUnload);
-                        gui.ui.tip(xrect, t!("gui.tor.unload_tip").to_string());
+                        gui.ui.tip_keyed(xrect, t!("gui.tor.unload_tip").to_string());
 
                         y += 1;
                         let mut x = content.x + lw;
@@ -1429,7 +1429,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                             x += open.chars().count() as u16;
                         } else {
                             let w = text_button(frame, gui, x, y, &open, false, Act::TorHandOff);
-                            gui.ui.tip(Rect { x, y, width: w, height: 1 }, format!("{open} — o"));
+                            gui.ui.tip_keyed(Rect { x, y, width: w, height: 1 }, format!("{open} — o"));
                             x += w;
                         }
                         put(frame, x, y, " · ", dim());
@@ -1439,7 +1439,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                         } else {
                             let detect = t!("gui.tor.auto_detect").to_string();
                             let w = text_button(frame, gui, x, y, &detect, false, Act::TorDetect);
-                            gui.ui.tip(Rect { x, y, width: w, height: 1 }, format!("{detect} — d"));
+                            gui.ui.tip_keyed(Rect { x, y, width: w, height: 1 }, format!("{detect} — d"));
                         }
                     }
                 }

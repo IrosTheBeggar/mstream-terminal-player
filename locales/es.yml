@@ -1345,6 +1345,9 @@ gui:
     listen_group: "ESCUCHAR"
     dj: "Auto DJ"
     dj_desc: "Mantiene la música sonando cuando la cola se agota."
+    display_group: "PANTALLA"
+    key_hints: "Atajos de teclado"
+    key_hints_desc: "mostrar las teclas en el pie y en las descripciones emergentes"
   pl:
     new: "Nueva lista de reproducción"
     create: "Crear"

@@ -1345,6 +1345,9 @@ gui:
     listen_group: "ÉCOUTER"
     dj: "Auto DJ"
     dj_desc: "La musique continue quand la file s'épuise."
+    display_group: "AFFICHAGE"
+    key_hints: "Indications clavier"
+    key_hints_desc: "afficher les touches dans le pied de page et les infobulles"
   pl:
     new: "Nouvelle liste de lecture"
     create: "Créer"

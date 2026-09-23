@@ -433,6 +433,8 @@ mod tests {
     #[test]
     fn the_footer_names_the_keys_of_the_view_that_is_up() {
         let mut gui = artists_gui(&["Bassnectar", "Portishead"]);
+        // The footer is a setting on this surface, off by default.
+        gui.config.gui.key_hints = true;
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("h back · a queue"), "a list has the Files keys: {all}");
         gui.act(Act::PaneRow(List::Library, 2, RowVerb::Open));

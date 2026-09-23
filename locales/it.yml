@@ -1345,6 +1345,9 @@ gui:
     listen_group: "ASCOLTO"
     dj: "Auto DJ"
     dj_desc: "La musica continua quando la coda si esaurisce."
+    display_group: "SCHERMO"
+    key_hints: "Suggerimenti tastiera"
+    key_hints_desc: "mostra i tasti nel piè di pagina e nei suggerimenti"
   pl:
     new: "Nuova playlist"
     create: "Crea"

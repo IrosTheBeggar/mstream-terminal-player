@@ -456,6 +456,11 @@ owned `String`s so they translate like everything else.
   (docker/npm installs, launcher-less bundles). Every action keeps a key
   binding and a named hint in the tips line — hints compress, never
   disappear. Mouse (click, hover, OSC 22 hand cursor) is enhancement.
+  The one room that inverts this is the GUI player: it is the pointer's
+  surface, the classic TUI is the keyboard's, so its footer of keys and
+  the ` — key` tails on its tooltips are OFF by default and a Settings
+  switch (`[gui] key_hints`) brings them back; the keys themselves keep
+  working either way (`Surface::tip_keyed`).
 - **The pointer contract (OSC 22).** Announce the DEFAULT arrow once at
   startup (terminals keep their text beam until an app says otherwise),
   switch to the hand over clickables, emit only on state changes, and

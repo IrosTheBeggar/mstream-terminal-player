@@ -1345,6 +1345,9 @@ gui:
     listen_group: "OUVIR"
     dj: "Auto DJ"
     dj_desc: "Mantém a música tocando quando a fila fica curta."
+    display_group: "EXIBIÇÃO"
+    key_hints: "Dicas de teclado"
+    key_hints_desc: "mostrar as teclas no rodapé e nas dicas"
   pl:
     new: "Nova playlist"
     create: "Criar"

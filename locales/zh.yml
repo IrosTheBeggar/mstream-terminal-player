@@ -1345,6 +1345,9 @@ gui:
     listen_group: "聆听"
     dj: "Auto DJ"
     dj_desc: "队列快播完时让音乐继续。"
+    display_group: "显示"
+    key_hints: "键盘提示"
+    key_hints_desc: "在页脚和提示中显示按键"
   pl:
     new: "新建播放列表"
     create: "创建"

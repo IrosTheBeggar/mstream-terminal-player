@@ -1345,6 +1345,9 @@ gui:
     listen_group: "SŁUCHANIE"
     dj: "Auto DJ"
     dj_desc: "Muzyka gra dalej, gdy kolejka się kończy."
+    display_group: "WYŚWIETLANIE"
+    key_hints: "Podpowiedzi klawiszy"
+    key_hints_desc: "pokazuj klawisze w stopce i w podpowiedziach"
   pl:
     new: "Nowa playlista"
     create: "Utwórz"

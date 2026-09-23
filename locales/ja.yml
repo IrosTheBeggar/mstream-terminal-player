@@ -1345,6 +1345,9 @@ gui:
     listen_group: "リッスン"
     dj: "Auto DJ"
     dj_desc: "キューが少なくなっても音楽を途切れさせません。"
+    display_group: "表示"
+    key_hints: "キーボードのヒント"
+    key_hints_desc: "フッターとツールチップにキーを表示"
   pl:
     new: "新しいプレイリスト"
     create: "作成"
