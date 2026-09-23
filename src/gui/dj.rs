@@ -17,10 +17,10 @@ use tui_input::backend::crossterm::EventHandler;
 use crate::config;
 use crate::dj::{self, EmptyQueueStart, GenreMode, SonicAnchor};
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{Surface, cursor_ring, dim, input_display, modal_close, modal_frame_on, scroll_list, table_view, tall_button, tall_frame, wrap_words};
+use crate::kit::{ListView, Surface, cursor_ring, dim, input_display, modal_close, modal_frame_on, scroll_list, table_view, tall_button, tall_frame, wrap_words};
 use crate::tui::app::{Action, Capture, DjEdit, DjRow};
 
-use super::{Act, Gui, SETTINGS_NAV, accent, bright_bold, put, sel, text_button};
+use super::{Act, Gui, List, SETTINGS_NAV, accent, bright_bold, put, sel, text_button};
 
 /// The chooser's three rows: the two answers, then the remember box.
 const ROWS: usize = 3;
@@ -42,10 +42,9 @@ pub(crate) struct DjUi {
     pub room: bool,
     /// The keyboard cursor: None is stowed (the kit's resting state).
     pub cursor: Option<Item>,
-    /// The first visible row of the room's body.
-    pub scroll: usize,
-    /// The next draw scrolls the cursor into view.
-    reveal: bool,
+    /// The room's body: its first visible row, and whether the next draw
+    /// scrolls the cursor into view.
+    pub body: ListView,
     /// The keyword field (clause 49).
     pub keyword: Input,
     /// The sub-cursor along a chips row.
@@ -53,11 +52,10 @@ pub(crate) struct DjUi {
     /// The genre picker's search line and cursor (clause 48).
     pub filter: Input,
     pub pick_row: usize,
-    pub pick_scroll: usize,
+    pub genres: ListView,
     /// The server picker (clause 41), when open: its cursor row.
     pub server_pick: Option<usize>,
-    /// The body's height and window from the last draw, for the wheel.
-    lines: usize,
+    /// The body's window from the last draw, for the page keys.
     visible: usize,
     /// How many Preview picks the last draw saw: new ones scroll into view
     /// under their row, which is the body's last.
@@ -436,7 +434,7 @@ fn items(gui: &Gui) -> Vec<Item> {
 pub(crate) fn open_room(gui: &mut Gui) {
     gui.dj.room = true;
     gui.dj.cursor = None;
-    gui.dj.scroll = 0;
+    gui.dj.body.scroll = 0;
     let effects = gui.app.dj_room_opened();
     gui.pend(effects);
 }
@@ -506,24 +504,23 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if samples != gui.dj.samples_seen {
         gui.dj.samples_seen = samples;
         if gui.dj.cursor == Some(Item::Row(DjRow::Sample)) {
-            gui.dj.reveal = true;
+            gui.dj.body.reveal = true;
         }
     }
-    if std::mem::take(&mut gui.dj.reveal)
+    if std::mem::take(&mut gui.dj.body.reveal)
         && let Some(i) = lines.iter().position(|l| l.item().is_some() && l.item() == gui.dj.cursor)
     {
         let (top, mut h) = (tops[i], lines[i].height());
         if lines[i].item() == Some(Item::Row(DjRow::Sample)) {
             h += lines[i + 1..].iter().take_while(|l| matches!(l, L::Sample(_))).count();
         }
-        if top < gui.dj.scroll {
-            gui.dj.scroll = top;
-        } else if top + h > gui.dj.scroll + visible {
-            gui.dj.scroll = (top + h).saturating_sub(visible);
+        if top < gui.dj.body.scroll {
+            gui.dj.body.scroll = top;
+        } else if top + h > gui.dj.body.scroll + visible {
+            gui.dj.body.scroll = (top + h).saturating_sub(visible);
         }
     }
-    gui.dj.scroll = gui.dj.scroll.min(total.saturating_sub(visible));
-    gui.dj.lines = total;
+    gui.dj.body.scroll = gui.dj.body.scroll.min(total.saturating_sub(visible));
     gui.dj.visible = visible;
     let overflow = total > visible;
     let body = Rect {
@@ -532,7 +529,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         width: if overflow { region.width.saturating_sub(2) } else { region.width },
         height: region.height,
     };
-    let scroll = gui.dj.scroll;
+    let scroll = gui.dj.body.scroll;
     for (i, line) in lines.iter().enumerate() {
         let (top, h) = (tops[i], line.height());
         if top + h <= scroll {
@@ -550,7 +547,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
     if overflow {
         let bar = Rect { x: region.right().saturating_sub(1), y: region.y, width: 1, height: region.height };
-        scroll_list(frame, &mut gui.ui, bar, total, visible, scroll, Act::DjScrollBy(-1), Act::DjScrollBy(1), Act::DjScrollTo);
+        scroll_list(frame, &mut gui.ui, bar, total, visible, scroll, Act::ScrollBy(List::DjRoom, -1), Act::ScrollBy(List::DjRoom, 1), |first| Act::ScrollTo(List::DjRoom, first));
     }
 }
 
@@ -1164,8 +1161,8 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
     let row = gui.dj.pick_row.min(names.len() - 1);
     gui.dj.pick_row = row;
-    let (scroll, _) = table_view(names.len(), Some(row), gui.dj.pick_scroll, list_h);
-    gui.dj.pick_scroll = scroll;
+    let (scroll, _) = table_view(names.len(), Some(row), gui.dj.genres.scroll, list_h);
+    gui.dj.genres.scroll = scroll;
     let overflow = names.len() > list_h;
     let row_w = if overflow { inner.width.saturating_sub(1) } else { inner.width };
     for (i, name) in names.iter().enumerate().skip(scroll).take(list_h) {
@@ -1202,9 +1199,9 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             names.len(),
             list_h,
             scroll,
-            Act::DjGenresScrollBy(-1),
-            Act::DjGenresScrollBy(1),
-            Act::DjGenresScrollTo,
+            Act::ScrollBy(List::DjGenres, -1),
+            Act::ScrollBy(List::DjGenres, 1),
+            |first| Act::ScrollTo(List::DjGenres, first),
         );
     }
 }
@@ -1279,7 +1276,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
                 let changed = gui.dj.filter.handle_event(&TermEvent::Key(key)).is_some_and(|change| change.value);
                 if changed {
                     gui.dj.pick_row = 0;
-                    gui.dj.pick_scroll = 0;
+                    gui.dj.genres.scroll = 0;
                 }
             }
         }
@@ -1323,7 +1320,7 @@ fn move_cursor(gui: &mut Gui, delta: i32) {
         gui.dj.chip = 0;
     }
     gui.dj.cursor = Some(items[next]);
-    gui.dj.reveal = true;
+    gui.dj.body.reveal = true;
 }
 
 /// The chips row's names, for the sub-cursor.
@@ -1341,8 +1338,8 @@ fn room_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         None => match key.code {
             KeyCode::Down => move_cursor(gui, 1),
             KeyCode::Up => move_cursor(gui, -1),
-            KeyCode::PageDown => return Some(gui.act(Act::DjScrollBy(page))),
-            KeyCode::PageUp => return Some(gui.act(Act::DjScrollBy(-page))),
+            KeyCode::PageDown => return Some(gui.act(Act::ScrollBy(List::DjRoom, page))),
+            KeyCode::PageUp => return Some(gui.act(Act::ScrollBy(List::DjRoom, -page))),
             KeyCode::Esc => return Some(gui.act(Act::DjBack)),
             _ => return None,
         },
@@ -1361,8 +1358,8 @@ fn room_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
             KeyCode::Up | KeyCode::BackTab => move_cursor(gui, -1),
             KeyCode::Down | KeyCode::Tab => move_cursor(gui, 1),
             KeyCode::Esc => gui.dj.cursor = None,
-            KeyCode::PageDown => return Some(gui.act(Act::DjScrollBy(page))),
-            KeyCode::PageUp => return Some(gui.act(Act::DjScrollBy(-page))),
+            KeyCode::PageDown => return Some(gui.act(Act::ScrollBy(List::DjRoom, page))),
+            KeyCode::PageUp => return Some(gui.act(Act::ScrollBy(List::DjRoom, -page))),
             KeyCode::Left | KeyCode::Right => {
                 let delta = if key.code == KeyCode::Left { -1 } else { 1 };
                 match item {
@@ -1463,7 +1460,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         }
         Act::DjFocus(item) => {
             gui.dj.cursor = Some(item);
-            gui.dj.reveal = true;
+            gui.dj.body.reveal = true;
         }
         Act::DjStep(row, delta) => {
             gui.dj.cursor = Some(Item::Row(row));
@@ -1489,18 +1486,14 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::DjPickGenres => {
             gui.dj.filter = Input::default();
             gui.dj.pick_row = 0;
-            gui.dj.pick_scroll = 0;
+            gui.dj.genres.scroll = 0;
             let effects = gui.app.open_genre_picker();
             gui.pend(effects);
         }
         Act::DjGenresClose => gui.app.close_dj_picker(),
-        Act::DjGenresScrollBy(delta) => {
-            gui.dj.pick_scroll = (gui.dj.pick_scroll as i32 + delta).max(0) as usize;
-        }
-        Act::DjGenresScrollTo(first) => gui.dj.pick_scroll = first,
         Act::DjKeywordFocus => {
             gui.dj.cursor = Some(Item::KeywordInput);
-            gui.dj.reveal = true;
+            gui.dj.body.reveal = true;
         }
         Act::DjKeywordAdd => {
             let word = gui.dj.keyword.value().trim().to_string();
@@ -1534,11 +1527,6 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             }
         }
         Act::DjServerClose => gui.dj.server_pick = None,
-        Act::DjScrollBy(delta) => {
-            let max = gui.dj.lines.saturating_sub(gui.dj.visible) as i32;
-            gui.dj.scroll = (gui.dj.scroll as i32 + delta).clamp(0, max) as usize;
-        }
-        Act::DjScrollTo(first) => gui.dj.scroll = first,
         _ => return false,
     }
     true
@@ -1548,11 +1536,11 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
 /// False when neither is up.
 pub(crate) fn wheel(gui: &mut Gui, delta: i32) -> bool {
     if gui.app.dj_panel.genres.is_some() {
-        gui.act(Act::DjGenresScrollBy(delta));
+        gui.act(Act::ScrollBy(List::DjGenres, delta));
         return true;
     }
     if in_room(gui) {
-        gui.act(Act::DjScrollBy(delta));
+        gui.act(Act::ScrollBy(List::DjRoom, delta));
         return true;
     }
     false

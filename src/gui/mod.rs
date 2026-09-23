@@ -47,8 +47,7 @@ use rust_i18n::t;
 
 use crate::config::{self, Config};
 use crate::kit::{
-    GroundGuard, POINTER_RESET, Surface, dim, input_display, scroll_list, set_pointer_shape,
-    table_view,
+    GroundGuard, ListView, POINTER_RESET, Surface, dim, input_display, scroll_list, set_pointer_shape,
 };
 use crate::kit::theme::{self, legacy_conhost, th};
 use crate::tui::app::{
@@ -86,26 +85,15 @@ pub(crate) enum Act {
     VolSet(u8),
     /// A click on a seek cell: the fraction of the track it means.
     Seek(f64),
-    /// A Files row, clicked: select it and Activate (open the folder, or
-    /// play from the track) — the TUI's Enter, aimed by the mouse.
-    FileRow(usize),
-    /// The hovered track row's revealed [+]: queue just that one.
-    FileQueue(usize),
-    /// The hover verbs beside [+]: after the playing track, or at once.
-    FileNext(usize),
-    FileNow(usize),
-    /// The Files scrollbar (kit `scroll_list`): step and jump.
-    FScrollBy(i32),
-    FScrollTo(usize),
-    /// A Search pane row, by PANE index (clicks map through the class
-    /// filter): select and Activate — drill a class or an artist, or play
-    /// from a track.
-    SearchRow(usize),
-    SearchQueue(usize),
-    SearchNext(usize),
-    SearchNow(usize),
-    SScrollBy(i32),
-    SScrollTo(usize),
+    /// A browse pane's row, by PANE index (a class filter upstream maps
+    /// clicks through), with the verb the click meant: the row itself —
+    /// select and Activate, the TUI's Enter aimed by the mouse: open the
+    /// folder, drill the class or the artist, or play from the track — or
+    /// one of its hover verbs. One act for every list of the App's rows.
+    PaneRow(List, usize, RowVerb),
+    /// A list's scrollbar and wheel (kit `scroll_list`): a step, a jump.
+    ScrollBy(List, i32),
+    ScrollTo(List, usize),
     /// A class chip: put the chip cursor there and flip the class.
     Chip(usize),
     /// The query card: start (or resume) editing the search text.
@@ -121,14 +109,6 @@ pub(crate) enum Act {
     AlbJump(usize),
     /// A cell on the current page, clicked: open that album.
     AlbCell(usize),
-    /// The album track list: select + Activate (row 0 is the Parent row,
-    /// so it doubles as Back), the hover [+], and the kit scrollbar.
-    AlbTrackRow(usize),
-    AlbTrackQueue(usize),
-    AlbTrackNext(usize),
-    AlbTrackNow(usize),
-    AlbScrollBy(i32),
-    AlbScrollTo(usize),
     // ── The browser bar (docs/ux-contracts/browser-top-bar.md) ──────────
     /// The bar's back ◂ — the crumb's way out, h's clickable twin.
     BarBack,
@@ -153,17 +133,9 @@ pub(crate) enum Act {
     PlCancel,
     /// The delete gate's destructive yes.
     PlConfirm,
-    /// A drilled track row, and its hover [+].
-    PlTrackRow(usize),
-    PlTrackQueue(usize),
-    PlTrackNext(usize),
-    PlTrackNow(usize),
     /// A queue row: click plays it, its hover [x] removes it.
     QueueRow(usize),
     QueueRemove(usize),
-    /// The queue panel's scrollbar and wheel: a step, a proportional jump.
-    QScrollBy(i32),
-    QScrollTo(usize),
     /// Auto DJ's empty-queue chooser (contract clause 2) and the empty
     /// queue's openers (clause 16).
     DjChoose(usize),
@@ -187,14 +159,8 @@ pub(crate) enum Act {
     PickNew,
     PickClose,
     InfoClose,
-    /// The Library rooms (library-rooms contract): the pane's rows and
-    /// their verbs, the list's scrollbar, the strip's jump, the way back.
-    LibRow(usize),
-    LibQueue(usize),
-    LibNext(usize),
-    LibNow(usize),
-    LibScrollBy(i32),
-    LibScrollTo(usize),
+    /// The Library rooms (library-rooms contract): the strip's jump and
+    /// the way back — the rows are [`Act::PaneRow`]s.
     LibJump(usize),
     LibBack,
     /// The Auto DJ room (auto-dj contract, clauses 40–53): its rows, bars,
@@ -212,8 +178,6 @@ pub(crate) enum Act {
     DjGenre(String),
     DjPickGenres,
     DjGenresClose,
-    DjGenresScrollBy(i32),
-    DjGenresScrollTo(usize),
     DjKeywordFocus,
     DjKeywordAdd,
     DjKeywordRemove(String),
@@ -222,11 +186,6 @@ pub(crate) enum Act {
     DjServerPick,
     DjServer(usize),
     DjServerClose,
-    DjScrollBy(i32),
-    DjScrollTo(usize),
-    /// Whichever level is on screen scrolls.
-    PlScrollBy(i32),
-    PlScrollTo(usize),
     // ── Sonic path (see gui::sonic) ─────────────────────────────────────
     /// A setup card's body or a results chip: open the pick-methods menu.
     SonMenu(crate::tui::app::SonicSide),
@@ -246,8 +205,6 @@ pub(crate) enum Act {
     /// A stop row: play the journey from there. The hover [+] queues it.
     SonRow(usize),
     SonQueueStop(usize),
-    SonScrollBy(i32),
-    SonScrollTo(usize),
     SonPlay,
     SonQueueAll,
     SonSave,
@@ -324,6 +281,47 @@ pub(crate) enum Act {
     TorChooseClose,
     /// A modal's whole-screen backdrop: swallow the click.
     Guard,
+}
+
+/// The lists the shell scrolls, one per viewport — the App's browse panes
+/// as each room shows them, and the shell's own (the queue panel, the
+/// sonic results, the DJ room's body and its genre picker).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum List {
+    Files,
+    Search,
+    Library,
+    AlbumTracks,
+    Playlists,
+    PlaylistTracks,
+    Queue,
+    Sonic,
+    DjRoom,
+    DjGenres,
+}
+
+impl List {
+    /// The App pane a list's rows live in — `None` for the shell's own
+    /// lists, which carry no [`Act::PaneRow`].
+    fn tab(self) -> Option<Tab> {
+        match self {
+            List::Files => Some(Tab::Files),
+            List::Search => Some(Tab::Search),
+            List::Library | List::AlbumTracks | List::Playlists | List::PlaylistTracks => Some(Tab::Library),
+            List::Queue | List::Sonic | List::DjRoom | List::DjGenres => None,
+        }
+    }
+}
+
+/// What a click on a pane row meant: the row itself, or one of the hover
+/// verbs the track-actions contract names (clause 32 of multi-server for
+/// their meanings).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowVerb {
+    Open,
+    Queue,
+    Next,
+    Now,
 }
 
 // ── Navigation ──────────────────────────────────────────────────────────────
@@ -457,23 +455,19 @@ pub(crate) struct Gui {
     /// `MSTREAM_GUI_DEMO=1`: a fixed track shown while the App is idle.
     demo: Option<Now>,
     demo_paused: bool,
-    /// The Files list's wheel offset, and whether the keyboard cursor moved
-    /// this pass (a move reveals; the wheel scrolls freely — the kit's
-    /// `table_view` contract).
-    fscroll: usize,
-    freveal: bool,
-    /// The Search pane's wheel offset and reveal flag, its own list.
-    sscroll: usize,
-    sreveal: bool,
+    /// The Files and Search lists' viewports (the kit's table contract: a
+    /// keyboard move reveals, the wheel scrolls freely).
+    files_view: ListView,
+    search_view: ListView,
     /// The chip cursor among the five class chips, and which classes the
     /// menu shows — the search params. The server answers every class in
     /// one reply, so the choice is instant and free to change.
     chip: usize,
     classes_on: [bool; 5],
-    /// The queue panel's wheel offset, and the playing index last seen —
-    /// the panel reveals the playing row only when it CHANGES, so the
-    /// wheel can roam freely in between (the kit's table contract).
-    qscroll: usize,
+    /// The queue panel's viewport, and the playing index last seen — the
+    /// panel reveals the playing row only when it CHANGES, so the wheel
+    /// can roam freely in between (the kit's table contract).
+    queue_view: ListView,
     last_current: Option<usize>,
     /// The size of the last drawn frame, for hit zones the event loop
     /// needs outside a draw (the wheel's queue-vs-content split, the
@@ -524,13 +518,11 @@ impl Gui {
             bar_now: None,
             demo: None,
             demo_paused: false,
-            fscroll: 0,
-            freveal: false,
-            sscroll: 0,
-            sreveal: false,
+            files_view: ListView::default(),
+            search_view: ListView::default(),
             chip: 0,
             classes_on: [true; 5],
-            qscroll: 0,
+            queue_view: ListView::default(),
             last_current: None,
             last_width: MIN_W,
             last_height: MIN_H,
@@ -821,31 +813,17 @@ impl Gui {
                 let effects = self.app.queue_listing();
                 self.pend(effects);
             }
-            Act::FileRow(i) => {
-                self.app.tab = Tab::Files;
-                self.app.focus = crate::tui::app::Focus::Browser;
-                self.app.files.state.select(Some(i));
-                self.freveal = true;
-                self.forward_capturing(Action::Activate);
+            Act::PaneRow(list, i, verb) => {
+                self.aim(list, i);
+                match verb {
+                    RowVerb::Open => self.forward_capturing(Action::Activate),
+                    RowVerb::Queue => self.forward(Action::AddToQueue),
+                    RowVerb::Next => self.forward(Action::AddNext),
+                    RowVerb::Now => self.forward(Action::PlayNow),
+                }
             }
-            Act::FileQueue(i) => {
-                self.app.tab = Tab::Files;
-                self.app.focus = crate::tui::app::Focus::Browser;
-                self.app.files.state.select(Some(i));
-                self.forward(Action::AddToQueue);
-            }
-            Act::FileNext(i) => {
-                self.app.tab = Tab::Files;
-                self.app.focus = crate::tui::app::Focus::Browser;
-                self.app.files.state.select(Some(i));
-                self.forward(Action::AddNext);
-            }
-            Act::FileNow(i) => {
-                self.app.tab = Tab::Files;
-                self.app.focus = crate::tui::app::Focus::Browser;
-                self.app.files.state.select(Some(i));
-                self.forward(Action::PlayNow);
-            }
+            Act::ScrollBy(list, delta) => self.list_mut(list).step(delta),
+            Act::ScrollTo(list, first) => self.list_mut(list).scroll = first,
             Act::QueueRow(i) => {
                 // A click plays the row and hands the panel the keys
                 // (track-actions contract, clauses 17 and 19).
@@ -854,50 +832,10 @@ impl Gui {
                 let effects = self.app.play_index(i);
                 self.pend(effects);
             }
-            Act::QScrollBy(delta) => {
-                self.qscroll =
-                    if delta < 0 { self.qscroll.saturating_sub(1) } else { self.qscroll + 1 };
-            }
-            Act::QScrollTo(first) => self.qscroll = first,
             Act::QueueRemove(i) => {
                 let effects = self.app.remove_queue_row(i);
                 self.pend(effects);
             }
-            Act::FScrollBy(delta) => {
-                self.fscroll =
-                    if delta < 0 { self.fscroll.saturating_sub(1) } else { self.fscroll + 1 };
-            }
-            Act::FScrollTo(first) => self.fscroll = first,
-            Act::SearchRow(i) => {
-                self.app.tab = Tab::Search;
-                self.app.focus = crate::tui::app::Focus::Browser;
-                self.app.search.state.select(Some(i));
-                self.sreveal = true;
-                self.forward_capturing(Action::Activate);
-            }
-            Act::SearchQueue(i) => {
-                self.app.tab = Tab::Search;
-                self.app.focus = crate::tui::app::Focus::Browser;
-                self.app.search.state.select(Some(i));
-                self.forward(Action::AddToQueue);
-            }
-            Act::SearchNext(i) => {
-                self.app.tab = Tab::Search;
-                self.app.focus = crate::tui::app::Focus::Browser;
-                self.app.search.state.select(Some(i));
-                self.forward(Action::AddNext);
-            }
-            Act::SearchNow(i) => {
-                self.app.tab = Tab::Search;
-                self.app.focus = crate::tui::app::Focus::Browser;
-                self.app.search.state.select(Some(i));
-                self.forward(Action::PlayNow);
-            }
-            Act::SScrollBy(delta) => {
-                self.sscroll =
-                    if delta < 0 { self.sscroll.saturating_sub(1) } else { self.sscroll + 1 };
-            }
-            Act::SScrollTo(first) => self.sscroll = first,
             Act::Chip(i) => {
                 self.chip = i;
                 self.classes_on[i] = !self.classes_on[i];
@@ -1310,10 +1248,7 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         height: content.height - 3,
     };
     let selected = gui.app.files.state.selected();
-    let reveal = gui.freveal.then_some(selected).flatten();
-    gui.freveal = false;
-    let (first, visible) = table_view(entries.len(), reveal, gui.fscroll, list.height as usize);
-    gui.fscroll = first;
+    let (first, visible) = gui.files_view.window(entries.len(), selected, list.height as usize);
 
     let len = entries.len();
     let rows: Vec<(usize, &Entry)> =
@@ -1326,11 +1261,7 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         &rows,
         list,
         selected,
-        Act::FileRow,
-        Act::FileQueue,
-        Act::FileNext,
-        Act::FileNow,
-        more_files,
+        List::Files,
         gui.app.capture.is_none(),
     );
     scroll_list(
@@ -1340,9 +1271,9 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         len,
         visible,
         first,
-        Act::FScrollBy(-1),
-        Act::FScrollBy(1),
-        |first| Act::FScrollTo(first),
+        Act::ScrollBy(List::Files, -1),
+        Act::ScrollBy(List::Files, 1),
+        |first| Act::ScrollTo(List::Files, first),
     );
 }
 
@@ -1528,15 +1459,17 @@ fn draw_pane_rows(
     rows: &[(usize, &Entry)],
     list: Rect,
     selected: Option<usize>,
-    row_act: fn(usize) -> Act,
-    queue_act: fn(usize) -> Act,
-    next_act: fn(usize) -> Act,
-    now_act: fn(usize) -> Act,
-    more_act: fn(usize) -> Act,
+    pane: List,
     // An armed pick consumes the next activation outright (clause 10) —
     // the hover verbs must not offer to queue what a click would capture.
     queue_plus: bool,
 ) {
+    let tab = pane.tab().unwrap_or(Tab::Files);
+    let row_act = |i: usize| Act::PaneRow(pane, i, RowVerb::Open);
+    let queue_act = |i: usize| Act::PaneRow(pane, i, RowVerb::Queue);
+    let next_act = |i: usize| Act::PaneRow(pane, i, RowVerb::Next);
+    let now_act = |i: usize| Act::PaneRow(pane, i, RowVerb::Now);
+    let more_act = |i: usize| Act::More(tab, i);
     for (row, (index, entry)) in rows.iter().enumerate() {
         let y = list.y + row as u16;
         let rect = Rect { x: list.x, y, width: list.width, height: 1 };
@@ -1730,14 +1663,8 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         return;
     }
     let selected = gui.app.search.state.selected();
-    let reveal_row = gui
-        .sreveal
-        .then_some(selected)
-        .flatten()
-        .and_then(|sel| visible_rows.iter().position(|(i, _)| *i == sel));
-    gui.sreveal = false;
-    let (first, visible) = table_view(visible_rows.len(), reveal_row, gui.sscroll, list.height as usize);
-    gui.sscroll = first;
+    let sel_pos = selected.and_then(|sel| visible_rows.iter().position(|(i, _)| *i == sel));
+    let (first, visible) = gui.search_view.window(visible_rows.len(), sel_pos, list.height as usize);
     let playing = gui.app.now_playing.as_ref().map(|t| t.filepath.as_str());
     draw_pane_rows(
         frame,
@@ -1746,11 +1673,7 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         &visible_rows[first..first + visible],
         list,
         selected,
-        Act::SearchRow,
-        Act::SearchQueue,
-        Act::SearchNext,
-        Act::SearchNow,
-        more_search,
+        List::Search,
         gui.app.capture.is_none(),
     );
     scroll_list(
@@ -1760,9 +1683,9 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         visible_rows.len(),
         visible,
         first,
-        Act::SScrollBy(-1),
-        Act::SScrollBy(1),
-        |first| Act::SScrollTo(first),
+        Act::ScrollBy(List::Search, -1),
+        Act::ScrollBy(List::Search, 1),
+        |first| Act::ScrollTo(List::Search, first),
     );
 }
 
@@ -1873,16 +1796,6 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 
 /// The sheet's door on each pane's rows (track-actions contract, entry
 /// point 1): the App's pane, by tab, and the row.
-fn more_files(i: usize) -> Act {
-    Act::More(Tab::Files, i)
-}
-pub(crate) fn more_library(i: usize) -> Act {
-    Act::More(Tab::Library, i)
-}
-fn more_search(i: usize) -> Act {
-    Act::More(Tab::Search, i)
-}
-
 /// Where settings row `i` draws, under its section label.
 fn row_y(top: u16, i: usize) -> u16 {
     match i {
@@ -1937,13 +1850,13 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             KeyCode::Esc => gui.forward(Action::Cancel),
             KeyCode::Backspace => gui.forward(Action::Backspace),
             KeyCode::Down => {
-                gui.freveal = true;
-                gui.playlists.lreveal = true;
+                gui.files_view.reveal = true;
+                gui.playlists.list.reveal = true;
                 gui.forward(Action::Down);
             }
             KeyCode::Up => {
-                gui.freveal = true;
-                gui.playlists.lreveal = true;
+                gui.files_view.reveal = true;
+                gui.playlists.list.reveal = true;
                 gui.forward(Action::Up);
             }
             KeyCode::Char(c) => gui.forward(Action::Input(c)),
@@ -2005,7 +1918,7 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Enter => {
                 gui.forward(Action::Submit);
-                gui.sreveal = true;
+                gui.search_view.reveal = true;
             }
             KeyCode::Esc => gui.forward(Action::Cancel),
             KeyCode::Backspace => gui.forward(Action::Backspace),
@@ -2036,19 +1949,19 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         // The Files list is the App's own pane: arrows, Enter, back and
         // queue-add forward straight to the shared state machine.
         KeyCode::Down if files => {
-            gui.freveal = true;
+            gui.files_view.reveal = true;
             gui.forward(Action::Down);
         }
         KeyCode::Up if files => {
-            gui.freveal = true;
+            gui.files_view.reveal = true;
             gui.forward(Action::Up);
         }
         KeyCode::PageDown if files => {
-            gui.freveal = true;
+            gui.files_view.reveal = true;
             gui.forward(Action::PageDown);
         }
         KeyCode::PageUp if files => {
-            gui.freveal = true;
+            gui.files_view.reveal = true;
             gui.forward(Action::PageUp);
         }
         KeyCode::Enter if files => gui.forward_capturing(Action::Activate),
@@ -2059,11 +1972,11 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         // Search browsing: the same pane keys as Files, plus the chip
         // cursor on ←/→ and `t` to flip the class under it.
         KeyCode::Down if search => {
-            gui.sreveal = true;
+            gui.search_view.reveal = true;
             gui.forward(Action::Down);
         }
         KeyCode::Up if search => {
-            gui.sreveal = true;
+            gui.search_view.reveal = true;
             gui.forward(Action::Up);
         }
         KeyCode::Enter if search => gui.forward_capturing(Action::Activate),
@@ -2271,6 +2184,34 @@ impl Gui {
         self.last_width.saturating_sub(34)
     }
 
+    /// The viewport a list scrolls — the album wall's track list is
+    /// whichever wall is on screen, the Albums room's or an artist's.
+    fn list_mut(&mut self, list: List) -> &mut ListView {
+        match list {
+            List::Files => &mut self.files_view,
+            List::Search => &mut self.search_view,
+            List::Library => &mut self.library.view,
+            List::AlbumTracks => &mut albums::wall(self).tracks,
+            List::Playlists => &mut self.playlists.list,
+            List::PlaylistTracks => &mut self.playlists.tracks,
+            List::Queue => &mut self.queue_view,
+            List::Sonic => &mut self.sonic.results,
+            List::DjRoom => &mut self.dj.body,
+            List::DjGenres => &mut self.dj.genres,
+        }
+    }
+
+    /// Seat a pane row for a forwarded verb: the App's tab and pane cursor
+    /// go there, the keys come back to the browser (track-actions contract,
+    /// clause 19), and the list reveals the row.
+    fn aim(&mut self, list: List, index: usize) {
+        let Some(tab) = list.tab() else { return };
+        self.app.tab = tab;
+        self.app.focus = crate::tui::app::Focus::Browser;
+        self.app.pane_for_mut(tab).state.select(Some(index));
+        self.list_mut(list).reveal = true;
+    }
+
     /// Which App tab the active browse room's pane rides — the bar's acts
     /// and keys seat it before forwarding (docs/ux-contracts/browser-top-bar.md).
     fn browse_tab(&self) -> Tab {
@@ -2291,7 +2232,7 @@ impl Gui {
     fn wheel(&mut self, at: Position, delta: i32) {
         self.ui.pointer = Some(at);
         if self.queue_open && at.x >= self.queue_panel_x() {
-            self.act(Act::QScrollBy(delta));
+            self.act(Act::ScrollBy(List::Queue, delta));
             return;
         }
         // The nav column scrolls nothing.
@@ -2300,11 +2241,11 @@ impl Gui {
         }
         match NAV[self.active] {
             NavId::Files => {
-                self.act(Act::FScrollBy(delta));
+                self.act(Act::ScrollBy(List::Files, delta));
             }
             NavId::Albums => albums::wheel(self, delta),
             NavId::Search => {
-                self.act(Act::SScrollBy(delta));
+                self.act(Act::ScrollBy(List::Search, delta));
             }
             NavId::Sonic => sonic::wheel(self, delta),
             NavId::Playlists => playlists::wheel(self, delta),
@@ -2477,7 +2418,7 @@ mod tests {
     #[test]
     fn clicking_a_row_selects_it_and_activates_through_the_app() {
         let mut gui = browsing_gui();
-        gui.act(Act::FileRow(1));
+        gui.act(Act::PaneRow(List::Files, 1, RowVerb::Open));
         // Activate on a directory asks the server for a listing — the
         // effect is queued for dispatch, and the pane goes loading with
         // its cursor cleared (the App's own open semantics): proof the
@@ -2493,7 +2434,7 @@ mod tests {
     #[test]
     fn queueing_from_the_hover_control_uses_add_to_queue() {
         let mut gui = browsing_gui();
-        gui.act(Act::FileQueue(2));
+        gui.act(Act::PaneRow(List::Files, 2, RowVerb::Queue));
         assert_eq!(gui.app.queue.items.len(), 1, "the one track was queued");
         assert_eq!(gui.app.queue.items[0].filepath, "music/a.mp3");
     }
@@ -2506,20 +2447,20 @@ mod tests {
         // Rows resolve against their server, so the session needs one.
         gui.app.session.server = "http://host:3000".into();
         gui.app.session.server_id = "http://host:3000".into();
-        gui.act(Act::FileQueue(2));
-        gui.act(Act::FileQueue(3));
+        gui.act(Act::PaneRow(List::Files, 2, RowVerb::Queue));
+        gui.act(Act::PaneRow(List::Files, 3, RowVerb::Queue));
         gui.act(Act::QueueRow(1));
         assert!(gui.pending.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { url, .. }) if url.contains("b.mp3"))), "{:?}", gui.pending);
         assert_eq!(gui.app.queue.current, Some(1));
         gui.pending.clear();
         gui.app.status = crate::player::PlayerStatus { playing: true, source: "x".into(), ..Default::default() };
 
-        gui.act(Act::FileNext(2));
+        gui.act(Act::PaneRow(List::Files, 2, RowVerb::Next));
         assert_eq!(gui.app.queue.items.len(), 3);
         assert_eq!(gui.app.queue.items[2].filepath, "music/a.mp3", "in right after the playing row");
         assert!(!gui.pending.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))), "add next never plays");
 
-        gui.act(Act::FileNow(3));
+        gui.act(Act::PaneRow(List::Files, 3, RowVerb::Now));
         assert!(gui.pending.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { url, .. }) if url.contains("b.mp3"))), "play now plays: {:?}", gui.pending);
         assert_eq!(gui.app.queue.current, Some(2));
 
@@ -2541,8 +2482,8 @@ mod tests {
     #[test]
     fn the_queue_panel_shows_the_real_queue_headed_by_its_count() {
         let mut gui = browsing_gui();
-        gui.act(Act::FileQueue(2));
-        gui.act(Act::FileQueue(3));
+        gui.act(Act::PaneRow(List::Files, 2, RowVerb::Queue));
+        gui.act(Act::PaneRow(List::Files, 3, RowVerb::Queue));
         gui.app.queue.current = Some(1);
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("2 tracks · 8:00"), "count and total time head the panel: {all}");
@@ -2643,7 +2584,7 @@ mod tests {
             .position(|e| matches!(e, Entry::Search { node: SearchNode::Class(SearchClass::Titles), .. }))
             .expect("the Titles class is in the menu");
         let _ = all;
-        gui.act(Act::SearchRow(titles_row));
+        gui.act(Act::PaneRow(List::Search, titles_row, RowVerb::Open));
         assert!(
             gui.app
                 .search
@@ -3068,7 +3009,7 @@ mod tests {
         assert!(gui.app.capture.is_some());
 
         // Clicking the Aurora track row answers the pick and goes home.
-        gui.act(Act::FileRow(3));
+        gui.act(Act::PaneRow(List::Files, 3, RowVerb::Open));
         assert!(gui.app.capture.is_none(), "the pick was consumed");
         assert_eq!(gui.active, SONIC_NAV, "the answer returns to the room that asked");
         assert_eq!(
@@ -3150,7 +3091,7 @@ mod tests {
         assert!(text.contains("Stop 00"), "the top of the list first:\n{text}");
 
         for _ in 0..6 {
-            gui.act(Act::SonScrollBy(1));
+            gui.act(Act::ScrollBy(List::Sonic, 1));
         }
         let text = draw(&mut gui).join("\n");
         assert!(!text.contains("Stop 00"), "the wheel moved the window:\n{text}");
@@ -3159,7 +3100,7 @@ mod tests {
 
         // And back up past the top clamps instead of wrapping.
         for _ in 0..30 {
-            gui.act(Act::SonScrollBy(-1));
+            gui.act(Act::ScrollBy(List::Sonic, -1));
         }
         let text = draw(&mut gui).join("\n");
         assert!(text.contains("Stop 00"), "scrolled home:\n{text}");
@@ -3179,19 +3120,19 @@ mod tests {
 
         // Over the content column, the active room answers.
         gui.wheel(Position { x: 40, y: 10 }, 1);
-        assert_eq!(gui.sonic.scroll, 1, "the room's wheel");
+        assert_eq!(gui.sonic.results.scroll, 1, "the room's wheel");
         // Over the open queue, the queue answers — the room stands still.
         gui.wheel(Position { x: 90, y: 10 }, 1);
-        assert_eq!(gui.qscroll, 1, "the queue's wheel");
-        assert_eq!(gui.sonic.scroll, 1, "the room did not move");
+        assert_eq!(gui.queue_view.scroll, 1, "the queue's wheel");
+        assert_eq!(gui.sonic.results.scroll, 1, "the room did not move");
         // Over the nav column, nothing scrolls.
         gui.wheel(Position { x: 5, y: 10 }, 1);
-        assert_eq!((gui.sonic.scroll, gui.qscroll), (1, 1), "the nav scrolls nothing");
+        assert_eq!((gui.sonic.results.scroll, gui.queue_view.scroll), (1, 1), "the nav scrolls nothing");
         // With the queue folded, its columns belong to the room again.
         gui.queue_open = false;
         gui.wheel(Position { x: 90, y: 10 }, 1);
-        assert_eq!(gui.sonic.scroll, 2, "the split follows the fold");
-        assert_eq!(gui.qscroll, 1);
+        assert_eq!(gui.sonic.results.scroll, 2, "the split follows the fold");
+        assert_eq!(gui.queue_view.scroll, 1);
     }
 
     #[test]

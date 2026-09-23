@@ -14,11 +14,11 @@ use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
 use crate::kit::theme::th;
-use crate::kit::{dim, input_display, modal_frame_on, scroll_list, table_view};
+use crate::kit::{ListView, dim, input_display, modal_frame_on, scroll_list};
 use crate::tui::app::{Action, Entry};
 use crate::tui::worker::{ApiCmd, LibraryNode};
 
-use super::{Act, Gui, accent, bright_bold, put, sel};
+use super::{Act, Gui, List, accent, bright_bold, put, sel};
 
 /// The room's own state: the name dialog, the delete gate, and the two
 /// levels' wheels. The rows themselves are the App's library pane.
@@ -28,11 +28,9 @@ pub(crate) struct PlaylistsUi {
     pub dialog: Option<PlDialog>,
     /// The delete gate, holding the name it asks about (clause 30).
     pub confirm: Option<String>,
-    /// List-level wheel offset + reveal, and the drilled tracks' own.
-    pub lscroll: usize,
-    pub lreveal: bool,
-    pub tscroll: usize,
-    pub treveal: bool,
+    /// The list level's viewport, and the drilled tracks' own.
+    pub list: ListView,
+    pub tracks: ListView,
 }
 
 pub(crate) struct PlDialog {
@@ -45,10 +43,8 @@ impl PlaylistsUi {
         PlaylistsUi {
             dialog: None,
             confirm: None,
-            lscroll: 0,
-            lreveal: false,
-            tscroll: 0,
-            treveal: false,
+            list: ListView::default(),
+            tracks: ListView::default(),
         }
     }
 }
@@ -160,15 +156,8 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
 
     let selected = gui.app.library.state.selected();
-    let reveal = gui
-        .playlists
-        .lreveal
-        .then_some(selected)
-        .flatten()
-        .and_then(|sel| names.iter().position(|i| *i == sel));
-    gui.playlists.lreveal = false;
-    let (first, visible) = table_view(names.len(), reveal, gui.playlists.lscroll, list.height as usize);
-    gui.playlists.lscroll = first;
+    let sel_pos = selected.and_then(|sel| names.iter().position(|i| *i == sel));
+    let (first, visible) = gui.playlists.list.window(names.len(), sel_pos, list.height as usize);
 
     let rename_label = t!("gui.pl.rename_verb").to_string();
     for (row, index) in names.iter().skip(first).take(visible).enumerate() {
@@ -222,9 +211,9 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         names.len(),
         visible,
         first,
-        Act::PlScrollBy(-1),
-        Act::PlScrollBy(1),
-        Act::PlScrollTo,
+        Act::ScrollBy(List::Playlists, -1),
+        Act::ScrollBy(List::Playlists, 1),
+        |first| Act::ScrollTo(List::Playlists, first),
     );
 }
 
@@ -267,10 +256,7 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str) {
         height: content.height.saturating_sub(3),
     };
     let selected = gui.app.library.state.selected();
-    let reveal = gui.playlists.treveal.then_some(selected).flatten();
-    gui.playlists.treveal = false;
-    let (first, visible) = table_view(entries.len(), reveal, gui.playlists.tscroll, list.height as usize);
-    gui.playlists.tscroll = first;
+    let (first, visible) = gui.playlists.tracks.window(entries.len(), selected, list.height as usize);
     let rows: Vec<(usize, &Entry)> =
         entries.iter().enumerate().skip(first).take(visible).collect();
     let len = entries.len();
@@ -282,11 +268,7 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str) {
         &rows,
         list,
         selected,
-        Act::PlTrackRow,
-        Act::PlTrackQueue,
-        Act::PlTrackNext,
-        Act::PlTrackNow,
-        super::more_library,
+        List::PlaylistTracks,
         gui.app.capture.is_none(),
     );
     scroll_list(
@@ -296,9 +278,9 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str) {
         len,
         visible,
         first,
-        Act::PlScrollBy(-1),
-        Act::PlScrollBy(1),
-        Act::PlScrollTo,
+        Act::ScrollBy(List::PlaylistTracks, -1),
+        Act::ScrollBy(List::PlaylistTracks, 1),
+        |first| Act::ScrollTo(List::PlaylistTracks, first),
     );
 }
 
@@ -446,49 +428,9 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             gui.app.tab = crate::tui::app::Tab::Library;
             gui.app.focus = crate::tui::app::Focus::Browser;
             gui.app.library.state.select(Some(index));
-            gui.playlists.lreveal = true;
+            gui.playlists.list.reveal = true;
             gui.forward(Action::Activate);
-            gui.playlists.tscroll = 0;
-        }
-        Act::PlTrackRow(index) => {
-            gui.app.tab = crate::tui::app::Tab::Library;
-            gui.app.focus = crate::tui::app::Focus::Browser;
-            gui.app.library.state.select(Some(index));
-            gui.playlists.treveal = true;
-            gui.forward_capturing(Action::Activate);
-        }
-        Act::PlTrackQueue(index) => {
-            gui.app.tab = crate::tui::app::Tab::Library;
-            gui.app.focus = crate::tui::app::Focus::Browser;
-            gui.app.library.state.select(Some(index));
-            gui.forward(Action::AddToQueue);
-        }
-        Act::PlTrackNext(index) => {
-            gui.app.tab = crate::tui::app::Tab::Library;
-            gui.app.focus = crate::tui::app::Focus::Browser;
-            gui.app.library.state.select(Some(index));
-            gui.forward(Action::AddNext);
-        }
-        Act::PlTrackNow(index) => {
-            gui.app.tab = crate::tui::app::Tab::Library;
-            gui.app.focus = crate::tui::app::Focus::Browser;
-            gui.app.library.state.select(Some(index));
-            gui.forward(Action::PlayNow);
-        }
-        Act::PlScrollBy(delta) => {
-            let scroll = if drilled(gui).is_some() {
-                &mut gui.playlists.tscroll
-            } else {
-                &mut gui.playlists.lscroll
-            };
-            *scroll = if delta < 0 { scroll.saturating_sub(1) } else { *scroll + 1 };
-        }
-        Act::PlScrollTo(first) => {
-            if drilled(gui).is_some() {
-                gui.playlists.tscroll = first;
-            } else {
-                gui.playlists.lscroll = first;
-            }
+            gui.playlists.tracks.scroll = 0;
         }
         _ => return false,
     }
@@ -498,7 +440,8 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
 /// The room's wheel: whichever level is on screen scrolls (the router's
 /// exhaustive match sent us here).
 pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
-    gui.act(Act::PlScrollBy(delta));
+    let list = if drilled(gui).is_some() { List::PlaylistTracks } else { List::Playlists };
+    gui.act(Act::ScrollBy(list, delta));
 }
 
 // ── Keys ────────────────────────────────────────────────────────────────────
@@ -540,11 +483,11 @@ pub(crate) fn handle_key(
     match drilled(gui) {
         Some(_) => match key.code {
             KeyCode::Down => {
-                gui.playlists.treveal = true;
+                gui.playlists.tracks.reveal = true;
                 gui.forward(Action::Down);
             }
             KeyCode::Up => {
-                gui.playlists.treveal = true;
+                gui.playlists.tracks.reveal = true;
                 gui.forward(Action::Up);
             }
             KeyCode::Enter => gui.forward_capturing(Action::Activate),
@@ -563,7 +506,7 @@ pub(crate) fn handle_key(
                         None => 1,
                     };
                     gui.app.library.state.select(Some(next.max(1)));
-                    gui.playlists.lreveal = true;
+                    gui.playlists.list.reveal = true;
                 }
             }
             KeyCode::Up => {
@@ -574,7 +517,7 @@ pub(crate) fn handle_key(
                         None => len - 1,
                     };
                     gui.app.library.state.select(Some(next));
-                    gui.playlists.lreveal = true;
+                    gui.playlists.list.reveal = true;
                 }
             }
             KeyCode::Esc => gui.app.library.state.select(None),
@@ -843,7 +786,7 @@ mod tests {
         draw(&mut gui);
         wheel(&mut gui, 1);
         wheel(&mut gui, 1);
-        assert_eq!(gui.playlists.lscroll, 2, "the list level's wheel");
-        assert_eq!(gui.playlists.tscroll, 0, "the drilled level stood still");
+        assert_eq!(gui.playlists.list.scroll, 2, "the list level's wheel");
+        assert_eq!(gui.playlists.tracks.scroll, 0, "the drilled level stood still");
     }
 }

@@ -583,6 +583,33 @@ pub fn table_view(len: usize, reveal: Option<usize>, scroll: usize, avail: usize
     (first, visible)
 }
 
+/// A list's viewport state, the table contract in one place: the wheel
+/// offset, and whether the next frame reveals the cursor (a keyboard move,
+/// a fresh add; the wheel scrolls freely in between).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListView {
+    pub scroll: usize,
+    pub reveal: bool,
+}
+
+impl ListView {
+    /// The viewport for this frame — [`table_view`] over `len` rows in
+    /// `avail` cells, revealing `selected` (a drawn-row position) when a
+    /// reveal was asked since the last frame — with the offset written back
+    /// clamped.
+    pub fn window(&mut self, len: usize, selected: Option<usize>, avail: usize) -> (usize, usize) {
+        let reveal = std::mem::take(&mut self.reveal).then_some(selected).flatten();
+        let (first, visible) = table_view(len, reveal, self.scroll, avail);
+        self.scroll = first;
+        (first, visible)
+    }
+
+    /// A wheel or page step; the next frame clamps it.
+    pub fn step(&mut self, delta: i32) {
+        self.scroll = self.scroll.saturating_add_signed(delta as isize);
+    }
+}
+
 /// The kit scrollbar, fully live: endcaps step (and hold-repeat), track
 /// cells jump proportionally, a track press arms a thumb drag, and the
 /// bar brightens under the pointer. Draws only on overflow; registers

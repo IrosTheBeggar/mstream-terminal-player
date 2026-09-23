@@ -12,14 +12,14 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
-use crate::kit::{dim, scroll_list, table_view};
+use crate::kit::{ListView, dim, scroll_list};
 use crate::kit::theme::{legacy_conhost, th};
 use crate::tui::app::{Action, Entry, Tab};
 use crate::api::types::Album;
 use crate::tui::worker::LibraryNode;
 
 use super::cover::{Pace, Slot};
-use super::{Act, Gui, accent, bright_bold, put, sel};
+use super::{Act, Gui, List, RowVerb, accent, bright_bold, put, sel};
 
 /// The cover's cells: 12x6 is square at the common 10x20 font.
 const COVER_W: u16 = 12;
@@ -40,10 +40,8 @@ pub(crate) struct WallState {
     pub page: usize,
     /// The cell cursor within the page — the keyboard's hand on the grid.
     pub cursor: usize,
-    /// The track view's wheel offset and reveal flag (the kit's table
-    /// contract, same as Files).
-    pub tscroll: usize,
-    pub treveal: bool,
+    /// The track view's viewport (the kit's table contract, same as Files).
+    pub tracks: ListView,
 }
 
 pub(crate) struct AlbumsUi {
@@ -106,7 +104,7 @@ fn on_root_wall(gui: &Gui) -> bool {
     gui.active == super::ALBUMS_NAV
 }
 
-fn wall(gui: &mut Gui) -> &mut WallState {
+pub(super) fn wall(gui: &mut Gui) -> &mut WallState {
     if gui.active == super::ALBUMS_NAV { &mut gui.albums.wall } else { &mut gui.library.wall }
 }
 
@@ -206,8 +204,8 @@ fn open_album(gui: &mut Gui, index_on_page: usize) {
     {
         let w = wall(gui);
         w.cursor = index_on_page;
-        w.tscroll = 0;
-        w.treveal = false;
+        w.tracks.scroll = 0;
+        w.tracks.reveal = false;
     }
     let node = LibraryNode::Album {
         name: album.name.clone().unwrap_or_default(),
@@ -243,37 +241,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
     match act {
         Act::AlbPage(delta) => turn_page(gui, *delta),
         Act::AlbCell(i) => open_album(gui, *i),
-        Act::AlbTrackRow(i) => {
-            gui.app.tab = Tab::Library;
-            gui.app.focus = crate::tui::app::Focus::Browser;
-            gui.app.library.state.select(Some(*i));
-            wall(gui).treveal = true;
-            gui.forward_capturing(Action::Activate);
-        }
         Act::AlbJump(at) => jump_wall(gui, *at),
-        Act::AlbTrackQueue(i) => {
-            gui.app.tab = Tab::Library;
-            gui.app.focus = crate::tui::app::Focus::Browser;
-            gui.app.library.state.select(Some(*i));
-            gui.forward(Action::AddToQueue);
-        }
-        Act::AlbTrackNext(i) => {
-            gui.app.tab = Tab::Library;
-            gui.app.focus = crate::tui::app::Focus::Browser;
-            gui.app.library.state.select(Some(*i));
-            gui.forward(Action::AddNext);
-        }
-        Act::AlbTrackNow(i) => {
-            gui.app.tab = Tab::Library;
-            gui.app.focus = crate::tui::app::Focus::Browser;
-            gui.app.library.state.select(Some(*i));
-            gui.forward(Action::PlayNow);
-        }
-        Act::AlbScrollBy(delta) => {
-            let w = wall(gui);
-            w.tscroll = if *delta < 0 { w.tscroll.saturating_sub(1) } else { w.tscroll + 1 };
-        }
-        Act::AlbScrollTo(first) => wall(gui).tscroll = *first,
         _ => return false,
     }
     true
@@ -288,19 +256,19 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
     if drilled_album(gui).is_some() {
         match key.code {
             KeyCode::Down => {
-                wall(gui).treveal = true;
+                wall(gui).tracks.reveal = true;
                 gui.forward(Action::Down);
             }
             KeyCode::Up => {
-                wall(gui).treveal = true;
+                wall(gui).tracks.reveal = true;
                 gui.forward(Action::Up);
             }
             KeyCode::PageDown => {
-                wall(gui).treveal = true;
+                wall(gui).tracks.reveal = true;
                 gui.forward(Action::PageDown);
             }
             KeyCode::PageUp => {
-                wall(gui).treveal = true;
+                wall(gui).tracks.reveal = true;
                 gui.forward(Action::PageUp);
             }
             KeyCode::Enter => gui.forward_capturing(Action::Activate),
@@ -348,7 +316,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
 /// The wheel turns the wall a page at a time, and scrolls the track list.
 pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
     if drilled_album(gui).is_some() {
-        let _ = act(gui, &Act::AlbScrollBy(delta));
+        gui.act(Act::ScrollBy(List::AlbumTracks, delta));
     } else {
         turn_page(gui, delta);
     }
@@ -630,7 +598,7 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
     };
     let hover = gui.ui.hovers(back);
     put(frame, content.x, content.y, &back_label, if hover { bright_bold() } else { dim() });
-    gui.ui.click(back, Act::AlbTrackRow(0)); // row 0 is the Parent row: Back
+    gui.ui.click(back, Act::PaneRow(List::AlbumTracks, 0, RowVerb::Open)); // row 0 is the Parent row: Back
 
     let title_x = back.right() + 2;
     let name = if name.is_empty() { t!("gui.lib.singles").to_string() } else { name.to_string() };
@@ -664,14 +632,7 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
         height: content.height - 3,
     };
     let selected = gui.app.library.state.selected();
-    let reveal = wall_ref(gui).treveal.then_some(selected).flatten();
-    let tscroll = wall_ref(gui).tscroll;
-    let (first, visible) = table_view(len, reveal, tscroll, list.height as usize);
-    {
-        let w = wall(gui);
-        w.treveal = false;
-        w.tscroll = first;
-    }
+    let (first, visible) = wall(gui).tracks.window(len, selected, list.height as usize);
     let entries = &gui.app.library.entries;
 
     let rows: Vec<(usize, &crate::tui::app::Entry)> =
@@ -685,11 +646,7 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
         &rows,
         list,
         selected,
-        Act::AlbTrackRow,
-        Act::AlbTrackQueue,
-        Act::AlbTrackNext,
-        Act::AlbTrackNow,
-        super::more_library,
+        List::AlbumTracks,
         gui.app.capture.is_none(),
     );
     scroll_list(
@@ -699,9 +656,9 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
         len,
         visible,
         first,
-        Act::AlbScrollBy(-1),
-        Act::AlbScrollBy(1),
-        Act::AlbScrollTo,
+        Act::ScrollBy(List::AlbumTracks, -1),
+        Act::ScrollBy(List::AlbumTracks, 1),
+        |first| Act::ScrollTo(List::AlbumTracks, first),
     );
 }
 
@@ -876,7 +833,7 @@ mod tests {
         assert!(all.contains("Opening Night"), "its tracks are rows");
 
         gui.pending.clear();
-        let _ = act(&mut gui, &Act::AlbTrackRow(0));
+        gui.act(Act::PaneRow(List::AlbumTracks, 0, RowVerb::Open));
         assert!(drilled_album(&gui).is_none(), "the Parent row walks back to the wall");
         assert!(
             !gui.pending

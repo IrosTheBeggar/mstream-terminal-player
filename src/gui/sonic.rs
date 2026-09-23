@@ -21,11 +21,11 @@ use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{dim, input_display, modal_close, modal_frame_on, scroll_list, table_view, tall_button, tall_secondary};
+use crate::kit::{ListView, dim, input_display, modal_close, modal_frame_on, scroll_list, tall_button, tall_secondary};
 use crate::tui::app::{Action, Capture, SonicEmpty, SonicSide, SonicView, Tab};
 use crate::tui::worker::ApiCmd;
 
-use super::{Act, Gui, accent, bright_bold, put, sel};
+use super::{Act, Gui, List, accent, bright_bold, put, sel};
 
 /// The setup stage's keyboard rows, top to bottom.
 const ROW_START: usize = 0;
@@ -46,15 +46,14 @@ pub(crate) struct SonicUi {
     /// Setup keyboard cursor over [`ROW_START`]..[`ROW_BUILD`]. None is the
     /// kit's resting state — ↓ picks it up, Esc stows it.
     pub cursor: Option<usize>,
-    /// Results list cursor + wheel, the Files pane's contract.
+    /// Results list cursor + viewport, the Files pane's contract.
     pub rcursor: Option<usize>,
-    pub scroll: usize,
-    pub reveal: bool,
+    pub results: ListView,
 }
 
 impl SonicUi {
     pub(crate) fn new() -> Self {
-        SonicUi { menu: None, menu_row: 0, cursor: None, rcursor: None, scroll: 0, reveal: false }
+        SonicUi { menu: None, menu_row: 0, cursor: None, rcursor: None, results: ListView::default() }
     }
 }
 
@@ -467,10 +466,7 @@ fn draw_results(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     );
     put(frame, body.x, body.y + 1, &"─".repeat(list.width as usize), dim());
     let len = sonic.stops.len();
-    let reveal = gui.sonic.reveal.then_some(gui.sonic.rcursor).flatten();
-    gui.sonic.reveal = false;
-    let (first, visible) = table_view(len, reveal, gui.sonic.scroll, list.height as usize);
-    gui.sonic.scroll = first;
+    let (first, visible) = gui.sonic.results.window(len, gui.sonic.rcursor, list.height as usize);
 
     let last = len.saturating_sub(1);
     for (row, index) in (first..(first + visible).min(len)).enumerate() {
@@ -537,9 +533,9 @@ fn draw_results(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         len,
         visible,
         first,
-        Act::SonScrollBy(-1),
-        Act::SonScrollBy(1),
-        Act::SonScrollTo,
+        Act::ScrollBy(List::Sonic, -1),
+        Act::ScrollBy(List::Sonic, 1),
+        |first| Act::ScrollTo(List::Sonic, first),
     );
 
     // The pinned verbs (clause 34): Play is the kit's one primary and sits
@@ -722,14 +718,14 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
                 let effects = gui.app.build_sonic_path();
                 gui.pend(effects);
                 gui.sonic.rcursor = None;
-                gui.sonic.scroll = 0;
+                gui.sonic.results.scroll = 0;
             }
         }
         Act::SonStartOver => {
             gui.app.reset_sonic_path();
             gui.sonic.cursor = None;
             gui.sonic.rcursor = None;
-            gui.sonic.scroll = 0;
+            gui.sonic.results.scroll = 0;
         }
         Act::SonRow(index) => {
             let effects = gui.app.play_sonic_from(index);
@@ -740,12 +736,6 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             let effects = gui.app.queue_sonic_stop(index);
             gui.pend(effects);
         }
-        Act::SonScrollBy(delta) => {
-            let len = gui.app.sonic.stops.len();
-            gui.sonic.scroll =
-                gui.sonic.scroll.saturating_add_signed(delta as isize).min(len.saturating_sub(1));
-        }
-        Act::SonScrollTo(first) => gui.sonic.scroll = first,
         Act::SonPlay => {
             let effects = gui.app.play_sonic_from(0);
             gui.pend(effects);
@@ -793,7 +783,7 @@ pub(crate) fn random_landed(gui: &mut Gui, was_results: bool) {
 /// exhaustive match makes sure none ships without one.)
 pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
     if gui.app.sonic.view == SonicView::Results {
-        gui.act(Act::SonScrollBy(delta));
+        gui.act(Act::ScrollBy(List::Sonic, delta));
     }
 }
 
@@ -879,7 +869,7 @@ pub(crate) fn handle_key(
                 if len > 0 {
                     gui.sonic.rcursor =
                         Some(gui.sonic.rcursor.map_or(0, |c| (c + 1).min(len - 1)));
-                    gui.sonic.reveal = true;
+                    gui.sonic.results.reveal = true;
                 }
             }
             KeyCode::Up => {
@@ -887,7 +877,7 @@ pub(crate) fn handle_key(
                 if len > 0 {
                     gui.sonic.rcursor =
                         Some(gui.sonic.rcursor.map_or(len - 1, |c| c.saturating_sub(1)));
-                    gui.sonic.reveal = true;
+                    gui.sonic.results.reveal = true;
                 }
             }
             KeyCode::Esc => gui.sonic.rcursor = None,

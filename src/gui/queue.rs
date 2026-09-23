@@ -31,7 +31,7 @@ use crate::kit::theme::th;
 use crate::kit::{dim, scroll_list, table_view};
 
 use super::cover::{Pace, Slot};
-use super::{Act, Gui, bar, bright_bold, put, sel, text_button};
+use super::{Act, Gui, List, bar, bright_bold, put, sel, text_button};
 
 /// The cover's cells: 6x3 is square at the common 10x20 font — the
 /// now-playing card's cover, so the panel and the bar agree on a size.
@@ -89,7 +89,7 @@ pub(crate) fn row_at(gui: &Gui, y: u16) -> Option<usize> {
     if y < TOP {
         return None;
     }
-    let index = gui.qscroll + usize::from((y - TOP) / ROW_H);
+    let index = gui.queue_view.scroll + usize::from((y - TOP) / ROW_H);
     (index < gui.app.queue.items.len()).then_some(index)
 }
 
@@ -135,8 +135,8 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         .or_else(|| (selected != gui.last_qsel).then_some(selected).flatten());
     gui.last_current = current;
     gui.last_qsel = selected;
-    let (first, visible) = table_view(len, reveal, gui.qscroll, rows_that_fit(area.height));
-    gui.qscroll = first;
+    let (first, visible) = table_view(len, reveal, gui.queue_view.scroll, rows_that_fit(area.height));
+    gui.queue_view.scroll = first;
 
     // The covers these rows still owe the cache, claimed through the App's
     // own fetch — hashmap lookups after the first frame.
@@ -287,9 +287,9 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             len,
             visible,
             first,
-            Act::QScrollBy(-1),
-            Act::QScrollBy(1),
-            Act::QScrollTo,
+            Act::ScrollBy(List::Queue, -1),
+            Act::ScrollBy(List::Queue, 1),
+            |first| Act::ScrollTo(List::Queue, first),
         );
     }
     // Slots for covers that have left the view are let go once the pool
@@ -315,7 +315,7 @@ mod tests {
     use ratatui::layout::Position;
     use ratatui::style::Modifier;
 
-    use super::super::{Act, Gui, render};
+    use super::super::{Act, Gui, List, render};
     use crate::api::types::{Track, TrackMetadata};
     use crate::config::Config;
     use crate::kit::theme::th;
@@ -606,10 +606,10 @@ mod tests {
         assert_eq!(super::rows_that_fit(30), 5);
         assert!(all.contains("Track 04") && !all.contains("Track 05"), "five rows fit:\n{all}");
 
-        gui.qscroll = 7;
+        gui.queue_view.scroll = 7;
         let all = lines(&draw(&mut gui)).join("\n");
         assert!(all.contains("Track 09") && !all.contains("Track 04"), "the wheel clamps to the end:\n{all}");
-        assert_eq!(gui.qscroll, 5, "and the offset is written back clamped");
+        assert_eq!(gui.queue_view.scroll, 5, "and the offset is written back clamped");
     }
 
     #[test]
@@ -621,21 +621,21 @@ mod tests {
         assert_eq!(cells(&rows[4], BAR as usize, 1), "▲", "the top cap: {:?}", rows[4]);
         assert_eq!(cells(&rows[18], BAR as usize, 1), "▼", "the bottom cap: {:?}", rows[18]);
         assert_eq!(cells(&rows[5], BAR as usize, 1), "█", "the thumb at the top while first is 0");
-        assert_eq!(gui.ui.hit(Position { x: BAR, y: 18 }), Some(Act::QScrollBy(1)));
-        assert_eq!(gui.ui.hit(Position { x: BAR, y: 4 }), Some(Act::QScrollBy(-1)));
+        assert_eq!(gui.ui.hit(Position { x: BAR, y: 18 }), Some(Act::ScrollBy(List::Queue, 1)));
+        assert_eq!(gui.ui.hit(Position { x: BAR, y: 4 }), Some(Act::ScrollBy(List::Queue, -1)));
         assert!(
-            matches!(gui.ui.hit(Position { x: BAR, y: 17 }), Some(Act::QScrollTo(_))),
+            matches!(gui.ui.hit(Position { x: BAR, y: 17 }), Some(Act::ScrollTo(List::Queue, _))),
             "a track cell jumps"
         );
-        gui.act(Act::QScrollBy(1));
-        assert_eq!(gui.qscroll, 1);
-        gui.act(Act::QScrollTo(4));
+        gui.act(Act::ScrollBy(List::Queue, 1));
+        assert_eq!(gui.queue_view.scroll, 1);
+        gui.act(Act::ScrollTo(List::Queue, 4));
         let rows = lines(&draw(&mut gui));
         assert!(rows[4].contains("Track 04"), "the jump landed: {:?}", rows[4]);
         assert_eq!(cells(&rows[17], BAR as usize, 1), "█", "the thumb rode to the end");
         // The wheel over the panel rides the same act.
         gui.wheel(Position { x: 90, y: 10 }, -1);
-        assert_eq!(gui.qscroll, 3);
+        assert_eq!(gui.queue_view.scroll, 3);
     }
 
     /// Ten rows, each with a cover of its own decoded and waiting.
@@ -673,17 +673,17 @@ mod tests {
         settle(&mut gui);
         assert_eq!(gui.queue.encodes(), 5, "five covers on view, five encodes");
 
-        gui.act(Act::QScrollBy(1));
+        gui.act(Act::ScrollBy(List::Queue, 1));
         settle(&mut gui);
         assert_eq!(gui.queue.encodes(), 6, "one row came into view: one encode, four covers moved");
 
-        gui.act(Act::QScrollBy(-1));
+        gui.act(Act::ScrollBy(List::Queue, -1));
         settle(&mut gui);
         assert_eq!(gui.queue.encodes(), 6, "and back: the cover that left was still warm");
 
         // The pool holds the view plus its slack, then lets the rest go.
         for _ in 0..5 {
-            gui.act(Act::QScrollBy(1));
+            gui.act(Act::ScrollBy(List::Queue, 1));
             settle(&mut gui);
         }
         assert_eq!(gui.queue.encodes(), 10, "every cover encoded once on its way through");

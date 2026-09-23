@@ -11,12 +11,12 @@ use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
 use crate::kit::theme::legacy_conhost;
-use crate::kit::{STRIP_MIN_ROWS, dim, letter_index, letter_strip, scroll_list, table_view};
+use crate::kit::{ListView, STRIP_MIN_ROWS, dim, letter_index, letter_strip, scroll_list};
 use crate::tui::app::{Action, App, Entry, Tab};
 use crate::tui::worker::LibraryNode;
 
 use super::albums::{self, WallState};
-use super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, RECENT_NAV, accent, bright_bold, put};
+use super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, List, RECENT_NAV, accent, bright_bold, put};
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -25,8 +25,7 @@ use super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, RECENT_NAV, accent, bright_bold, 
 /// own state (library-rooms contract, clause 7).
 #[derive(Debug, Default)]
 pub(crate) struct LibraryUi {
-    pub scroll: usize,
-    pub reveal: bool,
+    pub view: ListView,
     pub wall: WallState,
 }
 
@@ -53,8 +52,8 @@ fn is_room(gui: &Gui) -> bool {
 /// The nav row chosen (entry point 1): the root list, fresh — the rooms
 /// share one pane, and "recent" means now (clauses 4 and the flows).
 pub(crate) fn open(gui: &mut Gui, root: LibraryNode) {
-    gui.library.scroll = 0;
-    gui.library.reveal = false;
+    gui.library.view.scroll = 0;
+    gui.library.view.reveal = false;
     gui.library.wall = WallState::default();
     // A fresh root has no way back: a trail left by another room's drill
     // would be an orphan under it.
@@ -186,10 +185,7 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     };
     let selected = gui.app.library.state.selected();
     let sel_pos = selected.and_then(|s| rows.iter().position(|(i, _)| *i == s));
-    let reveal = gui.library.reveal.then_some(sel_pos).flatten();
-    gui.library.reveal = false;
-    let (first, visible) = table_view(rows.len(), reveal, gui.library.scroll, list.height as usize);
-    gui.library.scroll = first;
+    let (first, visible) = gui.library.view.window(rows.len(), sel_pos, list.height as usize);
 
     let len = rows.len();
     let shown: Vec<(usize, &Entry)> = rows.into_iter().skip(first).take(visible).collect();
@@ -201,11 +197,7 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         &shown,
         list,
         selected,
-        Act::LibRow,
-        Act::LibQueue,
-        Act::LibNext,
-        Act::LibNow,
-        super::more_library,
+        List::Library,
         gui.app.capture.is_none(),
     );
     scroll_list(
@@ -215,29 +207,20 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         len,
         visible,
         first,
-        Act::LibScrollBy(-1),
-        Act::LibScrollBy(1),
-        Act::LibScrollTo,
+        Act::ScrollBy(List::Library, -1),
+        Act::ScrollBy(List::Library, 1),
+        |first| Act::ScrollTo(List::Library, first),
     );
 }
 
 // ── Acting ──────────────────────────────────────────────────────────────────
-
-/// A row chosen by the pointer: the App's cursor moves there first, so the
-/// forwarded action lands on it.
-fn select_row(gui: &mut Gui, index: usize) {
-    gui.app.tab = Tab::Library;
-    gui.app.focus = crate::tui::app::Focus::Browser;
-    gui.app.library.state.select(Some(index));
-    gui.library.reveal = true;
-}
 
 /// The strip's jump (clause 10): the row at `pos` (in the drawn rows) comes
 /// to the top and takes the cursor.
 fn jump_list(gui: &mut Gui, pos: usize) {
     let target = rows(gui).get(pos).map(|(i, _)| *i);
     if let Some(index) = target {
-        gui.library.scroll = pos;
+        gui.library.view.scroll = pos;
         gui.app.tab = Tab::Library;
         gui.app.library.state.select(Some(index));
     }
@@ -246,27 +229,6 @@ fn jump_list(gui: &mut Gui, pos: usize) {
 /// The rooms' side of [`Gui::act`]. True when the act was ours.
 pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
     match act {
-        Act::LibRow(i) => {
-            select_row(gui, *i);
-            gui.forward_capturing(Action::Activate);
-        }
-        Act::LibQueue(i) => {
-            select_row(gui, *i);
-            gui.forward(Action::AddToQueue);
-        }
-        Act::LibNext(i) => {
-            select_row(gui, *i);
-            gui.forward(Action::AddNext);
-        }
-        Act::LibNow(i) => {
-            select_row(gui, *i);
-            gui.forward(Action::PlayNow);
-        }
-        Act::LibScrollBy(delta) => {
-            gui.library.scroll =
-                if *delta < 0 { gui.library.scroll.saturating_sub(1) } else { gui.library.scroll + 1 };
-        }
-        Act::LibScrollTo(first) => gui.library.scroll = *first,
         Act::LibJump(pos) => jump_list(gui, *pos),
         Act::LibBack => {
             gui.app.tab = Tab::Library;
@@ -288,20 +250,20 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     }
     match key.code {
         KeyCode::Down => {
-            gui.library.reveal = true;
+            gui.library.view.reveal = true;
             gui.forward(Action::Down);
         }
         KeyCode::Up => {
-            gui.library.reveal = true;
+            gui.library.view.reveal = true;
             gui.forward(Action::Up);
             keep_off_parent(gui);
         }
         KeyCode::PageDown => {
-            gui.library.reveal = true;
+            gui.library.view.reveal = true;
             gui.forward(Action::PageDown);
         }
         KeyCode::PageUp => {
-            gui.library.reveal = true;
+            gui.library.view.reveal = true;
             gui.forward(Action::PageUp);
             keep_off_parent(gui);
         }
@@ -337,7 +299,7 @@ pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
     if wall_view(gui) {
         albums::wheel(gui, delta);
     } else {
-        gui.act(Act::LibScrollBy(delta));
+        gui.act(Act::ScrollBy(List::Library, delta));
     }
 }
 
@@ -348,7 +310,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Position;
 
-    use super::super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, RECENT_NAV, render};
+    use super::super::{ARTISTS_NAV, Act, GENRES_NAV, Gui, List, RECENT_NAV, RowVerb, render};
     use crate::api::types::{Album, Genre, Track};
     use crate::config::Config;
     use crate::tui::app::{App, Effect, Tab};
@@ -455,8 +417,8 @@ mod tests {
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(all.contains("Ambient (4)") && all.contains("Techno (9)"), "{all}");
-        assert_eq!(hit_text(&gui, &rows, "Techno"), Some(Act::LibRow(2)));
-        gui.act(Act::LibRow(2));
+        assert_eq!(hit_text(&gui, &rows, "Techno"), Some(Act::PaneRow(List::Library, 2, RowVerb::Open)));
+        gui.act(Act::PaneRow(List::Library, 2, RowVerb::Open));
         assert!(asked(&gui, &LibraryNode::Genre("Techno".into())), "a genre opens into its tracks");
         land(&mut gui, LibraryNode::Genre("Techno".into()), LibraryData::Tracks(vec![track("t/a.mp3", 61.0), track("t/b.mp3", 125.0)]));
         let rows = draw(&mut gui);
@@ -476,7 +438,7 @@ mod tests {
         let mut gui = artists_gui(&["Bassnectar", "Portishead"]);
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("h back · a queue"), "a list has the Files keys: {all}");
-        gui.act(Act::LibRow(2));
+        gui.act(Act::PaneRow(List::Library, 2, RowVerb::Open));
         land(&mut gui, LibraryNode::Artist("Portishead".into()), LibraryData::Albums(vec![album(Some("Dummy"), "Portishead", Some(1994))]));
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("← → page"), "the wall has the wall's keys: {all}");
@@ -494,15 +456,15 @@ mod tests {
         let all = rows.join("\n");
         assert!(all.contains("30 items") && all.contains("▸ play"), "{all}");
         assert!(!rows.iter().any(|r| r.contains("# A B C")), "newest first is not an alphabet: {all}");
-        assert_eq!(hit_text(&gui, &rows, "A00.mp3"), Some(Act::LibRow(1)));
+        assert_eq!(hit_text(&gui, &rows, "A00.mp3"), Some(Act::PaneRow(List::Library, 1, RowVerb::Open)));
     }
 
     #[test]
     fn an_artist_opens_a_wall_of_its_albums_and_a_card_opens_its_tracks() {
         let mut gui = artists_gui(&["Bassnectar", "Portishead"]);
         let rows = draw(&mut gui);
-        assert_eq!(hit_text(&gui, &rows, "Portishead"), Some(Act::LibRow(2)));
-        gui.act(Act::LibRow(2));
+        assert_eq!(hit_text(&gui, &rows, "Portishead"), Some(Act::PaneRow(List::Library, 2, RowVerb::Open)));
+        gui.act(Act::PaneRow(List::Library, 2, RowVerb::Open));
         assert!(asked(&gui, &LibraryNode::Artist("Portishead".into())));
         gui.pending.clear();
         land(
@@ -539,7 +501,7 @@ mod tests {
         key(&mut gui, KeyCode::Esc);
         assert!(matches!(gui.app.library_stack.here(), LibraryNode::Artists));
         // Opening the bucket asks for the artist's name-less album.
-        gui.act(Act::LibRow(2));
+        gui.act(Act::PaneRow(List::Library, 2, RowVerb::Open));
         assert!(asked(&gui, &LibraryNode::Artist("Portishead".into())), "the artist opens again: {:?}", gui.pending);
         land(&mut gui, LibraryNode::Artist("Portishead".into()), LibraryData::Albums(vec![album(None, "Portishead", None)]));
         draw(&mut gui);
@@ -579,7 +541,7 @@ mod tests {
         assert_eq!(gui.ui.hit(cell(3)), Some(Act::LibJump(2)), "C jumps to Crtist");
         assert_eq!(gui.ui.hit(cell(26)), Some(Act::LibJump(23)), "Z snaps to the nearest present letter, X");
         gui.act(Act::LibJump(20));
-        assert_eq!(gui.library.scroll, 20, "the row comes to the top");
+        assert_eq!(gui.library.view.scroll, 20, "the row comes to the top");
         assert_eq!(gui.app.library.state.selected(), Some(21), "and takes the cursor");
         // A pane short enough to scroll: the list's window clamps to its end,
         // and the jumped-to row is inside it while the first row is gone.
