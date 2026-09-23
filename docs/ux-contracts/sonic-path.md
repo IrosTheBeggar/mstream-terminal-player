@@ -197,7 +197,7 @@ Idiom mapping, per the kit's conventions (docs/ui-kit.md, the GUI canvas):
 | Drawer entry | Left-nav room (gated like the record's drawer entry) |
 | Bottom sheets | Kit modals (`modal_frame`) |
 | Snackbars/toasts | The note line above the bar |
-| Capture banner | The App's existing armed-capture banner |
+| Capture banner | A banner row above the room, in the accent, BOLD, with `[X]` to let the pick go; the room stands one row lower while the pick is armed, and the row follows the user into any room and the Now Playing screen (2026-09-23 — the bar's note row carried it before, where it was easy to miss while browsing). With keyboard hints off the "· Esc cancels" tail is cut; `[X]` stands for it. |
 | Tap | Click *and* a key — every verb keyed, tips line names them |
 | Slider | Kit-drawn bar, ←→ to adjust (the TUI's reading) |
 | MatchMeter (4×28 px vertical fill + percent) | Cell-sized meter + percent — design in the canvas before building |
@@ -246,3 +246,9 @@ Gaps in the shared App that this contract adds (verify at implementation):
 - **2026-08-31 — The same-server guard on "Use playing" is vacuous here**
   (clause 1): a native session plays only the connected server's tracks,
   so no guard is drawn. Revisit if cross-server playback ever lands.
+- **2026-09-23 — The capture banner moves into the browser** (clause 4's
+  "persistent banner"): it stood on the bar's note row, out of the eye's
+  way while a track was being chosen up in the room. Now it is a row over
+  the room in the accent, with `[X]` beside it, and the room steps down a
+  row for as long as the pick is armed. The DJ's opening-song pick wears
+  the same row.

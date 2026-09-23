@@ -2029,6 +2029,12 @@ a LATER secondary screen (party view), Columns retired.
   each end, the status as one line with Start / Stop at its right, and a
   help line under the body for the row under the pointer or the cursor in
   place of the clipped descriptions. The room scrolls above the help line.
+- **The pick banner moves into the browser ✅ 2026-09-23** — a sonic
+  endpoint or the DJ's opening song being chosen showed its banner on the
+  bar's note row, below where the choosing happened. Now a banner row in
+  the accent stands over the room (or the Now Playing stage) with `[X]`
+  to let the pick go, and the room steps down a row while the pick is
+  armed; the "· Esc cancels" tail is cut when keyboard hints are off.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the

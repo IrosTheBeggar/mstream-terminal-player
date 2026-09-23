@@ -1084,6 +1084,7 @@ gui:
     of: "%{total} 件中 %{shown} 件"
     back_tip: "戻る — h"
     clear_tip: "クリア — Esc"
+    pick_cancel_tip: "選択を取り消す — Esc"
   files:
     empty: "(ここには何もありません)"
     items: "%{count} 件"

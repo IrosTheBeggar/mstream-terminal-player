@@ -423,8 +423,11 @@ the card — repeat, prev, play, next, shuffle: prev and next rounded in
 the text colour BOLD, play THICK in GOLD (`tall_frame_bordered`, the seek
 rule's colour on the one primary action), the toggles rounded in their
 state colours. The bottom row holds the volume group at the left,
-the screen's note (or an armed pick's banner) after it, and the card's
-last line. The card, at the right edge, is an eight-by-four cover with
+the screen's note after it, and the card's
+last line. An armed pick (a sonic endpoint, the DJ's opening song) is a
+mode, not news: its banner is a row above the room in the accent, BOLD,
+with `[X]` at its right, and the room stands one row lower while it lasts
+(2026-09-23; the bar's note row carried it before). The card, at the right edge, is an eight-by-four cover with
 four lines beside it: title, artist · year, the spec line, the stars with
 key and tempo; a right click (or `m`) opens the track's sheet, the
 chevron folds the queue.

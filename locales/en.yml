@@ -1084,6 +1084,7 @@ gui:
     of: "%{shown} of %{total}"
     back_tip: "Back — h"
     clear_tip: "Clear — Esc"
+    pick_cancel_tip: "cancel the pick — Esc"
   files:
     empty: "(nothing here)"
     items: "%{count} items"

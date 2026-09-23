@@ -1084,6 +1084,7 @@ gui:
     of: "%{shown} di %{total}"
     back_tip: "Indietro — h"
     clear_tip: "Svuota — Esc"
+    pick_cancel_tip: "annulla la scelta — Esc"
   files:
     empty: "(niente qui)"
     items: "%{count} elementi"

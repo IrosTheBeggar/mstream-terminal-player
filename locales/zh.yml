@@ -1084,6 +1084,7 @@ gui:
     of: "%{shown} / %{total}"
     back_tip: "返回 — h"
     clear_tip: "清除 — Esc"
+    pick_cancel_tip: "取消选择 — Esc"
   files:
     empty: "(这里没有内容)"
     items: "%{count} 项"

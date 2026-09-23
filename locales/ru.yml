@@ -1084,6 +1084,7 @@ gui:
     of: "%{shown} из %{total}"
     back_tip: "Назад — h"
     clear_tip: "Очистить — Esc"
+    pick_cancel_tip: "отменить выбор — Esc"
   files:
     empty: "(здесь пусто)"
     items: "%{count} элементов"

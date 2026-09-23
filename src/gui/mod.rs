@@ -144,6 +144,8 @@ pub(crate) enum Act {
     DjChoose(usize),
     DjRemember,
     DjCancel,
+    /// The [X] on an armed pick's banner: the pick let go (Esc's twin).
+    CaptureCancel,
     DjSurprise,
     DjPick,
     /// Track actions (track-actions contract): a pane row's, a queue row's
@@ -714,6 +716,7 @@ impl Gui {
             return false;
         }
         match act {
+            Act::CaptureCancel => self.forward(Action::Cancel),
             Act::Screen(screen) => {
                 self.screen = screen;
                 if screen == Screen::NowPlaying {
@@ -1113,13 +1116,22 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     draw_top_tabs(frame, gui);
     servers::draw_header(frame, gui, area);
 
+    // An armed pick is a mode, and it shows where the picking happens: a
+    // banner row above the room (or the stage), the room one row lower for
+    // as long as it lasts, [X] to let it go (sonic-path clause 4, auto-dj
+    // clause 4). The bar's note row is news; a mode is not news.
+    let banner = capture_banner(gui);
     match gui.screen {
         Screen::Library => {
             draw_nav(frame, gui, area);
             // The content column, between the nav rule and the queue (when
             // open). Exhaustive over the nav, like the wheel: a room cannot
             // ship without a body.
-            let content = content_rect(area.width, area.height, gui.queue_open, gui.footer());
+            let mut content = content_rect(area.width, area.height, gui.queue_open, gui.footer());
+            if let Some(text) = &banner {
+                draw_capture_banner(frame, gui, content, text);
+                content = Rect { y: content.y + 1, height: content.height.saturating_sub(1), ..content };
+            }
             match NAV[gui.active] {
                 NavId::Files => draw_files(frame, gui, content),
                 NavId::Albums => albums::draw(frame, gui, content),
@@ -1132,7 +1144,11 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             }
         }
         Screen::NowPlaying => {
-            let stage = now::stage_rect(area, gui.queue_open, gui.footer());
+            let mut stage = now::stage_rect(area, gui.queue_open, gui.footer());
+            if let Some(text) = &banner {
+                draw_capture_banner(frame, gui, stage, text);
+                stage = Rect { y: stage.y + 1, height: stage.height.saturating_sub(1), ..stage };
+            }
             now::draw(frame, gui, stage);
         }
     }
@@ -1142,28 +1158,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     }
 
     // The note rides the bar's bottom row (gui's own first, else the App's
-    // words); the keyboard tips, when shown, take the very last row. An
-    // armed pick outranks both: the banner is the mode, not news (clauses
-    // 4, 10–13).
+    // words); the keyboard tips, when shown, take the very last row.
     let note = bar::note_rect(area, gui.footer());
-    let pick_banner = match gui.app.capture {
-        Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::Start)) => {
-            Some(t!("gui.sonic.pick_banner_start").to_string())
-        }
-        Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::End)) => {
-            Some(t!("gui.sonic.pick_banner_end").to_string())
-        }
-        _ => dj::banner(gui),
-    };
-    if let Some(banner) = pick_banner {
-        put(
-            frame,
-            note.x,
-            note.y,
-            &bar::clip(&banner, note.width as usize),
-            Style::default().fg(th().accent).add_modifier(Modifier::BOLD),
-        );
-    } else if let Some((text, is_err)) = gui.note.clone().or_else(|| {
+    if let Some((text, is_err)) = gui.note.clone().or_else(|| {
         gui.app
             .message
             .as_ref()
@@ -1305,6 +1302,37 @@ fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App) {
         app.cover_pane.draw(&mut canvas, cover);
         frame.render_widget(Paragraph::new(canvas.into_lines()), rect);
     }
+}
+
+/// The words of an armed pick (sonic-path clause 4, auto-dj clause 4) —
+/// with the "· Esc cancels" tail cut while the keyboard's names are
+/// hidden: the banner's [X] stands for it then.
+fn capture_banner(gui: &Gui) -> Option<String> {
+    let text = match gui.app.capture {
+        Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::Start)) => {
+            t!("gui.sonic.pick_banner_start").to_string()
+        }
+        Some(crate::tui::app::Capture::Sonic(crate::tui::app::SonicSide::End)) => {
+            t!("gui.sonic.pick_banner_end").to_string()
+        }
+        _ => dj::banner(gui)?,
+    };
+    if gui.config.gui.key_hints {
+        return Some(text);
+    }
+    Some(text.rsplit_once(" · ").map_or(text.clone(), |(head, _)| head.to_string()))
+}
+
+/// An armed pick's banner row: the words in the accent, BOLD, across the
+/// column, and [X] at its right to let the pick go (Esc does the same).
+fn draw_capture_banner(frame: &mut Frame, gui: &mut Gui, at: Rect, text: &str) {
+    let close = Rect { x: at.right().saturating_sub(3), y: at.y, width: 3, height: 1 };
+    let hover = gui.ui.hovers(close);
+    let avail = close.x.saturating_sub(at.x + 1) as usize;
+    put(frame, at.x, at.y, &bar::clip(text, avail), Style::default().fg(th().accent).add_modifier(Modifier::BOLD));
+    put(frame, close.x, at.y, "[X]", if hover { bright_bold() } else { dim() });
+    gui.ui.click(close, Act::CaptureCancel);
+    gui.ui.tip_keyed(close, t!("gui.bar.pick_cancel_tip").to_string());
 }
 
 fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
@@ -3288,7 +3316,16 @@ mod tests {
         // Hover the Aurora row: without an armed pick this reveals the [+].
         gui.ui.pointer = Some(Position { x: 30, y: 7 });
         let lines = draw(&mut gui);
-        assert!(lines.join("\n").contains("Pick the start song"), "the banner is the mode");
+        // The banner stands over the room, in the browser where the
+        // picking happens, and the room steps down a row under it; the
+        // bar's note row is left to news. Keyboard hints are off, so the
+        // "· Esc cancels" tail is cut and [X] stands for it.
+        assert!(lines[2].contains("Pick the start song") && lines[2].contains("[X]"), "{:?}", lines[2]);
+        assert!(!lines[2].contains("Esc cancels"), "{:?}", lines[2]);
+        assert!(lines[3].contains("Files"), "the room a row lower: {:?}", lines[3]);
+        assert!(!lines[lines.len() - 2].contains("Pick the start song"), "not on the note row");
+        let close_x = lines[2].chars().position(|c| c == '[').unwrap() as u16;
+        assert_eq!(gui.ui.hit(Position { x: close_x, y: 2 }), Some(Act::CaptureCancel), "[X] lets the pick go");
         assert!(
             !lines[7].contains("[+]"),
             "an armed pick must not offer to queue: {:?}",
