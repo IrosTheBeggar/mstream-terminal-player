@@ -935,11 +935,7 @@ impl Gui {
                     _ => self.app.status.position,
                 };
                 Some(Now {
-                    title: track
-                        .metadata
-                        .display_title()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| track.file_name().to_string()),
+                    title: track.title_or_file().to_string(),
                     artist: track.metadata.artist.clone().unwrap_or_default(),
                     elapsed,
                     duration,
@@ -988,11 +984,26 @@ fn bright_bold() -> Style {
     Style::default().fg(th().bright).add_modifier(Modifier::BOLD)
 }
 
+/// The shell's glyph pairs, by terminal: the fancy form, or the CP437
+/// stand-in legacy conhost can draw (see `setup::g`).
+fn forward_glyph() -> &'static str {
+    if legacy_conhost() { ">" } else { "▸" }
+}
+
+fn back_glyph() -> &'static str {
+    if legacy_conhost() { "<" } else { "◂" }
+}
+
+/// The checkbox pair: checked, unchecked.
+fn check_glyphs() -> (&'static str, &'static str) {
+    if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") }
+}
+
 /// A 1-row text button: dim at rest, bright under the pointer; the
 /// accent when it is the row's one way forward. Returns its width.
 fn text_button(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, label: &str, lead: bool, act: Act) -> u16 {
     let rect = Rect { x, y, width: label.chars().count() as u16, height: 1 };
-    let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+    let hover = gui.ui.hovers(rect);
     let style = match (hover, lead) {
         (true, _) => bright_bold(),
         (false, true) => accent(),
@@ -1230,7 +1241,7 @@ fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App) {
 
 fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     put(frame, 1, 4, &t!("gui.nav.library"), dim());
-    let forward = if legacy_conhost() { ">" } else { "▸" };
+    let forward = forward_glyph();
     let set_y = area.height - 9;
     for (i, id) in NAV.iter().enumerate() {
         // The sonic room rides the ping's flag: absent is absent — no
@@ -1253,7 +1264,7 @@ fn draw_nav(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let x = if active { 1 } else { 3 };
         let text = if active { format!("{forward} {label}") } else { label };
         let rect = Rect { x, y, width: text.chars().count() as u16, height: 1 };
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = gui.ui.hovers(rect);
         let style = match (active, hover) {
             (true, _) => Style::default().fg(th().accent).add_modifier(Modifier::BOLD),
             (false, true) => bright_bold(),
@@ -1351,8 +1362,8 @@ fn bar_count(gui: &Gui, plain: String) -> String {
 /// The bar's back ◂ at (x, y). Returns how far the crumb moves over.
 fn draw_bar_back(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16) -> u16 {
     let back = Rect { x, y, width: 1, height: 1 };
-    let hover = gui.ui.pointer.is_some_and(|p| back.contains(p));
-    let glyph = if legacy_conhost() { "<" } else { "◂" };
+    let hover = gui.ui.hovers(back);
+    let glyph = back_glyph();
     put(frame, x, y, glyph, if hover { bright_bold() } else { dim() });
     gui.ui.click(back, Act::BarBack);
     gui.ui.tip(back, t!("gui.bar.back_tip").to_string());
@@ -1370,7 +1381,7 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
     // The [X] that clears the filter, shared by the field and the chip.
     let close = |frame: &mut Frame, gui: &mut Gui, x: u16| {
         let rect = Rect { x, y, width: 3, height: 1 };
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = gui.ui.hovers(rect);
         put(frame, x, y, "[X]", if hover { bright_bold() } else { dim() });
         gui.ui.click(rect, Act::BarClear);
         gui.ui.tip(rect, t!("gui.bar.clear_tip").to_string());
@@ -1399,7 +1410,7 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
     if !filter.is_empty() {
         let chip = format!("/ {}", bar::clip(&filter, 24));
         let rect = Rect { x: content.x, y, width: chip.chars().count() as u16, height: 1 };
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = gui.ui.hovers(rect);
         put(
             frame,
             content.x,
@@ -1412,7 +1423,7 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
     } else {
         let label = format!("/ {}", t!("gui.bar.filter"));
         let rect = Rect { x: content.x, y, width: label.chars().count() as u16, height: 1 };
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = gui.ui.hovers(rect);
         put(frame, content.x, y, &label, if hover { bright_bold() } else { dim() });
         gui.ui.click(rect, Act::BarFilter);
         gui.ui.tip(rect, format!("{label} — f"));
@@ -1423,7 +1434,7 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
     if !gui.app.pane().has_tracks() {
         return;
     }
-    let forward_glyph = if legacy_conhost() { ">" } else { "▸" };
+    let forward_glyph = forward_glyph();
     let shuffle_glyph = if legacy_conhost() { "" } else { "⇄ " };
     let mut verbs: Vec<(String, Act)> = vec![
         (format!("{forward_glyph} {}", t!("gui.bar.play")), Act::BarPlay),
@@ -1451,7 +1462,7 @@ fn draw_bar_controls(frame: &mut Frame, gui: &mut Gui, content: Rect, y: u16) {
             vx += sep.chars().count() as u16;
         }
         let rect = Rect { x: vx, y, width: label.chars().count() as u16, height: 1 };
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = gui.ui.hovers(rect);
         let accent_verb = matches!(act, Act::BarPlay);
         let style = match (hover, accent_verb) {
             (true, _) => bright_bold(),
@@ -1480,7 +1491,7 @@ fn draw_files_bar(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let count_x = content.right().saturating_sub(count.chars().count() as u16);
     put(frame, count_x, y, &count, dim());
 
-    let forward_glyph = if legacy_conhost() { ">" } else { "▸" };
+    let forward_glyph = forward_glyph();
     let mut x = content.x;
     if !gui.app.path.is_empty() {
         x += draw_bar_back(frame, gui, x, y);
@@ -1529,7 +1540,7 @@ fn draw_pane_rows(
     for (row, (index, entry)) in rows.iter().enumerate() {
         let y = list.y + row as u16;
         let rect = Rect { x: list.x, y, width: list.width, height: 1 };
-        let hover = ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = ui.hovers(rect);
         let is_sel = *index == selected.unwrap_or(usize::MAX);
         if is_sel {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
@@ -1545,7 +1556,7 @@ fn draw_pane_rows(
                     (false, false, false) => (false, Style::default()),
                 };
                 if marker {
-                    let mark = if legacy_conhost() { ">" } else { "▸" };
+                    let mark = forward_glyph();
                     put(frame, list.x, y, mark, if is_sel { sel().add_modifier(Modifier::BOLD) } else { Style::default().fg(th().ok).add_modifier(Modifier::BOLD) });
                 }
                 // A right click opens the row's sheet (track-actions
@@ -1634,7 +1645,7 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     // keys, dim at rest, one click to wake it.
     let editing = gui.app.editing_query;
     let card = Rect { x: content.x, y: content.y, width: content.width, height: 3 };
-    let card_hover = gui.ui.pointer.is_some_and(|p| card.contains(p));
+    let card_hover = gui.ui.hovers(card);
     let border = if editing {
         Style::default().fg(th().accent)
     } else if card_hover {
@@ -1667,7 +1678,7 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     for (i, class) in SEARCH_CLASSES.iter().enumerate() {
         let label = class_label(*class);
         let rect = Rect { x, y: chips_y, width: label.chars().count() as u16, height: 1 };
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = gui.ui.hovers(rect);
         let style = if gui.chip == i && gui.cursor.is_none() && !editing {
             sel().add_modifier(Modifier::BOLD)
         } else if hover {
@@ -1765,7 +1776,7 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if gui.dj.room {
         return dj::draw_room(frame, gui, content);
     }
-    let (check_on, check_off) = if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") };
+    let (check_on, check_off) = check_glyphs();
     put(frame, content.x, content.y, &t!("gui.set.playback"), dim());
     put(frame, content.x, content.y + 7, &t!("gui.set.listen_group"), dim());
     put(frame, content.x, content.y + 10, &t!("gui.set.servers_group"), dim());
@@ -1805,15 +1816,15 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             t!("gui.set.resume_desc").to_string(),
         ),
         (
-            format!("{} {}", t!("gui.set.dj"), if legacy_conhost() { ">" } else { "▸" }),
+            format!("{} {}", t!("gui.set.dj"), forward_glyph()),
             t!("gui.set.dj_desc").to_string(),
         ),
         (
-            format!("{} {}", t!("gui.srv.manage"), if legacy_conhost() { ">" } else { "▸" }),
+            format!("{} {}", t!("gui.srv.manage"), forward_glyph()),
             t!("gui.srv.manage_desc").to_string(),
         ),
         (
-            format!("{} {}", t!("gui.set.tor_add"), if legacy_conhost() { ">" } else { "▸" }),
+            format!("{} {}", t!("gui.set.tor_add"), forward_glyph()),
             t!("gui.set.tor_add_desc").to_string(),
         ),
         (
@@ -1826,7 +1837,7 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         let y = row_y(content.y, i);
         let rect = Rect { x: content.x, y, width: content.width, height: 1 };
         let selected = gui.cursor == Some(i);
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = gui.ui.hovers(rect);
         if selected {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
         }

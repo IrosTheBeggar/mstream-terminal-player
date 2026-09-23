@@ -390,7 +390,7 @@ fn draw_wall_heading(frame: &mut Frame, gui: &mut Gui, content: Rect) -> u16 {
     let (back_glyph, forward) = if legacy_conhost() { ("<", ">") } else { ("◂", "▸") };
     let back_label = format!("{back_glyph} {}", t!("gui.nav.artists"));
     let back = Rect { x: content.x, y: content.y, width: back_label.chars().count() as u16, height: 1 };
-    let hover = gui.ui.pointer.is_some_and(|p| back.contains(p));
+    let hover = gui.ui.hovers(back);
     put(frame, content.x, content.y, &back_label, if hover { bright_bold() } else { dim() });
     gui.ui.click(back, Act::LibBack);
     let title = format!("{forward} {artist}");
@@ -455,17 +455,12 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     // The strip (library-rooms contract, clause 10): the root wall is
     // alphabetical; an artist's albums are in the server's order.
     if on_root_wall(gui) && total >= crate::kit::STRIP_MIN_ROWS {
-        let mut present = [false; crate::kit::STRIP_BUCKETS];
-        let mut first_of = [0usize; crate::kit::STRIP_BUCKETS];
-        if let Some(albums) = wall_albums(gui) {
-            for (pos, &at) in visible.iter().enumerate() {
-                let bucket = crate::kit::letter_bucket(albums.get(at).and_then(|a| a.name.as_deref()).unwrap_or(""));
-                if !present[bucket] {
-                    present[bucket] = true;
-                    first_of[bucket] = pos;
-                }
-            }
-        }
+        let (present, first_of) = match wall_albums(gui) {
+            Some(albums) => crate::kit::letter_index(
+                visible.iter().map(|&at| albums.get(at).and_then(|a| a.name.as_deref()).unwrap_or("")),
+            ),
+            None => ([false; crate::kit::STRIP_BUCKETS], [0; crate::kit::STRIP_BUCKETS]),
+        };
         let strip = Rect { x: content.x, y: content.y + 2, width: content.width, height: 1 };
         crate::kit::letter_strip(frame, &mut gui.ui, strip, &present, move |bucket| Act::AlbJump(first_of[bucket]));
     }
@@ -482,7 +477,7 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         (fwd_x, fwd_glyph, 1, page + 1 < pages),
     ] {
         let rect = Rect { x, y: content.y, width: 1, height: 1 };
-        let hover = live && gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = live && gui.ui.hovers(rect);
         let style = match (live, hover) {
             (false, _) => dim(),
             (true, true) => bright_bold(),
@@ -569,15 +564,8 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                     slots[i].draw_mosaic(frame, cover, art)
                 }
                 Some(art) => slots[i].draw_paced(frame, cover, art, &pace),
-                None => {
-                    // No cover (yet): the empty slot frame, the card's own
-                    // idiom.
-                    let block = ratatui::widgets::Block::default()
-                        .borders(ratatui::widgets::Borders::ALL)
-                        .border_type(ratatui::widgets::BorderType::Rounded)
-                        .border_style(dim());
-                    frame.render_widget(block, cover);
-                }
+                // No cover (yet): the empty slot frame, the card's own idiom.
+                None => super::bar::cover_slot(frame, cover.x, cover.y, cover.width, cover.height),
             }
 
             // The server's name-less bucket is the artist's loose tracks
@@ -586,7 +574,7 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             let name = name.as_str();
             let name_y = cell.y + COVER_H;
             let selected = wall.cursor == i;
-            let cell_hover = ui.pointer.is_some_and(|p| cell.contains(p));
+            let cell_hover = ui.hovers(cell);
             let name_rect = Rect { x: cell.x, y: name_y, width: COVER_W, height: 1 };
             if selected {
                 frame.render_widget(ratatui::widgets::Block::default().style(sel()), name_rect);
@@ -628,7 +616,7 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
     // The way back leads the header — named for where it goes: the artist
     // when the album was reached through one (library-rooms contract,
     // clause 9), the wall otherwise — then the album's own name.
-    let back_glyph = if legacy_conhost() { "<" } else { "◂" };
+    let back_glyph = super::back_glyph();
     let back_name = match gui.app.library_stack.parent() {
         Some(LibraryNode::Artist(artist)) => artist.clone(),
         _ => t!("gui.nav.albums").to_string(),
@@ -640,7 +628,7 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
         width: back_label.chars().count() as u16,
         height: 1,
     };
-    let hover = gui.ui.pointer.is_some_and(|p| back.contains(p));
+    let hover = gui.ui.hovers(back);
     put(frame, content.x, content.y, &back_label, if hover { bright_bold() } else { dim() });
     gui.ui.click(back, Act::AlbTrackRow(0)); // row 0 is the Parent row: Back
 

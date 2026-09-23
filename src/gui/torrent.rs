@@ -1277,7 +1277,7 @@ fn draw_text_row(
 ) {
     let rect = Rect { x: content.x, y, width: content.width, height: 1 };
     let focused = gui.torrent.cursor == Some(row);
-    let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+    let hover = gui.ui.hovers(rect);
     put(frame, content.x, y, label, label_style(focused, hover));
     let trailing_w = trailing.as_ref().map_or(0, |(t, _)| t.chars().count() as u16 + 2);
     let vx = content.x + lw;
@@ -1313,8 +1313,8 @@ fn draw_text_row(
 pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     // Title row: the way back, the name, the gate's standing at the right.
     let back = Rect { x: content.x, y: content.y, width: 1, height: 1 };
-    let bhover = gui.ui.pointer.is_some_and(|p| back.contains(p));
-    put(frame, back.x, back.y, if legacy_conhost() { "<" } else { "◂" }, if bhover { bright_bold() } else { dim() });
+    let bhover = gui.ui.hovers(back);
+    put(frame, back.x, back.y, super::back_glyph(), if bhover { bright_bold() } else { dim() });
     gui.ui.click(back, Act::TorBack);
     gui.ui.tip(back, t!("gui.tor.back_tip").to_string());
     put(frame, content.x + 2, content.y, &t!("gui.tor.title"), Style::default().add_modifier(Modifier::BOLD));
@@ -1353,7 +1353,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let libraries = gui.app.libraries.clone();
     let rows = gui.torrent.rows(libraries.len());
     let mut y = content.y + 2 + gap;
-    let forward = if legacy_conhost() { ">" } else { "▸" };
+    let forward = super::forward_glyph();
 
     for row in rows {
         // The metadata block breathes when the room has the height.
@@ -1364,7 +1364,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             Row::Library => {
                 let rect = Rect { x: content.x, y, width: content.width, height: 1 };
                 let focused = gui.torrent.cursor == Some(Row::Library);
-                let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+                let hover = gui.ui.hovers(rect);
                 put(frame, content.x, y, &t!("gui.tor.library"), label_style(focused, hover));
                 if libraries.is_empty() {
                     put(frame, content.x + lw, y, &t!("gui.tor.no_libraries"), dim());
@@ -1374,15 +1374,15 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                     let name = libraries.get(gui.torrent.vpath).cloned().unwrap_or_default();
                     let (l, r) = if legacy_conhost() { ("<", ">") } else { ("◂", "▸") };
                     let lrect = Rect { x: content.x + lw, y, width: 1, height: 1 };
-                    let lhover = gui.ui.pointer.is_some_and(|p| lrect.contains(p));
+                    let lhover = gui.ui.hovers(lrect);
                     put(frame, lrect.x, y, l, if lhover { bright_bold() } else { dim() });
                     let nx = lrect.x + 2;
                     let shown = super::bar::clip(&name, content.width.saturating_sub(lw + 6) as usize);
                     let nrect = Rect { x: nx, y, width: shown.chars().count() as u16, height: 1 };
-                    let nhover = gui.ui.pointer.is_some_and(|p| nrect.contains(p));
+                    let nhover = gui.ui.hovers(nrect);
                     put(frame, nx, y, &shown, if nhover { bright_bold() } else { Style::default().add_modifier(Modifier::BOLD) });
                     let rrect = Rect { x: nrect.right() + 1, y, width: 1, height: 1 };
-                    let rhover = gui.ui.pointer.is_some_and(|p| rrect.contains(p));
+                    let rhover = gui.ui.hovers(rrect);
                     put(frame, rrect.x, y, r, if rhover { bright_bold() } else { dim() });
                     gui.ui.click(rect, Act::TorRow(Row::Library));
                     gui.ui.click(lrect, Act::TorLib(-1));
@@ -1393,7 +1393,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             Row::File => {
                 let rect = Rect { x: content.x, y, width: content.width, height: 1 };
                 let focused = gui.torrent.cursor == Some(Row::File);
-                let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+                let hover = gui.ui.hovers(rect);
                 put(frame, content.x, y, &t!("gui.tor.source"), label_style(focused, hover));
                 gui.ui.click(rect, Act::TorRow(Row::File));
                 // The name alone: the loaded file carries the torrent's
@@ -1429,11 +1429,11 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                         let name_w = content.width.saturating_sub(lw + 5) as usize;
                         let shown = super::bar::clip(&name, name_w);
                         let nrect = Rect { x: content.x + lw, y, width: shown.chars().count() as u16, height: 1 };
-                        let nhover = gui.ui.pointer.is_some_and(|p| nrect.contains(p));
+                        let nhover = gui.ui.hovers(nrect);
                         put(frame, nrect.x, y, &shown, if nhover { bright_bold() } else { Style::default().add_modifier(Modifier::BOLD) });
                         gui.ui.click(nrect, Act::TorPick);
                         let xrect = Rect { x: nrect.right() + 1, y, width: 3, height: 1 };
-                        let xhover = gui.ui.pointer.is_some_and(|p| xrect.contains(p));
+                        let xhover = gui.ui.hovers(xrect);
                         let xstyle = if xhover {
                             Style::default().fg(th().danger).add_modifier(Modifier::BOLD)
                         } else {
@@ -1492,7 +1492,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 // Both toggles share one line: the second sits after the
                 // first, each its own target, each carrying its
                 // description as its tip (clause 15).
-                let (check_on, check_off) = if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") };
+                let (check_on, check_off) = super::check_glyphs();
                 let on = if row == Row::Rename { gui.torrent.rename_root } else { gui.torrent.force_fresh };
                 let (label, desc, act) = if row == Row::Rename {
                     (t!("gui.tor.rename_root"), t!("gui.tor.rename_root_desc"), Act::TorToggleRename)
@@ -1508,7 +1508,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 };
                 let rect = Rect { x, y, width: text.chars().count() as u16, height: 1 };
                 let focused = gui.torrent.cursor == Some(row);
-                let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+                let hover = gui.ui.hovers(rect);
                 let glyph_style = if on { Style::default().fg(th().ok) } else { dim() };
                 let label_style = match (focused, hover) {
                     (true, _) => accent().add_modifier(Modifier::BOLD),
@@ -1554,13 +1554,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                     gui.ui.tip(rect, why);
                 }
                 if gui.torrent.cursor == Some(Row::Submit) {
-                    frame.render_widget(
-                        ratatui::widgets::Block::default()
-                            .borders(ratatui::widgets::Borders::ALL)
-                            .border_type(ratatui::widgets::BorderType::Rounded)
-                            .border_style(if ready { accent() } else { dim().add_modifier(Modifier::BOLD) }),
-                        rect,
-                    );
+                    crate::kit::cursor_ring(frame, rect, if ready { accent() } else { dim().add_modifier(Modifier::BOLD) });
                 }
             }
         }
@@ -1573,32 +1567,12 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 
 // ── Modals ──────────────────────────────────────────────────────────────────
 
-/// Greedy word wrap for the modal sentences.
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        let need = if line.is_empty() { word.chars().count() } else { line.chars().count() + 1 + word.chars().count() };
-        if need > width && !line.is_empty() {
-            lines.push(std::mem::take(&mut line));
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(word);
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
 /// A modal's row: the cursor's selection bg, hover bright, an optional
 /// dim detail at the right edge.
 #[allow(clippy::too_many_arguments)]
 fn modal_row(frame: &mut Frame, gui: &mut Gui, inner: Rect, y: u16, label: &str, detail: Option<&str>, selected: bool, lead: bool, act: Act) {
     let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
-    let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+    let hover = gui.ui.hovers(rect);
     if selected {
         frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
     }
@@ -1636,10 +1610,10 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         put(frame, inner.x + 1, inner.y, &t!("gui.tor.received_title"), accent().add_modifier(Modifier::BOLD));
         modal_close(frame, &mut gui.ui, inner, Act::TorChooseClose);
         put(frame, inner.x + 1, inner.y + 1, &super::bar::clip(&what, inner.width as usize - 2), dim());
-        for (i, line) in wrap(&t!("gui.tor.received_body"), inner.width as usize - 2).into_iter().take(2).enumerate() {
+        for (i, line) in crate::kit::wrap_words(&t!("gui.tor.received_body"), inner.width as usize - 2).into_iter().take(2).enumerate() {
             put(frame, inner.x + 1, inner.y + 2 + i as u16, &line, Style::default());
         }
-        let (check_on, check_off) = if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") };
+        let (check_on, check_off) = super::check_glyphs();
         let ask = format!("{} {}", if dont_ask { check_on } else { check_off }, t!("gui.tor.received_dont_ask"));
         let rows: [(String, Act); 3] = [
             (t!("gui.tor.received_add").to_string(), Act::TorChooseAdd),
@@ -1677,12 +1651,12 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         picker.sel_anchor = picker.sel;
         let overflow = suggestions.len() > visible;
         let row_width = if overflow { inner.width.saturating_sub(1) } else { inner.width };
-        let forward = if legacy_conhost() { ">" } else { "▸" };
+        let forward = super::forward_glyph();
         for (row, i) in (first..first + visible).enumerate() {
             let entry = &picker.entries[suggestions[i]];
             let selected = picker.sel == Some(i);
             let rect = Rect { x: inner.x, y: inner.y + 4 + row as u16, width: row_width, height: 1 };
-            let hovered = ui.pointer.is_some_and(|p| rect.contains(p));
+            let hovered = ui.hovers(rect);
             let style = match (selected, hovered, entry.dir) {
                 (true, _, _) => sel(),
                 (false, true, _) => Style::default().fg(th().bright),
@@ -1721,7 +1695,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let inner = modal_frame_on(frame, &mut gui.ui, area, 72, 7 + n, th().accent);
         put(frame, inner.x + 1, inner.y, &t!("gui.tor.partial_title"), accent().add_modifier(Modifier::BOLD));
         modal_close(frame, &mut gui.ui, inner, Act::TorMatchClose);
-        for (i, line) in wrap(&t!("gui.tor.partial_body"), inner.width as usize - 2).into_iter().take(2).enumerate() {
+        for (i, line) in crate::kit::wrap_words(&t!("gui.tor.partial_body"), inner.width as usize - 2).into_iter().take(2).enumerate() {
             put(frame, inner.x + 1, inner.y + 1 + i as u16, &line, dim());
         }
         let top = inner.y + 4;

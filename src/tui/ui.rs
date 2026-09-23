@@ -1759,7 +1759,7 @@ fn file_format(meta: &TrackMetadata) -> Option<String> {
     let format = meta.format.as_deref().map(str::trim).filter(|f| !f.is_empty());
     // Rounded to whole kbps: the server counts in bits per second, and nobody
     // reads a rip as 320.0 kbps rather than 320.
-    let kbps = meta.bitrate.filter(|b| *b > 0).map(|b| (b as f64 / 1000.0).round() as u64);
+    let kbps = meta.kbps();
     match (format, kbps) {
         (Some(format), Some(kbps)) => Some(format!("{}   {kbps} kbps", format.to_uppercase())),
         (Some(format), None) => Some(format.to_uppercase()),
@@ -1772,15 +1772,8 @@ fn file_format(meta: &TrackMetadata) -> Option<String> {
 /// absence says something too and it is left out rather than guessed at.
 fn audio_shape(meta: &TrackMetadata) -> Option<String> {
     let mut parts = Vec::new();
-    if let Some(rate) = meta.sample_rate.filter(|r| *r > 0) {
-        let khz = f64::from(rate) / 1000.0;
-        // 44.1 and 48 both want to look right, so the decimal only appears
-        // when there is something after it.
-        parts.push(if (khz.fract() * 10.0).round() == 0.0 {
-            format!("{khz:.0} kHz")
-        } else {
-            format!("{khz:.1} kHz")
-        });
+    if let Some(khz) = meta.khz_words() {
+        parts.push(format!("{khz} kHz"));
     }
     if let Some(depth) = meta.bit_depth.filter(|d| *d > 0) {
         parts.push(format!("{depth}-bit"));
@@ -1792,18 +1785,6 @@ fn audio_shape(meta: &TrackMetadata) -> Option<String> {
         _ => {}
     }
     (!parts.is_empty()).then(|| parts.join("   "))
-}
-
-fn fmt_bytes(bytes: u64) -> String {
-    const MB: f64 = 1024.0 * 1024.0;
-    let mb = bytes as f64 / MB;
-    if mb >= 100.0 {
-        format!("{mb:.0} MB")
-    } else if mb >= 1.0 {
-        format!("{mb:.1} MB")
-    } else {
-        format!("{:.0} KB", bytes as f64 / 1024.0)
-    }
 }
 
 fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
@@ -1826,7 +1807,7 @@ fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::raw(""),
         Line::from(Span::styled(
-            fit(meta.display_title().unwrap_or_else(|| track.file_name()), width),
+            fit(track.title_or_file(), width),
             Style::new().fg(accent()).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
@@ -1891,7 +1872,7 @@ fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
         fact_row(&mut lines, "Audio", plain(audio));
     }
     if let Some(size) = meta.file_size.filter(|b| *b > 0) {
-        fact_row(&mut lines, "Size", plain(fmt_bytes(size)));
+        fact_row(&mut lines, "Size", plain(crate::api::types::fmt_bytes(size)));
     }
 
     lines.push(Line::raw(""));
@@ -2675,7 +2656,7 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
     // strictness row's cosine was losing its last digit at 100 columns.
     let note = |text: String| Span::styled(format!("  {text}"), faint);
     let switch = |on: bool| value(if on { "on".to_string() } else { "off".to_string() });
-    let clock = |seconds: u32| format!("{}:{:02}", seconds / 60, seconds % 60);
+    let clock = |seconds: u32| crate::api::types::fmt_duration(f64::from(seconds));
     let s = &app.dj;
     match row {
         DjRow::Armed => {
@@ -3088,7 +3069,7 @@ fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::{DirEntry, DirListing, FileEntry, Track, TrackMetadata};
+    use crate::api::types::{DirEntry, DirListing, FileEntry, Track, TrackMetadata, fmt_bytes};
     use crate::tui::app::{Action, InputMode};
     use crate::tui::worker::Event;
     use ratatui::Terminal;

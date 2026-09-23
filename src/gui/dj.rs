@@ -9,8 +9,7 @@ use ratatui::Frame;
 use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Span;
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::widgets::Block;
 use rust_i18n::t;
 use tui_input::Input;
 use tui_input::backend::crossterm::EventHandler;
@@ -18,7 +17,7 @@ use tui_input::backend::crossterm::EventHandler;
 use crate::config;
 use crate::dj::{self, EmptyQueueStart, GenreMode, SonicAnchor};
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{Surface, dim, input_display, modal_close, modal_frame_on, scroll_list, tall_button};
+use crate::kit::{Surface, cursor_ring, dim, input_display, modal_close, modal_frame_on, scroll_list, table_view, tall_button, tall_frame, wrap_words};
 use crate::tui::app::{Action, Capture, DjEdit, DjRow};
 
 use super::{Act, Gui, SETTINGS_NAV, accent, bright_bold, put, sel, text_button};
@@ -256,24 +255,20 @@ fn songs_words(count: u32) -> String {
     .to_string()
 }
 
-fn clock(seconds: u32) -> String {
-    format!("{}:{:02}", seconds / 60, seconds % 60)
-}
-
 /// The length window's words (clause 47): a rail means unbounded, so a
 /// bare 0:00–20:00 never looks like a constraint.
 fn length_words(s: &dj::Settings) -> String {
     match (s.min_seconds > 0, s.max_seconds < dj::LENGTH_RAIL_SECONDS) {
         (false, false) => t!("gui.dj.length_any"),
-        (true, false) => t!("gui.dj.length_over", min = clock(s.min_seconds)),
-        (false, true) => t!("gui.dj.length_under", max = clock(s.max_seconds)),
-        (true, true) => t!("gui.dj.length_between", min = clock(s.min_seconds), max = clock(s.max_seconds)),
+        (true, false) => t!("gui.dj.length_over", min = crate::api::types::fmt_duration(f64::from(s.min_seconds))),
+        (false, true) => t!("gui.dj.length_under", max = crate::api::types::fmt_duration(f64::from(s.max_seconds))),
+        (true, true) => t!("gui.dj.length_between", min = crate::api::types::fmt_duration(f64::from(s.min_seconds)), max = crate::api::types::fmt_duration(f64::from(s.max_seconds))),
     }
     .to_string()
 }
 
 fn sample_words(track: &crate::api::types::Track) -> String {
-    let title = track.metadata.display_title().unwrap_or_else(|| track.file_name()).to_string();
+    let title = track.title_or_file().to_string();
     match track.metadata.artist.as_deref().filter(|a| !a.is_empty()) {
         Some(artist) => format!("{title} — {artist}"),
         None => title,
@@ -413,12 +408,12 @@ fn lines(gui: &Gui, width: usize) -> Vec<L> {
     for line in v {
         match line {
             L::Text(text, tone) => {
-                for part in super::sonic::wrap(&text, width.max(20)) {
+                for part in wrap_words(&text, width.max(20)) {
                     wrapped.push(L::Text(part, tone));
                 }
             }
             L::Hint(text) => {
-                for part in super::sonic::wrap(&text, width.saturating_sub(4).max(16)) {
+                for part in wrap_words(&text, width.saturating_sub(4).max(16)) {
                     wrapped.push(L::Hint(part));
                 }
             }
@@ -472,16 +467,12 @@ fn desc_x(label: &str, indent: u16) -> u16 {
     (indent + label.chars().count() as u16 + 2).max(DESC_X)
 }
 
-fn hover_at(gui: &Gui, rect: Rect) -> bool {
-    gui.ui.pointer.is_some_and(|p| rect.contains(p))
-}
-
 /// The room (clauses 40–53): the way back, the name, the state at the
 /// right; then the body, scrolled, with the kit's scrollbar on overflow.
 pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let back = Rect { x: content.x, y: content.y, width: 1, height: 1 };
-    let bhover = hover_at(gui, back);
-    put(frame, back.x, back.y, if legacy_conhost() { "<" } else { "◂" }, if bhover { bright_bold() } else { dim() });
+    let bhover = gui.ui.hovers(back);
+    put(frame, back.x, back.y, super::back_glyph(), if bhover { bright_bold() } else { dim() });
     gui.ui.click(back, Act::DjBack);
     gui.ui.tip(back, t!("gui.tor.back_tip").to_string());
     put(frame, content.x + 2, content.y, &t!("gui.dj.title"), Style::default().add_modifier(Modifier::BOLD));
@@ -565,8 +556,8 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 
 fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
     let (x, w) = (body.x, body.width);
-    let forward = if legacy_conhost() { ">" } else { "▸" };
-    let (check_on, check_off) = if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") };
+    let forward = super::forward_glyph();
+    let (check_on, check_off) = super::check_glyphs();
     match line {
         L::Section(text) => put(frame, x, y, text, dim()),
         L::Blank => {}
@@ -597,19 +588,13 @@ fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
                 tall_button(frame, &mut gui.ui, at, &label, true, Act::DjStartStop)
             };
             if gui.dj.cursor == Some(Item::Toggle) {
-                frame.render_widget(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(th().bright).add_modifier(Modifier::BOLD)),
-                    rect,
-                );
+                cursor_ring(frame, rect, Style::default().fg(th().bright).add_modifier(Modifier::BOLD));
             }
         }
         L::Server => {
             let rect = Rect { x, y, width: w, height: 1 };
             let focused = gui.dj.cursor == Some(Item::Server);
-            let hover = hover_at(gui, rect);
+            let hover = gui.ui.hovers(rect);
             put(frame, x, y, &t!("gui.dj.server"), row_style(focused, hover));
             let name = format!("{} {forward}", gui.app.dj_server_name());
             let shown = super::bar::clip(&name, w.saturating_sub(LABEL_W) as usize);
@@ -624,7 +609,7 @@ fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
             let on = radio_on(gui, *item);
             let rect = Rect { x: x + 2, y, width: w.saturating_sub(2), height: 1 };
             let focused = gui.dj.cursor == Some(*item);
-            let hover = hover_at(gui, rect);
+            let hover = gui.ui.hovers(rect);
             let glyph = match (on, legacy_conhost()) {
                 (true, true) => "(*)",
                 (true, false) => "(•)",
@@ -652,7 +637,7 @@ fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
             let label = format!("{} {forward}", t!("gui.dj.pick_genres"));
             let rect = Rect { x: x + 4, y, width: label.chars().count() as u16, height: 1 };
             let focused = gui.dj.cursor == Some(Item::PickGenres);
-            let hover = hover_at(gui, rect);
+            let hover = gui.ui.hovers(rect);
             let style = match (focused, hover) {
                 (true, _) => accent().add_modifier(Modifier::BOLD),
                 (false, true) => bright_bold(),
@@ -665,7 +650,7 @@ fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
         L::Source(i, name, on) => {
             let rect = Rect { x, y, width: w, height: 1 };
             let focused = gui.dj.cursor == Some(Item::Source(*i));
-            let hover = hover_at(gui, rect);
+            let hover = gui.ui.hovers(rect);
             put(frame, x, y, if *on { check_on } else { check_off }, if *on { Style::default().fg(th().ok) } else { dim() });
             put(frame, x + 4, y, &super::bar::clip(name, w.saturating_sub(4) as usize), row_style(focused, hover));
             gui.ui.click(rect, Act::DjSource(name.clone()));
@@ -677,7 +662,7 @@ fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
             } else {
                 let label = format!("{} {forward}", t!("gui.dj.preview"));
                 let rect = Rect { x, y, width: label.chars().count() as u16, height: 1 };
-                let hover = hover_at(gui, rect);
+                let hover = gui.ui.hovers(rect);
                 let style = match (focused, hover) {
                     (true, _) => accent().add_modifier(Modifier::BOLD),
                     (false, true) => bright_bold(),
@@ -776,7 +761,7 @@ fn draw_switch(
     };
     let rect = Rect { x, y, width: w, height: 1 };
     let focused = gui.dj.cursor == Some(Item::Row(row));
-    let hover = hover_at(gui, rect);
+    let hover = gui.ui.hovers(rect);
     let glyph_style = if on && reason.is_none() { Style::default().fg(th().ok) } else { dim() };
     put(frame, x, y, if on { check_on } else { check_off }, glyph_style);
     put(frame, x + 4, y, &label, row_style(focused, hover));
@@ -881,7 +866,7 @@ fn bar_spec(gui: &Gui, row: DjRow) -> Option<BarSpec> {
             lo: 0,
             hi: dj::LENGTH_RAIL_SECONDS,
             value: s.min_seconds,
-            words: if s.min_seconds == 0 { t!("gui.dj.any").to_string() } else { clock(s.min_seconds) },
+            words: if s.min_seconds == 0 { t!("gui.dj.any").to_string() } else { crate::api::types::fmt_duration(f64::from(s.min_seconds)) },
             note: String::new(),
             tip: t!("gui.dj.length_sub").to_string(),
             seconds: true,
@@ -894,7 +879,7 @@ fn bar_spec(gui: &Gui, row: DjRow) -> Option<BarSpec> {
             words: if s.max_seconds >= dj::LENGTH_RAIL_SECONDS {
                 t!("gui.dj.any").to_string()
             } else {
-                clock(s.max_seconds)
+                crate::api::types::fmt_duration(f64::from(s.max_seconds))
             },
             note: String::new(),
             tip: t!("gui.dj.length_sub").to_string(),
@@ -930,13 +915,13 @@ fn draw_bar(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, row: DjRow
     let Some(spec) = bar_spec(gui, row) else { return };
     let rect = Rect { x, y, width: w, height: 1 };
     let focused = gui.dj.cursor == Some(Item::Row(row));
-    let hover = hover_at(gui, rect);
+    let hover = gui.ui.hovers(rect);
     put(frame, x, y, &super::bar::clip(&spec.label, LABEL_W as usize - 1), row_style(focused, hover));
     let bx = x + LABEL_W;
     let filled = filled_cells(&spec);
     let (full, empty) = if legacy_conhost() { ("#", "-") } else { ("▓", "░") };
     let bar_rect = Rect { x: bx, y, width: CELLS, height: 1 };
-    let bar_hover = hover_at(gui, bar_rect);
+    let bar_hover = gui.ui.hovers(bar_rect);
     for k in 0..CELLS {
         let cell = Rect { x: bx + k, y, width: 1, height: 1 };
         let style = if k < filled {
@@ -987,7 +972,7 @@ fn draw_chips(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, item: It
             break;
         }
         let rect = Rect { x: cx, y, width, height: 1 };
-        let hover = hover_at(gui, rect);
+        let hover = gui.ui.hovers(rect);
         let selected = focused && i == sub;
         let style = match (selected, hover) {
             (true, _) => accent().add_modifier(Modifier::BOLD),
@@ -1021,7 +1006,7 @@ fn draw_keyword_input(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, 
     let focused = gui.dj.cursor == Some(Item::KeywordInput);
     let label = t!("gui.dj.add_keyword").to_string();
     let row = Rect { x, y, width: w, height: 1 };
-    let hover = hover_at(gui, row);
+    let hover = gui.ui.hovers(row);
     put(frame, x, y, &super::bar::clip(&label, LABEL_W as usize - 1), row_style(focused, hover));
     let fx = x + LABEL_W;
     let fw = FIELD_W.min(w.saturating_sub(LABEL_W + 8)).max(8);
@@ -1047,23 +1032,7 @@ fn draw_keyword_input(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, w: u16, 
 /// The destructive tall button (Stop Auto DJ): the kit's primary frame in
 /// the danger colour, bright under the pointer.
 fn tall_danger(frame: &mut Frame, ui: &mut Surface<Act>, at: Rect, label: &str, act: Act) -> Rect {
-    let text = format!("  {label}  ");
-    let width = (text.chars().count() as u16 + 2).min(at.width);
-    let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
-    let hovered = ui.pointer.is_some_and(|p| rect.contains(p));
-    let color = if hovered { th().bright } else { th().danger };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(color));
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-    frame.render_widget(
-        Paragraph::new(Span::styled(text, Style::default().fg(color).add_modifier(Modifier::BOLD))),
-        inner,
-    );
-    ui.click(rect, act);
-    rect
+    tall_frame(frame, ui, at, label, 2, |hovered| (if hovered { th().bright } else { th().danger }, true), Some(act))
 }
 
 // ── Modals ──────────────────────────────────────────────────────────────────
@@ -1085,18 +1054,18 @@ fn draw_chooser(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     gui.ui.click(area, Act::DjCancel);
     let width: u16 = 74.min(area.width.saturating_sub(2)).max(40);
     let text_w = width as usize - 4;
-    let subtitle = super::sonic::wrap(&t!("gui.dj.start_subtitle"), text_w);
-    let (check_on, check_off) = if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") };
+    let subtitle = wrap_words(&t!("gui.dj.start_subtitle"), text_w);
+    let (check_on, check_off) = super::check_glyphs();
     let rows: [(String, Vec<String>, Act); ROWS] = [
         (
             t!("gui.dj.surprise").to_string(),
-            super::sonic::wrap(&t!("gui.dj.surprise_sub"), text_w - 2),
+            wrap_words(&t!("gui.dj.surprise_sub"), text_w - 2),
             Act::DjChoose(0),
         ),
-        (t!("gui.dj.pick").to_string(), super::sonic::wrap(&t!("gui.dj.pick_sub"), text_w - 2), Act::DjChoose(1)),
+        (t!("gui.dj.pick").to_string(), wrap_words(&t!("gui.dj.pick_sub"), text_w - 2), Act::DjChoose(1)),
         (
             format!("{} {}", if chooser.remember { check_on } else { check_off }, t!("gui.dj.remember")),
-            super::sonic::wrap(&t!("gui.dj.remember_sub"), text_w - 2),
+            wrap_words(&t!("gui.dj.remember_sub"), text_w - 2),
             Act::DjRemember,
         ),
     ];
@@ -1114,7 +1083,7 @@ fn draw_chooser(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     y += 1;
     for (i, (label, detail, act)) in rows.into_iter().enumerate() {
         let rect = Rect { x: inner.x, y, width: inner.width, height: 1 + detail.len() as u16 };
-        let hover = hover_at(gui, rect);
+        let hover = gui.ui.hovers(rect);
         let is_sel = chooser.row == i;
         if is_sel {
             let line = Rect { x: inner.x, y, width: inner.width, height: 1 };
@@ -1173,7 +1142,7 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 
     let list_y = fy + 2;
     let list_h = inner.bottom().saturating_sub(list_y) as usize;
-    let (check_on, check_off) = if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") };
+    let (check_on, check_off) = super::check_glyphs();
     if picker.loading {
         put(frame, inner.x + 1, list_y, &t!("gui.dj.genres_loading"), dim());
         return;
@@ -1195,15 +1164,8 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
     let row = gui.dj.pick_row.min(names.len() - 1);
     gui.dj.pick_row = row;
-    if list_h > 0 {
-        if row < gui.dj.pick_scroll {
-            gui.dj.pick_scroll = row;
-        } else if row >= gui.dj.pick_scroll + list_h {
-            gui.dj.pick_scroll = row + 1 - list_h;
-        }
-    }
-    gui.dj.pick_scroll = gui.dj.pick_scroll.min(names.len().saturating_sub(list_h));
-    let scroll = gui.dj.pick_scroll;
+    let (scroll, _) = table_view(names.len(), Some(row), gui.dj.pick_scroll, list_h);
+    gui.dj.pick_scroll = scroll;
     let overflow = names.len() > list_h;
     let row_w = if overflow { inner.width.saturating_sub(1) } else { inner.width };
     for (i, name) in names.iter().enumerate().skip(scroll).take(list_h) {
@@ -1211,7 +1173,7 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let rect = Rect { x: inner.x, y, width: row_w, height: 1 };
         let on = library.genres.iter().any(|g| g == name);
         let is_sel = i == row;
-        let hover = hover_at(gui, rect);
+        let hover = gui.ui.hovers(rect);
         if is_sel {
             frame.render_widget(Block::default().style(sel()), rect);
         }
@@ -1258,7 +1220,7 @@ fn draw_server_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let inner = modal_frame_on(frame, &mut gui.ui, area, width, height, th().accent);
     put(frame, inner.x + 1, inner.y, &t!("gui.dj.server_title"), accent().add_modifier(Modifier::BOLD));
     modal_close(frame, &mut gui.ui, inner, Act::DjServerClose);
-    let marker = if legacy_conhost() { ">" } else { "▸" };
+    let marker = super::forward_glyph();
     let branch = if legacy_conhost() { "+" } else { "└" };
     for (i, server) in servers.iter().enumerate() {
         let y = inner.y + 2 + i as u16;
@@ -1267,7 +1229,7 @@ fn draw_server_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         }
         let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
         let is_sel = i == cursor;
-        let hover = hover_at(gui, rect);
+        let hover = gui.ui.hovers(rect);
         if is_sel {
             frame.render_widget(Block::default().style(sel()), rect);
         }
@@ -1638,10 +1600,10 @@ pub(crate) fn draw_empty_queue(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16,
     if !gui.app.dj_armed() {
         return;
     }
-    let forward = if legacy_conhost() { ">" } else { "▸" };
+    let forward = super::forward_glyph();
     // The hint wraps in the narrow panel; the buttons follow it.
     let mut y = y + 1;
-    for line in super::sonic::wrap(&t!("gui.queue.empty_dj_hint"), width).into_iter().take(3) {
+    for line in wrap_words(&t!("gui.queue.empty_dj_hint"), width).into_iter().take(3) {
         put(frame, x, y, &line, dim());
         y += 1;
     }

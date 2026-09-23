@@ -14,8 +14,7 @@ use std::borrow::Cow;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Span;
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders};
 
 use crate::kit::{Surface, dim};
 use crate::kit::theme::{legacy_conhost, th};
@@ -87,10 +86,6 @@ pub(super) fn volume_cells(volume: f32) -> usize {
 
 // ── Small drawing helpers ───────────────────────────────────────────────────
 
-fn hovered(s: &Surface<Act>, rect: Rect) -> bool {
-    s.pointer.is_some_and(|p| rect.contains(p))
-}
-
 /// What a tall control is, color-wise.
 enum TallKind {
     /// The play/pause slot: ACCENT, always BOLD.
@@ -114,32 +109,18 @@ fn tall_compact(
     kind: TallKind,
     act: Act,
 ) -> u16 {
-    let text = format!(" {label} ");
-    let width = text.chars().count() as u16 + 2;
-    let rect = Rect { x, y, width, height: 3 };
-    let hover = hovered(s, rect);
-    let color = match (&kind, hover) {
-        (_, true) => th().bright,
-        (TallKind::Primary, false) => th().accent,
-        (TallKind::Secondary, false) => th().dim,
-        (TallKind::Toggle(true), false) => th().ok,
-        (TallKind::Toggle(false), false) => th().dim,
+    let tone = |hover: bool| {
+        let color = match (&kind, hover) {
+            (_, true) => th().bright,
+            (TallKind::Primary, false) => th().accent,
+            (TallKind::Secondary, false) => th().dim,
+            (TallKind::Toggle(true), false) => th().ok,
+            (TallKind::Toggle(false), false) => th().dim,
+        };
+        (color, hover || matches!(kind, TallKind::Primary | TallKind::Toggle(true)))
     };
-    let bold = hover || matches!(kind, TallKind::Primary | TallKind::Toggle(true));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(color));
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-    let style = if bold {
-        Style::default().fg(color).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(color)
-    };
-    frame.render_widget(Paragraph::new(Span::styled(text, style)), inner);
-    s.click(rect, act);
-    width
+    let at = Rect { x, y, width: u16::MAX, height: 3 };
+    crate::kit::tall_frame(frame, s, at, label, 1, tone, Some(act)).width
 }
 
 /// The empty cover slot: a DIM rounded frame holding the cells real pixels
@@ -161,7 +142,7 @@ fn draw_volume(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, volume: 
     let legacy = legacy_conhost();
     let (full, empty) = if legacy { ('■', '·') } else { ('▰', '▱') };
     let minus = Rect { x, y, width: 1, height: 1 };
-    put(frame, x, y, "-", if hovered(s, minus) { bright_bold() } else { dim() });
+    put(frame, x, y, "-", if s.hovers(minus) { bright_bold() } else { dim() });
     s.click(minus, Act::VolDown);
     let filled = volume_cells(volume);
     for i in 0..10u16 {
@@ -173,7 +154,7 @@ fn draw_volume(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, volume: 
         s.click(cell, Act::VolSet(i as u8));
     }
     let plus = Rect { x: x + 13, y, width: 1, height: 1 };
-    put(frame, x + 13, y, "+", if hovered(s, plus) { bright_bold() } else { dim() });
+    put(frame, x + 13, y, "+", if s.hovers(plus) { bright_bold() } else { dim() });
     s.click(plus, Act::VolUp);
     put(frame, x + 15, y, &format!("{:3}%", (volume * 100.0).round() as u32), dim());
 }
@@ -253,7 +234,7 @@ fn gold_rule(frame: &mut Frame, y: u16, width: u16) {
 fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &BarView) {
     let x = area.width - 32;
     let rect = Rect { x, y, width: 31, height: 3 };
-    let hover = hovered(s, rect);
+    let hover = s.hovers(rect);
     // With art in hand the frame would only bleed around the picture's
     // edges — the screen paints the cover over these cells after the bar.
     if !v.has_art {

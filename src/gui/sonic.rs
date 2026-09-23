@@ -152,7 +152,7 @@ fn draw_card(frame: &mut Frame, gui: &mut Gui, at: Rect, side: SonicSide) {
             // The per-row remove, the kit's [X]: dim at rest, danger red
             // under the pointer — clearing is destructive to the choice.
             let x_rect = Rect { x: inner.right().saturating_sub(4), y: inner.y, width: 3, height: 1 };
-            let hover = gui.ui.pointer.is_some_and(|p| x_rect.contains(p));
+            let hover = gui.ui.hovers(x_rect);
             let style = if hover {
                 Style::default().fg(th().danger).add_modifier(Modifier::BOLD)
             } else {
@@ -194,7 +194,7 @@ fn draw_card(frame: &mut Frame, gui: &mut Gui, at: Rect, side: SonicSide) {
                 }
                 let rect =
                     Rect { x, y: inner.y + 1, width: label.chars().count() as u16, height: 1 };
-                let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+                let hover = gui.ui.hovers(rect);
                 put(frame, x, inner.y + 1, &label, if hover { bright_bold() } else { dim() });
                 gui.ui.click(rect, act);
                 x += rect.width;
@@ -223,7 +223,7 @@ fn draw_length(frame: &mut Frame, gui: &mut Gui, at: Rect, in_results: bool) {
     for i in 0..LENGTH_CELLS {
         let cell = Rect { x: bar_x + i as u16, y: at.y, width: 1, height: 1 };
         let lit = i < filled;
-        let hover = gui.ui.pointer.is_some_and(|p| cell.contains(p));
+        let hover = gui.ui.hovers(cell);
         let style = match (hover, lit) {
             (true, _) => bright_bold(),
             (false, true) => Style::default().fg(th().gold),
@@ -255,7 +255,7 @@ fn draw_length(frame: &mut Frame, gui: &mut Gui, at: Rect, in_results: bool) {
         // re-seat under a resting pointer.
         let rect = Rect { x, y: at.y, width: tail_w, height: 1 };
         let busy = gui.app.sonic.pending || gui.app.sonic.probe;
-        let hover = !busy && gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = !busy && gui.ui.hovers(rect);
         put(frame, x, at.y, &tail, if hover { bright_bold() } else { dim() });
         if !busy {
             gui.ui.click(rect, Act::SonBuild);
@@ -330,13 +330,7 @@ fn draw_setup(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if gui.sonic.cursor == Some(ROW_BUILD) {
         // The keyboard cursor on a frame the pointer isn't in: the kit
         // marks it the accent way without stealing the hover contract.
-        frame.render_widget(
-            ratatui::widgets::Block::default()
-                .borders(ratatui::widgets::Borders::ALL)
-                .border_type(ratatui::widgets::BorderType::Rounded)
-                .border_style(if ready { accent() } else { dim().add_modifier(Modifier::BOLD) }),
-            rect,
-        );
+        crate::kit::cursor_ring(frame, rect, if ready { accent() } else { dim().add_modifier(Modifier::BOLD) });
     }
 }
 
@@ -352,7 +346,7 @@ fn draw_chip(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, side: SonicSide, 
         .unwrap_or_else(|| t!("gui.sonic.not_set").to_string());
     let text = super::bar::clip(&name, max);
     let rect = Rect { x, y, width: text.chars().count() as u16, height: 1 };
-    let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+    let hover = gui.ui.hovers(rect);
     let style = if hover {
         bright_bold()
     } else {
@@ -369,7 +363,7 @@ fn draw_results(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let over_x = content.right().saturating_sub(over.chars().count() as u16);
     let over_rect =
         Rect { x: over_x, y: content.y, width: over.chars().count() as u16, height: 1 };
-    let hover = gui.ui.pointer.is_some_and(|p| over_rect.contains(p));
+    let hover = gui.ui.hovers(over_rect);
     put(frame, over_x, content.y, &over, if hover { bright_bold() } else { dim() });
     gui.ui.click(over_rect, Act::SonStartOver);
 
@@ -421,7 +415,7 @@ fn draw_results(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             SonicEmpty::TurnedOff | SonicEmpty::NotAnalyzed => Style::default().fg(th().gold),
             SonicEmpty::Plain | SonicEmpty::ScanPending => dim(),
         };
-        for (i, line) in wrap(&note, body.width as usize).into_iter().enumerate() {
+        for (i, line) in crate::kit::wrap_words(&note, body.width as usize).into_iter().enumerate() {
             if i as u16 >= body.height {
                 break;
             }
@@ -437,7 +431,7 @@ fn draw_results(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 width: retry.chars().count() as u16,
                 height: 1,
             };
-            let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+            let hover = gui.ui.hovers(rect);
             put(
                 frame,
                 rect.x,
@@ -483,7 +477,7 @@ fn draw_results(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         let stop = &gui.app.sonic.stops[index];
         let y = list.y + row as u16;
         let rect = Rect { x: list.x, y, width: list.width, height: 1 };
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = gui.ui.hovers(rect);
         let is_sel = gui.sonic.rcursor == Some(index);
         if is_sel {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
@@ -583,27 +577,6 @@ fn draw_results(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     );
 }
 
-/// Greedy word wrap for the failure sentences — the kit tooltip's habit,
-/// simplified: these notes are one or two lines at any sane width.
-pub(super) fn wrap(text: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        let need = if line.is_empty() { word.chars().count() } else { line.chars().count() + 1 + word.chars().count() };
-        if need > width && !line.is_empty() {
-            lines.push(std::mem::take(&mut line));
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(word);
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
 // ── Modals ──────────────────────────────────────────────────────────────────
 
 /// The pick-methods menu and the save-as-playlist prompt. Drawn (and
@@ -635,7 +608,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         for (i, (label, detail, act)) in rows.into_iter().enumerate() {
             let y = inner.y + 2 + i as u16;
             let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
-            let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+            let hover = gui.ui.hovers(rect);
             let is_sel = gui.sonic.menu_row == i;
             if is_sel {
                 frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
@@ -689,7 +662,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             width: ok.chars().count() as u16,
             height: 1,
         };
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = gui.ui.hovers(rect);
         put(
             frame,
             rect.x,
@@ -985,7 +958,7 @@ mod tests {
 
     #[test]
     fn the_failure_wrap_keeps_words_whole() {
-        let lines = wrap("a sentence that needs to break somewhere sensible", 20);
+        let lines = crate::kit::wrap_words("a sentence that needs to break somewhere sensible", 20);
         assert!(lines.len() > 1);
         assert!(lines.iter().all(|l| l.chars().count() <= 20), "{lines:?}");
     }

@@ -361,6 +361,21 @@ impl TrackMetadata {
     pub fn display_title(&self) -> Option<&str> {
         self.title.as_deref().filter(|s| !s.is_empty())
     }
+
+    /// The bitrate in whole kbps — the server counts bits per second, and
+    /// nobody reads a rip as 320.0 — or `None` when unknown or zero.
+    pub fn kbps(&self) -> Option<u64> {
+        self.bitrate.filter(|b| *b > 0).map(|b| (b as f64 / 1000.0).round() as u64)
+    }
+
+    /// The sample rate in kHz as a person writes it — "44.1", "48": the
+    /// decimal only when there is something after it.
+    pub fn khz_words(&self) -> Option<String> {
+        self.sample_rate.filter(|r| *r > 0).map(|rate| {
+            let khz = f64::from(rate) / 1000.0;
+            if (khz.fract() * 10.0).round() == 0.0 { format!("{khz:.0}") } else { format!("{khz:.1}") }
+        })
+    }
 }
 
 /// A library track. `filepath` is the vpath-prefixed path used to build
@@ -378,11 +393,16 @@ impl Track {
         self.filepath.rsplit('/').next().unwrap_or(&self.filepath)
     }
 
+    /// The title tag, else the file's name — what every surface prints
+    /// for a track when it has one line for it.
+    pub fn title_or_file(&self) -> &str {
+        self.metadata.display_title().unwrap_or_else(|| self.file_name())
+    }
+
     pub fn display_name(&self) -> String {
         match (self.metadata.artist.as_deref(), self.metadata.display_title()) {
             (Some(a), Some(t)) if !a.is_empty() => format!("{a} - {t}"),
-            (_, Some(t)) => t.to_string(),
-            _ => self.file_name().to_string(),
+            _ => self.title_or_file().to_string(),
         }
     }
 }
@@ -399,6 +419,20 @@ pub fn fmt_duration(seconds: f64) -> String {
     }
     let total = seconds.round() as u64;
     format!("{}:{:02}", total / 60, total % 60)
+}
+
+/// A file size as a person reads it: whole megabytes past a hundred, a
+/// decimal below that, kilobytes under one.
+pub fn fmt_bytes(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    let mb = bytes as f64 / MB;
+    if mb >= 100.0 {
+        format!("{mb:.0} MB")
+    } else if mb >= 1.0 {
+        format!("{mb:.1} MB")
+    } else {
+        format!("{:.0} KB", bytes as f64 / 1024.0)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

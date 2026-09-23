@@ -11,7 +11,7 @@ use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
 use crate::kit::theme::legacy_conhost;
-use crate::kit::{STRIP_BUCKETS, STRIP_MIN_ROWS, dim, letter_bucket, letter_strip, scroll_list, table_view};
+use crate::kit::{STRIP_MIN_ROWS, dim, letter_index, letter_strip, scroll_list, table_view};
 use crate::tui::app::{Action, App, Entry, Tab};
 use crate::tui::worker::LibraryNode;
 
@@ -107,21 +107,6 @@ fn alphabetical(gui: &Gui) -> bool {
     matches!(gui.app.library_stack.here(), LibraryNode::Artists | LibraryNode::Genres)
 }
 
-/// The list's letters (clause 11: the narrowed list's), and the first row of
-/// each — as positions in the drawn rows.
-fn letters(rows: &[(usize, &Entry)]) -> ([bool; STRIP_BUCKETS], [usize; STRIP_BUCKETS]) {
-    let mut present = [false; STRIP_BUCKETS];
-    let mut first_of = [0usize; STRIP_BUCKETS];
-    for (pos, (_, entry)) in rows.iter().enumerate() {
-        let bucket = letter_bucket(entry.label());
-        if !present[bucket] {
-            present[bucket] = true;
-            first_of[bucket] = pos;
-        }
-    }
-    (present, first_of)
-}
-
 // ── Drawing ─────────────────────────────────────────────────────────────────
 
 pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
@@ -146,7 +131,7 @@ fn draw_heading(frame: &mut Frame, gui: &mut Gui, content: Rect) -> u16 {
             let back_label = format!("{back_glyph} {}", t!("gui.nav.genres"));
             let back =
                 Rect { x: content.x, y: content.y, width: back_label.chars().count() as u16, height: 1 };
-            let hover = gui.ui.pointer.is_some_and(|p| back.contains(p));
+            let hover = gui.ui.hovers(back);
             put(frame, content.x, content.y, &back_label, if hover { bright_bold() } else { dim() });
             gui.ui.click(back, Act::LibBack);
             let title = format!("{forward} {genre}");
@@ -187,7 +172,8 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 
     // The strip on an alphabetical list of 25 or more (clauses 10–12).
     if alpha && rows.len() >= STRIP_MIN_ROWS {
-        let (present, first_of) = letters(&rows);
+        // The narrowed list's letters (clause 11), by drawn position.
+        let (present, first_of) = letter_index(rows.iter().map(|(_, entry)| entry.label()));
         let strip = Rect { x: content.x, y: content.y + 2, width: content.width, height: 1 };
         letter_strip(frame, &mut gui.ui, strip, &present, move |bucket| Act::LibJump(first_of[bucket]));
     }

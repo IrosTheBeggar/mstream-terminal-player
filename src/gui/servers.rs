@@ -1330,7 +1330,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
 /// second server is saved) and the [+] that adds one.
 pub(crate) fn draw_header(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let plus = Rect { x: area.width.saturating_sub(5), y: 0, width: 3, height: 1 };
-    let plus_hover = gui.ui.pointer.is_some_and(|p| plus.contains(p));
+    let plus_hover = gui.ui.hovers(plus);
     put(frame, plus.x, 0, "[+]", if plus_hover { bright_bold() } else { dim() });
     gui.ui.click(plus, Act::SrvAdd);
     gui.ui.tip(plus, t!("gui.srv.add").to_string());
@@ -1350,7 +1350,7 @@ pub(crate) fn draw_header(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let width = label.chars().count() as u16;
     let x = plus.x.saturating_sub(width + 1);
     let rect = Rect { x, y: 0, width, height: 1 };
-    let hover = many && gui.ui.pointer.is_some_and(|p| rect.contains(p));
+    let hover = many && gui.ui.hovers(rect);
     put(frame, x, 0, &label, if hover { bright_bold() } else { dim() });
     if many {
         // No dwell tooltip here: it matured right where the dropdown
@@ -1464,7 +1464,7 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let marker = if legacy_conhost() { ">" } else { "▸" };
+    let marker = super::forward_glyph();
     let star = if legacy_conhost() { "*" } else { "★" };
     for (row, (i, label, current, default)) in entries.iter().enumerate() {
         let y = inner.y + row as u16;
@@ -1472,7 +1472,7 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             break;
         }
         let row = Rect { x: inner.x, y, width: inner.width, height: 1 };
-        let hover = gui.ui.pointer.is_some_and(|p| row.contains(p));
+        let hover = gui.ui.hovers(row);
         let style = match (current, hover) {
             (true, _) => Style::default().fg(th().accent).add_modifier(Modifier::BOLD),
             (false, true) => bright_bold(),
@@ -1489,7 +1489,7 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let add_y = inner.y + entries.len() as u16;
     if add_y < inner.bottom() {
         let row = Rect { x: inner.x, y: add_y, width: inner.width, height: 1 };
-        let hover = gui.ui.pointer.is_some_and(|p| row.contains(p));
+        let hover = gui.ui.hovers(row);
         put(frame, inner.x + 2, add_y, &add_label, if hover { bright_bold() } else { dim() });
         gui.ui.click(row, Act::SrvAdd);
     }
@@ -1507,7 +1507,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let servers = gui.config.servers.clone();
     let default = gui.config.default_server.clone();
     let star = if legacy_conhost() { "*" } else { "★" };
-    let marker = if legacy_conhost() { ">" } else { "▸" };
+    let marker = super::forward_glyph();
 
     let name_w = content.width.saturating_sub(30) as usize;
     let branch = if legacy_conhost() { "+" } else { "└" };
@@ -1520,7 +1520,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         }
         let row = Rect { x: content.x, y, width: content.width, height: 1 };
         let selected = gui.servers.cursor == pos;
-        let hover = gui.ui.pointer.is_some_and(|p| row.contains(p));
+        let hover = gui.ui.hovers(row);
         if selected {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), row);
         }
@@ -1583,7 +1583,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     if add_y + 3 < content.bottom() {
         let row = Rect { x: content.x, y: add_y, width: content.width, height: 1 };
         let selected = gui.servers.cursor == servers.len();
-        let hover = gui.ui.pointer.is_some_and(|p| row.contains(p));
+        let hover = gui.ui.hovers(row);
         if selected {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), row);
         }
@@ -1619,7 +1619,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                     act: Option<Act>| {
         let width = label.chars().count() as u16;
         let rect = Rect { x: *x, y: actions_y, width, height: 1 };
-        let hovered = act.is_some() && gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hovered = act.is_some() && gui.ui.hovers(rect);
         put(frame, *x, actions_y, &label, if hovered { hover_style } else { style });
         if let Some(act) = act {
             gui.ui.click(rect, act);
@@ -1849,7 +1849,7 @@ fn draw_quick_connect(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let y = list_y + i as u16;
         let rect = Rect { x: inner.x + 1, y, width: inner.width.saturating_sub(2), height: 1 };
         let selected = row == i;
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = gui.ui.hovers(rect);
         if selected {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
         }
@@ -1874,7 +1874,7 @@ fn draw_quick_connect(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let card_y = list_y + 5;
     let on_paste = row >= found.len();
     let rect = Rect { x: inner.x + 1, y: card_y, width: inner.width.saturating_sub(2), height: 3 };
-    let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+    let hover = gui.ui.hovers(rect);
     let border = if on_paste {
         Style::default().fg(th().accent)
     } else if hover {
@@ -1965,7 +1965,7 @@ fn draw_direct(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     put(frame, inner.x + 1, inner.y, &title, bright_bold());
     modal_close(frame, &mut gui.ui, inner, Act::FormCancel);
 
-    let (check_on, check_off) = if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") };
+    let (check_on, check_off) = super::check_glyphs();
     let field_w = inner.width.saturating_sub(2);
 
     let card = |frame: &mut Frame,
@@ -1978,7 +1978,7 @@ fn draw_direct(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                     mask: bool,
                     act: Act| {
         let rect = Rect { x: inner.x + 1, y, width: field_w, height: 3 };
-        let hover = enabled && gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = enabled && gui.ui.hovers(rect);
         let border = if focused && enabled {
             Style::default().fg(th().accent)
         } else if hover {
@@ -2064,7 +2064,7 @@ fn draw_direct(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let text = format!("{} {}", if on { check_on } else { check_off }, label);
         let rect = Rect { x: inner.x + 2, y, width: text.chars().count() as u16, height: 1 };
         let focused = view.focus == slot + 3;
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = gui.ui.hovers(rect);
         let style = if focused {
             sel().add_modifier(Modifier::BOLD)
         } else if hover {

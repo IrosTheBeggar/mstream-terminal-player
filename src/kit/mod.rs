@@ -193,6 +193,12 @@ impl<A: Clone> Surface<A> {
         self.clicks.iter().rev().find(|(rect, _)| rect.contains(at)).map(|(_, act)| act.clone())
     }
 
+    /// Whether the pointer rests in `rect` — the test every control asks
+    /// before choosing its color.
+    pub fn hovers(&self, rect: Rect) -> bool {
+        self.pointer.is_some_and(|p| rect.contains(p))
+    }
+
     /// True while the pointer is over anything clickable — drives the
     /// OSC 22 hand cursor.
     pub fn hovering_clickable(&self) -> bool {
@@ -350,31 +356,12 @@ pub fn tall_button<A: Clone>(
     enabled: bool,
     act: A,
 ) -> Rect {
-    let text = format!("  {label}  ");
-    let width = (text.chars().count() as u16 + 2).min(at.width);
-    let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
-    let hovered = enabled && s.pointer.is_some_and(|p| rect.contains(p));
-    let color = match (enabled, hovered) {
-        (false, _) => th().dim,
-        (true, true) => th().bright,
-        (true, false) => th().accent,
+    let tone = |hovered: bool| match (enabled, hovered) {
+        (false, _) => (th().dim, false),
+        (true, true) => (th().bright, true),
+        (true, false) => (th().accent, true),
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(color));
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-    let label_style = if enabled {
-        Style::default().fg(color).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(color)
-    };
-    frame.render_widget(Paragraph::new(Span::styled(text, label_style)), inner);
-    if enabled {
-        s.click(rect, act);
-    }
-    rect
+    tall_frame(frame, s, at, label, 2, tone, enabled.then_some(act))
 }
 
 /// The tall SECONDARY: the backward/neutral action beside a primary —
@@ -389,25 +376,54 @@ pub fn tall_secondary<A: Clone>(
     label: &str,
     act: A,
 ) -> Rect {
-    let text = format!("  {label}  ");
+    let tone = |hovered: bool| if hovered { (th().bright, true) } else { (th().dim, false) };
+    tall_frame(frame, s, at, label, 2, tone, Some(act))
+}
+
+/// The 3-row frame every tall control shares: the label with `pad` spaces
+/// a side, a Rounded border and the label in one color, the label BOLD or
+/// not — `tone` picks both from whether the pointer is in the frame — and
+/// the click when `act` is given (none: disabled, no hover, no hand).
+/// Returns the rect drawn into.
+pub fn tall_frame<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    at: Rect,
+    label: &str,
+    pad: usize,
+    tone: impl Fn(bool) -> (Color, bool),
+    act: Option<A>,
+) -> Rect {
+    let text = format!("{:pad$}{label}{:pad$}", "", "");
     let width = (text.chars().count() as u16 + 2).min(at.width);
     let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
-    let hovered = s.pointer.is_some_and(|p| rect.contains(p));
-    let color = if hovered { th().bright } else { th().dim };
+    let hovered = act.is_some() && s.hovers(rect);
+    let (color, bold) = tone(hovered);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(color));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    let label_style = if hovered {
+    let label_style = if bold {
         Style::default().fg(color).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(color)
     };
     frame.render_widget(Paragraph::new(Span::styled(text, label_style)), inner);
-    s.click(rect, act);
+    if let Some(act) = act {
+        s.click(rect, act);
+    }
     rect
+}
+
+/// The keyboard cursor on a framed control the pointer isn't in: the ring
+/// redrawn in `style`, so the mark never steals the hover contract.
+pub fn cursor_ring(frame: &mut Frame, rect: Rect, style: Style) {
+    frame.render_widget(
+        Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(style),
+        rect,
+    );
 }
 
 /// A one-line clickable button: draws itself, registers its click, and
@@ -423,7 +439,7 @@ pub fn button<A: Clone>(
     let text = format!("  {label}  ");
     let width = (text.chars().count() as u16).min(at.width);
     let rect = Rect { x: at.x, y: at.y, width, height: 1 };
-    let hovered = s.pointer.is_some_and(|p| rect.contains(p));
+    let hovered = s.hovers(rect);
     let style = match (primary, hovered) {
         (true, true) => Style::default().fg(th().bright).add_modifier(Modifier::BOLD),
         (true, false) => Style::default().fg(th().accent).add_modifier(Modifier::BOLD),
@@ -521,7 +537,7 @@ pub fn modal_frame_anchored(
 /// says so — the same words on every modal in the family).
 pub fn modal_close<A: Clone>(frame: &mut Frame, s: &mut Surface<A>, inner: Rect, act: A) {
     let rect = Rect { x: inner.right().saturating_sub(3), y: inner.y, width: 3, height: 1 };
-    let hovered = s.pointer.is_some_and(|p| rect.contains(p));
+    let hovered = s.hovers(rect);
     let style = if hovered {
         Style::default().fg(th().bright).add_modifier(Modifier::BOLD)
     } else {
@@ -588,7 +604,7 @@ pub fn scroll_list<A: Clone>(
     }
     let max_scroll = len - visible;
     let mut state = ScrollbarState::new(max_scroll + 1).position(first);
-    let bar_hover = s.pointer.is_some_and(|p| bar.contains(p));
+    let bar_hover = s.hovers(bar);
     let ends = if bar_hover { Style::default().fg(th().bright) } else { dim() };
     let thumb = if bar_hover {
         Style::default().fg(th().bright)
@@ -662,6 +678,21 @@ pub fn snap_bucket(present: &[bool; STRIP_BUCKETS], wanted: usize) -> Option<usi
     })
 }
 
+/// The strip's index over a list's labels, in list order: which buckets
+/// are present, and the position of the first row in each.
+pub fn letter_index<'a>(labels: impl IntoIterator<Item = &'a str>) -> ([bool; STRIP_BUCKETS], [usize; STRIP_BUCKETS]) {
+    let mut present = [false; STRIP_BUCKETS];
+    let mut first_of = [0usize; STRIP_BUCKETS];
+    for (pos, label) in labels.into_iter().enumerate() {
+        let bucket = letter_bucket(label);
+        if !present[bucket] {
+            present[bucket] = true;
+            first_of[bucket] = pos;
+        }
+    }
+    (present, first_of)
+}
+
 /// A row of `# A B … Z`: present letters live, absent ones dim, each a click
 /// target whose jump snaps to the nearest present letter. Spaced when the
 /// row has the width, packed otherwise.
@@ -679,7 +710,7 @@ pub fn letter_strip<A: Clone>(
             break;
         }
         let cell = Rect { x, y: at.y, width: 1, height: 1 };
-        let hover = s.pointer.is_some_and(|p| cell.contains(p));
+        let hover = s.hovers(cell);
         let style = match (present[bucket], hover) {
             (_, true) => Style::default().fg(th().bright).add_modifier(Modifier::BOLD),
             (true, false) => Style::default().fg(th().text),
@@ -699,21 +730,29 @@ pub fn letter_strip<A: Clone>(
 
 // ── Tooltips ─────────────────────────────────────────────────────────────────
 
-/// Greedy word wrap for tooltip copy, at [`TIP_WRAP`] cells.
+/// Greedy word wrap at `width` cells — the rooms' sentences, one algorithm.
+pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    wrap_at(text, width, false)
+}
+
+/// Greedy word wrap for tooltip copy, at [`TIP_WRAP`] cells. A word wider
+/// than the box (a file path) hard-breaks at the character level — the
+/// greedy wrap would emit it as one line wider than the box, which clips.
 pub fn wrap_tip(text: &str) -> Vec<String> {
+    wrap_at(text, TIP_WRAP, true)
+}
+
+fn wrap_at(text: &str, width: usize, hard_break: bool) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
-        // A word wider than the wrap (a file path) hard-breaks at the
-        // character level — the greedy wrap would emit it as one line
-        // wider than the box, which clips.
-        if word.chars().count() > TIP_WRAP {
+        if hard_break && word.chars().count() > width {
             if !line.is_empty() {
                 lines.push(std::mem::take(&mut line));
             }
             let chars: Vec<char> = word.chars().collect();
-            for chunk in chars.chunks(TIP_WRAP) {
-                if chunk.len() == TIP_WRAP {
+            for chunk in chars.chunks(width) {
+                if chunk.len() == width {
                     lines.push(chunk.iter().collect());
                 } else {
                     line = chunk.iter().collect();
@@ -721,8 +760,8 @@ pub fn wrap_tip(text: &str) -> Vec<String> {
             }
             continue;
         }
-        let need = if line.is_empty() { word.chars().count() } else { word.chars().count() + 1 };
-        if !line.is_empty() && line.chars().count() + need > TIP_WRAP {
+        let need = if line.is_empty() { word.chars().count() } else { line.chars().count() + 1 + word.chars().count() };
+        if need > width && !line.is_empty() {
             lines.push(std::mem::take(&mut line));
         }
         if !line.is_empty() {

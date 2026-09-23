@@ -13,7 +13,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use rust_i18n::t;
 
-use crate::kit::theme::{legacy_conhost, th};
+use crate::kit::theme::th;
 use crate::kit::{dim, input_display, modal_frame_on, scroll_list, table_view};
 use crate::tui::app::{Action, Entry};
 use crate::tui::worker::{ApiCmd, LibraryNode};
@@ -111,7 +111,7 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 
     let card_w = content.width.min(60);
     let card = Rect { x: content.x, y: content.y + 3, width: card_w, height: 3 };
-    let hover = gui.ui.pointer.is_some_and(|p| card.contains(p));
+    let hover = gui.ui.hovers(card);
     let color = if hover { th().bright } else { th().ok };
     let block = ratatui::widgets::Block::default()
         .borders(ratatui::widgets::Borders::ALL)
@@ -175,7 +175,7 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         let Entry::Node { label: name, .. } = &gui.app.library.entries[*index] else { continue };
         let y = list.y + row as u16;
         let rect = Rect { x: list.x, y, width: list.width, height: 1 };
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = gui.ui.hovers(rect);
         let is_sel = *index == selected.unwrap_or(usize::MAX);
         if is_sel {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
@@ -201,11 +201,11 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             let rx = rect.right().saturating_sub(verbs_w);
             let rename_rect =
                 Rect { x: rx, y, width: rename_label.chars().count() as u16, height: 1 };
-            let rhover = gui.ui.pointer.is_some_and(|p| rename_rect.contains(p));
+            let rhover = gui.ui.hovers(rename_rect);
             put(frame, rx, y, &rename_label, if rhover { bright_bold() } else { dim() });
             gui.ui.click(rename_rect, Act::PlRename(*index));
             let x_rect = Rect { x: rect.right().saturating_sub(4), y, width: 3, height: 1 };
-            let xhover = gui.ui.pointer.is_some_and(|p| x_rect.contains(p));
+            let xhover = gui.ui.hovers(x_rect);
             let xstyle = if xhover {
                 Style::default().fg(th().danger).add_modifier(Modifier::BOLD)
             } else {
@@ -235,7 +235,7 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str) {
     let crumb = format!(
         "{} {} {}",
         t!("gui.nav.playlists"),
-        if legacy_conhost() { ">" } else { "▸" },
+        super::forward_glyph(),
         name
     );
     let count = super::bar_count(
@@ -329,7 +329,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             width: action.chars().count() as u16,
             height: 1,
         };
-        let hover = gui.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = gui.ui.hovers(rect);
         put(
             frame,
             rect.x,
@@ -366,7 +366,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let y = inner.bottom().saturating_sub(1);
         let cancel_rect =
             Rect { x: cancel_x, y, width: cancel.chars().count() as u16, height: 1 };
-        let chover = gui.ui.pointer.is_some_and(|p| cancel_rect.contains(p));
+        let chover = gui.ui.hovers(cancel_rect);
         put(
             frame,
             cancel_x,
@@ -376,7 +376,7 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         );
         gui.ui.click(cancel_rect, Act::PlCancel);
         let del_rect = Rect { x: del_x, y, width: del.chars().count() as u16, height: 1 };
-        let dhover = gui.ui.pointer.is_some_and(|p| del_rect.contains(p));
+        let dhover = gui.ui.hovers(del_rect);
         let dstyle = if dhover {
             Style::default().fg(th().danger).add_modifier(Modifier::BOLD)
         } else {

@@ -13,7 +13,7 @@ use tui_input::backend::crossterm::EventHandler;
 
 use crate::api::types::Track;
 use crate::kit::theme::{legacy_conhost, th};
-use crate::kit::{Surface, dim, input_display, modal_close, modal_frame_on};
+use crate::kit::{Surface, dim, input_display, modal_close, modal_frame_on, table_view};
 use crate::tui::app::{Action, App, Entry, Focus, Origin, Tab};
 
 use super::cover::Slot;
@@ -171,7 +171,7 @@ fn current_track<'a>(app: &'a App, sheet: &'a Sheet) -> &'a Track {
 }
 
 fn title_of(track: &Track) -> String {
-    track.metadata.display_title().unwrap_or_else(|| track.file_name()).to_string()
+    track.title_or_file().to_string()
 }
 
 fn byline_of(track: &Track) -> String {
@@ -191,22 +191,16 @@ fn spec_of(track: &Track) -> String {
     if let Some(format) = m.format.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
         parts.push(format.to_uppercase());
     }
-    if let Some(bitrate) = m.bitrate {
-        parts.push(t!("gui.info.kbps", n = (bitrate as f64 / 1000.0).round() as u64).to_string());
+    if let Some(kbps) = m.kbps() {
+        parts.push(t!("gui.info.kbps", n = kbps).to_string());
     }
-    if let Some(rate) = m.sample_rate {
-        parts.push(khz(rate));
+    if let Some(khz) = m.khz_words() {
+        parts.push(t!("gui.info.khz", n = khz).to_string());
     }
     if let Some(seconds) = m.duration {
         parts.push(super::bar::fmt_time(seconds));
     }
     parts.join(" · ")
-}
-
-fn khz(hz: u32) -> String {
-    let k = f64::from(hz) / 1000.0;
-    let words = if k.fract() == 0.0 { format!("{k:.0}") } else { format!("{k:.1}") };
-    t!("gui.info.khz", n = words).to_string()
 }
 
 /// Five stars in halves from the wire's 0–10 (clause 10).
@@ -263,20 +257,15 @@ fn info_rows(track: &Track) -> Vec<(String, String)> {
     add("key", m.musical_key.clone());
     add("genre", (!m.genres.is_empty()).then(|| m.genres.join(", ")));
     add("format", m.format.as_deref().map(str::to_uppercase));
-    add("bitrate", m.bitrate.map(|b| t!("gui.info.kbps", n = (b as f64 / 1000.0).round() as u64).to_string()));
-    add("sample_rate", m.sample_rate.map(khz));
+    add("bitrate", m.kbps().map(|k| t!("gui.info.kbps", n = k).to_string()));
+    add("sample_rate", m.khz_words().map(|k| t!("gui.info.khz", n = k).to_string()));
     add("bit_depth", m.bit_depth.map(|d| t!("gui.info.bits", n = d).to_string()));
     add("channels", m.channels.map(|c| c.to_string()));
-    add("size", m.file_size.map(size_words));
+    add("size", m.file_size.map(crate::api::types::fmt_bytes));
     add("plays", m.play_count.map(|p| p.to_string()));
     add("rating", m.rating.filter(|r| *r > 0).map(|r| format!("{} {}", stars(Some(r)), rating_words(Some(r)))));
     add("path", Some(track.filepath.clone()));
     rows
-}
-
-fn size_words(bytes: u64) -> String {
-    let mb = bytes as f64 / 1_048_576.0;
-    if mb >= 1.0 { format!("{mb:.1} MB") } else { format!("{:.0} KB", bytes as f64 / 1024.0) }
 }
 
 // ── Drawing ─────────────────────────────────────────────────────────────────
@@ -339,7 +328,7 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             let cell = Rect { x: bx + i as u16, y: by, width: 1, height: 1 };
             let full = 2 * (i as u32 + 1);
             let lit = v >= full - 1;
-            let hover = ui.pointer.is_some_and(|p| cell.contains(p));
+            let hover = ui.hovers(cell);
             let style = match (hover, lit) {
                 (true, _) => bright_bold(),
                 (false, true) => Style::default().fg(th().gold),
@@ -382,7 +371,7 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         let y = inner.y + 5 + i as u16;
         let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
         let is_sel = sheet.row == i;
-        let hover = ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = ui.hovers(rect);
         if is_sel {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
         }
@@ -432,7 +421,7 @@ fn draw_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let mut line = |frame: &mut Frame, ui: &mut Surface<Act>, index: usize, label: &str, act: Act, lead: bool| {
         let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
         let is_sel = row == index;
-        let hover = ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = ui.hovers(rect);
         if is_sel {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
         }
@@ -449,9 +438,9 @@ fn draw_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     line(frame, ui, 0, &format!("+ {}", t!("gui.pl.new")), Act::PickNew, true);
     match names {
         Some(names) => {
-            // The window keeps the cursor's row in view.
-            let visible = shown_rows.saturating_sub(1);
-            let first = row.saturating_sub(1).saturating_sub(visible.saturating_sub(1)).min(names.len().saturating_sub(visible));
+            // The window keeps the cursor's row in view — the kit's
+            // viewport, revealed from the top every frame.
+            let (first, visible) = table_view(names.len(), Some(row.saturating_sub(1)), 0, shown_rows.saturating_sub(1));
             for (i, name) in names.iter().enumerate().skip(first).take(visible) {
                 line(frame, ui, i + 1, name, Act::PickPlaylist(name.clone()), false);
             }

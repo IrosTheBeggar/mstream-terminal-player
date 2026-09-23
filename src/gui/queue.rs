@@ -165,7 +165,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             let is_current = current == Some(index);
             let is_sel = selected == Some(index);
             let rect = Rect { x, y, width: area.width - 1 - x, height: ROW_H };
-            let hover = ui.pointer.is_some_and(|p| rect.contains(p));
+            let hover = ui.hovers(rect);
             let (title_style, sub_style) = match (is_sel, is_current, hover) {
                 // The panel's keyboard cursor (track-actions contract,
                 // clause 19): the title line takes the selection colour.
@@ -210,7 +210,7 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 None => bar::cover_slot(frame, x, y, COVER_W, ROW_H),
             }
 
-            let title = item.metadata.display_title().unwrap_or_else(|| item.file_name());
+            let title = item.title_or_file();
             // The DJ's rows wear a badge before the title (auto-dj contract,
             // clause 60): a classic pick and a sonic one differently.
             let badge = match (item.dj, crate::kit::theme::legacy_conhost()) {
