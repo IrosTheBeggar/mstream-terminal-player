@@ -25,11 +25,18 @@ mod cmd_library;
 #[cfg(not(target_arch = "wasm32"))]
 mod cmd_play;
 #[cfg(not(target_arch = "wasm32"))]
+mod cmd_viz;
+#[cfg(not(target_arch = "wasm32"))]
 mod replay;
 #[cfg(not(target_arch = "wasm32"))]
 mod runtime;
 #[cfg(not(target_arch = "wasm32"))]
 mod serve;
+/// The visualizer presets: their format, their GLSL, their audio texture,
+/// and the GPU renderer that draws them. Native only — the browser build has
+/// no GPU path yet, and none of this belongs in it until it does.
+#[cfg(not(target_arch = "wasm32"))]
+mod shader;
 #[cfg(not(target_arch = "wasm32"))]
 mod kit;
 #[cfg(not(target_arch = "wasm32"))]
@@ -186,6 +193,8 @@ enum Command {
     QuickconnectProbe { code: String },
     /// Show whether this terminal can draw covers as pixels (diagnostic)
     GraphicsProbe,
+    /// Draw the visualizer presets on this machine's GPU (diagnostic)
+    VizProbe(cmd_viz::VizProbeArgs),
     /// Drive the interactive player from a script (smoke testing)
     Replay(replay::ReplayArgs),
     /// Print the key bindings as a config.toml section, ready to edit
@@ -320,6 +329,7 @@ fn main() {
             std::process::exit(quickconnect::probe(&code));
         }
         (Some(Command::GraphicsProbe), _) => std::process::exit(cmd_graphics::run()),
+        (Some(Command::VizProbe(args)), _) => std::process::exit(cmd_viz::run(args)),
         (Some(Command::Replay(args)), _) => std::process::exit(replay::run(args)),
         (Some(Command::Keys), _) => {
             // The bindings in force, not the built-in ones: someone asking
