@@ -45,6 +45,10 @@ pub const ARROW_REPEAT: Duration = Duration::from_millis(60);
 /// at the physical release — holds are invisible to it. A phantom
 /// release downgrades the capture to a SOFT one instead of ending it.
 pub const PHANTOM_RELEASE: Duration = Duration::from_millis(150);
+/// The caret's blink: half a second on, half a second off (the desktop
+/// editors' rate), counted from the last key or click so a caret that just
+/// moved is always seen.
+pub const CARET_BLINK: Duration = Duration::from_millis(500);
 /// The soft capture holds while motion stays within this many cells of
 /// the press; travelling beyond it resumes normal hover.
 pub const SOFT_RADIUS: u16 = 2;
@@ -99,6 +103,31 @@ pub struct Surface<A> {
     /// A soft capture left behind by a phantom release: hover stays
     /// suppressed near this press until the pointer genuinely leaves.
     soft_origin: Option<Position>,
+    /// The footprints of everything drawn OVER the base layer this frame —
+    /// modal frames, the header dropdown, the tooltip — and last frame's.
+    /// A pixel surface beneath (a cover) consults last frame's, because
+    /// the overlays draw after it: the terminal writer skips a picture's
+    /// cells, so a cover an overlay touched draws as text until the frame
+    /// after the overlay leaves, which repaints every cell it wrote. One
+    /// frame behind on the way in is harmless — the overlay's `Clear`
+    /// resets what it covers. Covers an overlay never touches stay pixels.
+    overlays: Vec<Rect>,
+    covered: Vec<Rect>,
+    /// What a right click means where — a row's context verb (the
+    /// track-actions contract's sheet). Rebuilt each frame like `clicks`.
+    contexts: Vec<(Rect, A)>,
+    /// Whether tooltips name the key that does the same (see
+    /// [`Surface::tip_keyed`]). On by default — the wizard and the admin
+    /// rooms always name theirs; the GUI player has a setting.
+    pub key_hints: bool,
+    /// The caret's blink clock: when a field last took input (the caret
+    /// shows solid from then, the way every editor's does), and whether a
+    /// field drew a caret this frame — the shell times its next frame to
+    /// the flip. Blinking here rather than through the terminal's cursor
+    /// because a terminal profile can veto a DECSCUSR blink, and a caret
+    /// that may or may not blink is worse than one that always does.
+    caret_since: Option<Instant>,
+    caret_drawn: bool,
 }
 
 impl<A> Default for Surface<A> {
@@ -113,6 +142,12 @@ impl<A> Default for Surface<A> {
             arrow_hold: None,
             armed: None,
             soft_origin: None,
+            overlays: Vec::new(),
+            covered: Vec::new(),
+            contexts: Vec::new(),
+            key_hints: true,
+            caret_since: None,
+            caret_drawn: false,
         }
     }
 }
@@ -122,9 +157,32 @@ impl<A: Clone> Surface<A> {
         Self::default()
     }
 
-    /// Start a render pass: the registries empty, the input state stays.
+    /// Start a render pass: the registries empty, the input state stays,
+    /// and last frame's overlay footprints become the ones to draw under.
     pub fn begin_frame(&mut self) {
+        self.covered = std::mem::take(&mut self.overlays);
         self.clear_registries();
+    }
+
+    /// Register something drawn over the base layer — its whole footprint,
+    /// border included. Not cleared by [`Self::clear_registries`]: an
+    /// overlay registers after the base layer's controls are dropped.
+    pub fn overlay(&mut self, rect: Rect) {
+        self.overlays.push(rect);
+    }
+
+    /// Whether an overlay stood over any part of `rect` LAST frame — the
+    /// question a pixel surface asks before drawing pixels there.
+    pub fn covered_last_frame(&self, rect: Rect) -> bool {
+        self.covered.iter().any(|over| over.intersects(rect))
+    }
+
+    /// Whether an overlay OTHER than `own` stood over any part of `rect`
+    /// last frame — the question a pixel surface INSIDE a modal asks: its
+    /// own frame always covers it, and only something drawn over the modal
+    /// (a tooltip, a second modal) makes its picture stand down.
+    pub fn covered_last_frame_by_another(&self, rect: Rect, own: Rect) -> bool {
+        self.covered.iter().any(|over| *over != own && over.intersects(rect))
     }
 
     /// Drop every registered rect — the modal-inertness move: a screen
@@ -134,6 +192,49 @@ impl<A: Clone> Surface<A> {
         self.clicks.clear();
         self.tips.clear();
         self.bars.clear();
+        self.contexts.clear();
+        self.caret_drawn = false;
+    }
+
+    /// A field took a key or a click: the caret shows solid from now.
+    pub fn caret_touch(&mut self) {
+        self.caret_since = Some(Instant::now());
+    }
+
+    /// Whether the caret is ON at this instant — a field asks as it draws
+    /// (see [`input_display_blink`]). A caret never touched is on. Marks
+    /// the frame as one with a caret, for [`Self::caret_next_flip`].
+    pub fn caret(&mut self) -> bool {
+        self.caret_drawn = true;
+        self.caret_since.is_none_or(|since| (since.elapsed().as_millis() / CARET_BLINK.as_millis()).is_multiple_of(2))
+    }
+
+    /// How long until the drawn caret flips, if one drew this frame — the
+    /// shell shortens its poll to land the next frame ON the flip, so the
+    /// blink is crisp instead of a poll tick late.
+    pub fn caret_next_flip(&self) -> Option<Duration> {
+        if !self.caret_drawn {
+            return None;
+        }
+        let elapsed = self.caret_since.map_or(0, |since| since.elapsed().as_millis());
+        let into = elapsed % CARET_BLINK.as_millis();
+        Some(Duration::from_millis((CARET_BLINK.as_millis() - into) as u64))
+    }
+
+    /// Age the blink clock, so a test can see the other phase.
+    #[cfg(test)]
+    pub fn caret_backdate(&mut self, by: Duration) {
+        self.caret_since = Instant::now().checked_sub(by);
+    }
+
+    /// Register what a right click on `rect` does. The last registered
+    /// wins a hit, as with clicks.
+    pub fn context(&mut self, rect: Rect, act: A) {
+        self.contexts.push((rect, act));
+    }
+
+    pub fn hit_context(&self, at: Position) -> Option<A> {
+        self.contexts.iter().rev().find(|(rect, _)| rect.contains(at)).map(|(_, act)| act.clone())
     }
 
     /// Register a clickable rect.
@@ -146,9 +247,30 @@ impl<A: Clone> Surface<A> {
         self.tips.push((rect, text.into()));
     }
 
+    /// A tooltip whose text ends in ` — key`, the key that does the same:
+    /// registered whole while the surface names keys, cut at the dash when
+    /// it does not. The dash is the one this family writes its key tails
+    /// with, so a tip with a sentence after a dash registers through
+    /// [`Surface::tip`] instead.
+    pub fn tip_keyed(&mut self, rect: Rect, text: impl Into<String>) {
+        let text = text.into();
+        let text = if self.key_hints {
+            text
+        } else {
+            text.rsplit_once(" — ").map_or(text.clone(), |(label, _)| label.to_string())
+        };
+        self.tips.push((rect, text));
+    }
+
     /// What a press at `at` hits — the last-drawn matching rect.
     pub fn hit(&self, at: Position) -> Option<A> {
         self.clicks.iter().rev().find(|(rect, _)| rect.contains(at)).map(|(_, act)| act.clone())
+    }
+
+    /// Whether the pointer rests in `rect` — the test every control asks
+    /// before choosing its color.
+    pub fn hovers(&self, rect: Rect) -> bool {
+        self.pointer.is_some_and(|p| rect.contains(p))
     }
 
     /// True while the pointer is over anything clickable — drives the
@@ -308,31 +430,12 @@ pub fn tall_button<A: Clone>(
     enabled: bool,
     act: A,
 ) -> Rect {
-    let text = format!("  {label}  ");
-    let width = (text.chars().count() as u16 + 2).min(at.width);
-    let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
-    let hovered = enabled && s.pointer.is_some_and(|p| rect.contains(p));
-    let color = match (enabled, hovered) {
-        (false, _) => th().dim,
-        (true, true) => th().bright,
-        (true, false) => th().accent,
+    let tone = |hovered: bool| match (enabled, hovered) {
+        (false, _) => (th().dim, false),
+        (true, true) => (th().bright, true),
+        (true, false) => (th().accent, true),
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(color));
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-    let label_style = if enabled {
-        Style::default().fg(color).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(color)
-    };
-    frame.render_widget(Paragraph::new(Span::styled(text, label_style)), inner);
-    if enabled {
-        s.click(rect, act);
-    }
-    rect
+    tall_frame(frame, s, at, label, 2, tone, enabled.then_some(act))
 }
 
 /// The tall SECONDARY: the backward/neutral action beside a primary —
@@ -347,25 +450,71 @@ pub fn tall_secondary<A: Clone>(
     label: &str,
     act: A,
 ) -> Rect {
-    let text = format!("  {label}  ");
+    let tone = |hovered: bool| if hovered { (th().bright, true) } else { (th().dim, false) };
+    tall_frame(frame, s, at, label, 2, tone, Some(act))
+}
+
+/// The 3-row frame every tall control shares: the label with `pad` spaces
+/// a side, a Rounded border and the label in one color, the label BOLD or
+/// not — `tone` picks both from whether the pointer is in the frame — and
+/// the click when `act` is given (none: disabled, no hover, no hand).
+/// Returns the rect drawn into.
+pub fn tall_frame<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    at: Rect,
+    label: &str,
+    pad: usize,
+    tone: impl Fn(bool) -> (Color, bool),
+    act: Option<A>,
+) -> Rect {
+    tall_frame_bordered(frame, s, at, label, pad, BorderType::Rounded, tone, act)
+}
+
+/// [`tall_frame`] with the border of the caller's choosing: the thick
+/// border is how a control stands out from the rounded frames beside it
+/// (the GUI player's transport).
+#[allow(clippy::too_many_arguments)]
+pub fn tall_frame_bordered<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    at: Rect,
+    label: &str,
+    pad: usize,
+    border: BorderType,
+    tone: impl Fn(bool) -> (Color, bool),
+    act: Option<A>,
+) -> Rect {
+    let text = format!("{:pad$}{label}{:pad$}", "", "");
     let width = (text.chars().count() as u16 + 2).min(at.width);
     let rect = Rect { x: at.x, y: at.y, width, height: 3.min(at.height.max(1)) };
-    let hovered = s.pointer.is_some_and(|p| rect.contains(p));
-    let color = if hovered { th().bright } else { th().dim };
+    let hovered = act.is_some() && s.hovers(rect);
+    let (color, bold) = tone(hovered);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(border)
         .border_style(Style::default().fg(color));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    let label_style = if hovered {
+    let label_style = if bold {
         Style::default().fg(color).add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(color)
     };
     frame.render_widget(Paragraph::new(Span::styled(text, label_style)), inner);
-    s.click(rect, act);
+    if let Some(act) = act {
+        s.click(rect, act);
+    }
     rect
+}
+
+/// The keyboard cursor on a framed control the pointer isn't in: the ring
+/// redrawn in `style`, so the mark never steals the hover contract.
+pub fn cursor_ring(frame: &mut Frame, rect: Rect, style: Style) {
+    frame.render_widget(
+        Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(style),
+        rect,
+    );
 }
 
 /// A one-line clickable button: draws itself, registers its click, and
@@ -381,7 +530,7 @@ pub fn button<A: Clone>(
     let text = format!("  {label}  ");
     let width = (text.chars().count() as u16).min(at.width);
     let rect = Rect { x: at.x, y: at.y, width, height: 1 };
-    let hovered = s.pointer.is_some_and(|p| rect.contains(p));
+    let hovered = s.hovers(rect);
     let style = match (primary, hovered) {
         (true, true) => Style::default().fg(th().bright).add_modifier(Modifier::BOLD),
         (true, false) => Style::default().fg(th().accent).add_modifier(Modifier::BOLD),
@@ -405,6 +554,43 @@ pub fn modal_frame(
     modal_frame_anchored(frame, area, width, height, height, title_color)
 }
 
+/// [`modal_frame`] on a screen with pixel surfaces beneath: the frame's
+/// footprint is registered with the surface, so a cover it touches draws
+/// as text (see [`Surface::overlay`]) and every other cover stays pixels.
+pub fn modal_frame_on<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    area: Rect,
+    width: u16,
+    height: u16,
+    title_color: Color,
+) -> Rect {
+    modal_frame_anchored_on(frame, s, area, width, height, height, title_color)
+}
+
+/// [`modal_frame_anchored`], registering its footprint like [`modal_frame_on`].
+pub fn modal_frame_anchored_on<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    area: Rect,
+    width: u16,
+    height: u16,
+    max_height: u16,
+    title_color: Color,
+) -> Rect {
+    s.overlay(modal_rect(area, width, height, max_height));
+    modal_frame_anchored(frame, area, width, height, max_height, title_color)
+}
+
+/// Where a modal of this size sits: centred, and vertically as if
+/// `max_height` tall, so one that grows keeps its top edge.
+pub fn modal_rect(area: Rect, width: u16, height: u16, max_height: u16) -> Rect {
+    let width = width.min(area.width.saturating_sub(4));
+    let height = height.min(area.height.saturating_sub(2));
+    let max_height = max_height.max(height).min(area.height.saturating_sub(2));
+    Rect { x: (area.width - width) / 2, y: (area.height - max_height) / 2, width, height }
+}
+
 /// Like [`modal_frame`], but vertically positioned as if the modal were
 /// `max_height` tall: a modal whose height varies (a suggestion list)
 /// keeps a FIXED top edge and grows downward — its input line never
@@ -417,15 +603,7 @@ pub fn modal_frame_anchored(
     max_height: u16,
     title_color: Color,
 ) -> Rect {
-    let width = width.min(area.width.saturating_sub(4));
-    let height = height.min(area.height.saturating_sub(2));
-    let max_height = max_height.max(height).min(area.height.saturating_sub(2));
-    let rect = Rect {
-        x: (area.width - width) / 2,
-        y: (area.height - max_height) / 2,
-        width,
-        height,
-    };
+    let rect = modal_rect(area, width, height, max_height);
     frame.render_widget(Clear, rect);
     // Clear resets cells to the terminal default — repaint the ground so
     // the modal interior matches the fixed scheme (when it is owned).
@@ -447,16 +625,10 @@ pub fn modal_frame_anchored(
 /// The modal's close control: `[X]` on the title row, right edge. Dim
 /// until hovered, then BRIGHT — dismissal is neutral, unlike a row
 /// remove's destructive red. Esc remains the keyboard path (the tip
-/// says so).
-pub fn modal_close<A: Clone>(
-    frame: &mut Frame,
-    s: &mut Surface<A>,
-    inner: Rect,
-    act: A,
-    tip: impl Into<String>,
-) {
+/// says so — the same words on every modal in the family).
+pub fn modal_close<A: Clone>(frame: &mut Frame, s: &mut Surface<A>, inner: Rect, act: A) {
     let rect = Rect { x: inner.right().saturating_sub(3), y: inner.y, width: 3, height: 1 };
-    let hovered = s.pointer.is_some_and(|p| rect.contains(p));
+    let hovered = s.hovers(rect);
     let style = if hovered {
         Style::default().fg(th().bright).add_modifier(Modifier::BOLD)
     } else {
@@ -464,7 +636,7 @@ pub fn modal_close<A: Clone>(
     };
     frame.render_widget(Paragraph::new(Span::styled("[X]", style)), rect);
     s.click(rect, act);
-    s.tip(rect, tip);
+    s.tip_keyed(rect, rust_i18n::t!("path_modal.tip_close").to_string());
 }
 
 // ── Scrolling ────────────────────────────────────────────────────────────────
@@ -502,6 +674,33 @@ pub fn table_view(len: usize, reveal: Option<usize>, scroll: usize, avail: usize
     (first, visible)
 }
 
+/// A list's viewport state, the table contract in one place: the wheel
+/// offset, and whether the next frame reveals the cursor (a keyboard move,
+/// a fresh add; the wheel scrolls freely in between).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListView {
+    pub scroll: usize,
+    pub reveal: bool,
+}
+
+impl ListView {
+    /// The viewport for this frame — [`table_view`] over `len` rows in
+    /// `avail` cells, revealing `selected` (a drawn-row position) when a
+    /// reveal was asked since the last frame — with the offset written back
+    /// clamped.
+    pub fn window(&mut self, len: usize, selected: Option<usize>, avail: usize) -> (usize, usize) {
+        let reveal = std::mem::take(&mut self.reveal).then_some(selected).flatten();
+        let (first, visible) = table_view(len, reveal, self.scroll, avail);
+        self.scroll = first;
+        (first, visible)
+    }
+
+    /// A wheel or page step; the next frame clamps it.
+    pub fn step(&mut self, delta: i32) {
+        self.scroll = self.scroll.saturating_add_signed(delta as isize);
+    }
+}
+
 /// The kit scrollbar, fully live: endcaps step (and hold-repeat), track
 /// cells jump proportionally, a track press arms a thumb drag, and the
 /// bar brightens under the pointer. Draws only on overflow; registers
@@ -523,7 +722,7 @@ pub fn scroll_list<A: Clone>(
     }
     let max_scroll = len - visible;
     let mut state = ScrollbarState::new(max_scroll + 1).position(first);
-    let bar_hover = s.pointer.is_some_and(|p| bar.contains(p));
+    let bar_hover = s.hovers(bar);
     let ends = if bar_hover { Style::default().fg(th().bright) } else { dim() };
     let thumb = if bar_hover {
         Style::default().fg(th().bright)
@@ -556,23 +755,122 @@ pub fn scroll_list<A: Clone>(
     s.register_bar(bar, max_scroll, step_back, step_fwd, Box::new(jump));
 }
 
+// ── Letter strip ─────────────────────────────────────────────────────────────
+
+/// The strip's buckets: `#` then A–Z (library-rooms contract, clause 10).
+pub const STRIP_BUCKETS: usize = 27;
+/// Rows an alphabetical list needs before the strip shows — the record's
+/// default threshold.
+pub const STRIP_MIN_ROWS: usize = 25;
+
+/// Which bucket a label files under: its first character uppercased when
+/// that is A–Z, else `#` — digits, punctuation and any non-Latin initial,
+/// the record's rule.
+pub fn letter_bucket(label: &str) -> usize {
+    match label.trim_start().chars().next().map(|c| c.to_ascii_uppercase()) {
+        Some(c @ 'A'..='Z') => (c as u8 - b'A') as usize + 1,
+        _ => 0,
+    }
+}
+
+pub fn bucket_glyph(bucket: usize) -> char {
+    if bucket == 0 { '#' } else { (b'A' + (bucket - 1) as u8) as char }
+}
+
+/// The nearest present bucket to `wanted` — itself when present — so a
+/// click on a dim letter still lands somewhere; `None` when nothing is.
+pub fn snap_bucket(present: &[bool; STRIP_BUCKETS], wanted: usize) -> Option<usize> {
+    if present.get(wanted).copied().unwrap_or(false) {
+        return Some(wanted);
+    }
+    (1..STRIP_BUCKETS as i32).find_map(|d| {
+        let below = wanted as i32 - d;
+        let above = wanted as i32 + d;
+        if below >= 0 && present[below as usize] {
+            Some(below as usize)
+        } else if (above as usize) < STRIP_BUCKETS && present[above as usize] {
+            Some(above as usize)
+        } else {
+            None
+        }
+    })
+}
+
+/// The strip's index over a list's labels, in list order: which buckets
+/// are present, and the position of the first row in each.
+pub fn letter_index<'a>(labels: impl IntoIterator<Item = &'a str>) -> ([bool; STRIP_BUCKETS], [usize; STRIP_BUCKETS]) {
+    let mut present = [false; STRIP_BUCKETS];
+    let mut first_of = [0usize; STRIP_BUCKETS];
+    for (pos, label) in labels.into_iter().enumerate() {
+        let bucket = letter_bucket(label);
+        if !present[bucket] {
+            present[bucket] = true;
+            first_of[bucket] = pos;
+        }
+    }
+    (present, first_of)
+}
+
+/// A row of `# A B … Z`: present letters live, absent ones dim, each a click
+/// target whose jump snaps to the nearest present letter. Spaced when the
+/// row has the width, packed otherwise.
+pub fn letter_strip<A: Clone>(
+    frame: &mut Frame,
+    s: &mut Surface<A>,
+    at: Rect,
+    present: &[bool; STRIP_BUCKETS],
+    jump: impl Fn(usize) -> A,
+) {
+    let step: u16 = if at.width >= (STRIP_BUCKETS * 2 - 1) as u16 { 2 } else { 1 };
+    for bucket in 0..STRIP_BUCKETS {
+        let x = at.x + bucket as u16 * step;
+        if x >= at.right() {
+            break;
+        }
+        let cell = Rect { x, y: at.y, width: 1, height: 1 };
+        let hover = s.hovers(cell);
+        let style = match (present[bucket], hover) {
+            (_, true) => Style::default().fg(th().bright).add_modifier(Modifier::BOLD),
+            (true, false) => Style::default().fg(th().text),
+            (false, false) => dim(),
+        };
+        frame.render_widget(Paragraph::new(Span::styled(bucket_glyph(bucket).to_string(), style)), cell);
+        if let Some(target) = snap_bucket(present, bucket) {
+            s.click(cell, jump(target));
+            // The dwell reads one rect; 27 formatted tips a frame said
+            // nothing the one under the pointer does not.
+            if hover {
+                s.tip(cell, rust_i18n::t!("gui.lib.jump_tip", letter = bucket_glyph(target)).to_string());
+            }
+        }
+    }
+}
+
 // ── Tooltips ─────────────────────────────────────────────────────────────────
 
-/// Greedy word wrap for tooltip copy, at [`TIP_WRAP`] cells.
+/// Greedy word wrap at `width` cells — the rooms' sentences, one algorithm.
+pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    wrap_at(text, width, false)
+}
+
+/// Greedy word wrap for tooltip copy, at [`TIP_WRAP`] cells. A word wider
+/// than the box (a file path) hard-breaks at the character level — the
+/// greedy wrap would emit it as one line wider than the box, which clips.
 pub fn wrap_tip(text: &str) -> Vec<String> {
+    wrap_at(text, TIP_WRAP, true)
+}
+
+fn wrap_at(text: &str, width: usize, hard_break: bool) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
-        // A word wider than the wrap (a file path) hard-breaks at the
-        // character level — the greedy wrap would emit it as one line
-        // wider than the box, which clips.
-        if word.chars().count() > TIP_WRAP {
+        if hard_break && word.chars().count() > width {
             if !line.is_empty() {
                 lines.push(std::mem::take(&mut line));
             }
             let chars: Vec<char> = word.chars().collect();
-            for chunk in chars.chunks(TIP_WRAP) {
-                if chunk.len() == TIP_WRAP {
+            for chunk in chars.chunks(width) {
+                if chunk.len() == width {
                     lines.push(chunk.iter().collect());
                 } else {
                     line = chunk.iter().collect();
@@ -580,8 +878,8 @@ pub fn wrap_tip(text: &str) -> Vec<String> {
             }
             continue;
         }
-        let need = if line.is_empty() { word.chars().count() } else { word.chars().count() + 1 };
-        if !line.is_empty() && line.chars().count() + need > TIP_WRAP {
+        let need = if line.is_empty() { word.chars().count() } else { line.chars().count() + 1 + word.chars().count() };
+        if need > width && !line.is_empty() {
             lines.push(std::mem::take(&mut line));
         }
         if !line.is_empty() {
@@ -636,10 +934,12 @@ pub fn caret_cell(rect: Rect, target: Rect) -> Option<(u16, u16, &'static str)> 
 /// A miniature of the neutral modal, anchored to its target: Clear +
 /// ground repaint beneath, Rounded DIM border with a caret stem pointing
 /// at the target, wrapped default-fg text. Draw LAST — over everything.
-pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) {
+/// Returns its footprint, for a screen with pixel surfaces to register
+/// (see [`Surface::overlay`]).
+pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) -> Rect {
     let lines = wrap_tip(text);
     if lines.is_empty() {
-        return;
+        return Rect::default();
     }
     let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 4;
     let h = lines.len() as u16 + 2;
@@ -665,6 +965,7 @@ pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) {
     }
     let body: Vec<Line> = lines.into_iter().map(|l| Line::from(format!(" {l}"))).collect();
     frame.render_widget(Paragraph::new(body), inner);
+    rect
 }
 
 // ── Text input display ───────────────────────────────────────────────────────
@@ -676,12 +977,19 @@ pub fn draw_tooltip(frame: &mut Frame, area: Rect, target: Rect, text: &str) {
 /// cell, so the windowing math is identical (found live: the rename and
 /// directory-modal carets rendered as question marks).
 pub fn input_display(value: &str, cursor: usize, width: u16) -> String {
+    input_display_blink(value, cursor, width, true)
+}
+
+/// [`input_display`] with the caret drawn or withheld — its cell stays
+/// reserved either way, so the line never shifts as it blinks. A shell
+/// asks [`Surface::caret`] for the phase.
+pub fn input_display_blink(value: &str, cursor: usize, width: u16, on: bool) -> String {
     let (caret, clip) = if crate::kit::theme::legacy_conhost() {
         ('│', '»')
     } else {
         ('▏', '…')
     };
-    input_display_with(value, cursor, width, caret, clip)
+    input_display_with(value, cursor, width, if on { caret } else { ' ' }, clip)
 }
 
 /// Pure core - unit-tested with explicit marks so the assertions hold on
@@ -764,6 +1072,23 @@ impl Drop for GroundGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_footprints_are_the_next_frames_cover_to_draw_under() {
+        let mut s: Surface<u8> = Surface::new();
+        s.begin_frame();
+        s.overlay(Rect { x: 0, y: 0, width: 10, height: 10 });
+        let inside = Rect { x: 2, y: 2, width: 3, height: 3 };
+        let outside = Rect { x: 20, y: 20, width: 3, height: 3 };
+        assert!(!s.covered_last_frame(inside), "this frame's overlays draw after the base layer");
+        s.begin_frame();
+        assert!(s.covered_last_frame(inside), "last frame's footprint stands for one frame");
+        assert!(!s.covered_last_frame(outside));
+        s.clear_registries();
+        assert!(s.covered_last_frame(inside), "the modal-inertness clear keeps the footprints");
+        s.begin_frame();
+        assert!(!s.covered_last_frame(inside), "and the frame after it leaves is clear");
+    }
 
     #[test]
     fn pointer_shapes_speak_both_name_families_and_reset_is_empty() {
@@ -853,6 +1178,36 @@ mod tests {
         assert_eq!(shown.chars().count(), 20);
         assert!(shown.starts_with('…') && shown.ends_with('…') && shown.contains('▏'));
         assert_eq!(input_display_with_fancy("123456789", 4, 10), "1234▏56789");
+    }
+
+    #[test]
+    fn the_caret_withheld_leaves_its_cell_so_the_line_never_shifts() {
+        assert_eq!(input_display_blink("1234", 2, 10, false), "12 34");
+        assert_eq!(input_display_blink("1234", 2, 10, true).chars().count(), 5);
+        let long = "/very/long/path/that/does/not/fit/anywhere/music";
+        let on = input_display_blink(long, 24, 20, true);
+        let off = input_display_blink(long, 24, 20, false);
+        assert_eq!((on.chars().count(), off.chars().count()), (20, 20));
+        let differ: Vec<usize> =
+            on.chars().zip(off.chars()).enumerate().filter(|(_, (a, b))| a != b).map(|(i, _)| i).collect();
+        assert_eq!(differ.len(), 1, "one cell blinks, the rest stand: {on} / {off}");
+        assert_eq!(off.chars().nth(differ[0]), Some(' '));
+    }
+
+    #[test]
+    fn the_surface_blinks_the_caret_half_a_second_at_a_time() {
+        let mut s: Surface<i32> = Surface::new();
+        assert!(s.caret_next_flip().is_none(), "no caret drawn, no flip to time");
+        s.caret_touch();
+        assert!(s.caret(), "solid right after a touch");
+        let flip = s.caret_next_flip().expect("a caret drew this frame");
+        assert!(flip <= CARET_BLINK && flip > Duration::from_millis(400), "{flip:?}");
+        s.caret_backdate(CARET_BLINK + Duration::from_millis(50));
+        assert!(!s.caret(), "off in the second half");
+        s.caret_backdate(2 * CARET_BLINK + Duration::from_millis(50));
+        assert!(s.caret(), "on again in the third");
+        s.clear_registries();
+        assert!(s.caret_next_flip().is_none(), "the frame's mark clears with the registries");
     }
 
     #[test]

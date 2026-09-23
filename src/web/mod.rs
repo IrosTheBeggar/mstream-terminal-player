@@ -72,6 +72,11 @@ impl Shell {
             // Nothing durable to save to in a spike. localStorage is the
             // obvious home when this grows up.
             Effect::SaveSession => {}
+            // The browser's fetch owns TLS; nothing to register.
+            Effect::Trust(_) => {}
+            // One server, no saved list to fold peers into.
+            Effect::SavePeers { .. } => {}
+            Effect::SaveDjLibrary { .. } => {}
         }
     }
 }
@@ -130,16 +135,22 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("no window.location.origin — not running in a browser?")?;
 
     let start = Startup {
+        stats: None,
         server: Some(origin),
         token: None,
         username: None,
         last_path: None,
         prefs: config::PlayerPrefs::default(),
         tunnel_code: None,
+        self_signed: false,
         keys: Default::default(),
         theme: config::ThemePrefs::default(),
         display: config::DisplayPrefs::default(),
         mouse: config::MousePrefs::default(),
+        // One server, the session's; nothing else to reach.
+        servers: Vec::new(),
+        bundled: None,
+        queue: None,
     };
     let (theme, _warnings) = ui::Theme::from_prefs(&start.theme);
     ui::set_theme(theme);

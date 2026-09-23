@@ -8,10 +8,15 @@ canvas: <https://claude.ai/code/artifact/8eb74e0a-b721-434c-9ff7-b6f02385aab8>.
 The shipped implementation is `src/kit/`: `Surface<A>` (the per-frame
 click/tip/scrollbar registries plus pointer, tooltip dwell, capture and
 hold-repeat, generic over each screen's action enum), the widgets as
-free functions (`tall_button`, `button`, `modal_frame(_anchored)`,
-`modal_close`, `scroll_list`, `draw_tooltip`, `input_display`), the
-pure geometry (`table_view`, `bar_jump`, `tooltip_rect`, `caret_cell`),
-the pointer contract, and `kit::theme` (the fixed palette + the OSC 11
+free functions (`tall_button` and `tall_secondary` over one
+`tall_frame`, `tall_frame_bordered` for the thick border, `button`,
+`cursor_ring`, `modal_frame(_anchored)`,
+`modal_close`, `scroll_list`, `letter_strip`, `draw_tooltip`,
+`input_display`), the pure geometry (`table_view` and the `ListView`
+that carries a list's offset and reveal flag across frames, `letter_index`,
+`wrap_words`, `bar_jump`, `tooltip_rect`, `caret_cell`), the hover test
+(`Surface::hovers`), the pointer contract, and `kit::theme` (the fixed
+palette + the OSC 11
 ground lease). `src/setup/` is the reference consumer — a new screen
 embeds a `Surface`, draws kit widgets, and wires its event loop to the
 surface's `hit`/`arm_bars`/`motion`/`drag_action`/`hold_action`/
@@ -191,6 +196,28 @@ turns LightBlue and the caret appears — and while focused it takes every
 key: the tips line speaks for the field alone, Enter submits, Esc gives
 the keys back to the screen. Unfocused it never steals a letter, so the
 room's single-key actions keep working around it.
+**The caret blinks in the GUI player** (2026-09-23): the `Surface` keeps a
+blink clock — `caret_touch()` on every key and click, `caret()` answers
+the phase as a field draws (half a second on, half off, `CARET_BLINK`,
+solid from the last touch), `caret_next_flip()` lets the event loop land
+its next frame on the flip — and `kit::input_display_blink` withholds the
+`▏` in the off phase while keeping its cell, so the line never shifts.
+Drawn by the app rather than lent to the terminal's cursor on purpose: a
+terminal profile can veto a DECSCUSR blink (kitty's interval 0, WezTerm's
+rate 0, Alacritty's `Never`, Apple Terminal ignoring the escape), and a
+caret that only sometimes blinks is worse than one that always does. The
+wizard, the admin rooms and the web shell still draw the steady `▏`;
+they can adopt the clock the same way.
+
+**A settings room's rows** (the Auto DJ room, from its canvas's E′ board,
+2026-09-23): the label at the left, indented two cells for a sub-row, and
+every control at one value column — a bar in the volume widget's grammar
+(`- ▰▰▰▰▰▱▱▱▱▱ +  55% or closer`: `-` / `+` step, a cell sets), the `(•)`
+choices side by side, a value in words dim — with a blank row between
+settings and no description beside a row. The row under the pointer, else
+the keyboard cursor's, explains itself in a **help line** under the body:
+a dim rule and two wrapped lines. Descriptions belong there, whole, not
+clipped at the cell edge beside every row.
 
 ### Path input + completion
 Suggestions under the input, max 6 visible — the list WINDOWS around the
@@ -314,6 +341,14 @@ gates (the public-mode modal) get NO `[X]` — they force an explicit
 choice.
 A modal whose height varies (the suggestion list) anchors as if always
 at full height: title and input hold one spot, the list grows DOWNWARD.
+**Over pixels**: on a screen that draws real pixels (the queue's and the
+wall's covers), every overlay — a modal frame (`modal_frame_on`), the
+header dropdown, the tooltip — registers its footprint with the surface
+(`Surface::overlay`), and a cover the footprint touched LAST frame draws
+as the ▀-mosaic for that frame. The terminal writer skips a picture's
+cells, so the overlay's edge and the frame after it leaves need plain
+cells to repaint; a cover no overlay touches never blurs, and one frame
+behind on the way in costs nothing because `Clear` resets what it covers.
 
 ### Tooltip
 A dwell of ~500ms on a tip target shows a floating box: a miniature of
@@ -367,6 +402,37 @@ line, LEFT side) · the **gold rule** (`─` × width, fg Yellow — the one
 rule; screens have no top rule) · the **bottom bar** (3 rows): the scan
 widget on the left (empty until a scan is actually running), the screen's
 forward action as a tall primary on the right.
+
+**The GUI player's top bar**: two tabs at the left — Library, Now Playing
+— worn as the kit's tab slab for the screen that is up and dim text for
+the other, and the session's server label with `[+]` at the right. The
+Library is the nav column and its rooms — Files and Search at the top, the
+LIBRARY group (Albums, Artists, Genres, Recent, Playlists, Last played,
+Most played), then a TOOLS group (Auto DJ, whose row wears a `•` in the ok
+colour while the DJ is armed, and the capability-gated Sonic path),
+Settings on the column's last row; fourteen rows, the 24-row minimum's
+worth with the footer on; Now Playing is the playing track
+large (`src/gui/now.rs`), a first cut ahead of its contract. The queue
+panel and the bar stand under both.
+
+**The GUI player's bar** (the "Player bar options" canvas, A′; `src/gui/bar.rs`):
+five rows at the bottom, the tips line under them only while keyboard hints
+are on. The gold rule is the seek bar (times at its ends, the played part
+gold). Beneath it, three rows of compact tall frames: auto-dj a few
+columns in from the left edge in its state colour, then ONE group centred
+in the span before
+the card — repeat, prev, play, next, shuffle: prev and next rounded in
+the text colour BOLD, play THICK in GOLD (`tall_frame_bordered`, the seek
+rule's colour on the one primary action), the toggles rounded in their
+state colours. The bottom row holds the volume group at the left,
+the screen's note after it, and the card's
+last line. An armed pick (a sonic endpoint, the DJ's opening song) is a
+mode, not news: its banner is a row above the room in the accent, BOLD,
+with `[X]` at its right, and the room stands one row lower while it lasts
+(2026-09-23; the bar's note row carried it before). The card, at the right edge, is an eight-by-four cover with
+four lines beside it: title, artist · year, the spec line, the stars with
+key and tempo; a right click (or `m`) opens the track's sheet, the
+chevron folds the queue.
 
 **The Done page owns its frame**: no horizontal gold rule, no bottom
 bar — a full-height VERTICAL gold rule divides its two left-anchored
@@ -444,6 +510,11 @@ owned `String`s so they translate like everything else.
   (docker/npm installs, launcher-less bundles). Every action keeps a key
   binding and a named hint in the tips line — hints compress, never
   disappear. Mouse (click, hover, OSC 22 hand cursor) is enhancement.
+  The one room that inverts this is the GUI player: it is the pointer's
+  surface, the classic TUI is the keyboard's, so its footer of keys and
+  the ` — key` tails on its tooltips are OFF by default and a Settings
+  switch (`[gui] key_hints`) brings them back; the keys themselves keep
+  working either way (`Surface::tip_keyed`).
 - **The pointer contract (OSC 22).** Announce the DEFAULT arrow once at
   startup (terminals keep their text beam until an app says otherwise),
   switch to the hand over clickables, emit only on state changes, and

@@ -69,9 +69,10 @@ impl Art {
     ///
     /// For tests, which want a cover of a known four pixels rather than a
     /// round trip through a codec. It carries no source bytes, so an `Art`
-    /// built this way can be sampled but not drawn as a picture — which is
-    /// the right way round: the tests are the build that has no terminal to
-    /// draw one on.
+    /// built this way draws as a picture only into a box its own pixels
+    /// can fill; anything larger would need the source, and there is none
+    /// — which is the right way round: the tests are the build that has no
+    /// terminal to draw one on.
     #[cfg(test)]
     pub fn from_rgb(width: u32, height: u32, rgb: Vec<u8>) -> Option<Art> {
         Art::build(width, height, rgb, Arc::from([].as_slice()))
@@ -92,6 +93,23 @@ impl Art {
     /// The bytes this cover arrived as, or empty for one built from pixels.
     pub fn source(&self) -> &[u8] {
         &self.source
+    }
+
+    /// The thumbnail's pixel dimensions — the source's shape at no more
+    /// than [`MAX_SIDE`] a side.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// The thumbnail's pixels, row-major RGB, three bytes a pixel: what a
+    /// renderer draws from when its box wants no more pixels than these —
+    /// a queue row's cover, the card's, a wall cell's at an ordinary font.
+    pub fn rgb(&self) -> &[u8] {
+        &self.rgb
     }
 }
 

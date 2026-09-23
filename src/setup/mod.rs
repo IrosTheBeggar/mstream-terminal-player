@@ -939,48 +939,10 @@ impl Wizard {
                 return;
             }
             // A leading `~` expands to the local home the moment it is
-            // typed — synchronously, cursor keeping its distance from
-            // the end.
-            let starts_tilde = {
-                let v = draft.text.value();
-                v == "~" || v.starts_with("~/") || v.starts_with("~\\")
-            };
-            if starts_tilde {
-                if let Some(home) = local_home() {
-                    let old = draft.text.value().to_string();
-                    let home = home.trim_end_matches(['/', '\\']).to_string();
-                    // A bare `~` gains its separator, so the preview lands
-                    // INSIDE the home instead of listing its parent.
-                    let replacement = if old == "~" {
-                        let sep = if home.contains('\\') { '\\' } else { '/' };
-                        format!("{home}{sep}")
-                    } else {
-                        home
-                    };
-                    let new_text = old.replacen('~', &replacement, 1);
-                    let from_end = old.chars().count() - draft.text.cursor();
-                    let cursor = new_text.chars().count().saturating_sub(from_end);
-                    draft.text = Input::new(new_text).with_cursor(cursor);
-                }
-            }
-            // Collapse doubled separators — typing `/` right after an
-            // expansion or completion that already ended with one is
-            // natural (a leading pair survives for UNC paths).
-            let raw = draft.text.value().to_string();
-            let mut cleaned = String::with_capacity(raw.len());
-            let mut prev_sep = false;
-            for (i, ch) in raw.chars().enumerate() {
-                let is_sep = ch == '/' || ch == '\\';
-                if is_sep && prev_sep && i != 1 {
-                    continue;
-                }
-                prev_sep = is_sep;
-                cleaned.push(ch);
-            }
-            if cleaned != raw {
-                let from_end = raw.chars().count() - draft.text.cursor();
-                let cursor = cleaned.chars().count().saturating_sub(from_end);
-                draft.text = Input::new(cleaned).with_cursor(cursor);
+            // typed and doubled separators collapse — the tidy the torrent
+            // picker shares (`tidy_path_input`).
+            if let Some(tidied) = tidy_path_input(&draft.text) {
+                draft.text = tidied;
             }
             let (dir, _) = split_input(draft.text.value());
             // Bare text (no separator yet) completes against the home.
@@ -1136,7 +1098,9 @@ impl Wizard {
             Done::Picked(picker::Pick::Folder(path)) => {
                 self.add_folder(path.display().to_string());
             }
-            Done::Picked(picker::Pick::Cancelled) => {}
+            // A file answer belongs to the GUI's torrent picker, never to
+            // a folder dialog; matched so the enum stays exhaustive.
+            Done::Picked(picker::Pick::Cancelled | picker::Pick::File(_)) => {}
             Done::Picked(picker::Pick::Unavailable(why)) => {
                 self.note = Some((
                     t!("note.no_picker", why = why).to_string(),
@@ -1513,11 +1477,52 @@ pub(crate) fn parent_server_path(path: &str) -> Option<String> {
 /// (Completion is LOCAL: the wizard is a same-machine first-run tool,
 /// and its primary affordance — the native picker — already speaks the
 /// local filesystem. The server validates every folder at commit.)
-fn local_home() -> Option<String> {
+pub(crate) fn local_home() -> Option<String> {
     std::env::var("HOME")
         .ok()
         .filter(|h| !h.is_empty())
         .or_else(|| std::env::var("USERPROFILE").ok().filter(|h| !h.is_empty()))
+}
+
+/// A typed path, tidied the way the wizard's path modal tidies its own —
+/// shared with the GUI's torrent picker, so the two roads agree. A leading
+/// `~` becomes the local home the moment it is typed (a bare `~` gains its
+/// separator, so the listing lands INSIDE the home instead of its parent);
+/// doubled separators collapse — typing `/` right after a completion that
+/// already ended with one is natural (a leading pair survives for UNC
+/// paths). The cursor keeps its distance from the end. `None` when the
+/// text was already tidy.
+pub(crate) fn tidy_path_input(input: &Input) -> Option<Input> {
+    let raw = input.value();
+    let mut text = raw.to_string();
+    if (raw == "~" || raw.starts_with("~/") || raw.starts_with("~\\"))
+        && let Some(home) = local_home()
+    {
+        let home = home.trim_end_matches(['/', '\\']).to_string();
+        let replacement = if raw == "~" {
+            let sep = if home.contains('\\') { '\\' } else { '/' };
+            format!("{home}{sep}")
+        } else {
+            home
+        };
+        text = raw.replacen('~', &replacement, 1);
+    }
+    let mut cleaned = String::with_capacity(text.len());
+    let mut prev_sep = false;
+    for (i, ch) in text.chars().enumerate() {
+        let is_sep = ch == '/' || ch == '\\';
+        if is_sep && prev_sep && i != 1 {
+            continue;
+        }
+        prev_sep = is_sep;
+        cleaned.push(ch);
+    }
+    if cleaned == raw {
+        return None;
+    }
+    let from_end = raw.chars().count().saturating_sub(input.cursor());
+    let cursor = cleaned.chars().count().saturating_sub(from_end);
+    Some(Input::new(cleaned).with_cursor(cursor))
 }
 
 /// List a LOCAL directory's subdirectories (symlinks resolved), sorted
@@ -1588,7 +1593,9 @@ pub(crate) fn common_prefix(items: &[String]) -> String {
 /// quiet zone, PNG-encoded so [`tui::graphics`] can draw it through
 /// whatever pixel protocol the terminal answered. Rendered generously
 /// (8 px a module) so the protocol only ever scales it down.
-fn qr_art(data: &str) -> Option<crate::tui::art::Art> {
+// pub(crate): the GUI's pairing modal draws the same ticket the wizard
+// does, through the same two paths.
+pub(crate) fn qr_art(data: &str) -> Option<crate::tui::art::Art> {
     const SCALE: u32 = 8;
     const QUIET: u32 = 4; // modules of quiet zone each side, per the QR spec
     let code = qrcode::QrCode::new(data.as_bytes()).ok()?;
@@ -1618,7 +1625,7 @@ fn qr_art(data: &str) -> Option<crate::tui::art::Art> {
 /// must be DARK, and the page already surrounds the block with empty dark
 /// cells wider than the spec's four modules — rendering it again only cost
 /// four rows and columns this render can't spare.
-fn qr_lines(data: &str) -> Option<Vec<String>> {
+pub(crate) fn qr_lines(data: &str) -> Option<Vec<String>> {
     use qrcode::render::unicode::Dense1x2;
     let code = qrcode::QrCode::new(data.as_bytes()).ok()?;
     let rendered = code
@@ -2471,7 +2478,7 @@ fn draw_language(frame: &mut Frame, wizard: &mut Wizard, area: Rect, sel: usize)
         Paragraph::new(Span::styled(t!("lang.modal_title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
-    kit::modal_close(frame, &mut wizard.ui, inner, Act::PathCancel, t!("path_modal.tip_close"));
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::PathCancel);
     for (i, (code, autonym)) in LANGS.iter().enumerate() {
         let y = inner.y + 2 + i as u16;
         let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
@@ -3064,7 +3071,7 @@ fn draw_done(frame: &mut Frame, wizard: &mut Wizard, column: Rect) {
 
 fn draw_skip_warning(frame: &mut Frame, wizard: &mut Wizard, area: Rect) {
     let inner = kit::modal_frame(frame, area, 62, 15, th().gold);
-    kit::modal_close(frame, &mut wizard.ui, inner, Act::SkipCancel, t!("path_modal.tip_close"));
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::SkipCancel);
     let lines = vec![
         Line::from(Span::styled(t!("skip_modal.title").to_string(), Style::default().fg(th().gold).add_modifier(Modifier::BOLD))),
         Line::from(""),
@@ -3113,7 +3120,7 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
         Paragraph::new(Span::styled(t!("browse.title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
-    kit::modal_close(frame, &mut wizard.ui, inner, Act::BrowseCancel, t!("path_modal.tip_close"));
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::BrowseCancel);
     frame.render_widget(
         Paragraph::new(Span::styled(browse.path.clone(), dim())),
         Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 },
@@ -3167,7 +3174,7 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
         Paragraph::new(Span::styled(t!("path_modal.title").to_string(), bold())),
         Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 },
     );
-    kit::modal_close(frame, &mut wizard.ui, inner, Act::PathCancel, t!("path_modal.tip_close"));
+    kit::modal_close(frame, &mut wizard.ui, inner, Act::PathCancel);
     frame.render_widget(
         Paragraph::new(Span::raw(kit::input_display(
             draft.text.value(),

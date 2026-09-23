@@ -59,15 +59,39 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
     match cmd {
         ApiCmd::Shutdown => None,
 
-        ApiCmd::Connect { server, token } => Some(connect(session, &server, token).await),
+        // `self_signed` has no meaning here: the browser owns TLS trust.
+        // One server, the page's own: no peers to aim at from here.
+        ApiCmd::Connect { server, identity, token, self_signed: _, peer: _, local_token: _ } => {
+            Some(connect(session, &server, &identity, token).await)
+        }
+        ApiCmd::FederationPeers { .. } => None,
+        // The browser owns the network: a failed open is the source's fault.
+        ApiCmd::Probe { server, .. } => Some(Event::Reachable { server, reachable: true }),
 
-        ApiCmd::Login { server, username, password } => {
-            Some(login(session, &server, &username, &password).await)
+        ApiCmd::Login { server, identity, username, password, self_signed: _, local_token: _ } => {
+            Some(login(session, &server, &identity, &username, &password).await)
         }
 
-        ApiCmd::QuickConnect { .. } => Some(Event::Error(
-            "Quick Connect needs the native player — the tunnel is iroh, not HTTP".to_string(),
-        )),
+        // The tunnel is iroh, not HTTP: the browser build has none.
+        ApiCmd::TunnelOpen { id, .. } | ApiCmd::TunnelCredential { id, .. } => {
+            Some(Event::TunnelFailed {
+                id,
+                rejected: false,
+                why: "Quick Connect needs the native player — the tunnel is iroh, not HTTP"
+                    .to_string(),
+            })
+        }
+        ApiCmd::TunnelClose { id } => Some(Event::TunnelClosed { id }),
+        // No peers to reach from the browser: the page's own server only.
+        ApiCmd::DirectAccess { parent, id, .. } => Some(Event::DirectAccess {
+            parent,
+            id,
+            answer: crate::api::types::DirectAnswer::Failed("direct access needs the native player".into()),
+        }),
+        ApiCmd::Retarget { identity, .. } => Some(Event::RetargetFailed {
+            identity,
+            why: "the browser build has one server, the page's own".into(),
+        }),
 
         ApiCmd::Browse(path) => {
             with_session(session, async |s| {
@@ -85,34 +109,99 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
+        // The browser build has one client — the session's — so the DJ's
+        // reach is not honoured here: its server is the browsed one.
         ApiCmd::AutoDj(request) => {
             with_session(session, async |s| {
-                worker::autodj_pick(&s.client, s.caps, &request).await.map(|picked| {
-                    Event::AutoDjPick {
-                        candidates: picked.tracks,
-                        ignore_list: picked.ignore_list,
-                        note: picked.note,
-                    }
-                })
+                Ok(worker::pick_event(worker::autodj_pick(&s.client, &request).await, &request))
             })
             .await
         }
 
         ApiCmd::AutoDjSample { request, count } => {
+            with_session(session, async |s| worker::autodj_sample(&s.client, &request, count).await)
+                .await
+        }
+
+        // The plays go through the session's client here too (one client
+        // in the browser); the shapers are the worker's.
+        ApiCmd::ReportPlays { body, ids, .. } => {
             with_session(session, async |s| {
-                worker::autodj_sample(&s.client, s.caps, &request, count).await
+                Ok(worker::plays_reported_event(ids.clone(), s.client.report_plays_async(body.clone()).await))
+            })
+            .await
+        }
+        ApiCmd::Scrobble { filepath, .. } => {
+            with_session(session, async |s| Ok(worker::scrobbled_event(&filepath, s.client.scrobble_async(&filepath).await)))
+                .await
+        }
+
+        ApiCmd::DjProbe { identity, .. } => {
+            with_session(session, async |s| {
+                Ok(Event::DjProbed { identity: identity.clone(), info: worker::dj_probe(&s.client).await })
             })
             .await
         }
 
         ApiCmd::Genres => {
-            with_session(session, async |s| s.client.genres_async().await.map(Event::Genres))
+            with_session(session, async |s| worker::genres_event(s.client.genres_async().await)).await
+        }
+
+        // The track verbs (track-actions contract): the browser build has one
+        // client, so a reach is the session's here too; the words are the
+        // native worker's shapers.
+        ApiCmd::RateSong { filepath, rating, seq, .. } => {
+            with_session(session, async |s| {
+                let result = s.client.rate_song_async(&filepath, rating).await;
+                Ok(worker::rated_event(filepath.clone(), rating, seq, result))
+            })
+            .await
+        }
+        ApiCmd::AddToPlaylist { playlist, song, .. } => {
+            with_session(session, async |s| {
+                let result = s.client.playlist_add_song_async(&playlist, &song).await;
+                Ok(worker::added_to_playlist_event(playlist.clone(), result))
+            })
+            .await
+        }
+        ApiCmd::TrackInfo { filepath, .. } => {
+            with_session(session, async |s| {
+                let result = s.client.metadata_async(&filepath).await;
+                Ok(worker::track_info_event(filepath.clone(), result))
+            })
+            .await
+        }
+        ApiCmd::PlaylistNames { .. } => {
+            with_session(session, async |s| Ok(worker::playlist_names_event(s.client.playlists_async().await)))
                 .await
         }
 
         ApiCmd::Journey { start, end, length } => {
             with_session(session, async |s| {
                 worker::journey(&s.client, &start, &end, length).await
+            })
+            .await
+        }
+
+        ApiCmd::SonicRandom { side } => {
+            with_session(session, async |s| {
+                s.client
+                    .random_song_async(&crate::api::types::RandomSongRequest::default())
+                    .await
+                    .map(|r| Event::SonicRandom {
+                        side,
+                        track: r.songs.into_iter().next().map(Box::new),
+                    })
+            })
+            .await
+        }
+
+        ApiCmd::DiscoveryProbe => {
+            with_session(session, async |s| {
+                s.client
+                    .ping_async()
+                    .await
+                    .map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
             })
             .await
         }
@@ -135,6 +224,30 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
+        ApiCmd::CreatePlaylist { name } => {
+            with_session(session, async |s| {
+                worker::playlist_verb_event(worker::PlaylistVerb::Create(&name), s.client.playlist_new_async(&name).await)
+            })
+            .await
+        }
+
+        ApiCmd::RenamePlaylist { from, to } => {
+            with_session(session, async |s| {
+                worker::playlist_verb_event(
+                    worker::PlaylistVerb::Rename(&from),
+                    s.client.playlist_rename_async(&from, &to).await,
+                )
+            })
+            .await
+        }
+
+        ApiCmd::DeletePlaylist { name } => {
+            with_session(session, async |s| {
+                worker::playlist_verb_event(worker::PlaylistVerb::Delete(&name), s.client.playlist_delete_async(&name).await)
+            })
+            .await
+        }
+
         ApiCmd::Search(query) => {
             with_session(session, async |s| {
                 s.client.search_async(&query).await.map(|r| Event::SearchResults {
@@ -145,7 +258,8 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
-        ApiCmd::AlbumArt { file } => {
+        // One server, the page's own: a row's reach is that server anyway.
+        ApiCmd::AlbumArt { file, .. } => {
             // The waveform's rule, exactly as the native worker applies
             // it: a 404 or undecodable bytes settle as "no art"; a
             // transport failure — or no session yet — is not an answer
@@ -164,7 +278,7 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             Some(Event::AlbumArt { file, art, settled })
         }
 
-        ApiCmd::Waveform { filepath } => {
+        ApiCmd::Waveform { filepath, .. } => {
             // Art's rule, for the same reason: a shape nobody could draw is
             // not worth the "not connected" toast `with_session` would raise.
             let client = session.borrow().as_ref().map(|s| s.client.clone());
@@ -188,6 +302,7 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
 async fn connect(
     session: &Rc<RefCell<Option<Session>>>,
     server: &str,
+    identity: &str,
     token: Option<String>,
 ) -> Event {
     let client = match Client::new(server) {
@@ -200,8 +315,8 @@ async fn connect(
             let caps = Capabilities::from(&ping);
             *session.borrow_mut() = Some(Session { client: Rc::new(client), caps });
             Event::Connected {
-                server: server.clone(),
-                id: server,
+                server,
+                id: identity.to_string(),
                 username: None,
                 token,
                 ping: Box::new(ping),
@@ -218,6 +333,7 @@ async fn connect(
 async fn login(
     session: &Rc<RefCell<Option<Session>>>,
     server: &str,
+    identity: &str,
     username: &str,
     password: &str,
 ) -> Event {
@@ -239,8 +355,8 @@ async fn login(
             let caps = Capabilities::from(&ping);
             *session.borrow_mut() = Some(Session { client: Rc::new(client), caps });
             Event::Connected {
-                server: server.clone(),
-                id: server,
+                server,
+                id: identity.to_string(),
                 username: Some(username.to_string()),
                 token: Some(token),
                 ping: Box::new(ping),

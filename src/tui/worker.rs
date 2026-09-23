@@ -19,8 +19,8 @@ use std::thread;
 use std::time::Duration;
 
 use crate::api::types::{
-    Album, Capabilities, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults,
-    SimilarArtist, Track,
+    Album, DirListing, Genre, JourneyStop, Ping, PlaylistSummary, SearchResults, SimilarArtist,
+    Track,
 };
 use crate::api::{ApiError, Client};
 use crate::discovery::DiscoveredServer;
@@ -66,15 +66,96 @@ pub enum AudioCmd {
     Shutdown,
 }
 
+/// How a batch of plays fared, as the App settles its outbox (play-reporting
+/// contract, clause 8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportOutcome {
+    /// The ids the server named — accepted, duplicate or rejected — leave
+    /// the outbox.
+    Settled(Vec<String>),
+    /// The whole batch leaves: the server called it malformed, has no
+    /// route for it, or will never take it from this caller.
+    Dropped(String),
+    /// The batch stays for the next try: no network, a server error, an
+    /// expired token.
+    Kept(String),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ApiCmd {
+    /// A batch of finished plays for the server `reach` names — a row's
+    /// own, or a peer's parent (play-reporting contract, clause 8).
+    ReportPlays { reach: crate::tui::app::Reach, body: serde_json::Value, ids: Vec<String> },
+    /// The legacy scrobble, thirty seconds in, for a server without the
+    /// Stats API (clause 10).
+    Scrobble { reach: crate::tui::app::Reach, filepath: String },
     /// Use an existing token (or none, for public-mode servers).
-    Connect { server: String, token: Option<String> },
-    Login { server: String, username: String, password: String },
-    /// Dial a Quick Connect pairing code, then treat the resulting loopback
-    /// address as an ordinary server. A token is carried when reconnecting to
-    /// a tunnel server we have already signed in to.
-    QuickConnect { code: String, token: Option<String> },
+    /// `self_signed` trusts the server's own TLS certificate — carried per
+    /// command because the client is built here, from the one entry that
+    /// opted in.
+    /// `peer` aims the session at that federated peer of the server: every
+    /// read rides the parent's proxies with the parent's token (contract
+    /// clause 27).
+    /// `identity` is what the session is filed under — the server's URL, or
+    /// a tunnel's `mstream+iroh://` id when `server` is that tunnel's
+    /// loopback address — and comes back on [`Event::Connected`] unchanged.
+    /// `local_token` rides every request to a loopback bridge as `__lt=…`,
+    /// the shared tunnel client's gate against other local processes.
+    Connect {
+        server: String,
+        identity: String,
+        token: Option<String>,
+        self_signed: bool,
+        peer: Option<i64>,
+        local_token: Option<String>,
+    },
+    Login {
+        server: String,
+        identity: String,
+        username: String,
+        password: String,
+        self_signed: bool,
+        local_token: Option<String>,
+    },
+    /// Dial `credential` — a Quick Connect pairing code or a federation
+    /// guest ticket — and keep the tunnel under `id` until it is closed,
+    /// whichever session is current (contract clause 38). A no-op while
+    /// `id` is up or dialling; answers [`Event::TunnelUp`] or
+    /// [`Event::TunnelFailed`].
+    TunnelOpen { id: String, credential: String },
+    /// Drop the tunnel under `id`; answers [`Event::TunnelClosed`]. Sent by
+    /// the queue's release policy (contract clause 38's grace).
+    TunnelClose { id: String },
+    /// Swap what the tunnel under `id` dials with, in place — same port,
+    /// same URLs: a refreshed guest ticket, or a new pairing code for the
+    /// same server. Silent when it takes; [`Event::TunnelFailed`] when not.
+    /// Sent by the guest-ticket refresh (contract clause 27).
+    TunnelCredential { id: String, credential: String },
+    /// Ask `parent` — reached as `reach` says — for direct access to its
+    /// peer `id` (contract clause 27): a guest ticket, or its refusal.
+    /// `refresh` asks for a re-mint of a token the peer refused.
+    DirectAccess { parent: String, id: i64, reach: crate::tui::app::Reach, refresh: bool },
+    /// Swap the session's client for the same identity — a browsed peer
+    /// going direct once its own tunnel is up, or back to the parent's
+    /// proxy when that tunnel goes — after `server` answers. Nothing about
+    /// the session but its transport changes; a connect would re-open the
+    /// browser.
+    Retarget {
+        identity: String,
+        server: String,
+        token: Option<String>,
+        self_signed: bool,
+        peer: Option<i64>,
+        local_token: Option<String>,
+    },
+    /// The peers a saved server lists for browsing (contract clause 20),
+    /// asked once its ping says `federationBrowse`.
+    FederationPeers { parent: String },
+    /// Is `server` — reached at `base` — answering at all? The failure
+    /// walk's question (contract clause 37): a track that would not open
+    /// is skipped when its server answers and held when it does not.
+    /// Its own one-shot client: the row's server may not be the session's.
+    Probe { server: String, base: String, self_signed: bool, local_token: Option<String> },
     Browse(String),
     /// Fetch a library view for `dest` — the Library tab, or the Search tab
     /// drilling into an artist or album it found. The destination travels
@@ -86,41 +167,160 @@ pub enum ApiCmd {
     /// Ask for several picks at once without queueing any of them, so the
     /// panel can show what the current settings actually produce.
     AutoDjSample { request: Box<DjRequest>, count: usize },
+    /// What the DJ's server offers, asked off-session: its version, its
+    /// discovery flags and its libraries (auto-dj contract, clause 19).
+    /// `reach` as for [`ApiCmd::AlbumArt`]; `None` asks the session's server.
+    DjProbe { identity: String, reach: Option<crate::tui::app::Reach> },
     /// Every genre in the library, for the Auto-DJ genre filter.
     Genres,
     /// Walk from one track to another through the embedding space.
     Journey { start: String, end: String, length: u32 },
+    /// One random library track for a Sonic Path end. The side travels with
+    /// the command and comes back on the event, the `Library { dest }`
+    /// pattern.
+    SonicRandom { side: crate::tui::app::SonicSide },
+    /// Re-read the ping after a discovery route answered 403: the flag says
+    /// whether the feature is switched off or merely not yet scanned — the
+    /// route itself deliberately answers both the same way.
+    DiscoveryProbe,
     /// Fill a Discover view. `seed` is the track it all hangs off.
     Discover { node: DiscoverNode, seed: Box<Track>, dest: DiscoverDest },
     /// Write a whole track list to a playlist, creating it or replacing what
     /// was there. Sonic Path's "save as playlist" is the only caller.
     SavePlaylist { name: String, files: Vec<String> },
+    /// Create an EMPTY playlist — the Playlists room's New. (The bulk
+    /// create-or-overwrite above is a different act with a different name.)
+    CreatePlaylist { name: String },
+    /// Rename a playlist. The route arrived in mStream 5.16.0; an older
+    /// server 404s, and the arm words that as the server's age.
+    RenamePlaylist { from: String, to: String },
+    DeletePlaylist { name: String },
     Search(String),
     /// Fetch and decode one cover, named by the art file a track's metadata
-    /// carries. The app caches the answer under that name.
-    AlbumArt { file: String },
+    /// carries. The app caches the answer under that name. `reach` names
+    /// the row's own server when it is not the session's (contract clause
+    /// 30); `None` asks the session.
+    AlbumArt { file: String, reach: Option<crate::tui::app::Reach> },
     /// Fetch a track's shape for the progress bar. Keyed by filepath rather
     /// than by an art file: a waveform belongs to one recording, not to an
-    /// album.
-    Waveform { filepath: String },
+    /// album. `reach` as for [`ApiCmd::AlbumArt`].
+    Waveform { filepath: String, reach: Option<crate::tui::app::Reach> },
+    /// Rate a track on its own server (track-actions contract, clause 11);
+    /// `seq` comes back so the App can tell a stale refusal from the latest
+    /// write. `reach` as for [`ApiCmd::AlbumArt`].
+    RateSong { filepath: String, rating: Option<u32>, seq: u64, reach: Option<crate::tui::app::Reach> },
+    /// Add a track to a playlist on its own server (clause 12).
+    AddToPlaylist { playlist: String, song: String, reach: Option<crate::tui::app::Reach> },
+    /// A track's full block, for the sheet and Song info (clause 8).
+    TrackInfo { filepath: String, reach: Option<crate::tui::app::Reach> },
+    /// A server's playlist names, for the picker (clause 12).
+    PlaylistNames { reach: Option<crate::tui::app::Reach> },
     Shutdown,
 }
 
-/// Everything needed to ask the server for an Auto-DJ pick: the mode, the
-/// panel's settings, and the shape of the session so far.
+impl ApiCmd {
+    /// The reach a command carries for a row's own server; `None` rides the
+    /// session's client. Exhaustive on purpose: a new command must say
+    /// whether it aims away from the session, or it does not compile — the
+    /// silent alternative, a peer's read answered by the session, is what
+    /// the covers did until the 2026-09-20 rig run caught it.
+    pub(crate) fn reach(&self) -> Option<&crate::tui::app::Reach> {
+        match self {
+            ApiCmd::AlbumArt { reach, .. }
+            | ApiCmd::Waveform { reach, .. }
+            | ApiCmd::DjProbe { reach, .. }
+            | ApiCmd::RateSong { reach, .. }
+            | ApiCmd::AddToPlaylist { reach, .. }
+            | ApiCmd::TrackInfo { reach, .. }
+            | ApiCmd::PlaylistNames { reach } => reach.as_ref(),
+            // The DJ's turns go to ITS server (auto-dj contract, clause 19).
+            ApiCmd::AutoDj(request) | ApiCmd::AutoDjSample { request, .. } => request.reach.as_ref(),
+            // A play goes to its row's server, a peer's to the parent.
+            ApiCmd::ReportPlays { reach, .. } | ApiCmd::Scrobble { reach, .. } => Some(reach),
+            // Its reach is the parent's and its arm builds the client itself.
+            ApiCmd::DirectAccess { .. }
+            | ApiCmd::Connect { .. }
+            | ApiCmd::Login { .. }
+            | ApiCmd::TunnelOpen { .. }
+            | ApiCmd::TunnelClose { .. }
+            | ApiCmd::TunnelCredential { .. }
+            | ApiCmd::Retarget { .. }
+            | ApiCmd::FederationPeers { .. }
+            | ApiCmd::Probe { .. }
+            | ApiCmd::Browse(_)
+            | ApiCmd::Library { .. }
+            | ApiCmd::Genres
+            | ApiCmd::Journey { .. }
+            | ApiCmd::SonicRandom { .. }
+            | ApiCmd::DiscoveryProbe
+            | ApiCmd::Discover { .. }
+            | ApiCmd::SavePlaylist { .. }
+            | ApiCmd::CreatePlaylist { .. }
+            | ApiCmd::RenamePlaylist { .. }
+            | ApiCmd::DeletePlaylist { .. }
+            | ApiCmd::Search(_)
+            | ApiCmd::Shutdown => None,
+        }
+    }
+}
+
+/// One Auto DJ turn, as the App composed it (auto-dj contract, clause 19):
+/// the DJ's server, how to reach it when it is not the session's, the lane
+/// the ask belongs to, and everything the body is built from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DjRequest {
-    pub mode: AutoDjMode,
-    pub settings: dj::Settings,
-    pub seed: Option<Box<Track>>,
-    pub ignore_list: Vec<u32>,
-    /// Recent track paths, newest first — what the sonic pool measures from.
-    pub anchors: Vec<String>,
-    /// Recently-played artists, newest first, for the cooldown.
-    pub recent_artists: Vec<String>,
-    /// Whether the server has the embedding index at all. Without it the
-    /// sonic pool must not be requested: the whole call would 403.
-    pub sonic_available: bool,
+    /// The DJ server's identity — the learner's key, and the log's name.
+    pub identity: String,
+    /// The reach the App resolved for it; `None` rides the session's client.
+    pub reach: Option<crate::tui::app::Reach>,
+    /// The lane this ask belongs to: a reply under another is dropped
+    /// (clause 11), and the pool a lane let go of stays down for it alone.
+    pub epoch: u64,
+    pub ask: dj::Ask,
+}
+
+/// Why a turn came back empty-handed (clauses 30–34) — the App's to say
+/// once per lane, and to park the queue on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DjFailure {
+    /// A 401, or a 403 that was not a schema rejection.
+    Auth,
+    /// The server could not be reached; the pick is owed.
+    Network(String),
+    /// Nothing survived the server's waterfall.
+    NoMatch,
+    Server(String),
+}
+
+/// What a pick or a preview has to say besides its songs — a kind, for the
+/// App to put in the user's words (both shells show it; clauses 30, 53).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DjNote {
+    /// The pool was let go of this lane: nothing within the range.
+    SonicRange,
+    /// The pool was let go of this lane: the scan has not reached these tracks.
+    SonicUnscanned,
+    /// Preview came back empty-handed, and why.
+    PreviewFailed(DjFailure),
+}
+
+/// What the DJ's server offers, from its `/api/` — or its flat ping, which
+/// carries no version and no readiness (clause 19).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DjServerInfo {
+    pub version: Option<String>,
+    pub discovery: bool,
+    /// `None` when the server does not say, which holds nothing back.
+    pub discovery_ready: Option<bool>,
+    pub libraries: Vec<String>,
+}
+
+impl DjServerInfo {
+    /// Whether a sonic pool may be asked of this server at all (clauses 23
+    /// and 36): discovery on, and the scan not reported unfinished.
+    pub fn sonic_usable(&self) -> bool {
+        self.discovery && self.discovery_ready != Some(false)
+    }
 }
 
 /// A view in the Discover tab. Like [`LibraryNode`], it is both the request
@@ -182,6 +382,10 @@ pub enum LibraryNode {
     Genres,
     Genre(String),
     Recent,
+    /// The play lists (library-rooms contract, clauses 21–24): the user's
+    /// last hundred plays newest first, and the hundred played most.
+    RecentlyPlayed,
+    MostPlayed,
     /// Your own lists, which are a way of browsing the library like any
     /// other — they were a tab of their own until they turned out to need
     /// every machine the Library tab already had.
@@ -199,86 +403,8 @@ pub enum LibraryData {
 }
 
 /// How Auto-DJ chooses what comes next.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AutoDjMode {
-    #[default]
-    Off,
-    /// Nearest neighbours in the server's audio-embedding space.
-    Similar,
-    /// Harmonically and rhythmically compatible: Camelot-adjacent keys and
-    /// tempo windows around the current track (including half/double time).
-    BpmKey,
-}
-
-impl AutoDjMode {
-    /// Cycle to the next mode this server can actually deliver.
-    ///
-    /// Offering a mode that would immediately fall back to a different one
-    /// wastes a keystroke and misreports what the player is doing.
-    pub fn next_available(self, caps: Capabilities) -> Self {
-        let next = self.next();
-        if next == AutoDjMode::Similar && !caps.discovery {
-            // Only ever one hop: Off and BpmKey need nothing from the server.
-            return next.next();
-        }
-        next
-    }
-
-    /// The same ring, leftwards. Walks forward until the lap closes rather
-    /// than hopping twice: two hops is only "back" when all three modes are
-    /// on offer, and without discovery the ring is two long.
-    pub fn prev_available(self, caps: Capabilities) -> Self {
-        let mut at = self;
-        // Bounded by the number of modes rather than by getting home, so a
-        // mode this server cannot offer — which nothing walks back round
-        // to — settles on something available instead of spinning.
-        for _ in 0..3 {
-            let next = at.next_available(caps);
-            if next == self {
-                break;
-            }
-            at = next;
-        }
-        at
-    }
-
-    /// Whether this mode can work against the given server.
-    pub fn available(self, caps: Capabilities) -> bool {
-        self != AutoDjMode::Similar || caps.discovery
-    }
-
-    pub fn next(self) -> Self {
-        match self {
-            AutoDjMode::Off => AutoDjMode::Similar,
-            AutoDjMode::Similar => AutoDjMode::BpmKey,
-            AutoDjMode::BpmKey => AutoDjMode::Off,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            AutoDjMode::Off => "off",
-            AutoDjMode::Similar => "similar",
-            AutoDjMode::BpmKey => "tempo+key",
-        }
-    }
-
-    /// Anything unrecognised falls back to off rather than refusing to start.
-    pub fn from_label(label: &str) -> Self {
-        match label {
-            "similar" => AutoDjMode::Similar,
-            "tempo+key" => AutoDjMode::BpmKey,
-            _ => AutoDjMode::Off,
-        }
-    }
-}
-
 /// How many tracks "Recently Added" asks for.
 const RECENT_LIMIT: u32 = 100;
-
-/// Candidates to request from the similarity index. More than one because the
-/// nearest neighbour is often already sitting in the queue.
-const SIMILAR_LIMIT: u32 = 15;
 
 #[derive(Debug)]
 pub enum Event {
@@ -300,10 +426,28 @@ pub enum Event {
     /// error, a successful move is one line of info. Either way the
     /// engine has already acted; this is narration, not a request.
     AudioDevice(crate::player::DeviceNotice),
-    /// How the Quick Connect tunnel is reaching the server right now —
-    /// direct, through a relay, or between tunnels. Sent on change by a
-    /// sampler that lives exactly as long as the bridge does.
-    TunnelPath(crate::quickconnect::TunnelPath),
+    /// How the tunnel under `id` is reaching its server right now — direct,
+    /// through a relay, or between connections. Sent on change by the
+    /// sampler that watches every open tunnel.
+    TunnelPath { id: String, path: crate::quickconnect::TunnelPath },
+    /// The tunnel under `id` changed state: its supervisor is re-dialling,
+    /// gave up on a refused credential, or is down. Sent on change.
+    TunnelStatus { id: String, status: crate::quickconnect::TunnelStatus },
+    /// The tunnel under `id` is up: its server answers at `local_url`, and
+    /// every request there must carry `local_token` as `__lt=…`.
+    TunnelUp { id: String, local_url: String, local_token: String },
+    /// The dial for `id` (or a credential swap on it) failed. `rejected`
+    /// means the server refused the credential — a rotated pairing code,
+    /// an expired guest token — as opposed to not answering at all.
+    TunnelFailed { id: String, rejected: bool, why: String },
+    /// The tunnel under `id` was closed on request.
+    TunnelClosed { id: String },
+    /// The parent's answer about direct access to its peer `id`.
+    DirectAccess { parent: String, id: i64, answer: crate::api::types::DirectAnswer },
+    /// The session's client now speaks to `server` under the same identity.
+    Retargeted { identity: String, server: String, token: Option<String> },
+    /// `server` did not answer; the session keeps the transport it had.
+    RetargetFailed { identity: String, why: String },
     /// One source would not play — wrong format, gone from the server, or
     /// something this decoder doesn't speak. The rest of the queue is fine.
     /// Named for the same reason [`Event::TrackEnded`] is, and more urgently:
@@ -325,33 +469,52 @@ pub enum Event {
     /// We reached this server but it wants credentials. Distinct from
     /// [`Event::Unauthorized`], which means an established session went bad.
     NeedsLogin { server: String },
-    /// The Quick Connect tunnel is up and reachable at `local_url`, but the
-    /// server still wants credentials — the secret gates the pipe, not the API.
-    TunnelReady { local_url: String, id: String },
     Listing(Box<DirListing>),
     /// Contents of a library view, tagged with the node they belong to and
     /// the tab they were fetched for — the same data serves the Library tab
     /// and a drill out of the search results, and carrying the destination
     /// is what replaced a wholesale second command and event (audit #64).
     Library { node: LibraryNode, dest: Tab, data: LibraryData },
-    /// Auto-DJ candidates, best first. `note` explains any fallback that had
-    /// to happen so the UI can say so out loud.
-    AutoDjPick { candidates: Vec<Track>, ignore_list: Vec<u32>, note: Option<String> },
+    /// One Auto DJ turn's answer: the songs that passed, in the server's
+    /// order, the cursor to round-trip, whether the pool shaped them, the
+    /// degrade to say once per lane, and the failure when there is one.
+    AutoDjPick {
+        epoch: u64,
+        songs: Vec<Track>,
+        ignore_list: Vec<u32>,
+        sonic: bool,
+        note: Option<DjNote>,
+        failure: Option<DjFailure>,
+    },
+    /// What the DJ's server offers; `None` when it could not be asked.
+    DjProbed { identity: String, info: Option<DjServerInfo> },
+    /// The server's word on a batch of plays (play-reporting contract,
+    /// clause 8): which ids it settled, or why the batch is dropped or kept.
+    PlaysReported { ids: Vec<String>, outcome: ReportOutcome },
+    /// The legacy thirty-second scrobble went out (clause 10); only logged.
+    Scrobbled,
     /// What the current Auto-DJ settings produce, for the panel. Carries the
     /// sonic report when there was one — the pool size is the number that
     /// makes the tightness slider tunable.
     AutoDjSample {
         tracks: Vec<Track>,
         pool: Option<crate::api::types::SonicReport>,
-        note: Option<String>,
+        note: Option<DjNote>,
     },
     /// Every genre in the library.
     Genres(Vec<Genre>),
+    /// The genres could not be fetched — the picker's empty state.
+    GenresFailed(String),
     /// A journey's stops, in order. `note` explains a short or empty arc —
     /// both are answers the server gives deliberately rather than failures.
     /// `length` names the request this answers, since asking for a longer
     /// arc while one is still in flight is a race the UI can lose.
-    Journey { stops: Vec<JourneyStop>, note: Option<String>, length: u32 },
+    Journey { stops: Vec<JourneyStop>, note: Option<String>, length: u32, issue: JourneyIssue },
+    /// The random pick for one Sonic Path end — `None` when the library
+    /// answered empty.
+    SonicRandom { side: crate::tui::app::SonicSide, track: Option<Box<Track>> },
+    /// The ping's discovery-path flag, fetched to explain a 403.
+    DiscoveryProbe { available: bool },
     /// A Discover view's contents, tagged with the node they belong to.
     /// `seed` is the filepath it was asked about. The browser tab tells a
     /// stale reply by its node; the now-playing panel follows the speakers,
@@ -366,6 +529,21 @@ pub enum Event {
     /// A playlist was written. Carries the name so the confirmation can say
     /// which one, and how many tracks went into it.
     PlaylistSaved { name: String, count: usize },
+    /// The management verbs landed. They carry nothing: no message rides
+    /// them — the row appearing, renaming or vanishing is the confirmation
+    /// — so the one thing to do is re-ask for an open Playlists view.
+    PlaylistCreated,
+    PlaylistRenamed,
+    PlaylistDeleted,
+    /// A rating landed — or, with `error`, did not (track-actions contract,
+    /// clause 11); `seq` names the write.
+    Rated { filepath: String, rating: Option<u32>, seq: u64, error: Option<String> },
+    /// A track went into a playlist, or the server's words for why not.
+    AddedToPlaylist { playlist: String, error: Option<String> },
+    /// A track's full block; `None` when the server would not say.
+    TrackInfo { filepath: String, track: Option<Box<Track>> },
+    /// A server's playlist names for the picker; `None` when the ask failed.
+    PlaylistNames { names: Option<Vec<String>> },
     /// `query` is the search these results answer — replies can pass each
     /// other now, and the box's contents name the one still wanted.
     SearchResults { query: String, results: Box<SearchResults> },
@@ -390,7 +568,28 @@ pub enum Event {
     /// Credentials are missing or expired — the UI drops back to the
     /// connect screen.
     Unauthorized,
+    /// The peers `parent` lists for browsing, or `None` when the ask
+    /// failed — a failed fetch changes nothing (contract clause 20).
+    FederationPeers { parent: String, peers: Option<Vec<crate::api::types::PeerListing>> },
+    /// The probe's answer: whether `server` answered its public `/api`.
+    Reachable { server: String, reachable: bool },
     Error(String),
+}
+
+/// What kept a journey from being an ordinary list of stops. Typed rather
+/// than read back out of the note's wording: the UIs branch on it — a
+/// retry makes sense for an empty arc but not for a feature that is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JourneyIssue {
+    /// Nothing structural — the stops (or their absence) are the answer.
+    #[default]
+    None,
+    /// The route answered 403. Deliberately ambiguous server-side; the
+    /// app follows up with [`ApiCmd::DiscoveryProbe`] to name the reason.
+    Disabled,
+    /// An end has no embedding yet; the note names which. The fix is
+    /// editing or waiting for the scan, so no retry is offered.
+    NotAnalyzed,
 }
 
 // ── Audio thread ────────────────────────────────────────────────────────────
@@ -741,100 +940,183 @@ pub fn spawn_api(events: Sender<Event>) -> Sender<ApiCmd> {
     tx
 }
 
+/// Every open tunnel, by identity — the session's own and the ones the queue
+/// needs — for as long as the api thread lives. One dial in flight per
+/// identity at most; a tunnel stays until it is closed on request, whichever
+/// session is current (contract clause 38).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct Tunnels {
+    slots: std::collections::HashMap<String, TunnelSlot>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct TunnelSlot {
+    tunnel: Option<iroh_tunnel::Tunnel>,
+    dialling: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type TunnelTable = std::sync::Mutex<Tunnels>;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lock(table: &TunnelTable) -> std::sync::MutexGuard<'_, Tunnels> {
+    table.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
     let mut client: Option<Arc<Client>> = None;
-    // Held for as long as this thread lives; dropping it closes the tunnel out
-    // from under the client, so it is explicitly dropped on the way out. An
-    // Arc so the path sampler can watch it without owning it.
-    #[allow(unused_assignments)]
-    let mut bridge: Option<Arc<crate::quickconnect::TunnelBridge>> = None;
-    // The tunnel session's two names, once one is open: the loopback address
-    // requests go to, and the identity it is remembered by.
-    let mut tunnel: Option<(String, String)> = None;
-    // What the connected server said it can do. Nothing optional is probed
-    // before this says so.
-    let mut caps = Capabilities::default();
-
+    // The dial threads and the sampler hold the table too; the sampler only
+    // weakly, so it ends with this thread.
+    let tunnels: Arc<TunnelTable> = Arc::new(std::sync::Mutex::new(Tunnels::default()));
+    spawn_tunnel_sampler(Arc::downgrade(&tunnels), events.clone());
     while let Ok(cmd) = rx.recv() {
         // Connection commands change who `client` *is*, so they stay
         // serialized here — reaching a different server mid-dial is a
         // contradiction, not a feature. Everything else is a read against
         // the current client and answers on its own thread (audit #63):
         // one stalled search used to block every pane behind a 20-second
-        // timeout, and a tunnel dial held the line for the better part of
-        // a minute.
+        // timeout. A tunnel dial takes up to a minute cold, so it runs on
+        // its own thread as well and reports back through the events.
         let result = match cmd {
             ApiCmd::Shutdown => break,
 
-            ApiCmd::Connect { server, token } => {
-                connect(&mut client, &server, &server.clone(), token)
+            ApiCmd::Connect { server, identity, token, self_signed, peer, local_token } => {
+                connect(&mut client, &server, &identity, token, self_signed, peer, local_token)
             }
 
-            ApiCmd::Login { server, username, password } => {
-                // Signing in to a tunnel server goes over the open bridge, but
-                // is filed under the endpoint id — the loopback port is gone
-                // by the next run.
-                let (endpoint, id) = resolve_target(&server, tunnel.as_ref());
-                login(&mut client, &endpoint, &id, &username, &password)
+            ApiCmd::Login { server, identity, username, password, self_signed, local_token } => {
+                login(&mut client, &server, &identity, &username, &password, self_signed, local_token)
             }
 
-            ApiCmd::QuickConnect { code, token } => match quick_connect(&code) {
-                Ok((id, opened)) => {
-                    let url = opened.local_url.clone();
-                    // Dial over the new tunnel while the old one is still up.
-                    // Installing it here would drop the old bridge, and its
-                    // Drop closes the loopback listener the *current* session
-                    // is streaming through — so a code that opens but doesn't
-                    // answer used to leave the UI on a session whose port had
-                    // just been pulled out from under it (finding #20).
-                    let answer = connect(&mut client, &url, &id, token);
-                    if !tunnel_answered(&answer) {
-                        // `opened` drops here, closing the tunnel that just
-                        // failed and only that one. `client`, `bridge` and
-                        // `tunnel` are untouched, so the session the user is
-                        // on carries on working while they read the error.
-                        answer
-                    } else {
-                        let opened = Arc::new(opened);
-                        spawn_path_sampler(Arc::downgrade(&opened), events.clone());
-                        bridge = Some(opened);
-                        tunnel = Some((url.clone(), id.clone()));
-                        // A public-mode server answers straight away; anything
-                        // else needs a login over the freshly-opened tunnel.
-                        match answer {
-                            Some(Event::NeedsLogin { .. }) => {
-                                Some(Event::TunnelReady { local_url: url, id })
-                            }
-                            other => other,
-                        }
-                    }
-                }
-                Err(e) => Some(Event::Error(e)),
-            },
-
-
-            read => {
-                spawn_read(client.clone(), caps, events.clone(), read);
+            ApiCmd::TunnelOpen { id, credential } => {
+                tracing::info!("tunnel {}: dialling", tunnel_log_name(&id));
+                open_tunnel(&tunnels, id, credential, events.clone());
                 None
             }
+            ApiCmd::TunnelClose { id } => {
+                tracing::info!("tunnel {}: closing — nothing references it", tunnel_log_name(&id));
+                Some(close_tunnel(&tunnels, id))
+            }
+            ApiCmd::TunnelCredential { id, credential } => swap_credential(&tunnels, id, &credential),
+            ApiCmd::Retarget { identity, server, token, self_signed, peer, local_token } => {
+                Some(retarget(&mut client, &server, &identity, token, self_signed, peer, local_token))
+            }
 
+            read => {
+                spawn_read(client.clone(), events.clone(), read);
+                None
+            }
         };
 
-        // One place to learn what the server offers, so a new way of
-        // connecting can't forget to ask.
-        if let Some(Event::Connected { ping, .. }) = &result {
-            caps = Capabilities::from(ping.as_ref());
-        }
-
-        if let Some(event) = result {
-            if events.send(event).is_err() {
-                break;
-            }
+        if let Some(event) = result
+            && events.send(event).is_err()
+        {
+            break;
         }
     }
 
-    drop(bridge);
+    // Every tunnel goes down gracefully on the way out; a plain drop would
+    // slam the connections shut under whatever was still streaming.
+    let table = std::mem::take(&mut *lock(&tunnels));
+    if let Ok(rt) = crate::runtime::handle() {
+        for slot in table.slots.into_values() {
+            if let Some(tunnel) = slot.tunnel {
+                tunnel.begin_shutdown(rt);
+            }
+        }
+    }
+}
+
+// ── Shapers both workers share ───────────────────────────────────────────────
+//
+// The words a reply becomes live here once: the native worker and the browser
+// build's each drive their own client, and an event a feature lands with on
+// one build must land on the other with the same words.
+
+/// The track verbs answer with their outcome rather than an error event:
+/// the App reverts a rating, words a failed add, or shows a sheet without
+/// its block (track-actions contract).
+pub(crate) fn rated_event(filepath: String, rating: Option<u32>, seq: u64, result: Result<(), ApiError>) -> Event {
+    Event::Rated { filepath, rating, seq, error: result.err().map(|e| e.to_string()) }
+}
+
+pub(crate) fn added_to_playlist_event(playlist: String, result: Result<(), ApiError>) -> Event {
+    Event::AddedToPlaylist { playlist, error: result.err().map(|e| e.to_string()) }
+}
+
+pub(crate) fn track_info_event(filepath: String, result: Result<Track, ApiError>) -> Event {
+    Event::TrackInfo { filepath, track: result.ok().map(Box::new) }
+}
+
+pub(crate) fn playlist_names_event(result: Result<Vec<crate::api::types::PlaylistSummary>, ApiError>) -> Event {
+    Event::PlaylistNames { names: result.ok().map(|list| list.into_iter().map(|p| p.name).collect()) }
+}
+
+/// A dead session is the session's business; anything else is the
+/// picker's to say (auto-dj contract, clause 48).
+pub(crate) fn genres_event(result: Result<Vec<crate::api::types::Genre>, ApiError>) -> Result<Event, ApiError> {
+    match result {
+        Ok(genres) => Ok(Event::Genres(genres)),
+        Err(ApiError::Unauthorized) => Err(ApiError::Unauthorized),
+        Err(e) => Ok(Event::GenresFailed(e.to_string())),
+    }
+}
+
+/// A playlist management verb, with the name its failure is worded around.
+pub(crate) enum PlaylistVerb<'a> {
+    Create(&'a str),
+    Rename(&'a str),
+    Delete(&'a str),
+}
+
+/// The management verbs word their own failures — `<what failed>: <the
+/// server's words>` — so the generic fallthrough never has to guess what
+/// the user was doing (playlists contract, clause 50).
+pub(crate) fn playlist_verb_event(verb: PlaylistVerb<'_>, result: Result<(), ApiError>) -> Result<Event, ApiError> {
+    match (verb, result) {
+        (PlaylistVerb::Create(_), Ok(())) => Ok(Event::PlaylistCreated),
+        (PlaylistVerb::Rename(_), Ok(())) => Ok(Event::PlaylistRenamed),
+        (PlaylistVerb::Delete(_), Ok(())) => Ok(Event::PlaylistDeleted),
+        (_, Err(ApiError::Unauthorized)) => Err(ApiError::Unauthorized),
+        // The route is 5.16.0+: a 404 is the server's age, not a missing
+        // playlist — worded so it reads as old, not broken.
+        (PlaylistVerb::Rename(_), Err(ApiError::NotFound(_))) => {
+            Ok(Event::Error("this server can't rename playlists — it needs mStream 5.16".into()))
+        }
+        (PlaylistVerb::Create(name), Err(e)) => Ok(Event::Error(format!("couldn't create {name}: {e}"))),
+        (PlaylistVerb::Rename(from), Err(e)) => Ok(Event::Error(format!("couldn't rename {from}: {e}"))),
+        (PlaylistVerb::Delete(name), Err(e)) => Ok(Event::Error(format!("couldn't delete {name}: {e}"))),
+    }
+}
+
+/// The client for a read aimed at a row's own server. `None` when the base
+/// will not parse — the read then falls back to the session, whose answer
+/// the App's stale-reply guards judge as they would any other.
+///
+/// Kept, one per reach: a client is a connection pool, and building one
+/// per read meant a fresh handshake for every cover, waveform and DJ turn
+/// aimed away from the session. A handful of servers is all a queue ever
+/// mixes; the oldest goes when the shelf is full.
+#[cfg(not(target_arch = "wasm32"))]
+fn client_for(reach: &crate::tui::app::Reach) -> Option<Arc<Client>> {
+    static KEPT: std::sync::Mutex<Vec<(crate::tui::app::Reach, Arc<Client>)>> = std::sync::Mutex::new(Vec::new());
+    const SHELF: usize = 16;
+    let mut kept = KEPT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((_, client)) = kept.iter().find(|(known, _)| known == reach) {
+        return Some(client.clone());
+    }
+    let client = Client::new_with(&reach.base, reach.self_signed)
+        .ok()
+        .map(|c| c.with_token(reach.token.clone()).with_peer(reach.peer).with_local_token(reach.local_token.clone()))
+        .map(Arc::new)?;
+    if kept.len() >= SHELF {
+        kept.remove(0);
+    }
+    kept.push((reach.clone(), client.clone()));
+    Some(client)
 }
 
 /// Answer one read on its own thread, so a slow server holds up this reply
@@ -842,16 +1124,11 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
 /// replaced still arrive; the app's stale-reply guards are what drop them,
 /// the same as any other answer about somewhere the user no longer is.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_read(
-    client: Option<Arc<Client>>,
-    caps: Capabilities,
-    events: Sender<Event>,
-    cmd: ApiCmd,
-) {
+fn spawn_read(client: Option<Arc<Client>>, events: Sender<Event>, cmd: ApiCmd) {
     thread::Builder::new()
         .name("mstream-api-read".into())
         .spawn(move || {
-            let event = answer(client.as_deref(), caps, cmd);
+            let event = answer(client.as_deref(), cmd);
             let _ = events.send(event);
         })
         .ok();
@@ -861,9 +1138,34 @@ fn spawn_read(
 /// session is no good; 403 is a permission or feature-flag answer that
 /// shouldn't bounce the user to a login form.
 #[cfg(not(target_arch = "wasm32"))]
-fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
-    let Some(c) = client else {
-        return Event::Error("not connected to a server".into());
+fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
+    // Direct access is asked of the parent as the App reached it — never
+    // through a peer client's rewrite, and not necessarily the session.
+    if let ApiCmd::DirectAccess { parent, id, reach, refresh } = cmd {
+        let answer = match client_for(&reach) {
+            Some(c) => direct_answer(c.federation_access(id, refresh)),
+            None => crate::api::types::DirectAnswer::Failed("the parent's address will not parse".into()),
+        };
+        return Event::DirectAccess { parent, id, answer };
+    }
+    // The probe needs no session: it asks the row's own server, which may
+    // be one the session never reached.
+    if let ApiCmd::Probe { server, base, self_signed, local_token } = cmd {
+        let reachable = Client::new_with(&base, self_signed)
+            .map(|c| c.with_local_token(local_token))
+            .and_then(|c| c.server_info())
+            .is_ok();
+        return Event::Reachable { server, reachable };
+    }
+    // A row's own server when it is not the session's (contract clause 30):
+    // its cover and its shape come from a client built for the reach the
+    // App resolved — a tunnel's loopback with its token, a saved server
+    // with its own token and trust, a peer through its parent.
+    let own = cmd.reach().and_then(client_for);
+    let c = match (own.as_deref(), client) {
+        (Some(own), _) => own,
+        (None, Some(session)) => session,
+        (None, None) => return Event::Error("not connected to a server".into()),
     };
     let answered = match cmd {
         ApiCmd::Browse(path) => {
@@ -871,19 +1173,54 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
         }
         ApiCmd::Library { node, dest } => crate::api::wait(load_library(c, &node))
             .map(|data| Event::Library { node, dest, data }),
+        // Neither turn nor probe fails as an error: the App reads the answer.
         ApiCmd::AutoDj(request) => {
-            crate::api::wait(autodj_pick(c, caps, &request)).map(|picked| Event::AutoDjPick {
-                candidates: picked.tracks,
-                ignore_list: picked.ignore_list,
-                note: picked.note,
-            })
+            crate::api::wait(async { Ok::<_, ApiError>(autodj_pick(c, &request).await) })
+                .map(|picked| pick_event(picked, &request))
         }
         ApiCmd::AutoDjSample { request, count } => {
-            crate::api::wait(autodj_sample(c, caps, &request, count))
+            crate::api::wait(autodj_sample(c, &request, count))
         }
-        ApiCmd::Genres => c.genres().map(Event::Genres),
+        ApiCmd::DjProbe { identity, .. } => {
+            crate::api::wait(async { Ok::<_, ApiError>(dj_probe(c).await) })
+                .map(|info| Event::DjProbed { identity, info })
+        }
+        // Neither report fails as an error: the App settles its outbox on
+        // the answer, and a failed scrobble is only logged.
+        ApiCmd::ReportPlays { body, ids, .. } => {
+            Ok(plays_reported_event(ids, crate::api::wait(c.report_plays_async(body))))
+        }
+        ApiCmd::Scrobble { filepath, .. } => {
+            Ok(scrobbled_event(&filepath, crate::api::wait(c.scrobble_async(&filepath))))
+        }
+        // The track verbs and the genres answer through the shapers both
+        // workers share; their words live there.
+        ApiCmd::RateSong { filepath, rating, seq, .. } => {
+            let result = crate::api::wait(c.rate_song_async(&filepath, rating));
+            Ok(rated_event(filepath, rating, seq, result))
+        }
+        ApiCmd::AddToPlaylist { playlist, song, .. } => {
+            let result = crate::api::wait(c.playlist_add_song_async(&playlist, &song));
+            Ok(added_to_playlist_event(playlist, result))
+        }
+        ApiCmd::TrackInfo { filepath, .. } => {
+            let result = c.metadata(&filepath);
+            Ok(track_info_event(filepath, result))
+        }
+        ApiCmd::PlaylistNames { .. } => Ok(playlist_names_event(c.playlists())),
+        ApiCmd::Genres => genres_event(c.genres()),
         ApiCmd::Journey { start, end, length } => {
             crate::api::wait(journey(c, &start, &end, length))
+        }
+        ApiCmd::SonicRandom { side } => c
+            .random_song(&crate::api::types::RandomSongRequest::default())
+            .map(|r| Event::SonicRandom { side, track: r.songs.into_iter().next().map(Box::new) }),
+        ApiCmd::DiscoveryProbe => {
+            c.ping().map(|ping| Event::DiscoveryProbe { available: ping.discovery_path })
+        }
+        // A failed ask is `None`: nothing about the saved peers changes.
+        ApiCmd::FederationPeers { parent } => {
+            Ok(Event::FederationPeers { parent, peers: c.federation_peers().ok() })
         }
         ApiCmd::Discover { node, seed, dest } => {
             crate::api::wait(discover(c, &node, &seed, dest))
@@ -892,10 +1229,19 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
             let count = files.len();
             c.playlist_save(&name, &files).map(|()| Event::PlaylistSaved { name, count })
         }
+        ApiCmd::CreatePlaylist { name } => {
+            playlist_verb_event(PlaylistVerb::Create(&name), c.playlist_new(&name))
+        }
+        ApiCmd::RenamePlaylist { from, to } => {
+            playlist_verb_event(PlaylistVerb::Rename(&from), c.playlist_rename(&from, &to))
+        }
+        ApiCmd::DeletePlaylist { name } => {
+            playlist_verb_event(PlaylistVerb::Delete(&name), c.playlist_delete(&name))
+        }
         ApiCmd::Search(query) => {
             c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r) })
         }
-        ApiCmd::AlbumArt { file } => {
+        ApiCmd::AlbumArt { file, .. } => {
             // The waveform's rule, because this cache burned without it: a
             // 404 and bytes that won't decode are the server's own word
             // that there is no art — settled, remembered, never asked
@@ -909,7 +1255,7 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
             let art = answer.ok().and_then(|bytes| art::decode(&bytes));
             Ok(Event::AlbumArt { file, art, settled })
         }
-        ApiCmd::Waveform { filepath } => {
+        ApiCmd::Waveform { filepath, .. } => {
             // Same rule as art: a shape nobody could draw is not news. The
             // client already folds the server's four ways of saying "no
             // waveform" into `Ok(None)`; anything left is a real transport
@@ -920,9 +1266,15 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
             Ok(Event::Waveform { filepath, bars: answer.ok().flatten(), settled })
         }
         // The connection commands never reach here; api_loop keeps them.
+        // The probe answered above, before the session client was needed.
         ApiCmd::Connect { .. }
         | ApiCmd::Login { .. }
-        | ApiCmd::QuickConnect { .. }
+        | ApiCmd::TunnelOpen { .. }
+        | ApiCmd::TunnelClose { .. }
+        | ApiCmd::TunnelCredential { .. }
+        | ApiCmd::DirectAccess { .. }
+        | ApiCmd::Retarget { .. }
+        | ApiCmd::Probe { .. }
         | ApiCmd::Shutdown => return Event::Error("connection change routed as a read".into()),
     };
     match answered {
@@ -932,64 +1284,153 @@ fn answer(client: Option<&Client>, caps: Capabilities, cmd: ApiCmd) -> Event {
     }
 }
 
-/// Watch how the tunnel is reaching the server and tell the UI when it
-/// changes. Holds only a Weak: when the bridge is dropped (a new session,
-/// shutdown), the next sample fails to upgrade and the thread ends. The
-/// first sample is sent unconditionally so a fresh session shows its state
-/// within a beat of connecting.
+/// Dial `credential` for `id` on its own thread and install the tunnel. A
+/// dial already in flight makes this a no-op; a tunnel already up is simply
+/// reported again. The thread answers `TunnelUp` or `TunnelFailed`. A close that lands while the
+/// dial is out wins: the tunnel is shut down as soon as it arrives.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_path_sampler(
-    bridge: std::sync::Weak<crate::quickconnect::TunnelBridge>,
-    events: Sender<Event>,
-) {
-    let _ = thread::Builder::new().name("mstream-tunnel-path".into()).spawn(move || {
-        let mut last: Option<crate::quickconnect::TunnelPath> = None;
+fn open_tunnel(tunnels: &Arc<TunnelTable>, id: String, credential: String, events: Sender<Event>) {
+    {
+        let mut table = lock(tunnels);
+        let slot = table.slots.entry(id.clone()).or_default();
+        if let Some(tunnel) = &slot.tunnel {
+            // Already up: say so again, so an App whose picture of this
+            // tunnel lagged never waits on a dial that will not happen.
+            let _ = events.send(Event::TunnelUp {
+                id,
+                local_url: tunnel.local_url(),
+                local_token: tunnel.local_token(),
+            });
+            return;
+        }
+        if slot.dialling {
+            return; // the dial in flight will report
+        }
+        slot.dialling = true;
+    }
+    let tunnels = Arc::clone(tunnels);
+    let _ = thread::Builder::new().name("mstream-tunnel-dial".into()).spawn(move || {
+        let dialled = match crate::runtime::block_on(iroh_tunnel::connect_tunnel(&credential, 0)) {
+            Ok(dialled) => dialled,
+            Err(why) => Err(iroh_tunnel::DialError::Local(why)),
+        };
+        let event = match dialled {
+            Ok(tunnel) => {
+                let local_url = tunnel.local_url();
+                let local_token = tunnel.local_token();
+                let mut table = lock(&tunnels);
+                match table.slots.get_mut(&id) {
+                    Some(slot) if slot.dialling => {
+                        slot.dialling = false;
+                        slot.tunnel = Some(tunnel);
+                        Event::TunnelUp { id, local_url, local_token }
+                    }
+                    // Closed while the dial was out.
+                    _ => {
+                        drop(table);
+                        if let Ok(rt) = crate::runtime::handle() {
+                            tunnel.begin_shutdown(rt);
+                        }
+                        Event::TunnelClosed { id }
+                    }
+                }
+            }
+            Err(e) => {
+                lock(&tunnels).slots.remove(&id);
+                // A refused credential is the one failure a re-dial with
+                // the same code cannot fix; everything else is a server
+                // that did not answer.
+                Event::TunnelFailed { id, rejected: e.is_rejected(), why: e.to_string() }
+            }
+        };
+        let _ = events.send(event);
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn close_tunnel(tunnels: &Arc<TunnelTable>, id: String) -> Event {
+    let closed = lock(tunnels).slots.remove(&id).and_then(|slot| slot.tunnel);
+    if let Some(tunnel) = closed
+        && let Ok(rt) = crate::runtime::handle()
+    {
+        tunnel.begin_shutdown(rt);
+    }
+    Event::TunnelClosed { id }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn swap_credential(tunnels: &Arc<TunnelTable>, id: String, credential: &str) -> Option<Event> {
+    let failed = |why: String| Some(Event::TunnelFailed { id: id.clone(), rejected: false, why });
+    let table = lock(tunnels);
+    let Some(tunnel) = table.slots.get(&id).and_then(|slot| slot.tunnel.as_ref()) else {
+        return failed("no open tunnel to update".into());
+    };
+    let rt = match crate::runtime::handle() {
+        Ok(rt) => rt,
+        Err(e) => return failed(e),
+    };
+    match tunnel.set_credential(credential, rt) {
+        Ok(()) => None,
+        Err(e) => failed(e.to_string()),
+    }
+}
+
+/// A tunnel identity as the log should show it. A peer's identity carries
+/// `id@parent`, which the log's scrubber would read as a URL's userinfo and
+/// redact; spelled out, it is just a row number.
+#[cfg(not(target_arch = "wasm32"))]
+fn tunnel_log_name(id: &str) -> String {
+    match id.strip_prefix(crate::config::PEER_ID_PREFIX).and_then(|rest| rest.split_once('@')) {
+        Some((row, parent)) => format!("peer {row} of {}", crate::quickconnect::display_server(parent)),
+        None => crate::quickconnect::display_server(id),
+    }
+}
+
+/// Watch every open tunnel and tell the UI when one changes state or path.
+/// Holds only a Weak: when the api thread drops the table, the next sample
+/// fails to upgrade and this thread ends. The first sample of a tunnel is
+/// sent unconditionally, so a fresh one shows its state within a beat. The
+/// shared client's own event ring is drained into the log on the way.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_tunnel_sampler(tunnels: std::sync::Weak<TunnelTable>, events: Sender<Event>) {
+    let _ = thread::Builder::new().name("mstream-tunnel-watch".into()).spawn(move || {
+        let mut last: std::collections::HashMap<String, (u8, u8)> = Default::default();
         loop {
-            let Some(bridge) = bridge.upgrade() else { return };
-            let path = bridge.path();
-            drop(bridge);
-            if last != Some(path) {
-                last = Some(path);
-                if events.send(Event::TunnelPath(path)).is_err() {
-                    return;
+            let Some(tunnels) = tunnels.upgrade() else { return };
+            let mut seen = Vec::new();
+            {
+                let table = lock(&tunnels);
+                for (id, slot) in &table.slots {
+                    let Some(tunnel) = &slot.tunnel else { continue };
+                    if let Some(lines) = tunnel.drain_events() {
+                        let shown = tunnel_log_name(id);
+                        for line in lines.lines() {
+                            tracing::info!("tunnel {shown}: {line}");
+                        }
+                    }
+                    seen.push((id.clone(), tunnel.status(), tunnel.path_kind()));
+                }
+            }
+            drop(tunnels);
+            last.retain(|id, _| seen.iter().any(|(seen_id, _, _)| seen_id == id));
+            for (id, status, path) in seen {
+                let before = last.insert(id.clone(), (status, path));
+                if before.map(|(s, _)| s) != Some(status) {
+                    let status = crate::quickconnect::TunnelStatus::from_code(status);
+                    if events.send(Event::TunnelStatus { id: id.clone(), status }).is_err() {
+                        return;
+                    }
+                }
+                if before.map(|(_, p)| p) != Some(path) {
+                    let path = crate::quickconnect::TunnelPath::from_kind(path);
+                    if events.send(Event::TunnelPath { id, path }).is_err() {
+                        return;
+                    }
                 }
             }
             thread::sleep(Duration::from_secs(2));
         }
     });
-}
-
-/// Parse a pairing code, bring the tunnel up on loopback, and report the
-/// identity the code names alongside it.
-#[cfg(not(target_arch = "wasm32"))]
-fn quick_connect(code: &str) -> Result<(String, crate::quickconnect::TunnelBridge), String> {
-    let parsed = crate::quickconnect::parse_code(code)?;
-    let id = parsed.server_id();
-    Ok((id, crate::quickconnect::open_bridge(&parsed)?))
-}
-
-/// Split a connect target into (where to send bytes, what to remember it as).
-/// They differ only for a tunnel, which the UI names either way round: by its
-/// identity when reconnecting, by the loopback URL when the login form is
-/// carrying what the tunnel just published.
-#[cfg(not(target_arch = "wasm32"))]
-fn resolve_target(server: &str, tunnel: Option<&(String, String)>) -> (String, String) {
-    match tunnel {
-        Some((local_url, id)) if server == id || server == local_url => {
-            (local_url.clone(), id.clone())
-        }
-        _ => (server.to_string(), server.to_string()),
-    }
-}
-
-/// Whether a dial reached the server it was aimed at.
-///
-/// An allowlist rather than "not an error", because this decides whether a
-/// working tunnel gets torn down: an outcome nobody has thought about yet
-/// should keep the session that is already up, not replace it.
-#[cfg(not(target_arch = "wasm32"))]
-fn tunnel_answered(answer: &Option<Event>) -> bool {
-    matches!(answer, Some(Event::Connected { .. } | Event::NeedsLogin { .. }))
 }
 
 /// The tail both ways in share: ping the server, and only once it answers
@@ -1005,7 +1446,8 @@ fn establish(
     username: Option<String>,
     token: Option<String>,
 ) -> Result<Event, ApiError> {
-    let ping = c.ping()?;
+    // A peer answers no ping through the proxy; its layered `/api` does.
+    let ping = if c.peer().is_some() { c.ping_via_info()? } else { c.ping()? };
     let server = c.server();
     *client = Some(Arc::new(c));
     Ok(Event::Connected { server, id: id.to_string(), username, token, ping: Box::new(ping) })
@@ -1017,9 +1459,12 @@ fn connect(
     server: &str,
     id: &str,
     token: Option<String>,
+    self_signed: bool,
+    peer: Option<i64>,
+    local_token: Option<String>,
 ) -> Option<Event> {
-    let c = match Client::new(server) {
-        Ok(c) => c.with_token(token.clone()),
+    let c = match Client::new_with(server, self_signed) {
+        Ok(c) => c.with_token(token.clone()).with_peer(peer).with_local_token(local_token),
         Err(e) => return Some(Event::Error(e.to_string())),
     };
     // Taken before the client moves; it is the address that was reached,
@@ -1041,9 +1486,11 @@ fn login(
     id: &str,
     username: &str,
     password: &str,
+    self_signed: bool,
+    local_token: Option<String>,
 ) -> Option<Event> {
-    let mut c = match Client::new(server) {
-        Ok(c) => c,
+    let mut c = match Client::new_with(server, self_signed) {
+        Ok(c) => c.with_local_token(local_token),
         Err(e) => return Some(Event::Error(e.to_string())),
     };
     let token = match c.login(username, password) {
@@ -1057,6 +1504,86 @@ fn login(
         Ok(event) => Some(event),
         Err(e) => Some(Event::Error(e.to_string())),
     }
+}
+
+/// Swap the session's client for the same identity once `server` answers.
+/// A peer's layered `GET /api` is the ping either way — the loopback of a
+/// direct peer serves it plainly, the parent's proxy serves it rewritten.
+#[cfg(not(target_arch = "wasm32"))]
+fn retarget(
+    client: &mut Option<Arc<Client>>,
+    server: &str,
+    identity: &str,
+    token: Option<String>,
+    self_signed: bool,
+    peer: Option<i64>,
+    local_token: Option<String>,
+) -> Event {
+    let failed = |why: String| Event::RetargetFailed { identity: identity.to_string(), why };
+    let c = match Client::new_with(server, self_signed) {
+        Ok(c) => c.with_token(token.clone()).with_peer(peer).with_local_token(local_token),
+        Err(e) => return failed(e.to_string()),
+    };
+    if let Err(e) = c.ping_via_info() {
+        return failed(e.to_string());
+    }
+    let server = c.server();
+    *client = Some(Arc::new(c));
+    Event::Retargeted { identity: identity.to_string(), server, token }
+}
+
+/// Sort the parent's access answer (contract clause 27): a grant with every
+/// field is a ticket, `direct: false` is a refusal that holds for the
+/// session, and anything else — the peer unreachable for the mint (a 502),
+/// a 200 missing fields — is transient.
+#[cfg(not(target_arch = "wasm32"))]
+fn direct_answer(
+    result: Result<crate::api::types::DirectAccessResponse, ApiError>,
+) -> crate::api::types::DirectAnswer {
+    use crate::api::types::{DirectAnswer, DirectTicket};
+    let response = match result {
+        Ok(response) => response,
+        Err(e) => return DirectAnswer::Failed(e.to_string()),
+    };
+    if !response.direct {
+        return DirectAnswer::Denied(
+            response.reason.unwrap_or_else(|| "the parent declined direct access".to_string()),
+        );
+    }
+    let (Some(ticket), Some(guest_token)) = (response.direct_ticket, response.guest_token) else {
+        return DirectAnswer::Failed("the access answer is missing its ticket".into());
+    };
+    if !ticket.starts_with("mstrfedg") || guest_token.is_empty() {
+        return DirectAnswer::Failed("the access answer is not a guest ticket".into());
+    }
+    let (issued_at, expires_at) = jwt_times(&guest_token);
+    DirectAnswer::Granted(DirectTicket {
+        ticket,
+        guest_token,
+        endpoint_id: response.endpoint_id.filter(|id| !id.is_empty()),
+        issued_at,
+        expires_at,
+    })
+}
+
+/// The `iat` and `exp` claims of a JWT, read without verifying it — the
+/// peer verifies; this side only needs to know when to ask for a new one.
+#[cfg(not(target_arch = "wasm32"))]
+fn jwt_times(token: &str) -> (Option<std::time::SystemTime>, Option<std::time::SystemTime>) {
+    use base64::Engine as _;
+    let Some(payload) = token.split('.').nth(1) else { return (None, None) };
+    let normalised: String = payload.chars().filter(|c| *c != '=').collect();
+    let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(normalised) else {
+        return (None, None);
+    };
+    let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return (None, None) };
+    let at = |key: &str| {
+        claims
+            .get(key)
+            .and_then(|v| v.as_u64())
+            .map(|secs| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+    };
+    (at("iat"), at("exp"))
 }
 
 /// Shared by the native api thread (via `api::wait`) and the web worker
@@ -1084,6 +1611,10 @@ pub(crate) async fn load_library(
         LibraryNode::Recent => {
             LibraryData::Tracks(client.recently_added_async(RECENT_LIMIT).await?)
         }
+        LibraryNode::RecentlyPlayed => {
+            LibraryData::Tracks(client.recently_played_async(RECENT_LIMIT).await?)
+        }
+        LibraryNode::MostPlayed => LibraryData::Tracks(client.most_played_async(RECENT_LIMIT).await?),
         LibraryNode::Playlists => LibraryData::Playlists(client.playlists_async().await?),
         LibraryNode::Playlist(name) => {
             LibraryData::Tracks(client.playlist_load_async(name).await?)
@@ -1091,178 +1622,409 @@ pub(crate) async fn load_library(
     })
 }
 
-/// One answer from the picker.
+// ── Auto DJ ─────────────────────────────────────────────────────────────────
+
+/// One turn's answer, whatever happened: the songs that passed, the cursor
+/// to round-trip, and the failure or degrade the App may say out loud once
+/// per lane (auto-dj contract, clauses 26 and 30–34).
+#[derive(Debug, Clone)]
 pub(crate) struct Picked {
-    pub(crate) tracks: Vec<Track>,
+    pub(crate) songs: Vec<Track>,
     pub(crate) ignore_list: Vec<u32>,
-    pub(crate) note: Option<String>,
-    pool: Option<crate::api::types::SonicReport>,
+    /// Whether the pool shaped these picks — the badge's second glyph.
+    pub(crate) sonic: bool,
+    pub(crate) note: Option<DjNote>,
+    pub(crate) pool: Option<crate::api::types::SonicReport>,
+    pub(crate) failure: Option<DjFailure>,
 }
 
-type AutoDjResult = Result<Picked, ApiError>;
+impl Picked {
+    fn failed(ignore_list: Vec<u32>, failure: DjFailure) -> Picked {
+        Picked { songs: Vec::new(), ignore_list, sonic: false, note: None, pool: None, failure: Some(failure) }
+    }
+}
 
-/// Choose what Auto-DJ should play next.
-///
-/// Similarity is best-effort: the server may have discovery switched off, or
-/// simply not have embedded this track yet. Rather than stalling, both cases
-/// fall through to tempo/key matching and say why.
-pub(crate) async fn autodj_pick(
-    client: &Client,
-    caps: Capabilities,
-    request: &DjRequest,
-) -> AutoDjResult {
-    let ignore_list = request.ignore_list.clone();
-    match request.mode {
-        AutoDjMode::Off => {
-            Ok(Picked { tracks: Vec::new(), ignore_list, note: None, pool: None })
+/// The DJ's second voice (clause 63): the shell's log on the native build,
+/// where a filter that quietly does nothing would otherwise be
+/// indistinguishable from one that works; the browser build has none. The
+/// App's DJ and track modules log through here too.
+/// The server's word on a batch of plays, as the App settles it
+/// (play-reporting contract, clause 8): a batch the server calls malformed,
+/// has no route for, or will never take from this caller is dropped; a
+/// network failure, a server error or an expired token keeps it for the
+/// next try. Every outcome is a `[stats]` line (clause 12).
+pub(crate) fn plays_reported_event(
+    ids: Vec<String>,
+    result: Result<crate::api::types::PlaysAnswer, ApiError>,
+) -> Event {
+    let outcome = match result {
+        Ok(answer) => {
+            let mut settled: Vec<String> = answer.accepted.clone();
+            settled.extend(answer.duplicates.iter().cloned());
+            settled.extend(answer.rejected.iter().map(|r| r.id.clone()));
+            stats_log(format!(
+                "[stats] {} play(s) posted: {} accepted, {} already known, {} rejected",
+                ids.len(),
+                answer.accepted.len(),
+                answer.duplicates.len(),
+                answer.rejected.len()
+            ));
+            ReportOutcome::Settled(settled)
         }
+        Err(ApiError::Server { status: 400, message }) => {
+            stats_log(format!("[stats] the server refused a batch of {} play(s) as malformed; dropped: {message}", ids.len()));
+            ReportOutcome::Dropped(message)
+        }
+        Err(ApiError::NotFound(why)) => {
+            stats_log(format!("[stats] the server has no Stats API; {} play(s) dropped: {why}", ids.len()));
+            ReportOutcome::Dropped(why)
+        }
+        Err(ApiError::Forbidden(why)) => {
+            stats_log(format!("[stats] the server takes no plays from this caller; {} dropped: {why}", ids.len()));
+            ReportOutcome::Dropped(why)
+        }
+        Err(e) => {
+            let why = e.to_string();
+            stats_log(format!("[stats] {} play(s) kept for the next try: {why}", ids.len()));
+            ReportOutcome::Kept(why)
+        }
+    };
+    Event::PlaysReported { ids, outcome }
+}
 
-        AutoDjMode::BpmKey => pick_by_tempo_and_key(client, request, None).await,
+/// The legacy scrobble's answer: logged, never shown (clause 10).
+pub(crate) fn scrobbled_event(filepath: &str, result: Result<(), ApiError>) -> Event {
+    if let Err(e) = &result {
+        stats_log(format!("[stats] the thirty-second scrobble for {filepath} failed: {e}"));
+    }
+    Event::Scrobbled
+}
 
-        AutoDjMode::Similar => {
-            let Some(seed) = request.seed.as_deref() else {
-                return pick_by_tempo_and_key(client, request, None).await;
-            };
-            // No flag, no probe: ping already said there is no index here, so
-            // asking would spend a round trip to be told 403.
-            if !caps.discovery {
-                return pick_by_tempo_and_key(
-                    client,
-                    request,
-                    Some("this server has no similarity index — matching tempo and key"),
-                )
-                .await;
+/// The play reporter's own log line (play-reporting contract, clause 12).
+pub(crate) fn stats_log(line: String) {
+    #[cfg(not(target_arch = "wasm32"))]
+    tracing::info!("{line}");
+    #[cfg(target_arch = "wasm32")]
+    let _ = line;
+}
+
+pub(crate) fn dj_log(line: String) {
+    #[cfg(not(target_arch = "wasm32"))]
+    tracing::info!("{line}");
+    #[cfg(target_arch = "wasm32")]
+    let _ = line;
+}
+
+/// The DJ server's name in the log: the tunnel's short form on the native
+/// build, the identity itself in the browser, which has no tunnels.
+fn dj_log_name(identity: &str) -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tunnel_log_name(identity)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        identity.to_string()
+    }
+}
+
+/// The two keys a pool is asked with, let go of together (clause 30).
+const SONIC_KEYS: [&str; 2] = ["similarTo", "minSimilarity"];
+
+
+/// Which keys a server will not take — learned from a `"<key>" is not
+/// allowed` rejection for the rest of the process (clause 25) — and which a
+/// lane has let go of after its pool failed (clause 30), by epoch, so a new
+/// lane asks again. In memory only, by design: persisting "this server
+/// rejected X" would outlive the upgrade that fixes it, where a process
+/// lifetime is long enough to stop repeated failures and short enough to
+/// notice an upgrade.
+#[derive(Default)]
+struct DjLearner {
+    rejected: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    suppressed: std::collections::HashMap<String, (u64, std::collections::HashSet<String>)>,
+}
+
+fn learner() -> std::sync::MutexGuard<'static, DjLearner> {
+    static LEARNER: std::sync::OnceLock<std::sync::Mutex<DjLearner>> = std::sync::OnceLock::new();
+    LEARNER.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl DjLearner {
+    /// Strip what this server is known not to take, saying what went.
+    fn filter(&self, identity: &str, epoch: u64, body: &mut serde_json::Value) -> Vec<String> {
+        let mut dropped = Vec::new();
+        let Some(map) = body.as_object_mut() else { return dropped };
+        let rejected = self.rejected.get(identity);
+        let suppressed =
+            self.suppressed.get(identity).filter(|(e, _)| *e == epoch).map(|(_, keys)| keys);
+        map.retain(|key, _| {
+            let gone = rejected.is_some_and(|r| r.contains(key))
+                || suppressed.is_some_and(|s| s.contains(key));
+            if gone {
+                dropped.push(key.clone());
             }
-            match client.similar_tracks_async(&seed.filepath, SIMILAR_LIMIT).await? {
-                // Backstop for a server reconfigured mid-session; the flag
-                // above is what normally keeps us out of here.
-                None => {
-                    pick_by_tempo_and_key(
-                        client,
-                        request,
-                        Some("similarity was switched off on this server — matching tempo and key"),
-                    )
-                    .await
+            !gone
+        });
+        dropped
+    }
+
+    /// A key the server named in a rejection: never sent to it again this
+    /// process. True when it is news.
+    fn learn(&mut self, identity: &str, key: &str) -> bool {
+        self.rejected.entry(identity.to_string()).or_default().insert(key.to_string())
+    }
+
+    /// Keys a lane lets go of — valid, but the server cannot act on them
+    /// now (a pool with nothing in range, a library not yet scanned).
+    fn suppress(&mut self, identity: &str, epoch: u64, keys: &[&str]) {
+        let entry = self.suppressed.entry(identity.to_string()).or_insert((epoch, Default::default()));
+        if entry.0 != epoch {
+            *entry = (epoch, Default::default());
+        }
+        for key in keys {
+            entry.1.insert((*key).to_string());
+        }
+    }
+
+    fn all_suppressed(&self, identity: &str, epoch: u64, keys: &[&str]) -> bool {
+        self.suppressed
+            .get(identity)
+            .filter(|(e, _)| *e == epoch)
+            .is_some_and(|(_, set)| keys.iter().all(|k| set.contains(*k)))
+    }
+}
+
+/// The key a Joi rejection names — `"<key>" is not allowed`, its quotes
+/// escaped or not, since callers may pass the raw JSON body or the message
+/// already read out of it. `None` for any other message: the request then
+/// failed for some other reason, and resending a smaller body would only
+/// fail again with less information.
+pub(crate) fn not_allowed_key(message: &str) -> Option<String> {
+    let at = message.find(" is not allowed")?;
+    let head = message[..at].trim_end().trim_end_matches(['"', '\\']);
+    let key: String = head
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let quoted = head[..head.len() - key.len()].ends_with(['"', '\\']);
+    (!key.is_empty() && quoted).then_some(key)
+}
+
+/// What a refused turn means, read off the status and the body (clauses
+/// 25 and 30–32).
+#[derive(Debug, Clone, PartialEq)]
+enum Refusal {
+    /// A schema rejection naming a key: learn it and go again.
+    Learn(String),
+    /// The pool cannot be honoured: let it go for the lane, and say so —
+    /// or not, when the user switched discovery off themselves.
+    Degrade(Option<DjNote>),
+    Auth,
+    Network(String),
+    NoMatch,
+    Other(String),
+}
+
+fn classify(err: &ApiError, sonic_asked: bool) -> Refusal {
+    match err {
+        ApiError::Unauthorized => Refusal::Auth,
+        ApiError::Network(message) => Refusal::Network(message.clone()),
+        ApiError::Decode { .. } | ApiError::Config(_) => Refusal::Other(err.to_string()),
+        ApiError::Forbidden(message) | ApiError::NotFound(message) | ApiError::Server { message, .. } => {
+            // The body is the signal, not the status: mStream answered a
+            // schema rejection with 403 up to 6.11.0 and 400 since.
+            if let Some(key) = not_allowed_key(message) {
+                return Refusal::Learn(key);
+            }
+            if sonic_asked {
+                let lower = message.to_lowercase();
+                if lower.contains("similarity range") {
+                    return Refusal::Degrade(Some(DjNote::SonicRange));
                 }
-                Some(found) if found.not_analyzed => {
-                    pick_by_tempo_and_key(
-                        client,
-                        request,
-                        Some("this track hasn't been analysed yet — matching tempo and key"),
-                    )
-                    .await
+                if lower.contains("analyzed") {
+                    return Refusal::Degrade(Some(DjNote::SonicUnscanned));
                 }
-                Some(found) if found.results.is_empty() => {
-                    pick_by_tempo_and_key(
-                        client,
-                        request,
-                        Some("nothing sounded similar — matching tempo and key"),
-                    )
-                    .await
+                // Switched off server-side since the probe — the user's own
+                // change, so being told is noise; a 404 is a dead seed path.
+                if lower.contains("discovery is disabled") || matches!(err, ApiError::NotFound(_)) {
+                    return Refusal::Degrade(None);
                 }
-                Some(found) => Ok(Picked {
-                    tracks: found.results.into_iter().map(|r| r.into_track()).collect(),
-                    ignore_list,
-                    note: None,
-                    pool: None,
-                }),
+            }
+            match err {
+                ApiError::Forbidden(_) => Refusal::Auth,
+                ApiError::Server { status: 400, .. } => Refusal::NoMatch,
+                _ => Refusal::Other(err.to_string()),
             }
         }
     }
 }
 
-async fn pick_by_tempo_and_key(
-    client: &Client,
-    request: &DjRequest,
-    note: Option<&str>,
-) -> AutoDjResult {
-    let (body, tag_note) = dj::build_random_request(
-        &request.settings,
-        request.seed.as_deref(),
-        request.ignore_list.clone(),
-        &request.anchors,
-        &request.recent_artists,
-        request.sonic_available,
-    );
-    let sonic_asked = body.min_similarity.is_some();
-
-    let response = match client.random_song_async(&body).await {
-        Ok(response) => response,
-        // A hard sonic pool fails loudly by design — the server would rather
-        // say "nothing is that similar" than quietly play something that
-        // isn't. It answers 400 for both an empty pool and a seed it hasn't
-        // analysed. Retry once without the pool so the session keeps moving,
-        // and say what happened rather than leaving the queue to run dry.
-        Err(ApiError::Server { status: 400, message }) if sonic_asked => {
-            let (relaxed, _) = dj::build_random_request(
-                &request.settings,
-                request.seed.as_deref(),
-                request.ignore_list.clone(),
-                &request.anchors,
-                &request.recent_artists,
-                false,
-            );
-            let response = client.random_song_async(&relaxed).await?;
-            return Ok(Picked {
-                tracks: response.songs,
-                ignore_list: response.ignore_list,
-                note: Some(format!("{} — loosen the sonic pool", trim_period(&message))),
-                pool: None,
-            });
+/// One Auto DJ turn against the DJ's server: the ask, less whatever the
+/// server is known not to take; a schema rejection learned and retried; a
+/// failing pool let go of for the lane and the same pick taken without it;
+/// the keyword filter over the answer, re-asked with the fresh cursor when
+/// it blocked everything, five times, then the last answer whole (clauses
+/// 25, 26, 30). Never an error: the App reads the failure and speaks.
+pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked {
+    let identity = request.identity.as_str();
+    let epoch = request.epoch;
+    let name = dj_log_name(identity);
+    let mut ask = request.ask.clone();
+    if ask.sonic_asked() && learner().all_suppressed(identity, epoch, &SONIC_KEYS) {
+        ask = ask.without_sonic();
+    }
+    let mut note: Option<DjNote> = None;
+    let mut last: Option<crate::api::types::RandomSongsResponse> = None;
+    let mut attempts = 0;
+    while attempts < 5 {
+        attempts += 1;
+        let mut body = match serde_json::to_value(ask.request()) {
+            Ok(body) => body,
+            Err(e) => return Picked::failed(ask.ignore_list, DjFailure::Server(e.to_string())),
+        };
+        let dropped = learner().filter(identity, epoch, &mut body);
+        if !dropped.is_empty() {
+            dj_log(format!("[dj] {name}: dropped for this server: {}", dropped.join(", ")));
         }
-        Err(e) => return Err(e),
-    };
+        let mut answer = client.random_songs_raw_async(body).await;
+        // The learner's loop: every pass removes one key for good, so it
+        // ends by construction. Only a not-allowed body retries here.
+        while let Err(err) = &answer {
+            let Refusal::Learn(key) = classify(err, ask.sonic_asked()) else { break };
+            if learner().learn(identity, &key) {
+                dj_log(format!("[dj] {name}: rejected \"{key}\" — dropping it for the rest of this session"));
+            }
+            let mut body = serde_json::to_value(ask.request()).unwrap_or_default();
+            learner().filter(identity, epoch, &mut body);
+            answer = client.random_songs_raw_async(body).await;
+        }
+        match answer {
+            Ok(response) => {
+                let sonic = ask.sonic_asked();
+                if response.songs.is_empty() {
+                    return Picked { failure: Some(DjFailure::NoMatch), ..Picked { songs: Vec::new(), ignore_list: response.ignore_list, sonic, note, pool: response.sonic, failure: None } };
+                }
+                let accepted: Vec<Track> =
+                    response.songs.iter().filter(|t| !ask.keyword_blocked(t)).cloned().collect();
+                if !accepted.is_empty() {
+                    return Picked { songs: accepted, ignore_list: response.ignore_list, sonic, note, pool: response.sonic, failure: None };
+                }
+                // Blocked in full: the fresh cursor means the next answer
+                // is different candidates.
+                dj_log(format!("[dj] {name}: every song of the answer was a keyword hit — asking again"));
+                ask.ignore_list = response.ignore_list.clone();
+                last = Some(response);
+            }
+            Err(err) => match classify(&err, ask.sonic_asked()) {
+                Refusal::Degrade(say) => {
+                    dj_log(format!("[dj] {name}: the pool cannot be honoured ({err}) — playing without it this lane"));
+                    learner().suppress(identity, epoch, &SONIC_KEYS);
+                    if let Some(say) = say {
+                        note = Some(say);
+                    }
+                    ask = ask.without_sonic();
+                }
+                Refusal::Auth => {
+                    dj_log(format!("[dj] {name}: {err} — the session behind the DJ is no good"));
+                    return Picked::failed(ask.ignore_list, DjFailure::Auth);
+                }
+                Refusal::Network(message) => {
+                    return Picked::failed(ask.ignore_list, DjFailure::Network(message));
+                }
+                Refusal::NoMatch => return Picked::failed(ask.ignore_list, DjFailure::NoMatch),
+                Refusal::Learn(_) | Refusal::Other(_) => {
+                    dj_log(format!("[dj] {name}: random-songs failed: {err}"));
+                    return Picked::failed(ask.ignore_list, DjFailure::Server(err.to_string()));
+                }
+            },
+        }
+    }
+    // Every try was blocked in full: the last answer whole, rather than a
+    // queue stalled forever by an over-eager filter (clause 26).
+    match last {
+        Some(response) => Picked {
+            songs: response.songs,
+            ignore_list: response.ignore_list,
+            sonic: ask.sonic_asked(),
+            note,
+            pool: response.sonic,
+            failure: None,
+        },
+        None => Picked::failed(ask.ignore_list, DjFailure::NoMatch),
+    }
+}
 
-    Ok(Picked {
-        tracks: response.songs,
-        ignore_list: response.ignore_list,
-        note: note.map(str::to_string).or(tag_note),
-        pool: response.sonic,
-    })
+/// The turn's answer as the event the App consumes.
+pub(crate) fn pick_event(picked: Picked, request: &DjRequest) -> Event {
+    Event::AutoDjPick {
+        epoch: request.epoch,
+        songs: picked.songs,
+        ignore_list: picked.ignore_list,
+        sonic: picked.sonic,
+        note: picked.note,
+        failure: picked.failure,
+    }
 }
 
 /// Take several picks in a row without committing to any of them, feeding
-/// each back into the next call's cooldown so the sample shows variety rather
-/// than the same track three times.
+/// each back into the next call's cooldown and cursor so the sample shows
+/// variety rather than the same track three times (clause 53).
 pub(crate) async fn autodj_sample(
     client: &Client,
-    caps: Capabilities,
     request: &DjRequest,
     count: usize,
 ) -> Result<Event, ApiError> {
     let mut scratch = request.clone();
-    // Always sample through the random-songs path: it is the one the panel's
-    // settings actually drive, and the only one that reports a pool size.
-    scratch.mode = AutoDjMode::BpmKey;
-
+    scratch.ask.opener = false;
     let mut tracks: Vec<Track> = Vec::new();
     let mut pool = None;
     let mut note = None;
     for _ in 0..count {
-        let picked = match autodj_pick(client, caps, &scratch).await {
-            Ok(picked) => picked,
+        let picked = autodj_pick(client, &scratch).await;
+        pool = picked.pool.clone().or(pool);
+        note = note.or(picked.note.clone());
+        if let Some(failure) = picked.failure {
             // A sample that finds nothing is an answer, not an error: it is
             // exactly what a too-tight setting looks like.
-            Err(ApiError::Server { status: 400, message }) => {
-                note = Some(trim_period(&message));
-                break;
-            }
-            Err(e) => return Err(e),
-        };
-        pool = picked.pool.or(pool);
-        note = note.or(picked.note);
-        let Some(track) = picked.tracks.into_iter().next() else { break };
-        scratch.ignore_list = picked.ignore_list;
+            note = note.or(Some(DjNote::PreviewFailed(failure)));
+            break;
+        }
+        let Some(track) = picked.songs.into_iter().next() else { break };
+        scratch.ask.ignore_list = picked.ignore_list;
         if let Some(artist) = track.metadata.artist.clone() {
-            scratch.recent_artists.insert(0, artist);
+            scratch.ask.recent_artists.insert(0, artist);
         }
         if tracks.iter().any(|t: &Track| t.filepath == track.filepath) {
             break; // the pool is exhausted; more calls would repeat
         }
         tracks.push(track);
     }
-
     Ok(Event::AutoDjSample { tracks, pool, note })
+}
+
+/// What the DJ's server offers (clause 19): its layered `/api/` — version,
+/// discovery and readiness, libraries — or, on a server that answers only
+/// the flat ping, the flags and libraries alone.
+pub(crate) async fn dj_probe(client: &Client) -> Option<DjServerInfo> {
+    match client.layered_info_async().await {
+        Ok(info) => Some(DjServerInfo {
+            version: info.server,
+            discovery: info.features.discovery,
+            discovery_ready: info.features.discovery_ready,
+            libraries: info.user.vpaths,
+        }),
+        Err(_) => client.ping_async().await.ok().map(|ping| DjServerInfo {
+            version: None,
+            discovery: ping.discovery,
+            discovery_ready: None,
+            libraries: ping.vpaths,
+        }),
+    }
 }
 
 /// How many neighbours a Discover view asks for. Deep enough to browse,
@@ -1371,19 +2133,27 @@ pub(crate) async fn journey(
 ) -> Result<Event, ApiError> {
     let Some(response) = client.journey_async(start, end, length).await? else {
         // Gated on `discoveryPath`, so this only happens if the server was
-        // reconfigured since the ping.
+        // reconfigured since the ping. The 403 deliberately reads the same
+        // for "switched off" and "nothing scanned yet"; the app follows up
+        // with [`ApiCmd::DiscoveryProbe`] before naming a reason.
         return Ok(Event::Journey {
             stops: Vec::new(),
-            note: Some("discovery is switched off on this server".into()),
+            note: None,
             length,
+            issue: JourneyIssue::Disabled,
         });
     };
 
     let note = journey_note(&response, length);
     // An arc that couldn't be plotted has no stops worth showing; the note
     // carries the whole answer.
+    let issue = if response.not_analyzed.any() {
+        JourneyIssue::NotAnalyzed
+    } else {
+        JourneyIssue::None
+    };
     let stops = if response.not_analyzed.any() { Vec::new() } else { response.results };
-    Ok(Event::Journey { stops, note, length })
+    Ok(Event::Journey { stops, note, length, issue })
 }
 
 /// What, if anything, needs saying about a journey the server returned.
@@ -1411,10 +2181,6 @@ pub(crate) fn journey_note(
         return Some(format!("the library ran out at {got} of {asked} stops"));
     }
     None
-}
-
-fn trim_period(message: &str) -> String {
-    message.trim().trim_end_matches('.').to_string()
 }
 
 #[cfg(test)]
@@ -1675,71 +2441,216 @@ mod tests {
     }
 
     #[test]
-    fn the_mode_ring_steps_back_one_whatever_its_length() {
-        let all = Capabilities { discovery: true, ..Default::default() };
-        for mode in [AutoDjMode::Off, AutoDjMode::Similar, AutoDjMode::BpmKey] {
-            assert_eq!(mode.next_available(all).prev_available(all), mode);
-        }
-        // Without discovery the ring is two long, where "forward twice" —
-        // the old way back — is a lap.
-        let few = Capabilities::default();
-        for mode in [AutoDjMode::Off, AutoDjMode::BpmKey] {
-            assert_eq!(mode.next_available(few).prev_available(few), mode);
-            assert_ne!(mode.prev_available(few), mode, "left always moves");
-        }
+    fn a_joi_rejection_names_its_key_escaped_or_not() {
+        assert_eq!(not_allowed_key(r#"{"error":"\"minSimilarity\" is not allowed"}"#).as_deref(), Some("minSimilarity"));
+        assert_eq!(not_allowed_key(r#""limit" is not allowed"#).as_deref(), Some("limit"));
+        assert_eq!(not_allowed_key("No songs match criteria").as_deref(), None);
+        assert_eq!(not_allowed_key("is not allowed").as_deref(), None, "no key, no lesson");
     }
 
     #[test]
-    fn a_tunnel_login_goes_over_the_bridge_but_is_filed_under_the_identity() {
-        let tunnel = (
-            "http://127.0.0.1:51234".to_string(),
-            "mstream+iroh://endpointabc".to_string(),
-        );
-
-        // The login form carries the loopback URL the tunnel published...
-        assert_eq!(
-            resolve_target("http://127.0.0.1:51234", Some(&tunnel)),
-            (tunnel.0.clone(), tunnel.1.clone())
-        );
-        // ...and a reconnect names the same session by its identity. Both
-        // have to reach the bridge, and both have to be remembered as the id.
-        assert_eq!(
-            resolve_target("mstream+iroh://endpointabc", Some(&tunnel)),
-            (tunnel.0.clone(), tunnel.1.clone())
-        );
+    fn refusals_are_sorted_into_learn_degrade_auth_and_the_rest() {
+        let server = |status: u16, message: &str| ApiError::Server { status, message: message.into() };
+        assert_eq!(classify(&server(400, r#""limit" is not allowed"#), true), Refusal::Learn("limit".into()));
+        assert_eq!(classify(&ApiError::Forbidden(r#""requireBpm" is not allowed"#.into()), false), Refusal::Learn("requireBpm".into()), "the body is the signal, not the status");
+        assert_eq!(classify(&server(400, "No songs within the similarity range match criteria"), true), Refusal::Degrade(Some(DjNote::SonicRange)));
+        assert_eq!(classify(&server(400, "Sonic seed track has not been analyzed yet"), true), Refusal::Degrade(Some(DjNote::SonicUnscanned)));
+        assert_eq!(classify(&ApiError::Forbidden("discovery is disabled".into()), true), Refusal::Degrade(None));
+        assert_eq!(classify(&ApiError::NotFound("Track not found".into()), true), Refusal::Degrade(None), "a dead pin");
+        // The same words without a pool asked are not a degrade.
+        assert_eq!(classify(&server(400, "No songs match criteria"), false), Refusal::NoMatch);
+        assert_eq!(classify(&ApiError::Forbidden("discovery is disabled".into()), false), Refusal::Auth);
+        assert_eq!(classify(&ApiError::Unauthorized, true), Refusal::Auth);
+        assert!(matches!(classify(&ApiError::Network("refused".into()), true), Refusal::Network(_)));
     }
 
     #[test]
-    fn only_a_tunnel_that_answered_may_replace_the_one_in_use() {
-        // Installing a new bridge drops the old one, and its Drop closes the
-        // loopback listener the current session streams through. So the test
-        // is not "did the code parse" but "did the server on the other end
-        // reply" — a pairing code can dial fine and reach nothing.
-        let ping = || Box::new(crate::api::types::Ping::default());
-        assert!(tunnel_answered(&Some(Event::Connected {
-            server: "http://127.0.0.1:51234".into(),
-            id: "mstream+iroh://endpointabc".into(),
-            username: None,
+    fn the_learner_forgets_a_lanes_pool_with_the_lane_but_never_a_rejected_key() {
+        let mut learned = DjLearner::default();
+        let body = || serde_json::json!({"limit": 4, "similarTo": ["a"], "minSimilarity": 0.55, "ignoreList": []});
+        assert!(learned.learn("http://s", "limit"));
+        assert!(!learned.learn("http://s", "limit"), "not news twice");
+        learned.suppress("http://s", 7, &SONIC_KEYS);
+        let mut lane7 = body();
+        let mut dropped = learned.filter("http://s", 7, &mut lane7);
+        dropped.sort();
+        assert_eq!(dropped, ["limit", "minSimilarity", "similarTo"]);
+        assert!(lane7.get("ignoreList").is_some());
+        let mut lane8 = body();
+        assert_eq!(learned.filter("http://s", 8, &mut lane8), ["limit"], "a new lane asks for its pool again");
+        let mut other = body();
+        assert!(learned.filter("http://other", 7, &mut other).is_empty(), "keyed by server");
+        assert!(learned.all_suppressed("http://s", 7, &SONIC_KEYS));
+        assert!(!learned.all_suppressed("http://s", 8, &SONIC_KEYS));
+    }
+
+    /// The rig leg (plan T4): the real api thread against two live mStream
+    /// servers paired over federation. Run with the parent's address in
+    /// `MSTREAM_RIG_PARENT` (the server that lists the other as a peer):
+    ///
+    /// ```sh
+    /// MSTREAM_RIG_PARENT=http://127.0.0.1:3041 cargo test -- --ignored rig
+    /// ```
+    ///
+    /// Connect to the parent, read its peer list, ask for direct access to
+    /// the first peer, dial the peer's own tunnel with the guest ticket,
+    /// fetch a byte range of a track from the peer's loopback with the
+    /// guest token and the loopback token, then close the tunnel.
+    #[test]
+    #[ignore = "needs the two-server rig; see the doc comment"]
+    fn rig_a_peer_is_reached_directly_with_a_guest_ticket() {
+        use crate::api::types::DirectAnswer;
+        use std::time::Duration;
+        let Ok(parent) = std::env::var("MSTREAM_RIG_PARENT") else {
+            eprintln!("MSTREAM_RIG_PARENT not set — skipping");
+            return;
+        };
+        let (events_tx, events) = mpsc::channel();
+        let api = spawn_api(events_tx);
+        let wait = |what: &str, pick: &dyn Fn(&Event) -> bool| -> Event {
+            let deadline = std::time::Instant::now() + Duration::from_secs(90);
+            loop {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                let event = events.recv_timeout(left).unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+                if pick(&event) {
+                    return event;
+                }
+                eprintln!("  (skipping {event:?})");
+            }
+        };
+
+        api.send(ApiCmd::Connect {
+            server: parent.clone(),
+            identity: parent.clone(),
             token: None,
-            ping: ping(),
-        })));
-        assert!(
-            tunnel_answered(&Some(Event::NeedsLogin { server: "http://127.0.0.1:51234".into() })),
-            "reached it and was asked to sign in — the tunnel works"
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        })
+        .unwrap();
+        let connected = wait("Connected", &|e| matches!(e, Event::Connected { .. } | Event::NeedsLogin { .. } | Event::Error(_)));
+        let Event::Connected { ping, .. } = connected else { panic!("the rig's parent must be public: {connected:?}") };
+        assert!(ping.federation_direct, "the parent offers direct access");
+        assert!(ping.federation_browse);
+
+        api.send(ApiCmd::FederationPeers { parent: parent.clone() }).unwrap();
+        let listed = wait("FederationPeers", &|e| matches!(e, Event::FederationPeers { .. }));
+        let Event::FederationPeers { peers: Some(peers), .. } = listed else { panic!("{listed:?}") };
+        let peer = peers.first().expect("the parent lists a peer").clone();
+        eprintln!("peer {} (id {})", peer.name, peer.id);
+
+        let reach = crate::tui::app::Reach {
+            base: parent.clone(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        };
+        api.send(ApiCmd::DirectAccess { parent: parent.clone(), id: peer.id, reach, refresh: false }).unwrap();
+        let answer = wait("DirectAccess", &|e| matches!(e, Event::DirectAccess { .. }));
+        let Event::DirectAccess { answer: DirectAnswer::Granted(ticket), .. } = answer else {
+            panic!("the parent grants a ticket: {answer:?}")
+        };
+        assert!(ticket.ticket.starts_with("mstrfedg1:"));
+        assert!(ticket.expires_at.is_some(), "the guest JWT carries its times");
+
+        let pid = crate::config::peer_identity(&parent, peer.id);
+        api.send(ApiCmd::TunnelOpen { id: pid.clone(), credential: ticket.ticket.clone() }).unwrap();
+        let up = wait("TunnelUp", &|e| matches!(e, Event::TunnelUp { .. } | Event::TunnelFailed { .. }));
+        let Event::TunnelUp { local_url, local_token, .. } = up else { panic!("the peer's tunnel comes up: {up:?}") };
+        eprintln!("peer tunnel at {local_url}");
+
+        // The peer's own `/api` answers the guest, and its bytes come plain.
+        let client = Client::new(&local_url)
+            .unwrap()
+            .with_token(Some(ticket.guest_token.clone()))
+            .with_local_token(Some(local_token.clone()));
+        let info = client.ping_via_info().expect("the peer answers its layered /api to a guest");
+        assert!(info.vpaths.iter().any(|v| v == "demo"), "the granted library is visible: {:?}", info.vpaths);
+        let url = crate::api::urls::with_local_token(
+            crate::api::urls::media_url(&local_url, "demo/Boukmanflow/6AM.mp3", Some(&ticket.guest_token)).unwrap(),
+            Some(&local_token),
+        );
+        let bytes = crate::runtime::block_on(async {
+            let resp = reqwest::Client::new()
+                .get(&url)
+                .header("range", "bytes=0-99")
+                .send()
+                .await
+                .expect("the range request reaches the peer");
+            assert_eq!(resp.status().as_u16(), 206, "{url}");
+            resp.bytes().await.unwrap().len()
+        })
+        .unwrap();
+        assert_eq!(bytes, 100);
+
+        // A second peer tunnel request for the same identity re-reports it.
+        api.send(ApiCmd::TunnelOpen { id: pid.clone(), credential: ticket.ticket.clone() }).unwrap();
+        wait("TunnelUp again", &|e| matches!(e, Event::TunnelUp { .. }));
+
+        api.send(ApiCmd::TunnelClose { id: pid.clone() }).unwrap();
+        wait("TunnelClosed", &|e| matches!(e, Event::TunnelClosed { .. }));
+        api.send(ApiCmd::Shutdown).unwrap();
+    }
+
+    #[test]
+    fn the_access_answer_is_sorted_into_a_ticket_a_refusal_or_a_retry() {
+        use crate::api::types::{DirectAccessResponse, DirectAnswer};
+        use base64::Engine as _;
+        // A guest JWT with readable times: issued at 1700000000, one day long.
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"federationGuest":true,"iat":1700000000,"exp":1700086400}"#);
+        let jwt = format!("eyJhbGciOiJIUzI1NiJ9.{claims}.sig");
+        let granted = DirectAccessResponse {
+            direct: true,
+            reason: None,
+            endpoint_ticket: Some("endpointabc".into()),
+            endpoint_id: Some("abc".into()),
+            guest_token: Some(jwt.clone()),
+            expires_at: Some("2023-11-15T22:13:20.000Z".into()),
+            direct_ticket: Some("mstrfedg1:eyJ0IjoiZW5kcG9pbnRhYmMiLCJnIjoiLi4uIn0".into()),
+        };
+        match direct_answer(Ok(granted)) {
+            DirectAnswer::Granted(ticket) => {
+                assert_eq!(ticket.guest_token, jwt);
+                assert_eq!(ticket.endpoint_id.as_deref(), Some("abc"));
+                let epoch = std::time::UNIX_EPOCH;
+                assert_eq!(ticket.issued_at, Some(epoch + std::time::Duration::from_secs(1_700_000_000)));
+                assert_eq!(ticket.expires_at, Some(epoch + std::time::Duration::from_secs(1_700_086_400)));
+            }
+            other => panic!("a full grant is a ticket, got {other:?}"),
+        }
+
+        // `direct: false` is the parent's word: the proxy for the session.
+        let denied = DirectAccessResponse {
+            direct: false,
+            reason: Some("peer does not offer guest access".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            direct_answer(Ok(denied)),
+            DirectAnswer::Denied("peer does not offer guest access".into())
         );
 
-        assert!(
-            !tunnel_answered(&Some(Event::Error("no route to host".into()))),
-            "the dial failed, so the session already up keeps its bridge"
-        );
-        assert!(!tunnel_answered(&None));
-        // Anything else is not a success either: this decides whether a
-        // working tunnel is torn down, so it lists what may do that.
-        assert!(!tunnel_answered(&Some(Event::Unauthorized)));
-        assert!(!tunnel_answered(&Some(Event::TunnelReady {
-            local_url: "http://127.0.0.1:51234".into(),
-            id: "mstream+iroh://endpointabc".into(),
-        })));
+        // A 200 missing its ticket, and a peer unreachable for the mint
+        // (the parent's 502), are transient.
+        let half = DirectAccessResponse { direct: true, ..Default::default() };
+        assert!(matches!(direct_answer(Ok(half)), DirectAnswer::Failed(_)));
+        let down = ApiError::Server { status: 502, message: "Peer unreachable".into() };
+        assert!(matches!(direct_answer(Err(down)), DirectAnswer::Failed(why) if why.contains("502") || why.contains("unreachable")));
+
+        // A token whose payload is not JSON still yields a ticket, with no
+        // times to schedule by.
+        let opaque = DirectAccessResponse {
+            direct: true,
+            guest_token: Some("not.a.jwt".into()),
+            direct_ticket: Some("mstrfedg1:xyz".into()),
+            ..Default::default()
+        };
+        match direct_answer(Ok(opaque)) {
+            DirectAnswer::Granted(ticket) => assert_eq!((ticket.issued_at, ticket.expires_at), (None, None)),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -1778,15 +2689,5 @@ mod tests {
         // …and a four-stop journey that came back whole is not "the same
         // track" just because two of its rows are the seeds.
         assert!(journey_note(&stops(4), 4).is_none());
-    }
-
-    #[test]
-    fn a_direct_server_is_its_own_identity() {
-        let direct = ("http://host:3000".to_string(), "http://host:3000".to_string());
-        assert_eq!(resolve_target("http://host:3000", None), direct);
-
-        // An unrelated server is not swallowed by an open tunnel.
-        let tunnel = ("http://127.0.0.1:1".to_string(), "mstream+iroh://x".to_string());
-        assert_eq!(resolve_target("http://host:3000", Some(&tunnel)), direct);
     }
 }

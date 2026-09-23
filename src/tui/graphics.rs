@@ -61,11 +61,22 @@ mod native {
         /// 10x20 must not drift toward whatever terminal happens to be
         /// running the suite.
         adaptive: bool,
+        /// When the window-size ioctl was last consulted. One cover per
+        /// frame was this module's design point; the GUI's album wall
+        /// draws fifteen, and re-asking for every one of them was
+        /// hundreds of syscalls a second for an answer that changes on
+        /// the scale of someone adjusting their font.
+        font_checked: std::time::Instant,
         /// How many render-time decodes have run, for the tests that pin
         /// the caching above — a cache that silently stopped caching would
         /// otherwise still pass every drawing assertion.
         #[cfg(test)]
         decodes: std::cell::Cell<u32>,
+        /// And how many protocols have been built — every encode, from the
+        /// thumbnail or the source — for the tests that pin what a scroll
+        /// or a shared cover costs.
+        #[cfg(test)]
+        encodes: std::cell::Cell<u32>,
     }
 
     /// What failed, precisely enough not to over-refuse: a decode failure
@@ -79,9 +90,11 @@ mod native {
 
     struct Cached {
         art: u64,
-        /// The source's own pixel dimensions. Kept so the question "would
-        /// this area want a different picture?" can be answered without
-        /// decoding the cover again to ask it.
+        /// The pixel dimensions the fit was taken from — the thumbnail's
+        /// when it had every pixel the box wanted, the decoded source's
+        /// otherwise. Kept so the question "would this area want a
+        /// different picture?" can be answered without decoding the cover
+        /// again to ask it.
         source: (u32, u32),
         /// How many cells the picture came out as. This, not the area, is
         /// what the cache turns on — see [`Graphics::draw`].
@@ -262,9 +275,18 @@ mod native {
                 cached: None,
                 refused: None,
                 adaptive: false,
+                font_checked: std::time::Instant::now(),
                 #[cfg(test)]
                 decodes: std::cell::Cell::new(0),
+                #[cfg(test)]
+                encodes: std::cell::Cell::new(0),
             }
+        }
+
+        /// How many covers this instance has encoded — tests only.
+        #[cfg(test)]
+        pub(crate) fn encodes(&self) -> u32 {
+            self.encodes.get()
         }
 
         /// Which protocol is carrying the picture, for `graphics-probe` to
@@ -332,6 +354,13 @@ mod native {
             if !self.adaptive {
                 return;
             }
+            // Half a second is soon enough to catch a font change; asking
+            // on every draw was fine with one cover a frame and is not
+            // with a wall of them.
+            if self.font_checked.elapsed() < std::time::Duration::from_millis(500) {
+                return;
+            }
+            self.font_checked = std::time::Instant::now();
             let Some(picker) = self.picker.as_ref() else {
                 return;
             };
@@ -359,6 +388,21 @@ mod native {
             );
         }
 
+        ///
+        /// Nor does the cache turn on the area's place: an encoded cover
+        /// draws anywhere for free — kitty by reference to what it
+        /// transmitted, sixel and iTerm2 by their bytes re-emitted — so a
+        /// picture that merely moves (a scrolled queue row) costs nothing.
+        ///
+        /// And what an encode decodes turns on how many pixels the box
+        /// wants. The thumbnail beside every `Art` shares the source's
+        /// shape at 128 px a side, so fitting the box from it says whether
+        /// the source is needed at all: a 6x3 cover at a 10x20 font is 60
+        /// px a side and a 12x6 wall cell 120, both inside the thumbnail —
+        /// no decode, where decoding a 400 px jpeg was tens of
+        /// milliseconds in a debug build for every cover a scroll revealed
+        /// (2026-09-20). Only a box that wants more pixels than the
+        /// thumbnail holds decodes the source.
         pub fn draw(&mut self, frame: &mut Frame, area: Rect, art: &Art) -> bool {
             self.refresh_font();
             let Some(picker) = self.picker.as_ref() else {
@@ -378,31 +422,61 @@ mod native {
             let font = picker.font_size();
             let font = (font.width, font.height);
 
-            let stale = match &self.cached {
-                Some(held) => {
-                    held.art != art.id()
-                        || fit(area, font, held.source.0, held.source.1) != held.size
-                }
-                None => true,
-            };
-
-            if stale {
-                // Decoded here rather than kept decoded: the cache holds
-                // sixty-four covers, and at this size the pixels are an
-                // order of magnitude more memory than the bytes.
-                #[cfg(test)]
-                self.decodes.set(self.decodes.get() + 1);
-                let Ok(source) = image::load_from_memory(art.source()) else {
-                    self.refused = Some(Refusal { art: art.id(), area: None });
+            // Warm: the same cover at the same fitted size, wherever the
+            // box now stands.
+            let warm = self.cached.as_ref().is_some_and(|held| {
+                held.art == art.id()
+                    && fit(area, font, held.source.0, held.source.1) == held.size
+            });
+            if !warm {
+                // A failure already on record for this box answers without
+                // the work of discovering it again — see `Refusal`.
+                if self.refused.as_ref().is_some_and(|refusal| {
+                    refusal.art == art.id() && refusal.area == Some((area.width, area.height))
+                }) {
                     return false;
-                };
-                let dimensions = (source.width(), source.height());
-                let size = fit(area, font, dimensions.0, dimensions.1);
+                }
+                let thumb = (art.width(), art.height());
+                let size = fit(area, font, thumb.0, thumb.1);
                 if size.0 == 0 || size.1 == 0 {
                     self.refused =
                         Some(Refusal { art: art.id(), area: Some((area.width, area.height)) });
                     return false;
                 }
+                let wanted =
+                    (u32::from(size.0) * u32::from(font.0), u32::from(size.1) * u32::from(font.1));
+                let (source, dimensions, size) = if wanted.0 <= thumb.0 && wanted.1 <= thumb.1 {
+                    // The thumbnail has every pixel the box can show.
+                    let pixels = image::RgbImage::from_raw(thumb.0, thumb.1, art.rgb().to_vec())
+                        .expect("an Art's pixels match its dimensions");
+                    (image::DynamicImage::ImageRgb8(pixels), thumb, size)
+                } else {
+                    // Bytes that would not decode will not decode now.
+                    if self
+                        .refused
+                        .as_ref()
+                        .is_some_and(|refusal| refusal.art == art.id() && refusal.area.is_none())
+                    {
+                        return false;
+                    }
+                    // Decoded here rather than kept decoded: the cache holds
+                    // sixty-four covers, and at this size the pixels are an
+                    // order of magnitude more memory than the bytes.
+                    #[cfg(test)]
+                    self.decodes.set(self.decodes.get() + 1);
+                    let Ok(source) = image::load_from_memory(art.source()) else {
+                        self.refused = Some(Refusal { art: art.id(), area: None });
+                        return false;
+                    };
+                    let dimensions = (source.width(), source.height());
+                    let size = fit(area, font, dimensions.0, dimensions.1);
+                    if size.0 == 0 || size.1 == 0 {
+                        self.refused =
+                            Some(Refusal { art: art.id(), area: Some((area.width, area.height)) });
+                        return false;
+                    }
+                    (source, dimensions, size)
+                };
                 let fitted = Size::new(size.0, size.1);
                 // Scale rather than Fit: Fit never enlarges, so a cover
                 // smaller than its box kept its own size while `centre`
@@ -419,6 +493,8 @@ mod native {
                         Some(Refusal { art: art.id(), area: Some((area.width, area.height)) });
                     return false;
                 };
+                #[cfg(test)]
+                self.encodes.set(self.encodes.get() + 1);
                 let shown = protocol.size();
                 self.cached = Some(Cached {
                     art: art.id(),
@@ -782,9 +858,10 @@ mod native {
             use ratatui::backend::TestBackend;
 
             // The banner in a 60x60px box fits at zero rows: no picture.
-            // Learning that costs one full decode — and only one, where it
-            // used to cost one per frame, thirty a second, for as long as
-            // the view stayed up with the mosaic drawing over the waste.
+            // The thumbnail's shape says so before any decode — and the
+            // refusal is remembered, where it used to be rediscovered
+            // every frame, thirty a second, for as long as the view stayed
+            // up with the mosaic drawing over the waste.
             let art = a_banner();
             let mut graphics = Graphics::forced(ProtocolType::Kitty);
             let mut terminal = Terminal::new(TestBackend::new(6, 3)).unwrap();
@@ -793,17 +870,22 @@ mod native {
                     .draw(|frame| assert!(!graphics.draw(frame, frame.area(), &art)))
                     .unwrap();
             }
-            assert_eq!(graphics.decodes.get(), 1, "one decode buys the whole answer");
+            assert_eq!(graphics.decodes.get(), 0, "the thumbnail's shape answers without a decode");
+            assert_eq!(graphics.encodes.get(), 0);
 
-            // A resize is a different question and earns a fresh attempt.
+            // A resize is a different question and earns a fresh attempt —
+            // a 240px-wide box wants more than the thumbnail's 128, so
+            // this one decodes the source.
             let mut terminal = Terminal::new(TestBackend::new(24, 12)).unwrap();
             let mut drew = false;
             terminal.draw(|frame| drew = graphics.draw(frame, frame.area(), &art)).unwrap();
             assert!(drew, "the banner fits a real panel");
-            assert_eq!(graphics.decodes.get(), 2);
+            assert_eq!(graphics.decodes.get(), 1);
+            assert_eq!(graphics.encodes.get(), 1);
 
-            // Bytes that never decode are refused at every size for the
-            // price of one failed attempt (a from_rgb art has no source).
+            // Bytes that never decode are refused at every size that needs
+            // them for the price of one failed attempt (a from_rgb art has
+            // no source, and two pixels fill no box).
             let pixels = crate::tui::art::Art::from_rgb(2, 2, vec![0; 12]).unwrap();
             for size in [(6, 3), (24, 12)] {
                 let mut terminal = Terminal::new(TestBackend::new(size.0, size.1)).unwrap();
@@ -811,7 +893,99 @@ mod native {
                     .draw(|frame| assert!(!graphics.draw(frame, frame.area(), &pixels)))
                     .unwrap();
             }
-            assert_eq!(graphics.decodes.get(), 3, "undecodable bytes are asked exactly once");
+            assert_eq!(graphics.decodes.get(), 2, "undecodable bytes are asked exactly once");
+        }
+
+        #[test]
+        fn a_small_box_draws_from_the_thumbnail_and_a_moved_box_re_encodes_nothing() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // A 400px cover into a 6x3 box: 60px a side, well inside the
+            // thumbnail — no decode, one encode.
+            let art = a_cover(400);
+            let mut graphics = Graphics::forced(ProtocolType::Kitty);
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            let mut drew = false;
+            terminal
+                .draw(|frame| {
+                    drew = graphics.draw(frame, Rect { x: 0, y: 0, width: 6, height: 3 }, &art)
+                })
+                .unwrap();
+            assert!(drew);
+            assert_eq!((graphics.decodes.get(), graphics.encodes.get()), (0, 1));
+
+            // The same box elsewhere on the screen — a scrolled row — is
+            // the warm cache drawn at the new place.
+            terminal
+                .draw(|frame| {
+                    drew = graphics.draw(frame, Rect { x: 20, y: 6, width: 6, height: 3 }, &art)
+                })
+                .unwrap();
+            assert!(drew);
+            assert_eq!(graphics.encodes.get(), 1, "a move costs no encode");
+            let placed = terminal.backend().buffer()[(20, 6)].symbol().contains('\u{10EEEE}');
+            assert!(placed, "the placeholders stand at the new place");
+
+            // A box the thumbnail cannot fill decodes the source.
+            terminal
+                .draw(|frame| drew = graphics.draw(frame, frame.area(), &art))
+                .unwrap();
+            assert!(drew);
+            assert_eq!((graphics.decodes.get(), graphics.encodes.get()), (1, 2));
+        }
+
+        /// What a queue row's cover costs to encode, by protocol, against
+        /// what the source decode alone used to cost every encode. Run
+        /// with `cargo test cover_encode_costs -- --ignored --nocapture`,
+        /// and again with `--release` for the shipped numbers.
+        #[test]
+        #[ignore]
+        fn cover_encode_costs() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // A 400x400 jpeg with detail in it, as covers actually ship.
+            let mut pixels = image::RgbImage::new(400, 400);
+            for (x, y, pixel) in pixels.enumerate_pixels_mut() {
+                let v = ((x * 7) ^ (y * 13)) as u8;
+                *pixel = image::Rgb([v, v.wrapping_mul(3), 255 - v]);
+            }
+            let mut jpeg = std::io::Cursor::new(Vec::new());
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 85)
+                .encode_image(&pixels)
+                .unwrap();
+            let jpeg = jpeg.into_inner();
+            let art = crate::tui::art::decode(&jpeg).unwrap();
+
+            let start = std::time::Instant::now();
+            for _ in 0..10 {
+                let _ = image::load_from_memory(&jpeg).unwrap();
+            }
+            let decode = start.elapsed() / 10;
+            eprintln!(
+                "decoding the {} KB source jpeg: {decode:?} — what every encode paid before",
+                jpeg.len() / 1024
+            );
+
+            for protocol in [ProtocolType::Kitty, ProtocolType::Sixel, ProtocolType::Iterm2] {
+                let mut graphics = Graphics::forced(protocol);
+                let mut terminal = Terminal::new(TestBackend::new(6, 3)).unwrap();
+                let start = std::time::Instant::now();
+                terminal
+                    .draw(|frame| assert!(graphics.draw(frame, frame.area(), &art)))
+                    .unwrap();
+                let encode = start.elapsed();
+                let start = std::time::Instant::now();
+                terminal
+                    .draw(|frame| assert!(graphics.draw(frame, frame.area(), &art)))
+                    .unwrap();
+                let again = start.elapsed();
+                eprintln!(
+                    "{protocol:?}: {encode:?} to encode a 6x3 cover from the thumbnail ({} decodes), {again:?} to draw it again",
+                    graphics.decodes.get()
+                );
+            }
         }
 
         #[test]

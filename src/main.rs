@@ -31,6 +31,8 @@ mod runtime;
 #[cfg(not(target_arch = "wasm32"))]
 mod serve;
 #[cfg(not(target_arch = "wasm32"))]
+mod gui;
+#[cfg(not(target_arch = "wasm32"))]
 mod kit;
 #[cfg(not(target_arch = "wasm32"))]
 mod setup;
@@ -80,7 +82,8 @@ mod quickconnect;
 /// Stand-in for the pure items of [quickconnect.rs] that the app logic
 /// reaches for (tunnel identities appear in saved-server lists, and the
 /// tunnel-path words appear in the header); the tunnel itself is iroh and
-/// stays native. Kept line-for-line identical.
+/// stays native. The shared items are kept identical; the parse is a
+/// refusal.
 #[cfg(target_arch = "wasm32")]
 mod quickconnect {
     /// Marks a remembered server as one reached through a tunnel rather than
@@ -111,10 +114,58 @@ mod quickconnect {
                 TunnelPath::Reconnecting => "reconnecting…",
             }
         }
+
+        pub fn from_kind(kind: u8) -> TunnelPath {
+            match kind {
+                1 => TunnelPath::Direct,
+                2 => TunnelPath::Relay,
+                _ => TunnelPath::Reconnecting,
+            }
+        }
+    }
+
+    /// What a tunnel's supervisor is doing, as the shared client reports it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TunnelStatus {
+        Connecting,
+        Connected,
+        Reconnecting,
+        Rejected,
+        Down,
+    }
+
+    impl TunnelStatus {
+        pub fn from_code(code: u8) -> TunnelStatus {
+            match code {
+                0 => TunnelStatus::Connecting,
+                1 => TunnelStatus::Connected,
+                2 => TunnelStatus::Reconnecting,
+                3 => TunnelStatus::Rejected,
+                _ => TunnelStatus::Down,
+            }
+        }
     }
 
     pub fn is_tunnel_id(server: &str) -> bool {
         server.starts_with(TUNNEL_ID_PREFIX)
+    }
+
+    pub fn local_url(port: u16) -> String {
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// The identity a code names; the browser cannot dial one, and it
+    /// cannot read a ticket either, so a pasted code is refused here.
+    pub struct PairingCode;
+
+    impl PairingCode {
+        pub fn server_id(&self) -> String {
+            String::new()
+        }
+    }
+
+    pub fn parse_code(_raw: &str) -> Result<PairingCode, String> {
+        Err("Quick Connect needs the native player — the tunnel is iroh, not HTTP".to_string())
     }
 
     /// A tunnel identity in a form worth showing someone, since the raw
@@ -128,9 +179,9 @@ mod quickconnect {
     }
 }
 
-// The wizard's locale table, embedded at compile time from locales/*.yml.
+// The locale table, embedded at compile time from locales/*.yml: the
+// wizard's, the GUI's, and the shared App's own notes — every target.
 // Crate root because t!() resolves crate::_rust_i18n_translate.
-#[cfg(not(target_arch = "wasm32"))]
 rust_i18n::i18n!("locales", fallback = "en");
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -157,7 +208,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Launch the interactive terminal player (the default)
-    Tui(cmd_library::ConnArgs),
+    Tui(TuiArgs),
+    /// Launch the GUI player — the mouse-first surface the installers open
+    /// (preview: Files browsing and playback, the bottom bar, Settings)
+    Gui(GuiArgs),
     /// Run the headless server-audio engine (jukebox mode)
     Serve(ServeArgs),
     /// Play one source and exit — end-to-end streaming/seek smoke test
@@ -202,6 +256,41 @@ enum Command {
     },
     /// List playlists, or show one playlist's tracks
     Playlists(cmd_library::PlaylistArgs),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Args)]
+struct TuiArgs {
+    #[command(flatten)]
+    conn: cmd_library::ConnArgs,
+
+    /// The server this player was installed beside — the installers'
+    /// launcher passes it. The entry is seeded as the default on first boot
+    /// and can never be removed from here; other servers come and go as
+    /// usual. A launch property: nothing is persisted about the mode.
+    #[arg(long, value_name = "URL")]
+    bundled_server: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Args)]
+struct GuiArgs {
+    #[command(flatten)]
+    conn: cmd_library::ConnArgs,
+
+    /// The server this player was installed beside — the installers'
+    /// launcher passes it. The entry is seeded as the default on first boot
+    /// and can never be removed from here; other servers come and go as
+    /// usual. A launch property: nothing is persisted about the mode.
+    #[arg(long, value_name = "URL")]
+    bundled_server: Option<String>,
+
+    /// Open with a torrent — a .torrent file's path or a magnet link — the
+    /// way the OS hands one to the app it registered for them. The GUI
+    /// asks whether to add it to the server or hand it to another app
+    /// (Settings › Torrents decides whether it keeps asking).
+    #[arg(long, value_name = "FILE-OR-MAGNET")]
+    torrent: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -284,7 +373,9 @@ fn main() {
     // A one-shot subcommand keeps its hands off the default location: see
     // logging::init.
     let run = match &cli.command {
-        None | Some(Command::Tui(_)) | Some(Command::Serve(_)) => logging::Run::Session,
+        None | Some(Command::Tui(_)) | Some(Command::Gui(_)) | Some(Command::Serve(_)) => {
+            logging::Run::Session
+        }
         Some(_) => logging::Run::OneShot,
     };
     if let Some(path) = logging::init(run) {
@@ -302,8 +393,16 @@ fn main() {
     engine::http::set_spool_dir(spool_dir);
 
     let serve_args = match (cli.command, cli.port) {
-        (Some(Command::Tui(conn)), _) => {
-            std::process::exit(tui::run(conn.server, conn.token));
+        (Some(Command::Tui(args)), _) => {
+            std::process::exit(tui::run(args.conn.server, args.conn.token, args.bundled_server));
+        }
+        (Some(Command::Gui(args)), _) => {
+            std::process::exit(gui::run(
+                args.conn.server,
+                args.conn.token,
+                args.torrent,
+                args.bundled_server,
+            ));
         }
         (Some(Command::Play(args)), _) => std::process::exit(cmd_play::run(args)),
         (Some(Command::Setup(args)), _) => std::process::exit(setup::run(args)),
@@ -324,7 +423,7 @@ fn main() {
         (Some(Command::Keys), _) => {
             // The bindings in force, not the built-in ones: someone asking
             // what their keys are wants the answer for their config.
-            let start = tui::startup(None, None);
+            let start = tui::startup(None, None, None);
             print!("{}", tui::keymap_for(&start.keys).to_config_toml());
             std::process::exit(0);
         }
@@ -361,7 +460,7 @@ fn main() {
             }
         }
         // Bare `mstream-player` launches the player.
-        None => std::process::exit(tui::run(None, None)),
+        None => std::process::exit(tui::run(None, None, None)),
     }
 }
 

@@ -21,7 +21,8 @@ use crate::player::PlayerStatus;
 use crate::tui::art::Art;
 
 use super::worker::{
-    ApiCmd, AudioCmd, AutoDjMode, DiscoverData, DiscoverDest, DiscoverNode, DjRequest, Event,
+    ApiCmd, AudioCmd, DiscoverData, DiscoverDest, DiscoverNode, DjFailure, DjRequest,
+    DjServerInfo, Event,
     LibraryData,
     LibraryNode,
 };
@@ -58,6 +59,19 @@ pub enum Effect {
     SaveSession,
     /// Look for servers advertising themselves on the local network.
     Discover,
+    /// Trust this server's own TLS certificate for the streams about to be
+    /// opened against it — a queued track's server, which may not be the
+    /// session's (contract clause 30). Idempotent; the shell registers the
+    /// host with the stream client.
+    Trust(String),
+    /// Fold `parent`'s peer list into the saved servers (contract clauses
+    /// 20–23): the shell reconciles the config and saves it when anything
+    /// changed. An empty list marks every peer of that parent missing.
+    SavePeers { parent: String, listed: Vec<(i64, String)> },
+    /// Write a server entry's Auto DJ library rules — its sources switched
+    /// off, its own rating floor and genre filter (auto-dj contract, clause
+    /// 51): the shell puts them on the entry and saves.
+    SaveDjLibrary { server: String, overrides: crate::config::DjLibraryOverrides },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +152,9 @@ pub enum SettingRow {
     BlendSkips,
     /// Pause and resume ride a short ramp instead of landing mid-wave.
     PauseFade,
+    /// The queue and the place in it come back on launch; anything
+    /// toggles it (contract clause 39).
+    ResumeQueue,
     /// The root row that opens the logs group.
     LogsMenu,
     /// Whether the debug log is written at all; anything toggles it.
@@ -277,6 +294,14 @@ pub enum Action {
     Activate,
     Back,
     AddToQueue,
+    /// The highlighted track goes in right after the playing one — at the
+    /// end when nothing plays — and nothing starts (contract clause 32).
+    AddNext,
+    /// The highlighted track goes in next and starts at once.
+    PlayNow,
+    /// The highlighted queue row trades places with its neighbour.
+    MoveQueueUp,
+    MoveQueueDown,
     PlayPause,
     NextTrack,
     PrevTrack,
@@ -311,6 +336,11 @@ pub enum Action {
     ToggleRepeat,
     ToggleShuffle,
     ToggleAutoDj,
+    /// The empty-queue openers (auto-dj contract, clauses 3, 4 and 16):
+    /// the filtered random song, or the library under a banner — the GUI's
+    /// empty-state buttons and chooser send these.
+    DjSurprise,
+    DjPick,
     /// `J` — open the Sonic Path tab aimed at the highlighted track.
     StartJourney,
     StartSearch,
@@ -494,6 +524,16 @@ impl Pane {
 
     /// How many rows are on screen, and how many there would be with no
     /// filter. `..` counts as neither: it is the way out, not a result.
+    /// Visit every track row this pane holds — the shown ones and the ones
+    /// a filter is hiding — so a patch reaches them all.
+    pub(crate) fn for_each_track_mut(&mut self, mut f: impl FnMut(&mut Track)) {
+        for entry in self.entries.iter_mut().chain(self.unfiltered.iter_mut().flatten()) {
+            if let Entry::Track { track, .. } = entry {
+                f(track);
+            }
+        }
+    }
+
     pub fn counts(&self) -> (usize, usize) {
         let real = |list: &[Entry]| list.iter().filter(|e| !matches!(e, Entry::Parent)).count();
         let shown = real(&self.entries);
@@ -541,11 +581,303 @@ impl Pane {
         }
         (tracks, offset)
     }
+
+    /// Whether the listing holds a playable row at all — the browse bar's
+    /// gate, asked every frame, so no track is copied to answer it.
+    pub fn has_tracks(&self) -> bool {
+        self.entries.iter().any(|entry| matches!(entry, Entry::Track { .. }))
+    }
+}
+
+/// Where a queued track lives: the saved server's identity — the string the
+/// config keys entries by (a URL, or a tunnel id) — and, for a federated
+/// peer, the peer's row id on that parent. Stamped when the track is
+/// queued, read when it plays: a queue can mix servers (contract clause
+/// 30), and a switch changes the browsed server, never the queue (11).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Origin {
+    pub server: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<i64>,
+}
+
+/// Why Auto DJ picked a row, for the queue's badge (auto-dj contract,
+/// clause 60): a sonic pick and a classic random one wear it differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DjMark {
+    pub sonic: bool,
+}
+
+/// One queue row: the track, where it came from, and whether the DJ chose
+/// it. Derefs to the track so every reader that only wants its tags keeps
+/// reading them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Queued {
+    pub origin: Origin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dj: Option<DjMark>,
+    pub track: Track,
+}
+
+impl std::ops::Deref for Queued {
+    type Target = Track;
+    fn deref(&self) -> &Track {
+        &self.track
+    }
+}
+
+/// A saved server as the queue needs to know it: enough to reach a track
+/// that lives somewhere other than the session (contract clause 30).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownServer {
+    /// The identity the config keys the entry by: its URL, a tunnel id, or
+    /// a peer's synthetic identity.
+    pub id: String,
+    /// What to call it: a peer's name, a tunnel's short identity, an
+    /// address.
+    pub name: String,
+    pub token: Option<String>,
+    pub self_signed: bool,
+    /// A federated peer: the parent it is reached through, and its row id
+    /// there. Everything else about it is the parent's.
+    pub peer: Option<(String, i64)>,
+    /// A tunnel server's pairing code — what a queued row on it is dialled
+    /// with when the session is elsewhere (contract clause 38).
+    pub pairing: Option<String>,
+    /// Auto DJ's rules for this library (auto-dj contract, clause 51).
+    pub dj: crate::config::DjLibraryOverrides,
+}
+
+/// How to reach a queued track's server right now: the base its stream URL
+/// is built on, the token that authenticates it, and whether its
+/// certificate is trusted by the user's choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reach {
+    pub base: String,
+    pub token: Option<String>,
+    pub self_signed: bool,
+    /// Through the parent's proxies, for this peer of it.
+    pub peer: Option<i64>,
+    /// Over a tunnel bridge: the loopback token every request there must
+    /// carry as `__lt=…` (the shared tunnel client's gate).
+    pub local_token: Option<String>,
+}
+
+/// A tunnel as the api worker last reported it — the registry the queue's
+/// rows and the session resolve against (contract clause 38).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TunnelState {
+    /// Being dialled; nothing can be asked of it yet.
+    Dialling,
+    /// Serving at `local_url`; every request carries `local_token`.
+    Up {
+        local_url: String,
+        local_token: String,
+        status: crate::quickconnect::TunnelStatus,
+        path: Option<crate::quickconnect::TunnelPath>,
+    },
+    /// The last dial failed. `rejected`: the server refused the credential.
+    Down { rejected: bool, why: String },
+}
+
+/// The queue without `server`'s rows, and where playback lands afterwards
+/// (contract clause 35): the current row's new position when it survives,
+/// else the first survivor after it, else the last survivor. `None` when
+/// no row belonged to `server`. Pure.
+pub(crate) struct Sweep {
+    pub keep: Vec<Queued>,
+    pub index: Option<usize>,
+    pub current_survives: bool,
+}
+
+pub(crate) fn queue_without(items: &[Queued], server: &str, current: Option<usize>) -> Option<Sweep> {
+    // A parent's rows and its peers' rows alike: a peer's origin names the
+    // parent (contract clause 28).
+    queue_without_by(items, |origin| crate::config::same_server(&origin.server, server), current)
+}
+
+/// [`queue_without`], for whichever rows `gone` says are leaving.
+pub(crate) fn queue_without_by(
+    items: &[Queued],
+    gone: impl Fn(&Origin) -> bool,
+    current: Option<usize>,
+) -> Option<Sweep> {
+    let mut keep = Vec::with_capacity(items.len());
+    let mut index = None;
+    let mut current_survives = false;
+    for (i, item) in items.iter().enumerate() {
+        if gone(&item.origin) {
+            continue;
+        }
+        if Some(i) == current {
+            current_survives = true;
+            index = Some(keep.len());
+        } else if current.is_some_and(|cur| i > cur) && !current_survives && index.is_none() {
+            index = Some(keep.len());
+        }
+        keep.push(item.clone());
+    }
+    if keep.len() == items.len() {
+        return None;
+    }
+    let index = if keep.is_empty() { None } else { Some(index.unwrap_or(keep.len() - 1)) };
+    Some(Sweep { keep, index, current_survives })
+}
+
+/// The failure walk's hold (contract clause 37): a row whose server did
+/// not answer. Nothing skips past it; the server is asked again on a
+/// cadence, and the row starts when it answers.
+#[derive(Debug, Clone)]
+pub struct Stall {
+    pub index: usize,
+    pub server: String,
+    pub asked: crate::clock::Instant,
+}
+
+/// How often a held row's server is asked again.
+const STALL_PROBE_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+/// Transient failures retried on the same row before it is skipped.
+const MAX_RETRIES: u32 = 2;
+
+/// How long a tunnel nobody references stays up before it is released
+/// (contract clause 38): a restore, a clear-then-refill and the launch's
+/// empty queue all pass through "nothing queued" for a moment, and the
+/// record tore a launch tunnel down mid-dial before it had this.
+pub(crate) const TUNNEL_RELEASE_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+/// The cold-dial ladder for a tunnel that would not come up — the record's
+/// `retryDelaySeconds` — then five minutes past the tenth failure.
+const TUNNEL_RETRY_LADDER_SECS: [u64; 5] = [5, 10, 20, 40, 60];
+const TUNNEL_RETRY_LONG_AFTER: u32 = 10;
+const TUNNEL_RETRY_LONG: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// How long after its `failures`th failed dial a tunnel is dialled again.
+pub(crate) fn tunnel_retry_delay(failures: u32) -> std::time::Duration {
+    if failures > TUNNEL_RETRY_LONG_AFTER {
+        return TUNNEL_RETRY_LONG;
+    }
+    let step = (failures.max(1) - 1) as usize;
+    std::time::Duration::from_secs(TUNNEL_RETRY_LADDER_SECS[step.min(TUNNEL_RETRY_LADDER_SECS.len() - 1)])
+}
+
+/// A guest ticket is asked for again once this much of its life is gone —
+/// the parent re-mints past the same point — so the token in hand never
+/// runs out mid-session (contract clause 27).
+const DIRECT_REFRESH_AT: f64 = 0.75;
+/// After a refresh that came back empty-handed, how long before a stale
+/// ticket is asked for again; a refused or expired token has the shorter
+/// gap, since every request is failing meanwhile.
+const DIRECT_REFRESH_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(300);
+const DIRECT_REFUSED_RETRY_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A peer's direct access as its parent last answered (contract clause 27):
+/// the ticket in hand, when it was fetched, whether the parent declined for
+/// the session, and the bookkeeping that spaces the asks.
+#[derive(Debug, Clone, Default)]
+pub struct DirectState {
+    pub ticket: Option<crate::api::types::DirectTicket>,
+    /// When a NEW ticket was fetched — the same one handed out again does
+    /// not restart the clock.
+    pub fetched_at: Option<crate::clock::Instant>,
+    /// The parent answered `direct: false`: the proxy for the session.
+    pub denied: bool,
+    /// An access request is out.
+    pub asking: bool,
+    pub last_ask: Option<crate::clock::Instant>,
+    pub last_failure: Option<crate::clock::Instant>,
+    /// The ticket the peer refused at the handshake, or that its wall
+    /// answered 401 to: not dialled again; the next ask is a re-mint.
+    pub refused: Option<String>,
+}
+
+/// Whether a ticket is past the point of asking for the next one: expired,
+/// or more than [`DIRECT_REFRESH_AT`] of its life gone. A ticket with no
+/// readable times is never stale on its own — a refusal renews it.
+pub(crate) fn ticket_stale(ticket: &crate::api::types::DirectTicket, now: std::time::SystemTime) -> bool {
+    match (ticket.issued_at, ticket.expires_at) {
+        (_, Some(expires)) if now >= expires => true,
+        (Some(issued), Some(expires)) => match expires.duration_since(issued) {
+            Ok(life) if !life.is_zero() => {
+                let refresh_at = issued + life.mul_f64(DIRECT_REFRESH_AT);
+                now >= refresh_at
+            }
+            _ => true,
+        },
+        _ => false,
+    }
+}
+
+/// A tunnel's failed dials, for the ladder.
+#[derive(Debug, Clone)]
+pub struct TunnelRetry {
+    pub failed_at: crate::clock::Instant,
+    pub failures: u32,
+}
+
+/// The failure walk's tunnel step (contract clause 37): a row parked on a
+/// tunnel that is not up yet. Nothing skips past it; it starts when the
+/// tunnel does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelWait {
+    pub index: usize,
+    pub id: String,
+}
+
+/// Whether an open failure reads as the network's rather than the file's:
+/// the server never answered, or the connection died on the way. A 4xx,
+/// a format the decoder does not speak, an address that cannot be built
+/// are the source's fault and skip at once (contract clause 37).
+pub(crate) fn transient_failure(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    if e.contains("invalid url") || e.contains("stream init failed") {
+        return false;
+    }
+    if ["401", "403", "404", "410", "unsupported", "decode", "format", "not found"]
+        .iter()
+        .any(|word| e.contains(word))
+    {
+        return false;
+    }
+    e.contains("no answer")
+        || e.contains("request failed")
+        || e.contains("connect")
+        || e.contains("reset")
+        || e.contains("timed out")
+        || e.contains("dns")
+        || e.contains("unreachable")
+        || e.contains("network")
+}
+
+/// The saved queue (contract clause 39): the rows with their origins, the
+/// playing row and the seconds into it, shuffle and repeat. Versioned so a
+/// file from another shape is ignored, never migrated (clause 40).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QueueSnapshot {
+    pub version: u32,
+    pub index: Option<usize>,
+    pub position: f64,
+    pub shuffle: bool,
+    pub repeat: String,
+    pub items: Vec<Queued>,
+}
+
+pub const QUEUE_SNAPSHOT_VERSION: u32 = 1;
+
+/// A position at or within a second of the track's end restarts the track:
+/// resuming there would seek past the end and stop on play (contract
+/// clause 40). Unchanged when the length is unknown.
+pub(crate) fn clamp_resume_position(position: f64, duration: Option<f64>) -> f64 {
+    if !position.is_finite() || position <= 0.0 {
+        return 0.0;
+    }
+    match duration {
+        Some(d) if d > 0.0 && position >= d - 1.0 => 0.0,
+        _ => position,
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct Queue {
-    pub items: Vec<Track>,
+    pub items: Vec<Queued>,
     pub current: Option<usize>,
     pub state: ListState,
     pub repeat: Repeat,
@@ -563,17 +895,51 @@ impl Default for Repeat {
 }
 
 impl Queue {
-    pub fn replace(&mut self, tracks: Vec<Track>) {
+    pub fn replace(&mut self, tracks: Vec<Queued>) {
         self.items = tracks;
         self.current = None;
         self.state.select(if self.items.is_empty() { None } else { Some(0) });
     }
 
-    pub fn push(&mut self, track: Track) {
+    pub fn push(&mut self, track: Queued) {
         self.items.push(track);
         if self.state.selected().is_none() {
             self.state.select(Some(0));
         }
+    }
+
+    /// Insert right after the playing row — at the end when nothing plays
+    /// — and say where it landed (contract clause 32).
+    pub fn insert_next(&mut self, track: Queued) -> usize {
+        let at = match self.current {
+            Some(current) if current < self.items.len() => current + 1,
+            _ => self.items.len(),
+        };
+        self.items.insert(at, track);
+        if self.state.selected().is_none() {
+            self.state.select(Some(0));
+        }
+        at
+    }
+
+    /// Move row `from` to sit at `to`, keeping `current` on the same track.
+    pub fn move_row(&mut self, from: usize, to: usize) {
+        if from >= self.items.len() || to >= self.items.len() || from == to {
+            return;
+        }
+        let item = self.items.remove(from);
+        self.items.insert(to, item);
+        self.current = self.current.map(|cur| {
+            if cur == from {
+                to
+            } else if from < cur && cur <= to {
+                cur - 1
+            } else if to <= cur && cur < from {
+                cur + 1
+            } else {
+                cur
+            }
+        });
     }
 
     pub fn clear(&mut self) {
@@ -696,6 +1062,11 @@ pub struct Message {
 // screen, and the [`Session`] it produces — lives in `session` (audit #56),
 // re-exported so every caller keeps saying `app::ConnectForm`.
 mod autodj;
+pub(crate) mod stats;
+mod track;
+pub use track::{PlaylistNames, RatingWrite};
+#[allow(unused_imports)] // the browser shell has no room yet
+pub use autodj::DjEdit;
 pub(crate) mod entries;
 mod nav;
 mod session;
@@ -716,50 +1087,71 @@ const RECENT_MEMORY: usize = 20;
 /// enough to show the character of the settings and no more.
 const DJ_SAMPLE_COUNT: usize = 3;
 
-/// One adjustable line in the Auto-DJ panel.
+/// One adjustable line in the Auto-DJ tab (docs/ux-contracts/auto-dj.md,
+/// clauses 40–53), in the room's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DjRow {
-    Mode,
-    Tightness,
+    /// On or off — and where it is picking from.
+    Armed,
+    SongsPerFetch,
+    Sonic,
+    Strictness,
     Anchor,
-    Tempo,
-    Key,
-    Rating,
+    EmptyQueue,
+    Bpm,
+    Tolerance,
+    Harmonic,
     Cooldown,
+    Rating,
+    Length,
+    Shortest,
+    Longest,
+    UnknownLength,
     Genres,
-    /// Not a setting — the row that asks what these settings actually pick.
-    /// A row rather than a key of its own, because in a tab (as opposed to
-    /// the modal this used to be) every key that means something has to be
-    /// one the rest of the player is not already using.
+    Keywords,
+    Sources,
+    /// Preview: three picks, none of them queued.
     Sample,
 }
 
 impl DjRow {
     pub fn label(self) -> &'static str {
         match self {
-            DjRow::Mode => "Mode",
-            DjRow::Tightness => "Sonic pool",
+            DjRow::Armed => "Auto DJ",
+            DjRow::SongsPerFetch => "Songs per fetch",
+            DjRow::Sonic => "Sonic similarity",
+            DjRow::Strictness => "Match strictness",
             DjRow::Anchor => "Anchor",
-            DjRow::Tempo => "Tempo window",
-            DjRow::Key => "Key matching",
-            DjRow::Rating => "Rating floor",
+            DjRow::EmptyQueue => "On an empty queue",
+            DjRow::Bpm => "BPM continuity",
+            DjRow::Tolerance => "Tolerance",
+            DjRow::Harmonic => "Harmonic mixing",
             DjRow::Cooldown => "Artist cooldown",
-            DjRow::Genres => "Genres",
-            DjRow::Sample => "Sample",
+            DjRow::Rating => "Minimum rating",
+            DjRow::Length => "Track length",
+            DjRow::Shortest => "Shortest",
+            DjRow::Longest => "Longest",
+            DjRow::UnknownLength => "Unknown length",
+            DjRow::Genres => "Genre filter",
+            DjRow::Keywords => "Keyword filter",
+            DjRow::Sources => "Sources",
+            DjRow::Sample => "Preview",
         }
     }
 }
 
-/// The Auto-DJ tab's own state. Rows shown depend on what the server can do,
-/// so they are rebuilt when a ping says what that is.
+/// The Auto-DJ tab's own state. The rows shown depend on the settings and
+/// on what the DJ's server offers, so they are rebuilt when either changes.
 #[derive(Debug)]
 pub struct DjPanel {
     pub rows: Vec<DjRow>,
     pub row: usize,
-    /// Genre chooser, when open over the tab. The one modal left in Auto-DJ:
-    /// a list you toggle through needs the keyboard to itself.
+    /// The genre chooser, when open over the tab: a list you toggle
+    /// through needs the keyboard to itself.
     pub genres: Option<GenrePicker>,
-    /// Sample picks from the current settings, and what the pool looked like.
+    /// The sources chooser (clause 42), when open — the same shape.
+    pub sources: Option<GenrePicker>,
+    /// Preview's picks, and what the pool looked like.
     pub sample: Vec<Track>,
     pub sample_pending: bool,
     pub pool: Option<crate::api::types::SonicReport>,
@@ -768,9 +1160,10 @@ pub struct DjPanel {
 impl Default for DjPanel {
     fn default() -> Self {
         DjPanel {
-            rows: DjPanel::rows_for(crate::api::types::Capabilities::default()),
+            rows: DjPanel::rows_for(&dj::Settings::default(), None, false),
             row: 0,
             genres: None,
+            sources: None,
             sample: Vec::new(),
             sample_pending: false,
             pool: None,
@@ -779,34 +1172,67 @@ impl Default for DjPanel {
 }
 
 impl DjPanel {
-    fn rows_for(capabilities: crate::api::types::Capabilities) -> Vec<DjRow> {
-        let mut rows = vec![DjRow::Mode];
-        // No index, no pool — and no row promising one.
-        if capabilities.discovery {
-            rows.push(DjRow::Tightness);
-            rows.push(DjRow::Anchor);
+    /// The rows these settings and this server give (clauses 43–50): a
+    /// switch's details show while it is on; a server KNOWN to predate a
+    /// floor hides what it cannot take; a peer has no rating row (a key
+    /// has no stars); the sources row wants more than one library.
+    fn rows_for(settings: &dj::Settings, info: Option<&DjServerInfo>, is_peer: bool) -> Vec<DjRow> {
+        let version = info.and_then(|i| i.version.as_deref());
+        let filters = !dj::known_older(version, dj::FLOOR_FILTERS);
+        let mut rows = vec![DjRow::Armed];
+        if !dj::known_older(version, dj::FLOOR_BATCH) {
+            rows.push(DjRow::SongsPerFetch);
         }
-        rows.extend([
-            DjRow::Tempo,
-            DjRow::Key,
-            DjRow::Rating,
-            DjRow::Cooldown,
-            DjRow::Genres,
-            DjRow::Sample,
-        ]);
+        rows.push(DjRow::Sonic);
+        if settings.sonic {
+            rows.extend([DjRow::Strictness, DjRow::Anchor]);
+        }
+        rows.push(DjRow::EmptyQueue);
+        if filters {
+            rows.push(DjRow::Bpm);
+            if settings.bpm {
+                rows.push(DjRow::Tolerance);
+            }
+            rows.push(DjRow::Harmonic);
+        }
+        rows.push(DjRow::Cooldown);
+        if !is_peer {
+            rows.push(DjRow::Rating);
+        }
+        if !dj::known_older(version, dj::FLOOR_LENGTH) {
+            rows.push(DjRow::Length);
+            if settings.length {
+                rows.extend([DjRow::Shortest, DjRow::Longest]);
+                if settings.min_seconds > 0 || settings.max_seconds < dj::LENGTH_RAIL_SECONDS {
+                    rows.push(DjRow::UnknownLength);
+                }
+            }
+        }
+        if filters {
+            rows.push(DjRow::Genres);
+        }
+        rows.push(DjRow::Keywords);
+        if info.is_some_and(|i| i.libraries.len() > 1) {
+            rows.push(DjRow::Sources);
+        }
+        rows.push(DjRow::Sample);
         rows
     }
 
-    /// Fit the rows to what this server offers, keeping the cursor on screen.
-    /// Called when a ping lands, which is the only thing that can change the
-    /// answer.
-    pub(super) fn rebuild(&mut self, capabilities: crate::api::types::Capabilities) {
-        self.rows = DjPanel::rows_for(capabilities);
-        self.row = self.row.min(self.rows.len().saturating_sub(1));
+    /// Fit the rows to the settings and the server, keeping the cursor on
+    /// the row it was on where that row survives.
+    pub(super) fn rebuild(&mut self, settings: &dj::Settings, info: Option<&DjServerInfo>, is_peer: bool) {
+        let selected = self.selected();
+        self.rows = DjPanel::rows_for(settings, info, is_peer);
+        self.row = self
+            .rows
+            .iter()
+            .position(|r| *r == selected)
+            .unwrap_or_else(|| self.row.min(self.rows.len().saturating_sub(1)));
     }
 
     pub fn selected(&self) -> DjRow {
-        self.rows.get(self.row).copied().unwrap_or(DjRow::Mode)
+        self.rows.get(self.row).copied().unwrap_or(DjRow::Armed)
     }
 }
 
@@ -824,6 +1250,9 @@ pub enum Capture {
     /// The full-screen Discover panel's seed: what to look around from,
     /// which is how you ask about a track without playing it.
     Discover,
+    /// Auto DJ's opening song, chosen from the library (auto-dj contract,
+    /// clause 4): the DJ switches on when the row lands, not before.
+    DjSeed,
 }
 
 impl Capture {
@@ -832,6 +1261,7 @@ impl Capture {
         match self {
             Capture::Sonic(side) => side.shout(),
             Capture::Discover => "SEED",
+            Capture::DjSeed => "OPENER",
         }
     }
 }
@@ -939,6 +1369,32 @@ pub struct SonicPath {
     /// the panel straight back in — the one thing the seeding promises not
     /// to do. Cleared by "Start over", which is a pristine panel again.
     pub touched: bool,
+    /// A build answered 403 and the ping is being re-read to find out why —
+    /// the route deliberately says "switched off" and "nothing scanned yet"
+    /// the same way, so no reason is named until the probe comes back. The
+    /// user is never shown an explanation that then has to be retracted.
+    pub probe: bool,
+    /// Why the stops list is empty, when it is — what separates "worth a
+    /// retry" from "the feature is gone" and "pick another song". The note
+    /// carries the sentence; this carries the branch.
+    pub empty: SonicEmpty,
+}
+
+/// The typed half of an empty journey answer (the note is the worded half).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SonicEmpty {
+    /// Nothing structural: the server looked and found no arc. Retryable.
+    #[default]
+    Plain,
+    /// The feature is on but nothing is scanned yet — a retry resolves
+    /// once the discovery scan has run.
+    ScanPending,
+    /// The feature was switched off under us. Nothing to retry; the next
+    /// real ping takes the entry point with it.
+    TurnedOff,
+    /// An end has no embedding yet; the note names which. The fix is
+    /// editing or waiting, so no retry is offered.
+    NotAnalyzed,
 }
 
 impl Default for SonicPath {
@@ -953,6 +1409,8 @@ impl Default for SonicPath {
             fetched: false,
             note: None,
             touched: false,
+            probe: false,
+            empty: SonicEmpty::Plain,
         }
     }
 }
@@ -965,7 +1423,7 @@ impl SonicPath {
         }
     }
 
-    fn set_side(&mut self, side: SonicSide, track: Option<Track>) {
+    pub(crate) fn set_side(&mut self, side: SonicSide, track: Option<Track>) {
         self.touched = true;
         match side {
             SonicSide::Start => self.start = track,
@@ -1012,12 +1470,14 @@ pub struct NowDiscover {
 }
 
 /// Choosing which genres the filter applies to.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct GenrePicker {
     /// Every genre the server knows, alphabetical as it sent them.
     pub all: Vec<String>,
     pub row: usize,
     pub loading: bool,
+    /// Why the list could not be fetched, when it could not.
+    pub failed: Option<String>,
 }
 
 /// The next track, as announced to the engine for a crossfade — plus
@@ -1048,8 +1508,48 @@ pub struct App {
     /// Which server this is, whose token, as one value — not five parallel
     /// fields that every connect path had to remember together (audit #56).
     pub session: Session,
+    /// Every saved server as the queue needs it — enough to reach a track
+    /// that lives somewhere other than the session (contract clause 30).
+    /// Seeded by the shell from the config and the credentials; the
+    /// session's own server is answered from `session` first.
+    pub servers: Vec<KnownServer>,
+    /// Every tunnel the api worker holds open, by identity — the session's
+    /// own and the ones the queue needs — as the worker last reported it
+    /// (contract clause 38).
+    pub tunnels: std::collections::BTreeMap<String, TunnelState>,
+    /// The tunnel identity the session is waiting on: `begin` opened it and
+    /// connects through it the moment it comes up.
+    pub pending_tunnel: Option<String>,
+    /// Failed dials per tunnel, for the ladder; cleared when one comes up.
+    pub tunnel_retry: std::collections::BTreeMap<String, TunnelRetry>,
+    /// When each tunnel stopped being referenced, for the release grace.
+    pub tunnel_release: std::collections::BTreeMap<String, crate::clock::Instant>,
+    /// The row parked on a tunnel that is not up yet (contract clause 37).
+    pub tunnel_wait: Option<TunnelWait>,
+    /// Direct access per peer, by the peer's identity (contract clause 27).
+    pub direct: std::collections::BTreeMap<String, DirectState>,
+    /// The parents whose capability payload said `federationDirect`.
+    pub direct_offered: std::collections::BTreeSet<String>,
+    /// Booted with `--bundled-server`: the installer's own server, which the
+    /// servers room never offers to remove (contract clauses 50–58).
+    pub bundled_server: Option<String>,
+    /// Save the queue and the place in it, and bring both back on launch
+    /// (contract clause 39). The shell's saver reads it; Settings toggles it.
+    pub resume_queue: bool,
+    /// A restored queue's place — row and seconds in — opened paused and
+    /// never auto-played (contract clause 40). Spent by the first play,
+    /// which starts that row there; kept as the saved position until then,
+    /// so a checkpoint written before anything plays keeps the spot.
+    pub resume_spot: Option<(usize, f64)>,
     pub connected: bool,
     pub connecting: bool,
+    /// Whether this shell draws the App's own connect screen while no
+    /// session is up. The TUI does, and the keys typed into its fields
+    /// must not fire playback — so [`App::act`] routes everything there.
+    /// The GUI has forms of its own and shows the room's words instead, so
+    /// its transport stays live for the queue's rows from other servers
+    /// (multi-server contract, clauses 11 and 13); it switches this off.
+    pub connect_screen: bool,
     pub connect: ConnectForm,
 
     pub tab: Tab,
@@ -1071,6 +1571,25 @@ pub struct App {
     /// Breadcrumb through the tag hierarchy; the last element is the view on
     /// screen. Always non-empty once the Library tab has been opened.
     pub library_stack: Drill<LibraryNode>,
+    /// The albums reply, kept whole beside the pane's rows: the GUI's grid
+    /// wants each album's art file and year, which the row labels flatten
+    /// away. Same bargain as `search_hits`. Cleared with the session — the
+    /// list belongs to one server.
+    pub albums: Option<Vec<crate::api::types::Album>>,
+    /// The drilled artist's albums, kept whole for the GUI's artist wall the
+    /// way `albums` is kept for the root wall (library-rooms contract,
+    /// clause 7): the pane holds them as text rows, the wall wants the
+    /// covers and years.
+    pub artist_albums: Option<(String, Vec<crate::api::types::Album>)>,
+    /// The full block the sheet or Song info asked for last (track-actions
+    /// contract, clause 8), by the track's path.
+    pub track_info: Option<Track>,
+    /// A server's playlist names for the add-to-playlist picker
+    /// (track-actions contract, clause 12).
+    pub playlist_names: PlaylistNames,
+    /// The rating writes out, for the latest-wins revert (clause 11).
+    pub(crate) rating_writes: Vec<RatingWrite>,
+    rating_seq: u64,
     /// The whole search reply, kept rather than flattened. Every class comes
     /// back in one response, so moving between them costs nothing.
     pub search_hits: Option<Box<crate::api::types::SearchResults>>,
@@ -1110,9 +1629,24 @@ pub struct App {
     pub capabilities: crate::api::types::Capabilities,
     /// The server's libraries, as the ping named them. Empty until it answers,
     /// which is the same as "no reason to stop anywhere in particular".
-    libraries: Vec<String>,
-    pub autodj: AutoDjMode,
-    /// How Auto-DJ chooses, beyond the mode.
+    pub(crate) libraries: Vec<String>,
+    /// The server Auto DJ is armed FOR, apart from the session's (auto-dj
+    /// contract, clause 19); `None` is off.
+    pub dj_server: Option<String>,
+    /// What that server offers, once its probe has answered.
+    pub dj_info: Option<DjServerInfo>,
+    /// The session lane (clause 10).
+    pub(crate) lane: autodj::DjLane,
+    /// The empty-queue chooser, when open (clause 2).
+    pub dj_chooser: Option<autodj::DjChooser>,
+    /// The Auto-DJ tab's keyword entry (clause 49): the word being typed,
+    /// while Enter on the Keywords row has it open.
+    pub dj_keyword: Option<String>,
+    /// The server an opening question is about, until it is answered.
+    dj_target: Option<String>,
+    /// The old `autodj` mode was on: arm on the session's server at start.
+    dj_migrate: bool,
+    /// How Auto DJ chooses (clause 51).
     pub dj: dj::Settings,
     /// The Auto-DJ tab of the full-screen view: which row the cursor is on,
     /// what a sample produced, the genre chooser when it is open. Always
@@ -1134,10 +1668,6 @@ pub struct App {
     /// the artist cooldown, so the session anchors on where it has been
     /// rather than only on the song currently sounding.
     autodj_recent: Vec<Track>,
-    /// Round-trip cursor the random-songs picker uses to avoid repeats.
-    autodj_ignore: Vec<u32>,
-    /// A request is in flight; don't pile on another.
-    autodj_pending: bool,
     pub status: PlayerStatus,
     /// The source asked for but not yet heard back about.
     ///
@@ -1152,6 +1682,16 @@ pub struct App {
     /// skipping so a queue of nothing but broken files stops rather than
     /// looping.
     failures: usize,
+    /// Retries of the row being played after a transient failure whose
+    /// server answered the probe (contract clause 37); reset by a play
+    /// that took.
+    retries: u32,
+    /// A transient failure waiting on its probe: the row it happened on.
+    probing: Option<usize>,
+    /// The hold (contract clause 37): a row whose server did not answer.
+    /// Playback stays on it, the server is asked again every few seconds,
+    /// and the row starts the moment it answers.
+    pub stall: Option<Stall>,
     /// The debug log's two switches, mirrored from crate::logging for the
     /// Settings rows: whether anything is written, and how loud once it is.
     /// `log_touched` is what lets quitting persist only choices actually
@@ -1205,6 +1745,9 @@ pub struct App {
     /// re-roll a shuffled pick each time, and to know whether the engine's
     /// announcement is stale without asking it.
     announced: Option<AnnouncedNext>,
+    /// Play reporting (docs/ux-contracts/play-reporting.md): the open
+    /// session, the outbox, the batch in flight.
+    pub stats: stats::Stats,
     pub now_playing: Option<Track>,
     /// Covers fetched this session, keyed by the server's art filename.
     /// `None` records both "asked, nothing there" and "asked, still
@@ -1286,9 +1829,23 @@ impl App {
                 tunnel_code: None,
                 token,
                 username,
+                self_signed: false,
+                peer: None,
             },
+            servers: Vec::new(),
+            tunnels: Default::default(),
+            pending_tunnel: None,
+            tunnel_retry: Default::default(),
+            tunnel_release: Default::default(),
+            tunnel_wait: None,
+            direct: Default::default(),
+            direct_offered: Default::default(),
+            bundled_server: None,
+            resume_queue: true,
+            resume_spot: None,
             connected: false,
             connecting: false,
+            connect_screen: true,
             connect: ConnectForm::default(),
             tab: Tab::Files,
             focus: Focus::Browser,
@@ -1297,6 +1854,12 @@ impl App {
             files: Pane::default(),
             library: Pane::default(),
             library_stack: Drill::new(LibraryNode::Root),
+            albums: None,
+            artist_albums: None,
+            track_info: None,
+            playlist_names: PlaylistNames::Unasked,
+            rating_writes: Vec::new(),
+            rating_seq: 0,
             search_hits: None,
             search_stack: Drill::new(SearchNode::Root),
             queue_column: false,
@@ -1316,7 +1879,13 @@ impl App {
             queue: Queue::default(),
             capabilities: Default::default(),
             libraries: Vec::new(),
-            autodj: AutoDjMode::Off,
+            dj_server: None,
+            dj_info: None,
+            lane: Default::default(),
+            dj_chooser: None,
+            dj_keyword: None,
+            dj_target: None,
+            dj_migrate: false,
             dj: dj::Settings::default(),
             dj_panel: DjPanel::default(),
             sonic: SonicPath::default(),
@@ -1325,11 +1894,12 @@ impl App {
             capture: None,
             sonic_playlist_name: None,
             autodj_recent: Vec::new(),
-            autodj_ignore: Vec::new(),
-            autodj_pending: false,
             status: PlayerStatus::default(),
             starting: None,
             failures: 0,
+            retries: 0,
+            probing: None,
+            stall: None,
             browse_undo: None,
             log_write: crate::logging::writing(),
             log_level: crate::logging::level(),
@@ -1344,6 +1914,7 @@ impl App {
             blend_skips: false,
             pause_fade: false,
             announced: None,
+            stats: stats::Stats::default(),
             now_playing: None,
             art: HashMap::new(),
             waveforms: HashMap::new(),
@@ -1411,7 +1982,8 @@ impl App {
         self.volume = prefs.volume.clamp(0.0, 1.0);
         self.queue.repeat = Repeat::from_label(&prefs.repeat);
         self.queue.shuffle = prefs.shuffle;
-        self.autodj = AutoDjMode::from_label(&prefs.autodj);
+        self.dj_server = prefs.autodj_server.clone().filter(|s| !s.trim().is_empty());
+        self.dj_migrate = self.dj_server.is_none() && !prefs.autodj.is_empty() && prefs.autodj != "off";
         // The same clamp as the engine's, so the file and the behavior
         // agree; anything unreadable costs the blend and nothing else.
         self.crossfade = if prefs.crossfade_seconds.is_finite() {
@@ -1422,6 +1994,7 @@ impl App {
         self.gapless = prefs.gapless;
         self.blend_skips = prefs.blend_skips;
         self.pause_fade = prefs.pause_fade;
+        self.resume_queue = prefs.resume_queue;
         self.dj = dj::Settings::from_prefs(&prefs.dj);
         self
     }
@@ -1434,11 +2007,12 @@ impl App {
             volume: (self.volume * 100.0).round() / 100.0,
             repeat: self.queue.repeat.label().to_string(),
             shuffle: self.queue.shuffle,
-            autodj: self.autodj.label().to_string(),
+            autodj_server: self.dj_server.clone(),
             crossfade_seconds: self.crossfade,
             gapless: self.gapless,
             blend_skips: self.blend_skips,
             pause_fade: self.pause_fade,
+            resume_queue: self.resume_queue,
             dj: self.dj.to_prefs(),
             // Settings from a newer player belong to the file, not to this
             // app's state; `PlayerPrefs::adopt` is what carries them across.
@@ -1448,7 +2022,24 @@ impl App {
 
     /// Effects to run at startup.
     pub fn start(&mut self) -> Vec<Effect> {
-        let effects = self.begin();
+        let mut effects = self.begin();
+        // The three-mode panel's "on" never named a server: it arms on the
+        // remembered session's (the contract's migration table).
+        if std::mem::take(&mut self.dj_migrate) {
+            let id = if self.session.server_id.is_empty() {
+                self.session.server.clone()
+            } else {
+                self.session.server_id.clone()
+            };
+            if !id.is_empty() {
+                self.dj_server = Some(id);
+            }
+        }
+        // Remembered as on comes back ARMED, never playing (clause 61); its
+        // server is probed as soon as it can be reached.
+        if self.dj_armed() {
+            effects.extend(self.probe_dj());
+        }
         self.note_pending(&effects);
         effects
     }
@@ -1458,11 +2049,15 @@ impl App {
             || self.editing_query
             || self.filtering
             || self.sonic_playlist_name.is_some()
+            || self.dj_keyword.is_some()
         {
             InputMode::Editing
-        } else if self.dj_panel.genres.is_some() {
-            // The last modal in the player, and it is drawn over the
-            // full-screen view, so it still owns the keyboard there.
+        } else if self.dj_panel.genres.is_some()
+            || self.dj_panel.sources.is_some()
+            || self.dj_chooser.is_some()
+        {
+            // The DJ's choosers are modals drawn over either screen, so they
+            // own the keyboard there.
             InputMode::Panel
         } else if self.fullscreen {
             InputMode::Now
@@ -1516,7 +2111,7 @@ impl App {
         self.pane_for(self.tab)
     }
 
-    fn pane_mut(&mut self) -> &mut Pane {
+    pub(crate) fn pane_mut(&mut self) -> &mut Pane {
         let tab = self.tab;
         self.pane_for_mut(tab)
     }
@@ -1565,7 +2160,14 @@ impl App {
                             ..PlayerStatus::default()
                         };
                     }
-                    AudioCmd::Stop => self.starting = None,
+                    AudioCmd::Stop => {
+                        self.starting = None;
+                        // Playback stops: the open session closes the way
+                        // the end-of-track path said, else as stopped; the
+                        // next tick posts it (play-reporting clause 5).
+                        let requested = self.stats.ending.take().unwrap_or(stats::Outcome::Stopped);
+                        self.stats_end(requested);
+                    }
                     _ => {}
                 }
                 continue;
@@ -1703,6 +2305,16 @@ impl App {
     /// is a loopback port that means nothing to anyone, so it is named by its
     /// identity instead.
     pub fn server_display(&self) -> String {
+        // A peer is named, and named through its parent.
+        if let Some((parent, _)) = &self.session.peer {
+            let name = self
+                .servers
+                .iter()
+                .find(|s| crate::config::same_server(&s.id, &self.session.server_id))
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| self.session.server_id.clone());
+            return format!("{name} via {}", crate::quickconnect::display_server(parent));
+        }
         if crate::quickconnect::is_tunnel_id(&self.session.server_id) {
             return crate::quickconnect::display_server(&self.session.server_id);
         }
@@ -1732,8 +2344,10 @@ impl App {
     }
 
     fn act(&mut self, action: Action) -> Vec<Effect> {
-        // The connect screen swallows everything except quit.
-        if !self.connected {
+        // The connect screen swallows everything except quit — where a
+        // shell shows one. A shell without it keeps the queue's transport
+        // working while the session is down (see `connect_screen`).
+        if !self.connected && self.connect_screen {
             return self.handle_connect_action(action);
         }
         // Panels are modal: they own the arrow keys and the letters they use,
@@ -1743,7 +2357,13 @@ impl App {
         if self.log_view.is_some() {
             return self.handle_log_view_action(action);
         }
-        if self.dj_panel.genres.is_some() {
+        if self.dj_keyword.is_some() {
+            return self.handle_dj_keyword_action(action);
+        }
+        if self.dj_chooser.is_some() {
+            return self.handle_dj_chooser_action(action);
+        }
+        if self.dj_panel.genres.is_some() || self.dj_panel.sources.is_some() {
             return self.handle_genre_action(action);
         }
         if self.sonic_playlist_name.is_some()
@@ -1790,6 +2410,12 @@ impl App {
                     return match who {
                         Capture::Sonic(_) => self.open_sonic_tab(),
                         Capture::Discover => self.open_discover_tab(),
+                        // The DJ was never switched on; it stays off.
+                        Capture::DjSeed => {
+                            self.dj_target = None;
+                            self.info("Auto DJ stays off");
+                            Vec::new()
+                        }
                     };
                 }
                 // The guaranteed way out of the settings value rows, where
@@ -1881,6 +2507,10 @@ impl App {
                 }
             }
             Action::AddToQueue => self.add_selected_to_queue(),
+            Action::AddNext => self.queue_selected_next(false),
+            Action::PlayNow => self.queue_selected_next(true),
+            Action::MoveQueueUp => self.move_queue_row(-1),
+            Action::MoveQueueDown => self.move_queue_row(1),
 
             Action::PlayPause => self.play_pause(),
             Action::NextTrack => self.skip(true),
@@ -1916,10 +2546,21 @@ impl App {
             Action::VolumeUp => self.change_volume(VOLUME_STEP),
             Action::VolumeDown => self.change_volume(-VOLUME_STEP),
 
+            // On the Auto-DJ tab's Keywords row, x takes the last word back.
+            Action::RemoveFromQueue if self.on_dj_tab() && self.dj_panel.selected() == DjRow::Keywords => {
+                self.dj_remove_last_keyword()
+            }
             Action::RemoveFromQueue => self.remove_from_queue(),
             Action::ClearQueue => {
                 self.queue.clear();
                 self.now_playing = None;
+                self.stall = None;
+                self.tunnel_wait = None;
+                // A cleared queue is somewhere new: the DJ's lane starts over
+                // (auto-dj contract, the flows), the DJ staying armed. The
+                // last note was about rows that are gone.
+                self.lane.reset();
+                self.message = None;
                 vec![Effect::Audio(AudioCmd::Stop)]
             }
             Action::ToggleRepeat => {
@@ -1935,7 +2576,9 @@ impl App {
                 ));
                 Vec::new()
             }
-            Action::ToggleAutoDj => self.cycle_autodj(),
+            Action::ToggleAutoDj => self.toggle_autodj(),
+            Action::DjSurprise => self.dj_surprise(),
+            Action::DjPick => self.dj_pick_from_library(),
             Action::StartJourney => self.start_journey(),
 
             Action::StartSearch => {
@@ -2048,7 +2691,7 @@ impl App {
         match tab {
             Tab::Library if self.library_stack.unopened() => {
                 self.library_stack.enter(LibraryNode::Root);
-                self.library.set(library_root_entries());
+                self.library.set(library_root_entries(self.session.peer.is_some()));
                 Vec::new()
             }
             Tab::Discover => {
@@ -2173,7 +2816,7 @@ impl App {
             // Enter on a neighbour queues it and starts it.
             if let Some(track) = self.now_discover_selected() {
                 let label = track.display_name();
-                self.queue.push(track);
+                self.push_queue(track);
                 self.info(format!("playing {label}"));
                 return self.play_index(self.queue.items.len() - 1);
             }
@@ -2277,6 +2920,7 @@ impl App {
                 | SettingRow::Gapless
                 | SettingRow::BlendSkips
                 | SettingRow::PauseFade
+                | SettingRow::ResumeQueue
                 | SettingRow::LogWrite
                 | SettingRow::LogLevel => self.adjust_setting(1),
             },
@@ -2288,7 +2932,7 @@ impl App {
                 if tracks.is_empty() {
                     return Vec::new();
                 }
-                self.queue.replace(tracks);
+                self.replace_queue(tracks);
                 self.play_index(offset)
             }
         }
@@ -2409,7 +3053,7 @@ impl App {
                 };
                 match node {
                     LibraryNode::Root => {
-                        self.library.set(library_root_entries());
+                        self.library.set(library_root_entries(self.session.peer.is_some()));
                         Vec::new()
                     }
                     node => {
@@ -2522,6 +3166,11 @@ impl App {
         } else {
             "off · pause lands at once".to_string()
         };
+        let resume = if self.resume_queue {
+            "on · the queue and your place come back on launch".to_string()
+        } else {
+            "off · each launch starts with an empty queue".to_string()
+        };
         vec![
             Entry::Parent,
             Entry::Setting {
@@ -2539,6 +3188,11 @@ impl App {
                 label: "Pause fade".into(),
                 detail: pause_fade,
                 row: SettingRow::PauseFade,
+            },
+            Entry::Setting {
+                label: "Resume queue".into(),
+                detail: resume,
+                row: SettingRow::ResumeQueue,
             },
         ]
     }
@@ -2637,6 +3291,11 @@ impl App {
             SettingRow::PauseFade => {
                 self.pause_fade = !self.pause_fade;
                 Effect::Audio(AudioCmd::SetPauseFade(self.pause_fade))
+            }
+            SettingRow::ResumeQueue => {
+                self.resume_queue = !self.resume_queue;
+                self.refresh_settings_rows();
+                return Vec::new();
             }
             SettingRow::LogWrite => {
                 self.log_write = !self.log_write;
@@ -3016,7 +3675,7 @@ impl App {
                 _ => None,
             },
             Focus::Queue => {
-                self.queue.state.selected().and_then(|i| self.queue.items.get(i)).cloned()
+                self.queue.state.selected().and_then(|i| self.queue.items.get(i)).map(|item| item.track.clone())
             }
         }
     }
@@ -3029,7 +3688,8 @@ impl App {
         if let Some(track) = self.now_discover_selected() {
             let label = track.display_name();
             let was_empty = self.queue.items.is_empty();
-            self.queue.push(track);
+            let queued = self.queued(track);
+            self.queue.push(queued);
             self.info(format!("queued {label}"));
             if was_empty && self.status.is_idle() {
                 return self.play_index(0);
@@ -3044,7 +3704,8 @@ impl App {
         };
         let label = track.display_name();
         let was_empty = self.queue.items.is_empty();
-        self.queue.push(*track);
+        let queued = self.queued(*track);
+        self.queue.push(queued);
         self.info(format!("queued {label}"));
 
         // Nothing playing and nothing queued before: start immediately.
@@ -3054,31 +3715,886 @@ impl App {
         Vec::new()
     }
 
+    /// Whether the queue is what the keys act on: its column, or the Queue
+    /// tab of the full-screen view, whatever the hidden browser has focused.
+    fn on_the_queue(&self) -> bool {
+        if self.fullscreen { self.now_tab() == NowTab::Queue } else { self.focus == Focus::Queue }
+    }
+
     fn remove_from_queue(&mut self) -> Vec<Effect> {
-        // The Queue tab of the full-screen view is the queue, whatever the
-        // hidden browser screen happens to have focused.
-        let on_the_queue =
-            if self.fullscreen { self.now_tab() == NowTab::Queue } else { self.focus == Focus::Queue };
-        if !on_the_queue {
+        if !self.on_the_queue() {
             return Vec::new();
         }
         let Some(index) = self.queue.state.selected() else {
             return Vec::new();
         };
+        self.remove_queue_row(index)
+    }
+
+    /// Take row `index` out of the queue — the TUI's `d`, the GUI's hover
+    /// verb. The playing row removed stops playback rather than silently
+    /// continuing something no longer queued.
+    pub(crate) fn remove_queue_row(&mut self, index: usize) -> Vec<Effect> {
         if self.queue.remove(index) {
-            // The playing track was removed: stop rather than silently
-            // continuing something that is no longer in the queue.
             self.now_playing = None;
+            self.stall = None;
+            self.tunnel_wait = None;
             return vec![Effect::Audio(AudioCmd::Stop)];
         }
+        Vec::new()
+    }
+
+    /// The highlighted queue row trades places with its neighbour
+    /// (contract clause 32). The announcement is re-made by the funnel:
+    /// what comes next may just have moved.
+    fn move_queue_row(&mut self, delta: isize) -> Vec<Effect> {
+        if !self.on_the_queue() {
+            return Vec::new();
+        }
+        let Some(from) = self.queue.state.selected() else {
+            return Vec::new();
+        };
+        let to = from as isize + delta;
+        if to < 0 || to as usize >= self.queue.items.len() {
+            return Vec::new();
+        }
+        self.queue.move_row(from, to as usize);
+        self.queue.state.select(Some(to as usize));
+        self.announced = None;
+        Vec::new()
+    }
+
+    /// The track the queue verbs act on: the full-screen Discover panel's
+    /// row when that is in front, else the browser's highlighted track.
+    fn selected_playable(&self) -> Option<Track> {
+        if let Some(track) = self.now_discover_selected() {
+            return Some(track);
+        }
+        if self.focus != Focus::Browser {
+            return None;
+        }
+        match self.pane().selected() {
+            Some(Entry::Track { track, .. }) => Some((**track).clone()),
+            _ => None,
+        }
+    }
+
+    /// Add next, and Play now (contract clause 32): the highlighted track
+    /// goes in right after the playing row — at the end when nothing plays
+    /// — and either waits its turn or starts at once. Neither starts an
+    /// empty queue by itself (clause 33).
+    fn queue_selected_next(&mut self, play: bool) -> Vec<Effect> {
+        let Some(track) = self.selected_playable() else {
+            return Vec::new();
+        };
+        let label = track.display_name();
+        let item = self.queued(track);
+        let index = self.queue.insert_next(item);
+        // Whatever was announced as next has just been cut in front of.
+        self.announced = None;
+        if play {
+            return self.play_index(index);
+        }
+        self.info(format!("{label} — next"));
         Vec::new()
     }
 
     /// One row's media URL, by the same road [`App::play_index`] builds the
     /// one it plays. None only when the URL cannot be built at all, which
     /// play_index would have refused too.
-    fn queue_url(&self, track: &Track) -> Option<String> {
-        urls::media_url(&self.session.server, &track.filepath, self.session.token.as_deref()).ok()
+    fn queue_url(&self, item: &Queued) -> Option<String> {
+        self.stream_url(item).ok().map(|(url, _)| url)
+    }
+
+    /// The session's identity as a queue origin: what the config keys the
+    /// server by — its URL, or a tunnel id — never the loopback address.
+    pub(crate) fn origin(&self) -> Origin {
+        // A peer session's rows are the parent's rows, through the proxy:
+        // the origin names the parent and the peer's id on it.
+        if let Some((parent, id)) = &self.session.peer {
+            return Origin { server: parent.clone(), peer: Some(*id) };
+        }
+        let server = if self.session.server_id.is_empty() {
+            self.session.server.clone()
+        } else {
+            self.session.server_id.clone()
+        };
+        Origin { server, peer: None }
+    }
+
+    /// Stamp a track with where it came from — the session — on its way
+    /// into the queue (contract clause 30).
+    pub(crate) fn queued(&self, track: Track) -> Queued {
+        Queued { dj: None, origin: self.origin(), track }
+    }
+
+    pub(crate) fn queued_all(&self, tracks: Vec<Track>) -> Vec<Queued> {
+        let origin = self.origin();
+        tracks.into_iter().map(|track| Queued { dj: None, origin: origin.clone(), track }).collect()
+    }
+
+    /// Replace the queue with these tracks, stamped as the session's.
+    pub(crate) fn replace_queue(&mut self, tracks: Vec<Track>) {
+        let tracks = self.queued_all(tracks);
+        self.queue.replace(tracks);
+    }
+
+    /// Stamp a track with an origin it already has — a queue row's, the
+    /// playing track's — on its way back into the queue.
+    pub(crate) fn queued_from(&self, origin: &Origin, track: Track) -> Queued {
+        Queued { dj: None, origin: origin.clone(), track }
+    }
+
+    /// Add next and Play now for a track named outright — the sheet's
+    /// verbs (track-actions contract, clause 5): after the playing row, at
+    /// the end when nothing plays; waiting its turn or starting at once.
+    pub(crate) fn queue_track_next(&mut self, origin: &Origin, track: Track, play: bool) -> Vec<Effect> {
+        let label = track.display_name();
+        let item = self.queued_from(origin, track);
+        let index = self.queue.insert_next(item);
+        self.announced = None;
+        if play {
+            return self.play_index(index);
+        }
+        self.info(format!("{label} — next"));
+        Vec::new()
+    }
+
+    /// Add to end for a track named outright (clause 6): appends, and an
+    /// empty, idle queue starts on it.
+    pub(crate) fn queue_track_end(&mut self, origin: &Origin, track: Track) -> Vec<Effect> {
+        let label = track.display_name();
+        let was_empty = self.queue.items.is_empty();
+        let item = self.queued_from(origin, track);
+        self.queue.push(item);
+        self.info(format!("queued {label}"));
+        if was_empty && self.status.is_idle() {
+            return self.play_index(0);
+        }
+        Vec::new()
+    }
+
+    /// A grip drag crossing a row (clause 18): the row moves, the cursor
+    /// follows it, and what was announced as next is re-made.
+    pub(crate) fn drag_queue_row(&mut self, from: usize, to: usize) {
+        self.queue.move_row(from, to);
+        self.queue.state.select(Some(to));
+        self.announced = None;
+    }
+
+    /// Append one track, stamped as the session's.
+    pub(crate) fn push_queue(&mut self, track: Track) {
+        let track = self.queued(track);
+        self.queue.push(track);
+    }
+
+    /// The identity whose tunnel carries this session's bytes: the session's
+    /// own server, or a peer's parent.
+    pub(crate) fn session_transport(&self) -> &str {
+        match &self.session.peer {
+            // A peer reached over a tunnel of its own carries its own bytes.
+            Some(_) if self.session_is_direct() => &self.session.server_id,
+            Some((parent, _)) => parent,
+            None => &self.session.server_id,
+        }
+    }
+
+    /// A peer session whose requests go to the peer's own tunnel rather
+    /// than through the parent's proxies (contract clause 27).
+    pub(crate) fn session_is_direct(&self) -> bool {
+        self.session.peer.is_some()
+            && self
+                .tunnel_at(&self.session.server)
+                .is_some_and(|(id, _)| crate::config::same_server(id, &self.session.server_id))
+    }
+
+    /// The ticket in hand for a peer, by its identity.
+    pub(crate) fn direct_ticket(&self, peer_id: &str) -> Option<&crate::api::types::DirectTicket> {
+        self.direct.get(peer_id).and_then(|state| state.ticket.as_ref())
+    }
+
+    /// The peers the session and the queue reference — (identity, parent,
+    /// row id on the parent), each once.
+    fn peer_targets(&self) -> Vec<(String, String, i64)> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        let mut add = |parent: &str, id: i64| {
+            let pid = crate::config::peer_identity(parent, id);
+            if seen.insert(pid.clone()) {
+                out.push((pid, parent.to_string(), id));
+            }
+        };
+        if let Some((parent, id)) = &self.session.peer {
+            add(parent, *id);
+        }
+        for item in &self.queue.items {
+            if let Some(id) = item.origin.peer {
+                add(&item.origin.server, id);
+            }
+        }
+        out
+    }
+
+    /// Whether a peer's own tunnel is worth dialling: its parent offers
+    /// direct access, nobody declined this session, and a ticket the peer
+    /// has not refused is in hand.
+    fn direct_ready(&self, peer_id: &str, parent: &str) -> bool {
+        if !self.direct_offered.contains(parent) {
+            return false;
+        }
+        self.direct.get(peer_id).is_some_and(|state| {
+            !state.denied
+                && state.ticket.as_ref().is_some_and(|t| state.refused.as_deref() != Some(t.ticket.as_str()))
+        })
+    }
+
+    /// Whether a peer's ticket needs asking for: none, refused, expired, or
+    /// stale (contract clause 27).
+    fn ticket_due(&self, peer_id: &str, parent: &str, now_wall: std::time::SystemTime) -> bool {
+        if !self.direct_offered.contains(parent) {
+            return false;
+        }
+        match self.direct.get(peer_id) {
+            None => true,
+            Some(state) if state.denied => false,
+            Some(state) => match &state.ticket {
+                None => true,
+                Some(ticket) => {
+                    state.refused.as_deref() == Some(ticket.ticket.as_str()) || ticket_stale(ticket, now_wall)
+                }
+            },
+        }
+    }
+
+    /// The tunnel serving at `base`, if one is — how a loopback address is
+    /// mapped back to the identity it belongs to, and the token requests
+    /// there carry.
+    pub(crate) fn tunnel_at(&self, base: &str) -> Option<(&str, &str)> {
+        self.tunnels.iter().find_map(|(id, state)| match state {
+            TunnelState::Up { local_url, local_token, .. }
+                if crate::config::same_server(local_url, base) =>
+            {
+                Some((id.as_str(), local_token.as_str()))
+            }
+            _ => None,
+        })
+    }
+
+    /// The loopback token the session's own requests carry, when its
+    /// address is a tunnel's bridge.
+    pub(crate) fn session_local_token(&self) -> Option<String> {
+        self.tunnel_at(&self.session.server).map(|(_, token)| token.to_string())
+    }
+
+    /// What to call a server identity: the book's name, else the identity
+    /// as it should be shown.
+    pub(crate) fn server_name_of(&self, id: &str) -> String {
+        self.servers
+            .iter()
+            .find(|s| crate::config::same_server(&s.id, id))
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| crate::quickconnect::display_server(id))
+    }
+
+    /// Whether a row is the session's own — same server, same peer or none.
+    pub(crate) fn is_session_origin(&self, origin: &Origin) -> bool {
+        let mine = self.origin();
+        !mine.server.is_empty()
+            && crate::config::same_server(&origin.server, &mine.server)
+            && origin.peer == mine.peer
+    }
+
+    /// How to reach a queued track's server right now (contract clause 30):
+    /// the session answers for its own server; a saved standard server
+    /// answers from the book; a tunnel server through its bridge while the
+    /// worker holds one open (contract clause 38) — a row on a tunnel that
+    /// is closed or still dialling cannot be asked for yet.
+    pub(crate) fn reach(&self, origin: &Origin) -> Result<Reach, String> {
+        // The session's own rows: whatever it is, it is reached already. A
+        // peer session over the peer's own tunnel serves plain `/media`
+        // with the guest token (contract clause 27).
+        if self.is_session_origin(origin) {
+            let direct = self.session_is_direct();
+            return Ok(Reach {
+                base: self.session.server.clone(),
+                token: self.session.token.clone(),
+                self_signed: if direct { false } else { self.session.self_signed },
+                peer: if direct { None } else { origin.peer },
+                local_token: self.session_local_token(),
+            });
+        }
+        if let Some(id) = origin.peer {
+            // A peer with a tunnel of its own serves its bytes itself, with
+            // the guest token in the ordinary slot (contract clause 27)…
+            let pid = crate::config::peer_identity(&origin.server, id);
+            if let Some(TunnelState::Up { local_url, local_token, .. }) = self.tunnels.get(&pid)
+                && let Some(ticket) = self.direct_ticket(&pid)
+            {
+                return Ok(Reach {
+                    base: local_url.clone(),
+                    token: Some(ticket.guest_token.clone()),
+                    self_signed: false,
+                    peer: None,
+                    local_token: Some(local_token.clone()),
+                });
+            }
+            // …and rides its parent's proxies otherwise, however the parent
+            // is reached.
+            let parent = self.reach(&Origin { server: origin.server.clone(), peer: None })?;
+            return Ok(Reach { peer: Some(id), ..parent });
+        }
+        let shown = crate::quickconnect::display_server(&origin.server);
+        let known = self
+            .servers
+            .iter()
+            .find(|s| s.peer.is_none() && crate::config::same_server(&s.id, &origin.server));
+        if crate::quickconnect::is_tunnel_id(&origin.server) {
+            return match self.tunnels.get(&origin.server) {
+                Some(TunnelState::Up { local_url, local_token, .. }) => Ok(Reach {
+                    base: local_url.clone(),
+                    token: known.and_then(|s| s.token.clone()),
+                    // Plain http on loopback: TLS trust never comes up.
+                    self_signed: false,
+                    peer: None,
+                    local_token: Some(local_token.clone()),
+                }),
+                Some(TunnelState::Dialling) => {
+                    Err(format!("{shown} is still connecting — its tunnel is being dialled"))
+                }
+                _ => Err(format!("{shown} is not connected — its tunnel is closed")),
+            };
+        }
+        let Some(known) = known else {
+            return Err(format!("{shown} is no longer a saved server"));
+        };
+        Ok(Reach {
+            base: known.id.clone(),
+            token: known.token.clone(),
+            self_signed: known.self_signed,
+            peer: None,
+            local_token: None,
+        })
+    }
+
+    /// A queued track's stream URL, built from its own server, with how
+    /// that server was reached (contract clause 30). A peer's bytes come
+    /// through the parent's stream proxy (clause 27).
+    pub(crate) fn stream_url(&self, item: &Queued) -> Result<(String, Reach), String> {
+        let reach = self.reach(&item.origin)?;
+        let url = match reach.peer {
+            Some(peer) => urls::peer_media_url(&reach.base, peer, &item.filepath, reach.token.as_deref())?,
+            None => urls::media_url(&reach.base, &item.filepath, reach.token.as_deref())?,
+        };
+        // A bridge answers only requests that carry its loopback token.
+        let url = urls::with_local_token(url, reach.local_token.as_deref());
+        Ok((url, reach))
+    }
+
+    /// A removed server takes its queued tracks with it, silently (contract
+    /// clause 35): the playing row keeps playing where it survives; else
+    /// playback lands on the next survivor — playing when something was —
+    /// and a queue that belonged wholly to the server ends as a Clear would.
+    pub(crate) fn drop_server_items(&mut self, server: &str) -> Vec<Effect> {
+        // Its DJ goes with it (auto-dj contract, clause 10).
+        let mut effects = self.dj_server_removed(server);
+        let sweep = queue_without(&self.queue.items, server, self.queue.current);
+        effects.extend(self.apply_sweep(sweep));
+        effects
+    }
+
+    /// A forgotten peer takes its queued rows with it (contract clause
+    /// 23), by the same rule as a removed server.
+    pub(crate) fn drop_peer_items(&mut self, parent: &str, id: i64) -> Vec<Effect> {
+        let mut effects = self.dj_server_removed(&crate::config::peer_identity(parent, id));
+        let sweep = queue_without_by(
+            &self.queue.items,
+            |origin| crate::config::same_server(&origin.server, parent) && origin.peer == Some(id),
+            self.queue.current,
+        );
+        effects.extend(self.apply_sweep(sweep));
+        effects
+    }
+
+    fn apply_sweep(&mut self, sweep: Option<Sweep>) -> Vec<Effect> {
+        let Some(sweep) = sweep else {
+            return Vec::new();
+        };
+        let was_playing = self.status.playing && !self.status.paused;
+        let was_on = !self.status.is_idle();
+        // Rows shifted under the announcement; the refresh at the end
+        // re-announces from wherever playback lands.
+        self.announced = None;
+        self.queue.items = sweep.keep;
+        if self.queue.items.is_empty() {
+            self.queue.clear();
+            self.now_playing = None;
+            self.failures = 0;
+            let mut effects = vec![Effect::Audio(AudioCmd::Stop)];
+            effects.extend(self.refresh_prepared());
+            return effects;
+        }
+        let mut effects = match (sweep.current_survives, sweep.index) {
+            (true, Some(index)) => {
+                self.queue.current = Some(index);
+                self.queue.state.select(Some(index));
+                Vec::new()
+            }
+            (false, Some(index)) if was_playing => self.play_index(index),
+            (false, Some(index)) => {
+                self.now_playing = None;
+                self.queue.current = None;
+                self.queue.state.select(Some(index));
+                if was_on { vec![Effect::Audio(AudioCmd::Stop)] } else { Vec::new() }
+            }
+            _ => Vec::new(),
+        };
+        effects.extend(self.refresh_prepared());
+        effects
+    }
+
+    /// What to write down for next time (contract clause 39): every row,
+    /// the playing one and the seconds into it — or the spot a restore is
+    /// still holding, so a checkpoint before anything plays cannot write
+    /// track 1 / 0:00 over the real place. `None` for an empty queue.
+    pub fn queue_snapshot(&self) -> Option<QueueSnapshot> {
+        if self.queue.items.is_empty() {
+            return None;
+        }
+        let (index, position) = match (self.resume_spot, self.queue.current) {
+            (Some((index, position)), _) if self.status.is_idle() => (Some(index), position),
+            (_, Some(current)) => {
+                let position = if self.status.is_idle() { 0.0 } else { self.status.position };
+                (Some(current), position)
+            }
+            (_, None) => (None, 0.0),
+        };
+        Some(QueueSnapshot {
+            version: QUEUE_SNAPSHOT_VERSION,
+            index,
+            position,
+            shuffle: self.queue.shuffle,
+            repeat: self.queue.repeat.label().to_string(),
+            items: self.queue.items.clone(),
+        })
+    }
+
+    /// Bring a saved queue back (contract clause 40): rows whose server is
+    /// no longer known are dropped, the playing row keeps its place when it
+    /// survives (else the index is clamped), a position at the end restarts
+    /// the track, and nothing plays — the spot waits for the first play.
+    /// Returns whether anything came back.
+    pub fn restore_queue(&mut self, snapshot: QueueSnapshot) -> bool {
+        if snapshot.version != QUEUE_SNAPSHOT_VERSION {
+            return false;
+        }
+        let live = self.origin();
+        let known = |origin: &Origin| {
+            origin.server == live.server
+                || self.servers.iter().any(|s| crate::config::same_server(&s.id, &origin.server))
+        };
+        let mut kept = Vec::with_capacity(snapshot.items.len());
+        let mut index = None;
+        for (i, item) in snapshot.items.into_iter().enumerate() {
+            if !known(&item.origin) {
+                continue;
+            }
+            if snapshot.index == Some(i) {
+                index = Some(kept.len());
+            }
+            kept.push(item);
+        }
+        if kept.is_empty() {
+            return false;
+        }
+        let index = index.or_else(|| snapshot.index.map(|i| i.min(kept.len() - 1)));
+        self.queue.replace(kept);
+        self.queue.shuffle = snapshot.shuffle;
+        self.queue.repeat = Repeat::from_label(&snapshot.repeat);
+        if let Some(index) = index {
+            let duration = self.queue.items[index].metadata.duration;
+            self.queue.current = Some(index);
+            self.queue.state.select(Some(index));
+            self.now_playing = Some(self.queue.items[index].track.clone());
+            self.resume_spot = Some((index, clamp_resume_position(snapshot.position, duration)));
+        }
+        true
+    }
+
+    /// A queued track that cannot even be asked for — its server is gone
+    /// from the list, its tunnel is closed. It walks on exactly as a track
+    /// the engine refused would (contract clause 37).
+    fn unplayable(&mut self, index: usize, why: String) -> Vec<Effect> {
+        self.queue.start(index);
+        self.now_playing = self.queue.items.get(index).map(|item| item.track.clone());
+        self.starting = None;
+        self.tunnel_wait = None;
+        // Nothing to probe: the server could not even be named.
+        self.skip_failed(Some(&why))
+    }
+
+    /// Park on row `index` until its tunnel is up (contract clause 37's
+    /// tunnel step): the row is current and named, nothing plays, and
+    /// `TunnelUp` for that tunnel starts it — at the restored spot when the
+    /// row is holding one. The reconcile keeps dialling meanwhile.
+    fn hold_for_tunnel(&mut self, index: usize, item: &Queued) -> Vec<Effect> {
+        self.queue.start(index);
+        self.now_playing = Some(item.track.clone());
+        self.starting = None;
+        self.stall = None;
+        self.probing = None;
+        self.announced = None;
+        let id = item.origin.server.clone();
+        self.info(format!("Connecting to {}…", crate::quickconnect::display_server(&id)));
+        self.tunnel_wait = Some(TunnelWait { index, id });
+        // Whatever was on goes quiet until the tunnel answers.
+        vec![Effect::Audio(AudioCmd::Stop)]
+    }
+
+    /// Play row `index`, seeking to the restored position when the row is
+    /// the spot a restore is holding (contract clause 40) — a seek right
+    /// behind the play, which the engine answers once the source is open.
+    /// The spot is spent by the play itself, so a row parked for its tunnel
+    /// keeps it for when the tunnel comes up.
+    pub(crate) fn play_row_resuming(&mut self, index: usize) -> Vec<Effect> {
+        let spot = self.resume_spot.filter(|(row, _)| *row == index);
+        let mut effects = self.play_index(index);
+        if let Some((_, position)) = spot
+            && position > 0.0
+            && effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. })))
+        {
+            effects.push(Effect::Audio(AudioCmd::Seek(position)));
+        }
+        effects
+    }
+
+    /// One source would not play (contract clause 37). A failure that reads
+    /// as the network's asks the row's server whether it answers at all
+    /// before deciding; the file's own fault skips at once. Shared by the
+    /// engine's refusal and a URL that could not be built.
+    fn playback_failed(&mut self, error: String) -> Vec<Effect> {
+        // A direct peer's wall stopped honouring the guest token: renew it
+        // through the parent and try the row again, the proxy being the
+        // fallback (contract clause 27). The row waits on the peer's own
+        // tunnel identity, which the renewal's outcome resolves.
+        if (error.contains("401") || error.contains("403"))
+            && let Some(index) = self.queue.current
+            && let Some(item) = self.queue.items.get(index)
+            && let Some(id) = item.origin.peer
+        {
+            let pid = crate::config::peer_identity(&item.origin.server, id);
+            if matches!(self.tunnels.get(&pid), Some(TunnelState::Up { .. }))
+                && let Some(state) = self.direct.get_mut(&pid)
+                && let Some(ticket) = &state.ticket
+            {
+                state.refused = Some(ticket.ticket.clone());
+                state.last_ask = None;
+                let what = self.server_name_of(&pid);
+                self.tunnel_wait = Some(TunnelWait { index, id: pid });
+                self.info(format!("Renewing access to {what}…"));
+                return vec![Effect::Audio(AudioCmd::Stop)];
+            }
+        }
+        if transient_failure(&error)
+            && let Some(index) = self.queue.current
+            && let Some(item) = self.queue.items.get(index)
+            && let Ok(reach) = self.reach(&item.origin)
+        {
+            self.probing = Some(index);
+            return vec![Effect::Api(ApiCmd::Probe {
+                server: item.origin.server.clone(),
+                base: reach.base,
+                self_signed: reach.self_signed,
+                local_token: reach.local_token,
+            })];
+        }
+        self.skip_failed(Some(&error))
+    }
+
+    /// Walk past the row that would not play: say so — the record's words,
+    /// with the track named and the reason kept — count it, and carry on;
+    /// or stop once every row has failed in turn.
+    fn skip_failed(&mut self, reason: Option<&str>) -> Vec<Effect> {
+        let what = self
+            .now_playing
+            .as_ref()
+            .map(Track::display_name)
+            .unwrap_or_else(|| "that track".to_string());
+        self.retries = 0;
+        self.failures += 1;
+        // A queue where nothing plays must not be walked forever —
+        // with repeat on, skipping would go round and round.
+        if self.failures >= self.queue.items.len().max(1) {
+            self.failures = 0;
+            self.now_playing = None;
+            self.queue.current = None;
+            self.error("Can't play these tracks — check the files or server.");
+            return vec![Effect::Audio(AudioCmd::Stop)];
+        }
+        match reason {
+            Some(reason) => self.error(format!("Skipping a track that won’t play — {what}: {reason}")),
+            None => self.error(format!("Skipping a track that won’t play — {what}")),
+        }
+        // Manual, so repeat-one doesn't sit on the broken track.
+        self.skip(true)
+    }
+
+    /// The probe answered (contract clause 37). A server that answers means
+    /// the row's own open failed: try it again, a bounded number of times,
+    /// then skip it. One that does not answer holds the row: playback stays
+    /// on it, paused, until the server is back.
+    fn probe_answered(&mut self, server: &str, reachable: bool) -> Vec<Effect> {
+        if let Some(stall) = self.stall.as_ref().filter(|s| s.server == server) {
+            if !reachable {
+                return Vec::new();
+            }
+            let index = stall.index;
+            self.stall = None;
+            self.retries = 0;
+            self.info("back online — resuming");
+            return self.play_index(index);
+        }
+        let Some(index) = self.probing.take() else {
+            return Vec::new();
+        };
+        if self.queue.current != Some(index) {
+            return Vec::new(); // the user moved on while the probe was out
+        }
+        if reachable {
+            if self.retries < MAX_RETRIES {
+                self.retries += 1;
+                return self.play_index(index);
+            }
+            return self.skip_failed(None);
+        }
+        self.stall = Some(Stall {
+            index,
+            server: server.to_string(),
+            asked: crate::clock::Instant::now(),
+        });
+        self.error("Lost the connection — paused. Resumes when you’re back online.");
+        vec![Effect::Audio(AudioCmd::Stop)]
+    }
+
+    /// Once per loop iteration: a held row's server is asked again on a
+    /// cadence (contract clause 37).
+    pub fn tick(&mut self) -> Vec<Effect> {
+        self.tick_at(crate::clock::Instant::now())
+    }
+
+    pub fn tick_at(&mut self, now: crate::clock::Instant) -> Vec<Effect> {
+        let mut effects = self.reconcile_direct(now);
+        effects.extend(self.reconcile_tunnels(now));
+        effects.extend(self.probe_stall(now));
+        effects.extend(self.stats_flush_due(now));
+        effects
+    }
+
+    /// Once a tick: every referenced peer whose parent offers direct access
+    /// is asked for a ticket when it holds none, a stale one, or the one
+    /// the peer refused — spaced by the record's gaps — and never again
+    /// once the parent declined (contract clause 27).
+    pub(crate) fn reconcile_direct(&mut self, now: crate::clock::Instant) -> Vec<Effect> {
+        let now_wall = std::time::SystemTime::now();
+        let mut asks = Vec::new();
+        for (pid, parent, id) in self.peer_targets() {
+            if !self.direct_offered.contains(&parent) {
+                continue;
+            }
+            let state = self.direct.get(&pid).cloned().unwrap_or_default();
+            if state.denied || state.asking {
+                continue;
+            }
+            let refused = state.refused.is_some()
+                && state.refused == state.ticket.as_ref().map(|t| t.ticket.clone());
+            let expired = state.ticket.as_ref().and_then(|t| t.expires_at).is_some_and(|e| now_wall >= e);
+            let stale = state.ticket.as_ref().is_some_and(|t| ticket_stale(t, now_wall));
+            if !(state.ticket.is_none() || refused || expired || stale) {
+                continue;
+            }
+            // Attempts are spaced after a refusal or an expiry (every
+            // request is failing, so the short gap); only failed attempts
+            // are spaced for a merely stale ticket.
+            let urgent = refused || expired;
+            let held_back = match (urgent, state.last_ask, state.last_failure) {
+                (true, Some(asked), _) => now.duration_since(asked) < DIRECT_REFUSED_RETRY_GAP,
+                (false, _, Some(failed)) => now.duration_since(failed) < DIRECT_REFRESH_MIN_GAP,
+                _ => false,
+            };
+            if held_back {
+                continue;
+            }
+            // The access call rides the parent, however the parent is
+            // reached; a parent whose tunnel is not up yet is a target
+            // meanwhile (see `want_for_peer`).
+            let Ok(reach) = self.reach(&Origin { server: parent.clone(), peer: None }) else { continue };
+            asks.push((pid, parent, id, reach, refused));
+        }
+        let mut effects = Vec::new();
+        for (pid, parent, id, reach, refresh) in asks {
+            let state = self.direct.entry(pid).or_default();
+            state.asking = true;
+            state.last_ask = Some(now);
+            effects.push(Effect::Api(ApiCmd::DirectAccess { parent, id, reach, refresh }));
+        }
+        effects
+    }
+
+    /// A held row's server is asked again on a cadence (contract clause 37).
+    fn probe_stall(&mut self, now: crate::clock::Instant) -> Vec<Effect> {
+        let Some(stall) = self.stall.as_mut() else {
+            return Vec::new();
+        };
+        if now.duration_since(stall.asked) < STALL_PROBE_EVERY {
+            return Vec::new();
+        }
+        stall.asked = now;
+        let index = stall.index;
+        let Some(item) = self.queue.items.get(index) else {
+            self.stall = None;
+            return Vec::new();
+        };
+        let Ok(reach) = self.reach(&item.origin) else {
+            self.stall = None;
+            return Vec::new();
+        };
+        vec![Effect::Api(ApiCmd::Probe {
+            server: item.origin.server.clone(),
+            base: reach.base,
+            self_signed: reach.self_signed,
+            local_token: reach.local_token,
+        })]
+    }
+
+    /// The tunnels the session and the queue need right now (contract
+    /// clause 38): the session's transport when it is one, and every
+    /// queued row's server that is one — a peer's rows name their parent.
+    pub(crate) fn tunnel_targets(&self) -> std::collections::BTreeSet<String> {
+        let mut wanted = std::collections::BTreeSet::new();
+        match &self.session.peer {
+            Some((parent, id)) => self.want_for_peer(&mut wanted, parent, *id),
+            None => {
+                let transport = self.session_transport();
+                if crate::quickconnect::is_tunnel_id(transport) {
+                    wanted.insert(transport.to_string());
+                }
+            }
+        }
+        for item in &self.queue.items {
+            match item.origin.peer {
+                Some(id) => self.want_for_peer(&mut wanted, &item.origin.server, id),
+                None => {
+                    if crate::quickconnect::is_tunnel_id(&item.origin.server) {
+                        wanted.insert(item.origin.server.clone());
+                    }
+                }
+            }
+        }
+        // And the DJ's server while it is armed (auto-dj contract, clause 19).
+        self.dj_tunnel_target(&mut wanted);
+        wanted
+    }
+
+    /// What a referenced peer needs kept up (contract clause 27): a tunnel
+    /// of its own when its parent offers direct access and a ticket is in
+    /// hand; and its parent's tunnel, when the parent is one, until the
+    /// peer is direct — and whenever the ticket is due, since the access
+    /// call rides the parent.
+    fn want_for_peer(&self, wanted: &mut std::collections::BTreeSet<String>, parent: &str, id: i64) {
+        let pid = crate::config::peer_identity(parent, id);
+        if self.direct_ready(&pid, parent) {
+            wanted.insert(pid.clone());
+        }
+        if crate::quickconnect::is_tunnel_id(parent) {
+            let peer_up = matches!(self.tunnels.get(&pid), Some(TunnelState::Up { .. }));
+            if !peer_up || self.ticket_due(&pid, parent, std::time::SystemTime::now()) {
+                wanted.insert(parent.to_string());
+            }
+        }
+    }
+
+    /// What tunnel `id` is dialled with: the session's own code when the
+    /// session is on it, else the pairing the book saved for it.
+    fn credential_for(&self, id: &str) -> Option<String> {
+        // A peer's own tunnel dials with the guest ticket its parent handed
+        // out — unless the peer refused that one.
+        if id.starts_with(crate::config::PEER_ID_PREFIX) {
+            return self.direct.get(id).and_then(|state| {
+                state
+                    .ticket
+                    .as_ref()
+                    .filter(|t| state.refused.as_deref() != Some(t.ticket.as_str()))
+                    .map(|t| t.ticket.clone())
+            });
+        }
+        if id == self.session_transport()
+            && let Some(code) = &self.session.tunnel_code
+        {
+            return Some(code.clone());
+        }
+        self.servers
+            .iter()
+            .find(|s| crate::config::same_server(&s.id, id))
+            .and_then(|s| s.pairing.clone())
+    }
+
+    /// Whether a row's tunnel is on its way rather than gone: dialling,
+    /// down but on the ladder, or not yet asked for and dialable. A tunnel
+    /// the server refused, or one with no pairing code to dial, is not.
+    fn tunnel_pending_for(&self, origin: &Origin) -> bool {
+        if !crate::quickconnect::is_tunnel_id(&origin.server) {
+            return false;
+        }
+        match self.tunnels.get(&origin.server) {
+            Some(TunnelState::Dialling) => true,
+            Some(TunnelState::Down { rejected, .. }) => !rejected && self.credential_for(&origin.server).is_some(),
+            Some(TunnelState::Up { .. }) => false,
+            None => self.credential_for(&origin.server).is_some(),
+        }
+    }
+
+    /// Once a tick: the tunnels the session and the queue need are opened —
+    /// a failed one on the ladder, a refused one never on its own — and the
+    /// ones nothing references any more are released once the grace is up
+    /// (contract clause 38). A tunnel wanted again inside the grace simply
+    /// keeps running.
+    pub(crate) fn reconcile_tunnels(&mut self, now: crate::clock::Instant) -> Vec<Effect> {
+        let wanted = self.tunnel_targets();
+        let mut effects = Vec::new();
+        for id in &wanted {
+            self.tunnel_release.remove(id);
+            let due = match self.tunnels.get(id) {
+                Some(TunnelState::Up { .. }) | Some(TunnelState::Dialling) => false,
+                Some(TunnelState::Down { rejected: true, .. }) => false,
+                Some(TunnelState::Down { .. }) => match self.tunnel_retry.get(id) {
+                    Some(retry) => now.duration_since(retry.failed_at) >= tunnel_retry_delay(retry.failures),
+                    None => true,
+                },
+                None => true,
+            };
+            if !due {
+                continue;
+            }
+            let Some(credential) = self.credential_for(id) else { continue };
+            self.tunnels.insert(id.clone(), TunnelState::Dialling);
+            effects.push(Effect::Api(ApiCmd::TunnelOpen { id: id.clone(), credential }));
+        }
+        let idle: Vec<String> = self.tunnels.keys().filter(|id| !wanted.contains(*id)).cloned().collect();
+        for id in idle {
+            match self.tunnel_release.get(&id) {
+                None => {
+                    self.tunnel_release.insert(id, now);
+                }
+                Some(since) if now.duration_since(*since) >= TUNNEL_RELEASE_GRACE => {
+                    self.tunnel_release.remove(&id);
+                    self.tunnels.remove(&id);
+                    self.tunnel_retry.remove(&id);
+                    effects.push(Effect::Api(ApiCmd::TunnelClose { id }));
+                }
+                Some(_) => {}
+            }
+        }
+        self.tunnel_release.retain(|id, _| self.tunnels.contains_key(id));
+        effects
     }
 
     /// The queue row whose media URL is `url`, if any. A scan, but of an
@@ -3203,25 +4719,75 @@ impl App {
         }
     }
 
+    /// The browser bar's Play and Shuffle (contract: browser-top-bar,
+    /// clauses 10 and 12): replace the queue with the pane's playable rows
+    /// — the FILTERED view when a filter is on, what you see is what plays
+    /// — and start from the top. `shuffle` reorders once, the record's own
+    /// semantic; the shuffle MODE is not touched.
+    pub(crate) fn play_listing(&mut self, shuffle: bool) -> Vec<Effect> {
+        let (mut tracks, _) = self.pane().tracks_with_offset();
+        if tracks.is_empty() {
+            return Vec::new();
+        }
+        if shuffle {
+            fastrand::shuffle(&mut tracks);
+        }
+        let tracks = self.queued_all(tracks);
+        self.queue.replace(tracks);
+        self.play_index(0)
+    }
+
+    /// The browser bar's Queue all (clause 11): append the pane's playable
+    /// rows, say how many, and — the house rule every queue-add follows —
+    /// start playing when the queue was empty and nothing was on.
+    pub(crate) fn queue_listing(&mut self) -> Vec<Effect> {
+        let (tracks, _) = self.pane().tracks_with_offset();
+        if tracks.is_empty() {
+            return Vec::new();
+        }
+        let count = tracks.len();
+        let was_empty = self.queue.items.is_empty();
+        for track in self.queued_all(tracks) {
+            self.queue.push(track);
+        }
+        self.info(format!("queued {count}"));
+        if was_empty && self.status.is_idle() {
+            return self.play_index(0);
+        }
+        Vec::new()
+    }
+
     pub fn play_index(&mut self, index: usize) -> Vec<Effect> {
-        let Some(track) = self.queue.items.get(index).cloned() else {
+        let Some(item) = self.queue.items.get(index).cloned() else {
             return Vec::new();
         };
-        let session = &self.session;
-        let url = match urls::media_url(&session.server, &track.filepath, session.token.as_deref()) {
-            Ok(url) => url,
-            Err(e) => {
-                self.error(e);
-                return Vec::new();
-            }
+        // From the track's own server, whichever is browsed (contract
+        // clause 30). A row that cannot be reached walks on like a row
+        // the engine refused.
+        let (url, reach) = match self.stream_url(&item) {
+            Ok(built) => built,
+            // A tunnel that is not up yet is waited for, not skipped
+            // (contract clause 37); anything else walks on like a row the
+            // engine refused.
+            Err(_) if self.tunnel_pending_for(&item.origin) => return self.hold_for_tunnel(index, &item),
+            Err(why) => return self.unplayable(index, why),
         };
         self.queue.start(index);
-        let hint = track.metadata.duration;
+        // Any play spends a restored spot: playback is somewhere real now.
+        self.resume_spot = None;
+        // And ends a hold: the user (or the probe) moved things along.
+        self.stall = None;
+        self.probing = None;
+        self.tunnel_wait = None;
+        let hint = item.metadata.duration;
         // Taken before the track moves into `now_playing`; the shape is
         // asked for by path, so nothing else about the track is needed.
-        let filepath = track.filepath.clone();
-        self.remember_played(&track);
-        self.now_playing = Some(track);
+        let filepath = item.filepath.clone();
+        // The play's session (play-reporting contract, clause 1) — the one
+        // before it closes as the end-of-track path said, else as a skip.
+        self.stats_begin(&item);
+        self.remember_played(&item.track);
+        self.now_playing = Some(item.track);
         // Every Play wipes the engine's pending next (play_source clears
         // it), so whatever announcement stood is now this side's belief
         // alone. Drop it and the trailing refresh re-announces — free when
@@ -3234,9 +4800,13 @@ impl App {
         // one.
         self.seek_goal = None;
 
-        let mut effects = vec![Effect::Audio(AudioCmd::Play { url, duration_hint: hint })];
+        let mut effects = Vec::new();
+        if reach.self_signed {
+            effects.push(Effect::Trust(reach.base.clone()));
+        }
+        effects.push(Effect::Audio(AudioCmd::Play { url, duration_hint: hint }));
         effects.extend(self.fetch_art());
-        effects.extend(self.fetch_waveform(&filepath));
+        effects.extend(self.fetch_waveform(&filepath, &item.origin));
         effects.extend(self.maybe_autodj());
         effects
     }
@@ -3246,14 +4816,92 @@ impl App {
     /// skipping n-n-n through one album costs one request, not five.
     fn fetch_art(&mut self) -> Option<Effect> {
         let file = self.now_playing.as_ref()?.metadata.album_art.clone()?;
+        let reach = self.playing_row_reach();
+        self.fetch_art_from(&file, reach)
+    }
+
+    /// The playing row's own server when it is not the session's (contract
+    /// clause 30): its cover and its shape come from where the track lives,
+    /// not from the browsed server.
+    fn playing_row_reach(&self) -> Option<Reach> {
+        let item = self.queue.current.and_then(|index| self.queue.items.get(index))?;
+        self.row_reach(&item.origin)
+    }
+
+    /// A row's reach for a read, or `None` for the session's own rows —
+    /// the session client serves those.
+    fn row_reach(&self, origin: &Origin) -> Option<Reach> {
+        if self.is_session_origin(origin) {
+            return None;
+        }
+        self.reach(origin).ok()
+    }
+
+    /// Ask for one cover by the art file that names it, unless the cache
+    /// already holds it — or the placeholder a previous ask left, which is
+    /// what stops the same cover being asked for twice. The GUI's album
+    /// grid asks through here so a page of covers rides the same claim
+    /// discipline as the playing track's.
+    pub(crate) fn fetch_art_file(&mut self, file: &str) -> Option<Effect> {
+        self.fetch_art_from(file, None)
+    }
+
+    /// Ask for a queue row's cover, unless the cache holds it or a claim is
+    /// out — from the row's own server when that is not the session's
+    /// (contract clause 30), the way the playing row's is fetched. A row
+    /// on a tunnel that is not up is NOT claimed: the ask would have
+    /// nowhere to go, and the placeholder a claim leaves would stand in
+    /// the picture's way for the rest of the session. The GUI's queue
+    /// panel asks through here for every row it shows.
+    pub(crate) fn fetch_queue_art(&mut self, index: usize) -> Option<Effect> {
+        let item = self.queue.items.get(index)?;
+        let file = item.metadata.album_art.clone()?;
         if self.art.contains_key(&file) {
+            return None;
+        }
+        let reach = if self.is_session_origin(&item.origin) {
+            None
+        } else {
+            Some(self.reach(&item.origin).ok()?)
+        };
+        self.fetch_art_from(&file, reach)
+    }
+
+    fn fetch_art_from(&mut self, file: &str, reach: Option<Reach>) -> Option<Effect> {
+        if self.art.contains_key(file) {
             return None;
         }
         if self.art.len() >= ART_CACHE_CAP {
             self.art.clear();
         }
-        self.art.insert(file.clone(), None);
-        Some(Effect::Api(ApiCmd::AlbumArt { file }))
+        self.art.insert(file.to_string(), None);
+        Some(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach }))
+    }
+
+    /// Aim the Library drill at `node` and ask for it — the GUI's direct
+    /// door to a library view its nav names outright (the TUI reaches the
+    /// same nodes by drilling from the mode menu). `fresh` restarts the
+    /// trail from the root: a nav click means "the Albums view", not one
+    /// more level on whatever walk came before.
+    pub(crate) fn open_library_node(&mut self, node: LibraryNode, fresh: bool) -> Vec<Effect> {
+        self.tab = Tab::Library;
+        if fresh {
+            self.library_stack = Drill::new(LibraryNode::Root);
+            // A fresh root has no way back: a trail left by an earlier walk
+            // would be an orphan under it.
+            self.library.trail.clear();
+        } else if let Some(row) =
+            self.library.entries.iter().position(|e| matches!(e, Entry::Node { node: n, .. } if *n == node))
+        {
+            // The pane lists the node: drill through its own row, so the
+            // trail keeps the listing and Back restores it without asking
+            // again (library-rooms contract, clause 6).
+            self.library.state.select(Some(row));
+            self.push_trail();
+        }
+        self.library_stack.enter(node.clone());
+        self.library.set(Vec::new());
+        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Library })]
     }
 
     /// Ask for a track's shape, unless the cache already holds it — or the
@@ -3263,7 +4911,14 @@ impl App {
     /// Takes a filepath rather than reading `now_playing`, because the whole
     /// point is that it is also called for the track that has not started
     /// yet (see [`App::prefetch_waveform`]).
-    fn fetch_waveform(&mut self, filepath: &str) -> Option<Effect> {
+    fn fetch_waveform(&mut self, filepath: &str, origin: &Origin) -> Option<Effect> {
+        // Waveforms are off the federation allowlist: a peer's row has no
+        // shape to ask for, through its parent or over its own tunnel (the
+        // rig showed the peer's wall refusing the ask).
+        if origin.peer.is_some() {
+            return None;
+        }
+        let reach = self.row_reach(origin);
         if self.waveforms.contains_key(filepath) {
             return None;
         }
@@ -3271,7 +4926,7 @@ impl App {
             self.waveforms.clear();
         }
         self.waveforms.insert(filepath.to_string(), None);
-        Some(Effect::Api(ApiCmd::Waveform { filepath: filepath.to_string() }))
+        Some(Effect::Api(ApiCmd::Waveform { filepath: filepath.to_string(), reach }))
     }
 
     /// Ask for the *next* track's shape while this one is still playing.
@@ -3295,19 +4950,25 @@ impl App {
         // the top of the queue, and asking for it turns every keystroke on a
         // stopped player into a request.
         self.now_playing.as_ref()?;
-        let next = match &self.announced {
-            Some(next) => next.filepath.clone(),
-            None if !self.queue.shuffle => {
-                let index = self.queue.next_index(false)?;
-                self.queue.items.get(index)?.filepath.clone()
-            }
+        let index = match &self.announced {
+            Some(_) => self.announced_still_valid()?,
+            None if !self.queue.shuffle => self.queue.next_index(false)?,
             None => return None,
         };
-        self.fetch_waveform(&next)
+        let item = self.queue.items.get(index)?;
+        let next = item.filepath.clone();
+        let origin = item.origin.clone();
+        self.fetch_waveform(&next, &origin)
     }
 
     fn play_pause(&mut self) -> Vec<Effect> {
         if self.status.is_idle() {
+            // A restored queue resumes where it was left (contract clause
+            // 40): that row, and the seconds into it — a seek right behind
+            // the play, which the engine answers once the source is open.
+            if let Some((index, _)) = self.resume_spot {
+                return self.play_row_resuming(index);
+            }
             // Nothing loaded — start the queue if there is one.
             return match self.queue.next_index(true) {
                 Some(index) => self.play_index(index),
@@ -3417,9 +5078,11 @@ impl App {
                     self.starting = None;
                 }
                 // Something loaded and is playing, so whatever went wrong
-                // before is behind us — the run of failures starts over.
+                // before is behind us — the run of failures starts over,
+                // and so do the retries of the row (contract clause 37).
                 if !status.source.is_empty() {
                     self.failures = 0;
+                    self.retries = 0;
                 }
                 // A seek goal has served once status catches up to it — or
                 // once the source changes under it, where the old track's
@@ -3430,7 +5093,10 @@ impl App {
                     }
                 }
                 self.status = status;
-                Vec::new()
+                // The session folds every status of the track it is on
+                // (play-reporting contract, clauses 2–4).
+                let status = self.status.clone();
+                self.stats_tick(&status)
             }
             Event::TrackEnded { source } => {
                 // The end of a track we are no longer on. Advancing on it
@@ -3438,6 +5104,9 @@ impl App {
                 if !self.is_current_source(&source) {
                     return Vec::new();
                 }
+                // The engine ran out of it: a completed play, whichever
+                // Play or Stop follows (play-reporting contract, clause 5).
+                self.stats.ending = Some(stats::Outcome::Completed);
                 self.skip(false)
             }
             Event::HandedOver { from, to } => {
@@ -3461,8 +5130,13 @@ impl App {
                     .or_else(|| self.index_of_url(&to));
                 match adopted {
                     Some(index) => {
-                        let track = self.queue.items[index].clone();
+                        let track = self.queue.items[index].track.clone();
                         self.queue.start(index);
+                        // The blend ran the old track out: its play is
+                        // completed, and the adopted row's session opens.
+                        self.stats.ending = Some(stats::Outcome::Completed);
+                        let adopted = self.queue.items[index].clone();
+                        self.stats_begin(&adopted);
                         self.remember_played(&track);
                         self.now_playing = Some(track);
                         // Spent; the refresh at the end of this dispatch
@@ -3514,36 +5188,36 @@ impl App {
                 // a wait with nothing coming would discard every status after
                 // it. Whatever we move to next sets its own.
                 self.starting = None;
+                // A play that failed mid-way is stopped, not skipped; one
+                // that never played is too short to post.
+                self.stats.ending = Some(stats::Outcome::Stopped);
                 // One bad file used to end the listening session: the message
                 // appeared and the queue simply stopped. Say which track, and
                 // carry on to the next.
-                let what = self
-                    .now_playing
-                    .as_ref()
-                    .map(Track::display_name)
-                    .unwrap_or_else(|| "that track".to_string());
-                self.failures += 1;
-                // A queue where nothing plays must not be walked forever —
-                // with repeat on, skipping would go round and round.
-                if self.failures >= self.queue.items.len().max(1) {
-                    self.failures = 0;
-                    self.now_playing = None;
-                    self.queue.current = None;
-                    self.error(format!("{what} could not be played, and nor could the rest"));
-                    return vec![Effect::Audio(AudioCmd::Stop)];
-                }
-                self.error(format!("skipping {what} — {error}"));
-                // Manual, so repeat-one doesn't sit on the broken track.
-                self.skip(true)
+                self.playback_failed(error)
             }
             // Everything about who we are connected to and how goes
             // through one door into session.rs, which owns the connect
             // screen those replies land on (audit #60).
             event @ (Event::Connected { .. }
             | Event::ServersDiscovered(_)
-            | Event::TunnelReady { .. }
             | Event::NeedsLogin { .. }
-            | Event::Unauthorized) => self.consume_session(event),
+            | Event::Unauthorized) => {
+                // A connect is when owed plays can go out again
+                // (play-reporting contract, clause 8).
+                let connected = matches!(event, Event::Connected { .. });
+                let effects = self.consume_session(event);
+                if connected {
+                    self.stats.retry_at = None;
+                    self.stats.flush_wanted = true;
+                }
+                effects
+            }
+            Event::PlaysReported { ids, outcome } => {
+                self.stats_reported(ids, outcome);
+                Vec::new()
+            }
+            Event::Scrobbled => Vec::new(),
             Event::Listing(listing) => {
                 let path = listing.path.trim_matches('/');
                 // A reply for a folder we have since left. Taking it would put
@@ -3568,11 +5242,22 @@ impl App {
                 // Which drill answers depends on who asked — the Search tab
                 // files library nodes under its own trail.
                 let fresh = match dest {
-                    Tab::Search => self.search_stack.wants(&SearchNode::Library(node)),
+                    Tab::Search => self.search_stack.wants(&SearchNode::Library(node.clone())),
                     _ => self.library_stack.wants(&node),
                 };
                 if !fresh {
                     return Vec::new();
+                }
+                // The grid's copy, kept whole — see the field's note.
+                if let (LibraryNode::Albums, Tab::Library, LibraryData::Albums(albums)) =
+                    (&node, dest, &data)
+                {
+                    self.albums = Some(albums.clone());
+                }
+                if let (LibraryNode::Artist(artist), Tab::Library, LibraryData::Albums(albums)) =
+                    (&node, dest, &data)
+                {
+                    self.artist_albums = Some((artist.clone(), albums.clone()));
                 }
                 self.pane_for_mut(dest).set(entries_from_library(data));
                 self.message = None;
@@ -3645,7 +5330,19 @@ impl App {
             event @ (Event::AutoDjSample { .. }
             | Event::Journey { .. }
             | Event::Genres(_)
-            | Event::AutoDjPick { .. }) => self.consume_dj(event),
+            | Event::GenresFailed(_)
+            | Event::AutoDjPick { .. }
+            | Event::DjProbed { .. }) => self.consume_dj(event),
+            // A random pick lands on the sonic end that asked for it, the
+            // same road a browsed or playing track takes.
+            Event::SonicRandom { side, track } => match track {
+                Some(track) => self.capture_sonic_side(side, *track),
+                None => {
+                    self.error("couldn't fetch a song from the server");
+                    Vec::new()
+                }
+            },
+            Event::DiscoveryProbe { available } => self.consume_discovery_probe(available),
             Event::AlbumArt { file, art, settled } => {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just
@@ -3677,6 +5374,19 @@ impl App {
                 Vec::new()
             }
             Event::PlaylistSaved { name, count } => self.consume_playlist_saved(name, count),
+            Event::PlaylistCreated | Event::PlaylistRenamed | Event::PlaylistDeleted => {
+                self.consume_playlist_changed()
+            }
+            Event::Rated { filepath, rating, seq, error } => self.consume_rated(filepath, rating, seq, error),
+            Event::AddedToPlaylist { playlist, error } => self.consume_added_to_playlist(playlist, error),
+            Event::TrackInfo { filepath, track } => {
+                self.consume_track_info(filepath, track.map(|t| *t));
+                Vec::new()
+            }
+            Event::PlaylistNames { names } => {
+                self.playlist_names = names.map_or(PlaylistNames::Failed, PlaylistNames::Listed);
+                Vec::new()
+            }
             Event::SearchResults { query, results } => {
                 // Replies can pass each other now that each answers on its
                 // own thread; only the search still standing in the box is
@@ -3700,17 +5410,38 @@ impl App {
                 self.message = None;
                 Vec::new()
             }
-            Event::TunnelPath(path) => {
-                // The old bridge outlives a switch to a direct server (its
-                // Drop would cut a session mid-handover), and its sampler
-                // keeps reporting. A verdict about a tunnel this session is
-                // not on belongs to nobody — without this, a direct URL
-                // wore the last tunnel's badge (pre-merge review).
-                if crate::quickconnect::is_tunnel_id(&self.session.server_id) {
-                    self.tunnel_path = Some(path);
+            // Every tunnel the worker holds, coming up, going down, changing
+            // state or path: the registry, and the session waiting on one.
+            event @ (Event::TunnelUp { .. }
+            | Event::TunnelFailed { .. }
+            | Event::TunnelClosed { .. }
+            | Event::TunnelStatus { .. }
+            | Event::TunnelPath { .. }) => self.consume_tunnel(event),
+            Event::Reachable { server, reachable } => self.probe_answered(&server, reachable),
+            Event::DirectAccess { parent, id, answer } => self.consume_direct(&parent, id, answer),
+            Event::Retargeted { identity, server, token } => {
+                if crate::config::same_server(&identity, &self.session.server_id) {
+                    self.session.server = server;
+                    self.session.token = token;
                 }
                 Vec::new()
             }
+            Event::RetargetFailed { identity, why } => {
+                // The session keeps the transport it had; say why the move
+                // did not happen.
+                if crate::config::same_server(&identity, &self.session.server_id) {
+                    let what = self.server_name_of(&identity);
+                    self.info(format!("{what}: {why} — staying on the current path"));
+                }
+                Vec::new()
+            }
+            Event::FederationPeers { parent, peers } => match peers {
+                Some(peers) => vec![Effect::SavePeers {
+                    parent,
+                    listed: peers.into_iter().map(|p| (p.id, p.name)).collect(),
+                }],
+                None => Vec::new(),
+            },
             Event::Error(e) => {
                 self.connecting = false;
                 self.connect.submitting = false;

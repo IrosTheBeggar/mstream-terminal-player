@@ -8,13 +8,18 @@ fn track(path: &str) -> Track {
     Track { filepath: path.to_string(), metadata: TrackMetadata::default() }
 }
 
+/// A queue row from the test server, for tests that build a `Queue` by hand.
+fn item(path: &str) -> Queued {
+    Queued { dj: None, origin: Origin { server: "http://host:3000".into(), peer: None }, track: track(path) }
+}
+
 #[test]
 fn removing_the_only_track_while_it_plays_reports_it_was_current() {
     // The emptied-queue outcome has to count as removing the current row —
     // a one-track queue has nowhere else to point, and reporting false
     // here would leave playback running on a track no longer queued.
     let mut queue = Queue::default();
-    queue.replace(vec![track("solo")]);
+    queue.replace(vec![item("solo")]);
     queue.start(0);
     assert!(queue.remove(0), "the emptied queue took the playing row with it");
     assert_eq!(queue.current, None);
@@ -62,9 +67,12 @@ fn connected_app() -> App {
         discovery_path: true,
         discovery_p2p: false,
         federation_discovery: false,
+        federation_browse: false,
+        federation_direct: false,
+        stats: true,
     };
     // What a real ping does on the way in: the Auto-DJ rows depend on it.
-    app.dj_panel.rebuild(app.capabilities);
+    app.dj_panel.rebuild(&app.dj, None, false);
     app
 }
 
@@ -411,7 +419,7 @@ fn an_end_from_the_track_left_behind_does_not_walk_the_queue_on() {
     // can cross in the post. Taking one for the other costs the user the
     // track they just chose: it is passed over without a note played.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b"), track("c")]);
+    app.replace_queue(vec![track("a"), track("b"), track("c")]);
     let first = app.handle_action(Action::PlayPause);
     app.handle_action(Action::NextTrack);
     assert_eq!(app.queue.current, Some(1));
@@ -424,7 +432,7 @@ fn an_end_from_the_track_left_behind_does_not_walk_the_queue_on() {
 #[test]
 fn queue_advances_on_track_end_and_stops_at_the_end() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    app.replace_queue(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
     let effects = app.handle_action(Action::PlayPause);
 
     let effects = app.apply_event(ended(&effects));
@@ -444,7 +452,7 @@ fn a_shuffled_queue_still_ends_when_repeat_is_off() {
     // counted: it used to draw another track forever while the
     // indicator said repeat was off.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b"), track("c")]);
+    app.replace_queue(vec![track("a"), track("b"), track("c")]);
     app.queue.shuffle = true;
 
     let mut effects = app.handle_action(Action::PlayPause);
@@ -477,7 +485,7 @@ fn jump_to_playing_puts_the_queue_on_screen_before_handing_it_the_cursor() {
     // arrows driving a list nobody could see, Enter restarting the
     // current track, and `d` deleting an unseen row.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
     app.handle_action(Action::PlayPause);
     assert!(!app.queue_column, "the column starts hidden");
 
@@ -493,7 +501,7 @@ fn jump_to_playing_in_the_fullscreen_view_turns_to_the_queue_tab() {
     // nothing — and a focus quietly parked on the queue would leave the
     // browser screen driving the hidden column after `0` back.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a")]);
+    app.replace_queue(vec![track("a")]);
     app.handle_action(Action::PlayPause);
     app.handle_action(Action::ToggleNowPlaying);
     app.now_tab = NowTab::Visualizer;
@@ -511,7 +519,7 @@ fn the_jump_keys_follow_the_fullscreen_view_like_the_arrows_do() {
     // dead while it silently moved the browser nobody could see.
     let mut app = connected_app();
     app.apply_event(Event::Listing(Box::new(listing("/lib/", &["sub"], &["a.mp3"]))));
-    app.queue.replace(vec![track("a"), track("b"), track("c")]);
+    app.replace_queue(vec![track("a"), track("b"), track("c")]);
     app.handle_action(Action::ToggleNowPlaying);
     app.now_tab = NowTab::Queue;
 
@@ -521,23 +529,6 @@ fn the_jump_keys_follow_the_fullscreen_view_like_the_arrows_do() {
     app.handle_action(Action::First);
     assert_eq!(app.queue.state.selected(), Some(0), "g comes back to the top");
     assert_eq!(app.files.state.selected(), browser_at, "the hidden browser never moved");
-}
-
-#[test]
-fn the_dj_mode_row_steps_left_even_when_the_ring_is_two_long() {
-    // Stepping back by going forward twice assumed all three modes were
-    // on offer. Without a similarity index the ring is Off and BpmKey,
-    // and two steps forward is a lap: left looked dead on a default
-    // server while right worked.
-    let mut app = connected_app();
-    app.capabilities = crate::api::types::Capabilities::default();
-    app.dj_panel = Default::default();
-    on_the_dj_tab(&mut app);
-
-    app.handle_action(Action::NowLeft); // left on the Mode row
-    assert_eq!(app.autodj, AutoDjMode::BpmKey, "left from Off reaches the other mode");
-    app.handle_action(Action::NowLeft);
-    assert_eq!(app.autodj, AutoDjMode::Off, "and left again comes back round");
 }
 
 /// Put the cursor on the Auto-DJ tab of the full-screen view, which is the
@@ -563,7 +554,7 @@ fn settings_tab(app: &App) -> usize {
 #[test]
 fn the_track_coming_up_never_wears_the_state_of_the_one_that_ended() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
     let effects = app.handle_action(Action::PlayPause);
     let first = played_url(&effects);
     app.apply_event(Event::Status(PlayerStatus {
@@ -606,7 +597,7 @@ fn a_length_already_known_is_shown_before_the_engine_confirms_it() {
     let mut app = connected_app();
     let mut long = track("a");
     long.metadata.duration = Some(221.0);
-    app.queue.replace(vec![long]);
+    app.replace_queue(vec![long]);
     app.handle_action(Action::PlayPause);
     assert_eq!(app.status.duration, 221.0);
 }
@@ -614,7 +605,7 @@ fn a_length_already_known_is_shown_before_the_engine_confirms_it() {
 #[test]
 fn repeat_all_wraps_but_repeat_one_only_traps_automatic_advance() {
     let mut queue = Queue {
-        items: vec![track("a"), track("b")],
+        items: vec![item("a"), item("b")],
         current: Some(1),
         ..Default::default()
     };
@@ -632,7 +623,7 @@ fn repeat_all_wraps_but_repeat_one_only_traps_automatic_advance() {
 #[test]
 fn previous_restarts_the_track_when_past_the_grace_window() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
     app.play_index(1);
 
     app.status.position = 10.0;
@@ -649,7 +640,7 @@ fn previous_restarts_the_track_when_past_the_grace_window() {
 #[test]
 fn removing_the_playing_track_stops_playback() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b"), track("c")]);
+    app.replace_queue(vec![track("a"), track("b"), track("c")]);
     app.play_index(1);
     app.focus = Focus::Queue;
     app.queue.state.select(Some(1));
@@ -663,7 +654,7 @@ fn removing_the_playing_track_stops_playback() {
 #[test]
 fn removing_an_earlier_track_keeps_the_current_one_playing() {
     let mut queue = Queue {
-        items: vec![track("a"), track("b"), track("c")],
+        items: vec![item("a"), item("b"), item("c")],
         current: Some(2),
         ..Default::default()
     };
@@ -720,16 +711,20 @@ fn seeking_while_idle_does_nothing() {
 fn the_tunnel_path_reaches_the_header_and_resets_with_the_session() {
     use crate::quickconnect::TunnelPath;
     let mut app = connected_app();
-    // A direct-URL session refuses tunnel verdicts outright: the old
-    // bridge's sampler outlives a server switch, and its reports belong
-    // to nobody here.
-    app.apply_event(Event::TunnelPath(TunnelPath::Relay));
+    let id = format!("{}abc123", crate::quickconnect::TUNNEL_ID_PREFIX);
+    // A direct-URL session refuses tunnel verdicts outright: the tunnels
+    // the queue keeps open report on, and their paths belong to nobody
+    // here.
+    app.apply_event(Event::TunnelPath { id: id.clone(), path: TunnelPath::Relay });
     assert_eq!(app.tunnel_path, None, "a direct session wears no tunnel badge");
 
-    app.session.server_id = format!("{}abc123", crate::quickconnect::TUNNEL_ID_PREFIX);
-    app.apply_event(Event::TunnelPath(TunnelPath::Relay));
+    app.session.server_id = id.clone();
+    app.apply_event(Event::TunnelPath { id: id.clone(), path: TunnelPath::Relay });
     assert_eq!(app.tunnel_path, Some(TunnelPath::Relay));
-    app.apply_event(Event::TunnelPath(TunnelPath::Direct));
+    app.apply_event(Event::TunnelPath { id: id.clone(), path: TunnelPath::Direct });
+    assert_eq!(app.tunnel_path, Some(TunnelPath::Direct));
+    // Another tunnel's verdict is not this session's.
+    app.apply_event(Event::TunnelPath { id: format!("{}other", crate::quickconnect::TUNNEL_ID_PREFIX), path: TunnelPath::Relay });
     assert_eq!(app.tunnel_path, Some(TunnelPath::Direct));
     // The words the header will use.
     assert_eq!(TunnelPath::Direct.label(), "direct");
@@ -802,7 +797,7 @@ fn waveforms_asked(effects: &[Effect]) -> Vec<String> {
     effects
         .iter()
         .filter_map(|e| match e {
-            Effect::Api(ApiCmd::Waveform { filepath }) => Some(filepath.clone()),
+            Effect::Api(ApiCmd::Waveform { filepath, .. }) => Some(filepath.clone()),
             _ => None,
         })
         .collect()
@@ -811,7 +806,7 @@ fn waveforms_asked(effects: &[Effect]) -> Vec<String> {
 #[test]
 fn a_waveform_is_asked_for_once_per_track() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
 
     let effects = app.handle_action(Action::PlayPause);
     assert!(waveforms_asked(&effects).contains(&"a".to_string()), "the shape of what started");
@@ -838,7 +833,7 @@ fn a_shape_nobody_answered_for_is_asked_for_again() {
     // for exactly the track that most needs one — so it must leave the slot
     // free, or one bad moment is the last word on that track all session.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a")]);
+    app.replace_queue(vec![track("a")]);
     assert!(waveforms_asked(&app.handle_action(Action::PlayPause)).contains(&"a".to_string()));
 
     app.apply_event(Event::Waveform { filepath: "a".into(), bars: None, settled: false });
@@ -861,7 +856,7 @@ fn the_next_tracks_waveform_is_fetched_before_it_plays() {
     // announcement machinery already worked out what is coming, for the
     // crossfade; this rides along with it.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
 
     let effects = app.handle_action(Action::PlayPause);
     let asked = waveforms_asked(&effects);
@@ -881,7 +876,7 @@ fn a_queue_edit_moves_the_prefetch_with_it() {
     // The prefetch reads the announcement, so it has to follow one: a queue
     // edit that changes what comes next changes which shape is worth having.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
     app.handle_action(Action::PlayPause);
     assert!(app.waveforms.contains_key("b"));
 
@@ -889,7 +884,7 @@ fn a_queue_edit_moves_the_prefetch_with_it() {
     app.queue.state.select(Some(1));
     app.focus = Focus::Queue;
     app.handle_action(Action::RemoveFromQueue);
-    app.queue.push(track("c"));
+    app.push_queue(track("c"));
     let effects = app.handle_action(Action::JumpToPlaying);
     assert!(waveforms_asked(&effects).contains(&"c".to_string()), "{effects:?}");
 }
@@ -945,7 +940,7 @@ fn the_discover_tab_asks_what_to_look_around_from_before_anything_else() {
     // The step that lets you ask about a track without playing it — which
     // the full-screen panel cannot do, since it follows the speakers.
     let mut app = connected_app();
-    app.queue.replace(vec![track("playing")]);
+    app.replace_queue(vec![track("playing")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
     assert_eq!(*app.discover_node(), DiscoverNode::Root);
@@ -1005,7 +1000,7 @@ fn a_discover_seed_can_be_pointed_at_rather_than_played() {
 fn how_close_leads_the_row_rather_than_where_it_sits() {
     // The rows arrive in order, so a rank says nothing a position does not.
     let mut app = connected_app();
-    app.queue.replace(vec![track("playing")]);
+    app.replace_queue(vec![track("playing")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
     app.handle_action(Action::Activate); // seed: what's playing
@@ -1027,7 +1022,7 @@ fn the_full_screen_panel_still_just_follows_the_speakers() {
     // It is glanced at while a track plays, so it steers itself: no seed to
     // choose, no menu, one question re-asked when the answer would change.
     let mut app = connected_app();
-    app.queue.replace(vec![track("first"), track("second")]);
+    app.replace_queue(vec![track("first"), track("second")]);
     app.play_index(0);
     assert!(app.now_discover.is_none(), "nothing until the tab is looked at");
 
@@ -1309,7 +1304,11 @@ fn choosing_a_discovered_server_connects_to_it_directly() {
         effects,
         vec![Effect::Api(ApiCmd::Connect {
             server: "http://192.168.1.71:3999".into(),
+            identity: "http://192.168.1.71:3999".into(),
             token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
         })]
     );
 }
@@ -1323,7 +1322,8 @@ fn late_discovery_results_do_not_move_the_cursor_off_the_paste_row() {
     use crate::discovery::DiscoveredServer;
     let mut app = App::new(None, None, None);
     app.connect.stage = ConnectStage::QuickConnect;
-    for c in "mstr1:abc".chars() {
+    let code = crate::quickconnect::testing::sample_code();
+    for c in code.chars() {
         app.handle_action(Action::Input(c));
     }
     assert!(app.connect.on_paste_row());
@@ -1340,7 +1340,10 @@ fn late_discovery_results_do_not_move_the_cursor_off_the_paste_row() {
     let effects = app.handle_action(Action::Submit);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None })]
+        vec![Effect::Api(ApiCmd::TunnelOpen {
+            id: crate::quickconnect::testing::sample_id(),
+            credential: code,
+        })]
     );
 }
 
@@ -1372,13 +1375,17 @@ fn typing_a_code_jumps_past_the_discovered_servers() {
     assert!(app.connect.on_paste_row(), "typing means the user has a code");
 
     // …and Enter now dials rather than connecting to the highlighted server.
-    for c in "str1:abc".chars() {
+    let code = crate::quickconnect::testing::sample_code();
+    for c in code[1..].chars() {
         app.handle_action(Action::Input(c));
     }
     let effects = app.handle_action(Action::Submit);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None })]
+        vec![Effect::Api(ApiCmd::TunnelOpen {
+            id: crate::quickconnect::testing::sample_id(),
+            credential: code,
+        })]
     );
 }
 
@@ -1396,15 +1403,101 @@ fn the_selection_cannot_run_past_the_paste_row() {
 fn pasting_a_pairing_code_dials_the_tunnel() {
     let mut app = App::new(None, None, None);
     app.connect.stage = ConnectStage::QuickConnect;
-    for c in "mstr1:abc".chars() {
+    let code = crate::quickconnect::testing::sample_code();
+    let id = crate::quickconnect::testing::sample_id();
+    for c in code.chars() {
         app.handle_action(Action::Input(c));
     }
     let effects = app.handle_action(Action::Submit);
+    assert_eq!(effects, vec![Effect::Api(ApiCmd::TunnelOpen { id: id.clone(), credential: code })]);
+    assert!(app.connecting);
+    assert_eq!(app.pending_tunnel.as_deref(), Some(id.as_str()), "waiting on that tunnel");
+    assert_eq!(app.session.server_id, id, "filed under the code's identity from the start");
+    assert_eq!(app.tunnels.get(&id), Some(&TunnelState::Dialling));
+
+    // The tunnel comes up: the session connects through it, and every
+    // request over the bridge carries its loopback token.
+    let effects = app.apply_event(Event::TunnelUp {
+        id: id.clone(),
+        local_url: "http://127.0.0.1:51234".into(),
+        local_token: "lt".into(),
+    });
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::QuickConnect { code: "mstr1:abc".into(), token: None })]
+        vec![Effect::Api(ApiCmd::Connect {
+            server: "http://127.0.0.1:51234".into(),
+            identity: id.clone(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: Some("lt".into()),
+        })]
     );
-    assert!(app.connecting);
+    assert!(app.pending_tunnel.is_none());
+}
+
+#[test]
+fn a_code_that_is_not_one_is_refused_before_any_dial() {
+    let mut app = App::new(None, None, None);
+    app.connect.stage = ConnectStage::QuickConnect;
+    for c in "mstr1:abc".chars() {
+        app.handle_action(Action::Input(c));
+    }
+    assert!(app.handle_action(Action::Submit).is_empty());
+    assert!(!app.connecting);
+    assert!(app.message.as_ref().is_some_and(|m| m.text.contains("pairing code")), "{:?}", app.message);
+}
+
+#[test]
+fn a_tunnel_the_queue_holds_open_is_used_rather_than_dialled_again() {
+    // Contract clause 38: the worker keeps a tunnel for the queue; a code
+    // pasted for that server connects through it at once.
+    let mut app = App::new(None, None, None);
+    app.connect.stage = ConnectStage::QuickConnect;
+    let code = crate::quickconnect::testing::sample_code();
+    let id = crate::quickconnect::testing::sample_id();
+    app.tunnels.insert(
+        id.clone(),
+        TunnelState::Up {
+            local_url: "http://127.0.0.1:4000".into(),
+            local_token: "lt".into(),
+            status: crate::quickconnect::TunnelStatus::Connected,
+            path: None,
+        },
+    );
+    for c in code.chars() {
+        app.handle_action(Action::Input(c));
+    }
+    let effects = app.handle_action(Action::Submit);
+    assert!(
+        matches!(effects.as_slice(), [Effect::Api(ApiCmd::Connect { server, identity, .. })]
+            if server == "http://127.0.0.1:4000" && *identity == id),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn a_dial_that_fails_says_so_and_frees_the_form() {
+    let mut app = App::new(None, None, None);
+    app.connect.stage = ConnectStage::QuickConnect;
+    let code = crate::quickconnect::testing::sample_code();
+    let id = crate::quickconnect::testing::sample_id();
+    for c in code.chars() {
+        app.handle_action(Action::Input(c));
+    }
+    app.handle_action(Action::Submit);
+    app.apply_event(Event::TunnelFailed {
+        id: id.clone(),
+        rejected: true,
+        why: "tunnel handshake rejected — wrong or rotated connect secret".into(),
+    });
+    assert!(!app.connecting);
+    assert!(!app.connect.submitting);
+    assert!(app.message.as_ref().is_some_and(|m| m.text.contains("rejected")), "{:?}", app.message);
+    assert_eq!(
+        app.tunnels.get(&id),
+        Some(&TunnelState::Down { rejected: true, why: "tunnel handshake rejected — wrong or rotated connect secret".into() })
+    );
 }
 
 #[test]
@@ -1414,32 +1507,50 @@ fn a_tunnel_session_is_remembered_by_identity_not_by_its_loopback_port() {
     // was filed under a URL that could never match again.
     let mut app = App::new(None, None, None);
     app.connect.stage = ConnectStage::QuickConnect;
-    for c in "mstr1:abc".chars() {
+    let code = crate::quickconnect::testing::sample_code();
+    let id = crate::quickconnect::testing::sample_id();
+    for c in code.chars() {
         app.handle_action(Action::Input(c));
     }
     app.handle_action(Action::Submit);
 
-    app.apply_event(Event::TunnelReady {
+    app.apply_event(Event::TunnelUp {
+        id: id.clone(),
         local_url: "http://127.0.0.1:51234".into(),
-        id: "mstream+iroh://endpointabc".into(),
+        local_token: "lt".into(),
     });
+    // The server behind the tunnel wants a sign-in: the form aims at the
+    // bridge, the sign-in is filed under the identity and carries the
+    // bridge's token.
+    app.apply_event(Event::NeedsLogin { server: "http://127.0.0.1:51234".into() });
     app.connect.username = "alice".into();
     app.connect.password = "pw".into();
-    app.handle_action(Action::Submit);
+    let effects = app.handle_action(Action::Submit);
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::Login {
+            server: "http://127.0.0.1:51234".into(),
+            identity: id.clone(),
+            username: "alice".into(),
+            password: "pw".into(),
+            self_signed: false,
+            local_token: Some("lt".into()),
+        })]
+    );
     app.apply_event(Event::Connected {
         server: "http://127.0.0.1:51234".into(),
-        id: "mstream+iroh://endpointabc".into(),
+        id: id.clone(),
         username: Some("alice".into()),
         token: Some("tok".into()),
         ping: Box::new(Default::default()),
     });
 
     // What gets written down is the identity...
-    assert_eq!(app.session.server_id, "mstream+iroh://endpointabc");
+    assert_eq!(app.session.server_id, id);
     // ...while requests and stream URLs still go over the bridge.
     assert_eq!(app.session.server, "http://127.0.0.1:51234");
     let kept = app.session.tunnel_code.as_deref();
-    assert_eq!(kept, Some("mstr1:abc"), "kept, or there's no way back");
+    assert_eq!(kept, Some(code.as_str()), "kept, or there's no way back");
 }
 
 #[test]
@@ -1448,14 +1559,14 @@ fn a_public_tunnel_server_is_still_worth_saving() {
     // code stored, the server is unreachable next time.
     let mut app = App::new(None, None, None);
     app.connect.stage = ConnectStage::QuickConnect;
-    for c in "mstr1:pub".chars() {
+    for c in crate::quickconnect::testing::sample_code().chars() {
         app.handle_action(Action::Input(c));
     }
     app.handle_action(Action::Submit);
 
     let effects = app.apply_event(Event::Connected {
         server: "http://127.0.0.1:5000".into(),
-        id: "mstream+iroh://pubserver".into(),
+        id: crate::quickconnect::testing::sample_id(),
         username: None,
         token: None,
         ping: Box::new(Default::default()),
@@ -1475,13 +1586,797 @@ fn reconnecting_to_a_tunnel_server_dials_its_code_again() {
     let effects = app.start();
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::QuickConnect {
-            code: "mstr1:saved".into(),
+        vec![Effect::Api(ApiCmd::TunnelOpen {
+            id: "mstream+iroh://endpointabc".into(),
+            credential: "mstr1:saved".into(),
+        })]
+    );
+    assert!(app.connecting);
+
+    // Up: the saved token rides the connect through the bridge.
+    let effects = app.apply_event(Event::TunnelUp {
+        id: "mstream+iroh://endpointabc".into(),
+        local_url: "http://127.0.0.1:5100".into(),
+        local_token: "lt".into(),
+    });
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::Connect {
+            server: "http://127.0.0.1:5100".into(),
+            identity: "mstream+iroh://endpointabc".into(),
             token: Some("tok".into()),
+            self_signed: false,
+            peer: None,
+            local_token: Some("lt".into()),
         })],
         "the saved token rides the re-dialled tunnel"
     );
-    assert!(app.connecting);
+}
+
+#[test]
+fn a_remembered_tunnel_server_dials_with_the_code_from_the_book() {
+    // The session may hold no code of its own — a peer's parent, a
+    // server reached from the book — so the saved pairing serves.
+    let mut app = App::new(Some("mstream+iroh://endpointabc".into()), None, None);
+    app.servers.push(KnownServer {
+        id: "mstream+iroh://endpointabc".into(),
+        name: "quick connect · endpointabc".into(),
+        token: None,
+        self_signed: false,
+        peer: None,
+        pairing: Some("mstr1:fromthebook".into()),
+        dj: Default::default(),
+    });
+    let effects = app.start();
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::TunnelOpen {
+            id: "mstream+iroh://endpointabc".into(),
+            credential: "mstr1:fromthebook".into(),
+        })]
+    );
+}
+
+// ── Direct access to a peer (contract clause 27) ─────────────────────────
+
+const ATTIC: &str = "http://attic:3000";
+
+fn nas() -> String {
+    crate::config::peer_identity(ATTIC, 3)
+}
+
+/// A guest ticket as the worker hands it to the App: issued `ago` seconds
+/// ago, good for `left` more.
+fn guest(name: &str, ago: u64, left: u64) -> crate::api::types::DirectTicket {
+    let now = std::time::SystemTime::now();
+    crate::api::types::DirectTicket {
+        ticket: format!("mstrfedg1:{name}"),
+        guest_token: format!("guest-{name}"),
+        endpoint_id: None,
+        issued_at: Some(now - secs(ago)),
+        expires_at: Some(now + secs(left)),
+    }
+}
+
+fn granted(name: &str) -> Event {
+    Event::DirectAccess { parent: ATTIC.into(), id: 3, answer: crate::api::types::DirectAnswer::Granted(guest(name, 60, 86_340)) }
+}
+
+fn nas_row(path: &str) -> Queued {
+    Queued { dj: None, origin: Origin { server: ATTIC.into(), peer: Some(3) }, track: track(path) }
+}
+
+/// Connected to the parent, which offers direct access; the peer is in the book.
+fn federated_app() -> App {
+    let mut app = App::new(Some(ATTIC.into()), Some("at".into()), None);
+    app.connected = true;
+    app.servers = vec![
+        KnownServer {
+            id: ATTIC.into(),
+            name: ATTIC.into(),
+            token: Some("at".into()),
+            self_signed: false,
+            peer: None,
+            pairing: None, dj: Default::default(),
+        },
+        KnownServer {
+            id: nas(),
+            name: "Nas".into(),
+            token: None,
+            self_signed: false,
+            peer: Some((ATTIC.into(), 3)),
+            pairing: None, dj: Default::default(),
+        },
+    ];
+    app.direct_offered.insert(ATTIC.into());
+    app
+}
+
+fn direct_asks(effects: &[Effect]) -> Vec<(i64, bool)> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Api(ApiCmd::DirectAccess { id, refresh, .. }) => Some((*id, *refresh)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_parent_that_offers_direct_access_is_remembered_from_its_ping() {
+    let mut app = App::new(Some(ATTIC.into()), Some("at".into()), None);
+    app.apply_event(Event::Connected {
+        server: ATTIC.into(),
+        id: ATTIC.into(),
+        username: None,
+        token: Some("at".into()),
+        ping: Box::new(crate::api::types::Ping { federation_direct: true, ..Default::default() }),
+    });
+    assert!(app.direct_offered.contains(ATTIC));
+    assert!(app.capabilities.federation_direct);
+    // The flag going off is information too.
+    app.apply_event(Event::Connected {
+        server: ATTIC.into(),
+        id: ATTIC.into(),
+        username: None,
+        token: Some("at".into()),
+        ping: Box::new(crate::api::types::Ping::default()),
+    });
+    assert!(!app.direct_offered.contains(ATTIC));
+}
+
+#[test]
+fn a_queued_peer_row_asks_its_parent_for_direct_access_once() {
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    let now = crate::clock::Instant::now();
+    let effects = app.tick_at(now);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCmd::DirectAccess { parent, id: 3, reach, refresh: false })]
+                if parent == ATTIC && reach.base == ATTIC && reach.token.as_deref() == Some("at") && reach.peer.is_none()
+        ),
+        "the access call rides the parent, plainly: {effects:?}"
+    );
+    assert!(app.direct.get(&nas()).is_some_and(|s| s.asking));
+    assert!(direct_asks(&app.tick_at(now + secs(1))).is_empty(), "one ask in flight, not one per tick");
+
+    // A parent that does not offer it is never asked.
+    let mut plain = federated_app();
+    plain.direct_offered.clear();
+    plain.queue.push(nas_row("music/y.mp3"));
+    assert!(direct_asks(&plain.tick_at(now)).is_empty());
+}
+
+#[test]
+fn a_granted_ticket_dials_the_peer_and_its_rows_play_from_its_own_tunnel() {
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    let now = crate::clock::Instant::now();
+    app.tick_at(now);
+
+    // Meanwhile the row rides the parent's proxy.
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/3/stream/music/y.mp3?token=at");
+
+    app.apply_event(granted("T1"));
+    let state = app.direct.get(&nas()).expect("a ticket in hand");
+    assert!(!state.asking);
+    assert_eq!(state.ticket.as_ref().map(|t| t.ticket.as_str()), Some("mstrfedg1:T1"));
+
+    // The peer's own tunnel is a target now, dialled with the ticket.
+    let effects = app.tick_at(now + secs(1));
+    assert!(
+        effects.contains(&Effect::Api(ApiCmd::TunnelOpen { id: nas(), credential: "mstrfedg1:T1".into() })),
+        "{effects:?}"
+    );
+    assert!(direct_asks(&effects).is_empty(), "the ticket is fresh: nothing to ask");
+
+    // Up: plain /media with the guest token in the ordinary slot.
+    app.apply_event(Event::TunnelUp { id: nas(), local_url: "http://127.0.0.1:5000".into(), local_token: "lt".into() });
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://127.0.0.1:5000/media/music/y.mp3?token=guest-T1&__lt=lt");
+    // Its cover too, from the peer itself.
+    assert!(
+        matches!(app.reach(&Origin { server: ATTIC.into(), peer: Some(3) }), Ok(Reach { base, peer: None, .. }) if base == "http://127.0.0.1:5000")
+    );
+}
+
+#[test]
+fn a_peer_row_asks_for_no_shape_over_either_transport() {
+    // Waveforms are off the federation allowlist; the rig showed the peer's
+    // wall refusing the ask over the direct tunnel.
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    let effects = app.play_index(0);
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Waveform { .. }))), "proxy: {effects:?}");
+
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+    app.waveforms.clear();
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://127.0.0.1:5000/media/music/y.mp3?token=guest-T1&__lt=lt");
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Waveform { .. }))), "direct: {effects:?}");
+}
+
+#[test]
+fn a_parent_that_declines_keeps_the_peer_on_the_proxy_for_the_session() {
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    let now = crate::clock::Instant::now();
+    app.tick_at(now);
+    app.apply_event(Event::DirectAccess {
+        parent: ATTIC.into(),
+        id: 3,
+        answer: crate::api::types::DirectAnswer::Denied("an older build".into()),
+    });
+    assert!(app.direct.get(&nas()).is_some_and(|s| s.denied));
+    assert!(direct_asks(&app.tick_at(now + secs(3600))).is_empty(), "declined for the session");
+    assert!(!app.tunnel_targets().contains(&nas()));
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/3/stream/music/y.mp3?token=at");
+}
+
+#[test]
+fn a_stale_ticket_is_renewed_in_place_and_a_failure_waits_for_the_gap() {
+    assert!(!ticket_stale(&guest("fresh", 60, 86_340), std::time::SystemTime::now()));
+    assert!(ticket_stale(&guest("old", 3 * 3600, 3600), std::time::SystemTime::now()), "three quarters gone");
+    assert!(ticket_stale(&guest("dead", 86_400, 0), std::time::SystemTime::now() + secs(1)));
+
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 3 * 3600, 3600)), ..Default::default() });
+    let now = crate::clock::Instant::now();
+    assert_eq!(direct_asks(&app.tick_at(now)), vec![(3, false)], "stale: asked, not as a refusal");
+
+    // Empty-handed: the next ask waits for the gap, not the next tick.
+    app.apply_event(Event::DirectAccess {
+        parent: ATTIC.into(),
+        id: 3,
+        answer: crate::api::types::DirectAnswer::Failed("Peer unreachable".into()),
+    });
+    assert!(direct_asks(&app.tick_at(now + secs(60))).is_empty());
+    assert_eq!(direct_asks(&app.tick_at(now + secs(301))), vec![(3, false)]);
+
+    // A new ticket swaps in place: same port, only what is asked for from
+    // now on carries the new token.
+    let effects = app.apply_event(granted("T2"));
+    assert!(
+        effects.contains(&Effect::Api(ApiCmd::TunnelCredential { id: nas(), credential: "mstrfedg1:T2".into() })),
+        "{effects:?}"
+    );
+    assert!(matches!(app.tunnels.get(&nas()), Some(TunnelState::Up { .. })));
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://127.0.0.1:5000/media/music/y.mp3?token=guest-T2&__lt=lt");
+}
+
+#[test]
+fn a_refused_guest_ticket_is_re_minted_at_once_and_the_proxy_serves_meanwhile() {
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    let now = crate::clock::Instant::now();
+    let effects = app.tick_at(now);
+    assert!(effects.contains(&Effect::Api(ApiCmd::TunnelOpen { id: nas(), credential: "mstrfedg1:T1".into() })));
+
+    // The peer says NO: not a re-pair — the parent re-mints, now.
+    app.apply_event(Event::TunnelFailed { id: nas(), rejected: true, why: "handshake rejected — the guest token was refused".into() });
+    assert_eq!(app.direct.get(&nas()).and_then(|s| s.refused.clone()), Some("mstrfedg1:T1".into()));
+    let effects = app.tick_at(now + secs(1));
+    assert_eq!(direct_asks(&effects), vec![(3, true)], "a re-mint, asked at once");
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::TunnelOpen { .. }))), "the refused ticket is not dialled again");
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/3/stream/music/y.mp3?token=at");
+
+    // A fresh ticket: the reconcile dials again with it.
+    app.apply_event(granted("T2"));
+    let effects = app.tick_at(now + secs(2));
+    assert!(effects.contains(&Effect::Api(ApiCmd::TunnelOpen { id: nas(), credential: "mstrfedg1:T2".into() })), "{effects:?}");
+
+    // The same refused ticket handed out again: the gap applies.
+    let mut again = federated_app();
+    again.queue.push(nas_row("music/y.mp3"));
+    again.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), refused: Some("mstrfedg1:T1".into()), ..Default::default() });
+    assert_eq!(direct_asks(&again.tick_at(now)), vec![(3, true)]);
+    again.apply_event(granted("T1"));
+    assert!(direct_asks(&again.tick_at(now + secs(30))).is_empty());
+    assert_eq!(direct_asks(&again.tick_at(now + secs(61))), vec![(3, true)]);
+}
+
+#[test]
+fn a_peer_whose_tunnel_is_up_is_browsed_through_it_and_back_when_it_goes() {
+    let mut app = federated_app();
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+
+    let effects = app.adopt_server(
+        Session { server: ATTIC.into(), server_id: nas(), token: Some("at".into()), peer: Some((ATTIC.into(), 3)), ..Default::default() },
+        Some("music".into()),
+    );
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::Connect {
+            server: "http://127.0.0.1:5000".into(),
+            identity: nas(),
+            token: Some("guest-T1".into()),
+            self_signed: false,
+            peer: None,
+            local_token: Some("lt".into()),
+        })]
+    );
+    app.apply_event(Event::Connected {
+        server: "http://127.0.0.1:5000".into(),
+        id: nas(),
+        username: None,
+        token: Some("guest-T1".into()),
+        ping: Box::new(Default::default()),
+    });
+    assert!(app.session_is_direct());
+    assert_eq!(app.session.server_id, nas(), "filed under the peer's identity");
+    assert!(app.session.peer.is_some(), "still a peer session: read-only, capabilities pinned");
+    assert_eq!(app.capabilities, crate::api::types::Capabilities::default());
+
+    // Its own rows play plainly from its tunnel…
+    app.push_queue(track("music/z.mp3"));
+    assert_eq!(app.queue.items[0].origin, Origin { server: ATTIC.into(), peer: Some(3) }, "the row's identity is transport-free");
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://127.0.0.1:5000/media/music/z.mp3?token=guest-T1&__lt=lt");
+
+    // …and when the tunnel goes, the session moves back onto the parent's
+    // proxies without re-opening the browser.
+    let path_before = app.path.clone();
+    let effects = app.apply_event(Event::TunnelClosed { id: nas() });
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::Retarget {
+            identity: nas(),
+            server: ATTIC.into(),
+            token: Some("at".into()),
+            self_signed: false,
+            peer: Some(3),
+            local_token: None,
+        })]
+    );
+    app.apply_event(Event::Retargeted { identity: nas(), server: format!("{ATTIC}/"), token: Some("at".into()) });
+    assert_eq!(app.session.server, format!("{ATTIC}/"));
+    assert_eq!(app.session.token.as_deref(), Some("at"));
+    assert_eq!(app.path, path_before, "the browse stack stays");
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/3/stream/music/z.mp3?token=at");
+}
+
+#[test]
+fn a_browsed_peer_goes_direct_when_its_own_tunnel_comes_up() {
+    let mut app = federated_app();
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    // Browsing the peer through the parent today.
+    app.adopt_server(
+        Session { server: ATTIC.into(), server_id: nas(), token: Some("at".into()), peer: Some((ATTIC.into(), 3)), ..Default::default() },
+        None,
+    );
+    app.apply_event(Event::Connected {
+        server: ATTIC.into(),
+        id: nas(),
+        username: None,
+        token: Some("at".into()),
+        ping: Box::new(Default::default()),
+    });
+    assert!(!app.session_is_direct());
+
+    let effects = app.apply_event(Event::TunnelUp { id: nas(), local_url: "http://127.0.0.1:5000".into(), local_token: "lt".into() });
+    assert!(
+        effects.contains(&Effect::Api(ApiCmd::Retarget {
+            identity: nas(),
+            server: "http://127.0.0.1:5000".into(),
+            token: Some("guest-T1".into()),
+            self_signed: false,
+            peer: None,
+            local_token: Some("lt".into()),
+        })),
+        "{effects:?}"
+    );
+    app.apply_event(Event::Retargeted { identity: nas(), server: "http://127.0.0.1:5000/".into(), token: Some("guest-T1".into()) });
+    assert!(app.session_is_direct());
+}
+
+#[test]
+fn a_401_on_a_direct_session_renews_the_ticket_instead_of_asking_for_a_sign_in() {
+    let mut app = federated_app();
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+    app.adopt_server(
+        Session { server: ATTIC.into(), server_id: nas(), token: Some("at".into()), peer: Some((ATTIC.into(), 3)), ..Default::default() },
+        None,
+    );
+    app.apply_event(Event::Connected {
+        server: "http://127.0.0.1:5000".into(),
+        id: nas(),
+        username: None,
+        token: Some("guest-T1".into()),
+        ping: Box::new(Default::default()),
+    });
+
+    app.apply_event(Event::Unauthorized);
+    assert!(app.connected, "no sign-in form for a guest token");
+    assert_eq!(app.direct.get(&nas()).and_then(|s| s.refused.clone()), Some("mstrfedg1:T1".into()));
+    let now = crate::clock::Instant::now();
+    assert_eq!(direct_asks(&app.tick_at(now)), vec![(3, true)]);
+    // The new token rides both the tunnel and the session.
+    let effects = app.apply_event(granted("T2"));
+    assert!(effects.contains(&Effect::Api(ApiCmd::TunnelCredential { id: nas(), credential: "mstrfedg1:T2".into() })));
+    assert!(effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Retarget { token: Some(t), .. }) if t == "guest-T2")), "{effects:?}");
+}
+
+#[test]
+fn a_401_on_a_direct_row_renews_the_ticket_and_plays_the_row_again_or_through_the_proxy() {
+    let mut app = federated_app();
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+    app.queue.push(nas_row("music/y.mp3"));
+    app.play_index(0);
+
+    let effects = app.playback_failed("request failed: 401 Unauthorized".into());
+    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.tunnel_wait, Some(TunnelWait { index: 0, id: nas() }));
+    assert!(app.message.as_ref().is_some_and(|m| m.text == "Renewing access to Nas…"), "{:?}", app.message);
+    let now = crate::clock::Instant::now();
+    assert_eq!(direct_asks(&app.tick_at(now)), vec![(3, true)]);
+
+    // Renewed: the row plays again with the new token.
+    let effects = app.apply_event(granted("T2"));
+    assert_eq!(played_url(&effects), "http://127.0.0.1:5000/media/music/y.mp3?token=guest-T2&__lt=lt");
+    assert!(app.tunnel_wait.is_none());
+
+    // Or declined: the peer's tunnel goes and the row plays through the
+    // parent.
+    let mut app = federated_app();
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+    app.queue.push(nas_row("music/y.mp3"));
+    app.play_index(0);
+    app.playback_failed("request failed: 401 Unauthorized".into());
+    let effects = app.apply_event(Event::DirectAccess {
+        parent: ATTIC.into(),
+        id: 3,
+        answer: crate::api::types::DirectAnswer::Denied("federation is off there".into()),
+    });
+    assert!(effects.contains(&Effect::Api(ApiCmd::TunnelClose { id: nas() })));
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/3/stream/music/y.mp3?token=at");
+}
+
+#[test]
+fn a_running_peer_tunnel_that_gives_up_on_its_token_has_it_re_minted() {
+    let mut app = federated_app();
+    app.queue.push(nas_row("music/y.mp3"));
+    app.direct.insert(nas(), DirectState { ticket: Some(guest("T1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(nas(), tunnel_up("http://127.0.0.1:5000"));
+    let now = crate::clock::Instant::now();
+    assert!(direct_asks(&app.tick_at(now)).is_empty(), "fresh and up: nothing to ask");
+
+    app.apply_event(Event::TunnelStatus { id: nas(), status: crate::quickconnect::TunnelStatus::Rejected });
+    assert_eq!(app.direct.get(&nas()).and_then(|s| s.refused.clone()), Some("mstrfedg1:T1".into()));
+    assert_eq!(direct_asks(&app.tick_at(now + secs(1))), vec![(3, true)]);
+    // The tunnel is still there: the new ticket swaps in, and the crate
+    // re-dials with it at once.
+    let effects = app.apply_event(granted("T2"));
+    assert!(effects.contains(&Effect::Api(ApiCmd::TunnelCredential { id: nas(), credential: "mstrfedg1:T2".into() })), "{effects:?}");
+
+    // A Quick Connect tunnel saying the same is a re-pair, not a retry.
+    let mut qc = connected_app();
+    qc.servers.push(faraway());
+    qc.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    qc.apply_event(Event::TunnelStatus { id: FARAWAY.into(), status: crate::quickconnect::TunnelStatus::Rejected });
+    assert!(qc.direct.is_empty());
+}
+
+#[test]
+fn a_tunnel_parent_is_kept_for_the_access_call_and_let_go_once_the_peer_is_direct() {
+    // The peer's parent is a Quick Connect server: its tunnel carries the
+    // proxy path until the peer is direct, and the access call whenever
+    // the ticket is due.
+    let mut app = connected_app();
+    let parent = "mstream+iroh://faraway";
+    let pid = crate::config::peer_identity(parent, 7);
+    app.servers.push(faraway());
+    app.servers.push(KnownServer { id: pid.clone(), name: "Shed".into(), token: None, self_signed: false, peer: Some((parent.into(), 7)), pairing: None, dj: Default::default() });
+    app.direct_offered.insert(parent.into());
+    app.queue.push(Queued { dj: None, origin: Origin { server: parent.into(), peer: Some(7) }, track: track("music/s.mp3") });
+
+    // No ticket yet: the parent is wanted (the proxy, and the access call).
+    assert!(app.tunnel_targets().contains(parent));
+    assert!(!app.tunnel_targets().contains(&pid));
+
+    // A fresh ticket and the peer's own tunnel up: the parent is let go.
+    app.direct.insert(pid.clone(), DirectState { ticket: Some(guest("S1", 60, 86_340)), ..Default::default() });
+    app.tunnels.insert(pid.clone(), tunnel_up("http://127.0.0.1:6000"));
+    assert!(app.tunnel_targets().contains(&pid));
+    assert!(!app.tunnel_targets().contains(parent), "the bytes no longer cross the parent");
+
+    // The ticket going stale wants the parent back for the re-mint.
+    app.direct.insert(pid.clone(), DirectState { ticket: Some(guest("S1", 3 * 3600, 3600)), ..Default::default() });
+    assert!(app.tunnel_targets().contains(parent));
+}
+
+// ── Tunnels follow the queue (contract clause 38) ───────────────────────
+
+fn tunnel_up(local_url: &str) -> TunnelState {
+    TunnelState::Up {
+        local_url: local_url.into(),
+        local_token: "lt".into(),
+        status: crate::quickconnect::TunnelStatus::Connected,
+        path: None,
+    }
+}
+
+/// A saved Quick Connect server with a pairing code in the book.
+fn faraway() -> KnownServer {
+    KnownServer {
+        id: "mstream+iroh://faraway".into(),
+        name: "quick connect · faraway".into(),
+        token: Some("t".into()),
+        self_signed: false,
+        peer: None,
+        pairing: Some("mstr1:far".into()),
+        dj: Default::default(),
+    }
+}
+
+const FARAWAY: &str = "mstream+iroh://faraway";
+
+fn secs(n: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(n)
+}
+
+#[test]
+fn a_queued_row_on_a_tunnel_server_has_its_tunnel_dialled() {
+    // Whichever server is browsed: the session is on a standard server.
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    let now = crate::clock::Instant::now();
+    assert!(app.tick_at(now).is_empty(), "nothing queued, nothing to dial");
+
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    let effects = app.tick_at(now);
+    assert_eq!(
+        effects,
+        vec![Effect::Api(ApiCmd::TunnelOpen { id: FARAWAY.into(), credential: "mstr1:far".into() })]
+    );
+    assert_eq!(app.tunnels.get(FARAWAY), Some(&TunnelState::Dialling));
+    assert!(app.tick_at(now + secs(1)).is_empty(), "one dial in flight, not one per tick");
+}
+
+#[test]
+fn a_tunnel_nothing_references_is_released_after_the_grace() {
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    let now = crate::clock::Instant::now();
+    assert!(app.tick_at(now).is_empty(), "wanted and up: nothing to do");
+
+    app.queue.items.clear();
+    assert!(app.tick_at(now).is_empty(), "the grace starts");
+    assert!(app.tick_at(now + secs(9)).is_empty(), "and holds");
+    let effects = app.tick_at(now + secs(10));
+    assert_eq!(effects, vec![Effect::Api(ApiCmd::TunnelClose { id: FARAWAY.into() })]);
+    assert!(!app.tunnels.contains_key(FARAWAY));
+    assert!(app.tick_at(now + secs(20)).is_empty(), "closed once");
+}
+
+#[test]
+fn a_row_arriving_inside_the_grace_keeps_the_tunnel() {
+    // A restore, a clear-then-refill and the launch's empty queue all pass
+    // through "nothing queued" for a moment.
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    let now = crate::clock::Instant::now();
+    assert!(app.tick_at(now).is_empty(), "the grace starts");
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    assert!(app.tick_at(now + secs(5)).is_empty(), "wanted again: the release is cancelled");
+    assert!(app.tick_at(now + secs(30)).is_empty(), "and stays cancelled");
+    assert!(matches!(app.tunnels.get(FARAWAY), Some(TunnelState::Up { .. })));
+}
+
+#[test]
+fn the_ladder_spaces_the_dials_and_a_refused_code_is_never_redialled_on_its_own() {
+    assert_eq!(tunnel_retry_delay(1), secs(5));
+    assert_eq!(tunnel_retry_delay(2), secs(10));
+    assert_eq!(tunnel_retry_delay(3), secs(20));
+    assert_eq!(tunnel_retry_delay(4), secs(40));
+    assert_eq!(tunnel_retry_delay(5), secs(60));
+    assert_eq!(tunnel_retry_delay(10), secs(60));
+    assert_eq!(tunnel_retry_delay(11), secs(300));
+
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    let now = crate::clock::Instant::now();
+    assert!(matches!(app.tick_at(now).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+
+    app.apply_event(Event::TunnelFailed { id: FARAWAY.into(), rejected: false, why: "no answer".into() });
+    let failed = app.tunnel_retry.get(FARAWAY).expect("on the ladder").failed_at;
+    assert!(app.tick_at(failed + secs(4)).is_empty(), "the first rung is five seconds");
+    assert!(matches!(app.tick_at(failed + secs(5)).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+
+    app.apply_event(Event::TunnelFailed { id: FARAWAY.into(), rejected: false, why: "no answer".into() });
+    let failed = app.tunnel_retry.get(FARAWAY).expect("still on the ladder").failed_at;
+    assert_eq!(app.tunnel_retry.get(FARAWAY).unwrap().failures, 2);
+    assert!(app.tick_at(failed + secs(9)).is_empty(), "the second rung is ten");
+    assert!(matches!(app.tick_at(failed + secs(10)).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+
+    // Up: the ladder is forgotten.
+    app.apply_event(Event::TunnelUp {
+        id: FARAWAY.into(),
+        local_url: "http://127.0.0.1:4242".into(),
+        local_token: "lt".into(),
+    });
+    assert!(!app.tunnel_retry.contains_key(FARAWAY));
+
+    // Refused: a rotated code is a re-pair, not a retry.
+    app.tunnels.remove(FARAWAY);
+    assert!(matches!(app.tick_at(failed + secs(60)).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+    app.apply_event(Event::TunnelFailed { id: FARAWAY.into(), rejected: true, why: "rejected".into() });
+    let failed = app.tunnel_retry.get(FARAWAY).unwrap().failed_at;
+    assert!(app.tick_at(failed + secs(3600)).is_empty(), "never on its own");
+    assert!(matches!(app.tunnels.get(FARAWAY), Some(TunnelState::Down { rejected: true, .. })));
+}
+
+#[test]
+fn a_row_on_a_tunnel_not_yet_up_is_held_and_starts_when_it_comes_up() {
+    // Contract clause 37's tunnel step: brought up and re-seeded without
+    // skipping.
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    app.push_queue(track("music/near.mp3"));
+
+    // Not even asked for yet — but dialable, so it is waited for.
+    let effects = app.play_index(0);
+    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.tunnel_wait, Some(TunnelWait { index: 0, id: FARAWAY.into() }));
+    assert_eq!(app.queue.current, Some(0));
+    assert!(app.now_playing.as_ref().is_some_and(|t| t.filepath == "music/far.mp3"));
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text == "Connecting to quick connect · faraway…"),
+        "{:?}",
+        app.message
+    );
+
+    // The reconcile dials it on the next tick.
+    let now = crate::clock::Instant::now();
+    assert!(matches!(app.tick_at(now).as_slice(), [Effect::Api(ApiCmd::TunnelOpen { .. })]));
+
+    // Up: the held row plays from the loopback, with both tokens.
+    let effects = app.apply_event(Event::TunnelUp {
+        id: FARAWAY.into(),
+        local_url: "http://127.0.0.1:4242".into(),
+        local_token: "lt".into(),
+    });
+    assert_eq!(played_url(&effects), "http://127.0.0.1:4242/media/music/far.mp3?token=t&__lt=lt");
+    assert!(app.tunnel_wait.is_none());
+}
+
+#[test]
+fn a_held_row_keeps_its_restored_spot_for_when_the_tunnel_comes_up() {
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    app.resume_spot = Some((0, 42.5));
+
+    let effects = app.play_row_resuming(0);
+    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.resume_spot, Some((0, 42.5)), "the spot is spent by a play, not by a wait");
+
+    let effects = app.apply_event(Event::TunnelUp {
+        id: FARAWAY.into(),
+        local_url: "http://127.0.0.1:4242".into(),
+        local_token: "lt".into(),
+    });
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+    assert!(effects.contains(&Effect::Audio(AudioCmd::Seek(42.5))), "{effects:?}");
+    assert_eq!(app.resume_spot, None);
+}
+
+#[test]
+fn a_refused_tunnel_skips_the_held_row_with_a_word_and_an_unanswered_one_keeps_waiting() {
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.queue.push(at(FARAWAY, "music/far.mp3"));
+    app.push_queue(track("music/near.mp3"));
+    app.play_index(0);
+    assert!(app.tunnel_wait.is_some());
+
+    // No answer: the ladder will dial again; the row waits, nothing plays.
+    let effects =
+        app.apply_event(Event::TunnelFailed { id: FARAWAY.into(), rejected: false, why: "no answer".into() });
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))), "{effects:?}");
+    assert!(app.tunnel_wait.is_some());
+    assert_eq!(app.queue.current, Some(0));
+
+    // Refused: nothing will bring it up, so the row walks on.
+    let effects = app.apply_event(Event::TunnelFailed {
+        id: FARAWAY.into(),
+        rejected: true,
+        why: "tunnel handshake rejected — wrong or rotated connect secret".into(),
+    });
+    assert_eq!(played_url(&effects), "http://host:3000/media/music/near.mp3?token=tok");
+    assert!(app.tunnel_wait.is_none());
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text.contains("won’t play") && m.text.contains("rejected")),
+        "{:?}",
+        app.message
+    );
+}
+
+#[test]
+fn a_switch_away_keeps_the_tunnel_the_queue_still_needs() {
+    // Contract clause 11 with clause 38: the session leaves its tunnel
+    // server; the queue's rows keep the tunnel until they leave too.
+    let mut app = App::new(Some(FARAWAY.into()), Some("t".into()), None).with_tunnel(Some("mstr1:far".into()));
+    app.connected = true;
+    app.session.server = "http://127.0.0.1:4242".into();
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    app.servers.push(faraway());
+    app.push_queue(track("music/far.mp3"));
+    assert_eq!(app.queue.items[0].origin.server, FARAWAY);
+
+    app.adopt_server(
+        Session { server: "http://office:3000".into(), server_id: "http://office:3000".into(), ..Default::default() },
+        None,
+    );
+    let now = crate::clock::Instant::now();
+    assert!(app.tick_at(now).is_empty());
+    assert!(app.tick_at(now + secs(60)).is_empty(), "wanted by the queue: never released");
+    assert!(matches!(app.tunnels.get(FARAWAY), Some(TunnelState::Up { .. })));
+
+    // …and released once the last row leaves.
+    app.queue.items.clear();
+    assert!(app.tick_at(now + secs(60)).is_empty());
+    assert_eq!(app.tick_at(now + secs(70)), vec![Effect::Api(ApiCmd::TunnelClose { id: FARAWAY.into() })]);
+}
+
+#[test]
+fn a_playing_row_from_another_server_asks_that_server_for_its_cover_and_shape() {
+    // Contract clause 30: the art URL is built from the row's own server.
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    let mut far = at(FARAWAY, "music/far.mp3");
+    far.track.metadata.album_art = Some("far.jpg".into());
+    app.queue.push(far);
+    let mut near = track("music/near.mp3");
+    near.metadata.album_art = Some("near.jpg".into());
+    app.push_queue(near);
+
+    let effects = app.play_index(0);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Api(ApiCmd::AlbumArt { file, reach: Some(Reach { base, local_token, .. }) })
+                if file == "far.jpg" && base == "http://127.0.0.1:4242" && local_token.as_deref() == Some("lt")
+        )),
+        "the cover comes from the row's server: {effects:?}"
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Api(ApiCmd::Waveform { filepath, reach: Some(_) }) if filepath == "music/far.mp3"
+        )),
+        "and so does the shape: {effects:?}"
+    );
+
+    // The session's own row asks the session.
+    let effects = app.play_index(1);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Api(ApiCmd::AlbumArt { file, reach: None }) if file == "near.jpg"
+        )),
+        "{effects:?}"
+    );
 }
 
 #[test]
@@ -1506,6 +2401,15 @@ fn an_expired_tunnel_session_signs_back_in_over_the_open_bridge() {
     app.session.server = "http://127.0.0.1:51234".into();
     app.session.server_id = "mstream+iroh://endpointabc".into();
     app.session.token = Some("stale".into());
+    app.tunnels.insert(
+        "mstream+iroh://endpointabc".into(),
+        TunnelState::Up {
+            local_url: "http://127.0.0.1:51234".into(),
+            local_token: "lt".into(),
+            status: crate::quickconnect::TunnelStatus::Connected,
+            path: None,
+        },
+    );
 
     app.apply_event(Event::Unauthorized);
     assert_eq!(app.connect.stage, ConnectStage::Direct);
@@ -1520,8 +2424,11 @@ fn an_expired_tunnel_session_signs_back_in_over_the_open_bridge() {
         effects,
         vec![Effect::Api(ApiCmd::Login {
             server: "http://127.0.0.1:51234".into(),
+            identity: "mstream+iroh://endpointabc".into(),
             username: "alice".into(),
             password: "pw".into(),
+            self_signed: false,
+            local_token: Some("lt".into()),
         })]
     );
 }
@@ -1556,17 +2463,24 @@ fn an_open_tunnel_leads_to_the_login_form() {
     // means "now sign in", not "you're in".
     let mut app = App::new(None, None, None);
     app.connect.stage = ConnectStage::QuickConnect;
-    app.connecting = true;
-
-    app.apply_event(Event::TunnelReady {
+    let code = crate::quickconnect::testing::sample_code();
+    let id = crate::quickconnect::testing::sample_id();
+    for c in code.chars() {
+        app.handle_action(Action::Input(c));
+    }
+    app.handle_action(Action::Submit);
+    app.apply_event(Event::TunnelUp {
+        id: id.clone(),
         local_url: "http://127.0.0.1:51234".into(),
-        id: "mstream+iroh://abc123".into(),
+        local_token: "lt".into(),
     });
+    app.apply_event(Event::NeedsLogin { server: "http://127.0.0.1:51234".into() });
     assert_eq!(app.connect.stage, ConnectStage::Direct);
     assert_eq!(app.connect.server, "http://127.0.0.1:51234");
     assert_eq!(app.connect.field, 1, "focus lands on the username");
     assert!(!app.connecting);
-    assert_eq!(app.session.server_id, "mstream+iroh://abc123", "already filed under its identity");
+    assert_eq!(app.session.server_id, id, "already filed under its identity");
+    assert!(app.message.as_ref().is_some_and(|m| m.text.contains("tunnel open")), "{:?}", app.message);
 }
 
 #[test]
@@ -1614,8 +2528,483 @@ fn connecting_without_a_username_uses_public_mode() {
     let effects = app.handle_action(Action::Submit);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::Connect { server: "http://host:3000".into(), token: None })]
+        vec![Effect::Api(ApiCmd::Connect {
+            server: "http://host:3000".into(),
+            identity: "http://host:3000".into(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        })]
     );
+}
+
+#[test]
+fn a_self_signed_session_carries_its_trust_into_every_connect() {
+    // The flag rides the entry → the session → the command, so the worker
+    // builds the one lenient client for the one server that opted in.
+    let mut app = App::new(Some("https://attic.local:3000".into()), None, None);
+    app.session.self_signed = true;
+    let effects = app.start();
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Api(ApiCmd::Connect { self_signed: true, .. }))),
+        "begin() carries the flag: {effects:?}"
+    );
+
+    // And a switch seats it fresh for the next server.
+    let effects = app.adopt_server(
+        Session {
+            server: "http://office.local:3000".into(),
+            server_id: "http://office.local:3000".into(),
+            ..Default::default()
+        },
+        Some("music/Ambient".into()),
+    );
+    assert!(!app.session.self_signed, "trust never leaks across servers");
+    assert_eq!(app.path, "music/Ambient", "the entry's last path comes along");
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Api(ApiCmd::Connect { self_signed: false, .. })))
+    );
+}
+
+/// A queue row from a named server, for the cross-server tests.
+fn at(server: &str, path: &str) -> Queued {
+    Queued { dj: None, origin: Origin { server: server.to_string(), peer: None }, track: track(path) }
+}
+
+#[test]
+fn a_queued_track_remembers_the_server_it_came_from() {
+    // Contract clause 30: every queued track carries its origin.
+    let mut app = connected_app();
+    app.push_queue(track("music/a.mp3"));
+    assert_eq!(app.queue.items[0].origin, Origin { server: "http://host:3000".into(), peer: None });
+
+    // A tunnel session stamps its identity, never the loopback port the
+    // bridge happens to be on this run.
+    let mut app = App::new(Some("http://127.0.0.1:5123".into()), None, None);
+    app.session.server_id = "mstream+iroh://endpoint".into();
+    app.push_queue(track("music/a.mp3"));
+    assert_eq!(app.queue.items[0].origin.server, "mstream+iroh://endpoint");
+}
+
+#[test]
+fn adopting_a_server_keeps_the_music_and_the_queue() {
+    // Contract clause 11: a switch changes the browsed server and nothing
+    // else. Clause 30: each row then plays from its own server.
+    let mut app = App::new(Some("http://attic.local:3000".into()), Some("attic-token".into()), None);
+    app.connected = true;
+    app.servers = vec![
+        KnownServer {
+            id: "http://attic.local:3000".into(),
+            name: "http://attic.local:3000".into(),
+            token: Some("attic-token".into()),
+            self_signed: false, peer: None, pairing: None, dj: Default::default() },
+        KnownServer {
+            id: "http://office.local:3000".into(),
+            name: "http://office.local:3000".into(),
+            token: Some("office-token".into()),
+            self_signed: true, peer: None, pairing: None, dj: Default::default() },
+    ];
+    app.push_queue(track("music/a.mp3"));
+    app.push_queue(track("music/b.mp3"));
+    app.queue.current = Some(0);
+    app.now_playing = Some(track("music/a.mp3"));
+
+    let effects = app.adopt_server(
+        Session {
+            server: "http://office.local:3000".into(),
+            server_id: "http://office.local:3000".into(),
+            token: Some("office-token".into()),
+            self_signed: true,
+            ..Default::default()
+        },
+        None,
+    );
+    assert!(effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Connect { .. }))));
+    assert!(app.now_playing.is_some(), "what is streaming already has its URL");
+    assert_eq!(app.queue.items.len(), 2, "the queue comes along");
+    assert_eq!(app.queue.current, Some(0));
+    assert!(!app.connected, "connected again only when the new server answers");
+
+    // Office answers. The attic row still plays from the attic, with the
+    // attic's own token, and nothing about its certificate is special.
+    app.apply_event(Event::Connected {
+        server: "http://office.local:3000".into(),
+        id: "http://office.local:3000".into(),
+        username: None,
+        token: Some("office-token".into()),
+        ping: Box::default(),
+    });
+    let effects = app.play_index(1);
+    assert_eq!(played_url(&effects), "http://attic.local:3000/media/music/b.mp3?token=attic-token");
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Trust(_))));
+
+    // A row queued on office plays from office, whose certificate the
+    // entry trusts by choice — the stream client is told so.
+    app.push_queue(track("music/c.mp3"));
+    let effects = app.play_index(2);
+    assert_eq!(played_url(&effects), "http://office.local:3000/media/music/c.mp3?token=office-token");
+    assert!(effects.iter().any(|e| matches!(e, Effect::Trust(s) if s == "http://office.local:3000")));
+}
+
+#[test]
+fn a_row_on_a_closed_tunnel_walks_on_like_a_refused_one() {
+    // Contract clauses 30 and 37: a tunnel row is reachable only while its
+    // bridge is open; until then it is skipped with a word, not a stall.
+    let mut app = connected_app();
+    app.servers.push(KnownServer {
+        id: "mstream+iroh://faraway".into(),
+        name: "mstream+iroh://faraway".into(),
+        token: Some("t".into()),
+        self_signed: false, peer: None, pairing: None, dj: Default::default() });
+    app.queue.push(at("mstream+iroh://faraway", "music/far.mp3"));
+    app.push_queue(track("music/near.mp3"));
+
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://host:3000/media/music/near.mp3?token=tok");
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text.contains("tunnel is closed")),
+        "said why: {:?}",
+        app.message
+    );
+
+    // While its tunnel is being dialled the row is held, not skipped
+    // (contract clause 37): nothing plays, the row is current, and the
+    // line says what it waits on. (The skip budget is what a played track
+    // resets; nothing has played here, so it is reset by hand.)
+    app.failures = 0;
+    app.tunnels.insert("mstream+iroh://faraway".into(), TunnelState::Dialling);
+    let effects = app.play_index(0);
+    assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.tunnel_wait, Some(TunnelWait { index: 0, id: "mstream+iroh://faraway".into() }));
+    assert_eq!(app.queue.current, Some(0));
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text.contains("Connecting to quick connect · faraway")),
+        "said what it waits on: {:?}",
+        app.message
+    );
+
+    // Once its tunnel is up the same row plays through the loopback, with
+    // the token the entry saved and the bridge's own loopback token.
+    app.failures = 0;
+    app.tunnels.insert(
+        "mstream+iroh://faraway".into(),
+        TunnelState::Up {
+            local_url: "http://127.0.0.1:4242".into(),
+            local_token: "lt".into(),
+            status: crate::quickconnect::TunnelStatus::Connected,
+            path: None,
+        },
+    );
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://127.0.0.1:4242/media/music/far.mp3?token=t&__lt=lt");
+}
+
+#[test]
+fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone() {
+    // Contract clause 40: rows from a server no longer known are dropped,
+    // the playing row keeps its place, the position comes back, and
+    // nothing plays until asked — then that row, from that second.
+    let mut app = connected_app();
+    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: Some("bt".into()), self_signed: false , peer: None, pairing: None, dj: Default::default() }];
+    let mut long = at("http://b", "music/2.mp3");
+    long.track.metadata.duration = Some(300.0);
+    let snapshot = QueueSnapshot {
+        version: QUEUE_SNAPSHOT_VERSION,
+        index: Some(2),
+        position: 42.5,
+        shuffle: true,
+        repeat: "all".into(),
+        items: vec![
+            at("http://host:3000", "music/1.mp3"),
+            at("http://gone", "music/lost.mp3"),
+            long,
+            at("http://gone", "music/lost2.mp3"),
+        ],
+    };
+    assert!(app.restore_queue(snapshot));
+    assert_eq!(app.queue.items.len(), 2, "the two rows whose servers are known");
+    assert_eq!(app.queue.current, Some(1), "the playing row, renumbered");
+    assert_eq!(app.resume_spot, Some((1, 42.5)));
+    assert!(app.queue.shuffle && app.queue.repeat == Repeat::All);
+    assert!(app.now_playing.is_some(), "shown, not played");
+    assert!(app.status.is_idle());
+
+    // The first play is that row, from the spot; the seek rides behind it.
+    let effects = app.handle_action(Action::PlayPause);
+    assert_eq!(played_url(&effects), "http://b/media/music/2.mp3?token=bt");
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Seek(p)) if (*p - 42.5).abs() < 1e-9)));
+    assert!(app.resume_spot.is_none(), "spent");
+
+    // A position at the end restarts the track; a file from another
+    // shape is ignored; a snapshot with nothing known restores nothing.
+    assert_eq!(clamp_resume_position(299.2, Some(300.0)), 0.0);
+    assert_eq!(clamp_resume_position(12.0, Some(300.0)), 12.0);
+    assert_eq!(clamp_resume_position(12.0, None), 12.0);
+    assert_eq!(clamp_resume_position(-3.0, None), 0.0);
+    let mut fresh = connected_app();
+    assert!(!fresh.restore_queue(QueueSnapshot {
+        version: QUEUE_SNAPSHOT_VERSION + 1,
+        index: None,
+        position: 0.0,
+        shuffle: false,
+        repeat: "off".into(),
+        items: vec![at("http://host:3000", "music/1.mp3")],
+    }));
+    assert!(!fresh.restore_queue(QueueSnapshot {
+        version: QUEUE_SNAPSHOT_VERSION,
+        index: Some(0),
+        position: 0.0,
+        shuffle: false,
+        repeat: "off".into(),
+        items: vec![at("http://gone", "music/1.mp3")],
+    }));
+    assert!(fresh.queue.items.is_empty());
+}
+
+#[test]
+fn a_snapshot_round_trips_and_keeps_a_held_spot_until_something_plays() {
+    // Contract clause 39: what is written is what comes back; a checkpoint
+    // taken while a restored spot is still held writes that spot, not
+    // track 1 / 0:00.
+    let mut app = connected_app();
+    app.push_queue(track("music/a.mp3"));
+    app.push_queue(track("music/b.mp3"));
+    let effects = app.play_index(1);
+    app.status = PlayerStatus { playing: true, position: 17.0, source: played_url(&effects), ..Default::default() };
+    let snapshot = app.queue_snapshot().expect("a queue to save");
+    assert_eq!((snapshot.index, snapshot.position), (Some(1), 17.0));
+    let text = serde_json::to_string(&snapshot).unwrap();
+    let back: QueueSnapshot = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, snapshot);
+
+    let mut again = connected_app();
+    assert!(again.restore_queue(back));
+    assert_eq!(again.resume_spot, Some((1, 17.0)));
+    let held = again.queue_snapshot().unwrap();
+    assert_eq!((held.index, held.position), (Some(1), 17.0), "the held spot, not 0:00");
+
+    // An empty queue has nothing to write.
+    assert!(App::new(None, None, None).queue_snapshot().is_none());
+}
+
+#[test]
+fn add_next_lands_after_the_playing_row_and_play_now_starts_it() {
+    // Contract clauses 32 and 33.
+    let mut app = connected_app();
+    app.apply_event(Event::Listing(Box::new(listing("/music", &[], &["a.mp3", "b.mp3", "c.mp3"]))));
+    app.focus = Focus::Browser;
+
+    // Nothing playing: Add next goes to the end and starts nothing.
+    app.files.state.select(Some(1)); // a.mp3 (row 0 is the Parent row)
+    let effects = app.handle_action(Action::AddNext);
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))), "never autoplays");
+    assert_eq!(app.queue.items.len(), 1);
+    assert!(app.status.is_idle());
+
+    // Playing row 0 with another row after it: Add next cuts in at 1.
+    app.push_queue(track("music/z.mp3"));
+    let effects = app.play_index(0);
+    app.status = PlayerStatus { playing: true, source: played_url(&effects), ..Default::default() };
+    app.files.state.select(Some(2)); // b.mp3
+    app.handle_action(Action::AddNext);
+    let paths: Vec<&str> = app.queue.items.iter().map(|i| i.filepath.as_str()).collect();
+    assert_eq!(paths, ["music/a.mp3", "music/b.mp3", "music/z.mp3"]);
+    assert_eq!(app.queue.current, Some(0), "the playing row stays where it is");
+
+    // Play now: in at 1 again, and started at once.
+    app.files.state.select(Some(3)); // c.mp3
+    let effects = app.handle_action(Action::PlayNow);
+    assert_eq!(played_url(&effects), "http://host:3000/media/music/c.mp3?token=tok");
+    let paths: Vec<&str> = app.queue.items.iter().map(|i| i.filepath.as_str()).collect();
+    assert_eq!(paths, ["music/a.mp3", "music/c.mp3", "music/b.mp3", "music/z.mp3"]);
+    assert_eq!(app.queue.current, Some(1));
+}
+
+#[test]
+fn moving_a_queued_row_keeps_current_on_its_track() {
+    // The pure rule: current follows the track it was on.
+    let mut queue = Queue { items: vec![item("a"), item("b"), item("c"), item("d")], current: Some(1), ..Default::default() };
+    queue.move_row(3, 0); // d to the front: b slides to 2
+    assert_eq!(queue.items.iter().map(|i| i.filepath.as_str()).collect::<Vec<_>>(), ["d", "a", "b", "c"]);
+    assert_eq!(queue.current, Some(2));
+    queue.move_row(2, 3); // the playing row itself moves
+    assert_eq!(queue.current, Some(3));
+    queue.move_row(0, 2); // d past the playing row: it slides back up
+    assert_eq!(queue.items.iter().map(|i| i.filepath.as_str()).collect::<Vec<_>>(), ["a", "c", "d", "b"]);
+    assert_eq!(queue.current, Some(3));
+    queue.move_row(9, 0); // out of range: nothing
+    assert_eq!(queue.current, Some(3));
+
+    // Through the keys, on the queue column: the highlighted row moves
+    // and stays highlighted; off the queue the keys do nothing.
+    let mut app = connected_app();
+    app.push_queue(track("1"));
+    app.push_queue(track("2"));
+    app.push_queue(track("3"));
+    app.focus = Focus::Queue;
+    app.queue.state.select(Some(0));
+    app.handle_action(Action::MoveQueueDown);
+    assert_eq!(app.queue.items.iter().map(|i| i.filepath.as_str()).collect::<Vec<_>>(), ["2", "1", "3"]);
+    assert_eq!(app.queue.state.selected(), Some(1));
+    app.focus = Focus::Browser;
+    app.handle_action(Action::MoveQueueUp);
+    assert_eq!(app.queue.items[0].filepath, "2", "the browser's keys are its own");
+}
+
+#[test]
+fn a_peers_rows_play_through_the_parents_stream_proxy() {
+    // Contract clauses 27 and 30: a peer's origin names its parent, and
+    // its bytes come through the parent's proxy with the parent's token.
+    let mut app = connected_app();
+    app.queue.push(Queued {
+        dj: None,
+        origin: Origin { server: "http://host:3000".into(), peer: Some(3) },
+        track: track("music/x.mp3"),
+    });
+    let effects = app.play_index(0);
+    assert_eq!(
+        played_url(&effects),
+        "http://host:3000/api/v1/federation/peers/3/stream/music/x.mp3?token=tok"
+    );
+
+    // From a session on another server, the parent is reached through
+    // the book — and a parent removed takes the peer's rows too.
+    let mut app = App::new(Some("http://office:3000".into()), None, None);
+    app.connected = true;
+    app.servers = vec![KnownServer {
+        id: "http://attic:3000".into(),
+        name: "http://attic:3000".into(),
+        token: Some("at".into()),
+        self_signed: false,
+        peer: None, pairing: None, dj: Default::default() }];
+    app.queue.push(Queued {
+        dj: None,
+        origin: Origin { server: "http://attic:3000".into(), peer: Some(5) },
+        track: track("music/y.mp3"),
+    });
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/5/stream/music/y.mp3?token=at");
+    app.drop_server_items("http://attic:3000");
+    assert!(app.queue.items.is_empty(), "a parent's removal sweeps its peers' rows");
+}
+
+#[test]
+fn a_peer_session_stamps_its_rows_and_keeps_none_of_the_optional_features() {
+    // Contract clauses 26 and 27.
+    let mut app = App::new(Some("http://attic:3000".into()), Some("at".into()), None);
+    app.servers = vec![KnownServer {
+        id: "mstream+peer://3@http://attic:3000".into(),
+        name: "Nas".into(),
+        token: None,
+        self_signed: false,
+        peer: Some(("http://attic:3000".into(), 3)), pairing: None, dj: Default::default() }];
+    let effects = app.adopt_server(
+        Session {
+            server: "http://attic:3000".into(),
+            server_id: "mstream+peer://3@http://attic:3000".into(),
+            username: Some("paul".into()),
+            token: Some("at".into()),
+            peer: Some(("http://attic:3000".into(), 3)),
+            ..Default::default()
+        },
+        None,
+    );
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        Effect::Api(ApiCmd::Connect { server, peer: Some(3), .. }) if server == "http://attic:3000"
+    )));
+    let ping = crate::api::types::Ping { discovery: true, discovery_path: true, ..Default::default() };
+    app.apply_event(Event::Connected {
+        server: "http://attic:3000".into(),
+        id: "http://attic:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::new(ping),
+    });
+    assert_eq!(app.session.server_id, "mstream+peer://3@http://attic:3000", "filed under the peer");
+    assert_eq!(app.capabilities, crate::api::types::Capabilities::default(), "pinned off");
+    assert_eq!(app.server_display(), "Nas via http://attic:3000");
+    app.push_queue(track("music/z.mp3"));
+    assert_eq!(app.queue.items[0].origin, Origin { server: "http://attic:3000".into(), peer: Some(3) });
+    let effects = app.play_index(0);
+    assert_eq!(played_url(&effects), "http://attic:3000/api/v1/federation/peers/3/stream/music/z.mp3?token=at");
+}
+
+#[test]
+fn a_parents_ping_asks_for_its_peers_and_the_answer_is_saved() {
+    // Contract clause 20.
+    let mut app = App::new(Some("http://attic:3000".into()), None, None);
+    let ping = crate::api::types::Ping { federation_browse: true, ..Default::default() };
+    let effects = app.apply_event(Event::Connected {
+        server: "http://attic:3000".into(),
+        id: "http://attic:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::new(ping),
+    });
+    assert!(effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::FederationPeers { parent }) if parent == "http://attic:3000")));
+
+    let effects = app.apply_event(Event::FederationPeers {
+        parent: "http://attic:3000".into(),
+        peers: Some(vec![crate::api::types::PeerListing { id: 3, name: "Nas".into() }]),
+    });
+    assert_eq!(
+        effects,
+        vec![Effect::SavePeers { parent: "http://attic:3000".into(), listed: vec![(3, "Nas".into())] }]
+    );
+    // A failed ask changes nothing.
+    assert!(app.apply_event(Event::FederationPeers { parent: "http://attic:3000".into(), peers: None }).is_empty());
+
+    // Without the flag, the parent's peers are marked missing.
+    let effects = app.apply_event(Event::Connected {
+        server: "http://attic:3000".into(),
+        id: "http://attic:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::default(),
+    });
+    assert!(effects.iter().any(|e| matches!(e, Effect::SavePeers { parent, listed } if parent == "http://attic:3000" && listed.is_empty())));
+}
+
+#[test]
+fn a_removed_server_takes_its_rows_and_playback_lands_on_the_next_survivor() {
+    // The pure rule first (contract clause 35).
+    let items = vec![at("a", "1"), at("b", "2"), at("a", "3"), at("b", "4")];
+    let sweep = queue_without(&items, "a", Some(0)).unwrap();
+    assert_eq!(sweep.keep.iter().map(|i| i.filepath.as_str()).collect::<Vec<_>>(), ["2", "4"]);
+    assert_eq!((sweep.index, sweep.current_survives), (Some(0), false), "the first survivor after it");
+    let sweep = queue_without(&items, "a", Some(1)).unwrap();
+    assert_eq!((sweep.index, sweep.current_survives), (Some(0), true), "the current row, renumbered");
+    let sweep = queue_without(&items, "b", Some(3)).unwrap();
+    assert_eq!((sweep.index, sweep.current_survives), (Some(1), false), "nothing after it: the last");
+    assert!(queue_without(&items, "c", Some(0)).is_none(), "nothing dropped, nothing to do");
+    let sweep = queue_without(&[at("a", "1")], "a", Some(0)).unwrap();
+    assert!(sweep.keep.is_empty() && sweep.index.is_none());
+
+    // Playing row 0 on the session's server; removing that server plays
+    // the survivor, which lives on the other one.
+    let mut app = connected_app();
+    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: None, self_signed: false , peer: None, pairing: None, dj: Default::default() }];
+    app.queue.items = vec![at("http://host:3000", "music/1.mp3"), at("http://b", "music/2.mp3")];
+    let effects = app.play_index(0);
+    app.status = PlayerStatus { playing: true, source: played_url(&effects), ..Default::default() };
+    let effects = app.drop_server_items("http://host:3000");
+    assert_eq!(app.queue.items.len(), 1);
+    assert_eq!(played_url(&effects), "http://b/media/music/2.mp3");
+
+    // Idle, and the whole queue was the removed server's: it empties as a
+    // Clear would, quietly.
+    let mut app = connected_app();
+    app.queue.items = vec![at("http://host:3000", "music/1.mp3")];
+    let effects = app.drop_server_items("http://host:3000");
+    assert!(app.queue.items.is_empty());
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Stop))));
+    assert!(app.message.is_none(), "no toast for a sweep");
 }
 
 #[test]
@@ -1655,8 +3044,11 @@ fn login_effect_carries_credentials_and_clears_the_password() {
         effects,
         vec![Effect::Api(ApiCmd::Login {
             server: "http://host:3000".into(),
+            identity: "http://host:3000".into(),
             username: "alice".into(),
             password: "secret".into(),
+            self_signed: false,
+            local_token: None,
         })]
     );
     assert!(app.connect.password.is_empty(), "password is not kept in memory after use");
@@ -1678,7 +3070,14 @@ fn a_typed_address_is_completed_before_it_is_used() {
     let effects = app.handle_action(Action::Submit);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::Connect { server: "http://nas:3000".into(), token: None })]
+        vec![Effect::Api(ApiCmd::Connect {
+            server: "http://nas:3000".into(),
+            identity: "http://nas:3000".into(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        })]
     );
     assert_eq!(app.connect.server, "http://nas:3000", "the field shows what was assumed");
 
@@ -1729,8 +3128,11 @@ fn sending_a_password_over_plain_http_asks_first() {
         effects,
         vec![Effect::Api(ApiCmd::Login {
             server: "http://music.example.com".into(),
+            identity: "http://music.example.com".into(),
             username: "alice".into(),
             password: "secret".into(),
+            self_signed: false,
+            local_token: None,
         })]
     );
 }
@@ -1953,7 +3355,7 @@ fn library_tab_opens_on_a_static_menu_without_a_request() {
     let mut app = connected_app();
     let effects = app.handle_action(Action::SelectTab(1));
     assert!(effects.is_empty(), "the mode menu costs no round-trip");
-    assert_eq!(app.library.entries.len(), 5);
+    assert_eq!(app.library.entries.len(), 7);
     assert_eq!(app.library_node(), &LibraryNode::Root);
 
     let labels: Vec<&str> = app
@@ -1965,7 +3367,7 @@ fn library_tab_opens_on_a_static_menu_without_a_request() {
             _ => "?",
         })
         .collect();
-    assert_eq!(labels, ["Artists", "Albums", "Genres", "Recently Added", "Playlists"]);
+    assert_eq!(labels, ["Artists", "Albums", "Genres", "Recently Added", "Playlists", "Recently Played", "Most Played"]);
 }
 
 #[test]
@@ -2052,7 +3454,7 @@ fn back_walks_the_library_stack_to_the_menu() {
     let effects = app.handle_action(Action::Back);
     assert!(effects.is_empty(), "returning to the static menu needs no request");
     assert_eq!(app.library_node(), &LibraryNode::Root);
-    assert_eq!(app.library.entries.len(), 5);
+    assert_eq!(app.library.entries.len(), 7, "the menu: five ways in and the two play lists");
 
     // Already at the top.
     assert!(app.handle_action(Action::Back).is_empty());
@@ -2071,7 +3473,7 @@ fn a_reply_for_an_abandoned_view_is_discarded() {
         data: LibraryData::Artists(vec!["Ghost".into()]),
     });
     assert_eq!(app.library_node(), &LibraryNode::Root);
-    assert_eq!(app.library.entries.len(), 5, "the menu is untouched by the late reply");
+    assert_eq!(app.library.entries.len(), 7, "the menu is untouched by the late reply");
 }
 
 #[test]
@@ -2149,24 +3551,19 @@ fn recently_added_lists_tracks_directly() {
     assert!(matches!(app.library.entries[1], Entry::Track { .. }));
 }
 
-fn autodj_effect(effects: &[Effect]) -> Option<&ApiCmd> {
-    effects.iter().find_map(|e| match e {
-        Effect::Api(cmd @ ApiCmd::AutoDj { .. }) => Some(cmd),
-        _ => None,
-    })
-}
-
 #[test]
 fn remembered_preferences_are_applied_and_handed_back() {
     let saved = crate::config::PlayerPrefs {
         volume: 0.35,
         repeat: "all".into(),
         shuffle: true,
-        autodj: "tempo+key".into(),
+        autodj_server: Some("http://host:3000".into()),
+        autodj: String::new(),
         crossfade_seconds: 4.5,
         gapless: true,
         blend_skips: true,
         pause_fade: true,
+        resume_queue: true,
         dj: Default::default(),
         extra: Default::default(),
     };
@@ -2174,14 +3571,21 @@ fn remembered_preferences_are_applied_and_handed_back() {
     assert_eq!(app.volume, 0.35);
     assert_eq!(app.queue.repeat, Repeat::All);
     assert!(app.queue.shuffle);
-    assert_eq!(app.autodj, AutoDjMode::BpmKey);
+    assert_eq!(app.dj_server.as_deref(), Some("http://host:3000"), "remembered as on comes back armed");
     assert_eq!(app.crossfade, 4.5);
     assert!(app.gapless);
     assert!(app.blend_skips);
     assert!(app.pause_fade);
 
-    // What goes out matches what came in, so a restart is a no-op.
-    assert_eq!(app.prefs(), saved);
+    // What goes out matches what came in — in the current spelling: the
+    // genre rule's legacy "off" comes back as its two keys — so a restart
+    // is a no-op, and the second round trip is the identity.
+    let mut expected = saved.clone();
+    expected.dj.genre_filter = Some(false);
+    expected.dj.genre_mode = "whitelist".into();
+    let out = app.prefs();
+    assert_eq!(out, expected);
+    assert_eq!(App::new(None, None, None).with_prefs(&out).prefs(), out, "stable from then on");
 }
 
 #[test]
@@ -2191,31 +3595,21 @@ fn nonsense_preferences_fall_back_rather_than_refusing_to_start() {
         volume: 9.0,
         repeat: "sideways".into(),
         shuffle: false,
+        autodj_server: None,
         autodj: "disco".into(),
         crossfade_seconds: f32::NAN,
         gapless: false,
         blend_skips: false,
         pause_fade: false,
+        resume_queue: true,
         dj: Default::default(),
         extra: Default::default(),
     };
     let app = App::new(None, None, None).with_prefs(&saved);
     assert_eq!(app.volume, 1.0, "volume is clamped");
     assert_eq!(app.queue.repeat, Repeat::Off);
-    assert_eq!(app.autodj, AutoDjMode::Off);
+    assert!(app.dj_server.is_none());
     assert_eq!(app.crossfade, 0.0, "a NaN blend is no blend");
-}
-
-#[test]
-fn autodj_cycles_through_its_modes() {
-    let mut app = connected_app();
-    assert_eq!(app.autodj, AutoDjMode::Off);
-    app.handle_action(Action::ToggleAutoDj);
-    assert_eq!(app.autodj, AutoDjMode::Similar);
-    app.handle_action(Action::ToggleAutoDj);
-    assert_eq!(app.autodj, AutoDjMode::BpmKey);
-    app.handle_action(Action::ToggleAutoDj);
-    assert_eq!(app.autodj, AutoDjMode::Off);
 }
 
 /// A browser pane holding tracks, with one highlighted.
@@ -2303,7 +3697,7 @@ fn the_seed_row_names_the_track_it_would_take() {
     };
     assert_eq!(detail, "nothing playing");
 
-    app.queue.replace(vec![track("playing")]);
+    app.replace_queue(vec![track("playing")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
     let Entry::Discover { detail, .. } = &app.discover.entries[0] else {
@@ -2320,7 +3714,7 @@ fn the_seed_row_names_the_track_it_would_take() {
 #[test]
 fn similar_tracks_are_ordinary_playable_rows() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("seed")]);
+    app.replace_queue(vec![track("seed")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
     app.handle_action(Action::Activate); // seed: what's playing
@@ -2368,7 +3762,7 @@ fn an_artist_drills_into_its_ways_in_without_asking_again() {
     // The entry points arrived with the artist list, so going in costs
     // nothing — the whole reason the server sends them inline.
     let mut app = connected_app();
-    app.queue.replace(vec![track("seed")]);
+    app.replace_queue(vec![track("seed")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(discover_tab(&app)));
     app.handle_action(Action::Activate); // seed: what's playing
@@ -2594,14 +3988,14 @@ fn a_track_that_will_not_play_is_skipped_rather_than_stopping_everything() {
     // message appeared and nothing moved. One bad file should cost one
     // track, not the session.
     let mut app = connected_app();
-    app.queue.replace(vec![track("broken"), track("fine"), track("also-fine")]);
+    app.replace_queue(vec![track("broken"), track("fine"), track("also-fine")]);
     let started = app.handle_action(Action::PlayPause);
 
     let effects = app.apply_event(failed(&started, "unrecognised format"));
     assert_eq!(app.queue.current, Some(1), "moved on to the next track");
     assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
     let message = &app.message.as_ref().unwrap().text;
-    assert!(message.contains("skipping"), "got: {message}");
+    assert!(message.contains("won’t play"), "got: {message}");
     assert!(message.contains("broken"), "and names the track: {message}");
 }
 
@@ -2614,7 +4008,7 @@ fn a_failure_from_a_track_already_left_is_not_pinned_on_this_one() {
     // unheard, and counted a failure against a track nothing had been
     // tried on.
     let mut app = connected_app();
-    app.queue.replace(vec![track("stalled.mp3"), track("chosen.mp3"), track("after.mp3")]);
+    app.replace_queue(vec![track("stalled.mp3"), track("chosen.mp3"), track("after.mp3")]);
     let stalled = app.handle_action(Action::PlayPause);
     let chosen = app.handle_action(Action::NextTrack);
 
@@ -2638,14 +4032,14 @@ fn a_queue_where_nothing_plays_gives_up_instead_of_looping() {
     // forever, hammering the server and never making a sound.
     let mut app = connected_app();
     app.queue.repeat = Repeat::All;
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
     let started = app.handle_action(Action::PlayPause);
 
     let next = app.apply_event(failed(&started, "nope"));
     let effects = app.apply_event(failed(&next, "nope"));
     assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)], "it stops rather than wrapping");
     assert_eq!(app.queue.current, None);
-    assert!(app.message.as_ref().unwrap().text.contains("nor could the rest"));
+    assert!(app.message.as_ref().unwrap().text.contains("check the files or server"));
 }
 
 #[test]
@@ -2655,12 +4049,12 @@ fn running_out_of_queue_ends_the_run_of_failures() {
     // limit, and the first hiccup after the network came back was
     // declared the end of everything on a queue that was otherwise fine.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b"), track("c")]);
+    app.replace_queue(vec![track("a"), track("b"), track("c")]);
     app.handle_action(Action::PlayPause);
     let second = app.handle_action(Action::NextTrack);
-    // The network dies on b; the walk fails through c and runs out.
-    let third = app.apply_event(failed(&second, "network is down"));
-    let ended = app.apply_event(failed(&third, "network is down"));
+    // b and c will not decode; the walk fails through them and runs out.
+    let third = app.apply_event(failed(&second, "unrecognised format"));
+    let ended = app.apply_event(failed(&third, "unrecognised format"));
     assert_eq!(ended, vec![Effect::Audio(AudioCmd::Stop)]);
     assert_eq!(app.queue.current, None, "the walk ran out of queue");
     assert_eq!(app.failures, 0, "and the run of failures ended with it");
@@ -2668,13 +4062,92 @@ fn running_out_of_queue_ends_the_run_of_failures() {
     // The engine reports the stop the dead end asked for, as it would live.
     app.apply_event(Event::Status(PlayerStatus::default()));
 
-    // The network returns; one track hiccups. That is a skip, not the
-    // end of everything.
+    // Later, one track hiccups. That is a skip, not the end of everything.
     let again = app.handle_action(Action::PlayPause);
     app.apply_event(failed(&again, "one bad moment"));
     let message = app.message.as_ref().unwrap().text.clone();
-    assert!(message.contains("skipping"), "{message}");
-    assert!(!message.contains("nor could the rest"), "{message}");
+    assert!(message.contains("won’t play"), "{message}");
+    assert!(!message.contains("check the files or server"), "{message}");
+}
+
+#[test]
+fn a_failure_that_reads_as_the_networks_probes_the_server_first() {
+    // Contract clause 37: a transient failure asks the row's server
+    // whether it answers; one that does means the row's own open failed —
+    // retried a bounded number of times, then skipped.
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a"), track("b")]);
+    let started = app.handle_action(Action::PlayPause);
+    let a_url = played_url(&started);
+
+    let effects = app.apply_event(failed(&started, "request failed: connection reset by peer"));
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCmd::Probe { server, base, .. })]
+                if server == "http://host:3000" && base == "http://host:3000"
+        ),
+        "{effects:?}"
+    );
+    assert_eq!(app.queue.current, Some(0), "nothing moves until the probe answers");
+    assert_eq!(app.failures, 0);
+
+    // The server answers: the same row again, twice, then the walk.
+    let retry = app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: true });
+    assert_eq!(played_url(&retry), a_url, "retry one");
+    let effects = app.apply_event(failed(&retry, "request failed: connection reset by peer"));
+    assert!(matches!(effects.as_slice(), [Effect::Api(ApiCmd::Probe { .. })]));
+    let retry = app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: true });
+    assert_eq!(played_url(&retry), a_url, "retry two");
+    let effects = app.apply_event(failed(&retry, "request failed: connection reset by peer"));
+    assert!(matches!(effects.as_slice(), [Effect::Api(ApiCmd::Probe { .. })]));
+    let skipped = app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: true });
+    assert!(played_url(&skipped).contains("/b"), "out of retries: the next row");
+    assert_eq!(app.failures, 1);
+    assert!(app.message.as_ref().unwrap().text.contains("won’t play"));
+
+    // A probe answering for a row the user has already left is stale.
+    let effects = app.apply_event(failed(&skipped, "no answer from the server after 20s"));
+    assert!(matches!(effects.as_slice(), [Effect::Api(ApiCmd::Probe { .. })]));
+    app.handle_action(Action::PrevTrack);
+    assert!(app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: true }).is_empty());
+}
+
+#[test]
+fn an_unreachable_server_holds_the_row_and_resumes_when_it_answers() {
+    // Contract clause 37: no connectivity pauses and holds — the row is
+    // never skipped — and the server is asked again on a cadence.
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a"), track("b")]);
+    let started = app.handle_action(Action::PlayPause);
+    let a_url = played_url(&started);
+    app.apply_event(failed(&started, "no answer from the server after 20s"));
+    let held = app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: false });
+    assert_eq!(held, vec![Effect::Audio(AudioCmd::Stop)]);
+    assert_eq!(app.stall.as_ref().map(|s| s.index), Some(0), "held on the row");
+    assert_eq!(app.queue.current, Some(0));
+    assert!(app.message.as_ref().unwrap().text.contains("Lost the connection"));
+
+    // Asked again only once the cadence has passed.
+    let asked = app.stall.as_ref().unwrap().asked;
+    assert!(app.tick_at(asked + std::time::Duration::from_secs(1)).is_empty());
+    let effects = app.tick_at(asked + std::time::Duration::from_secs(6));
+    assert!(matches!(effects.as_slice(), [Effect::Api(ApiCmd::Probe { .. })]), "{effects:?}");
+    assert!(app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: false }).is_empty());
+    assert!(app.stall.is_some(), "still held");
+
+    // Back: the row starts where the walk stopped.
+    let resumed = app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: true });
+    assert_eq!(played_url(&resumed), a_url);
+    assert!(app.stall.is_none());
+
+    // The user can always move on: a skip while held ends the hold.
+    app.apply_event(failed(&resumed, "no answer from the server after 20s"));
+    app.apply_event(Event::Reachable { server: "http://host:3000".into(), reachable: false });
+    assert!(app.stall.is_some());
+    let next = app.handle_action(Action::NextTrack);
+    assert!(played_url(&next).contains("/b"));
+    assert!(app.stall.is_none());
 }
 
 #[test]
@@ -2682,7 +4155,7 @@ fn one_track_playing_forgives_the_failures_before_it() {
     // The give-up counter is about a *run* of failures. A queue with one
     // bad file every few tracks must keep going indefinitely.
     let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
+    app.replace_queue(vec![track("a"), track("b")]);
     let started = app.handle_action(Action::PlayPause);
     let effects = app.apply_event(failed(&started, "nope"));
     assert_eq!(app.failures, 1);
@@ -2698,7 +4171,7 @@ fn j_aims_the_sonic_path_at_the_highlighted_track() {
     // obvious place to leave from, and the highlighted one is where to
     // arrive — so there is nothing left to ask and it plots straight away.
     let mut app = connected_app();
-    app.queue.replace(vec![track("playing")]);
+    app.replace_queue(vec![track("playing")]);
     app.play_index(0);
     browsing(&mut app, &["far-away"], 0);
 
@@ -2771,19 +4244,146 @@ fn on_sonic_row(app: &mut App, row: SonicRow) {
 }
 
 #[test]
+fn a_disabled_journey_probes_before_naming_a_reason() {
+    use crate::tui::worker::JourneyIssue;
+    // The route's 403 reads the same for "switched off" and "nothing
+    // scanned yet" — so the answer is a re-ping, not a guess, and the user
+    // never reads an explanation that then gets retracted.
+    let mut app = connected_app();
+    app.replace_queue(vec![track("from")]);
+    app.play_index(0);
+    browsing(&mut app, &["to"], 0);
+    app.handle_action(Action::StartJourney);
+
+    let effects =
+        app.consume_journey(Vec::new(), None, app.sonic.length, JourneyIssue::Disabled);
+    assert!(app.sonic.probe, "the reason is still being asked for");
+    assert!(app.sonic.note.is_none(), "nothing is claimed yet");
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::DiscoveryProbe))),
+        "the ping was asked for: {effects:?}"
+    );
+
+    // The flag still on: the scan simply hasn't run — worth retrying.
+    app.apply_event(Event::DiscoveryProbe { available: true });
+    assert!(!app.sonic.probe);
+    assert_eq!(app.sonic.empty, SonicEmpty::ScanPending);
+    assert!(
+        app.sonic.note.as_deref().unwrap_or("").contains("hasn't analyzed"),
+        "got: {:?}",
+        app.sonic.note
+    );
+
+    // And the flag gone: the feature was switched off under us.
+    app.sonic.probe = true;
+    app.apply_event(Event::DiscoveryProbe { available: false });
+    assert_eq!(app.sonic.empty, SonicEmpty::TurnedOff);
+    assert!(
+        app.sonic.note.as_deref().unwrap_or("").contains("switched off"),
+        "got: {:?}",
+        app.sonic.note
+    );
+
+    // A probe nobody is waiting for changes nothing.
+    let note = app.sonic.note.clone();
+    app.apply_event(Event::DiscoveryProbe { available: true });
+    assert_eq!(app.sonic.note, note, "an unasked probe is ignored");
+}
+
+#[test]
+fn the_listing_verbs_play_queue_and_shuffle_once() {
+    // The browser bar's three verbs (contract: browser-top-bar 10–12).
+    let mut app = connected_app();
+    browsing(&mut app, &["one", "two", "three"], 0);
+
+    let effects = app.play_listing(false);
+    assert!(!effects.is_empty(), "play starts the engine");
+    assert_eq!(
+        app.queue.items.iter().map(|t| t.filepath.as_str()).collect::<Vec<_>>(),
+        vec!["one", "two", "three"],
+        "play keeps the listing's order"
+    );
+
+    // Queue all appends and says how many; already playing, so no restart.
+    let effects = app.queue_listing();
+    assert!(effects.is_empty(), "already playing — nothing restarts");
+    assert_eq!(app.queue.items.len(), 6, "the listing was appended");
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text.contains("queued 3")),
+        "got: {:?}",
+        app.message
+    );
+
+    // Shuffle reorders ONCE — the record's semantic: the mode is not
+    // touched, and the same songs are all still there.
+    fastrand::seed(7);
+    let shuffled_mode_before = app.queue.shuffle;
+    app.play_listing(true);
+    assert_eq!(app.queue.shuffle, shuffled_mode_before, "the shuffle MODE is untouched");
+    let mut played: Vec<_> = app.queue.items.iter().map(|t| t.filepath.clone()).collect();
+    played.sort();
+    assert_eq!(played, vec!["one", "three", "two"], "a permutation, nothing lost");
+}
+
+#[test]
+fn a_playlist_change_reasks_an_open_playlists_view() {
+    // Create, rename and delete are silent — the row changing is the
+    // confirmation — but a Playlists view on screen is looking at a list
+    // that just changed, so it re-asks. Anywhere else: nothing.
+    let mut app = connected_app();
+    app.open_library_node(LibraryNode::Playlists, true);
+    let effects = app.apply_event(Event::PlaylistCreated);
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Api(ApiCmd::Library { node: LibraryNode::Playlists, .. })
+        )),
+        "the open view re-asks: {effects:?}"
+    );
+    assert!(app.message.is_none(), "the new row is the confirmation, not a toast");
+
+    app.open_library_node(LibraryNode::Albums, true);
+    let effects = app.apply_event(Event::PlaylistDeleted);
+    assert!(effects.is_empty(), "no refresh for a view not on screen: {effects:?}");
+}
+
+#[test]
+fn a_random_pick_lands_on_the_side_that_asked() {
+    let mut app = connected_app();
+    app.apply_event(Event::SonicRandom {
+        side: SonicSide::End,
+        track: Some(Box::new(track("lib/lucky.mp3"))),
+    });
+    assert_eq!(
+        app.sonic.end.as_ref().map(|t| t.filepath.as_str()),
+        Some("lib/lucky.mp3"),
+        "the pick filled the end that asked"
+    );
+
+    // An empty library answers with words, not silence.
+    app.apply_event(Event::SonicRandom { side: SonicSide::Start, track: None });
+    assert!(app.sonic.start.is_none());
+    assert!(
+        app.message.as_ref().is_some_and(|m| m.text.contains("couldn't fetch")),
+        "got: {:?}",
+        app.message
+    );
+}
+
+#[test]
 fn changing_the_length_asks_for_a_different_arc() {
     // The stops aren't a list to trim — a shorter path is a different set
     // of waypoints, so it has to be replotted. Sliding the length does not
     // ask on its own, though: that would be a request per keystroke.
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
     assert!(!app.sonic.pending);
 
@@ -2812,14 +4412,14 @@ fn changing_the_length_asks_for_a_different_arc() {
 #[test]
 fn playing_a_sonic_path_replaces_the_queue_and_starts_it() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("old")]);
+    app.replace_queue(vec![track("old")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     on_sonic_row(&mut app, SonicRow::Play);
@@ -2840,14 +4440,14 @@ fn playing_a_sonic_path_replaces_the_queue_and_starts_it() {
 #[test]
 fn queueing_a_sonic_path_adds_to_what_is_already_there() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("old")]);
+    app.replace_queue(vec![track("old")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     on_sonic_row(&mut app, SonicRow::QueueAll);
@@ -2865,14 +4465,14 @@ fn a_stop_row_is_an_ordinary_track_row() {
     // The whole reason the stops are Entry::Track: `a` queues one, and
     // Enter plays the path from there — no new keys, no new rules.
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     let mid = app
@@ -2947,7 +4547,7 @@ fn an_armed_pick_is_called_off_by_escape() {
 #[test]
 fn use_playing_song_takes_what_is_on_the_speakers() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("sounding")]);
+    app.replace_queue(vec![track("sounding")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(sonic_tab(&app)));
     // Landing on the tab with something playing already suggests it as the
@@ -2965,7 +4565,7 @@ fn use_playing_song_takes_what_is_on_the_speakers() {
 #[test]
 fn clearing_an_end_puts_the_row_back_to_not_set() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("sounding")]);
+    app.replace_queue(vec![track("sounding")]);
     app.play_index(0);
     app.handle_action(Action::SelectTab(sonic_tab(&app)));
     assert!(app.sonic.start.is_some());
@@ -2981,14 +4581,14 @@ fn clearing_an_end_puts_the_row_back_to_not_set() {
 #[test]
 fn saving_a_path_as_a_playlist_asks_for_a_name_first() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("mid", 0.5), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     on_sonic_row(&mut app, SonicRow::SavePlaylist);
@@ -3022,7 +4622,7 @@ fn the_path_says_what_it_is_doing_and_why_it_came_back_empty() {
     // A results view with no stops under the controls and no word about
     // why is the one state this tab must never be in.
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
@@ -3040,7 +4640,7 @@ fn the_path_says_what_it_is_doing_and_why_it_came_back_empty() {
     app.apply_event(Event::Journey {
         stops: Vec::new(),
         note: Some("the destination hasn't been analysed yet".into()),
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
     assert_eq!(status(&app).as_deref(), Some("the destination hasn't been analysed yet"));
 
@@ -3071,14 +4671,14 @@ fn the_path_says_what_it_is_doing_and_why_it_came_back_empty() {
 #[test]
 fn start_over_clears_both_ends_and_the_path() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
     app.apply_event(Event::Journey {
         stops: vec![stop("from", 0.0), stop("to", 1.0)],
         note: None,
-        length: app.sonic.length,
+        length: app.sonic.length, issue: crate::tui::worker::JourneyIssue::None
     });
 
     on_sonic_row(&mut app, SonicRow::StartOver);
@@ -3126,7 +4726,7 @@ fn search_replies_that_pass_each_other_cannot_swap_the_results() {
 #[test]
 fn a_path_reply_for_a_length_since_changed_keeps_waiting() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
@@ -3142,7 +4742,7 @@ fn a_path_reply_for_a_length_since_changed_keeps_waiting() {
     app.apply_event(Event::Journey {
         stops: vec![stop("stale", 0.0)],
         note: None,
-        length: first,
+        length: first, issue: crate::tui::worker::JourneyIssue::None
     });
     assert!(app.sonic.stops.is_empty(), "an arc of the wrong length is not this arc");
     assert!(app.sonic.pending, "still waiting on the length actually asked for");
@@ -3150,7 +4750,7 @@ fn a_path_reply_for_a_length_since_changed_keeps_waiting() {
     app.apply_event(Event::Journey {
         stops: vec![stop("fresh", 0.0)],
         note: None,
-        length: first + 1,
+        length: first + 1, issue: crate::tui::worker::JourneyIssue::None
     });
     assert_eq!(app.sonic.stops.len(), 1);
     assert!(!app.sonic.pending);
@@ -3182,32 +4782,15 @@ fn drilling_out_of_search_lights_the_search_tab_spinner() {
 #[test]
 fn a_path_reply_that_arrives_after_start_over_is_dropped() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("from")]);
+    app.replace_queue(vec![track("from")]);
     app.play_index(0);
     browsing(&mut app, &["to"], 0);
     app.handle_action(Action::StartJourney);
     app.reset_sonic_path();
 
-    app.apply_event(Event::Journey { stops: vec![stop("late", 0.0)], note: None, length: 14 });
+    app.apply_event(Event::Journey { stops: vec![stop("late", 0.0)], note: None, length: 14, issue: crate::tui::worker::JourneyIssue::None });
     assert!(app.sonic.stops.is_empty(), "a path nobody is waiting for is not drawn");
     assert_eq!(app.queue.items.len(), 1, "and nothing is queued behind the user's back");
-}
-
-#[test]
-fn the_dj_tab_only_offers_rows_the_server_can_honour() {
-    let app = connected_app();
-    let rows = &app.dj_panel.rows;
-    assert!(rows.contains(&DjRow::Tightness), "this server has the index");
-    assert!(rows.contains(&DjRow::Anchor));
-
-    // Without it, a row promising a sonic pool would be a lie.
-    let mut app = connected_app();
-    app.capabilities = Default::default();
-    app.dj_panel.rebuild(app.capabilities);
-    let rows = &app.dj_panel.rows;
-    assert!(!rows.contains(&DjRow::Tightness));
-    assert!(!rows.contains(&DjRow::Anchor));
-    assert!(rows.contains(&DjRow::Tempo), "the rest is still there");
 }
 
 /// A `[keys]` section from a config file.
@@ -3393,7 +4976,7 @@ fn jumping_to_what_is_playing_goes_to_the_queue() {
             ..Default::default()
         },
     };
-    app.queue.replace(vec![track("a"), named, track("c")]);
+    app.replace_queue(vec![track("a"), named, track("c")]);
     app.play_index(1);
     // Wander off.
     app.focus = Focus::Browser;
@@ -3412,7 +4995,7 @@ fn jumping_to_what_is_playing_goes_to_the_queue() {
 #[test]
 fn jumping_with_nothing_playing_says_so() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("a")]);
+    app.replace_queue(vec![track("a")]);
     assert!(app.handle_action(Action::JumpToPlaying).is_empty());
     assert_eq!(app.focus, Focus::Browser, "the cursor stays where it was");
     assert!(app.message.as_ref().unwrap().text.contains("nothing is playing"));
@@ -3475,9 +5058,10 @@ fn the_arrows_belong_to_the_tab_and_the_numbers_do_the_navigating() {
     assert_eq!(map_key(press(KeyCode::Char('1')), InputMode::Normal), Some(Action::SelectTab(0)));
 
     let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
     on_the_dj_tab(&mut app);
     app.handle_action(Action::NowRight);
-    assert_eq!(app.autodj, AutoDjMode::Similar, "→ adjusted the Mode row");
+    assert!(app.dj_armed(), "→ toggled the Auto DJ row");
     assert_eq!(app.now_tab(), NowTab::AutoDj, "and did not leave the tab");
 
     // The way out is the same key it is on every other tab.
@@ -3504,7 +5088,7 @@ fn the_genre_chooser_owns_the_keyboard_while_it_is_open() {
     assert_eq!(app.input_mode(), InputMode::Panel);
 
     // Space toggles a genre in there rather than pausing the music.
-    app.queue.replace(vec![track("a")]);
+    app.replace_queue(vec![track("a")]);
     let effects = app.handle_action(Action::PlayPause);
     assert!(effects.is_empty(), "no playback from inside the chooser");
 
@@ -3513,53 +5097,26 @@ fn the_genre_chooser_owns_the_keyboard_while_it_is_open() {
 }
 
 #[test]
-fn adjusting_a_row_changes_the_setting_it_names() {
+fn the_genre_rows_arrows_cycle_the_rule_and_the_switch_keeps_the_mode() {
     let mut app = connected_app();
     on_the_dj_tab(&mut app);
-
-    // Row 0 is the mode; stepping right cycles it.
-    app.handle_action(Action::NowRight);
-    assert_eq!(app.autodj, AutoDjMode::Similar);
-
-    // Tightness moves in useful steps and stops at the ends rather than
-    // wrapping — a slider that wraps loses your place.
-    app.dj_panel.row = 1;
-    assert_eq!(app.dj_panel.selected(), DjRow::Tightness);
-    app.handle_action(Action::NowRight);
-    assert_eq!(app.dj.sonic_tightness, 5);
-    for _ in 0..40 {
-        app.handle_action(Action::NowRight);
-    }
-    assert_eq!(app.dj.sonic_tightness, 100, "clamped at the top");
-    for _ in 0..40 {
-        app.handle_action(Action::NowLeft);
-    }
-    assert_eq!(app.dj.sonic_tightness, 0, "and at the bottom, which is off");
-}
-
-#[test]
-fn dj_tab_settings_are_remembered() {
-    let mut app = connected_app();
-    on_the_dj_tab(&mut app);
-    app.dj_panel.row = 1;
-    app.handle_action(Action::NowRight); // tightness 5
-
-    let saved = app.prefs();
-    assert_eq!(saved.dj.sonic_tightness, 5);
-    let restored = App::new(None, None, None).with_prefs(&saved);
-    assert_eq!(restored.dj, app.dj);
-}
-
-#[test]
-fn g_and_shift_g_jump_to_the_ends_of_the_dj_tab() {
-    // Found live: both keys were bound but the settings list ignored them,
-    // so `G` silently did nothing.
-    let mut app = connected_app();
-    on_the_dj_tab(&mut app);
-    app.handle_action(Action::Last);
-    assert_eq!(app.dj_panel.selected(), DjRow::Sample, "the last row");
-    app.handle_action(Action::First);
-    assert_eq!(app.dj_panel.selected(), DjRow::Mode);
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Genres).unwrap();
+    assert!(!app.dj.genre_filter);
+    app.adjust_dj_row(1);
+    assert_eq!((app.dj.genre_filter, app.dj.genre_mode), (true, dj::GenreMode::Whitelist));
+    app.adjust_dj_row(1);
+    assert_eq!(app.dj.genre_mode, dj::GenreMode::Blacklist);
+    app.adjust_dj_row(1);
+    assert!(!app.dj.genre_filter, "off again");
+    assert_eq!(app.dj.genre_mode, dj::GenreMode::Blacklist, "the mode is kept while off");
+    // The switch itself (both shells' checkbox) toggles without touching the
+    // mode — a click on a checked whitelist must never land on blacklist.
+    app.dj_edit(crate::tui::app::DjEdit::Step(DjRow::Genres, 1));
+    assert_eq!((app.dj.genre_filter, app.dj.genre_mode), (true, dj::GenreMode::Blacklist));
+    app.dj_edit(crate::tui::app::DjEdit::GenreMode(dj::GenreMode::Whitelist));
+    assert_eq!((app.dj.genre_filter, app.dj.genre_mode), (true, dj::GenreMode::Whitelist));
+    app.dj_edit(crate::tui::app::DjEdit::Step(DjRow::Genres, 1));
+    assert_eq!((app.dj.genre_filter, app.dj.genre_mode), (false, dj::GenreMode::Whitelist));
 }
 
 #[test]
@@ -3585,7 +5142,8 @@ fn choosing_a_genre_switches_the_filter_on() {
 
     app.handle_action(Action::PlayPause); // toggle "Ambient"
     assert_eq!(app.dj.genres, vec!["Ambient"]);
-    assert_eq!(app.dj.genre_mode, dj::GenreMode::Whitelist, "switched on for you");
+    assert!(app.dj.genre_filter, "switched on for you");
+    assert_eq!(app.dj.genre_mode, dj::GenreMode::Whitelist, "in the default mode");
 
     // And toggling it back off leaves nothing selected.
     app.handle_action(Action::PlayPause);
@@ -3635,7 +5193,7 @@ fn a_cleared_end_stays_cleared_when_you_come_back() {
     // identical to never having chosen one — so stepping away and back
     // filled it straight back in, which is the one thing it must not do.
     let mut app = connected_app();
-    app.queue.replace(vec![track("playing")]);
+    app.replace_queue(vec![track("playing")]);
     app.play_index(0);
 
     let sonic = sonic_tab(&app);
@@ -3698,7 +5256,7 @@ fn changing_the_length_stops_waiting_for_a_path_of_the_old_one() {
 
     // And the reply plotted for the old length is still ignored when it
     // lands — clearing the wait must not have opened a door for it.
-    app.consume_journey(Vec::new(), None, was);
+    app.consume_journey(Vec::new(), None, was, crate::tui::worker::JourneyIssue::None);
     assert!(!app.sonic.fetched, "a path of the wrong length is not this panel's answer");
 }
 
@@ -3711,7 +5269,7 @@ fn a_wait_nothing_will_answer_is_given_up_on() {
     // that could be closed, and the full-screen Discover panel never had
     // one — and neither can be retried while its flag is still up.
     let mut app = connected_app();
-    app.queue.replace(vec![track("first")]);
+    app.replace_queue(vec![track("first")]);
     app.play_index(0);
     on_the_now_discover_tab(&mut app);
     assert!(app.now_discover.as_ref().unwrap().pending);
@@ -3741,38 +5299,10 @@ fn a_wait_nothing_will_answer_is_given_up_on() {
 }
 
 #[test]
-fn a_request_carries_the_session_the_panel_is_tuning() {
-    let mut app = connected_app();
-    app.autodj = AutoDjMode::BpmKey;
-    app.dj.sonic_tightness = 50;
-    app.dj.artist_cooldown = 2;
-
-    // Two tracks played, newest first, with the artist of each.
-    app.queue.replace(vec![
-        track_by("a", "Alpha"),
-        track_by("b", "Beta"),
-        track_by("c", "Gamma"),
-    ]);
-    app.play_index(0);
-    app.play_index(1);
-    let effects = app.play_index(2);
-
-    match autodj_effect(&effects).expect("the queue ran out") {
-        ApiCmd::AutoDj(request) => {
-            assert_eq!(request.anchors, vec!["c", "b", "a"], "newest first");
-            assert_eq!(request.recent_artists, vec!["Gamma", "Beta", "Alpha"]);
-            assert!(request.sonic_available, "this server has the index");
-            assert_eq!(request.settings.sonic_tightness, 50);
-        }
-        other => panic!("unexpected {other:?}"),
-    }
-}
-
-#[test]
 fn the_cooldown_list_does_not_repeat_an_artist() {
     // Three tracks by the same artist should not spend the whole cooldown.
     let mut app = connected_app();
-    app.queue.replace(vec![
+    app.replace_queue(vec![
         track_by("a", "Alpha"),
         track_by("b", "Alpha"),
         track_by("c", "Beta"),
@@ -3781,176 +5311,6 @@ fn the_cooldown_list_does_not_repeat_an_artist() {
     app.play_index(1);
     app.play_index(2);
     assert_eq!(app.recent_artists(), vec!["Beta", "Alpha"]);
-}
-
-#[test]
-fn autodj_skips_a_mode_the_server_cannot_serve() {
-    // Default install: no embedding index. Offering "similar" would spend
-    // a keystroke and a round trip to land on tempo+key anyway.
-    let mut app = connected_app();
-    app.capabilities = Default::default();
-
-    app.handle_action(Action::ToggleAutoDj);
-    assert_eq!(app.autodj, AutoDjMode::BpmKey, "straight past similar");
-    app.handle_action(Action::ToggleAutoDj);
-    assert_eq!(app.autodj, AutoDjMode::Off, "and the cycle still closes");
-}
-
-#[test]
-fn a_remembered_similar_mode_is_dropped_on_a_server_without_the_index() {
-    // Preferences are global; capabilities are per-server. Reconnecting
-    // elsewhere must not leave a mode selected that does something else.
-    let saved = crate::config::PlayerPrefs {
-        volume: 1.0,
-        repeat: "off".into(),
-        shuffle: false,
-        autodj: "similar".into(),
-        crossfade_seconds: 0.0,
-        gapless: false,
-        blend_skips: false,
-        pause_fade: false,
-        dj: Default::default(),
-        extra: Default::default(),
-    };
-    let mut app = App::new(None, None, None).with_prefs(&saved);
-    assert_eq!(app.autodj, AutoDjMode::Similar);
-
-    app.apply_event(Event::Connected {
-        server: "http://plain:3000".into(),
-        id: "http://plain:3000".into(),
-        username: None,
-        token: None,
-        ping: Box::new(Default::default()),
-    });
-    assert_eq!(app.autodj, AutoDjMode::BpmKey);
-    assert!(app.message.as_ref().unwrap().text.contains("similarity index"));
-
-    // On a server that has one, the remembered mode is left alone.
-    let mut app = App::new(None, None, None).with_prefs(&saved);
-    app.apply_event(Event::Connected {
-        server: "http://rich:3000".into(),
-        id: "http://rich:3000".into(),
-        username: None,
-        token: None,
-        ping: Box::new(crate::api::types::Ping {
-            discovery: true,
-            ..Default::default()
-        }),
-    });
-    assert_eq!(app.autodj, AutoDjMode::Similar);
-    assert!(app.capabilities.discovery);
-}
-
-#[test]
-fn switching_autodj_on_with_an_empty_queue_starts_it() {
-    let mut app = connected_app();
-    let effects = app.handle_action(Action::ToggleAutoDj);
-    match autodj_effect(&effects).expect("a request goes out") {
-        ApiCmd::AutoDj(request) => {
-            assert_eq!(request.mode, AutoDjMode::Similar);
-            assert!(request.seed.is_none());
-            assert!(request.ignore_list.is_empty());
-        }
-        other => panic!("unexpected command {other:?}"),
-    }
-}
-
-#[test]
-fn switching_autodj_on_does_not_jump_a_queue_the_user_built() {
-    let mut app = connected_app();
-    app.queue.replace(vec![track("a"), track("b")]);
-    let effects = app.handle_action(Action::ToggleAutoDj);
-    assert!(autodj_effect(&effects).is_none(), "there are tracks waiting already");
-}
-
-#[test]
-fn autodj_requests_only_once_the_queue_has_nothing_after_the_current_track() {
-    let mut app = connected_app();
-    app.autodj = AutoDjMode::BpmKey;
-    app.queue.replace(vec![track("a"), track("b")]);
-
-    let effects = app.play_index(0);
-    assert!(autodj_effect(&effects).is_none(), "one track still waiting");
-
-    let effects = app.play_index(1);
-    let cmd = autodj_effect(&effects).expect("the last track should pull in another");
-    match cmd {
-        ApiCmd::AutoDj(request) => {
-            assert_eq!(request.mode, AutoDjMode::BpmKey);
-            assert_eq!(
-                request.seed.as_ref().unwrap().filepath,
-                "b",
-                "seeded on what's playing"
-            );
-        }
-        other => panic!("unexpected command {other:?}"),
-    }
-
-    // A second trigger while the first is unanswered must not pile on.
-    assert!(app.maybe_autodj().is_empty());
-}
-
-#[test]
-fn autodj_picks_are_appended_and_deduped() {
-    let mut app = connected_app();
-    app.autodj = AutoDjMode::Similar;
-    app.queue.replace(vec![track("a")]);
-    app.play_index(0);
-
-    app.apply_event(Event::AutoDjPick {
-        // The first candidate is already queued, so the second wins.
-        candidates: vec![track("a"), track("b")],
-        ignore_list: vec![7],
-        note: None,
-    });
-    assert_eq!(app.queue.items.len(), 2);
-    assert_eq!(app.queue.items[1].filepath, "b");
-    assert_eq!(app.autodj_ignore, vec![7], "the cursor is kept for the next request");
-    assert!(!app.autodj_pending);
-}
-
-#[test]
-fn an_autodj_pick_starts_playing_when_the_queue_ran_dry() {
-    let mut app = connected_app();
-    app.autodj = AutoDjMode::Similar;
-    // Nothing playing, nothing queued.
-    let effects = app.apply_event(Event::AutoDjPick {
-        candidates: vec![track("fresh")],
-        ignore_list: Vec::new(),
-        note: None,
-    });
-    assert_eq!(app.queue.items.len(), 1);
-    assert!(matches!(effects[0], Effect::Audio(AudioCmd::Play { .. })));
-    assert_eq!(app.queue.current, Some(0));
-}
-
-#[test]
-fn a_pick_arriving_after_autodj_is_switched_off_is_dropped() {
-    let mut app = connected_app();
-    app.autodj = AutoDjMode::Similar;
-    app.autodj_pending = true;
-    app.autodj = AutoDjMode::Off;
-
-    let effects = app.apply_event(Event::AutoDjPick {
-        candidates: vec![track("late")],
-        ignore_list: Vec::new(),
-        note: None,
-    });
-    assert!(app.queue.items.is_empty());
-    assert!(effects.is_empty());
-}
-
-#[test]
-fn a_fallback_note_is_surfaced_instead_of_the_track_name() {
-    let mut app = connected_app();
-    app.autodj = AutoDjMode::Similar;
-    app.apply_event(Event::AutoDjPick {
-        candidates: vec![track("x")],
-        ignore_list: Vec::new(),
-        note: Some("this track hasn't been analysed yet — matching tempo and key".into()),
-    });
-    let message = app.message.as_ref().unwrap();
-    assert!(message.text.contains("analysed"), "the user learns why it fell back");
 }
 
 #[test]
@@ -3986,14 +5346,14 @@ fn now_art(app: &App) -> Option<&crate::tui::art::Art> {
 #[test]
 fn starting_a_track_asks_for_its_cover_once() {
     let mut app = connected_app();
-    app.queue.replace(vec![
+    app.replace_queue(vec![
         track_with_cover("lib/a.mp3", "aa.jpeg"),
         track_with_cover("lib/b.mp3", "aa.jpeg"),
         track("lib/plain.mp3"),
     ]);
 
     let effects = app.play_index(0);
-    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into() });
+    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None });
     assert!(effects.contains(&asked), "got {effects:?}");
 
     // The next track shares the cover and the first ask is still out; the
@@ -4012,7 +5372,7 @@ fn starting_a_track_asks_for_its_cover_once() {
 #[test]
 fn a_cover_reply_reaches_the_playing_track_whenever_it_lands() {
     let mut app = connected_app();
-    app.queue.replace(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
     app.play_index(0);
     assert_eq!(now_art(&app), None, "nothing has arrived yet");
 
@@ -4024,7 +5384,7 @@ fn a_cover_reply_reaches_the_playing_track_whenever_it_lands() {
 
     // "The server has no cover for this" is also an answer, and it must
     // not leave the previous track's art on screen.
-    app.queue.replace(vec![track_with_cover("lib/b.mp3", "bb.jpeg")]);
+    app.replace_queue(vec![track_with_cover("lib/b.mp3", "bb.jpeg")]);
     app.play_index(0);
     app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: None, settled: true });
     assert_eq!(now_art(&app), None);
@@ -4038,8 +5398,8 @@ fn a_cover_nobody_answered_for_is_asked_for_again() {
     // session while the waveform beside it quietly recovered. The
     // waveform's rule, applied here.
     let mut app = connected_app();
-    app.queue.replace(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
-    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into() });
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
+    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None });
     assert!(app.play_index(0).contains(&asked));
 
     // The fetch dies with the network: nothing was learned, so nothing is
@@ -4059,13 +5419,13 @@ fn a_cover_nobody_answered_for_is_asked_for_again() {
 fn the_art_cache_is_bounded() {
     let mut app = connected_app();
     for n in 0..ART_CACHE_CAP {
-        app.queue.replace(vec![track_with_cover("lib/a.mp3", &format!("{n}.jpeg"))]);
+        app.replace_queue(vec![track_with_cover("lib/a.mp3", &format!("{n}.jpeg"))]);
         app.play_index(0);
     }
     assert_eq!(app.art.len(), ART_CACHE_CAP);
 
     // One more starts the cache over rather than growing without bound.
-    app.queue.replace(vec![track_with_cover("lib/a.mp3", "again.jpeg")]);
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "again.jpeg")]);
     app.play_index(0);
     assert_eq!(app.art.len(), 1);
 }
@@ -4085,7 +5445,7 @@ fn announced_url(effects: &[Effect]) -> Option<String> {
 /// the announced one.
 fn blending(app: &mut App, tracks: &[&str]) -> (String, String) {
     app.crossfade = 6.0;
-    app.queue.replace(tracks.iter().map(|t| track(t)).collect());
+    app.replace_queue(tracks.iter().map(|t| track(t)).collect());
     let play = app.play_index(0);
     let url = played_url(&play);
     let status = PlayerStatus { source: url.clone(), playing: true, ..Default::default() };
@@ -4110,7 +5470,7 @@ fn a_playing_queue_announces_its_next_track_once() {
 #[test]
 fn no_crossfade_means_no_announcements() {
     let mut app = connected_app();
-    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    app.replace_queue(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
     let play = app.play_index(0);
     let url = played_url(&play);
     let effects = app
@@ -4168,7 +5528,7 @@ fn a_handover_the_queue_no_longer_describes_falls_back_to_a_real_play() {
 
     // The engine blended into b, but by the time the event lands the queue
     // has been rebuilt around different tracks entirely.
-    app.queue.replace(vec![track("lib/x.mp3"), track("lib/y.mp3")]);
+    app.replace_queue(vec![track("lib/x.mp3"), track("lib/y.mp3")]);
     let effects = app.apply_event(Event::HandedOver { from: url, to: announced });
     assert!(
         played_url(&effects).contains("x.mp3"),
@@ -4204,14 +5564,14 @@ fn a_push_behind_the_wrap_reannounces_the_new_tail() {
     let mut app = connected_app();
     app.crossfade = 6.0;
     app.queue.repeat = Repeat::All;
-    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    app.replace_queue(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
     let play = app.play_index(1);
     let url = played_url(&play);
     let status = PlayerStatus { source: url.clone(), playing: true, ..Default::default() };
     let effects = app.apply_event(Event::Status(status.clone()));
     assert!(announced_url(&effects).expect("the wrap").contains("a.mp3"));
 
-    app.queue.push(track("lib/c.mp3"));
+    app.push_queue(track("lib/c.mp3"));
     let effects = app.apply_event(Event::Status(status));
     let announced = announced_url(&effects).expect("the push changed the answer");
     assert!(announced.contains("c.mp3"), "{announced}");
@@ -4244,7 +5604,7 @@ fn a_duplicate_next_is_never_announced_and_still_advances() {
     // never announced, and the transition takes the ordinary road.
     let mut app = connected_app();
     app.crossfade = 6.0;
-    app.queue.replace(vec![track("lib/x.mp3"), track("lib/x.mp3"), track("lib/y.mp3")]);
+    app.replace_queue(vec![track("lib/x.mp3"), track("lib/x.mp3"), track("lib/y.mp3")]);
     let play = app.play_index(0);
     let url = played_url(&play);
     let status = PlayerStatus { source: url.clone(), playing: true, ..Default::default() };
@@ -4266,7 +5626,7 @@ fn the_fallback_adopts_the_copy_ahead_not_behind() {
     // walk backwards into rows already heard (review finding).
     let mut app = connected_app();
     app.crossfade = 6.0;
-    app.queue.replace(vec![
+    app.replace_queue(vec![
         track("lib/a.mp3"),
         track("lib/b.mp3"),
         track("lib/a.mp3"),
@@ -4353,7 +5713,7 @@ fn gapless_announces_the_next_track_without_a_blend() {
     // the engine to hold something appendable, blend or no blend.
     let mut app = connected_app();
     app.gapless = true;
-    app.queue.replace(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
+    app.replace_queue(vec![track("lib/a.mp3"), track("lib/b.mp3")]);
     let play = app.play_index(0);
     let url = played_url(&play);
     let effects = app
@@ -4373,7 +5733,7 @@ fn gapless_repeat_one_announces_its_own_seam() {
     let mut app = connected_app();
     app.gapless = true;
     app.queue.repeat = Repeat::One;
-    app.queue.replace(vec![track("lib/a.mp3")]);
+    app.replace_queue(vec![track("lib/a.mp3")]);
     let play = app.play_index(0);
     let url = played_url(&play);
     let effects = app.apply_event(Event::Status(PlayerStatus {
@@ -4549,7 +5909,7 @@ fn a_lone_track_under_repeat_all_gets_its_seam() {
     let mut app = connected_app();
     app.gapless = true;
     app.queue.repeat = Repeat::All;
-    app.queue.replace(vec![track("lib/only.mp3")]);
+    app.replace_queue(vec![track("lib/only.mp3")]);
     let play = app.play_index(0);
     let url = played_url(&play);
     let effects = app.apply_event(Event::Status(PlayerStatus {
@@ -4573,7 +5933,7 @@ fn turning_crossfade_on_withdraws_a_standing_seam_announcement() {
     let mut app = connected_app();
     app.gapless = true;
     app.queue.repeat = Repeat::One;
-    app.queue.replace(vec![track("lib/a.mp3")]);
+    app.replace_queue(vec![track("lib/a.mp3")]);
     let play = app.play_index(0);
     let url = played_url(&play);
     let effects = app.apply_event(Event::Status(PlayerStatus {
@@ -4679,4 +6039,776 @@ fn connecting_tells_the_engine_the_blend_length() {
             && effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::SetPauseFade(_)))),
         "the C6 pair travel with it"
     );
+}
+
+#[test]
+fn the_connect_screen_swallows_playback_only_where_a_shell_shows_one() {
+    // The TUI draws the App's connect screen while no session is up, and a
+    // Space typed into it must not toggle anything; the GUI has no such
+    // screen and keeps the queue's transport live (multi-server contract,
+    // clauses 11 and 13).
+    let mut app = App::new(Some("http://host:3000".into()), None, None);
+    assert!(!app.connected);
+    app.handle_action(Action::ToggleShuffle);
+    assert!(!app.queue.shuffle, "the connect screen swallows the key");
+    app.connect_screen = false;
+    app.handle_action(Action::ToggleShuffle);
+    assert!(app.queue.shuffle, "a shell without the screen lets it through");
+}
+
+// ── Auto DJ (docs/ux-contracts/auto-dj.md) ──────────────────────────────────
+
+const HOST: &str = "http://host:3000";
+
+fn dj_probe_effect(effects: &[Effect]) -> Option<(&str, &Option<crate::tui::app::Reach>)> {
+    effects.iter().find_map(|e| match e {
+        Effect::Api(ApiCmd::DjProbe { identity, reach }) => Some((identity.as_str(), reach)),
+        _ => None,
+    })
+}
+
+fn dj_request(effects: &[Effect]) -> Option<&crate::tui::worker::DjRequest> {
+    effects.iter().find_map(|e| match e {
+        Effect::Api(ApiCmd::AutoDj(request)) => Some(request.as_ref()),
+        _ => None,
+    })
+}
+
+fn pick(epoch: u64, songs: Vec<Track>) -> Event {
+    Event::AutoDjPick { epoch, songs, ignore_list: vec![7], sonic: true, note: None, failure: None }
+}
+
+/// A session that is really playing something, as the top-up rule wants.
+fn playing(app: &mut App) {
+    app.status.source = "http://host:3000/media/x".into();
+}
+
+#[test]
+fn the_old_mode_arms_on_the_remembered_server_at_start() {
+    // The three-mode panel's "on" never named a server (the contract's
+    // migration table): it arms on the remembered session's, and the file
+    // is written the new way from then on.
+    let saved = crate::config::PlayerPrefs { autodj: "tempo+key".into(), ..Default::default() };
+    let mut app = App::new(Some(HOST.into()), Some("tok".into()), None).with_prefs(&saved);
+    assert!(app.dj_server.is_none(), "nothing is known until the session is");
+    app.start();
+    assert_eq!(app.dj_server.as_deref(), Some(HOST));
+    let out = app.prefs();
+    assert_eq!(out.autodj_server.as_deref(), Some(HOST));
+    assert!(out.autodj.is_empty(), "the old key is never written again");
+}
+
+#[test]
+fn the_toggle_arms_here_switches_off_here_and_moves_elsewhere() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a"), track("b")]);
+
+    let effects = app.handle_action(Action::ToggleAutoDj);
+    assert_eq!(app.dj_server.as_deref(), Some(HOST), "armed for the session's server");
+    assert!(app.message.as_ref().unwrap().text.contains("Auto DJ on"));
+    let (identity, reach) = dj_probe_effect(&effects).expect("the server is probed");
+    assert_eq!(identity, HOST);
+    assert!(reach.is_none(), "the session's own server rides its client");
+    assert!(dj_request(&effects).is_none(), "two rows waiting: nothing to top up yet (clause 1)");
+    assert!(app.dj_info.is_some(), "and the session's ping stands in until the probe answers");
+    let first_lane = app.lane.epoch;
+
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(app.dj_server.is_none(), "on here means off");
+    assert!(app.message.as_ref().unwrap().text.contains("Auto DJ off"));
+
+    // Armed on one server, the toggle on another moves it there and starts
+    // a new lane; browsing does not.
+    app.handle_action(Action::ToggleAutoDj);
+    let armed_lane = app.lane.epoch;
+    app.session.server = "http://other:3000".into();
+    app.session.server_id = "http://other:3000".into();
+    assert_eq!(app.dj_server.as_deref(), Some(HOST), "a switch of the browsed server moves nothing");
+    app.handle_action(Action::ToggleAutoDj);
+    assert_eq!(app.dj_server.as_deref(), Some("http://other:3000"));
+    assert!(app.lane.epoch > armed_lane && armed_lane > first_lane, "each arm elsewhere is a new lane");
+}
+
+#[test]
+fn the_top_up_fires_only_on_a_live_last_row() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a"), track("b")]);
+    app.handle_action(Action::ToggleAutoDj);
+    playing(&mut app);
+
+    let effects = app.play_index(0);
+    assert!(dj_request(&effects).is_none(), "one track still waiting");
+    let effects = app.play_index(1);
+    let request = dj_request(&effects).expect("the last row pulls in a turn");
+    assert_eq!(request.identity, HOST);
+    assert_eq!(request.epoch, app.lane.epoch);
+    assert!(app.lane.pending);
+    // A second trigger while the first is unanswered must not pile on.
+    assert!(app.maybe_autodj().is_empty());
+
+    // Idle index emissions never top up (clause 13); nor does a failure walk.
+    app.lane.pending = false;
+    app.status.source.clear();
+    assert!(app.maybe_autodj().is_empty(), "idle");
+    playing(&mut app);
+    app.failures = 1;
+    assert!(app.maybe_autodj().is_empty(), "walking failed tracks");
+    app.failures = 0;
+    assert!(!app.maybe_autodj().is_empty());
+}
+
+#[test]
+fn a_turn_carries_the_lane_and_the_playing_track() {
+    let mut app = connected_app();
+    app.dj.artist_cooldown = 2;
+    app.replace_queue(vec![track_by("a", "Alpha"), track_by("b", "Beta"), track_by("c", "Gamma")]);
+    app.handle_action(Action::ToggleAutoDj);
+    playing(&mut app);
+    app.play_index(0);
+    app.play_index(1);
+    let effects = app.play_index(2);
+    let request = dj_request(&effects).expect("the queue ran out");
+    assert!(request.reach.is_none(), "the session's own client");
+    assert_eq!(request.ask.recent_artists, vec!["Gamma", "Beta", "Alpha"], "newest first");
+    assert_eq!(request.ask.settings.artist_cooldown, 2);
+    // Rolling anchor, no history yet: the playing track seeds, since it
+    // lives on the DJ's server (clause 23).
+    assert_eq!(request.ask.sonic_seeds, vec!["c"]);
+    assert!(!request.ask.opener);
+}
+
+#[test]
+fn a_batch_lands_in_order_wears_the_badge_and_plays_when_the_queue_ran_dry() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.queue.current = Some(0);
+    app.lane.pending = true;
+
+    // The first song is already queued and is skipped; the rest land in order.
+    let effects = app.apply_event(pick(app.lane.epoch, vec![track("a"), track("b"), track("c")]));
+    let paths: Vec<&str> = app.queue.items.iter().map(|t| t.filepath.as_str()).collect();
+    assert_eq!(paths, ["a", "b", "c"]);
+    assert!(app.queue.items[0].dj.is_none(), "the user's row wears no badge");
+    assert_eq!(app.queue.items[1].dj, Some(crate::tui::app::DjMark { sonic: true }));
+    assert_eq!(app.lane.ignore, vec![7], "the cursor is kept for the next turn");
+    assert!(!app.lane.pending);
+    assert_eq!(app.lane.history, vec!["b", "c"], "every pick joins the rolling anchor");
+    // Idle on the last row: the first new row plays at once (clause 14).
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+    assert_eq!(app.queue.current, Some(1));
+}
+
+#[test]
+fn a_reply_from_another_lane_is_dropped_and_so_is_one_after_off() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.lane.pending = true;
+    let stale = app.lane.epoch;
+    app.lane.reset(); // a queue clear, say
+    app.lane.pending = true;
+    let effects = app.apply_event(pick(stale, vec![track("late")]));
+    assert_eq!(app.queue.items.len(), 1, "the dead lane's track stays out");
+    assert!(effects.is_empty());
+    assert!(app.lane.pending, "and the live lane's own wait stands");
+
+    let epoch = app.lane.epoch;
+    app.handle_action(Action::ToggleAutoDj); // off
+    let effects = app.apply_event(pick(epoch + 1, vec![track("later")]));
+    assert_eq!(app.queue.items.len(), 1);
+    assert!(effects.is_empty());
+}
+
+#[test]
+fn a_degrade_is_said_once_per_lane_and_an_auth_failure_too() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    let epoch = app.lane.epoch;
+    app.message = None;
+    app.apply_event(Event::AutoDjPick {
+        epoch,
+        songs: vec![track("b")],
+        ignore_list: vec![],
+        sonic: false,
+        note: Some(crate::tui::worker::DjNote::SonicRange),
+        failure: None,
+    });
+    assert!(app.message.as_ref().unwrap().text.contains("similarity range"));
+    app.message = None;
+    app.apply_event(Event::AutoDjPick {
+        epoch,
+        songs: vec![track("c")],
+        ignore_list: vec![],
+        sonic: false,
+        note: Some(crate::tui::worker::DjNote::SonicRange),
+        failure: None,
+    });
+    // The second turn is announced as a pick, not as the note again.
+    assert!(!app.message.as_ref().unwrap().text.contains("similarity range"), "once per lane");
+
+    app.apply_event(Event::AutoDjPick {
+        epoch,
+        songs: vec![],
+        ignore_list: vec![],
+        sonic: false,
+        note: None,
+        failure: Some(crate::tui::worker::DjFailure::Auth),
+    });
+    assert!(app.message.as_ref().unwrap().text.contains("session expired"));
+    assert!(app.dj_armed(), "the DJ stays armed for the next queue end");
+    app.message = None;
+    app.apply_event(Event::AutoDjPick {
+        epoch,
+        songs: vec![],
+        ignore_list: vec![],
+        sonic: false,
+        note: None,
+        failure: Some(crate::tui::worker::DjFailure::Network("down".into())),
+    });
+    assert!(app.message.is_none(), "an offline queue end is normal");
+    assert!(app.lane.owed, "and the turn is owed");
+}
+
+#[test]
+fn switching_on_with_an_empty_queue_asks_and_the_opener_seeds_the_session() {
+    let mut app = connected_app();
+    let effects = app.handle_action(Action::ToggleAutoDj);
+    assert!(effects.is_empty() && app.dj_chooser.is_some(), "the opening question");
+    assert!(app.dj_server.is_none(), "not armed until it is answered");
+    assert_eq!(app.input_mode(), InputMode::Panel);
+
+    // Surprise me: the filtered opener, one song, nothing else.
+    let effects = app.handle_action(Action::Activate);
+    assert!(app.dj_chooser.is_none());
+    let request = dj_request(&effects).expect("the opener goes out");
+    assert!(request.ask.opener);
+    assert!(request.ask.ignore_list.is_empty());
+    assert_eq!(request.identity, HOST);
+    let body = serde_json::to_value(request.ask.request()).unwrap();
+    assert!(body.get("limit").is_none() && body.get("similarTo").is_none());
+
+    let effects = app.apply_event(pick(request.epoch, vec![track("opener")]));
+    assert_eq!(app.dj_server.as_deref(), Some(HOST), "the seed arms the DJ");
+    assert_eq!(app.queue.items.len(), 1);
+    assert_eq!(app.queue.items[0].filepath, "opener");
+    assert!(app.queue.items[0].dj.is_some(), "the DJ chose it");
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+    assert!(dj_request(&effects).is_some(), "and the followers are asked for (clause 7)");
+    assert!(app.lane.followers);
+}
+
+#[test]
+fn the_openers_failure_leaves_the_dj_off_in_the_records_words() {
+    let mut app = connected_app();
+    app.dj.empty_queue = dj::EmptyQueueStart::Random;
+    let effects = app.handle_action(Action::ToggleAutoDj);
+    let request = dj_request(&effects).expect("remembered: no question asked");
+    app.apply_event(Event::AutoDjPick {
+        epoch: request.epoch,
+        songs: vec![],
+        ignore_list: vec![],
+        sonic: false,
+        note: None,
+        failure: Some(crate::tui::worker::DjFailure::NoMatch),
+    });
+    assert!(app.dj_server.is_none());
+    assert!(app.message.as_ref().unwrap().text.contains("No songs match your Auto DJ filters"));
+}
+
+#[test]
+fn the_chooser_remembers_when_asked_and_esc_leaves_the_dj_off() {
+    let mut app = connected_app();
+    app.handle_action(Action::ToggleAutoDj);
+    app.handle_action(Action::Cancel);
+    assert!(app.dj_chooser.is_none() && app.dj_server.is_none(), "dismissed: off");
+
+    app.handle_action(Action::ToggleAutoDj);
+    app.handle_action(Action::Down); // Let me choose
+    app.handle_action(Action::PlayPause); // remember this
+    app.handle_action(Action::Activate);
+    assert_eq!(app.dj.empty_queue, dj::EmptyQueueStart::Pick, "remembered");
+    assert_eq!(app.capture, Some(Capture::DjSeed), "the library, under the banner");
+    assert!(app.message.as_ref().unwrap().text.contains("Pick the opening song"));
+    assert!(app.dj_server.is_none(), "not before a row lands");
+    // Esc on the road leaves it off.
+    app.handle_action(Action::Cancel);
+    assert!(app.capture.is_none() && app.dj_server.is_none());
+}
+
+#[test]
+fn let_me_choose_arms_on_the_row_that_lands() {
+    let mut app = connected_app();
+    app.dj.empty_queue = dj::EmptyQueueStart::Pick;
+    app.handle_action(Action::ToggleAutoDj);
+    assert_eq!(app.capture, Some(Capture::DjSeed));
+    browsing(&mut app, &["one", "two"], 1);
+    let effects = app.handle_action(Action::Activate);
+    assert_eq!(app.dj_server.as_deref(), Some(HOST));
+    assert_eq!(app.queue.items.len(), 1);
+    assert_eq!(app.queue.items[0].filepath, "two");
+    assert!(app.queue.items[0].dj.is_none(), "the user chose it");
+    assert!(effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Play { .. }))));
+    assert!(app.capture.is_none());
+}
+
+#[test]
+fn a_removed_server_takes_its_dj_with_it() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.drop_server_items(HOST);
+    assert!(app.dj_server.is_none());
+}
+
+#[test]
+fn the_djs_tunnel_server_is_a_target_while_armed_and_its_turn_is_owed_until_it_serves() {
+    let mut app = connected_app();
+    app.servers.push(faraway());
+    app.replace_queue(vec![track("a")]);
+    app.dj_server = Some("mstream+iroh://faraway".into());
+    assert!(app.tunnel_targets().contains("mstream+iroh://faraway"), "tunnel follows the DJ");
+
+    playing(&mut app);
+    app.queue.current = Some(0);
+    app.tunnels.insert("mstream+iroh://faraway".into(), crate::tui::app::TunnelState::Dialling);
+    assert!(app.maybe_autodj().is_empty(), "nothing to ask while it dials");
+    assert!(app.lane.owed);
+
+    let effects = app.apply_event(Event::TunnelUp {
+        id: "mstream+iroh://faraway".into(),
+        local_url: "http://127.0.0.1:5555".into(),
+        local_token: "lt".into(),
+    });
+    let request = dj_request(&effects).expect("the owed turn goes out");
+    let reach = request.reach.as_ref().expect("over the tunnel's bridge");
+    assert_eq!(reach.base, "http://127.0.0.1:5555");
+    assert_eq!(reach.local_token.as_deref(), Some("lt"));
+    assert!(dj_probe_effect(&effects).is_some(), "and the server is probed");
+    assert!(!app.lane.owed);
+}
+
+#[test]
+fn the_dj_tab_only_offers_rows_the_settings_and_the_server_allow() {
+    let mut app = connected_app();
+    let rows = app.dj_panel.rows.clone();
+    assert!(rows.contains(&DjRow::Strictness) && rows.contains(&DjRow::Anchor), "sonic is on by default");
+    assert!(rows.contains(&DjRow::Bpm) && !rows.contains(&DjRow::Tolerance), "a switch off hides its detail");
+    assert!(rows.contains(&DjRow::Rating) && !rows.contains(&DjRow::Sources));
+
+    app.dj.sonic = false;
+    app.dj.bpm = true;
+    app.dj_panel.rebuild(&app.dj, None, false);
+    let rows = &app.dj_panel.rows;
+    assert!(!rows.contains(&DjRow::Strictness) && rows.contains(&DjRow::Tolerance));
+
+    // A server known to predate the filters hides them; two libraries want
+    // a Sources row; a peer has no rating.
+    let info = crate::tui::worker::DjServerInfo {
+        version: Some("6.6.0".into()),
+        discovery: false,
+        discovery_ready: None,
+        libraries: vec!["Music".into(), "Audiobooks".into()],
+    };
+    app.dj_panel.rebuild(&app.dj, Some(&info), true);
+    let rows = &app.dj_panel.rows;
+    assert!(!rows.contains(&DjRow::Bpm) && !rows.contains(&DjRow::Harmonic) && !rows.contains(&DjRow::Genres));
+    assert!(rows.contains(&DjRow::Sources) && !rows.contains(&DjRow::Rating));
+    assert!(rows.contains(&DjRow::Sample), "Preview stays");
+}
+
+// ── Track actions ───────────────────────────────────────────────────────────
+
+fn rated(path: &str, rating: Option<u32>) -> Track {
+    let mut t = track(path);
+    t.metadata.rating = rating;
+    t
+}
+
+#[test]
+fn a_rating_patches_every_copy_at_once_and_a_refusal_reverts_it() {
+    let mut app = connected_app();
+    let t = rated("lib/a.mp3", Some(4));
+    app.push_queue(t.clone());
+    app.files.set(vec![Entry::Track { label: "a".into(), track: Box::new(t.clone()) }]);
+    let origin = app.origin();
+    let effects = app.rate_track(&origin, "lib/a.mp3", Some(8));
+    assert!(
+        matches!(effects.as_slice(), [Effect::Api(ApiCmd::RateSong { filepath, rating: Some(8), seq: 1, .. })] if filepath == "lib/a.mp3"),
+        "{effects:?}"
+    );
+    assert_eq!(app.queue.items[0].metadata.rating, Some(8), "the queue's copy changed at once");
+    assert!(matches!(&app.files.entries[0], Entry::Track { track, .. } if track.metadata.rating == Some(8)), "the pane's too");
+    app.apply_event(Event::Rated { filepath: "lib/a.mp3".into(), rating: Some(8), seq: 1, error: Some("boom".into()) });
+    assert_eq!(app.queue.items[0].metadata.rating, Some(4), "refused: the previous value is back");
+    assert!(app.message.as_ref().unwrap().text.contains("Could not save rating"));
+}
+
+#[test]
+fn the_latest_rating_wins_over_an_older_refusal() {
+    let mut app = connected_app();
+    app.push_queue(rated("lib/a.mp3", Some(2)));
+    let origin = app.origin();
+    app.rate_track(&origin, "lib/a.mp3", Some(6));
+    app.rate_track(&origin, "lib/a.mp3", Some(10));
+    app.apply_event(Event::Rated { filepath: "lib/a.mp3".into(), rating: Some(6), seq: 1, error: Some("late".into()) });
+    assert_eq!(app.queue.items[0].metadata.rating, Some(10), "the newer write stands");
+    app.apply_event(Event::Rated { filepath: "lib/a.mp3".into(), rating: Some(10), seq: 2, error: None });
+    assert_eq!(app.queue.items[0].metadata.rating, Some(10));
+    assert!(app.rating_writes.is_empty(), "both writes are accounted for");
+}
+
+#[test]
+fn a_peers_track_takes_no_rating_and_no_playlist() {
+    let mut app = connected_app();
+    let peer = Origin { server: "http://parent:3000".into(), peer: Some(3) };
+    assert!(app.rate_track(&peer, "lib/a.mp3", Some(8)).is_empty());
+    assert!(app.add_to_playlist(&peer, "lib/a.mp3", "Mix").is_empty());
+}
+
+#[test]
+fn adding_to_a_playlist_asks_the_tracks_server_and_says_so() {
+    let mut app = connected_app();
+    let origin = app.origin();
+    let effects = app.add_to_playlist(&origin, "lib/a.mp3", " Mix ");
+    assert!(
+        matches!(effects.as_slice(), [Effect::Api(ApiCmd::AddToPlaylist { playlist, song, .. })] if playlist == "Mix" && song == "lib/a.mp3"),
+        "{effects:?}"
+    );
+    app.apply_event(Event::AddedToPlaylist { playlist: "Mix".into(), error: None });
+    assert_eq!(app.message.as_ref().unwrap().text, "Added to Mix");
+    app.apply_event(Event::AddedToPlaylist { playlist: "Mix".into(), error: Some("boom".into()) });
+    assert!(app.message.as_ref().unwrap().text.starts_with("Couldn't add to the playlist"));
+}
+
+#[test]
+fn the_tabs_keyword_row_takes_typed_words_and_x_removes_the_last() {
+    let mut app = connected_app();
+    on_the_dj_tab(&mut app);
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Keywords).unwrap();
+    app.handle_action(Action::Activate);
+    assert_eq!(app.dj_keyword.as_deref(), Some(""), "Enter opens the entry");
+    assert_eq!(app.input_mode(), InputMode::Editing, "and the keys are letters");
+    for c in "live".chars() {
+        app.handle_action(Action::Input(c));
+    }
+    app.handle_action(Action::Submit);
+    assert_eq!(app.dj.keywords, vec!["live"]);
+    assert!(app.dj.keyword_filter, "a word switches the filter on");
+    assert_eq!(app.dj_keyword.as_deref(), Some(""), "ready for the next word");
+    app.handle_action(Action::Submit);
+    assert!(app.dj_keyword.is_none(), "Enter on nothing leaves");
+    app.handle_action(Action::Activate);
+    app.handle_action(Action::Cancel);
+    assert!(app.dj_keyword.is_none(), "Esc leaves");
+    app.handle_action(Action::RemoveFromQueue);
+    assert!(app.dj.keywords.is_empty(), "x takes the last word back");
+    assert_eq!(app.now_tab(), NowTab::AutoDj, "still on the tab");
+}
+
+#[test]
+fn a_failed_genres_load_ends_the_pickers_loading_with_the_reason() {
+    let mut app = connected_app();
+    on_the_dj_tab(&mut app);
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Genres).unwrap();
+    app.handle_action(Action::Activate);
+    assert!(app.dj_panel.genres.as_ref().is_some_and(|p| p.loading), "Enter opens the picker, loading");
+    app.apply_event(Event::GenresFailed("boom".into()));
+    let picker = app.dj_panel.genres.as_ref().unwrap();
+    assert!(!picker.loading, "no longer loading");
+    assert_eq!(picker.failed.as_deref(), Some("boom"));
+}
+
+#[test]
+fn adjusting_a_row_changes_the_setting_it_names() {
+    let mut app = connected_app();
+    on_the_dj_tab(&mut app);
+    let go = |app: &mut App, row: DjRow| {
+        app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == row).unwrap();
+    };
+    go(&mut app, DjRow::SongsPerFetch);
+    app.handle_action(Action::NowRight);
+    assert_eq!(app.dj.songs_per_fetch, 5);
+    for _ in 0..40 {
+        app.handle_action(Action::NowRight);
+    }
+    assert_eq!(app.dj.songs_per_fetch, dj::SONGS_PER_FETCH_MAX, "clamped at the top");
+    for _ in 0..40 {
+        app.handle_action(Action::NowLeft);
+    }
+    assert_eq!(app.dj.songs_per_fetch, 1, "and at the bottom");
+
+    go(&mut app, DjRow::Strictness);
+    app.handle_action(Action::NowRight);
+    assert_eq!(app.dj.sonic_min_similarity, 0.6, "a step of .05");
+    for _ in 0..20 {
+        app.handle_action(Action::NowRight);
+    }
+    assert_eq!(app.dj.sonic_min_similarity, dj::SONIC_MAX_SIMILARITY);
+
+    go(&mut app, DjRow::Bpm);
+    app.handle_action(Action::NowRight);
+    assert!(app.dj.bpm && app.dj_panel.rows.contains(&DjRow::Tolerance), "the switch reveals its detail");
+    go(&mut app, DjRow::Tolerance);
+    app.handle_action(Action::NowLeft);
+    assert_eq!(app.dj.bpm_tolerance, 7);
+
+    go(&mut app, DjRow::Length);
+    app.handle_action(Action::Activate);
+    assert!(app.dj.length);
+    go(&mut app, DjRow::Shortest);
+    app.handle_action(Action::NowRight);
+    assert_eq!(app.dj.min_seconds, 15, "fifteen-second steps");
+    assert!(app.dj_panel.rows.contains(&DjRow::UnknownLength), "a real bound reveals the unknown row");
+}
+
+#[test]
+fn dj_tab_settings_are_remembered() {
+    let mut app = connected_app();
+    on_the_dj_tab(&mut app);
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::SongsPerFetch).unwrap();
+    app.handle_action(Action::NowRight); // five songs a turn
+    let saved = app.prefs();
+    assert_eq!(saved.dj.songs_per_fetch, 5);
+    let restored = App::new(None, None, None).with_prefs(&saved);
+    assert_eq!(restored.dj, app.dj);
+}
+
+#[test]
+fn g_and_shift_g_jump_to_the_ends_of_the_dj_tab() {
+    let mut app = connected_app();
+    on_the_dj_tab(&mut app);
+    app.handle_action(Action::Last);
+    assert_eq!(app.dj_panel.selected(), DjRow::Sample, "the last row");
+    app.handle_action(Action::First);
+    assert_eq!(app.dj_panel.selected(), DjRow::Armed);
+}
+
+#[test]
+fn the_sources_chooser_keeps_one_library_on() {
+    let mut app = connected_app();
+    app.servers.push(KnownServer {
+        id: HOST.into(),
+        name: "host".into(),
+        token: None,
+        self_signed: false,
+        peer: None,
+        pairing: None,
+        dj: Default::default(),
+    });
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    app.dj_info = Some(crate::tui::worker::DjServerInfo {
+        version: Some("6.28.0".into()),
+        discovery: true,
+        discovery_ready: Some(true),
+        libraries: vec!["Music".into(), "Audiobooks".into()],
+    });
+    app.dj_panel.rebuild(&app.dj, app.dj_info.as_ref(), false);
+    on_the_dj_tab(&mut app);
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Sources).unwrap();
+    app.handle_action(Action::Activate);
+    assert!(app.dj_panel.sources.is_some());
+    let effects = app.handle_action(Action::PlayPause); // Music off
+    assert_eq!(app.dj_sources_off(), vec!["Music"]);
+    assert!(matches!(effects.as_slice(), [Effect::SaveDjLibrary { server, .. }] if server == HOST));
+    app.handle_action(Action::Down);
+    let effects = app.handle_action(Action::PlayPause); // Audiobooks off too?
+    assert!(effects.is_empty());
+    assert_eq!(app.dj_sources_off(), vec!["Music"], "the last source stays on");
+    assert!(app.message.as_ref().unwrap().text.contains("At least one source"));
+}
+
+// ── Play reporting (docs/ux-contracts/play-reporting.md) ──────────────────
+
+fn stats_app() -> App {
+    let mut app = connected_app();
+    app.session.server = "http://host:3000".into();
+    app.session.server_id = "http://host:3000".into();
+    app
+}
+
+fn status_at(url: &str, position: f64, paused: bool) -> Event {
+    Event::Status(PlayerStatus { playing: true, paused, position, duration: 200.0, volume: 1.0, source: url.to_string() })
+}
+
+/// The batch a tick sent, if any: its body, its reach and its ids.
+fn reported(effects: &[Effect]) -> Option<(serde_json::Value, Reach, Vec<String>)> {
+    effects.iter().find_map(|e| match e {
+        Effect::Api(ApiCmd::ReportPlays { reach, body, ids }) => Some((body.clone(), reach.clone(), ids.clone())),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_play_that_runs_out_is_reported_completed_with_the_time_listened() {
+    let mut app = stats_app();
+    let mut first = item("a.mp3");
+    first.track.metadata.duration = Some(200.0);
+    app.queue.replace(vec![first, item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    for p in 0..=12 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    let effects = app.apply_event(ended(&effects));
+    assert!(matches!(effects.first(), Some(Effect::Audio(AudioCmd::Play { .. }))), "the queue advances");
+    let effects = app.tick();
+    let (body, reach, ids) = reported(&effects).expect("the finished play goes out on the next tick");
+    assert_eq!(reach.base, "http://host:3000");
+    assert_eq!(ids.len(), 1);
+    let play = &body["plays"][0];
+    assert_eq!(play["filePath"], "a.mp3");
+    assert_eq!(play["outcome"], "completed");
+    assert_eq!(play["playedMs"], 12_000);
+    assert_eq!(play["durationMs"], 200_000);
+    assert_eq!(play["source"], "manual");
+    assert_eq!(body["client"]["name"], "mstream-terminal-player");
+    assert_eq!(app.stats.session.as_ref().map(|s| s.file_path.as_str()), Some("b.mp3"), "the next track's session is open");
+    assert!(reported(&app.tick()).is_none(), "one batch in flight at a time");
+}
+
+#[test]
+fn a_skip_is_reported_skipped_a_seek_adds_no_time_and_a_pause_is_counted() {
+    let mut app = stats_app();
+    app.queue.replace(vec![item("a.mp3"), item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    for p in [0.0, 1.0, 2.0] {
+        app.apply_event(status_at(&url, p, false));
+    }
+    app.apply_event(status_at(&url, 2.0, true)); // paused
+    app.apply_event(status_at(&url, 2.0, true));
+    app.apply_event(status_at(&url, 2.0, false)); // resumed
+    app.apply_event(status_at(&url, 50.0, false)); // a seek: adds nothing
+    app.apply_event(status_at(&url, 51.0, false));
+    app.apply_event(status_at(&url, 52.0, false));
+    app.skip(true);
+    let (body, ..) = reported(&app.tick()).expect("the skipped play goes out");
+    let play = &body["plays"][0];
+    assert_eq!(play["outcome"], "skipped");
+    assert_eq!(play["playedMs"], 4_000, "two seconds before the pause, two after the seek");
+    assert_eq!(play["pauseCount"], 1);
+}
+
+#[test]
+fn a_session_under_a_second_is_never_posted() {
+    let mut app = stats_app();
+    app.queue.replace(vec![item("a.mp3"), item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    app.apply_event(status_at(&url, 0.0, false));
+    app.apply_event(status_at(&url, 0.5, false));
+    app.skip(true);
+    assert!(reported(&app.tick()).is_none());
+    assert!(app.stats.outbox.is_empty());
+}
+
+#[test]
+fn a_kept_batch_waits_a_minute_and_a_settled_or_dropped_one_leaves_the_outbox() {
+    use crate::tui::worker::ReportOutcome;
+    let mut app = stats_app();
+    app.queue.replace(vec![item("a.mp3"), item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    for p in 0..=5 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    let effects = app.skip(true);
+    let (_, _, ids) = reported(&app.tick()).expect("posted");
+    app.apply_event(Event::PlaysReported { ids: ids.clone(), outcome: ReportOutcome::Kept("offline".into()) });
+    assert_eq!(app.stats.outbox.len(), 1, "kept");
+    let now = crate::clock::Instant::now();
+    assert!(reported(&app.tick_at(now)).is_none(), "not before the minute");
+    let (_, _, again) = reported(&app.tick_at(now + std::time::Duration::from_secs(61))).expect("the minute is up");
+    assert_eq!(again, ids);
+    app.apply_event(Event::PlaysReported { ids: ids.clone(), outcome: ReportOutcome::Settled(ids.clone()) });
+    assert!(app.stats.outbox.is_empty(), "settled");
+
+    // The second track, dropped by the server: it leaves too.
+    let url = played_url(&effects);
+    for p in 0..=5 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    // The last row: the skip stops playback, and the Stop the app sends
+    // is what closes the session (the hook the action funnel runs).
+    let effects = app.skip(true);
+    app.note_pending(&effects);
+    let (_, _, ids) = reported(&app.tick()).expect("posted");
+    app.apply_event(Event::PlaysReported { ids, outcome: ReportOutcome::Dropped("malformed".into()) });
+    assert!(app.stats.outbox.is_empty(), "dropped");
+}
+
+#[test]
+fn a_peer_rows_play_goes_to_the_parent_with_the_peer_id_and_a_snapshot() {
+    let mut app = stats_app();
+    let mut row = item("music/peer.mp3");
+    row.origin.peer = Some(3);
+    row.track.metadata.title = Some("Peer song".into());
+    row.track.metadata.artist = Some("Them".into());
+    app.queue.replace(vec![row, item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    for p in 0..=5 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    app.skip(true);
+    let (body, reach, _) = reported(&app.tick()).expect("posted to the parent");
+    assert_eq!(reach.peer, None, "never through the peer proxy");
+    assert_eq!(reach.base, "http://host:3000");
+    let play = &body["plays"][0];
+    assert_eq!(play["peerId"], 3);
+    assert_eq!(play["track"]["title"], "Peer song");
+    assert_eq!(play["track"]["artist"], "Them");
+}
+
+#[test]
+fn a_server_without_the_stats_api_gets_one_legacy_scrobble_at_thirty_seconds_and_no_batch() {
+    let mut app = stats_app();
+    app.capabilities.stats = false;
+    app.queue.replace(vec![item("a.mp3"), item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    let mut scrobbles = 0;
+    for p in 0..=35 {
+        let effects = app.apply_event(status_at(&url, f64::from(p), false));
+        scrobbles += effects.iter().filter(|e| matches!(e, Effect::Api(ApiCmd::Scrobble { .. }))).count();
+        if p < 30 {
+            assert_eq!(scrobbles, 0, "not before thirty seconds");
+        }
+    }
+    assert_eq!(scrobbles, 1, "once");
+    app.skip(true);
+    assert!(reported(&app.tick()).is_none(), "no batch for a server without the Stats API");
+    assert!(app.stats.outbox.is_empty());
+}
+
+#[test]
+fn the_outbox_and_a_checkpointed_session_survive_a_restart() {
+    let mut app = stats_app();
+    app.queue.replace(vec![item("a.mp3"), item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    for p in 0..=5 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    let effects = app.skip(true); // a's play is owed; b's session opens
+    let url = played_url(&effects);
+    for p in 0..=7 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    let snapshot = app.stats_snapshot().expect("something to keep");
+    assert_eq!(snapshot.outbox.len(), 1);
+    assert!(snapshot.inflight.is_some());
+    let text = serde_json::to_string(&snapshot).unwrap();
+    let back: super::stats::StatsSnapshot = serde_json::from_str(&text).unwrap();
+    let mut next = stats_app();
+    next.restore_stats(back);
+    assert_eq!(next.stats.instance_id, app.stats.instance_id, "one id per install");
+    assert_eq!(next.stats.outbox.len(), 2, "the owed play and the session left behind");
+    let recovered = &next.stats.outbox[1].play;
+    assert_eq!((recovered.outcome, recovered.played_ms), (super::stats::Outcome::Stopped, 7_000));
+    let (body, ..) = reported(&next.tick()).expect("owed plays go out on the first tick");
+    assert_eq!(body["plays"].as_array().unwrap().len(), 2);
 }

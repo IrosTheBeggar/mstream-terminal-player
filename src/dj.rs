@@ -143,65 +143,40 @@ pub fn compatible_keys(raw: Option<&str>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Only the seed's own key — for people who want a set that never leaves it.
-pub fn exact_keys(raw: Option<&str>) -> Vec<String> {
-    raw.and_then(to_camelot).map(|c| vec![c.code()]).unwrap_or_default()
-}
-
-// ── Sonic pool ──────────────────────────────────────────────────────────────
-
-/// Ends of the useful cosine band for the sonic pool.
-///
-/// The embeddings do not spread over 0..1 in any useful way: the server's own
-/// calibration puts same-artist pairs around .6–.9 and cross-artist ones
-/// around .3–.7. A slider over the raw value would spend most of its travel
-/// selecting either everything or nothing, so the band is what gets exposed.
-pub const SONIC_LOOSEST: f64 = 0.30;
-pub const SONIC_TIGHTEST: f64 = 0.85;
-
-/// Map the panel's 1–100 tightness onto `minSimilarity`. Zero means the sonic
-/// pool is switched off, and returns `None` — the caller must then send
-/// neither `similarTo` nor `minSimilarity`, which the server requires as a
-/// pair.
-pub fn sonic_threshold(tightness: u32) -> Option<f64> {
-    if tightness == 0 {
-        return None;
-    }
-    let t = f64::from(tightness.clamp(1, 100));
-    let raw = SONIC_LOOSEST + (t - 1.0) / 99.0 * (SONIC_TIGHTEST - SONIC_LOOSEST);
-    Some((raw * 100.0).round() / 100.0)
-}
-
 // ── Settings ────────────────────────────────────────────────────────────────
 
-/// How hard to hold the key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum KeyMatching {
-    Off,
-    /// The Camelot neighbourhood — what harmonic mixing normally means.
-    #[default]
-    Compatible,
-    /// The seed's own key and nothing else.
-    Strict,
-}
-
-/// What the sonic pool measures distance from.
+/// What the sonic pool measures distance from (auto-dj contract, clause 23).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SonicAnchor {
-    /// Just what's playing — the set follows each track in turn.
-    Current,
-    /// Recent picks averaged into a centroid, so the set drifts as a whole
-    /// instead of walking away one song at a time.
+    /// "Follow the vibe": the last few DJ picks, most recent last, so the
+    /// session's sound may slowly evolve.
     #[default]
-    Session,
+    Rolling,
+    /// "Stay on seed": one pin, set on the lane's first pick and reused for
+    /// the whole session.
+    Locked,
 }
 
+/// What switching the DJ on with nothing queued does (clause 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmptyQueueStart {
+    #[default]
+    Ask,
+    /// "Surprise me": the filtered opener, then followers.
+    Random,
+    /// "Let me choose": the library, under a banner.
+    Pick,
+}
+
+/// Which way the genre filter cuts. The filter's SWITCH is a field of its
+/// own (`genre_filter`), the record's `autoDJGenreEnabled` beside
+/// `autoDJGenreMode`: switching off keeps the mode for the next switch on,
+/// and a switch never has to step through the other mode to get there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GenreMode {
-    #[default]
-    Off,
     /// Only these genres. Note this also excludes untagged tracks — the
     /// server treats "only these" as the stricter promise.
+    #[default]
     Whitelist,
     /// Anything but these. Untagged tracks pass.
     Blacklist,
@@ -210,47 +185,49 @@ pub enum GenreMode {
 // Labels are the on-disk spelling as well as the on-screen one. Anything
 // unrecognised falls back to the default rather than refusing to load a
 // config someone hand-edited.
-impl KeyMatching {
+impl SonicAnchor {
     pub fn label(self) -> &'static str {
         match self {
-            KeyMatching::Off => "off",
-            KeyMatching::Compatible => "compatible",
-            KeyMatching::Strict => "strict",
+            SonicAnchor::Rolling => "rolling",
+            SonicAnchor::Locked => "locked",
         }
     }
+    /// The player's old spellings ("current", "session") both meant a
+    /// moving anchor; they read as rolling.
     pub fn from_label(raw: &str) -> Self {
         match raw {
-            "off" => KeyMatching::Off,
-            "strict" => KeyMatching::Strict,
-            _ => KeyMatching::Compatible,
+            "locked" => SonicAnchor::Locked,
+            _ => SonicAnchor::Rolling,
         }
     }
     pub fn next(self) -> Self {
         match self {
-            KeyMatching::Off => KeyMatching::Compatible,
-            KeyMatching::Compatible => KeyMatching::Strict,
-            KeyMatching::Strict => KeyMatching::Off,
+            SonicAnchor::Rolling => SonicAnchor::Locked,
+            SonicAnchor::Locked => SonicAnchor::Rolling,
         }
     }
 }
 
-impl SonicAnchor {
+impl EmptyQueueStart {
     pub fn label(self) -> &'static str {
         match self {
-            SonicAnchor::Current => "current",
-            SonicAnchor::Session => "session",
+            EmptyQueueStart::Ask => "ask",
+            EmptyQueueStart::Random => "random",
+            EmptyQueueStart::Pick => "pick",
         }
     }
     pub fn from_label(raw: &str) -> Self {
         match raw {
-            "current" => SonicAnchor::Current,
-            _ => SonicAnchor::Session,
+            "random" => EmptyQueueStart::Random,
+            "pick" => EmptyQueueStart::Pick,
+            _ => EmptyQueueStart::Ask,
         }
     }
     pub fn next(self) -> Self {
         match self {
-            SonicAnchor::Current => SonicAnchor::Session,
-            SonicAnchor::Session => SonicAnchor::Current,
+            EmptyQueueStart::Ask => EmptyQueueStart::Random,
+            EmptyQueueStart::Random => EmptyQueueStart::Pick,
+            EmptyQueueStart::Pick => EmptyQueueStart::Ask,
         }
     }
 }
@@ -258,49 +235,76 @@ impl SonicAnchor {
 impl GenreMode {
     pub fn label(self) -> &'static str {
         match self {
-            GenreMode::Off => "off",
             GenreMode::Whitelist => "whitelist",
             GenreMode::Blacklist => "blacklist",
         }
     }
+    /// "off" — a file from before the switch had its own key — reads as
+    /// the default mode; the switch itself is read by `Settings::from_prefs`.
     pub fn from_label(raw: &str) -> Self {
         match raw {
-            "whitelist" => GenreMode::Whitelist,
             "blacklist" => GenreMode::Blacklist,
-            _ => GenreMode::Off,
-        }
-    }
-    pub fn next(self) -> Self {
-        match self {
-            GenreMode::Off => GenreMode::Whitelist,
-            GenreMode::Whitelist => GenreMode::Blacklist,
-            GenreMode::Blacklist => GenreMode::Off,
+            _ => GenreMode::Whitelist,
         }
     }
 }
 
-/// Everything the Auto-DJ panel controls.
+/// Everything Auto DJ's room controls that travels with the user (contract
+/// clause 51) — plus the library rules that stand behind a server entry
+/// carrying none of its own.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
-    /// Percent either side of the seed tempo. Zero drops the tempo filter.
-    pub tempo_tolerance: u32,
-    pub key_matching: KeyMatching,
-    /// 1–10, or zero for no floor.
-    pub min_rating: u32,
-    /// How many recently-played artists to keep out.
-    pub artist_cooldown: u32,
-    /// 1–100, or zero for no sonic pool.
-    pub sonic_tightness: u32,
+    pub songs_per_fetch: u32,
+    pub sonic: bool,
+    /// The raw cosine floor, [`SONIC_MIN_SIMILARITY`]..=[`SONIC_MAX_SIMILARITY`].
+    pub sonic_min_similarity: f64,
     pub sonic_anchor: SonicAnchor,
+    pub empty_queue: EmptyQueueStart,
+    pub bpm: bool,
+    /// ± BPM around the playing track, 1–20.
+    pub bpm_tolerance: u32,
+    pub harmonic: bool,
+    /// How many recently-played artists to keep out; zero is off.
+    pub artist_cooldown: u32,
+    pub length: bool,
+    /// Seconds; 0 and [`LENGTH_RAIL_SECONDS`] are the rails and are not sent.
+    pub min_seconds: u32,
+    pub max_seconds: u32,
+    pub allow_unknown_length: bool,
+    pub keyword_filter: bool,
+    pub keywords: Vec<String>,
+    /// The library fallbacks: 1–10 or zero for no floor; the genre filter —
+    /// its switch and its mode apart, so the mode survives a switch off.
+    pub min_rating: u32,
+    pub genre_filter: bool,
     pub genre_mode: GenreMode,
     pub genres: Vec<String>,
 }
 
-/// Bounds for the panel's adjustable numbers. A tempo tolerance past ~30%
-/// stops meaning anything, and the server caps ratings at 10.
-pub const TEMPO_TOLERANCE_MAX: u32 = 30;
+/// The bounds the room's controls move within, and the server's own caps.
+pub const SONGS_PER_FETCH_MAX: u32 = 25;
+pub const DEFAULT_SONGS_PER_FETCH: u32 = 4;
+pub const BPM_TOLERANCE_MIN: u32 = 1;
+pub const BPM_TOLERANCE_MAX: u32 = 20;
+pub const DEFAULT_BPM_TOLERANCE: u32 = 8;
+/// The wide set the server relaxes to before dropping tempo altogether.
+pub const BPM_WIDE_EXTRA: u32 = 2;
+/// The band the embeddings actually use: the server's own calibration puts
+/// same-artist pairs around .6–.9 and cross-artist ones around .3–.7.
+pub const SONIC_MIN_SIMILARITY: f64 = 0.30;
+pub const SONIC_MAX_SIMILARITY: f64 = 0.80;
+pub const DEFAULT_SONIC_MIN_SIMILARITY: f64 = 0.55;
+/// The strictness bar's step.
+pub const SONIC_STEP: f64 = 0.05;
+pub const LENGTH_RAIL_SECONDS: u32 = 1200;
+pub const LENGTH_STEP_SECONDS: u32 = 15;
+pub const KEYWORDS_MAX: usize = 50;
+/// The genre picker's cap (clause 48).
+pub const GENRES_MAX: usize = 200;
 pub const RATING_MAX: u32 = 10;
 pub const ARTIST_COOLDOWN_MAX: u32 = 20;
+/// How many DJ picks the rolling anchor remembers (clause 23).
+pub const HISTORY_LEN: usize = 5;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -308,15 +312,50 @@ impl Default for Settings {
     }
 }
 
+/// A cosine floor rounded to the bar's step and held inside the band.
+pub fn clamp_similarity(raw: f64) -> f64 {
+    let raw = if raw.is_finite() { raw } else { DEFAULT_SONIC_MIN_SIMILARITY };
+    ((raw.clamp(SONIC_MIN_SIMILARITY, SONIC_MAX_SIMILARITY) / SONIC_STEP).round() * SONIC_STEP * 100.0)
+        .round()
+        / 100.0
+}
+
 impl Settings {
+    /// From the file — clamped, and migrated from the three-mode panel's
+    /// keys when they are still there: a tempo percent above zero means
+    /// BPM continuity was wanted, a key matching other than off means
+    /// harmonic mixing was, and the perceptual slider is let go (the
+    /// record's model is a switch and a raw band).
     pub fn from_prefs(prefs: &crate::config::AutoDjPrefs) -> Self {
+        let bpm = prefs.bpm || prefs.tempo_tolerance.is_some_and(|t| t > 0);
+        let harmonic = prefs.harmonic || prefs.key_matching.as_deref().is_some_and(|k| k != "off");
+        let max_seconds = prefs.max_seconds.clamp(0, LENGTH_RAIL_SECONDS);
         Settings {
-            tempo_tolerance: prefs.tempo_tolerance.min(TEMPO_TOLERANCE_MAX),
-            key_matching: KeyMatching::from_label(&prefs.key_matching),
-            min_rating: prefs.min_rating.min(RATING_MAX),
-            artist_cooldown: prefs.artist_cooldown.min(ARTIST_COOLDOWN_MAX),
-            sonic_tightness: prefs.sonic_tightness.min(100),
+            songs_per_fetch: prefs.songs_per_fetch.clamp(1, SONGS_PER_FETCH_MAX),
+            sonic: prefs.sonic,
+            sonic_min_similarity: clamp_similarity(prefs.sonic_min_similarity),
             sonic_anchor: SonicAnchor::from_label(&prefs.sonic_anchor),
+            empty_queue: EmptyQueueStart::from_label(&prefs.empty_queue),
+            bpm,
+            bpm_tolerance: prefs.bpm_tolerance.clamp(BPM_TOLERANCE_MIN, BPM_TOLERANCE_MAX),
+            harmonic,
+            artist_cooldown: prefs.artist_cooldown.min(ARTIST_COOLDOWN_MAX),
+            length: prefs.length,
+            min_seconds: prefs.min_seconds.min(max_seconds),
+            max_seconds,
+            allow_unknown_length: prefs.allow_unknown_length,
+            keyword_filter: prefs.keyword_filter,
+            keywords: prefs
+                .keywords
+                .iter()
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .take(KEYWORDS_MAX)
+                .collect(),
+            min_rating: prefs.min_rating.min(RATING_MAX),
+            // A file from before the switch had its own key wrote "off" into
+            // the mode: that reads as the switch off, with whitelist kept.
+            genre_filter: prefs.genre_filter.unwrap_or(prefs.genre_mode != "off"),
             genre_mode: GenreMode::from_label(&prefs.genre_mode),
             genres: prefs.genres.clone(),
         }
@@ -324,116 +363,212 @@ impl Settings {
 
     pub fn to_prefs(&self) -> crate::config::AutoDjPrefs {
         crate::config::AutoDjPrefs {
-            tempo_tolerance: self.tempo_tolerance,
-            key_matching: self.key_matching.label().to_string(),
-            min_rating: self.min_rating,
-            artist_cooldown: self.artist_cooldown,
-            sonic_tightness: self.sonic_tightness,
+            songs_per_fetch: self.songs_per_fetch,
+            sonic: self.sonic,
+            sonic_min_similarity: self.sonic_min_similarity,
             sonic_anchor: self.sonic_anchor.label().to_string(),
+            empty_queue: self.empty_queue.label().to_string(),
+            bpm: self.bpm,
+            bpm_tolerance: self.bpm_tolerance,
+            harmonic: self.harmonic,
+            artist_cooldown: self.artist_cooldown,
+            length: self.length,
+            min_seconds: self.min_seconds,
+            max_seconds: self.max_seconds,
+            allow_unknown_length: self.allow_unknown_length,
+            keyword_filter: self.keyword_filter,
+            keywords: self.keywords.clone(),
+            min_rating: self.min_rating,
+            genre_filter: Some(self.genre_filter),
             genre_mode: self.genre_mode.label().to_string(),
             genres: self.genres.clone(),
-            // Only the panel's own settings are here; whatever a newer
+            // Only the room's own settings are here; whatever a newer
             // player wrote alongside them is held by the loaded prefs and
-            // put back by `PlayerPrefs::adopt`.
+            // put back by `PlayerPrefs::adopt`. The legacy keys stay gone.
             ..Default::default()
         }
     }
 
-    /// Tempo tolerance as the fraction `bpm_windows` takes.
-    pub fn tolerance(&self) -> f64 {
-        f64::from(self.tempo_tolerance) / 100.0
+    /// The length window's words (clause 47): a rail means unbounded, so a
+    /// bare 0:00–20:00 never looks like a constraint.
+    pub fn length_words(&self) -> String {
+        let fmt = |s: u32| format!("{}:{:02}", s / 60, s % 60);
+        match (self.min_seconds > 0, self.max_seconds < LENGTH_RAIL_SECONDS) {
+            (false, false) => "Any length".to_string(),
+            (true, false) => format!("Over {}", fmt(self.min_seconds)),
+            (false, true) => format!("Under {}", fmt(self.max_seconds)),
+            (true, true) => format!("{} to {}", fmt(self.min_seconds), fmt(self.max_seconds)),
+        }
     }
 }
 
-// ── Request building ────────────────────────────────────────────────────────
+// ── Composition ─────────────────────────────────────────────────────────────
 
 use crate::api::types::{BpmWindow, RandomSongRequest, Track};
 
-/// Turn the panel's settings and the current session into a random-songs
-/// request.
-///
-/// Pure on purpose: what gets asked of the server is the part worth pinning
-/// down in tests, and it depends on enough moving pieces — a seed that may
-/// lack tags, capabilities that may withhold the sonic pool, filters that
-/// must vanish rather than go out empty — that reading the JSON is the only
-/// honest way to know.
-///
-/// `anchors` are recent track paths, newest first, and `recent_artists` the
-/// names to keep out; both are trimmed here to whatever the settings allow.
-pub fn build_random_request(
-    settings: &Settings,
-    seed: Option<&Track>,
-    ignore_list: Vec<u32>,
-    anchors: &[String],
-    recent_artists: &[String],
-    sonic_available: bool,
-) -> (RandomSongRequest, Option<String>) {
-    let mut request = RandomSongRequest { ignore_list, ..Default::default() };
-    let mut note = None;
+/// The rules of the DJ's library, resolved from its server entry with the
+/// session-wide settings behind it (clause 51), and what the server is.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct LibraryFilters {
+    /// The libraries switched OFF (`ignoreVPaths`).
+    pub sources_off: Vec<String>,
+    /// 1–10, or zero for no floor.
+    pub min_rating: u32,
+    /// The genre filter's switch and its mode, two fields (clause 48).
+    pub genre_filter: bool,
+    pub genre_mode: GenreMode,
+    pub genres: Vec<String>,
+    /// A federated peer: a key or a guest has no stars, so no rating goes
+    /// (clause 6).
+    pub is_peer: bool,
+}
 
-    if let Some(seed) = seed {
-        if settings.tempo_tolerance > 0 {
-            if let Some(bpm) = seed.metadata.bpm {
-                let tolerance = settings.tolerance();
-                request.bpm_ranges = bpm_windows(f64::from(bpm), tolerance);
-                // The server relaxes to the wide set before dropping tempo
-                // altogether; twice the tolerance is that second chance.
-                request.bpm_ranges_wide = bpm_windows(f64::from(bpm), tolerance * 2.0);
+impl LibraryFilters {
+    /// A server entry's own rules over the session-wide fallbacks.
+    pub fn resolve(
+        settings: &Settings,
+        own: &crate::config::DjLibraryOverrides,
+        is_peer: bool,
+    ) -> LibraryFilters {
+        LibraryFilters {
+            sources_off: own.sources_off.clone(),
+            min_rating: own.min_rating.unwrap_or(settings.min_rating).min(RATING_MAX),
+            // An entry from before the switch had its own field said "off"
+            // in the mode: its switch off, and the mode falls back.
+            genre_filter: own.genre_filter.unwrap_or(match own.genre_mode.as_deref() {
+                Some("off") => false,
+                _ => settings.genre_filter,
+            }),
+            genre_mode: match own.genre_mode.as_deref() {
+                Some("off") | None => settings.genre_mode,
+                Some(raw) => GenreMode::from_label(raw),
+            },
+            genres: own.genres.clone().unwrap_or_else(|| settings.genres.clone()),
+            is_peer,
+        }
+    }
+}
+
+/// Everything one pick is composed from — built by the App, sent to the
+/// worker, and turned into the request body there. Pure on purpose: what
+/// gets asked of the server is the part worth pinning in tests, and it
+/// depends on enough moving pieces — a playing track that may lack tags,
+/// a pool that may be suppressed, filters that must vanish rather than go
+/// out empty — that reading the JSON is the only honest way to know.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ask {
+    pub settings: Settings,
+    pub library: LibraryFilters,
+    /// The playing track's tempo and key — numbers, so any server's row
+    /// will do (clauses 21 and 22).
+    pub playing_bpm: Option<u32>,
+    pub playing_key: Option<String>,
+    /// The lane's Camelot anchor, as a code, once locked.
+    pub camelot_anchor: Option<String>,
+    /// The sonic seeds the App's anchor rule resolved (clause 23); empty
+    /// means no pool is asked for.
+    pub sonic_seeds: Vec<String>,
+    /// The round-trip cursor (clause 24).
+    pub ignore_list: Vec<u32>,
+    /// Recently-played artists, newest first, for the cooldown.
+    pub recent_artists: Vec<String>,
+    /// The "Surprise me" opener: the library filters and nothing else, one
+    /// song (clause 3).
+    pub opener: bool,
+}
+
+impl Ask {
+    /// The body, filter by filter.
+    pub fn request(&self) -> RandomSongRequest {
+        let s = &self.settings;
+        let lib = &self.library;
+        let mut r = RandomSongRequest { ignore_list: self.ignore_list.clone(), ..Default::default() };
+
+        // The library filters, shared with the opener (clause 20).
+        r.ignore_vpaths = lib.sources_off.clone();
+        if lib.min_rating > 0 && !lib.is_peer {
+            r.min_rating = Some(lib.min_rating.min(RATING_MAX));
+        }
+        if lib.genre_filter && !lib.genres.is_empty() {
+            r.genres = lib.genres.clone();
+            r.genre_mode = Some(lib.genre_mode.label().to_string());
+        }
+        if s.length {
+            if s.min_seconds > 0 {
+                r.min_duration = Some(s.min_seconds);
+            }
+            if s.max_seconds < LENGTH_RAIL_SECONDS {
+                r.max_duration = Some(s.max_seconds);
+            }
+            if (r.min_duration.is_some() || r.max_duration.is_some()) && s.allow_unknown_length {
+                r.allow_unknown_duration = Some(true);
             }
         }
-        request.musical_keys = match settings.key_matching {
-            KeyMatching::Off => Vec::new(),
-            KeyMatching::Compatible => compatible_keys(seed.metadata.musical_key.as_deref()),
-            KeyMatching::Strict => exact_keys(seed.metadata.musical_key.as_deref()),
-        };
-
-        // Be honest when there was nothing to match on: the pick is really
-        // just random, and the user should know that rather than assume the
-        // tempo matching is broken.
-        let wanted_continuity =
-            settings.tempo_tolerance > 0 || settings.key_matching != KeyMatching::Off;
-        if wanted_continuity && request.bpm_ranges.is_empty() && request.musical_keys.is_empty() {
-            note = Some("no tempo or key tags on this track".to_string());
+        if self.opener {
+            return r;
         }
+
+        // The batch (clause 27): at one the key is left off.
+        if s.songs_per_fetch > 1 {
+            r.limit = Some(s.songs_per_fetch.min(SONGS_PER_FETCH_MAX));
+        }
+        // BPM continuity (clause 21): windows only around a tagged track.
+        if s.bpm && let Some(bpm) = self.playing_bpm.filter(|b| *b > 0) {
+            let tolerance = f64::from(s.bpm_tolerance);
+            r.bpm_ranges = bpm_windows(f64::from(bpm), tolerance);
+            r.bpm_ranges_wide = bpm_windows(f64::from(bpm), tolerance + f64::from(BPM_WIDE_EXTRA));
+            r.require_bpm = Some(true);
+        }
+        // Harmonic mixing (clause 22): the anchor's neighbourhood, and keyed
+        // tracks only even before there is one, so the first pick can lock it.
+        if s.harmonic {
+            if let Some(anchor) = &self.camelot_anchor {
+                r.musical_keys = compatible_keys(Some(anchor));
+            }
+            r.require_musical_key = Some(true);
+        }
+        // The cooldown (decision 9).
+        if s.artist_cooldown > 0 {
+            r.ignore_artists =
+                self.recent_artists.iter().take(s.artist_cooldown as usize).cloned().collect();
+        }
+        // The pool (clause 23): both keys or neither.
+        let threshold =
+            (!self.sonic_seeds.is_empty()).then(|| clamp_similarity(s.sonic_min_similarity));
+        r.with_sonic_pool(&self.sonic_seeds, threshold)
     }
 
-    if settings.min_rating > 0 {
-        request.min_rating = Some(settings.min_rating.min(RATING_MAX));
+    /// Whether this ask carries a sonic pool at all.
+    pub fn sonic_asked(&self) -> bool {
+        !self.opener && !self.sonic_seeds.is_empty()
     }
 
-    if settings.artist_cooldown > 0 {
-        request.ignore_artists = recent_artists
+    /// The same ask with the pool let go — the degrade of clause 30.
+    pub fn without_sonic(&self) -> Ask {
+        Ask { sonic_seeds: Vec::new(), ..self.clone() }
+    }
+
+    /// The keyword filter (clause 26): a song whose title, artist, album or
+    /// filepath contains any word, case-insensitively, is refused.
+    pub fn keyword_blocked(&self, track: &Track) -> bool {
+        if !self.settings.keyword_filter || self.settings.keywords.is_empty() {
+            return false;
+        }
+        let haystack = [
+            track.metadata.title.as_deref().unwrap_or_default(),
+            track.metadata.artist.as_deref().unwrap_or_default(),
+            track.metadata.album.as_deref().unwrap_or_default(),
+            track.filepath.as_str(),
+        ]
+        .join("\n")
+        .to_lowercase();
+        self.settings
+            .keywords
             .iter()
-            .take(settings.artist_cooldown as usize)
-            .cloned()
-            .collect();
+            .map(|k| k.trim().to_lowercase())
+            .filter(|k| !k.is_empty())
+            .any(|k| haystack.contains(&k))
     }
-
-    if settings.genre_mode != GenreMode::Off && !settings.genres.is_empty() {
-        request.genres = settings.genres.clone();
-        request.genre_mode = Some(settings.genre_mode.label().to_string());
-    }
-
-    // The pool needs the index; without it the request would 403 as a whole,
-    // taking the ordinary tempo/key pick down with it.
-    let threshold = sonic_available.then(|| sonic_threshold(settings.sonic_tightness)).flatten();
-    let seeds: Vec<String> = match settings.sonic_anchor {
-        SonicAnchor::Current => anchors.iter().take(1).cloned().collect(),
-        SonicAnchor::Session => anchors.to_vec(),
-    };
-    let request = request.with_sonic_pool(&seeds, threshold);
-
-    // Finish the "nothing to match on" note now that it is settled whether a
-    // pool is carrying the pick. "Picking at random" would be a lie when the
-    // choice is still confined to tracks that sound like the seed.
-    let note = note.map(|reason| {
-        if request.min_similarity.is_some() {
-            format!("{reason} — picking from the sonic pool")
-        } else {
-            format!("{reason} — picking at random")
-        }
-    });
-    (request, note)
 }
 
 /// Plausible tempo for a music track. Half/double-time windows outside this
@@ -441,41 +576,60 @@ pub fn build_random_request(
 const BPM_FLOOR: f64 = 40.0;
 const BPM_CEILING: f64 = 220.0;
 
-/// The tempo tolerance a fresh install runs, as the percentage the panel
-/// shows and the config file stores. It was a pair of f64 fractions here
-/// (0.06 and 0.12) for the `dj` command to hand-build windows with; now that
-/// the command asks the builder like everything else, the tolerance comes
-/// from the settings and the wide set is twice it, worked out in one place.
-pub const DEFAULT_TEMPO_TOLERANCE: u32 = 6;
-
-/// Windows around a seed tempo at the same, half and double time.
-///
-/// Sending all three is what the server's docs recommend: a 140 BPM track
-/// mixes naturally into 70 BPM, and matching only the literal number would
-/// reject those.
+/// Windows of ± `tolerance` BPM around a tempo at the same, half and
+/// double time (clause 21). Sending all three is what the server's docs
+/// recommend: a 140 BPM track mixes naturally into 70 BPM, and matching
+/// only the literal number would reject those.
 pub fn bpm_windows(bpm: f64, tolerance: f64) -> Vec<BpmWindow> {
-    if !bpm.is_finite() || bpm <= 0.0 {
+    if !bpm.is_finite() || bpm <= 0.0 || !tolerance.is_finite() || tolerance < 0.0 {
         return Vec::new();
     }
     [bpm, bpm / 2.0, bpm * 2.0]
         .into_iter()
         .filter(|center| (BPM_FLOOR..=BPM_CEILING).contains(center))
         .map(|center| BpmWindow {
-            min: (center * (1.0 - tolerance) * 10.0).round() / 10.0,
-            max: (center * (1.0 + tolerance) * 10.0).round() / 10.0,
+            min: ((center - tolerance).max(0.0) * 10.0).round() / 10.0,
+            max: ((center + tolerance) * 10.0).round() / 10.0,
         })
         .collect()
+}
+
+/// A version string against a floor (clause 50): `Some(true)` when the
+/// server is at least this new, `Some(false)` when it is KNOWN to be older,
+/// `None` when the string does not read as a version — a fork, a dev build
+/// — which keeps every control and lets the learner decide.
+pub fn version_at_least(version: &str, floor: (u32, u32, u32)) -> Option<bool> {
+    let digits: Vec<u32> = version
+        .trim()
+        .trim_start_matches('v')
+        .split(|c: char| !c.is_ascii_digit())
+        .take_while(|part| !part.is_empty())
+        .map(|part| part.parse().ok())
+        .collect::<Option<Vec<u32>>>()?;
+    if digits.len() < 2 {
+        return None;
+    }
+    let got = (digits[0], digits[1], digits.get(2).copied().unwrap_or(0));
+    Some(got >= floor)
+}
+
+/// The record's version floors: the BPM / key / genre block, the length
+/// window, and batch picks.
+pub const FLOOR_FILTERS: (u32, u32, u32) = (6, 7, 1);
+pub const FLOOR_SONIC: (u32, u32, u32) = (6, 15, 2);
+pub const FLOOR_LENGTH: (u32, u32, u32) = (6, 25, 0);
+pub const FLOOR_BATCH: (u32, u32, u32) = (6, 26, 0);
+
+/// True when a server is KNOWN to predate `floor` — an unknown version
+/// hides nothing.
+pub fn known_older(version: Option<&str>, floor: (u32, u32, u32)) -> bool {
+    version.and_then(|v| version_at_least(v, floor)) == Some(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The default tolerance as a fraction, and the wide set the server
-    /// relaxes to — derived from the shipped default rather than restated,
-    /// so changing it moves these windows with it.
-    const TIGHT: f64 = DEFAULT_TEMPO_TOLERANCE as f64 / 100.0;
-    const WIDE: f64 = TIGHT * 2.0;
+    use crate::api::types::TrackMetadata;
 
     fn code(raw: &str) -> Option<String> {
         to_camelot(raw).map(|c| c.code())
@@ -575,316 +729,350 @@ mod tests {
 
     #[test]
     fn bpm_windows_cover_half_and_double_time() {
-        let windows = bpm_windows(100.0, TIGHT);
+        // ± 8 BPM at each centre (clause 21).
+        let windows = bpm_windows(100.0, 8.0);
         assert_eq!(windows.len(), 3);
-        assert_eq!(windows[0], BpmWindow { min: 94.0, max: 106.0 });
-        assert_eq!(windows[1], BpmWindow { min: 47.0, max: 53.0 }, "half time");
-        assert_eq!(windows[2], BpmWindow { min: 188.0, max: 212.0 }, "double time");
+        assert_eq!(windows[0], BpmWindow { min: 92.0, max: 108.0 });
+        assert_eq!(windows[1], BpmWindow { min: 42.0, max: 58.0 }, "half time");
+        assert_eq!(windows[2], BpmWindow { min: 192.0, max: 208.0 }, "double time");
     }
 
     #[test]
     fn bpm_windows_drop_implausible_centers() {
         // Half of 70 is 35 — below anything a track is actually tagged at, so
         // a slow seed only gets its own window and the double-time one.
-        let windows = bpm_windows(70.0, TIGHT);
+        let windows = bpm_windows(70.0, 8.0);
         assert_eq!(windows.len(), 2);
-        assert!(windows.iter().all(|w| w.min > BPM_FLOOR));
-
-        // Symmetrically, a fast seed loses double-time: 120 → 240 is past
-        // anything real libraries tag, while 60 is perfectly ordinary.
-        let windows = bpm_windows(120.0, TIGHT);
+        assert!(windows.iter().all(|w| w.min > 30.0));
+        // Symmetrically, a fast seed loses double-time.
+        let windows = bpm_windows(120.0, 8.0);
         assert_eq!(windows.len(), 2);
-        assert_eq!(windows[1], BpmWindow { min: 56.4, max: 63.6 }, "half time survives");
-        assert_eq!(bpm_windows(170.0, TIGHT).len(), 2);
+        assert_eq!(windows[1], BpmWindow { min: 52.0, max: 68.0 }, "half time survives");
     }
 
     #[test]
-    fn wide_windows_are_wider_than_tight_ones() {
-        let tight = bpm_windows(128.0, TIGHT)[0];
-        let wide = bpm_windows(128.0, WIDE)[0];
-        assert!(wide.min < tight.min && wide.max > tight.max);
-    }
-
-    /// A seed with the tags a well-kept library has.
-    fn seed(bpm: Option<u32>, key: Option<&str>) -> Track {
-        Track {
-            filepath: "lib/seed.mp3".into(),
-            metadata: crate::api::types::TrackMetadata {
-                artist: Some("Seed Artist".into()),
-                bpm,
-                musical_key: key.map(str::to_string),
-                ..Default::default()
-            },
-        }
-    }
-
-    /// The request as JSON — what the server actually receives, which is the
-    /// only place absent-vs-empty is visible.
-    fn body(request: &RandomSongRequest) -> serde_json::Value {
-        serde_json::to_value(request).unwrap()
-    }
-
-    #[test]
-    fn a_default_session_asks_for_tempo_and_key_around_the_seed() {
-        let settings = Settings::default();
-        let (request, note) = build_random_request(
-            &settings,
-            Some(&seed(Some(128), Some("A minor"))),
-            vec![3, 4],
-            &[],
-            &[],
-            false,
-        );
-        assert!(note.is_none(), "nothing to explain when the tags are there");
-
-        let body = body(&request);
-        assert_eq!(body["ignoreList"], serde_json::json!([3, 4]));
-        assert_eq!(body["musicalKeys"], serde_json::json!(["8A", "7A", "9A", "8B"]));
-        // Tight windows, plus the wider set the server relaxes to first.
-        assert_eq!(body["bpmRanges"][0]["min"], 120.3);
-        assert_eq!(body["bpmRangesWide"][0]["min"], 112.6);
-        // Nothing else was asked for, so nothing else is sent.
-        for absent in ["minRating", "genres", "genreMode", "similarTo", "minSimilarity"] {
-            assert!(body.get(absent).is_none(), "{absent} should be absent: {body}");
-        }
-    }
-
-    #[test]
-    fn switching_a_filter_off_removes_it_rather_than_sending_an_empty_one() {
-        // The server branches on field presence — an empty list is not the
-        // same as no list, and would put the request in continuity mode.
-        let settings = Settings {
-            tempo_tolerance: 0,
-            key_matching: KeyMatching::Off,
-            min_rating: 0,
-            artist_cooldown: 0,
-            genre_mode: GenreMode::Off,
-            genres: vec!["Ambient".into()],
-            ..Settings::default()
-        };
-        let (request, note) = build_random_request(
-            &settings,
-            Some(&seed(Some(128), Some("A minor"))),
-            Vec::new(),
-            &["lib/a.mp3".into()],
-            &["Someone".into()],
-            true,
-        );
-        assert_eq!(body(&request), serde_json::json!({}), "an unfiltered pick asks for nothing");
-        assert!(note.is_none(), "not matching on tags was the instruction, not a surprise");
-    }
-
-    #[test]
-    fn an_untagged_seed_says_so_when_matching_was_wanted() {
-        let (request, note) =
-            build_random_request(&Settings::default(), Some(&seed(None, None)), Vec::new(), &[], &[], false);
-        assert!(request.bpm_ranges.is_empty() && request.musical_keys.is_empty());
-        let note = note.unwrap();
-        assert!(note.contains("no tempo or key tags"));
-        assert!(note.ends_with("picking at random"), "got: {note}");
-    }
-
-    #[test]
-    fn an_untagged_seed_inside_a_sonic_pool_is_not_called_random() {
-        // Found live: the pick was confined to 37 tracks that sound like the
-        // seed, and the player still called it random.
-        let settings = Settings { sonic_tightness: 40, ..Settings::default() };
-        let (request, note) = build_random_request(
-            &settings,
-            Some(&seed(None, None)),
-            Vec::new(),
-            &["lib/seed.mp3".into()],
-            &[],
-            true,
-        );
-        assert!(request.min_similarity.is_some());
-        assert!(note.unwrap().ends_with("picking from the sonic pool"));
-    }
-
-    #[test]
-    fn the_sonic_pool_follows_the_anchor_setting() {
-        let anchors: Vec<String> =
-            (0..12).map(|i| format!("lib/{i}.mp3")).collect();
-        let tight = Settings { sonic_tightness: 50, ..Settings::default() };
-
-        // Session: the whole rolling window, trimmed to what the server averages.
-        let (request, _) = build_random_request(
-            &Settings { sonic_anchor: SonicAnchor::Session, ..tight.clone() },
-            None,
-            Vec::new(),
-            &anchors,
-            &[],
-            true,
-        );
-        assert_eq!(request.similar_to.len(), 8);
-        assert!(request.min_similarity.is_some());
-
-        // Current: only what is playing right now.
-        let (request, _) = build_random_request(
-            &Settings { sonic_anchor: SonicAnchor::Current, ..tight },
-            None,
-            Vec::new(),
-            &anchors,
-            &[],
-            true,
-        );
-        assert_eq!(request.similar_to, vec!["lib/0.mp3"], "newest first");
-    }
-
-    #[test]
-    fn the_sonic_pool_is_withheld_when_the_server_has_no_index() {
-        // Sending it anyway would 403 the whole call and take the ordinary
-        // tempo/key pick down with it.
-        let settings = Settings { sonic_tightness: 80, ..Settings::default() };
-        let (request, _) = build_random_request(
-            &settings,
-            Some(&seed(Some(128), Some("8A"))),
-            Vec::new(),
-            &["lib/a.mp3".into()],
-            &[],
-            false,
-        );
-        assert!(request.similar_to.is_empty());
-        assert!(request.min_similarity.is_none());
-        assert!(!request.musical_keys.is_empty(), "the rest of the pick is unaffected");
-    }
-
-    #[test]
-    fn a_pool_with_nothing_to_anchor_on_is_not_half_sent() {
-        // First pick of a session: tightness is set but nothing has played.
-        let settings = Settings { sonic_tightness: 60, ..Settings::default() };
-        let (request, _) =
-            build_random_request(&settings, None, Vec::new(), &[], &[], true);
-        let body = body(&request);
-        assert!(body.get("similarTo").is_none(), "got {body}");
-        assert!(body.get("minSimilarity").is_none(), "half a pool is a 400");
-    }
-
-    #[test]
-    fn the_cooldown_sends_only_as_many_artists_as_asked_for() {
-        let recent: Vec<String> = (0..10).map(|i| format!("Artist {i}")).collect();
-        let settings = Settings { artist_cooldown: 3, ..Settings::default() };
-        let (request, _) =
-            build_random_request(&settings, None, Vec::new(), &[], &recent, false);
-        assert_eq!(request.ignore_artists, vec!["Artist 0", "Artist 1", "Artist 2"]);
-
-        let settings = Settings { artist_cooldown: 0, ..Settings::default() };
-        let (request, _) =
-            build_random_request(&settings, None, Vec::new(), &[], &recent, false);
-        assert!(request.ignore_artists.is_empty(), "off means the field is gone");
-    }
-
-    #[test]
-    fn genres_and_rating_ride_along_when_set() {
-        let settings = Settings {
-            genre_mode: GenreMode::Blacklist,
-            genres: vec!["Spoken Word".into()],
-            min_rating: 4,
-            ..Settings::default()
-        };
-        let (request, _) = build_random_request(&settings, None, Vec::new(), &[], &[], false);
-        let body = body(&request);
-        assert_eq!(body["genres"], serde_json::json!(["Spoken Word"]));
-        assert_eq!(body["genreMode"], "blacklist");
-        assert_eq!(body["minRating"], 4);
-    }
-
-    #[test]
-    fn a_genre_mode_with_no_genres_chosen_filters_nothing() {
-        let settings =
-            Settings { genre_mode: GenreMode::Whitelist, genres: Vec::new(), ..Settings::default() };
-        let (request, _) = build_random_request(&settings, None, Vec::new(), &[], &[], false);
-        let body = body(&request);
-        assert!(body.get("genres").is_none());
-        assert!(body.get("genreMode").is_none(), "a mode alone would filter everything out");
-    }
-
-    #[test]
-    fn strict_key_matching_narrows_what_gets_asked_for() {
-        let compatible = build_random_request(
-            &Settings { key_matching: KeyMatching::Compatible, ..Settings::default() },
-            Some(&seed(None, Some("A minor"))),
-            Vec::new(),
-            &[],
-            &[],
-            false,
-        )
-        .0;
-        let strict = build_random_request(
-            &Settings { key_matching: KeyMatching::Strict, ..Settings::default() },
-            Some(&seed(None, Some("A minor"))),
-            Vec::new(),
-            &[],
-            &[],
-            false,
-        )
-        .0;
-        assert_eq!(compatible.musical_keys.len(), 4);
-        assert_eq!(strict.musical_keys, vec!["8A"]);
-    }
-
-    #[test]
-    fn settings_survive_a_round_trip_through_the_config_file() {
-        let settings = Settings {
-            tempo_tolerance: 9,
-            key_matching: KeyMatching::Strict,
-            min_rating: 7,
-            artist_cooldown: 5,
-            sonic_tightness: 45,
-            sonic_anchor: SonicAnchor::Current,
-            genre_mode: GenreMode::Blacklist,
-            genres: vec!["Ambient".into()],
-        };
-        assert_eq!(Settings::from_prefs(&settings.to_prefs()), settings);
-
-        // A value from a newer player, or a typo in a hand-edited file, falls
-        // back rather than refusing to load.
-        let prefs = crate::config::AutoDjPrefs {
-            key_matching: "quantum".into(),
-            genre_mode: "maybe".into(),
-            tempo_tolerance: 9000,
-            min_rating: 99,
-            ..Default::default()
-        };
-        let settings = Settings::from_prefs(&prefs);
-        assert_eq!(settings.key_matching, KeyMatching::Compatible);
-        assert_eq!(settings.genre_mode, GenreMode::Off);
-        assert_eq!(settings.tempo_tolerance, TEMPO_TOLERANCE_MAX, "clamped, not wild");
-        assert_eq!(settings.min_rating, RATING_MAX);
-    }
-
-    #[test]
-    fn strict_key_matching_keeps_only_the_seeds_own_key() {
-        assert_eq!(exact_keys(Some("A minor")), vec!["8A"]);
-        assert_eq!(compatible_keys(Some("A minor")).len(), 4, "the wheel neighbourhood");
-        assert!(exact_keys(Some("gibberish")).is_empty());
-        assert!(exact_keys(None).is_empty());
-    }
-
-    #[test]
-    fn the_tightness_slider_spans_the_band_the_embeddings_actually_use() {
-        // Zero is off, and off must produce no threshold at all: the server
-        // rejects minSimilarity without similarTo and vice versa.
-        assert_eq!(sonic_threshold(0), None);
-
-        assert_eq!(sonic_threshold(1), Some(SONIC_LOOSEST));
-        assert_eq!(sonic_threshold(100), Some(SONIC_TIGHTEST));
-        // Monotonic, and inside the band the whole way.
-        let mut previous = 0.0;
-        for t in 1..=100 {
-            let v = sonic_threshold(t).unwrap();
-            assert!(v >= previous, "tightness {t} went backwards");
-            assert!((SONIC_LOOSEST..=SONIC_TIGHTEST).contains(&v), "tightness {t} → {v}");
-            previous = v;
-        }
-        // Out-of-range input is clamped rather than extrapolated past the band.
-        assert_eq!(sonic_threshold(500), Some(SONIC_TIGHTEST));
+    fn the_wide_set_is_two_bpm_wider() {
+        let tight = bpm_windows(128.0, 8.0)[0];
+        let wide = bpm_windows(128.0, 10.0)[0];
+        assert_eq!((wide.min, wide.max), (tight.min - 2.0, tight.max + 2.0));
     }
 
     #[test]
     fn bpm_windows_reject_nonsense_input() {
-        assert!(bpm_windows(0.0, TIGHT).is_empty());
-        assert!(bpm_windows(-5.0, TIGHT).is_empty());
-        assert!(bpm_windows(f64::NAN, TIGHT).is_empty());
+        assert!(bpm_windows(0.0, 8.0).is_empty());
+        assert!(bpm_windows(-5.0, 8.0).is_empty());
+        assert!(bpm_windows(f64::NAN, 8.0).is_empty());
+        assert!(bpm_windows(120.0, -1.0).is_empty());
+    }
+
+    // ── Composition ────────────────────────────────────────────────────────
+
+    fn ask(settings: Settings) -> Ask {
+        Ask {
+            settings,
+            library: LibraryFilters::default(),
+            playing_bpm: Some(120),
+            playing_key: Some("Am".into()),
+            camelot_anchor: None,
+            sonic_seeds: Vec::new(),
+            ignore_list: vec![4, 5],
+            recent_artists: vec!["Alpha".into(), "Beta".into(), "Gamma".into()],
+            opener: false,
+        }
+    }
+
+    fn json(ask: &Ask) -> serde_json::Value {
+        serde_json::to_value(ask.request()).unwrap()
+    }
+
+    #[test]
+    fn a_fresh_install_asks_for_a_batch_and_nothing_it_cannot_anchor() {
+        // Defaults: sonic on but no seeds yet (a cold start stays plain
+        // random), BPM and harmonic off, cooldown three, four songs.
+        let body = json(&ask(Settings::default()));
+        assert_eq!(body["limit"], 4);
+        assert_eq!(body["ignoreList"], serde_json::json!([4, 5]));
+        assert_eq!(body["ignoreArtists"], serde_json::json!(["Alpha", "Beta", "Gamma"]));
+        for absent in ["bpmRanges", "requireBpm", "musicalKeys", "requireMusicalKey", "similarTo",
+                       "minSimilarity", "minRating", "genres", "minDuration", "maxDuration",
+                       "allowUnknownDuration", "ignoreVPaths"] {
+            assert!(body.get(absent).is_none(), "{absent} went out: {body}");
+        }
+    }
+
+    #[test]
+    fn continuity_rides_the_playing_tracks_tags_and_requires_them() {
+        let mut s = Settings::default();
+        s.bpm = true;
+        s.harmonic = true;
+        let mut a = ask(s);
+        let body = json(&a);
+        assert_eq!(body["bpmRanges"].as_array().unwrap().len(), 2, "120: same and half time");
+        assert_eq!(body["bpmRanges"][0]["min"], 112.0);
+        assert_eq!(body["bpmRangesWide"][0]["min"], 110.0, "the wide set is + 2");
+        assert_eq!(body["requireBpm"], true);
+        // No anchor yet: keyed tracks only, so the first pick can lock one.
+        assert!(body.get("musicalKeys").is_none());
+        assert_eq!(body["requireMusicalKey"], true);
+
+        a.camelot_anchor = Some("8A".into());
+        let body = json(&a);
+        let mut keys: Vec<String> =
+            body["musicalKeys"].as_array().unwrap().iter().map(|k| k.as_str().unwrap().into()).collect();
+        keys.sort();
+        assert_eq!(keys, ["7A", "8A", "8B", "9A"], "the anchor's neighbourhood");
+
+        // An untagged playing track sends no windows, and no requirement.
+        a.playing_bpm = None;
+        let body = json(&a);
+        assert!(body.get("bpmRanges").is_none() && body.get("requireBpm").is_none());
+    }
+
+    #[test]
+    fn the_pool_goes_out_whole_or_not_at_all() {
+        let mut a = ask(Settings::default());
+        a.sonic_seeds = vec!["lib/a.mp3".into(), "lib/b.mp3".into()];
+        let body = json(&a);
+        assert_eq!(body["similarTo"], serde_json::json!(["lib/a.mp3", "lib/b.mp3"]));
+        assert_eq!(body["minSimilarity"], 0.55);
+        assert!(a.sonic_asked());
+
+        let relaxed = a.without_sonic();
+        let body = json(&relaxed);
+        assert!(body.get("similarTo").is_none() && body.get("minSimilarity").is_none());
+        assert!(!relaxed.sonic_asked());
+
+        // The floor rides the band's step and stays inside it.
+        a.settings.sonic_min_similarity = 0.93;
+        assert_eq!(json(&a)["minSimilarity"], 0.8);
+        a.settings.sonic_min_similarity = 0.12;
+        assert_eq!(json(&a)["minSimilarity"], 0.3);
+    }
+
+    #[test]
+    fn the_library_filters_are_the_openers_whole_body() {
+        let mut s = Settings::default();
+        s.bpm = true;
+        s.length = true;
+        s.min_seconds = 90;
+        s.max_seconds = LENGTH_RAIL_SECONDS;
+        s.allow_unknown_length = true;
+        let mut a = ask(s);
+        a.library = LibraryFilters {
+            sources_off: vec!["Audiobooks".into()],
+            min_rating: 6,
+            genre_filter: true,
+            genre_mode: GenreMode::Blacklist,
+            genres: vec!["Podcast".into()],
+            is_peer: false,
+        };
+        a.sonic_seeds = vec!["lib/a.mp3".into()];
+        a.opener = true;
+        let body = json(&a);
+        assert_eq!(body["ignoreVPaths"], serde_json::json!(["Audiobooks"]));
+        assert_eq!(body["minRating"], 6);
+        assert_eq!(body["genres"], serde_json::json!(["Podcast"]));
+        assert_eq!(body["genreMode"], "blacklist");
+        assert_eq!(body["minDuration"], 90);
+        assert!(body.get("maxDuration").is_none(), "the rail is not a bound");
+        assert_eq!(body["allowUnknownDuration"], true, "beside a real bound");
+        for absent in ["limit", "bpmRanges", "requireBpm", "similarTo", "ignoreArtists"] {
+            assert!(body.get(absent).is_none(), "the opener carries no {absent}: {body}");
+        }
+        assert!(!a.sonic_asked(), "an opener never asks for the pool");
+
+        // The same filters on a pick, less the rating for a peer.
+        a.opener = false;
+        a.library.is_peer = true;
+        let body = json(&a);
+        assert!(body.get("minRating").is_none(), "a key has no stars");
+        assert_eq!(body["limit"], 4);
+        assert_eq!(body["minDuration"], 90);
+    }
+
+    #[test]
+    fn rails_and_switched_off_filters_send_nothing() {
+        let mut s = Settings::default();
+        s.length = true; // both bounds on their rails
+        s.allow_unknown_length = true;
+        s.songs_per_fetch = 1;
+        s.artist_cooldown = 0;
+        s.genre_filter = true; // but no genres chosen
+        let body = json(&ask(s));
+        for absent in ["minDuration", "maxDuration", "allowUnknownDuration", "limit",
+                       "ignoreArtists", "genres", "genreMode"] {
+            assert!(body.get(absent).is_none(), "{absent} went out: {body}");
+        }
+    }
+
+    #[test]
+    fn the_cooldown_sends_only_as_many_artists_as_asked_for() {
+        let mut s = Settings::default();
+        s.artist_cooldown = 2;
+        let body = json(&ask(s));
+        assert_eq!(body["ignoreArtists"], serde_json::json!(["Alpha", "Beta"]));
+    }
+
+    #[test]
+    fn a_servers_own_rules_stand_over_the_fallbacks() {
+        let mut s = Settings::default();
+        s.min_rating = 4;
+        s.genre_filter = true;
+        s.genre_mode = GenreMode::Blacklist;
+        s.genres = vec!["Jazz".into()];
+        let own = crate::config::DjLibraryOverrides {
+            sources_off: vec!["Kids".into()],
+            min_rating: Some(8),
+            genre_filter: None,
+            genre_mode: None,
+            genres: None,
+        };
+        let lib = LibraryFilters::resolve(&s, &own, false);
+        assert_eq!(lib.sources_off, vec!["Kids"]);
+        assert_eq!(lib.min_rating, 8, "the entry's own floor");
+        assert!(lib.genre_filter, "the fallback where it set none");
+        assert_eq!(lib.genre_mode, GenreMode::Blacklist);
+        assert_eq!(lib.genres, vec!["Jazz"]);
+    }
+
+    #[test]
+    fn the_genre_switch_and_its_mode_are_two_fields_and_an_old_off_is_the_switch_off() {
+        let mut prefs = crate::config::AutoDjPrefs::default();
+        prefs.genre_mode = "off".to_string();
+        prefs.genre_filter = None;
+        let s = Settings::from_prefs(&prefs);
+        assert!(!s.genre_filter, "a file from before the switch had its own key");
+        assert_eq!(s.genre_mode, GenreMode::Whitelist);
+        prefs.genre_mode = "blacklist".to_string();
+        let s = Settings::from_prefs(&prefs);
+        assert!(s.genre_filter && s.genre_mode == GenreMode::Blacklist, "an old on reads on, its mode kept");
+        let written = s.to_prefs();
+        assert_eq!((written.genre_filter, written.genre_mode.as_str()), (Some(true), "blacklist"), "two keys");
+
+        // Off sends nothing, whatever the mode and the genres say.
+        let mut s = Settings::default();
+        s.genre_filter = false;
+        s.genre_mode = GenreMode::Blacklist;
+        s.genres = vec!["Podcast".into()];
+        let body = json(&ask(s.clone()));
+        assert!(body.get("genres").is_none() && body.get("genreMode").is_none(), "off sends nothing: {body}");
+
+        // An entry's old "off" is its switch off; its own two fields stand over the fallbacks.
+        s.genre_filter = true;
+        let legacy = crate::config::DjLibraryOverrides { genre_mode: Some("off".into()), ..Default::default() };
+        let lib = LibraryFilters::resolve(&s, &legacy, false);
+        assert!(!lib.genre_filter, "the entry's old \"off\"");
+        assert_eq!(lib.genre_mode, GenreMode::Blacklist, "and the mode falls back");
+        s.genre_filter = false;
+        let own = crate::config::DjLibraryOverrides {
+            genre_filter: Some(true),
+            genre_mode: Some("whitelist".into()),
+            ..Default::default()
+        };
+        let lib = LibraryFilters::resolve(&s, &own, false);
+        assert!(lib.genre_filter && lib.genre_mode == GenreMode::Whitelist, "the entry's own two fields");
+    }
+
+    #[test]
+    fn the_keyword_filter_reads_every_field_case_blind() {
+        let mut s = Settings::default();
+        s.keyword_filter = true;
+        s.keywords = vec!["LIVE".into(), " remix ".into(), "".into()];
+        let a = ask(s);
+        let track = |title: &str, path: &str| Track {
+            filepath: path.into(),
+            metadata: TrackMetadata { title: Some(title.into()), ..Default::default() },
+        };
+        assert!(a.keyword_blocked(&track("Song (Live at Roxy)", "lib/x.mp3")));
+        assert!(a.keyword_blocked(&track("Song", "lib/Remixes/x.mp3")));
+        assert!(!a.keyword_blocked(&track("Song", "lib/x.mp3")));
+        let mut off = a.clone();
+        off.settings.keyword_filter = false;
+        assert!(!off.keyword_blocked(&track("Song (Live)", "lib/x.mp3")), "the switch is the switch");
+    }
+
+    #[test]
+    fn settings_survive_a_round_trip_and_the_old_panel_migrates() {
+        let mut s = Settings::default();
+        s.songs_per_fetch = 7;
+        s.sonic_anchor = SonicAnchor::Locked;
+        s.empty_queue = EmptyQueueStart::Random;
+        s.bpm = true;
+        s.bpm_tolerance = 12;
+        s.length = true;
+        s.min_seconds = 60;
+        s.max_seconds = 600;
+        s.keyword_filter = true;
+        s.keywords = vec!["live".into()];
+        let back = Settings::from_prefs(&s.to_prefs());
+        assert_eq!(back, s);
+        assert!(s.to_prefs().tempo_tolerance.is_none(), "the legacy keys are never written");
+
+        // The three-mode panel's file: a tempo percent and a key matching
+        // both mean the switches were on; the slider is let go.
+        let legacy = crate::config::AutoDjPrefs {
+            tempo_tolerance: Some(6),
+            key_matching: Some("compatible".into()),
+            sonic_tightness: Some(40),
+            ..Default::default()
+        };
+        let migrated = Settings::from_prefs(&legacy);
+        assert!(migrated.bpm && migrated.harmonic);
+        assert_eq!(migrated.bpm_tolerance, DEFAULT_BPM_TOLERANCE, "a percent cannot be a BPM");
+        assert!(migrated.sonic, "the record's default stands");
+        let off = crate::config::AutoDjPrefs {
+            tempo_tolerance: Some(0),
+            key_matching: Some("off".into()),
+            ..Default::default()
+        };
+        let migrated = Settings::from_prefs(&off);
+        assert!(!migrated.bpm && !migrated.harmonic);
+    }
+
+    #[test]
+    fn hand_edited_values_are_clamped_not_refused() {
+        let prefs = crate::config::AutoDjPrefs {
+            songs_per_fetch: 99,
+            bpm_tolerance: 0,
+            sonic_min_similarity: f64::NAN,
+            min_seconds: 5000,
+            max_seconds: 9000,
+            min_rating: 40,
+            sonic_anchor: "sideways".into(),
+            ..Default::default()
+        };
+        let s = Settings::from_prefs(&prefs);
+        assert_eq!(s.songs_per_fetch, SONGS_PER_FETCH_MAX);
+        assert_eq!(s.bpm_tolerance, BPM_TOLERANCE_MIN);
+        assert_eq!(s.sonic_min_similarity, DEFAULT_SONIC_MIN_SIMILARITY);
+        assert_eq!(s.max_seconds, LENGTH_RAIL_SECONDS);
+        assert_eq!(s.min_seconds, LENGTH_RAIL_SECONDS, "the floor cannot pass the ceiling");
+        assert_eq!(s.min_rating, RATING_MAX);
+        assert_eq!(s.sonic_anchor, SonicAnchor::Rolling);
+    }
+
+    #[test]
+    fn the_length_window_reads_in_words() {
+        let mut s = Settings::default();
+        s.length = true;
+        assert_eq!(s.length_words(), "Any length");
+        s.min_seconds = 90;
+        assert_eq!(s.length_words(), "Over 1:30");
+        s.max_seconds = 480;
+        assert_eq!(s.length_words(), "1:30 to 8:00");
+        s.min_seconds = 0;
+        assert_eq!(s.length_words(), "Under 8:00");
+    }
+
+    #[test]
+    fn version_floors_hide_only_what_is_known_to_be_older() {
+        assert_eq!(version_at_least("6.28.0", FLOOR_BATCH), Some(true));
+        assert_eq!(version_at_least("6.25.0", FLOOR_BATCH), Some(false));
+        assert_eq!(version_at_least("v6.26.0-beta", FLOOR_BATCH), Some(true));
+        assert_eq!(version_at_least("6.7", FLOOR_FILTERS), Some(false), "6.7 is short of 6.7.1");
+        assert_eq!(version_at_least("fork", FLOOR_FILTERS), None);
+        assert!(known_older(Some("6.6.0"), FLOOR_FILTERS));
+        assert!(!known_older(Some("weird"), FLOOR_FILTERS), "an unknown version hides nothing");
+        assert!(!known_older(None, FLOOR_FILTERS));
     }
 }

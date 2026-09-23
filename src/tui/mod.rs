@@ -68,9 +68,14 @@ pub(crate) struct Startup {
     pub username: Option<String>,
     pub last_path: Option<String>,
     pub prefs: config::PlayerPrefs,
+    /// The play reporter's file (play-reporting contract, clause 9): owed
+    /// plays and a session left behind.
+    pub stats: Option<app::stats::StatsSnapshot>,
     /// Pairing code for the remembered server, when it is one reached through
     /// a tunnel. Without it that server cannot be dialled again.
     pub tunnel_code: Option<String>,
+    /// The chosen entry trusts its own TLS certificate.
+    pub self_signed: bool,
     /// The `[keys]` section, unvalidated — the app reports what it can't use.
     pub keys: std::collections::BTreeMap<String, Vec<String>>,
     /// The `[theme]` section, likewise.
@@ -80,21 +85,275 @@ pub(crate) struct Startup {
     pub display: config::DisplayPrefs,
     /// Whether to ask the terminal to report the mouse.
     pub mouse: config::MousePrefs,
+    /// Every saved server, with its token: what a queued track needs to be
+    /// reached from a session on another server (contract clause 30).
+    pub servers: Vec<app::KnownServer>,
+    /// `--bundled-server`: the installer's own server, seeded into the list
+    /// and never offered for removal (contract clauses 50–58).
+    pub bundled: Option<String>,
+    /// The saved queue, when the setting is on and a readable one exists
+    /// (contract clause 40).
+    pub queue: Option<app::QueueSnapshot>,
+}
+
+/// The saved queue as the config left it — `None` for no file, a file from
+/// another shape, or one that would not parse (never a reason to stop
+/// the player starting).
+#[cfg(not(target_arch = "wasm32"))]
+fn load_queue_snapshot() -> Option<app::QueueSnapshot> {
+    let text = config::load_queue_file().ok().flatten()?;
+    serde_json::from_str::<app::QueueSnapshot>(&text).ok()
+}
+
+/// The play reporter's file as the config left it — `None` for no file,
+/// another shape, or one that would not parse.
+#[cfg(not(target_arch = "wasm32"))]
+fn load_stats_snapshot() -> Option<app::stats::StatsSnapshot> {
+    let text = config::load_stats_file().ok().flatten()?;
+    serde_json::from_str::<app::stats::StatsSnapshot>(&text).ok()
+}
+
+/// Keeps `queue.json` current for the shell (contract clause 39): a write
+/// 800 ms after the queue last changed, a checkpoint every ten seconds
+/// while playing, a flush on the way out — and the file gone once a queue
+/// that existed this session is cleared, or the setting turned off. Keeps
+/// `stats.json` beside it the same way (play-reporting contract, clause
+/// 9): the owed plays and the open session, checkpointed.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct QueueSaver {
+    signature: u64,
+    dirty_since: Option<std::time::Instant>,
+    last_write: std::time::Instant,
+    stats_signature: u64,
+    stats_dirty_since: Option<std::time::Instant>,
+    stats_last_write: std::time::Instant,
+    /// A queue existed this session: only then does an empty one delete
+    /// the file — the empty queue a failed restore leaves behind must not
+    /// destroy the snapshot it failed to read.
+    had_queue: bool,
+    /// The setting as last seen, so turning it off deletes the file once.
+    enabled: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl QueueSaver {
+    const DEBOUNCE: Duration = Duration::from_millis(800);
+    const CHECKPOINT: Duration = Duration::from_secs(10);
+
+    pub(crate) fn new(app: &App) -> Self {
+        QueueSaver {
+            signature: Self::signature(app),
+            dirty_since: None,
+            last_write: std::time::Instant::now(),
+            stats_signature: Self::stats_signature(app),
+            stats_dirty_since: None,
+            stats_last_write: std::time::Instant::now(),
+            had_queue: !app.queue.items.is_empty(),
+            enabled: app.resume_queue,
+        }
+    }
+
+    /// What a change to the reporter looks like: the owed plays and the
+    /// open session's identity.
+    fn stats_signature(app: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for owed in &app.stats.outbox {
+            owed.play.id.hash(&mut h);
+        }
+        app.stats.session.as_ref().map(|s| &s.id).hash(&mut h);
+        h.finish()
+    }
+
+    /// The reporter's file: soon after a change, and every ten seconds
+    /// while a session is open so a crash loses little of it.
+    fn tick_stats(&mut self, app: &App, now: std::time::Instant) {
+        let signature = Self::stats_signature(app);
+        if signature != self.stats_signature {
+            self.stats_signature = signature;
+            self.stats_dirty_since.get_or_insert(now);
+        }
+        let due = match self.stats_dirty_since {
+            Some(since) => now.duration_since(since) >= Self::DEBOUNCE,
+            None => app.stats.session.is_some() && now.duration_since(self.stats_last_write) >= Self::CHECKPOINT,
+        };
+        if due {
+            self.write_stats(app);
+        }
+    }
+
+    fn write_stats(&mut self, app: &App) {
+        self.stats_dirty_since = None;
+        self.stats_last_write = std::time::Instant::now();
+        match app.stats_snapshot() {
+            Some(snapshot) => {
+                if let Ok(body) = serde_json::to_string(&snapshot) {
+                    let _ = config::save_stats_file(&body);
+                }
+            }
+            None => {
+                let _ = config::delete_stats_file();
+            }
+        }
+    }
+
+    /// What a change to the queue looks like from outside: the rows, the
+    /// playing one, the modes and a held spot. Cheap enough per tick.
+    fn signature(app: &App) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for item in &app.queue.items {
+            item.origin.server.hash(&mut h);
+            item.origin.peer.hash(&mut h);
+            item.filepath.hash(&mut h);
+        }
+        app.queue.current.hash(&mut h);
+        app.queue.shuffle.hash(&mut h);
+        app.queue.repeat.label().hash(&mut h);
+        app.resume_spot.map(|(i, _)| i).hash(&mut h);
+        h.finish()
+    }
+
+    /// Once per loop iteration.
+    pub(crate) fn tick(&mut self, app: &App) {
+        let now = std::time::Instant::now();
+        self.tick_stats(app, now);
+        if !app.resume_queue {
+            if self.enabled {
+                self.enabled = false;
+                let _ = config::delete_queue_file();
+            }
+            return;
+        }
+        self.enabled = true;
+        let signature = Self::signature(app);
+        if signature != self.signature {
+            self.signature = signature;
+            self.dirty_since.get_or_insert(now);
+        }
+        let due = match self.dirty_since {
+            Some(since) => now.duration_since(since) >= Self::DEBOUNCE,
+            None => {
+                app.status.playing
+                    && !app.status.paused
+                    && !app.queue.items.is_empty()
+                    && now.duration_since(self.last_write) >= Self::CHECKPOINT
+            }
+        };
+        if due {
+            self.write(app);
+        }
+    }
+
+    /// Write now — quitting, or the debounce that just elapsed.
+    pub(crate) fn flush(&mut self, app: &App) {
+        self.write_stats(app);
+        if !app.resume_queue {
+            return;
+        }
+        self.write(app);
+    }
+
+    fn write(&mut self, app: &App) {
+        self.dirty_since = None;
+        self.last_write = std::time::Instant::now();
+        match app.queue_snapshot() {
+            Some(snapshot) => {
+                self.had_queue = true;
+                // A read-only config directory costs the next launch its
+                // queue and nothing else; the screen is not the place to say so.
+                if let Ok(body) = serde_json::to_string(&snapshot) {
+                    let _ = config::save_queue_file(&body);
+                }
+            }
+            None if self.had_queue => {
+                let _ = config::delete_queue_file();
+            }
+            None => {}
+        }
+    }
+}
+
+/// `--bundled-server` on boot (contract clause 51): the packaged server
+/// gets an entry when it has none — without credentials, made the default
+/// — and an entry it already has is used as it stands, so a default the
+/// user chose later keeps standing. Returns the identity the mode guards.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn seed_bundled(config: &mut config::Config, url: &str) -> Option<String> {
+    let url = crate::api::server_url::normalize(url).ok()?;
+    let known = config.servers.iter().any(|entry| config::same_server(&entry.url, &url));
+    if !known {
+        // Seeded at the front and, being brand new, as the default; the
+        // MRU order sorts itself out from the first session on.
+        config::touch_server(config, &url, None);
+        config::set_default_server(config, Some(&url));
+        if let Err(e) = config::save(config) {
+            eprintln!("warning: could not save the bundled server: {e}");
+        }
+    }
+    Some(url)
+}
+
+/// The saved servers as the App's queue needs them (contract clause 30):
+/// each entry's identity, its token, and whether its certificate is
+/// trusted by choice.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn known_servers(
+    config: &config::Config,
+    credentials: &config::Credentials,
+) -> Vec<app::KnownServer> {
+    config
+        .servers
+        .iter()
+        .map(|entry| app::KnownServer {
+            id: entry.url.clone(),
+            name: config::display_name(entry),
+            token: config::token_for(credentials, &entry.url),
+            self_signed: entry.self_signed,
+            peer: entry.peer.as_ref().map(|p| (p.parent.clone(), p.id)),
+            // What a queued row on this server is dialled with, when the
+            // session is elsewhere (contract clause 38).
+            pairing: if crate::quickconnect::is_tunnel_id(&entry.url) {
+                config::pairing_for(credentials, &entry.url)
+            } else {
+                None
+            },
+            // Auto DJ's rules for this library (auto-dj contract, clause 51).
+            dj: config::DjLibraryOverrides {
+                sources_off: entry.dj_sources_off.clone(),
+                min_rating: entry.dj_min_rating,
+                genre_filter: entry.dj_genre_filter,
+                genre_mode: entry.dj_genre_mode.clone(),
+                genres: entry.dj_genres.clone(),
+            },
+        })
+        .collect()
 }
 
 /// Resolve the starting point from stored config plus any overrides. Shared
 /// with the replay harness so a scripted run begins exactly where the real
 /// binary would.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup {
-    let config = match config::load() {
-        Ok(config) => config,
+pub(crate) fn startup(
+    server: Option<String>,
+    token: Option<String>,
+    bundled: Option<String>,
+) -> Startup {
+    let (mut config, config_ok) = match config::load() {
+        Ok(config) => (config, true),
         Err(e) => {
             // A config we can't read shouldn't stop the player starting; the
             // worst case is being asked where the server is again.
             eprintln!("warning: {e}");
-            config::Config::default()
+            (config::Config::default(), false)
         }
+    };
+    // A config that failed to load is never written back — seeding into it
+    // would replace a file the user can still fix with a stub.
+    let bundled = match bundled {
+        Some(url) if config_ok => seed_bundled(&mut config, &url),
+        Some(url) => crate::api::server_url::normalize(&url).ok(),
+        None => None,
     };
     let credentials = config::load_credentials().unwrap_or_default();
 
@@ -112,11 +371,11 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
             .find(|entry| config::same_server(&entry.url, server))
             .cloned()
             .or(Some(config::ServerEntry { url: server.clone(), ..Default::default() })),
-        None => config::most_recent_server(&config).cloned(),
+        None => config::preferred_server(&config).cloned(),
     };
-    let (server, username, last_path) = match chosen {
-        Some(entry) => (Some(entry.url), entry.username, entry.last_path),
-        None => (None, None, None),
+    let (server, username, last_path, self_signed) = match chosen {
+        Some(entry) => (Some(entry.url), entry.username, entry.last_path, entry.self_signed),
+        None => (None, None, None, false),
     };
     let token = token
         .or_else(|| server.as_deref().and_then(|url| config::token_for(&credentials, url)));
@@ -125,17 +384,24 @@ pub(crate) fn startup(server: Option<String>, token: Option<String>) -> Startup 
         .filter(|s| crate::quickconnect::is_tunnel_id(s))
         .and_then(|id| config::pairing_for(&credentials, id));
 
+    let servers = known_servers(&config, &credentials);
+    let queue = if config.player.resume_queue { load_queue_snapshot() } else { None };
     Startup {
+        stats: load_stats_snapshot(),
         server,
         token,
         username,
         last_path,
         prefs: config.player,
         tunnel_code,
+        self_signed,
         keys: config.keys,
         theme: config.theme,
         display: config.display,
         mouse: config.mouse,
+        servers,
+        bundled,
+        queue,
     }
 }
 
@@ -186,6 +452,16 @@ pub(crate) fn app_from(start: Startup) -> App {
         .with_prefs(&start.prefs)
         .with_keys(&start.keys)
         .with_tunnel(start.tunnel_code);
+    app.session.self_signed = start.self_signed;
+    app.servers = start.servers;
+    app.bundled_server = start.bundled;
+    // After the servers, which decide which rows can come back at all.
+    if let Some(snapshot) = start.queue {
+        app.restore_queue(snapshot);
+    }
+    if let Some(snapshot) = start.stats {
+        app.restore_stats(snapshot);
+    }
     if let Some(path) = start.last_path {
         // Pick up where the last session left off; `start` browses this.
         app.path = path;
@@ -194,8 +470,8 @@ pub(crate) fn app_from(start: Startup) -> App {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run(server: Option<String>, token: Option<String>) -> i32 {
-    let start = startup(server, token);
+pub fn run(server: Option<String>, token: Option<String>, bundled: Option<String>) -> i32 {
+    let start = startup(server, token, bundled);
 
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let (audio_tx, tap) = worker::spawn_audio(event_tx.clone());
@@ -328,8 +604,18 @@ fn event_loop(
 ) -> std::io::Result<()> {
     let mut title = String::new();
     let mut spun = Instant::now();
+    let mut saver = QueueSaver::new(app);
     loop {
+        // A save changes what the book knows — a peer just reconciled, a
+        // token just signed in for — and the queue's rows resolve against it.
+        let saving = pending.iter().any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. }));
         dispatch(app, &mut pending, audio_tx, api_tx, event_tx);
+        if saving && let Ok(fresh) = config::load() {
+            let credentials = config::load_credentials().unwrap_or_default();
+            app.servers = known_servers(&fresh, &credentials);
+        }
+        saver.tick(app);
+        pending.extend(app.tick());
 
         if spun.elapsed() >= SPIN_EVERY {
             app.spinner = app.spinner.wrapping_add(1);
@@ -390,6 +676,7 @@ fn event_loop(
 
         if app.should_quit {
             dispatch(app, &mut pending, audio_tx, api_tx, event_tx);
+            saver.flush(app);
             return Ok(());
         }
     }
@@ -436,7 +723,7 @@ pub(crate) fn window_title(app: &App) -> String {
 /// AudioFailed, so the hook stands back rather than tearing the terminal
 /// down under a UI that is still running (audit #32).
 #[cfg(not(target_arch = "wasm32"))]
-fn install_panic_hook() {
+pub(crate) fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         if worker::panics_are_caught(std::thread::current().name()) {
@@ -553,9 +840,38 @@ pub(crate) fn dispatch(
                 }
             }
             Effect::Api(cmd) => {
+                // A server that presents its own certificate needs the
+                // STREAM client to extend the same trust the api client is
+                // about to — the flag rides the command either way, and
+                // this is the one native funnel both front ends share.
+                if let ApiCmd::Connect { server, self_signed: true, .. }
+                | ApiCmd::Login { server, self_signed: true, .. } = &cmd
+                {
+                    crate::engine::http::trust_server(server);
+                }
                 let _ = api_tx.send(cmd);
             }
             Effect::Discover => worker::spawn_discovery(event_tx.clone()),
+            // A queued track's server that presents its own certificate:
+            // the stream client extends the trust the entry opted into.
+            Effect::Trust(server) => crate::engine::http::trust_server(&server),
+            // A parent's peer list folds into the saved servers; nothing is
+            // written when nothing changed (contract clauses 20–23).
+            Effect::SavePeers { parent, listed } => {
+                if let Ok(mut config) = config::load()
+                    && config::reconcile_peers(&mut config, &parent, &listed)
+                    && let Err(e) = config::save(&config)
+                {
+                    eprintln!("warning: could not save the peer list: {e}");
+                }
+            }
+            // A server entry's Auto DJ library rules (auto-dj contract,
+            // clause 51).
+            Effect::SaveDjLibrary { server, overrides } => {
+                if let Err(e) = config::save_dj_library(&server, &overrides) {
+                    eprintln!("warning: could not save the Auto DJ sources: {e}");
+                }
+            }
             Effect::SaveSession => {
                 // A read-only config directory shouldn't take the app down;
                 // the sign-in just won't survive to the next run.
@@ -724,6 +1040,84 @@ mod tests {
 
         // Moving the pointer about is not an event worth an effect.
         assert!(on_mouse(&mut app, mouse_at(MouseEventKind::Moved, 10, 10), area).is_empty());
+    }
+
+    #[test]
+    fn the_queue_saver_writes_the_snapshot_and_removes_it_when_cleared_or_off() {
+        let _scratch = crate::config::testing::Scratch::new("queue-saver");
+        let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
+        app.connected = true;
+        app.push_queue(Track { filepath: "music/a.mp3".into(), metadata: Default::default() });
+        app.push_queue(Track { filepath: "music/b.mp3".into(), metadata: Default::default() });
+        app.queue.current = Some(1);
+        app.status = crate::player::PlayerStatus {
+            playing: true,
+            position: 9.0,
+            source: "http://host:3000/media/music/b.mp3?token=tok".into(),
+            ..Default::default()
+        };
+
+        let mut saver = QueueSaver::new(&app);
+        saver.flush(&app);
+        let saved = load_queue_snapshot().expect("the snapshot is on disk");
+        assert_eq!(saved.items.len(), 2);
+        assert_eq!((saved.index, saved.position), (Some(1), 9.0));
+        assert_eq!(saved.items[1].origin.server, "http://host:3000");
+
+        // A tick with nothing changed writes nothing new; a change is
+        // written once the debounce has passed (forced here by flushing).
+        app.queue.clear();
+        app.status = Default::default();
+        saver.flush(&app);
+        assert!(load_queue_snapshot().is_none(), "a cleared queue takes the file with it");
+
+        // Off: the file goes and stays gone.
+        app.push_queue(Track { filepath: "music/c.mp3".into(), metadata: Default::default() });
+        saver.flush(&app);
+        assert!(load_queue_snapshot().is_some());
+        app.resume_queue = false;
+        saver.tick(&app);
+        assert!(load_queue_snapshot().is_none(), "the setting off drops the snapshot");
+        saver.flush(&app);
+        assert!(load_queue_snapshot().is_none(), "and nothing is written while it is off");
+
+        // And startup brings a saved queue back only while the setting is on.
+        app.resume_queue = true;
+        let mut saver = QueueSaver::new(&app);
+        saver.flush(&app);
+        let start = startup(None, None, None);
+        assert!(start.queue.is_some(), "the default setting is on");
+    }
+
+    #[test]
+    fn the_bundled_server_is_seeded_once_as_the_default() {
+        let _scratch = crate::config::testing::Scratch::new("bundled-seed");
+        // First boot: no servers saved. The bundled one is created without
+        // credentials and made the default (contract clause 51), and the
+        // session opens on it.
+        let start = startup(None, None, Some("nas.local:3000".into()));
+        assert_eq!(start.bundled.as_deref(), Some("http://nas.local:3000"));
+        assert_eq!(start.server.as_deref(), Some("http://nas.local:3000"));
+        let config = config::load().unwrap();
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.default_server.as_deref(), Some("http://nas.local:3000"));
+        assert!(config.servers[0].username.is_none(), "no credentials seeded");
+
+        // The user later chose another default: the next boot leaves that
+        // standing, and the bundled entry is not seeded a second time.
+        let mut config = config::load().unwrap();
+        config::touch_server(&mut config, "http://office.local:3000", None);
+        config::set_default_server(&mut config, Some("http://office.local:3000"));
+        config::save(&config).unwrap();
+        let start = startup(None, None, Some("http://nas.local:3000".into()));
+        assert_eq!(start.server.as_deref(), Some("http://office.local:3000"), "the chosen default stands");
+        assert_eq!(start.bundled.as_deref(), Some("http://nas.local:3000"), "still guarded");
+        assert_eq!(config::load().unwrap().servers.len(), 2, "seeded once, not twice");
+
+        // Without the flag the same config boots as it always did: nothing
+        // about the mode persists.
+        let start = startup(None, None, None);
+        assert!(start.bundled.is_none());
     }
 
     #[test]

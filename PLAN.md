@@ -521,7 +521,11 @@ disconnect gate). Polls: the list every 5 s on the Torrents tab, everything ever
 the torrent types, twenty calls, a raw multipart `send_bytes`, `admin_users`;
 `extract_error` now prefers a body's `message` sentence over its `error` code. Locales `tor:`
 (240 keys × 10). Live-checked on the scratch server: choose Transmission → the connect form → a
-probe against nothing ("connection failed: connect ECONNREFUSED") → back to Disabled.
+probe against nothing ("connection failed: connect ECONNREFUSED") → back to Disabled. Cleanup
+2026-09-17, once the GUI's Add-torrent room was rebased in: the seeding tab's dialog is the shared
+typed `picker::pick_torrent` (`pick_file`/`FilePick` gone), and its POST rides the shared
+`Multipart` + `post_multipart` under the torrent routes' 45 s ceiling (`send_bytes` and the
+duplicate `extract_message` gone).
 
 Build, in order of fit: **logs** (`/api/v1/admin/logs/recent?since=<seq>` is a purpose-built
 tail-poll API with a cursor), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and
@@ -1455,6 +1459,20 @@ character-art wizard today. Also pinned: the wizard's scrollbar-hold soft-captur
 refinement for Apple Terminal — mac users now get the bundled console instead, which
 mooted the surface it was polishing.
 
+**File associations — the Add-torrent seam (2026-09-01).** The GUI's
+Add-torrent room (Phase 10) ships `mstream-player gui --torrent
+<file-or-magnet>`: the OS-hand-off entry point of the mobile app's
+feature, waiting on a claim. Each installer registers the app for
+`.torrent` files and the `magnet:` scheme and launches that seam — macOS
+document types + URL scheme on the .app (through the bundled Ghostty's
+config command), a Windows file association, a Linux `.desktop`
+`MimeType=application/x-bittorrent;x-scheme-handler/magnet;`. Two riders
+come with the claim: the Settings "default app for torrents" row the
+contract dropped for now (clause 52), and a hand-off that must not loop —
+the room already recognizes its own staged file coming back and says so,
+but a registered app should offer "open in another app" the way the OS
+does it (a chooser, not `open`).
+
 ### Phase 9 — Ship the wizard (merge PR #10 → release → mStream integration)
 
 The order is fixed by the machinery: the mStream server fetches this
@@ -1538,6 +1556,919 @@ RELEASE exists — so it's merge, then tag, then integrate.
 
 Phase 8 (the bundled console) stays sequenced AFTER 9c: it upgrades the
 launcher's terminal choice, not the wizard itself.
+
+### Phase 10 — The GUI player (`mstream-player gui`)
+
+The mouse-first player surface the Win/macOS installers will launch in the
+Phase-8 branded window — an ALTERNATIVE interface beside the classic TUI,
+built on `src/kit/` the wizard's way (fixed palette, OSC 11 ground, every
+action clickable AND keyed). Design of record: the "mStream Player GUI"
+canvas, <https://claude.ai/code/artifact/e0a92aec-c63e-4156-84e2-15a05a6167f0>
+(cell-exact 100×30 mockups + normative widget/limit boards), plus
+docs/ui-kit.md. Direction approved 2026-08-27; the Jukebox sketch is kept as
+a LATER secondary screen (party view), Columns retired.
+
+- **Slice 1 — the shell ✅ 2026-08-27**: left nav (Settings live; the rest
+  named and honest about arriving with browse), the Settings room (bottom-bar
+  choice + the crossfade group, wired to the real audio worker and persisted
+  per change), and BOTH bottom bars behind `[gui] bar` — `wave` (waveform +
+  reflection over the compact control row; classic bar is the loading state
+  AND the conhost floor) and `gold-line` (the gold rule IS the seek bar; song
+  info left toggles the queue; tall 3-row controls). `src/gui/{mod,bar}.rs`,
+  ten-locale `gui.*` keys, 18 unit/render tests + the ignored `dump_frames`
+  eyeball. `MSTREAM_GUI_DEMO=1` seats a fixed track so the bars can be seen
+  and the seek ridden before playback exists.
+- **Slice 2 — Files + playback ✅ 2026-08-28** (bar settled the same day:
+  controls above the rule, edge-to-card waveform, tips on the last row;
+  GoldLine card right + volume on the tall controls' line). The GUI now
+  embeds the REAL `App` + audio/api workers — the same state machine the
+  TUI, wasm shell and replay harness drive — so session restore
+  (`tui::startup`/`app_from`/`dispatch`/`remember`), queueing, crossfade
+  announcements, track-end advance and waveform prefetch are shared, not
+  re-implemented. Files leads the nav: browse the saved session's server
+  (`gui --server <url>` overrides), click a row = select + `Activate`
+  through the App's funnel, hover reveals [+] queue-add, kit scrollbar,
+  wheel scrolls the view; the queue panel shows the real queue; the bar
+  reads real timestamps/waveforms and seeks/pauses the engine. Settings'
+  crossfade group now reads/writes the App's own knobs. Mouse verbs that
+  have no honest keymap name (the volume cells) set the field and emit the
+  `Effect` directly — documented, funnel-free by design.
+- **Album art in the card ✅ 2026-08-28**: the graphics probe runs on boot
+  (after init, the player's ordering; Resize refreshes the encode cache);
+  the card paints real pixels where the terminal can and the ▀-mosaic
+  elsewhere, the empty slot frame yielding once the art is decoded. The
+  fetch was already free — `fetch_art` rides the App funnel. One cover per
+  frame, so the single-slot encode cache holds; widening it comes with the
+  Now Playing screen.
+- **Search ✅ 2026-08-28**: `/` (or the nav item) opens the kit query card,
+  which owns the keyboard while it takes text and drives the App's own
+  query via `StartSearch`/`Input`/`Submit` — so `search_submitted`'s
+  stale-reply guard keeps working. Five class chips (Artists · Albums ·
+  Titles · Files · Lyrics) are the search params: state-colored toggle
+  words filtering the class MENU (the API answers every class in one
+  reply, so the choice is instant); ←/→ + `t` is the keyboard path. The
+  results are the App's Search pane rendered by the same row renderer as
+  Files (`draw_pane_rows`, with the dim detail column for drill rows) —
+  class → listing → artist → albums all drill through the shared funnel,
+  and clicks map through the filter to true pane indexes.
+- **Servers ✅ 2026-08-29** (the Connect-screen slice, grown into
+  multi-server): the header's server label becomes a dropdown once a
+  second server is saved (current marked, default starred, "+ add" last);
+  the [+] beside it — and the no-session screen's button — opens the add
+  flow, a chooser first (2026-08-29 pass two): "Standard connect" is the
+  SERVER/USERNAME/PASSWORD cards plus two checkboxes, "Accept a
+  self-signed certificate" (a per-entry `danger_accept_invalid_certs`
+  client, never process-wide) and "Public server" (stands the credential
+  fields down; connect verifies with the auth-free ping); "Quick
+  Connect" is where the design board's "ON THIS NETWORK" list moved —
+  mDNS rows that carry their address to the standard page — plus the
+  pairing-code paste, dialled through the funnel with the code held
+  GUI-side until the tunnel answers (a bad code costs an error line,
+  never the session that was playing; on Connected the code is seated
+  for the save and the old server's state shed). The board's "Sign in
+  once" line is dropped, and so is the switcher label's dwell tooltip —
+  it matured exactly where the dropdown opens. Settings grew
+  a SERVERS group whose row opens the Manage Servers room: every saved
+  entry with username, live version (probed over the public `GET /api/`
+  — ping carries no version; `Ping` still reads one tolerantly if it
+  ever grows one) and the default star; per-row actions switch · edit ·
+  make default (`default_server` config key, outranks MRU at startup) ·
+  pair phone (the wizard's own QR renderers, pixels or half-blocks, over
+  the stored pairing code — card cover stands down while it shows, the
+  one-slot encode cache's rule) · remove (confirm modal; removal is the
+  ONE flow that drops a pairing code). Adding/editing validates on a
+  one-shot client so the live session is never touched until the server
+  answers; switching goes through the App's own funnel
+  (`App::adopt_server` → `begin()`), keeps what is already streaming,
+  and clears the queue — queued tracks are filepaths resolved against
+  the session's server at play time, so they cannot follow (true
+  multi-server queues need tracks to carry their origin; deferred).
+  Sign-in-needed answers (switch, expired session, fresh tunnel) open
+  the same form in its funnel-riding flavour. The GUI now also renders
+  the kit's dwell tooltips it had only been registering.
+- **Albums wall ✅ 2026-08-29**: every album's cover, name and year in a
+  grid, paged with ◂ ▸ arrows (and ←/→, PgUp/PgDn, the wheel) instead of
+  scrolling — the webapp's album wall. Feasibility was measured first
+  (the tests at the bottom of `gui/albums.rs` keep the numbers honest):
+  a page of mosaic covers costs ~10 ms a frame with a `CoverPane` per
+  slot, and the pixel path forks `Graphics` per slot with encodes PACED
+  — each frame spends at most 40 ms starting encodes, the mosaic stands
+  in, and a page upgrades over a few frames (debug-build sixel: worst
+  frame 137 ms where the unpaced page cost two full seconds). Covers
+  ride the App's own art claim (`fetch_art_file`, the playing cover's
+  discipline — page-at-a-time, so the wholesale cap wipe self-heals);
+  the list itself is the Library drill's Albums node, kept whole on
+  `App.albums` beside the pane rows (the GUI door is
+  `open_library_node`, seating the drill so the stale-reply guard keeps
+  working). Clicking an album drills through the same funnel to its
+  track list — `draw_pane_rows`, durations, hover [+], play on Enter —
+  and the Parent row or `h` walks back, refetching the wall the drill's
+  own way. Cell-exact: cover 12×6 (square at 10×20), name, `year ·
+  artist` dim beneath.
+  Performance pass (same day): `draw_pane_rows` takes BORROWED rows (the
+  per-frame clone of every visible entry — and Search cloned its whole
+  pane twice a frame — was drawing time spent on nothing); the wall
+  draws through split field borrows instead of cloning a page of albums
+  and their decoded covers (~50 KB of pixels apiece, ten times a
+  second); the art-fetch scan allocates only for files still missing;
+  `Graphics::refresh_font` re-reads the window-size ioctl at most every
+  500 ms (one cover a frame was its design point — the wall made it
+  fifteen syscalls a frame); and a frame whose encode budget turned
+  slots away marks the Gui HOT, shortening the event loop's idle wait to
+  10 ms so a page turn finishes upgrading in real tens of milliseconds
+  instead of one encode per 100 ms poll tick.
+- **Bar focused ✅ 2026-08-29**: the waveform bar is retired — the gold
+  line is THE bar. With it went the `[gui] bar` config key (a leftover
+  rides `GuiPrefs.extra` harmlessly), the Settings radio pair (PLAYBACK
+  leads the room now), `Now.wave` and the wave/reflection renderer. The
+  bar's dwell tooltips went too: the tips line already names every key,
+  and a bar is hovered too often for tooltips to earn their draw.
+- **Sonic path room ✅ 2026-08-31** — the first feature built the
+  contract-first way: `docs/ux-contracts/sonic-path.md` extracted from
+  the mobile app (the design of record, `mstream_music @ 137dd27`), the
+  "Sonic Path Room" canvas drawn from the contract, then `gui/sonic.rs`
+  implemented against both. The room rides the App's OWN sonic state
+  machine (the TUI tab's) — setup cards with the three pick methods
+  (playing · random · browse-capture), the ten-cell length bar, Build as
+  the kit primary, results with seed tags + one-cell eighth-block match
+  meters + Play/Queue all/Save as playlist, the save prompt on the App's
+  line. Nav row is capability-gated on `discoveryPath` and takes digit 9
+  (existing digits never renumber; absent is absent). New App plumbing
+  both surfaces share: `ApiCmd::SonicRandom` (the record's random pick),
+  and the clause-40 probe — a 403'd build re-pings before naming a
+  reason (`JourneyIssue`/`SonicEmpty` carry the taxonomy typed, so Retry
+  appears exactly where a retry can change the answer). Armed picks
+  banner the note line, suppress the hover [+] (an armed click must only
+  pick), and Esc/answer both return to the room. 18 new tests; smoked
+  end-to-end against demo.mstream.io (random ends → build → meters on
+  screen).
+- **Playlists room ✅ 2026-08-31** — contract-first again
+  (`docs/ux-contracts/playlists.md`; the record is the mobile browser
+  tab's SERVER-playlists view, not its local-playlists screen), and the
+  first feature to skip the canvas deliberately: every element maps to
+  an idiom already drawn (the albums drill, the kit affirmative card,
+  the servers-room hover verbs, the sonic name modal, the kit warning
+  modal), so the contract's translation table is the whole design. The
+  list rides `LibraryNode::Playlists` with the New card above it;
+  hover (or `e`/`x` on the cursor row) reveals rename and the [X];
+  create/rename share one name dialog with the record's no-op contract;
+  delete confirms through a warning gate where `x` answers and Enter
+  stays the safe way out. Activation drills to the shared track rows.
+  New plumbing both surfaces share: `playlist_new/rename/delete` on the
+  client and their ApiCmds — silent on success (the row changing IS the
+  confirmation; an open Playlists view re-asks), worded per failure,
+  with rename's 404 named as the server's age (the route is 5.16.0+;
+  the session carries no version, so the record's hide-the-item gate
+  became honest wording — see the contract's deviations). 7 new tests;
+  read-only smoke against demo.mstream.io (list · drill · wheel · back
+  — no writes to a shared public server).
+- **Browser top bar ✅ 2026-08-31** — contract-first
+  (`docs/ux-contracts/browser-top-bar.md`; the record is the mobile
+  toolbar's context-aware AppBar bottom slot), canvas skipped again: one
+  bar row of existing kit vocabulary. The bar is two lines: the
+  crumb row stays what it was (back ◂ when there's somewhere to go, the
+  path, the count), and the controls line beneath carries —
+  gated on the list holding playable rows, the record's no-dead-chrome
+  law — play / queue all / shuffle as text verbs, the filter affordance
+  always, and the honest count (`n items`, `n of m` under a filter).
+  The filter IS the App's own prompt (StartFilter/filtering/apply_filter
+  — live narrowing, Enter keeps, Esc clears, backspace-past-empty
+  leaves, all pre-existing and TUI-shared); the three verbs are new App
+  helpers on the pane (`play_listing`/`queue_listing`) both surfaces
+  share — shuffle reorders ONCE, the record's semantic, mode untouched;
+  verbs act on the narrowed view (what you see is what plays — a logged
+  deviation from the record, which reads the unfiltered list). Keys
+  f/p/A/S; verb keys ride dwell tooltips, the close-control's pattern.
+  4 new tests; read-only smoke against demo.mstream.io proved the
+  gating live (folders-only root: no verbs; drilled into tracks: verbs
+  appear; filter narrows with the `of` count).
+  Same-day follow-ups from review: the bar became TWO lines (the header
+  row each room always drew, the controls beneath — filter leading on
+  the left, verbs right), and it now serves every browse page — Files,
+  the albums wall and drilled album, the playlists list and drilled
+  playlist. The drilled views reuse the pane machinery wholesale; the
+  wall filters through an index map (pages, cells, cursor and cover
+  prefetch all follow the narrowed view, and a filtered cell opens the
+  album it shows). The keys ride one shared gate that outranks the room
+  handlers, so a typed letter can never queue a row.
+- **Add torrent ✅ 2026-09-01** — contract-first
+  (`docs/ux-contracts/add-torrent.md`; the record is the mobile app's
+  smart Add Torrent panel, itself a port of the webapp's, plus both
+  directions of its OS hand-off). The contract went to discussion with
+  five open questions and came back with five decisions, all logged:
+  the webapp's fuller `match_unmapped` / `pad_files_missing` wordings,
+  a second instance for a second `--torrent`, no OS-defaults row until
+  the installers exist, the hand-off kept as one verb on the file chip,
+  and the room housed as a Settings doorway (the Manage-servers shape)
+  plus the `mstream-player gui --torrent <file-or-magnet>` seam that
+  stands in for the OS hand-off. `gui/torrent.rs` is the room: the
+  `/torrent/preflight` gate as a gold banner with the server's own
+  reason (no ping flag exists), the native file dialog (the
+  wizard's picker backends grown a file-typed sibling, filtered to
+  `.torrent`, started in Downloads, on a thread) with a typed `.torrent`
+  picker as the fallback and the `t` road (the wizard's completion
+  re-drawn for files; listings and reads on threads), a live-validated magnet row, metadata pre-filled
+  from `info.name` / the magnet's `dn` through `torrent_meta.rs` (a
+  port of the record's parser and the server's sanitizer, `regex` now a
+  direct dep), the library's path template resolved with sticky hand
+  edits, rename-root on by default, the seed-existing check before any
+  add with every outcome worded and the partial-match picker as a kit
+  modal, the arrival chooser with its don't-ask box persisted under
+  `[torrent] ask`, and a hand-off that stages the file into the player's
+  temp folder — which doubles as the loop guard once an installer makes
+  us the default app. `api/mod.rs` grew a hand-rolled multipart body
+  (the API's only multipart; no reqwest feature) and the five calls,
+  shared by the wasm build. 1-row fields rather than the kit's 3-row
+  cards, so the whole form fits the 100×24 floor. 12 new room tests + 10
+  parser tests + 2 multipart tests; smoked read-only against
+  demo.mstream.io (the gate answers "No torrent client is selected" and
+  the primary stays disabled with that reason on its tip).
+- **Multi-server and the queue ✅ 2026-09-18** — contract-first
+  (docs/ux-contracts/multi-server.md, contract 06, with the bundled-server
+  addition). Six commits: every queued row carries its server and plays
+  from it, so a switch keeps the queue and a removed server sweeps its
+  rows; `--bundled-server` seeds the installer's server as the default
+  and never offers to remove it; the queue and the place in it come back
+  on launch, paused (`queue.json`, `[player] resume_queue`); Add next /
+  Play now / row moves and a queue panel whose rows answer clicks;
+  federated peers browsed through their parent, read-only, seated under
+  it in the room and the dropdown, hidden or forgotten from there; the
+  failure walk probes a row's server, retries, holds and resumes.
+  Per-server tunnels (clause 38) and the guest-ticket direct path to a
+  peer landed 2026-09-19 on the shared tunnel crate — T1–T3 below — and
+  T4's two-server rig proved them live on 2026-09-20. A drag grip for
+  reorder stays deferred. **Offline switch (2026-09-20)**: a switch to a
+  server that will not answer used to hide the header's picker and route
+  every action into the TUI's connect screen (the GUI's transport died
+  while queue clicks still played); now the label and picker stay, the
+  rooms say the server is offline with "Try again", and the App gates on
+  a `connect_screen` flag the GUI switches off — contract clause 13's
+  deviation entry has the details.
+- **Queue rows three cells tall — an experiment (2026-09-20)**: the
+  panel's rows carry a 6×3 cover on the left — the card's own cover size;
+  the wall's per-slot pixel/mosaic machinery, moved to `src/gui/cover.rs`
+  and shared — the title over the artist over the album, the length on
+  the last line where the hover [x] lands, and the kit's live scrollbar
+  (`Act::QScrollBy`/`QScrollTo`, the wheel riding the same act) down the
+  screen's last column; the ▸ is gone and the playing row is told by
+  colour and weight. Covers are claimed through `App::fetch_queue_art` —
+  once, from the row's own server, a row on a closed tunnel waiting
+  unclaimed — and pixels stand down under any overlay (the dropdown, a
+  modal). Began as two lines with a 4×2 cover, grown the same day for a
+  bigger picture. `src/gui/queue.rs` with thirteen tests,
+  `smoke/gui/scenario_queue.py` against Rig B. Costs to weigh: a third of
+  the rows fit (five at 30 lines). A drag grip would take the cover's
+  column or a cell of the air; still deferred.
+- **A scroll no longer re-encodes the covers (2026-09-20)**: the first cut
+  keyed the panel's slots by row position, so every wheel tick re-encoded
+  every visible cover — and each encode decoded the full source jpeg,
+  tens of milliseconds apiece in a debug build, paced one per frame: a
+  second of mosaic before the pictures returned. Two fixes. The slots
+  are keyed by the cover (`QueueUi.slots: HashMap<art id, Slot>`, a
+  slack of eight past the view): an encoded picture draws anywhere for
+  free — kitty by reference, sixel and iTerm2 by re-emitting their bytes
+  — so a row's cover moves with it, an album shares one transmission,
+  and only a newly revealed cover encodes. And `Graphics::draw` fits the
+  box from the 128 px thumbnail first and encodes from it when it has
+  every pixel the box can show (a 6×3 cover at 10×20 is 60 px; a 12×6
+  wall cell 120), decoding the source only for a bigger box — which also
+  gives huge covers that kept no source bytes their pixels at small
+  sizes. Pinned by `a_scroll_moves_the_covers_with_their_rows_and_encodes_only_the_new_one`
+  and `a_small_box_draws_from_the_thumbnail_and_a_moved_box_re_encodes_nothing`;
+  **Overlays no longer blur the whole panel (2026-09-20)**: the first
+  gate stood every cover down to the mosaic while any dropdown or modal
+  was open (reported: the covers "turn blurry" and the picture's extent
+  shifts). Overlays now register their footprint with the kit's
+  `Surface` (`modal_frame_on`, the dropdown, the tooltip), and only a
+  cover a footprint touched last frame draws as text — for that frame and
+  the one after the overlay leaves, which is what repaints its cells.
+  `cover_encode_costs` (ignored) prints the numbers: a 400 px jpeg's
+  decode alone was 35 ms in debug and 2.8 ms in release; the 6×3 encode
+  from the thumbnail is 4 / 13 / 5 ms in debug (kitty / sixel / iTerm2)
+  and 0.28 / 0.56 / 0.22 ms in release, and a redraw microseconds — so a
+  wheel tick now costs one of those, not seven of the old.
+- **Auto DJ — contract settled 2026-09-20, implemented 2026-09-20/21 (slices A1–A5)**
+  (docs/ux-contracts/auto-dj.md, re-extracted against the mobile record's
+  `439b4de4`: songs per fetch, a peer hosting the DJ, readiness, the
+  empty-queue openers; multi-server sessions out of scope; decisions 1–12
+  recorded and confirmed 2026-09-20 — decision 10 rewritten to the
+  record's model: the DJ is armed FOR a server and the session browses
+  freely). Slices, each citing its clauses:
+  - **A1 — the shared model ✅ 2026-09-20**: `player.autodj` becomes `autodj_server`
+    (the identity the DJ is armed for) and `[player.dj]` the record's
+    toggles (the migration table in the contract); `Similar` retired; the
+    DJ's server apart from the session with its probe (clause 19), the
+    record's toggle semantics (entry point 1), the lane with its epoch,
+    the top-up guards (13), batches in `consume_dj` (14, 27), the request
+    builder grown sources / length / keywords / `require*` / `limit` and
+    the peer rule (20–27), the seed rule by origin (23), the opener (3),
+    the one-shot seed (5), the empty-queue answer and `Capture::DjSeed`
+    (2, 4, 16), disarm on removal. Pure tests on the request JSON and the
+    lane.
+  - **A2 — the worker ✅ 2026-09-20** (landed with A1): every pick through `client_for(reach)` for the
+    DJ's server, the tunnel-target set grown by it while armed (19), the
+    capability learner keyed by server identity with the version
+    pre-filter from the probe (25, 50), the failure taxonomy (30–34), the
+    tunnel defer and owed pick (33, 35), readiness from
+    `features.discoveryReady` (36), the `[dj]` log lines (63).
+  - **A3 — the GUI ✅ 2026-09-21** (two commits): the start chooser as a
+    kit modal, the opening-song banner, the queue panel's badge and
+    empty-state openers (2, 4, 16, 60, 62); then the Settings doorway
+    (`Auto DJ ▸`, a LISTEN group) and the room (40–53) — the state line
+    and Start/Stop, QUEUE · CONTINUITY · FILTERS · SOURCES as `[✓]` rows,
+    ten-cell bars that set by cell and step by ←→, `(•)` radio rows, chips
+    with a remove, the keyword field, the genre picker with its search
+    line, the server picker that moves the DJ (41), the version gates and
+    the sonic reasons (43, 50), Preview (53); a scrolling body with the kit
+    scrollbar. One `DjEdit` on the App that both shells edit through;
+    rating and genres written to the target server's own entry (51); the
+    room probes the session's server when opened with the DJ off. Ten
+    locales of `gui.dj.*` carried from the record's `autoDj*` (the
+    `mstream_music` worktree's ARB files), the terminal's own strings
+    beside them. 11 GUI tests; `dump_dj` (ignored) renders it all.
+  - **A4 — the TUI and the web shell follow ✅ 2026-09-21** (mostly with
+    A1: `A` arms / switches off / moves, the tab's rows are the contract's,
+    the choosers draw over both screens, the wasm check passes; the tab's
+    Keywords row now types a word on Enter — Enter adds it and clears for
+    the next, Esc or Enter on nothing leaves, `x` on the row takes the
+    last word back — through the same `DjEdit` as the room).
+  - **A5 — the rig ✅ 2026-09-21** (`smoke/gui/scenario_dj.py`): the room
+    off with the probe's sonic reason (no discovery data on the rig), Start
+    on a one-row queue landing a batch of four badged rows, Preview's three
+    picks, a bar set by a cell click live, the server picker moving the DJ
+    to Rig A through B's proxy with the next turn picked from there, Stop
+    leaving the rows. Not exercised on this rig: a direct (tunnel) peer
+    lane and the `discovery is disabled` degrade — the rig has no
+    discovery data at all, so sonic is never asked; both remain a manual
+    check against a server with discovery on.
+- **The Library rooms ✅ 2026-09-21** (docs/ux-contracts/library-rooms.md,
+  extracted from the mobile browser and the webapp's genres, then built):
+  Artists · Genres · Recent as rooms over the shared App's Library pane
+  under the browse bar (`src/gui/library.rs`); an artist opens as the
+  wall — `albums.rs` generalized over a `WallState` per room and the App's
+  `artist_albums` beside `albums` — with the singles bucket as a card; the
+  drilled album's Back names the artist; the kit's `letter_strip` (`#`
+  A–Z, 25 rows, snapping, following the filter) on Artists, Genres and the
+  Albums wall; a wall's card opens through the pane's own row so Back
+  restores from the trail. Five GUI tests.
+- **Track actions & the queue ✅ 2026-09-21** (docs/ux-contracts/
+  track-actions.md, extracted from the mobile sheet, its queue and its
+  rating, then built in two commits): the shared App gained rate-song and
+  add-song with a latest-wins revert, the full block and playlist names
+  through the track's own reach (`src/tui/app/track.rs`); the GUI gained
+  the one sheet for a song wherever it is met — a row's `[⋯]`, a right
+  click (the kit's context registry), `m`, the playing card — with its
+  badge row (stars, key, tempo, lyrics), the picker with New playlist,
+  Song Info, and the queue panel's grip drag, `clear` and keyboard reach
+  through the App's focus (`src/gui/actions.rs`). Twelve tests across the
+  App and the GUI.
+- **Cleanup pass over the PR ✅ 2026-09-22** — four review lenses (reuse,
+  simplification, efficiency, altitude) run over `main...HEAD`, then seven
+  commits, each green on the suite, the wasm check and the rig: the
+  placeholder remnants, stale allows and alias acts dropped; the frame's
+  per-row copies removed (`put` writes cells, `clip` borrows, the sheet,
+  the torrent room and the playlists list read in place, one client per
+  reach kept in the worker); the shell's idioms as kit helpers
+  (`Surface::hovers`, `wrap_words`, `letter_index`, `tall_frame`,
+  `cursor_ring`, the glyph pairs, a track's facts on the types); one
+  `ListView` + `PaneRow(List, row, verb)` + `ScrollBy/ScrollTo(List)` for
+  every list; the App naming its states (`PlaylistNames`,
+  `adopt_server(Session, ..)`, an exhaustive `ApiCmd::reach`,
+  `for_each_copy`, the library door keeping its trail); one
+  `SettingsRoom`, `bar_now` on demand, the queue's key gate ahead of every
+  room, the path tidy shared with the wizard; the reply shapers shared by
+  both workers. Behaviour changed only where a symptom had been patched:
+  a focused queue no longer loses Esc/Enter to the album or library room,
+  a card opens through the App's door (Activate resolved by focus and
+  played the queue row), a zero bitrate no longer prints as 0 kbps.
+  Follow-ups the review named and this pass left: Arm/Disarm/Move as App
+  actions with prefs persisted as an effect (`autodj_server` from the bar
+  toggle is saved at quit, the room's doors save at once); a note lifetime
+  in place of nineteen hand-placed clears; the connect flow's session
+  writes moving from `servers::observe` into the App; the sonic rebuild
+  after a random pick moving into the App; the servers form on
+  `tui_input::Input`; the DJ room's per-frame line model; the per-room
+  offline gate; a `menu_row` kit widget for the nine hand-rolled
+  selectable rows.
+- **Keyboard hints as a setting ✅ 2026-09-22** — this surface is the
+  pointer's, the classic TUI the keyboard's, so the footer of keys and
+  the ` — key` tails on tooltips are off by default: `[gui] key_hints`,
+  a DISPLAY row in Settings, the kit's `Surface::tip_keyed` cutting a
+  keyed tip at its dash when the surface does not name keys (the wizard
+  and the admin rooms always do). The keys keep working either way.
+- **The player bar, A′ ✅ 2026-09-22** — drawn first on the "Player bar
+  options" canvas (six ways to spend the bottom ten rows; A chosen, then
+  the four asks: repeat at the left edge, the transport centred and bold,
+  the card four rows tall). Five rows where there were eight: the seek
+  line, three rows of tall frames — repeat alone at the left, the
+  transport (prev · play · next in the text colour, bold) with shuffle and
+  auto-dj centred in the span before the card — and a bottom row with the
+  volume, the screen's note and the card's fourth line. The card's cover
+  is eight by four cells (square), with title, artist · year, the spec
+  line and the stars with key and tempo beside it — the sheet's facts, so
+  a song reads the same wherever it is met. The content and the queue
+  panel take the three rows back (two with keyboard hints on: the tips
+  line sits under the bar and shifts it up). **Then H, the same day**, after
+  a fat-filled play (F) had a turn on the canvas and the bar: auto-dj
+  framed at the left edge; prev · play · next as one centred group, prev
+  and next in the rounded frame and play in the THICK one
+  (`kit::tall_frame_bordered`), all bold; shuffle and repeat worn bare
+  after them — the glyph alone on the middle row, a frame-high click
+  target. The fat fill went back out of the kit with nothing wearing it.
+  **Then I**: the toggles framed again, repeat moved to the left of prev
+  (repeat · prev · play · next · shuffle, auto-dj still at the edge), the
+  play frame in GOLD, and the card's hover `[⋯]` removed — a right click
+  or `m` is the playing track's sheet (track-actions deviation logged);
+  auto-dj then padded three columns in from the edge.
+- **The top bar and a first Now Playing screen ✅ 2026-09-22** — the
+  wordmark gives way to two tabs, Library and Now Playing (`Screen`,
+  `Act::Screen`, `0`/Esc between them; a nav digit is the Library's). Now
+  Playing (`src/gui/now.rs`) is the slot the contract's tabs will fill: the
+  playing track's cover as large as the stage allows through the cover
+  slot machinery, its title, byline, spec and facts beneath; the queue
+  panel and the bar stand under it. Ahead of its contract (the mobile
+  record's player panel, lyrics screen, visualizer and More sheet) — see
+  the next slice.
+- **The Auto DJ room moves to the Library nav ✅ 2026-09-23** — the
+  record keeps Auto DJ among its browse root's feature cards and in the
+  desktop rail's TOOLS group, never under Settings; the room's Settings
+  doorway (`Auto DJ ▸`, the LISTEN group) was this surface's own
+  translation, and it is retired with the room's `◂` back. The nav grows
+  a TOOLS group under Search — Auto DJ, then Sonic path — and the Auto DJ
+  row wears a `•` in the ok colour while the DJ is armed (the record's
+  card line). The tenth room has no digit; `D` opens it (auto-dj
+  contract: decision 5 amended, entry point 2, the deviations log;
+  `scenario_dj` opens the room from the nav).
+- **Widget polish — the text caret blinks ✅ 2026-09-23**: the GUI's
+  eleven text fields (the filter line, the search box, the DJ keyword
+  field and genre filter, the pairing code and the server form, the
+  playlist and sonic-save names, the torrent form and its picker) blink
+  their caret on the kit's own clock — `Surface::caret_touch` on every key
+  and click, `Surface::caret` for the phase as a field draws,
+  `caret_next_flip` timing the loop's next frame to the flip,
+  `kit::input_display_blink` withholding the `▏` with its cell kept. A
+  first cut lent the caret to the terminal's cursor as a blinking bar
+  (DECSCUSR 5) and was replaced the same day: a terminal profile can veto
+  that blink, and the ask was a caret that always blinks. The wizard,
+  admin rooms and web shell keep the steady `▏` for now.
+- **Bug: the genre switch stepped its mode ✅ 2026-09-23** — in the Auto
+  DJ room a click on the checked Genre filter with Whitelist chosen landed
+  on Blacklist, and only a second click switched it off, because the
+  switch and the radios shared one three-way `genre_mode`. Decoupled the
+  record's way: `genre_filter` (the switch) beside a two-way `genre_mode`,
+  in `[player.dj]` and on a server entry (`dj_genre_filter`), old "off"
+  values reading as the switch off; `DjEdit::GenreFilter` / `GenreCycle`
+  on the App, the TUI row keeping its three-state ←→ walk, its picker
+  reading the DJ library's genres. Tests on the model, the App, the GUI.
+- **The Auto DJ room re-laid ✅ 2026-09-23** — the canvas "Auto DJ room
+  options" drew today's dense form beside six directions (descriptions
+  wrapped, two columns, cards, tabs, quiet aligned columns, trailing
+  controls); E "Quiet" chosen with two changes (a blank row between
+  settings, the volume widget's bars). Built as drawn: every control at a
+  value column, `(•)` choices side by side, `- ▰▰▱ +` bars with a step at
+  each end, the status as one line with Start / Stop at its right, and a
+  help line under the body for the row under the pointer or the cursor in
+  place of the clipped descriptions. The room scrolls above the help line.
+- **The pick banner moves into the browser ✅ 2026-09-23** — a sonic
+  endpoint or the DJ's opening song being chosen showed its banner on the
+  bar's note row, below where the choosing happened. Now a banner row in
+  the accent stands over the room (or the Now Playing stage) with `[X]`
+  to let the pick go, and the room steps down a row while the pick is
+  armed; the "· Esc cancels" tail is cut when keyboard hints are off.
+- **Last played and Most played ✅ 2026-09-23** — the webapp's two stats
+  lists as two more LIBRARY rooms over the shared pane (library-rooms
+  clauses 21–24): `LibraryNode::{RecentlyPlayed, MostPlayed}` through
+  `stats/recently-played` and `stats/most-played` with the hundred, the
+  TUI's root menu with them too, hidden for a peer, no strip, no digit.
+  The nav grew to fourteen rows (Files and Search together at the top).
+  Open: the player does not report plays yet, so the lists show what the
+  server counted from other clients — play sessions are the next slice
+  (their own contract).
+- **Play reporting ✅ 2026-09-23** (docs/ux-contracts/play-reporting.md,
+  the webapp's play sessions as the record): one session per song start
+  folded from the engine's status — forward steps under three seconds
+  count, a pause is counted, the end of a known length is a completion —
+  posted to the plays' own servers (a peer's to its parent, with the peer
+  id and a snapshot) from an outbox that persists in `stats.json` with
+  the open session checkpointed, retried a minute after a kept batch and
+  on every connect; a server without the Stats API gets the legacy
+  thirty-second scrobble. `src/tui/app/stats.rs`, the worker's
+  `ReportPlays` / `Scrobble` and its `[stats]` lines, the queue saver
+  grown the second file. Last played and Most played now show this
+  player's own listening (`scenario_stats.py` on the rig).
+- Next slices, in rough order: the Now Playing screen (big art; the
+  per-slot fork pattern from the wall applies; lyrics and the visualizer
+  tabs), Discover's room and its "Play a path to…" entry (revisits the
+  sonic contract's §5 search-skip; Find similar re-enters the sheet with
+  it), the Rated list (ratings exist now), then e2e legs (fake server
+  needs player endpoints).
+
+#### Per-server tunnels and guest tickets — the plan (2026-09-18)
+
+The two deferrals the multi-server contract logged, taken together because
+they are one mechanism: **a tunnel registry that outlives the session**.
+Clause 38 (a Quick Connect server's tunnel stays up while the queue
+references it) needs bridges keyed by server instead of the api thread's
+single slot; clause 27's direct sentence (a peer with a guest ticket gets a
+tunnel of its own) is a second kind of credential dialled into the same
+registry. Record: `ServerManager` in `mstream_music`
+(`lib/singletons/server_list.dart` — `_tunnelTargets`, `setQueueIrohServers`,
+`ensureTunnels`, `_ensureHandle`, `_refreshDirectAccess`, `_maintainDirect`,
+`onDirectAuthRejected`), `lib/singletons/tunnel_policy.dart` (the
+constants), `lib/objects/direct_access.dart` (the payload),
+`lib/util/stream_url.dart` (the URL shapes). Server side, read at mStream
+`c791799a` (6.28.0): `docs/federation-guest-ticket.md`,
+`src/api/federation-browse.js` (the access route), `src/state/federation.js`
+(the federation endpoint's accept loop), `src/api/federation-auth.js` (what
+a guest may call), `src/api/server-info.js` (`federationDirect`).
+
+**Where we stand.** `api_loop` (`src/tui/worker.rs`) owns one
+`TunnelBridge` and one `(local_url, id)` pair; `ApiCmd::QuickConnect` dials
+and connects in one step and keeps the old bridge until the new one answers
+(`tunnel_answered`); `resolve_target` maps the loopback address back to the
+identity for a login. The App mirrors the single slot as `open_tunnel`, and
+`reach()` (`src/tui/app.rs`) answers a queued row on any other tunnel with
+"is not connected — its tunnel is closed", which the failure walk turns
+into a skip with a word. A peer always rides its parent's proxies with the
+parent's token. Nothing dials for a row; only a switch dials. Two things
+stay as they are: every bridge binds its own iroh `Endpoint`
+(`Tunnel::open` → `bind_endpoint`), and the `Redialer` inside a bridge
+re-dials a dead QUIC connection on the same loopback port, so a URL built
+on that port survives a network blip. What changes is who owns bridges and
+how many. One more fact that shapes the design: `Event::Connected` is a
+full re-open (the browser goes to the opening path, art and the sonic path
+clear), so a transport swap under a live session needs a command of its
+own, not a second connect.
+
+**The tunnel core is shared** (decided 2026-09-18). The mobile app's
+`rust/iroh_tunnel` crate (`crate-type = ["cdylib", "rlib"]`, ~1.3k lines
+of core under a thin C ABI, iroh 1.1.0) already does what T1 and T3 would
+have grown here: both credential kinds (`PairingKind` — a `mstr1:` code, a
+`mstrfedg1:` guest ticket dialled on the federation ALPN with the JWT on
+the first bi-stream), `Tunnel::set_credential` in place on the same port,
+a reconnect supervisor with `STATUS_{CONNECTING,CONNECTED,RECONNECTING,
+REJECTED,DOWN}` on a watch channel, `path_kind`, `force_reconnect`,
+`nudge_network`, an events ring, and a per-tunnel loopback token every
+local request must carry as `__lt=<token>` so another process on the
+machine cannot use the bridge as a proxy. Its interop harness
+(`interop/harness.mjs`, a replica of the server's endpoint on
+`@number0/iroh` 1.1.0) covers JSON, Range, concurrency, the kick and the
+GUEST phase (dial, refusal, swap), and the mobile federation rig proved
+the guest path live on 2026-09-05. One wire implementation for every
+client — the mobile app, this player, and third parties through the C
+ABI and the dev CLI — is the decision; the crate moves to its own
+repository first (`IROH_TUNNEL_CRATE_PLAN.md` in the mobile repo), and
+this player consumes it as a Rust dependency, never through the C ABI.
+The player keeps what is its own: the identity conventions
+(`mstream+iroh://`, `display_server`), the book, the App-side policy, and
+the staged `quickconnect-probe` until the crate exposes its stages.
+
+**The shape.**
+
+1. **The keeper** (worker side, mechanical). A registry of the crate's
+   `Tunnel`s keyed by identity — `mstream+iroh://<endpoint>` for a Quick Connect server,
+   `mstream+peer://<id>@<parent>` for a direct peer — shared between the
+   api thread and one thread per dial (`Arc<Mutex<HashMap<String, Slot>>>`;
+   a cold dial can take ONLINE 8 s + DIAL 25 s + HANDSHAKE 15 s and must
+   never sit on the api thread, where connection commands are serialized).
+   Three commands, four events:
+   - `ApiCmd::TunnelOpen { id, credential }` — a no-op when the id is up or
+     dialling; else a dial thread that installs the bridge and answers
+     `Event::TunnelUp { id, local_url }` or
+     `Event::TunnelFailed { id, rejected, why }` (`rejected` = the server
+     said NO — a rotated code or a refused guest token; everything else is
+     unreachable).
+   - `ApiCmd::TunnelClose { id }` — drop the bridge (its `Drop` closes the
+     listener and the connection); `Event::TunnelClosed { id }`.
+   - `ApiCmd::TunnelCredential { id, credential }` — the crate's
+     `set_credential`: same port, same URLs; applies at the next re-dial,
+     at once for a supervisor that gave up on a refused token.
+   - `Event::TunnelPath { id, path }` and `Event::TunnelStatus { id, status }`
+     from one sampler over the registry, polling `status()` and
+     `path_kind()` on today's cadence and reporting changes — so the App
+     sees a live tunnel go reconnecting, rejected or down without waiting
+     for a request to fail.
+   The api thread's `bridge`, `tunnel`, `resolve_target` and
+   `tunnel_answered` retire. `ApiCmd::Connect` and `Login` gain
+   `identity: String` (what the session is filed under — today derived from
+   the loopback address), and `ApiCmd::QuickConnect` and
+   `Event::TunnelReady` retire: the App composes *open, then connect at the
+   loopback*. A fourth command, `ApiCmd::Retarget { identity, server, token }`
+   → `Event::Retargeted { identity, server }`, swaps the session's client
+   for the same identity after a `GET /api` through the new base answers;
+   the App updates `session.server` and `session.token` and nothing else.
+2. **The policy** (App side, pure, on the fake clock — the `Stall` probe's
+   pattern). `App.tunnels: BTreeMap<String, TunnelState>` replaces
+   `open_tunnel`; `TunnelState` is `Dialling { since } | Up { local_url,
+   path } | Down { failed_at, attempts } | Rejected`. `tunnel_targets()` is
+   recomputed after every queue edit, switch, restore, removal and tick:
+   the session's transport plus every queued row's transport (a Quick
+   Connect row → its own id; a peer row → its parent when the parent is a
+   tunnel server, and its own id once T3 makes it direct).
+   `reconcile_tunnels(now)` (from `tick_at`) opens what is wanted and
+   absent — on the cold-dial ladder — and releases what is unwanted **after
+   a 10 s grace** (a release deadline per id, cancelled when the id is
+   wanted again: a restore, a clear-then-refill and the launch's empty
+   queue all pass through "nothing queued" for a moment; the record tore a
+   launch tunnel down mid-dial before it had the grace). A `Rejected` id is
+   never re-dialled automatically; a user switch or a re-pair is what tries
+   again.
+3. **Identity on the wire.** The credential a target dials with comes from
+   the book: `KnownServer` gains `pairing: Option<String>` (seeded from
+   `Credentials.pairings` by `known_servers`), so `Session.tunnel_code` and
+   the GUI's `pairing_for` lookup in `switch_to` collapse into it. A guest
+   ticket is runtime-only — the record never persists one, and nothing
+   here should either.
+4. **Direct peers.** A parent whose capability payload says
+   `federationDirect` is asked for each peer of it that is a target:
+   `GET /api/v1/federation/peers/:id/access` with the parent's token, on the
+   parent's plain client (never through `with_peer`'s rewrite). Granted →
+   the peer's identity is opened with the `mstrfedg1:` ticket — ALPN
+   `mstream/federation/1`, the JWT as the first bi-stream, `OK` back — and
+   from then on the peer answers plain `/media`, `/album-art` and
+   `/api/...` at its loopback with the guest token in the ordinary slots.
+   Denied (`direct: false`) → the proxy for the rest of the session.
+   Failed (a 502, a malformed 200) → the ladder. The ticket is asked for
+   again at three quarters of its life and swapped in place; a 401 on the
+   direct path asks once more with `?refresh=1`, then falls back.
+
+**Wire facts** (read from the sources above; the shared crate's unit tests
+and harness pin the credential, ALPN and handshake rows — this player's
+tests pin the rest):
+
+| | Quick Connect | Direct peer |
+|---|---|---|
+| Identity | `mstream+iroh://<endpoint>` | `mstream+peer://<id>@<parent>` (in the config since the peer work) |
+| Credential | `mstr1:` pairing code — `{t: EndpointTicket, s: 32-byte secret}` | `mstrfedg1:` guest ticket — `{t: the PEER's federation EndpointTicket, g: a JWT}`; unknown fields ignored, a missing `t`/`g` rejected, a newer version says "update the player" |
+| ALPN | `mstream/tunnel/2` | `mstream/federation/1` |
+| First bi-stream | the secret bytes, `finish`, read `OK` | the token's UTF-8 bytes, `finish`, read `OK`; a refusal is `NO` or a close with reason `unauthorized`/`backoff` |
+| Later bi-streams | one TCP connection each into the server's HTTP port | the same, into the peer's HTTP port |
+| Auth per request | the user's JWT (`x-access-token` / `?token=`) | the guest JWT in the same slots; claims `{federationGuest, federationKeyId, iat, exp}`, no `username` |
+| What answers | everything | the key's allowlist (`federation-auth.js`): `GET /api`, `GET /api/`, the db reads, `POST file-explorer`, `…/recursive`, `…/m3u`, `random-songs`, `federation/health`, `discovery/similar`, and the `/media/`, `/album-art/` GET prefixes — no ping, playlists, transcode or waveform |
+| Lifetime | until re-paired | the token's `exp` (24 h by default); the parent re-mints past 75 % of it, or on `?refresh=1` (served from cache within 5 s of a mint) |
+| Revocation | rotating the connect secret | deleting or expiring the parent's key on the peer — every guest of it fails at its next handshake and its next request |
+
+The access route in full: `GET /api/v1/federation/peers/:id/access[?refresh=1]`
+→ `200 {direct: true, endpointTicket, endpointId, guestToken, expiresAt,
+directTicket}` · `200 {direct: false, reason}` · `502` when the peer cannot
+be reached for the mint. `federationDirect` beside `federationBrowse` in
+`GET /api/` is the key's presence (the build has the route) and its value
+(there is a peer to reach); whether a given peer cooperates is only known
+from the access route. Both flags are caller-scoped, so they are read from
+a ping made with the parent's token — the session's own, or a one-shot
+`GET /api/` with the token for a saved parent that is not browsed (the
+`Probe` command grown a token and the flag).
+
+**The constants** (the record's `TunnelTiming`, kept as named consts in
+`app.rs` so the tests can read them): queue release grace **10 s**;
+cold-dial retry ladder **5, 10, 20, 40, 60 s**, then **5 min** after the
+tenth failure; direct ticket refresh at **0.75** of its life; **5 min**
+between failed refreshes of a stale ticket, **60 s** after a refusal, at
+once when the ticket has already expired; the switch spinner's bound
+**12 s** before the header says it is still connecting (the record's
+`awaitTunnelReady`). Not ported: the record's network-change hooks
+(`retryAfterNetworkReturn`, the probes, the watchdogs) — this player has
+no connectivity events; the App's ladder covers cold dials and the crate's
+supervisor covers a live tunnel that drops (its own backoff, cut short by
+`force_reconnect` or the relay coming back).
+
+**Slices** (each a commit; `cargo test`,
+`cargo check --target wasm32-unknown-unknown`, clippy on the new code).
+The shared crate exists: <https://github.com/IrosTheBeggar/mstream-iroh-tunnel>,
+tag `v0.1.0` (2026-09-18 — the crate as it left the mobile repo: ABI 2,
+iroh 1.1.0, MIT). T1 depends on it by git tag until it is on crates.io:
+`mstream-iroh-tunnel = { git = "https://github.com/IrosTheBeggar/mstream-iroh-tunnel", tag = "v0.1.0" }`
+(the `c-abi` / `os-trust` features arrive with E3, so at v0.1.0 the C
+symbols are compiled in — harmless, and the OS trust store is not yet
+selectable through the crate).
+
+- **T1 — the keeper, on the shared crate ✅ 2026-09-18.** As planned, with
+  two settlements: iroh is pinned at 1.1.0 (the crate's tested line —
+  `cargo update` had reached for 1.2.0), and an open request for a tunnel
+  the worker already holds re-reports it rather than staying silent, so
+  the App's picture can never lag behind a dial that will not happen. The
+  code is parsed for its identity before anything is dialled, which is why
+  the tests type a real-shaped code (`quickconnect::testing::sample_code`).
+  789 tests; the wasm build checks. **E3 followed on 2026-09-19** (crate
+  v0.2.0): the probe rides `connect_tunnel_staged` and prints the crate's
+  stages, a refused code is `DialError::is_rejected()` rather than a word in
+  the error text, `parse_code` is `iroh_tunnel::inspect` (a guest ticket is
+  refused as not a pairing code), the crate is pulled without its C ABI and
+  with `os-trust`, and `iroh` itself is a dev-dependency only — for the
+  tests' fake server endpoint. `Cargo.toml`: the crate under
+  the non-wasm target dependencies — at v0.1.0 as is; from E3 with
+  `default-features = false` (no C symbols in the player binary) and its
+  OS-trust feature on (the `platform-verifier` pin this player carries
+  for the corporate trust store, which the player's own `iroh` feature
+  line keeps enabling meanwhile through feature unification); iroh moves
+  from 1.0.3 to 1.1.0 with it. `src/quickconnect.rs`
+  shrinks to what is the player's own — `TUNNEL_ID_PREFIX`, `is_tunnel_id`,
+  `display_server`, the identity read off the ticket (`server_id`,
+  `endpoint_label`), and `probe`, which keeps the old staged dial until the
+  crate exposes its stages (E3) and then moves over; `Tunnel`, `Redialer`,
+  `TunnelBridge`, `open_bridge`, `handshake` and the accept loop go.
+  `src/tui/worker.rs`: the registry holds `iroh_tunnel::Tunnel`s;
+  `TunnelOpen { id, credential }` runs `connect_tunnel(&credential, 0)` on a
+  dial thread over the player's runtime (`runtime::runtime()` made
+  `pub(crate)`, since `set_credential`, `force_reconnect` and
+  `begin_shutdown` take a `&Runtime`) and answers `TunnelUp { id, local_url,
+  local_token }` or `TunnelFailed { id, rejected, why }` (`rejected` read off
+  the error text, the harness's contract, until E3 types it); `TunnelClose`
+  → `begin_shutdown`; `TunnelCredential` → `set_credential`; the sampler as
+  above, and the crate's events ring drained into the player's log ring at
+  info. `Connect` / `Login` gain `identity`; `QuickConnect`, `TunnelReady`,
+  `resolve_target`, `tunnel_answered`, the api thread's `bridge` and
+  `tunnel` retire. **The loopback token**: `Reach` gains
+  `local_token: Option<String>`; the builders in `src/api/urls.rs` append
+  `__lt=<token>` to every URL shape (the record's `localTokenQuery`), and
+  `Client` gains a query pair it adds to every request, set when a session's
+  base is a bridge — the engine's stream client needs nothing, the token is
+  in the URL. `src/tui/app.rs` + `app/session.rs`: `tunnels` replaces
+  `open_tunnel`; `begin()` for a tunnel server connects at the loopback when
+  the tunnel is up and opens it first when not (`connecting` shows
+  meanwhile); `TunnelUp` for the identity the session waits on → `Connect`;
+  `NeedsLogin` at a loopback address → the sign-in form as `TunnelReady` did;
+  `TunnelFailed { rejected: true }` → the "rejected — it may have been
+  rotated" line; `tunnel_path` only from the session transport's id.
+  `src/tui/mod.rs`: `known_servers` seeds `pairing`. `src/gui/servers.rs`:
+  `switch_to` stops looking the code up. `src/web/api_worker.rs`,
+  `src/web/mod.rs`: stubs (`TunnelOpen` → `TunnelFailed { rejected: false,
+  why: "tunnels need the native player" }`). Tests: the three
+  tunnel-session tests in `app/tests.rs` re-anchored on the composition;
+  the worker's `resolve_target` / `tunnel_answered` tests retire; new:
+  open-then-connect, a rejected dial's wording, the token on every URL
+  shape and on the api client, a status change reaching the App. The
+  envelope, ALPN, handshake and swap tests live in the crate. Size S–M: the
+  crate carries the tunnel; what is left is plumbing and the token.
+- **T2 — tunnels follow the queue ✅ 2026-09-19** (clause 38, and clause 37's
+  tunnel step). As planned; the policy lives in `tick_at` (`reconcile_tunnels`
+  every tick, the stall probe after it), the ladder's bookkeeping sits beside
+  the registry (`tunnel_retry`, `tunnel_release`), and a held row keeps its
+  restored spot for when the tunnel comes up. One settlement: the session's
+  own tunnel is re-dialled on the ladder after a failure, but the browser is
+  not reconnected on its own — the user saw the error. 798 tests. Plan text: `tunnel_targets()` and `reconcile_tunnels(now)` as above;
+  `TunnelState::Down` carries the ladder. The failure walk gains a hold
+  beside `Stall`: `play_index` on a row whose transport is a tunnel that is
+  wanted and not `Rejected` does not skip — it parks on the row, paused,
+  with the line **"Connecting to %{server}…"**, and `TunnelUp` for that id
+  re-runs `play_index` (the record: recover in place — ensure that server's
+  tunnel, re-seed, resume; don't skip). `TunnelFailed { rejected: true }`,
+  a server with no pairing code and a server gone from the book skip with a
+  word as today. Reads that belong to a row ride the row's reach:
+  `ApiCmd::AlbumArt { file, reach: Option<Reach> }` and
+  `Waveform { filepath, reach }` — `answer()` builds a one-shot client from
+  a given reach (the `Probe` pattern), so a mixed queue's now-playing cover
+  comes from its own server instead of the browsed one (clause 30's art
+  sentence, unmet today). The crossfade announcement re-derives on the
+  trailing refresh after `TunnelUp`, so a next row whose tunnel came up
+  late still prefetches. Launch: the restored queue's tunnel servers are
+  targets as soon as `restore_queue` runs, so the restored spot's server is
+  dialling while the user reads the screen (the record pre-warms the resume
+  server the same way). Removal and Forget: the sweep drops the rows, the
+  target leaves, the release runs after the grace. Contract: clause 38's
+  deviation closes; the status row updates. Tests (fake clock): targets
+  from the session and the rows; a row added inside the grace cancels the
+  release; the ladder's delays; a hold resumes on `TunnelUp`; `Rejected`
+  skips with the word; a switch away keeps the queue's tunnel; the last row
+  leaving releases after 10 s and not before; art asked with the row's
+  reach. Size M.
+- **T3 — guest tickets ✅ 2026-09-19** (clause 27's direct sentence). As planned,
+  with the crate carrying the handshake. Settlements: the ticket's times are
+  read off the guest JWT's own `iat`/`exp` (no date parsing; the peer's wall
+  judges by the same claims); `Retarget` is a fourth connection command,
+  since a `Connected` re-opens the browser; the record's `federationMissing`
+  gate is not ported (a missing peer's access call fails at the parent and
+  waits for the gap); a peer session that goes direct keeps `session.peer`,
+  so the read-only rules and pinned capabilities stand. The GUI's mark is
+  "· direct" beside "via {parent}" (`gui.srv.direct`, ten locales). Unverified
+  live until T4's rig: the whole path ships on the crate's harness and the
+  App's tests. Plan text: `src/api/types.rs`:
+  `Ping.federation_direct` (`federationDirect`),
+  `Capabilities.federation_direct`, `DirectAccessAnswer` (the three
+  shapes; a 200 missing fields is transient, not a refusal).
+  `src/api/mod.rs`: `federation_access_async(id, refresh)` on the plain
+  client. `src/tui/worker.rs`: `ApiCmd::DirectAccess { parent, id, reach,
+  refresh }` → `Event::DirectAccess { parent, id, answer: Granted(DirectTicket)
+  | Denied(reason) | Failed(why) }`. `src/tui/app.rs`: `direct: HashMap<peer
+  identity, DirectState { ticket, token, endpoint_id, expires_at,
+  fetched_at, denied, last_ask, last_failure, refused: Option<String> }>`
+  and `direct_offered: HashSet<parent>`; a peer target whose parent offers
+  direct, not denied, not missing, asks when it holds no ticket, a stale
+  one (≥ 0.75 of its life), or the one the peer refused — rate-limited as
+  above; `Granted` → `TunnelOpen` with the `mstrfedg1:` ticket as the
+  credential (the crate parses it and dials the federation ALPN), or
+  `TunnelCredential` when the tunnel is up (the crate's in-place swap); the parent stays a target while
+  a peer's ticket is due and the parent is itself a tunnel server (the
+  access call rides it). `reach()`: a peer whose own bridge is `Up` →
+  `Reach { base: local_url, token: guest, self_signed: false, peer: None }`
+  → `media_url` / `album_art_url`; else the parent proxy as today.
+  Session: a switch to (or a launch on) a peer whose bridge is up connects
+  at its loopback with the guest token and `identity` = the peer id,
+  `session.peer` kept so the read-only rules and the pinned capabilities
+  still apply; `TunnelUp` for the *browsed* peer → `Retarget` to the
+  loopback (the record flips a peer's URL shape exactly when its tunnel
+  does; the browse stack stays); `TunnelClosed` or a denial → `Retarget`
+  back to the parent's proxy base with the parent's token. A 401 on the
+  direct path (an `Unauthorized` from the session client, or a 401 open
+  failure on a row whose reach was direct — `transient_failure` must not
+  eat it) asks the parent once with `refresh=1`, swaps the credential and
+  retries the row; a second refusal falls back to the proxy for the
+  session. A refused guest handshake surfaces as `TunnelFailed { rejected:
+  true }` or a `Rejected` status on a running tunnel, and both mean
+  "refresh through the parent", never "re-pair". Wording: the servers
+  room's peer row gains **"· direct"** while its own tunnel is up; the hold line from T2 is reused; the ten locales.
+  Contract: clause 27's direct sentence and the "direct access not ported
+  (3)" deviation close; the wording table gains the rows; the Server API
+  row already lists the route. Tests: the three answers parse; one ask per
+  target, not per tick; stale → refresh, in place; denied → no re-ask this
+  session; refused → one refresh then the proxy; the two reach shapes;
+  `Retarget` keeps the browse stack; the 401 path. Size L — most of it
+  policy, all of it testable offline.
+- **T4 — the rig and the docs ✅ 2026-09-20.** Run as planned on two scratch
+  servers (:3040 Rig A, :3041 Rig B; iroh and federation on; paired with
+  two curls in public mode — the recipe is in the memory note), four legs:
+  the shared crate's dev client dialled A's federation endpoint with B's
+  guest ticket (path direct, mode guest; playlists 403 off the allowlist; a
+  request without `__lt` dropped); `quickconnect-probe` passed against B's
+  code through the crate; the `#[ignore]` worker test
+  `rig_a_peer_is_reached_directly_with_a_guest_ticket`
+  (`MSTREAM_RIG_PARENT=… cargo test -- --ignored rig`) ran the real api
+  thread from connect to a 206 byte range off A's loopback with the guest
+  token; and the GUI on a pty (`scratchpad/ptygui.py`, two scenarios)
+  switched to Rig A, went direct within a tick or two ("Rig A · direct ·
+  via …", A's log `authorized (guest, key 'rig-b')`), played "6AM" from A's
+  own tunnel, paired B a second time over Quick Connect, queued rows from
+  both servers, kept the tunnel-server row playing across two switches,
+  kept both tunnels up on the standard server, and released each ~10 s
+  after its last row left — `tunnel …: closing — nothing references it` in
+  the ring, `guest connection closed` on A, `tunnel connection closed` on
+  B, the room's mark gone. Two bugs the rig found, fixed in the same
+  commit: the App's book of servers was not refreshed when the peer
+  reconcile wrote the config (the header showed the peer's raw identity),
+  and a peer's row asked its direct tunnel for a waveform, which the
+  allowlist refuses (the rule now keys on the row's origin, not its
+  transport). Cosmetic: the dropdown clipped the mark at 44 columns (now
+  60, mark first); the "reaching…" note outlived the switch; the log
+  scrubber redacted `id@parent` in a peer identity as if it were userinfo
+  (spelled out now). Not run: a Netskope-shaped network. Plan text: Two scratch servers from the
+  `local-mstream-scratch-server` recipe with `iroh.enabled` and
+  `federation.enabled` on both (the secrets self-generate;
+  `federation.serverName` for labels); pair them with the player's own
+  room — `mstream-player admin federation` mints on A and pastes on B —
+  then: the player on B lists A as a peer with `federationBrowse` and
+  `federationDirect` true; the access route mints; the player dials A's
+  federation endpoint and a queued row from A plays from
+  `127.0.0.1:<port>/media/...?token=<guest>`; B's own Quick Connect code
+  (`GET /api/v1/iroh/code`, admin) pairs B as a tunnel server, rows from
+  both are queued, a switch to a standard server keeps both bridges, and
+  removing the last row of each releases it 10 s later (the ring says so
+  at info). `quickconnect-probe` stays the diagnostic for a code; a
+  `federation-probe <ticket>` sibling is cheap if the guest handshake needs
+  staging. PLAN and the contract's status row. Size S, plus whatever the
+  rig teaches.
+
+**Open questions (leans).**
+
+1. *Where the policy lives* — the App, on the fake clock (lean), or the
+   worker with timers. The App: the ladder, the grace and the ticket
+   schedule are then unit-tested like the `Stall` cadence, and the worker
+   stays a dialler.
+2. *A hold that never ends* — a row waiting on a tunnel whose ladder keeps
+   failing: hold indefinitely (lean; the record's playback path "would
+   rather wait than fail", the line says what it waits on, and a skip is
+   one key) or time out into the skip after the ladder's first long delay.
+3. *The browsed peer going direct mid-session* — `Retarget` when its tunnel
+   comes up (lean; the record's behaviour) or only at the next switch.
+4. *One iroh endpoint per tunnel* — settled by the crate, which binds one
+   per `connect_tunnel`; N relay connections for N tunnels is fine for a
+   handful, and a shared endpoint would be the crate's optimisation, not
+   this player's.
+5. *Dial a peer direct when its parent is a standard server* — yes (lean;
+   the record dials whenever the parent offers it and the peer has not
+   declined: the bytes stop crossing the parent's link twice either way).
+6. *A per-row tunnel mark in the queue panel* — no (lean); the hold line
+   and the servers room's "· direct" are enough until a listener asks.
+
+**Out of scope.** DJ fan-out over tunnels (this player's DJ is pointed at
+one server, clause 35); downloads and the offline copy; the record's status
+strip and Repair sheet (the servers room's re-pair path stands); the wasm
+build (no iroh — the stubs say so).
+
+**Risks.** The guest handshake is no longer this player's to prove: the
+crate's harness GUEST phase covers it against `@number0/iroh`, the mobile
+rig covered it live, and T4's rig (2026-09-20) proved the whole path from
+this player. What the switch does put at risk: the crate's supervisor replaces
+the `Redialer` whose single-flight re-dial and 4 s cooldown fixed requests
+stacking up behind a dead link — read `supervise` and the bridges' wait on
+the status watch before deleting the old code, and keep the "tunnel is
+flakey" listening test in the smoke round. iroh 1.0.3 → 1.1.0 is a
+lockfile bump the mobile side already made (it cleared four audit
+advisories) but it is new to the six release targets here. Two endpoints on
+one Mac should connect over the ticket's direct addresses without a relay;
+on the Netskope network the relay wait costs 8 s per dial and nothing more
+(a Known-risks line until seen). `runtime::block_on` runs dials on the
+shared multi-thread runtime, so concurrent dial threads are fine.
+
 
 ## Smoke testing
 

@@ -16,7 +16,7 @@ use super::app::{
     App, CONNECT_METHODS, ConnectStage, DjRow, Entry, Focus, MessageKind, NowTab, Queue, Repeat,
     SearchNode, SettingsNode, SonicNode, SonicRow, SonicView, Tab,
 };
-use super::worker::{AutoDjMode, DiscoverNode, LibraryNode};
+use super::worker::{DiscoverNode, LibraryNode};
 use crate::api::types::{Track, TrackMetadata};
 
 /// The colours the drawing code varies, resolved once at startup.
@@ -526,9 +526,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         // this view — so it has to be drawn here as well. It was only ever
         // drawn on the browser screen, which meant the old `D` panel opened
         // invisibly over the full-screen view and ate the keyboard.
-        if app.dj_panel.genres.is_some() {
-            render_genre_picker(frame, area, app);
-        }
+        render_dj_overlays(frame, area, app);
         if app.show_help {
             render_help(frame, area, app);
         }
@@ -550,9 +548,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_transport(frame, transport, app);
     render_footer(frame, footer, app);
 
-    if app.dj_panel.genres.is_some() {
-        render_genre_picker(frame, area, app);
-    }
+    render_dj_overlays(frame, area, app);
     if app.sonic_playlist_name.is_some() {
         render_playlist_prompt(frame, area, app);
     }
@@ -1054,6 +1050,8 @@ pub(crate) fn browser_title(app: &App) -> String {
             LibraryNode::Genres => " Genres ".to_string(),
             LibraryNode::Genre(genre) => format!(" Genre: {genre} "),
             LibraryNode::Recent => " Recently Added ".to_string(),
+            LibraryNode::RecentlyPlayed => " Recently Played ".to_string(),
+            LibraryNode::MostPlayed => " Most Played ".to_string(),
             LibraryNode::Playlists => " Playlists ".to_string(),
             LibraryNode::Playlist(name) => format!(" Playlist: {name} "),
         },
@@ -1763,7 +1761,7 @@ fn file_format(meta: &TrackMetadata) -> Option<String> {
     let format = meta.format.as_deref().map(str::trim).filter(|f| !f.is_empty());
     // Rounded to whole kbps: the server counts in bits per second, and nobody
     // reads a rip as 320.0 kbps rather than 320.
-    let kbps = meta.bitrate.filter(|b| *b > 0).map(|b| (b as f64 / 1000.0).round() as u64);
+    let kbps = meta.kbps();
     match (format, kbps) {
         (Some(format), Some(kbps)) => Some(format!("{}   {kbps} kbps", format.to_uppercase())),
         (Some(format), None) => Some(format.to_uppercase()),
@@ -1776,15 +1774,8 @@ fn file_format(meta: &TrackMetadata) -> Option<String> {
 /// absence says something too and it is left out rather than guessed at.
 fn audio_shape(meta: &TrackMetadata) -> Option<String> {
     let mut parts = Vec::new();
-    if let Some(rate) = meta.sample_rate.filter(|r| *r > 0) {
-        let khz = f64::from(rate) / 1000.0;
-        // 44.1 and 48 both want to look right, so the decimal only appears
-        // when there is something after it.
-        parts.push(if (khz.fract() * 10.0).round() == 0.0 {
-            format!("{khz:.0} kHz")
-        } else {
-            format!("{khz:.1} kHz")
-        });
+    if let Some(khz) = meta.khz_words() {
+        parts.push(format!("{khz} kHz"));
     }
     if let Some(depth) = meta.bit_depth.filter(|d| *d > 0) {
         parts.push(format!("{depth}-bit"));
@@ -1796,18 +1787,6 @@ fn audio_shape(meta: &TrackMetadata) -> Option<String> {
         _ => {}
     }
     (!parts.is_empty()).then(|| parts.join("   "))
-}
-
-fn fmt_bytes(bytes: u64) -> String {
-    const MB: f64 = 1024.0 * 1024.0;
-    let mb = bytes as f64 / MB;
-    if mb >= 100.0 {
-        format!("{mb:.0} MB")
-    } else if mb >= 1.0 {
-        format!("{mb:.1} MB")
-    } else {
-        format!("{:.0} KB", bytes as f64 / 1024.0)
-    }
 }
 
 fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
@@ -1830,7 +1809,7 @@ fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::raw(""),
         Line::from(Span::styled(
-            fit(meta.display_title().unwrap_or_else(|| track.file_name()), width),
+            fit(track.title_or_file(), width),
             Style::new().fg(accent()).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
@@ -1895,7 +1874,7 @@ fn now_playing_card(app: &App, width: usize) -> Vec<Line<'static>> {
         fact_row(&mut lines, "Audio", plain(audio));
     }
     if let Some(size) = meta.file_size.filter(|b| *b > 0) {
-        fact_row(&mut lines, "Size", plain(fmt_bytes(size)));
+        fact_row(&mut lines, "Size", plain(crate::api::types::fmt_bytes(size)));
     }
 
     lines.push(Line::raw(""));
@@ -2362,8 +2341,11 @@ fn mode_readout(app: &App, compact: bool) -> String {
     if app.queue.shuffle {
         parts.push(if compact { "shf".to_string() } else { "shuffle".to_string() });
     }
-    if app.autodj != AutoDjMode::Off {
-        parts.push(format!("dj {}", app.autodj.label()));
+    if app.dj_armed() {
+        // Where it is picking from, when that is not the room you are in.
+        let name = app.dj_server_name();
+        let here = app.session_identity().is_some_and(|s| crate::config::same_server(&s, app.dj_server.as_deref().unwrap_or_default()));
+        parts.push(if compact || here { "dj on".to_string() } else { format!("dj on · {name}") });
     }
     parts.join("  ")
 }
@@ -2672,95 +2654,146 @@ fn render_now_autodj(frame: &mut Frame, area: Rect, app: &App) {
 fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
     let faint = Style::new().fg(dim());
     let value = |text: String| Span::raw(text);
+    // Two cells of air, not three: the tab is a half-width column and the
+    // strictness row's cosine was losing its last digit at 100 columns.
+    let note = |text: String| Span::styled(format!("  {text}"), faint);
+    let switch = |on: bool| value(if on { "on".to_string() } else { "off".to_string() });
+    let clock = |seconds: u32| crate::api::types::fmt_duration(f64::from(seconds));
+    let s = &app.dj;
     match row {
-        DjRow::Mode => {
-            let mut spans = vec![value(app.autodj.label().to_string())];
-            // Worth saying out loud: in this mode the pick comes straight
-            // from the neighbour list, so the filters below are not consulted.
-            if app.autodj == AutoDjMode::Similar {
-                spans.push(Span::styled("   filters below don't apply", faint));
+        DjRow::Armed => {
+            if app.dj_armed() {
+                vec![value("on".into()), note(format!("picking from {}", app.dj_server_name()))]
+            } else {
+                vec![value("off".into()), note("Enter starts it here".into())]
+            }
+        }
+        DjRow::SongsPerFetch => {
+            vec![value(s.songs_per_fetch.to_string()), note("songs each turn".into())]
+        }
+        DjRow::Sonic => {
+            let mut spans = vec![switch(s.sonic)];
+            if let Some(reason) = app.dj_sonic_reason() {
+                spans.push(note(reason));
             }
             spans
         }
-        DjRow::Tightness => {
-            if app.dj.sonic_tightness == 0 {
-                return vec![value("off".into()), Span::styled("   any track", faint)];
-            }
-            let filled = (app.dj.sonic_tightness / 10) as usize;
-            let bar: String =
-                "▓".repeat(filled) + &"░".repeat(10usize.saturating_sub(filled));
-            let cosine = crate::dj::sonic_threshold(app.dj.sonic_tightness).unwrap_or(0.0);
-            vec![
-                value(format!("{bar} {:>3}%", app.dj.sonic_tightness)),
+        DjRow::Strictness => {
+            let band = crate::dj::SONIC_MAX_SIMILARITY - crate::dj::SONIC_MIN_SIMILARITY;
+            let filled = (((s.sonic_min_similarity - crate::dj::SONIC_MIN_SIMILARITY) / band) * 10.0)
+                .round()
+                .clamp(0.0, 10.0) as usize;
+            let bar: String = "▓".repeat(filled) + &"░".repeat(10 - filled);
+            let pct = (s.sonic_min_similarity * 100.0).round() as u32;
+            let mut spans = vec![
+                value(format!("{bar} {pct}%")),
                 // The raw number is what the server actually filters on, and
-                // seeing it is how the slider stops being a mystery.
-                Span::styled(format!("   cosine ≥ {cosine:.2}"), faint),
-            ]
+                // seeing it is how the bar stops being a mystery.
+                note(format!("cosine ≥ {:.2}", s.sonic_min_similarity)),
+            ];
+            if let Some(pool) = &app.dj_panel.pool {
+                spans.push(Span::styled(format!(" · {} in the pool", pool.pool_size), faint));
+            }
+            spans
         }
         DjRow::Anchor => {
-            let (label, what) = match app.dj.sonic_anchor {
-                crate::dj::SonicAnchor::Current => ("current", "follows each track"),
-                crate::dj::SonicAnchor::Session => ("session", "averages recent picks"),
+            let (label, what) = match s.sonic_anchor {
+                crate::dj::SonicAnchor::Rolling => {
+                    ("Follow the vibe", "each pick follows the session's recent sound")
+                }
+                crate::dj::SonicAnchor::Locked => {
+                    ("Stay on seed", "every pick stays close to the seed song")
+                }
             };
-            vec![value(label.into()), Span::styled(format!("   {what}"), faint)]
+            vec![value(label.into()), note(what.into())]
         }
-        DjRow::Tempo => {
-            if app.dj.tempo_tolerance == 0 {
-                return vec![value("off".into())];
-            }
-            vec![
-                value(format!("±{}%", app.dj.tempo_tolerance)),
-                Span::styled(
-                    format!("   widens to ±{}% before giving up", app.dj.tempo_tolerance * 2),
-                    faint,
-                ),
-            ]
-        }
-        DjRow::Key => {
-            let what = match app.dj.key_matching {
-                crate::dj::KeyMatching::Off => "any key",
-                crate::dj::KeyMatching::Compatible => "the Camelot neighbourhood",
-                crate::dj::KeyMatching::Strict => "the same key only",
+        DjRow::EmptyQueue => {
+            let label = match s.empty_queue {
+                crate::dj::EmptyQueueStart::Ask => "Ask",
+                crate::dj::EmptyQueueStart::Random => "Surprise me",
+                crate::dj::EmptyQueueStart::Pick => "Let me choose",
             };
-            vec![
-                value(app.dj.key_matching.label().to_string()),
-                Span::styled(format!("   {what}"), faint),
-            ]
+            vec![value(label.into()), note("when switched on with nothing queued".into())]
         }
-        DjRow::Rating => {
-            if app.dj.min_rating == 0 {
-                return vec![value("off".into())];
+        DjRow::Bpm => vec![switch(s.bpm)],
+        DjRow::Tolerance => vec![
+            value(format!("± {} BPM", s.bpm_tolerance)),
+            note(format!("wide set ± {}", s.bpm_tolerance + crate::dj::BPM_WIDE_EXTRA)),
+        ],
+        DjRow::Harmonic => {
+            let mut spans = vec![switch(s.harmonic)];
+            match &app.lane.camelot_anchor {
+                Some(anchor) if s.harmonic => spans.push(note(format!("anchored on {anchor}"))),
+                _ if s.harmonic => spans.push(note("the first keyed pick sets the anchor".into())),
+                _ => {}
             }
-            vec![value(format!("≥ {}", app.dj.min_rating))]
+            spans
         }
         DjRow::Cooldown => {
-            if app.dj.artist_cooldown == 0 {
+            if s.artist_cooldown == 0 {
                 return vec![value("off".into())];
             }
-            vec![
-                value(format!("{} artists", app.dj.artist_cooldown)),
-                Span::styled("   recently played, skipped", faint),
-            ]
+            vec![value(format!("{} artists", s.artist_cooldown)), note("recently played, skipped".into())]
+        }
+        // The library rows read the target server's own rules (clause 51).
+        DjRow::Rating => {
+            let library = app.dj_library();
+            if library.min_rating == 0 {
+                return vec![value("Any".into())];
+            }
+            vec![value(format!("{:.1} ★ or above", f64::from(library.min_rating) / 2.0))]
+        }
+        DjRow::Length => vec![switch(s.length), note(s.length_words())],
+        DjRow::Shortest => {
+            if s.min_seconds == 0 {
+                return vec![value("any".into())];
+            }
+            vec![value(clock(s.min_seconds))]
+        }
+        DjRow::Longest => {
+            if s.max_seconds >= crate::dj::LENGTH_RAIL_SECONDS {
+                return vec![value("any".into())];
+            }
+            vec![value(clock(s.max_seconds))]
+        }
+        DjRow::UnknownLength => {
+            vec![switch(s.allow_unknown_length), note("include tracks with no length read".into())]
         }
         DjRow::Genres => {
-            let mode = app.dj.genre_mode.label().to_string();
-            if app.dj.genre_mode == crate::dj::GenreMode::Off {
-                return vec![value(mode), Span::styled("   Enter to choose", faint)];
+            let library = app.dj_library();
+            if !library.genre_filter {
+                return vec![value("off".to_string()), note("Enter to choose".into())];
             }
-            let chosen = if app.dj.genres.is_empty() {
+            let mode = library.genre_mode.label().to_string();
+            let chosen = if library.genres.is_empty() {
                 "none chosen — Enter to pick".to_string()
             } else {
-                app.dj.genres.join(", ")
+                library.genres.join(", ")
             };
             let mut spans = vec![value(format!("{mode}  ")), Span::styled(chosen, faint)];
             // The asymmetry bites people: "only these" is a stricter promise
             // than "anything but these", and it drops untagged tracks.
-            if app.dj.genre_mode == crate::dj::GenreMode::Whitelist
-                && !app.dj.genres.is_empty()
-            {
+            if library.genre_mode == crate::dj::GenreMode::Whitelist && !library.genres.is_empty() {
                 spans.push(Span::styled("  (untagged excluded)", faint));
             }
             spans
+        }
+        DjRow::Keywords => {
+            if let Some(text) = &app.dj_keyword {
+                return vec![value(format!("{text}▏")), note("Enter adds the word · Esc done".into())];
+            }
+            let mut spans = vec![switch(s.keyword_filter)];
+            if s.keywords.is_empty() {
+                spans.push(note("no keywords · Enter types one".into()));
+            } else {
+                spans.push(note(format!("{}: {} · x removes the last", s.keywords.len(), s.keywords.join(", "))));
+            }
+            spans
+        }
+        DjRow::Sources => {
+            let total = app.dj_info.as_ref().map(|i| i.libraries.len()).unwrap_or(0);
+            let off = app.dj_sources_off().len();
+            vec![value(format!("{} of {total}", total.saturating_sub(off))), note("Enter to choose".into())]
         }
         // The row's own value stays short — this panel is a column beside
         // the facts, not a full-width modal any more. What the sample
@@ -2808,20 +2841,55 @@ fn dj_sample_lines(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
-fn render_genre_picker(frame: &mut Frame, area: Rect, app: &App) {
-    let Some(picker) = app.dj_panel.genres.as_ref() else { return };
+/// The DJ's choosers, drawn over either screen: a list to toggle through
+/// — the genres, or the DJ server's libraries (clause 42) — and the
+/// empty-queue question (clause 2).
+fn render_dj_overlays(frame: &mut Frame, area: Rect, app: &App) {
+    if app.dj_panel.genres.is_some() || app.dj_panel.sources.is_some() {
+        render_dj_picker(frame, area, app);
+    }
+    if app.dj_chooser.is_some() {
+        render_dj_chooser(frame, area, app);
+    }
+}
+
+/// Whether a picker row is switched on, however the picker decides that.
+type Chosen<'a> = Box<dyn Fn(&str) -> bool + 'a>;
+
+fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) {
+    let sources_off = app.dj_sources_off();
+    let (picker, title, empty, chosen): (&crate::tui::app::GenrePicker, String, &str, Chosen<'_>) =
+        if let Some(picker) = app.dj_panel.sources.as_ref() {
+        (
+            picker,
+            format!(" Sources · {} ", app.dj_server_name()),
+            "  no libraries to choose from",
+            Box::new(move |name: &str| !sources_off.iter().any(|s| s == name)),
+        )
+    } else if let Some(picker) = app.dj_panel.genres.as_ref() {
+        // The DJ's library's rule, not the session-wide fallback: a server
+        // entry with rules of its own keeps its chosen genres there.
+        let library = app.dj_library();
+        let title = format!(" Genres · {} ", if library.genre_filter { library.genre_mode.label() } else { "off" });
+        let genres = library.genres;
+        (picker, title, "  no genres tagged", Box::new(move |name: &str| genres.iter().any(|g| g == name)))
+    } else {
+        return;
+    };
 
     let mut lines: Vec<Line> = Vec::new();
     if picker.loading {
         lines.push(Line::from(Span::styled("  loading genres…", Style::new().fg(dim()))));
+    } else if let Some(err) = &picker.failed {
+        lines.push(Line::from(Span::styled(format!("  could not load genres — {err}"), Style::new().fg(dim()))));
     } else if picker.all.is_empty() {
-        lines.push(Line::from(Span::styled("  no genres tagged", Style::new().fg(dim()))));
+        lines.push(Line::from(Span::styled(empty, Style::new().fg(dim()))));
     } else {
         // Keep the highlighted row on screen for long lists.
         let visible = (area.height.saturating_sub(8)) as usize;
         let first = picker.row.saturating_sub(visible.saturating_sub(1));
         for (index, name) in picker.all.iter().enumerate().skip(first).take(visible) {
-            let chosen = app.dj.genres.iter().any(|g| g == name);
+            let on = chosen(name);
             let focused = index == picker.row;
             let style = if focused {
                 Style::new().fg(accent()).add_modifier(Modifier::BOLD)
@@ -2829,7 +2897,7 @@ fn render_genre_picker(frame: &mut Frame, area: Rect, app: &App) {
                 Style::new()
             };
             lines.push(Line::from(Span::styled(
-                format!("{}[{}] {name}", if focused { "> " } else { "  " }, if chosen { 'x' } else { ' ' }),
+                format!("{}[{}] {name}", if focused { "> " } else { "  " }, if on { 'x' } else { ' ' }),
                 style,
             )));
         }
@@ -2846,7 +2914,47 @@ fn render_genre_picker(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(accent()))
-        .title(format!(" Genres · {} ", app.dj.genre_mode.label()));
+        .title(title);
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// "Start Auto DJ with what?" — the two answers and the remember box.
+fn render_dj_chooser(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(chooser) = app.dj_chooser.as_ref() else { return };
+    let faint = Style::new().fg(dim());
+    let option = |index: usize, label: String, hint: &str| -> Vec<Line<'static>> {
+        let focused = chooser.row == index;
+        let style = if focused {
+            Style::new().fg(accent()).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+        };
+        vec![
+            Line::from(Span::styled(format!("{}{label}", if focused { "> " } else { "  " }), style)),
+            Line::from(Span::styled(format!("    {hint}"), faint)),
+        ]
+    };
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled("  Nothing is queued, so the DJ needs an opening track.", faint)),
+        Line::from(Span::styled("  With a queue it just follows what you already have.", faint)),
+        Line::raw(""),
+    ];
+    lines.extend(option(0, "Surprise me".into(), "Pick a random song from the library and build outward from it."));
+    lines.extend(option(1, "Let me choose".into(), "Open the library and pick the opening track yourself."));
+    let check = if chooser.remember { "[x]" } else { "[ ]" };
+    lines.extend(option(2, format!("{check} Remember this"), "Skip this question next time and always start this way."));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled("  ↑↓ move · Enter choose · Space remember · Esc cancel", faint)));
+
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let box_area = centered_rect(72, height, area);
+    frame.render_widget(Clear, box_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(accent()))
+        .title(" Start Auto DJ with what? ");
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
     frame.render_widget(Paragraph::new(lines), inner);
@@ -2963,7 +3071,7 @@ fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::{DirEntry, DirListing, FileEntry, Track, TrackMetadata};
+    use crate::api::types::{DirEntry, DirListing, FileEntry, Track, TrackMetadata, fmt_bytes};
     use crate::tui::app::{Action, InputMode};
     use crate::tui::worker::Event;
     use ratatui::Terminal;
@@ -3000,9 +3108,12 @@ mod tests {
             discovery_path: true,
             discovery_p2p: false,
             federation_discovery: false,
+            federation_browse: false,
+            federation_direct: false,
+            stats: true,
         };
         // What a real ping does on the way in: the Auto-DJ rows depend on it.
-        app.dj_panel.rebuild(app.capabilities);
+        app.dj_panel.rebuild(&app.dj, None, false);
         app
     }
 
@@ -3268,13 +3379,18 @@ mod tests {
             filepath: "lib/a.mp3".into(),
             metadata: TrackMetadata { duration: seconds, ..Default::default() },
         };
+        let home = |t: Track| crate::tui::app::Queued {
+            dj: None,
+            origin: crate::tui::app::Origin { server: "http://host".into(), peer: None },
+            track: t,
+        };
         let mut queue = Queue::default();
         assert_eq!(queue_title(&queue), " Queue (0) ");
 
-        queue.replace(vec![track(Some(2400.0)), track(Some(1800.0))]);
+        queue.replace(vec![home(track(Some(2400.0))), home(track(Some(1800.0)))]);
         assert_eq!(queue_title(&queue), " Queue (2) · 1h 10m ");
 
-        queue.replace(vec![track(None)]);
+        queue.replace(vec![home(track(None))]);
         assert_eq!(queue_title(&queue), " Queue (1) ", "no total when nothing knows its length");
     }
 
@@ -3307,7 +3423,7 @@ mod tests {
     #[test]
     fn transport_shows_track_position_and_modes() {
         let mut app = connected_app();
-        app.queue.replace(vec![Track {
+        app.replace_queue(vec![Track {
             filepath: "lib/a.mp3".into(),
             metadata: TrackMetadata {
                 title: Some("Moonlight".into()),
@@ -3338,7 +3454,7 @@ mod tests {
     #[test]
     fn the_gap_before_a_track_starts_reads_as_starting_not_stopped() {
         let mut app = connected_app();
-        app.queue.replace(vec![Track {
+        app.replace_queue(vec![Track {
             filepath: "lib/a.mp3".into(),
             metadata: TrackMetadata {
                 title: Some("Moonlight".into()),
@@ -3394,7 +3510,7 @@ mod tests {
     #[test]
     fn the_now_playing_screen_replaces_the_frame() {
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.play_index(0);
         app.status.playing = true;
         app.status.position = 71.0;
@@ -3601,7 +3717,7 @@ mod tests {
         // corrected offset away with every frame: the selection stuck to
         // the bottom edge and the list slid underneath it.
         let mut app = connected_app();
-        app.queue.replace(
+        app.replace_queue(
             (0..40)
                 .map(|i| Track {
                     filepath: format!("lib/{i:02}.mp3"),
@@ -3648,17 +3764,18 @@ mod tests {
         // view at all. The tab is the panel now.
         let mut app = connected_app();
         app.now_playing = Some(tagged_track());
+        app.replace_queue(vec![tagged_track()]);
         app.handle_action(Action::ToggleNowPlaying);
-        app.autodj = AutoDjMode::BpmKey;
+        app.dj_server = Some("http://host:3000".into());
         app.now_tab = NowTab::AutoDj;
 
         let text = draw(&mut app);
-        assert!(text.contains("Mode") && text.contains("tempo+key"), "{text}");
-        assert!(text.contains("Tempo window"), "{text}");
+        assert!(text.contains("Auto DJ") && text.contains("picking from"), "{text}");
+        assert!(text.contains("Songs per fetch"), "{text}");
         assert!(!text.contains("opens the panel"), "there is no other panel: {text}");
 
         app.handle_action(Action::NowRight);
-        assert_ne!(app.autodj, AutoDjMode::BpmKey, "the row under the cursor moved");
+        assert!(!app.dj_armed(), "the row under the cursor toggled it");
     }
 
     fn key_event(code: KeyCode) -> KeyEvent {
@@ -4164,7 +4281,7 @@ mod tests {
         // the rule below it. Off by one it is a dangling join: a ┴ under
         // nothing, and the border stopping at a blank cell.
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.play_index(0);
         app.handle_action(Action::ToggleNowPlaying);
 
@@ -4246,7 +4363,7 @@ mod tests {
     #[test]
     fn the_now_playing_screen_survives_a_small_terminal() {
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.play_index(0);
         app.handle_action(Action::ToggleNowPlaying);
         for (w, h) in [(20u16, 4u16), (32, 6), (200, 60)] {
@@ -4272,11 +4389,11 @@ mod tests {
 
         app.handle_action(Action::ToggleRepeat);
         app.handle_action(Action::ToggleShuffle);
-        app.autodj = AutoDjMode::Similar;
+        app.dj_server = Some("http://elsewhere:3000".into());
         let full = mode_readout(&app, false);
         assert!(full.contains("repeat all"), "{full}");
         assert!(full.contains("shuffle"), "{full}");
-        assert!(full.contains("dj similar"), "{full}");
+        assert!(full.contains("dj on · http://elsewhere:3000"), "where it picks from, when not here: {full}");
 
         let compact = mode_readout(&app, true);
         assert!(width_of(&compact) < width_of(&full), "the short form is shorter: {compact}");
@@ -4335,7 +4452,7 @@ mod tests {
         // A list of neighbours means nothing without saying neighbours of
         // what, so every view in the tab carries the seed in its title.
         let mut app = connected_app();
-        app.queue.replace(vec![Track {
+        app.replace_queue(vec![Track {
             filepath: "lib/seed.mp3".into(),
             metadata: TrackMetadata {
                 artist: Some("Seed Artist".into()),
@@ -4393,7 +4510,7 @@ mod tests {
     #[test]
     fn a_sonic_path_shows_the_arc_it_would_queue() {
         let mut app = connected_app();
-        app.queue.replace(vec![Track {
+        app.replace_queue(vec![Track {
             filepath: "lib/start.mp3".into(),
             metadata: TrackMetadata {
                 artist: Some("First".into()),
@@ -4457,6 +4574,7 @@ mod tests {
             ],
             note: None,
             length: app.sonic.length,
+            issue: crate::tui::worker::JourneyIssue::None,
         });
 
         let text = draw_sized(&mut app, 100, 30);
@@ -4474,7 +4592,7 @@ mod tests {
     #[test]
     fn a_sonic_path_survives_a_small_terminal() {
         let mut app = connected_app();
-        app.queue.replace(vec![Track { filepath: "a".into(), metadata: Default::default() }]);
+        app.replace_queue(vec![Track { filepath: "a".into(), metadata: Default::default() }]);
         app.play_index(0);
         app.files.set(vec![crate::tui::app::Entry::Track {
             label: "b".into(),
@@ -4493,6 +4611,7 @@ mod tests {
                 .collect(),
             note: None,
             length: app.sonic.length,
+            issue: crate::tui::worker::JourneyIssue::None,
         });
         // A 32-stop path in a short terminal scrolls like any other list.
         draw_sized(&mut app, 60, 20);
@@ -4511,21 +4630,25 @@ mod tests {
     #[test]
     fn the_dj_tab_shows_each_setting_with_what_it_means() {
         let mut app = connected_app();
-        app.dj.sonic_tightness = 60;
+        app.dj.sonic_min_similarity = 0.6;
+        app.dj.bpm = true;
+        app.dj.bpm_tolerance = 6;
+        app.dj_panel.rebuild(&app.dj, None, false);
         on_the_dj_tab(&mut app);
         let text = draw_sized(&mut app, 100, 34);
 
         assert!(text.contains("Auto-DJ"));
-        for row in ["Mode", "Sonic pool", "Anchor", "Tempo window", "Key matching", "Genres"] {
+        for row in ["Auto DJ", "Sonic similarity", "Match strictness", "Anchor", "BPM continuity",
+                    "Harmonic mixing", "Genre filter", "Preview"] {
             assert!(text.contains(row), "missing {row} in:\n{text}");
         }
-        // The slider shows the raw threshold it maps to, so the number the
+        // The bar shows the raw floor it stands at, so the number the
         // server filters on is never a mystery.
-        assert!(text.contains("cosine ≥ 0.63"), "got:\n{text}");
+        assert!(text.contains("cosine ≥ 0.60"), "got:\n{text}");
         assert!(text.contains("60%"));
-        // And the tempo row says what the fallback widens to.
-        assert!(text.contains("±6%") && text.contains("±12%"), "got:\n{text}");
-        assert!(text.contains("Sample") && text.contains("Enter to preview"), "got:\n{text}");
+        // And the tolerance row says what the fallback widens to.
+        assert!(text.contains("± 6 BPM") && text.contains("wide set ± 8"), "got:\n{text}");
+        assert!(text.contains("Enter to preview"), "got:\n{text}");
         // ←→ mean adjust here, so the hint has to say what moves between
         // tabs — the same thing it says on every other one, counted from
         // the strip this session actually has. This app has no Lyrics tab
@@ -4537,15 +4660,15 @@ mod tests {
     }
 
     #[test]
-    fn the_dj_tab_hides_the_sonic_rows_without_an_index() {
+    fn the_dj_tab_hides_the_sonic_rows_while_the_switch_is_off() {
         let mut app = connected_app();
-        app.capabilities = Default::default();
-        app.dj_panel = Default::default();
+        app.dj.sonic = false;
+        app.dj_panel.rebuild(&app.dj, None, false);
         on_the_dj_tab(&mut app);
         let text = draw_sized(&mut app, 100, 34);
-        assert!(!text.contains("Sonic pool"), "nothing promises a pool that can't exist");
+        assert!(!text.contains("Match strictness"), "a switch off hides its details");
         assert!(!text.contains("Anchor"));
-        assert!(text.contains("Tempo window"), "the rest of the tab is still there");
+        assert!(text.contains("BPM continuity"), "the rest of the tab is still there");
     }
 
     #[test]
@@ -4682,7 +4805,7 @@ mod tests {
     #[test]
     fn the_queue_column_opens_and_closes_on_tab() {
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         assert!(!draw(&mut app).contains("Queue ("));
 
         app.handle_action(Action::CycleFocus);
@@ -4725,7 +4848,7 @@ mod tests {
     #[test]
     fn the_queue_heading_shares_that_line_so_the_lists_start_level() {
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Artist"], &[]))));
         app.handle_action(Action::CycleFocus);
 
@@ -5013,7 +5136,7 @@ mod tests {
     fn the_visualizer_names_its_mode_and_v_moves_between_them() {
         use crate::tui::viz::{VIZ_MODES, VizMode};
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.play_index(0);
         app.handle_action(Action::ToggleNowPlaying);
         while app.now_tab() != NowTab::Visualizer {
@@ -5119,7 +5242,7 @@ mod tests {
         let mut app = connected_app();
         assert!(!app.drawing_audio(), "the browser does not need thirty frames a second");
 
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.play_index(0);
         app.handle_action(Action::ToggleNowPlaying);
         assert!(!app.drawing_audio(), "nor does the queue tab of the now-playing view");
@@ -5136,7 +5259,7 @@ mod tests {
     #[test]
     fn the_card_says_what_the_file_is() {
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
         app.play_index(0);
         app.handle_action(Action::ToggleNowPlaying);
 
@@ -5464,7 +5587,7 @@ mod tests {
     #[test]
     fn the_queue_key_says_whether_the_column_is_open() {
         let mut app = connected_app();
-        app.queue.replace(vec![tagged_track()]);
+        app.replace_queue(vec![tagged_track()]);
 
         let closed = draw_sized(&mut app, 140, 20);
         assert!(closed.contains(" Tab:Queue "), "{}", closed.lines().next().unwrap());

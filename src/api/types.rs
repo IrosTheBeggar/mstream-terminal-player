@@ -54,6 +54,18 @@ pub struct LoginResponse {
     pub vpaths: Vec<String>,
 }
 
+/// `GET /api/` — public server identification: no auth required, which the
+/// route promises in so many words. `server` is the mStream version.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ServerInfo {
+    /// The server's own version, e.g. `"5.13.2"`.
+    #[serde(rename = "server")]
+    pub version: Option<String>,
+    #[serde(rename = "apiVersions")]
+    pub api_versions: Vec<String>,
+}
+
 /// `GET /api/v1/ping` — the one-shot capability bootstrap.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -82,6 +94,156 @@ pub struct Ping {
     /// Similarity federated out to paired servers.
     #[serde(rename = "federationDiscovery")]
     pub federation_discovery: bool,
+    /// This server lists federated peers a local user may browse through
+    /// its proxies (mStream #927): on only with federation enabled and at
+    /// least one peer. An older build omits the key.
+    #[serde(rename = "federationBrowse")]
+    pub federation_browse: bool,
+    /// This server hands its own devices direct access to its federated
+    /// peers — the `access` route (mStream #943). Same shape as
+    /// `federationBrowse`: the key's presence says the build has the route,
+    /// its value that there is a peer to reach. Whether a given peer
+    /// cooperates is answered per peer by the access route.
+    #[serde(rename = "federationDirect")]
+    pub federation_direct: bool,
+    /// The Stats API's version (mStream 6.27): present when the server
+    /// takes play sessions at `POST /api/v1/stats/plays`; absent on an
+    /// older one, which counts the legacy thirty-second scrobble instead
+    /// (play-reporting contract, clause 10).
+    pub stats: Option<u32>,
+}
+
+/// `GET /api/` — the layered payload (mStream #932): server-wide `features`
+/// and the caller's own `user` block, which is where the ping's flags and
+/// libraries live there. A peer answers this through its parent's proxy and
+/// a guest over the peer's own tunnel, where `/api/v1/ping` is off the
+/// allowlist; a [`Ping`] is composed from the two halves the way the server
+/// composes its own.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LayeredInfo {
+    /// The server's own version, e.g. `"6.28.0"` — what the version floors
+    /// of the auto-dj contract (clause 50) are judged against.
+    pub server: Option<String>,
+    pub features: LayeredFeatures,
+    pub user: LayeredUser,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LayeredFeatures {
+    #[serde(deserialize_with = "transcode_or_off")]
+    pub transcode: Option<TranscodeInfo>,
+    pub discovery: bool,
+    /// Whether the discovery scan has produced vectors yet (mStream #879).
+    /// `None` on a server that does not say — which holds nothing back
+    /// (auto-dj contract, clause 36).
+    #[serde(rename = "discoveryReady")]
+    pub discovery_ready: Option<bool>,
+    #[serde(rename = "discoveryP2p")]
+    pub discovery_p2p: bool,
+    /// The Stats API's version, as the ping carries it.
+    pub stats: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LayeredUser {
+    pub vpaths: Vec<String>,
+    #[serde(rename = "noFileModify")]
+    pub no_file_modify: bool,
+    #[serde(rename = "noUpload")]
+    pub no_upload: bool,
+    #[serde(rename = "federationDiscovery")]
+    pub federation_discovery: bool,
+    #[serde(rename = "federationBrowse")]
+    pub federation_browse: bool,
+    #[serde(rename = "federationDirect")]
+    pub federation_direct: bool,
+}
+
+impl From<LayeredInfo> for Ping {
+    fn from(info: LayeredInfo) -> Ping {
+        Ping {
+            vpaths: info.user.vpaths,
+            transcode: info.features.transcode,
+            no_file_modify: info.user.no_file_modify,
+            no_upload: info.user.no_upload,
+            discovery: info.features.discovery,
+            // The layered payload carries no `discoveryPath`: on any build
+            // that serves `/api/` it equals `discovery` (the server says so).
+            discovery_path: info.features.discovery,
+            discovery_p2p: info.features.discovery_p2p,
+            federation_discovery: info.user.federation_discovery,
+            federation_browse: info.user.federation_browse,
+            federation_direct: info.user.federation_direct,
+            stats: info.features.stats,
+        }
+    }
+}
+
+/// `GET /api/v1/federation/peers/:id/access` on the wire: what a device
+/// needs to reach a peer without the parent in the path — or the parent's
+/// word that the peer will not mint (`direct: false`). Tolerant on purpose:
+/// which fields arrived decides which of the three answers this is.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct DirectAccessResponse {
+    pub direct: bool,
+    pub reason: Option<String>,
+    #[serde(rename = "endpointTicket")]
+    pub endpoint_ticket: Option<String>,
+    #[serde(rename = "endpointId")]
+    pub endpoint_id: Option<String>,
+    #[serde(rename = "guestToken")]
+    pub guest_token: Option<String>,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: Option<String>,
+    #[serde(rename = "directTicket")]
+    pub direct_ticket: Option<String>,
+}
+
+/// A guest ticket a parent handed out for one of its peers: the `mstrfedg1:`
+/// envelope the tunnel is dialled with, the guest JWT every request to the
+/// peer carries, and the token's own times — read off its claims, which is
+/// what the peer's wall judges by (contract clause 27).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectTicket {
+    pub ticket: String,
+    pub guest_token: String,
+    /// The peer's endpoint id, when the parent could read its ticket: how
+    /// one peer listed by two parents would be told apart.
+    pub endpoint_id: Option<String>,
+    pub issued_at: Option<std::time::SystemTime>,
+    pub expires_at: Option<std::time::SystemTime>,
+}
+
+/// The parent's answer to an access request, sorted into what the App does
+/// with it: dial the peer, stay on the proxy for the session, or ask again
+/// later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectAnswer {
+    Granted(DirectTicket),
+    /// `direct: false` — an older peer, or federation switched off there.
+    Denied(String),
+    /// The peer could not be reached for the mint, or the answer was not
+    /// one of the shapes above.
+    Failed(String),
+}
+
+/// One row of `GET /api/v1/federation/peers`: a peer this user may browse
+/// through the server, by the id every proxy route keys on.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct PeerListing {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PeerListingResponse {
+    pub peers: Vec<PeerListing>,
 }
 
 /// What this server can actually do, lifted out of [`Ping`].
@@ -99,6 +261,12 @@ pub struct Capabilities {
     pub discovery_path: bool,
     pub discovery_p2p: bool,
     pub federation_discovery: bool,
+    /// Peers to browse through this server (contract clause 20).
+    pub federation_browse: bool,
+    /// The parent offers direct access to its peers (the access route).
+    pub federation_direct: bool,
+    /// The server takes play sessions (play-reporting contract, clause 10).
+    pub stats: bool,
 }
 
 impl From<&Ping> for Capabilities {
@@ -108,8 +276,29 @@ impl From<&Ping> for Capabilities {
             discovery_path: ping.discovery_path,
             discovery_p2p: ping.discovery_p2p,
             federation_discovery: ping.federation_discovery,
+            federation_browse: ping.federation_browse,
+            federation_direct: ping.federation_direct,
+            stats: ping.stats.is_some(),
         }
     }
+}
+
+/// `POST /api/v1/stats/plays` — the server's word on a batch: every id it
+/// names is settled, whichever list it is on (a rejection means "drop it",
+/// by contract).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct PlaysAnswer {
+    pub accepted: Vec<String>,
+    pub duplicates: Vec<String>,
+    pub rejected: Vec<RejectedPlay>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct RejectedPlay {
+    pub id: String,
+    pub reason: String,
 }
 
 impl Capabilities {
@@ -145,7 +334,7 @@ pub struct TranscodeInfo {
 }
 
 /// Track metadata, as nested under `metadata` on library responses.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TrackMetadata {
     pub title: Option<String>,
@@ -201,11 +390,26 @@ impl TrackMetadata {
     pub fn display_title(&self) -> Option<&str> {
         self.title.as_deref().filter(|s| !s.is_empty())
     }
+
+    /// The bitrate in whole kbps — the server counts bits per second, and
+    /// nobody reads a rip as 320.0 — or `None` when unknown or zero.
+    pub fn kbps(&self) -> Option<u64> {
+        self.bitrate.filter(|b| *b > 0).map(|b| (b as f64 / 1000.0).round() as u64)
+    }
+
+    /// The sample rate in kHz as a person writes it — "44.1", "48": the
+    /// decimal only when there is something after it.
+    pub fn khz_words(&self) -> Option<String> {
+        self.sample_rate.filter(|r| *r > 0).map(|rate| {
+            let khz = f64::from(rate) / 1000.0;
+            if (khz.fract() * 10.0).round() == 0.0 { format!("{khz:.0}") } else { format!("{khz:.1}") }
+        })
+    }
 }
 
 /// A library track. `filepath` is the vpath-prefixed path used to build
 /// `/media/...` URLs.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub filepath: String,
     #[serde(default, deserialize_with = "null_default")]
@@ -218,11 +422,16 @@ impl Track {
         self.filepath.rsplit('/').next().unwrap_or(&self.filepath)
     }
 
+    /// The title tag, else the file's name — what every surface prints
+    /// for a track when it has one line for it.
+    pub fn title_or_file(&self) -> &str {
+        self.metadata.display_title().unwrap_or_else(|| self.file_name())
+    }
+
     pub fn display_name(&self) -> String {
         match (self.metadata.artist.as_deref(), self.metadata.display_title()) {
             (Some(a), Some(t)) if !a.is_empty() => format!("{a} - {t}"),
-            (_, Some(t)) => t.to_string(),
-            _ => self.file_name().to_string(),
+            _ => self.title_or_file().to_string(),
         }
     }
 }
@@ -239,6 +448,20 @@ pub fn fmt_duration(seconds: f64) -> String {
     }
     let total = seconds.round() as u64;
     format!("{}:{:02}", total / 60, total % 60)
+}
+
+/// A file size as a person reads it: whole megabytes past a hundred, a
+/// decimal below that, kilobytes under one.
+pub fn fmt_bytes(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    let mb = bytes as f64 / MB;
+    if mb >= 100.0 {
+        format!("{mb:.0} MB")
+    } else if mb >= 1.0 {
+        format!("{mb:.1} MB")
+    } else {
+        format!("{:.0} KB", bytes as f64 / 1024.0)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -804,13 +1027,36 @@ pub struct RandomSongRequest {
     pub bpm_ranges: Vec<BpmWindow>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub bpm_ranges_wide: Vec<BpmWindow>,
+    /// Tagged tracks only, so the waterfall never falls back to untagged
+    /// picks when the windows return nothing (auto-dj contract, clause 21).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_bpm: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub musical_keys: Vec<String>,
+    /// Keyed tracks only, even before the anchor is locked (clause 22).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_musical_key: Option<bool>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignore_artists: Vec<String>,
+    /// The libraries switched OFF for the DJ (clause 20). Named by hand:
+    /// the server spells it `ignoreVPaths`, which camelCase would not.
+    #[serde(rename = "ignoreVPaths", skip_serializing_if = "Vec::is_empty")]
+    pub ignore_vpaths: Vec<String>,
     /// 1–10. Omitted when zero, which the server also reads as "no floor".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_rating: Option<u32>,
+    /// The track-length window in seconds; a rail is not sent, and
+    /// `allowUnknownDuration` only rides beside a real bound (clause 20).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_duration: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_duration: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_unknown_duration: Option<bool>,
+    /// How many songs this turn asks for, 1–25; absent at one, the
+    /// pre-batch wire shape (clause 27).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub genres: Vec<String>,
     /// Only meaningful alongside `genres`: "whitelist" (default) or
@@ -1036,6 +1282,157 @@ pub struct PlaylistSummary {
     pub name: String,
 }
 
+// ── Torrents (the Add-torrent room; docs/ux-contracts/add-torrent.md) ───────
+
+/// `GET /api/v1/torrent/preflight` — whether this server takes a torrent
+/// from this user at all, and why not when it doesn't. There is no ping
+/// flag for torrents: this answer is the gate.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct TorrentPreflight {
+    pub active: bool,
+    #[serde(rename = "clientType")]
+    pub client_type: Option<String>,
+    /// The torrent client's name as people say it ("Transmission").
+    #[serde(rename = "displayName")]
+    pub display_name: Option<String>,
+    #[serde(rename = "noUpload")]
+    pub no_upload: bool,
+    #[serde(rename = "userAllowed")]
+    pub user_allowed: bool,
+    /// The server's own words for what stands in the way, when something does.
+    pub reason: Option<String>,
+}
+
+impl TorrentPreflight {
+    /// The three global gates the record's screen checks: a client is
+    /// selected, uploads are on, this user may. (Per-library mapping is
+    /// enforced by `/torrent/add` itself.)
+    pub fn ok(&self) -> bool {
+        self.active && self.user_allowed && !self.no_upload
+    }
+}
+
+/// `GET /api/v1/torrent/path-templates` — per-library destination
+/// templates, `{{ARTIST}}/{{ALBUM}}` and friends.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentTemplates {
+    pub vpaths: std::collections::HashMap<String, TorrentTemplateEntry>,
+    #[serde(rename = "suggestedTemplate")]
+    pub suggested_template: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentTemplateEntry {
+    pub template: Option<String>,
+}
+
+/// `POST /api/v1/torrent/auto-detect` — the server's own guess at the
+/// metadata. `confidence` is "high" or "low"; `ok: false` carries the
+/// reason in `message`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentDetect {
+    pub ok: bool,
+    pub confidence: Option<String>,
+    pub metadata: Option<TorrentDetectMeta>,
+    pub message: Option<String>,
+}
+
+/// The detected fields. Numbers arrive as numbers (a year), so each is a
+/// raw JSON value read through [`TorrentDetectMeta::text`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentDetectMeta {
+    pub artist: Option<serde_json::Value>,
+    pub album: Option<serde_json::Value>,
+    pub year: Option<serde_json::Value>,
+}
+
+impl TorrentDetectMeta {
+    /// A field as text — a string as itself, a number spelled out, nothing
+    /// for null or absent.
+    pub fn text(value: &Option<serde_json::Value>) -> String {
+        match value {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            _ => String::new(),
+        }
+    }
+}
+
+/// `POST /api/v1/torrent/seed-existing` — are the torrent's files already
+/// on disk? `outcome` is one of `seeded`, `already_in_daemon`,
+/// `partial_match`, `no_match`, `match_unmapped`, `pad_files_missing`,
+/// `invalid_torrent`, `daemon_error`; the other fields ride whichever
+/// outcome needs them.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SeedCheck {
+    pub ok: bool,
+    pub outcome: String,
+    /// The torrent's own name, when the server could read it.
+    pub name: Option<String>,
+    /// `invalid_torrent` / `daemon_error`: the server's words.
+    pub error: Option<String>,
+    /// `seeded` / `match_unmapped` / `pad_files_missing`: which library.
+    pub vpath: Option<String>,
+    /// `pad_files_missing`: which client type cannot recreate the pads.
+    #[serde(rename = "clientType")]
+    pub client_type: Option<String>,
+    /// `partial_match`: where some of the files already live.
+    pub matches: Vec<SeedMatch>,
+}
+
+/// One place a partial match found files: a library-relative path, and
+/// how much of the torrent is there.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct SeedMatch {
+    pub vpath: String,
+    #[serde(rename = "relativePath")]
+    pub relative_path: String,
+    pub matched: Option<u64>,
+    pub total: Option<u64>,
+    pub missing: Option<u64>,
+}
+
+/// `POST /api/v1/torrent/add` — the torrent is with the client.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TorrentAdded {
+    pub ok: bool,
+    pub name: Option<String>,
+    #[serde(rename = "downloadPath")]
+    pub download_path: Option<String>,
+    /// The client already had it — its own wording, not a failure.
+    #[serde(rename = "isDuplicate")]
+    pub is_duplicate: bool,
+    /// The add succeeded but the root-folder rename did not: a warning.
+    #[serde(rename = "renameWarning")]
+    pub rename_warning: Option<String>,
+}
+
+/// What a torrent submission carries: exactly one source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TorrentSource {
+    File { name: String, bytes: Vec<u8> },
+    Magnet(String),
+}
+
+/// The `/torrent/add` request, as the room assembles it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TorrentAddRequest {
+    pub vpath: String,
+    /// Folders above the destination folder, `/`-joined; empty for none.
+    pub sub_path: String,
+    pub directory_name: String,
+    pub rename_root: bool,
+    pub source: TorrentSource,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1157,6 +1554,38 @@ mod tests {
     }
 
     #[test]
+    fn the_layered_payload_composes_a_ping_from_its_two_halves() {
+        // What a rig server answered on `GET /api/` (2026-09-20): the flags
+        // and the libraries sit under `user`, the transcode under `features`.
+        let raw = r#"{
+            "server": "6.28.0", "apiVersions": ["1"],
+            "features": { "discoveryReady": false, "discovery": true, "discoveryP2p": false,
+                          "transcode": { "defaultCodec": "opus", "defaultBitrate": "96k" },
+                          "supportedAudioFiles": ["mp3"], "stats": 2 },
+            "user": { "vpaths": ["demo"], "noMkdir": false, "noUpload": true, "noFileModify": false,
+                      "federationDiscovery": false, "federationBrowse": true, "federationDirect": true,
+                      "federationInbox": 0, "vpathMetaData": {} },
+            "admin": true
+        }"#;
+        let info: LayeredInfo = serde_json::from_str(raw).unwrap();
+        let ping = Ping::from(info);
+        assert_eq!(ping.vpaths, vec!["demo".to_string()]);
+        assert!(ping.federation_browse && ping.federation_direct && !ping.federation_discovery);
+        assert_eq!(ping.stats, Some(2), "the Stats API's version rides `features`");
+        assert!(ping.discovery && ping.discovery_path && !ping.discovery_p2p);
+        assert!(ping.no_upload && !ping.no_file_modify);
+        assert_eq!(ping.transcode.as_ref().and_then(|t| t.default_codec.clone()).as_deref(), Some("opus"));
+
+        // A guest's answer over the peer's own tunnel: no transcode, one library.
+        let guest: LayeredInfo =
+            serde_json::from_str(r#"{"features":{"transcode":false},"user":{"vpaths":["demo"],"federationGuest":true}}"#)
+                .unwrap();
+        let ping = Ping::from(guest);
+        assert_eq!(ping.vpaths, vec!["demo".to_string()]);
+        assert!(ping.transcode.is_none());
+    }
+
+    #[test]
     fn parses_ping_transcode_defaults() {
         let json = r#"{"vpaths":["testlib"],"transcode":{"defaultCodec":"opus",
             "defaultBitrate":"96k"},"noMkdir":false,"noUpload":false}"#;
@@ -1264,6 +1693,9 @@ mod tests {
                 discovery_path: true,
                 discovery_p2p: false,
                 federation_discovery: false,
+                federation_browse: false,
+                federation_direct: false,
+                stats: false,
             }
         );
         assert_eq!(caps.enabled_names(), vec!["similarity", "sonic journey"]);
