@@ -35,6 +35,9 @@ const COVER_W: u16 = 8;
 const COVER_H: u16 = 4;
 /// Where the note begins on the bottom row, past the volume group.
 const NOTE_X: u16 = 24;
+/// Where the auto-dj frame stands: a few columns in from the left edge,
+/// so the frame does not hug it.
+pub(super) const DJ_X: u16 = 4;
 
 /// What is playing, as the bar needs it: the words beside the cover, and
 /// the facts the card's third and fourth lines wear (the sheet's, so a
@@ -352,7 +355,7 @@ fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, 
         None => gold_rule(frame, line, area.width),
     }
 
-    // Auto DJ stands at the left edge in its frame; the rest is one group
+    // Auto DJ stands near the left edge in its frame; the rest is one group
     // of frames — repeat, then prev, play, next, then shuffle — centred in
     // the span between it and the card, so the group holds the middle at
     // any width.
@@ -361,11 +364,11 @@ fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, 
     let shuffle_word = t!("gui.shuffle_word").to_string();
     let repeat_word = t!("gui.repeat_word").to_string();
     let (shuffle, repeat) = if legacy { (shuffle_word.as_str(), repeat_word.as_str()) } else { ("⇄", "↻") };
-    let dj_w = tall_compact(frame, s, 1, y, "auto-dj", TallKind::Toggle(v.autodj), Act::AutoDj);
+    let dj_w = tall_compact(frame, s, DJ_X, y, "auto-dj", TallKind::Toggle(v.autodj), Act::AutoDj);
     let (prev, play, next) = play_glyphs(v.paused);
     let group = [repeat, prev, play, next, shuffle];
     let group_w: u16 = group.iter().map(|l| l.chars().count() as u16 + 4).sum::<u16>() + (group.len() as u16 - 1);
-    let free_from = 1 + dj_w + 1;
+    let free_from = DJ_X + dj_w + 1;
     let free_to = card_x(area).saturating_sub(1);
     let mut x = free_from + free_to.saturating_sub(free_from).saturating_sub(group_w) / 2;
     x += tall_compact(frame, s, x, y, repeat, TallKind::Toggle(v.repeat), Act::Repeat) + 1;

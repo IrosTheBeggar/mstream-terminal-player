@@ -384,8 +384,9 @@ forward action as a tall primary on the right.
 **The GUI player's bar** (the "Player bar options" canvas, A′; `src/gui/bar.rs`):
 five rows at the bottom, the tips line under them only while keyboard hints
 are on. The gold rule is the seek bar (times at its ends, the played part
-gold). Beneath it, three rows of compact tall frames: auto-dj at the
-left edge in its state colour, then ONE group centred in the span before
+gold). Beneath it, three rows of compact tall frames: auto-dj a few
+columns in from the left edge in its state colour, then ONE group centred
+in the span before
 the card — repeat, prev, play, next, shuffle: prev and next rounded in
 the text colour BOLD, play THICK in GOLD (`tall_frame_bordered`, the seek
 rule's colour on the one primary action), the toggles rounded in their

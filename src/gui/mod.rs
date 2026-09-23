@@ -2747,7 +2747,7 @@ mod tests {
         let at = |needle: &str| line.char_indices().position(|(i, _)| line[i..].starts_with(needle)).map(|p| p as u16);
         let (dj, repeat, prev, play, next, shuffle) =
             (at("│ auto-dj │"), at("│ ↻ │"), at("│ ◂◂ │"), at("┃ ▮▮ ┃"), at("│ ▸▸ │"), at("│ ⇄ │"));
-        assert_eq!(dj, Some(1), "auto-dj at the left edge: {line:?}");
+        assert_eq!(dj, Some(bar::DJ_X), "auto-dj a few columns in from the left edge: {line:?}");
         assert!(repeat < prev && prev < play && play < next && next < shuffle, "repeat, prev, play, next, shuffle: {line:?}");
         let play = play.unwrap();
         assert_eq!(buf[(play, y)].fg, th().gold, "play's frame is gold");

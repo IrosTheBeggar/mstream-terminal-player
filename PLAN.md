@@ -1978,7 +1978,8 @@ a LATER secondary screen (party view), Columns retired.
   **Then I**: the toggles framed again, repeat moved to the left of prev
   (repeat · prev · play · next · shuffle, auto-dj still at the edge), the
   play frame in GOLD, and the card's hover `[⋯]` removed — a right click
-  or `m` is the playing track's sheet (track-actions deviation logged).
+  or `m` is the playing track's sheet (track-actions deviation logged);
+  auto-dj then padded three columns in from the edge.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the
