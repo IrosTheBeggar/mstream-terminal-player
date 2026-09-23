@@ -1541,10 +1541,12 @@ launcher's terminal choice, not the wizard itself.
 
 ### Phase 10 — The visualizer window: the mobile app's presets, on the desktop
 
-> **Status 2026-09-22: designed, and 10.0 under way.** Feasibility is probed, not projected:
-> a winit window opened from a terminal-launched process, fronted and drew on macOS 26.6,
-> and every pass of the mobile app's nine shader presets compiled through naga for Metal,
-> HLSL and GL. The scratch prototypes are not in the tree; what they proved is below.
+> **Status 2026-09-22: 10.0 is done** — the presets parse, translate, compile for every
+> backend and draw on a real GPU, and the audio texture matches Android's to the byte. 10.1,
+> the window, is next. Feasibility was probed before a line was written: a winit window
+> opened from a terminal-launched process, fronted and drew on macOS 26.6, and every pass of
+> the mobile app's nine presets compiled through naga for Metal, HLSL and GL. Those scratch
+> prototypes are not in the tree; what they proved is below.
 
 The terminal visualizer (`tui::viz`) tops out at half-block resolution, and a picture that
 fills the panel defeats `Canvas::into_lines`' run merging — every cell its own fg/bg pair,
@@ -1654,6 +1656,36 @@ by 2/Σw, a linear-domain EMA of 0.27, and a dB window of −69.7…−20.7 mapp
    `libwayland-*` or `libxkbcommon` in NEEDED on the Linux builds — and the binary-size delta
    against today's is recorded here.
 **Done when:** all seven are green and their numbers are in this section.
+
+**10.0 — done 2026-09-22.** What landed, and what it measured:
+- `assets/visualizer/`: the nine presets at `mstream_music@4ae3dec`, an attribution table and
+  06's one local line. `shader::library` compiles eight of them in; 04 stays out while its
+  license is settled.
+- `shader::preset`: Android's three line patterns ported as scanners that accept exactly what
+  its regexes do — a marker without its closing `===` is a comment there, so it is here — plus
+  the Dart side's `// param:` and title rules.
+- `shader::glsl`: the preamble, the `sampler2D` split, the `inout` hoist and the image-pass
+  flip, over a token stream. Each refuses by name where it cannot be exact.
+- `shader::matrix`: **60 of 60** — all fifteen passes through Metal, HLSL, SPIR-V and GLSL.
+  SPIR-V went from 11/15 to 15/15 with the hoist, and MountainBytes needs no hand edit at all.
+  Four canaries pin the naga bugs the rewrites answer; a layout test reads the uniform offsets
+  and bindings back out of naga.
+- `shader::audio`: golden vectors from the unmodified `audio_texture.cpp`, with the generator
+  and GL stubs to rebuild them (`test/golden/audio_texture/`; its README's recipe reproduces
+  the file byte for byte). **None of the 10,240 bytes differ** on this Mac; the test allows
+  ±1 for another platform's libm.
+- `mstream-player viz-probe`: on an M3 Pro (Metal), release build, all eight built-in presets
+  compiled in 26–292 ms and drew at 640×360 in 0.3–1.1 ms a frame. The frames were checked by
+  eye — upright, 05's feedback trails, MountainBytes' terrain from its two buffers — and a
+  debug and a release run drew them byte for byte alike: the probe is deterministic.
+- Linkage, on paper: every GPU and display library in the Linux graph is opened at run time —
+  ash `loaded`, khronos-egl `dynamic`, wayland-sys `dlopen` (declared so by wgpu-hal itself),
+  renderdoc through libloading, no drm. `test/linkage.sh` holds CI's x86_64 build and all
+  three shipped Linux binaries to it; its first real run is the next push.
+- Size: 24.7 MB → 28.9 MB for aarch64-apple-darwin in the release profile (+4.2 MB, +17%),
+  nearly all of it wgpu and naga — the eight embedded presets are 67 KB of it.
+- Unmeasured: any driver but this Mac's — DX12, Vulkan, a Mesa GL, a Pi. `viz-probe` is the
+  tool, and `WGPU_BACKEND` picks the backend it asks.
 
 **10.1 — The window.** `viz-window` with the six single-pass presets (01, 02, 03, 06, 07, 08):
 winit + a wgpu surface; `PresentMode::Fifo`, never a busy loop; no rendering while occluded or
