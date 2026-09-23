@@ -256,16 +256,26 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             if hover {
                 // The grip and the sheet's verb on the first line (clauses
                 // 17–18), registered after the row so they win their cells.
+                // Each verb dim at rest and bright under the hand (the text
+                // button's rule); the remove wears the destructive colour
+                // only under the pointer, the kit's per-row remove.
                 let grip = Rect { x: area.width - 7, y, width: 1, height: 1 };
-                put(frame, grip.x, y, if crate::kit::theme::legacy_conhost() { "=" } else { "≡" }, dim());
+                let grip_style = if ui.hovers(grip) { bright_bold() } else { dim() };
+                put(frame, grip.x, y, if crate::kit::theme::legacy_conhost() { "=" } else { "≡" }, grip_style);
                 ui.click(grip, Act::QueueGrip(index));
                 ui.tip(grip, t!("gui.queue.grip_tip").to_string());
                 let more = Rect { x: area.width - 5, y, width: 3, height: 1 };
-                put(frame, more.x, y, if crate::kit::theme::legacy_conhost() { "[.]" } else { "[⋯]" }, dim());
+                let more_style = if ui.hovers(more) { bright_bold() } else { dim() };
+                put(frame, more.x, y, if crate::kit::theme::legacy_conhost() { "[.]" } else { "[⋯]" }, more_style);
                 ui.click(more, Act::QueueMore(index));
                 ui.tip(more, t!("gui.act.more_tip").to_string());
                 let cell = Rect { x: area.width - 5, y: last, width: 3, height: 1 };
-                put(frame, cell.x, cell.y, "[x]", dim());
+                let x_style = if ui.hovers(cell) {
+                    Style::default().fg(th().danger).add_modifier(Modifier::BOLD)
+                } else {
+                    dim()
+                };
+                put(frame, cell.x, cell.y, "[x]", x_style);
                 ui.click(cell, Act::QueueRemove(index));
                 ui.tip(cell, t!("gui.queue.remove_tip").to_string());
             } else if !time.is_empty() {
@@ -539,8 +549,21 @@ mod tests {
     fn the_hover_x_takes_the_lengths_place_on_the_last_line() {
         let mut gui = two_rows();
         gui.ui.pointer = Some(Position { x: 80, y: 4 });
-        let rows = lines(&draw(&mut gui));
+        let buf = draw(&mut gui);
+        let rows = lines(&buf);
         assert_eq!(cells(&rows[6], 95, 3), "[x]", "the [x] on the hovered row's last line");
+        assert_ne!(buf[(95, 6)].fg, th().danger, "dim until the hand reaches it");
+        // The verbs answer the hand one by one: the remove in the
+        // destructive colour, the sheet's verb bright like a text button.
+        gui.ui.pointer = Some(Position { x: 96, y: 6 });
+        let buf = draw(&mut gui);
+        assert_eq!(buf[(95, 6)].fg, th().danger, "the [x] under the pointer wears the destructive colour");
+        assert!(buf[(95, 6)].modifier.contains(Modifier::BOLD));
+        gui.ui.pointer = Some(Position { x: 96, y: 4 });
+        let buf = draw(&mut gui);
+        assert_eq!(buf[(95, 4)].fg, th().bright, "the [⋯] under the pointer brightens");
+        gui.ui.pointer = Some(Position { x: 80, y: 4 });
+        let rows = lines(&draw(&mut gui));
         assert!(!rows[6].contains("4:12"), "in the length's place: {:?}", rows[6]);
         assert!(cells(&rows[6], TEXT, 10) == "Late Shift", "the album did not move");
         assert_eq!(cells(&rows[9], 94, 4), "3:48", "the other row keeps its length");

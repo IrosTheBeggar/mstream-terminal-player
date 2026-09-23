@@ -257,7 +257,8 @@ fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &Ba
         s.context(rect, Act::NowMore);
         if hover {
             let cell = Rect { x: area.width - 7, y, width: 3, height: 1 };
-            put(frame, cell.x, y, if crate::kit::theme::legacy_conhost() { "[.]" } else { "[⋯]" }, dim());
+            let style = if s.hovers(cell) { bright_bold() } else { dim() };
+            put(frame, cell.x, y, if crate::kit::theme::legacy_conhost() { "[.]" } else { "[⋯]" }, style);
             s.click(cell, Act::NowMore);
             s.tip(cell, t!("gui.act.more_tip").to_string());
         }

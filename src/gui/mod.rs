@@ -1517,7 +1517,9 @@ fn draw_pane_rows(
                     let mut x = rect.right() - 3;
                     for (glyph, act, tip) in verbs.into_iter().rev() {
                         let cell = Rect { x, y, width: 3, height: 1 };
-                        put(frame, x, y, glyph, dim());
+                        // Dim at rest, bright under the hand — the text
+                        // button's rule, so the verb about to fire says so.
+                        put(frame, x, y, glyph, if ui.hovers(cell) { bright_bold() } else { dim() });
                         ui.click(cell, act);
                         ui.tip(cell, tip.to_string());
                         x = x.saturating_sub(4);
@@ -2403,6 +2405,13 @@ mod tests {
         rows(&terminal)
     }
 
+    /// The frame with its styles, for the tests that read colour.
+    fn draw_buffer(gui: &mut Gui) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, gui)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
     /// A connected App with a listed Files pane, no server involved.
     fn browsing_gui() -> Gui {
         let mut gui = test_gui();
@@ -2487,6 +2496,15 @@ mod tests {
         assert!(hovered.contains("[+]"), "the queue-add: {hovered}");
         assert!(hovered.contains("[»]") || hovered.contains("[^]"), "add next: {hovered}");
         assert!(hovered.contains("[▸]") || hovered.contains("[>]"), "play now: {hovered}");
+
+        // Under the hand a verb brightens like every text button, and its
+        // neighbours stay dim — the one about to fire says so.
+        let col = hovered.char_indices().position(|(i, _)| hovered[i..].starts_with("[+]")).unwrap() as u16;
+        gui.ui.pointer = Some(Position { x: col + 1, y: 7 });
+        let buf = draw_buffer(&mut gui);
+        assert_eq!(buf[(col, 7)].fg, th().bright, "the hovered verb brightens");
+        assert!(buf[(col, 7)].modifier.contains(Modifier::BOLD), "and takes weight");
+        assert_ne!(buf[(col - 4, 7)].fg, th().bright, "the verb beside it stays dim");
     }
 
     #[test]
