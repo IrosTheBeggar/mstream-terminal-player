@@ -2474,6 +2474,7 @@ mod tests {
             }),
             dj_sources_off: Vec::new(),
             dj_min_rating: None,
+            dj_genre_filter: None,
             dj_genre_mode: None,
             dj_genres: None,
             extra: Default::default(),

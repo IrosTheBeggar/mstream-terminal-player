@@ -2759,10 +2759,10 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
         }
         DjRow::Genres => {
             let library = app.dj_library();
-            let mode = library.genre_mode.label().to_string();
-            if library.genre_mode == crate::dj::GenreMode::Off {
-                return vec![value(mode), note("Enter to choose".into())];
+            if !library.genre_filter {
+                return vec![value("off".to_string()), note("Enter to choose".into())];
             }
+            let mode = library.genre_mode.label().to_string();
             let chosen = if library.genres.is_empty() {
                 "none chosen — Enter to pick".to_string()
             } else {
@@ -2865,12 +2865,12 @@ fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) {
             Box::new(move |name: &str| !sources_off.iter().any(|s| s == name)),
         )
     } else if let Some(picker) = app.dj_panel.genres.as_ref() {
-        (
-            picker,
-            format!(" Genres · {} ", app.dj.genre_mode.label()),
-            "  no genres tagged",
-            Box::new(|name: &str| app.dj.genres.iter().any(|g| g == name)),
-        )
+        // The DJ's library's rule, not the session-wide fallback: a server
+        // entry with rules of its own keeps its chosen genres there.
+        let library = app.dj_library();
+        let title = format!(" Genres · {} ", if library.genre_filter { library.genre_mode.label() } else { "off" });
+        let genres = library.genres;
+        (picker, title, "  no genres tagged", Box::new(move |name: &str| genres.iter().any(|g| g == name)))
     } else {
         return;
     };

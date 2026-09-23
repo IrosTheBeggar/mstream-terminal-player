@@ -82,7 +82,14 @@ pub enum DjEdit {
     EmptyQueue(dj::EmptyQueueStart),
     /// Whitelist or blacklist; Off is the switch (a step on the Genres row
     /// cycles all three, the TUI's habit).
+    /// The mode apart from the switch (clause 48; the record's
+    /// `autoDJGenreMode` beside `autoDJGenreEnabled`) — the switch is the
+    /// row's [`DjEdit::Step`], like every other switch: switching off keeps
+    /// whitelist or blacklist for the next switch on, and a click never
+    /// has to pass through the other mode to get there.
     GenreMode(dj::GenreMode),
+    /// The TUI row's ←→: off → whitelist → blacklist → off, one key.
+    GenreCycle,
     /// A genre in or out of the chosen set.
     Genre(String),
     AddKeyword(String),
@@ -883,6 +890,8 @@ impl App {
             DjRow::Armed => self.toggle_autodj(),
             // Not values: Enter opens or asks; ←→ have nothing to move.
             DjRow::Sources | DjRow::Sample => Vec::new(),
+            // One row for a switch and a mode: the arrows walk the three states.
+            DjRow::Genres => self.dj_edit(DjEdit::GenreCycle),
             row => self.dj_edit(DjEdit::Step(row, delta)),
         }
     }
@@ -948,8 +957,8 @@ impl App {
                 }
                 DjRow::UnknownLength => self.dj.allow_unknown_length = !self.dj.allow_unknown_length,
                 DjRow::Genres => {
-                    let mode = self.dj_library().genre_mode.next();
-                    effects = self.set_dj_genre_mode(mode);
+                    let on = !self.dj_library().genre_filter;
+                    effects = self.set_dj_genre_filter(on);
                 }
                 DjRow::Keywords => self.dj.keyword_filter = !self.dj.keyword_filter,
             },
@@ -977,6 +986,14 @@ impl App {
             }
             DjEdit::EmptyQueue(choice) => self.dj.empty_queue = choice,
             DjEdit::GenreMode(mode) => effects = self.set_dj_genre_mode(mode),
+            DjEdit::GenreCycle => {
+                let library = self.dj_library();
+                effects = match (library.genre_filter, library.genre_mode) {
+                    (false, _) => self.set_dj_genre_rule(true, dj::GenreMode::Whitelist),
+                    (true, dj::GenreMode::Whitelist) => self.set_dj_genre_rule(true, dj::GenreMode::Blacklist),
+                    (true, dj::GenreMode::Blacklist) => self.set_dj_genre_rule(false, dj::GenreMode::Blacklist),
+                };
+            }
             DjEdit::Genre(name) => effects = self.toggle_dj_genre(name),
             DjEdit::AddKeyword(word) => {
                 let word = word.trim().to_string();
@@ -1042,17 +1059,33 @@ impl App {
         }
     }
 
-    fn set_dj_genre_mode(&mut self, mode: dj::GenreMode) -> Vec<Effect> {
+    /// The genre rule's two fields (clause 48), written where the library's
+    /// rules live. Set apart on purpose: the switch never touches the mode,
+    /// so whitelist or blacklist survives a switch off, and the mode never
+    /// touches the switch.
+    fn set_dj_genre_rule(&mut self, filter: bool, mode: dj::GenreMode) -> Vec<Effect> {
         match self.dj_library_entry() {
             Some(i) => {
+                self.servers[i].dj.genre_filter = Some(filter);
                 self.servers[i].dj.genre_mode = Some(mode.label().to_string());
                 self.save_dj_library(i)
             }
             None => {
+                self.dj.genre_filter = filter;
                 self.dj.genre_mode = mode;
                 Vec::new()
             }
         }
+    }
+
+    fn set_dj_genre_mode(&mut self, mode: dj::GenreMode) -> Vec<Effect> {
+        let filter = self.dj_library().genre_filter;
+        self.set_dj_genre_rule(filter, mode)
+    }
+
+    fn set_dj_genre_filter(&mut self, on: bool) -> Vec<Effect> {
+        let mode = self.dj_library().genre_mode;
+        self.set_dj_genre_rule(on, mode)
     }
 
     /// A genre in or out of the chosen set (clause 48), at most
@@ -1070,20 +1103,18 @@ impl App {
             }
             genres.push(name);
         }
-        let mode = if library.genre_mode == dj::GenreMode::Off && !genres.is_empty() {
-            dj::GenreMode::Whitelist
-        } else {
-            library.genre_mode
-        };
+        // Choosing with the filter off switches it on; the mode is its own.
+        let filter = library.genre_filter || !genres.is_empty();
         match self.dj_library_entry() {
             Some(i) => {
                 self.servers[i].dj.genres = Some(genres);
-                self.servers[i].dj.genre_mode = Some(mode.label().to_string());
+                self.servers[i].dj.genre_filter = Some(filter);
+                self.servers[i].dj.genre_mode = Some(library.genre_mode.label().to_string());
                 self.save_dj_library(i)
             }
             None => {
                 self.dj.genres = genres;
-                self.dj.genre_mode = mode;
+                self.dj.genre_filter = filter;
                 Vec::new()
             }
         }

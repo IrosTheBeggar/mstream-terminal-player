@@ -168,12 +168,15 @@ pub enum EmptyQueueStart {
     Pick,
 }
 
+/// Which way the genre filter cuts. The filter's SWITCH is a field of its
+/// own (`genre_filter`), the record's `autoDJGenreEnabled` beside
+/// `autoDJGenreMode`: switching off keeps the mode for the next switch on,
+/// and a switch never has to step through the other mode to get there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GenreMode {
-    #[default]
-    Off,
     /// Only these genres. Note this also excludes untagged tracks — the
     /// server treats "only these" as the stricter promise.
+    #[default]
     Whitelist,
     /// Anything but these. Untagged tracks pass.
     Blacklist,
@@ -232,23 +235,16 @@ impl EmptyQueueStart {
 impl GenreMode {
     pub fn label(self) -> &'static str {
         match self {
-            GenreMode::Off => "off",
             GenreMode::Whitelist => "whitelist",
             GenreMode::Blacklist => "blacklist",
         }
     }
+    /// "off" — a file from before the switch had its own key — reads as
+    /// the default mode; the switch itself is read by `Settings::from_prefs`.
     pub fn from_label(raw: &str) -> Self {
         match raw {
-            "whitelist" => GenreMode::Whitelist,
             "blacklist" => GenreMode::Blacklist,
-            _ => GenreMode::Off,
-        }
-    }
-    pub fn next(self) -> Self {
-        match self {
-            GenreMode::Off => GenreMode::Whitelist,
-            GenreMode::Whitelist => GenreMode::Blacklist,
-            GenreMode::Blacklist => GenreMode::Off,
+            _ => GenreMode::Whitelist,
         }
     }
 }
@@ -277,8 +273,10 @@ pub struct Settings {
     pub allow_unknown_length: bool,
     pub keyword_filter: bool,
     pub keywords: Vec<String>,
-    /// The library fallbacks: 1–10 or zero for no floor; the genre filter.
+    /// The library fallbacks: 1–10 or zero for no floor; the genre filter —
+    /// its switch and its mode apart, so the mode survives a switch off.
     pub min_rating: u32,
+    pub genre_filter: bool,
     pub genre_mode: GenreMode,
     pub genres: Vec<String>,
 }
@@ -355,6 +353,9 @@ impl Settings {
                 .take(KEYWORDS_MAX)
                 .collect(),
             min_rating: prefs.min_rating.min(RATING_MAX),
+            // A file from before the switch had its own key wrote "off" into
+            // the mode: that reads as the switch off, with whitelist kept.
+            genre_filter: prefs.genre_filter.unwrap_or(prefs.genre_mode != "off"),
             genre_mode: GenreMode::from_label(&prefs.genre_mode),
             genres: prefs.genres.clone(),
         }
@@ -378,6 +379,7 @@ impl Settings {
             keyword_filter: self.keyword_filter,
             keywords: self.keywords.clone(),
             min_rating: self.min_rating,
+            genre_filter: Some(self.genre_filter),
             genre_mode: self.genre_mode.label().to_string(),
             genres: self.genres.clone(),
             // Only the room's own settings are here; whatever a newer
@@ -412,6 +414,8 @@ pub struct LibraryFilters {
     pub sources_off: Vec<String>,
     /// 1–10, or zero for no floor.
     pub min_rating: u32,
+    /// The genre filter's switch and its mode, two fields (clause 48).
+    pub genre_filter: bool,
     pub genre_mode: GenreMode,
     pub genres: Vec<String>,
     /// A federated peer: a key or a guest has no stars, so no rating goes
@@ -429,11 +433,16 @@ impl LibraryFilters {
         LibraryFilters {
             sources_off: own.sources_off.clone(),
             min_rating: own.min_rating.unwrap_or(settings.min_rating).min(RATING_MAX),
-            genre_mode: own
-                .genre_mode
-                .as_deref()
-                .map(GenreMode::from_label)
-                .unwrap_or(settings.genre_mode),
+            // An entry from before the switch had its own field said "off"
+            // in the mode: its switch off, and the mode falls back.
+            genre_filter: own.genre_filter.unwrap_or(match own.genre_mode.as_deref() {
+                Some("off") => false,
+                _ => settings.genre_filter,
+            }),
+            genre_mode: match own.genre_mode.as_deref() {
+                Some("off") | None => settings.genre_mode,
+                Some(raw) => GenreMode::from_label(raw),
+            },
             genres: own.genres.clone().unwrap_or_else(|| settings.genres.clone()),
             is_peer,
         }
@@ -480,7 +489,7 @@ impl Ask {
         if lib.min_rating > 0 && !lib.is_peer {
             r.min_rating = Some(lib.min_rating.min(RATING_MAX));
         }
-        if lib.genre_mode != GenreMode::Off && !lib.genres.is_empty() {
+        if lib.genre_filter && !lib.genres.is_empty() {
             r.genres = lib.genres.clone();
             r.genre_mode = Some(lib.genre_mode.label().to_string());
         }
@@ -852,6 +861,7 @@ mod tests {
         a.library = LibraryFilters {
             sources_off: vec!["Audiobooks".into()],
             min_rating: 6,
+            genre_filter: true,
             genre_mode: GenreMode::Blacklist,
             genres: vec!["Podcast".into()],
             is_peer: false,
@@ -887,7 +897,7 @@ mod tests {
         s.allow_unknown_length = true;
         s.songs_per_fetch = 1;
         s.artist_cooldown = 0;
-        s.genre_mode = GenreMode::Whitelist; // but no genres chosen
+        s.genre_filter = true; // but no genres chosen
         let body = json(&ask(s));
         for absent in ["minDuration", "maxDuration", "allowUnknownDuration", "limit",
                        "ignoreArtists", "genres", "genreMode"] {
@@ -907,19 +917,60 @@ mod tests {
     fn a_servers_own_rules_stand_over_the_fallbacks() {
         let mut s = Settings::default();
         s.min_rating = 4;
-        s.genre_mode = GenreMode::Whitelist;
+        s.genre_filter = true;
+        s.genre_mode = GenreMode::Blacklist;
         s.genres = vec!["Jazz".into()];
         let own = crate::config::DjLibraryOverrides {
             sources_off: vec!["Kids".into()],
             min_rating: Some(8),
+            genre_filter: None,
             genre_mode: None,
             genres: None,
         };
         let lib = LibraryFilters::resolve(&s, &own, false);
         assert_eq!(lib.sources_off, vec!["Kids"]);
         assert_eq!(lib.min_rating, 8, "the entry's own floor");
-        assert_eq!(lib.genre_mode, GenreMode::Whitelist, "the fallback where it set none");
+        assert!(lib.genre_filter, "the fallback where it set none");
+        assert_eq!(lib.genre_mode, GenreMode::Blacklist);
         assert_eq!(lib.genres, vec!["Jazz"]);
+    }
+
+    #[test]
+    fn the_genre_switch_and_its_mode_are_two_fields_and_an_old_off_is_the_switch_off() {
+        let mut prefs = crate::config::AutoDjPrefs::default();
+        prefs.genre_mode = "off".to_string();
+        prefs.genre_filter = None;
+        let s = Settings::from_prefs(&prefs);
+        assert!(!s.genre_filter, "a file from before the switch had its own key");
+        assert_eq!(s.genre_mode, GenreMode::Whitelist);
+        prefs.genre_mode = "blacklist".to_string();
+        let s = Settings::from_prefs(&prefs);
+        assert!(s.genre_filter && s.genre_mode == GenreMode::Blacklist, "an old on reads on, its mode kept");
+        let written = s.to_prefs();
+        assert_eq!((written.genre_filter, written.genre_mode.as_str()), (Some(true), "blacklist"), "two keys");
+
+        // Off sends nothing, whatever the mode and the genres say.
+        let mut s = Settings::default();
+        s.genre_filter = false;
+        s.genre_mode = GenreMode::Blacklist;
+        s.genres = vec!["Podcast".into()];
+        let body = json(&ask(s.clone()));
+        assert!(body.get("genres").is_none() && body.get("genreMode").is_none(), "off sends nothing: {body}");
+
+        // An entry's old "off" is its switch off; its own two fields stand over the fallbacks.
+        s.genre_filter = true;
+        let legacy = crate::config::DjLibraryOverrides { genre_mode: Some("off".into()), ..Default::default() };
+        let lib = LibraryFilters::resolve(&s, &legacy, false);
+        assert!(!lib.genre_filter, "the entry's old \"off\"");
+        assert_eq!(lib.genre_mode, GenreMode::Blacklist, "and the mode falls back");
+        s.genre_filter = false;
+        let own = crate::config::DjLibraryOverrides {
+            genre_filter: Some(true),
+            genre_mode: Some("whitelist".into()),
+            ..Default::default()
+        };
+        let lib = LibraryFilters::resolve(&s, &own, false);
+        assert!(lib.genre_filter && lib.genre_mode == GenreMode::Whitelist, "the entry's own two fields");
     }
 
     #[test]

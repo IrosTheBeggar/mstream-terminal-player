@@ -257,6 +257,7 @@ pub(crate) fn known_servers(
             dj: config::DjLibraryOverrides {
                 sources_off: entry.dj_sources_off.clone(),
                 min_rating: entry.dj_min_rating,
+                genre_filter: entry.dj_genre_filter,
                 genre_mode: entry.dj_genre_mode.clone(),
                 genres: entry.dj_genres.clone(),
             },

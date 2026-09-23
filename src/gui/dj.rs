@@ -353,7 +353,7 @@ fn lines(gui: &Gui, width: usize) -> Vec<L> {
             }
             DjRow::Genres => {
                 v.push(L::Switch(row));
-                if library.genre_mode != GenreMode::Off {
+                if library.genre_filter {
                     v.push(L::Radio(
                         Item::GenreMode(GenreMode::Whitelist),
                         t!("gui.dj.whitelist").to_string(),
@@ -739,7 +739,7 @@ fn draw_switch(
             None,
         ),
         DjRow::Genres => (
-            gui.app.dj_library().genre_mode != GenreMode::Off,
+            gui.app.dj_library().genre_filter,
             t!("gui.dj.genre").to_string(),
             t!("gui.dj.genre_sub").to_string(),
             None,
@@ -1923,7 +1923,7 @@ mod tests {
         key(&mut gui, KeyCode::Char(' '));
         let entry = &gui.app.servers[0].dj;
         assert_eq!(entry.genres.as_deref(), Some(&["Techno".to_string()][..]), "written to the server's entry");
-        assert_eq!(entry.genre_mode.as_deref(), Some("whitelist"), "choosing switches the filter on");
+        assert_eq!((entry.genre_filter, entry.genre_mode.as_deref()), (Some(true), Some("whitelist")), "choosing switches the filter on");
         assert!(gui.pending.iter().any(|e| matches!(e, Effect::SaveDjLibrary { .. })), "and saved");
         key(&mut gui, KeyCode::Esc);
         assert!(gui.app.dj_panel.genres.is_none());
@@ -1931,6 +1931,32 @@ mod tests {
         let all = rows.join("\n");
         assert!(all.contains("(•) Whitelist") && all.contains("Techno [x]"), "{all}");
         assert_eq!(hit_text(&gui, &rows, "Techno [x]"), Some(Act::DjGenre("Techno".into())));
+    }
+
+    #[test]
+    fn the_genre_switch_and_the_mode_are_two_controls() {
+        let mut gui = room_gui();
+        gui.app.servers.push(known(HOST, "host"));
+        let rows = draw_tall(&mut gui);
+        assert!(!rows.join("\n").contains("(•) Whitelist"), "off: no radios");
+        assert_eq!(hit_text(&gui, &rows, "Genre filter"), Some(Act::DjStep(DjRow::Genres, 1)), "the switch row");
+        gui.act(Act::DjStep(DjRow::Genres, 1));
+        assert!(gui.app.dj_library().genre_filter);
+        let all = draw_tall(&mut gui).join("\n");
+        assert!(all.contains("[✓] Genre filter") && all.contains("(•) Whitelist"), "on, whitelist by default: {all}");
+        // Blacklist chosen, then ONE click on the switch: off, and the
+        // choice is kept for the next switch on. (It used to step the
+        // mode first, so a checked whitelist landed on blacklist.)
+        gui.act(Act::DjGenreMode(GenreMode::Blacklist));
+        assert_eq!(gui.app.dj_library().genre_mode, GenreMode::Blacklist);
+        gui.act(Act::DjStep(DjRow::Genres, 1));
+        assert!(!gui.app.dj_library().genre_filter, "one click switches off");
+        assert_eq!(gui.app.dj_library().genre_mode, GenreMode::Blacklist, "the mode is kept while off");
+        let entry = &gui.app.servers[0].dj;
+        assert_eq!((entry.genre_filter, entry.genre_mode.as_deref()), (Some(false), Some("blacklist")), "two fields");
+        gui.act(Act::DjStep(DjRow::Genres, 1));
+        let all = draw_tall(&mut gui).join("\n");
+        assert!(all.contains("(•) Blacklist"), "on again as blacklist: {all}");
     }
 
     #[test]

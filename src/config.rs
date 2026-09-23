@@ -248,8 +248,15 @@ pub struct AutoDjPrefs {
     /// Minimum rating, 1–10; zero means no floor. A server entry's own
     /// `dj_min_rating` overrides it.
     pub min_rating: u32,
-    /// "off", "whitelist" (only these) or "blacklist" (anything but these);
-    /// a server entry's own `dj_genre_mode` / `dj_genres` override.
+    /// The genre filter's switch, apart from its mode (the record's
+    /// `autoDJGenreEnabled` beside `autoDJGenreMode`). Absent in a file from
+    /// before it existed — there `genre_mode = "off"` was the switch off,
+    /// and the migration reads it so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genre_filter: Option<bool>,
+    /// "whitelist" (only these) or "blacklist" (anything but these), kept
+    /// while the switch is off; a server entry's own `dj_genre_filter` /
+    /// `dj_genre_mode` / `dj_genres` override.
     pub genre_mode: String,
     pub genres: Vec<String>,
     /// Legacy (the three-mode panel): a percent, "off" / "compatible" /
@@ -289,6 +296,12 @@ impl Default for AutoDjPrefs {
             keyword_filter: false,
             keywords: Vec::new(),
             min_rating: 0,
+            // The legacy spelling on purpose: with `genre_filter` absent, a
+            // mode of "off" is what reads as the switch off (see
+            // `dj::Settings::from_prefs`) — for a config with no key at all
+            // as much as for a file from before the switch had one. A
+            // player never writes "off" itself.
+            genre_filter: None,
             genre_mode: "off".to_string(),
             genres: Vec::new(),
             tempo_tolerance: None,
@@ -306,6 +319,9 @@ impl Default for AutoDjPrefs {
 pub struct DjLibraryOverrides {
     pub sources_off: Vec<String>,
     pub min_rating: Option<u32>,
+    /// The genre filter's switch and mode, two fields; an entry from before
+    /// the switch had its own said "off" in the mode.
+    pub genre_filter: Option<bool>,
     pub genre_mode: Option<String>,
     pub genres: Option<Vec<String>>,
 }
@@ -557,6 +573,8 @@ pub struct ServerEntry {
     pub dj_sources_off: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dj_min_rating: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dj_genre_filter: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dj_genre_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1052,6 +1070,7 @@ pub fn save_dj_library(identity: &str, overrides: &DjLibraryOverrides) -> Result
     };
     entry.dj_sources_off = overrides.sources_off.clone();
     entry.dj_min_rating = overrides.min_rating;
+    entry.dj_genre_filter = overrides.genre_filter;
     entry.dj_genre_mode = overrides.genre_mode.clone();
     entry.dj_genres = overrides.genres.clone();
     save(&config)

@@ -3576,8 +3576,15 @@ fn remembered_preferences_are_applied_and_handed_back() {
     assert!(app.blend_skips);
     assert!(app.pause_fade);
 
-    // What goes out matches what came in, so a restart is a no-op.
-    assert_eq!(app.prefs(), saved);
+    // What goes out matches what came in — in the current spelling: the
+    // genre rule's legacy "off" comes back as its two keys — so a restart
+    // is a no-op, and the second round trip is the identity.
+    let mut expected = saved.clone();
+    expected.dj.genre_filter = Some(false);
+    expected.dj.genre_mode = "whitelist".into();
+    let out = app.prefs();
+    assert_eq!(out, expected);
+    assert_eq!(App::new(None, None, None).with_prefs(&out).prefs(), out, "stable from then on");
 }
 
 #[test]
@@ -5089,6 +5096,29 @@ fn the_genre_chooser_owns_the_keyboard_while_it_is_open() {
 }
 
 #[test]
+fn the_genre_rows_arrows_cycle_the_rule_and_the_switch_keeps_the_mode() {
+    let mut app = connected_app();
+    on_the_dj_tab(&mut app);
+    app.dj_panel.row = app.dj_panel.rows.iter().position(|r| *r == DjRow::Genres).unwrap();
+    assert!(!app.dj.genre_filter);
+    app.adjust_dj_row(1);
+    assert_eq!((app.dj.genre_filter, app.dj.genre_mode), (true, dj::GenreMode::Whitelist));
+    app.adjust_dj_row(1);
+    assert_eq!(app.dj.genre_mode, dj::GenreMode::Blacklist);
+    app.adjust_dj_row(1);
+    assert!(!app.dj.genre_filter, "off again");
+    assert_eq!(app.dj.genre_mode, dj::GenreMode::Blacklist, "the mode is kept while off");
+    // The switch itself (both shells' checkbox) toggles without touching the
+    // mode — a click on a checked whitelist must never land on blacklist.
+    app.dj_edit(crate::tui::app::DjEdit::Step(DjRow::Genres, 1));
+    assert_eq!((app.dj.genre_filter, app.dj.genre_mode), (true, dj::GenreMode::Blacklist));
+    app.dj_edit(crate::tui::app::DjEdit::GenreMode(dj::GenreMode::Whitelist));
+    assert_eq!((app.dj.genre_filter, app.dj.genre_mode), (true, dj::GenreMode::Whitelist));
+    app.dj_edit(crate::tui::app::DjEdit::Step(DjRow::Genres, 1));
+    assert_eq!((app.dj.genre_filter, app.dj.genre_mode), (false, dj::GenreMode::Whitelist));
+}
+
+#[test]
 fn choosing_a_genre_switches_the_filter_on() {
     // Picking genres while the mode is off would do nothing at all, which
     // reads as the chooser being broken.
@@ -5111,7 +5141,8 @@ fn choosing_a_genre_switches_the_filter_on() {
 
     app.handle_action(Action::PlayPause); // toggle "Ambient"
     assert_eq!(app.dj.genres, vec!["Ambient"]);
-    assert_eq!(app.dj.genre_mode, dj::GenreMode::Whitelist, "switched on for you");
+    assert!(app.dj.genre_filter, "switched on for you");
+    assert_eq!(app.dj.genre_mode, dj::GenreMode::Whitelist, "in the default mode");
 
     // And toggling it back off leaves nothing selected.
     app.handle_action(Action::PlayPause);

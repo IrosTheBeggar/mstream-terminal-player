@@ -2011,6 +2011,15 @@ a LATER secondary screen (party view), Columns retired.
   (DECSCUSR 5) and was replaced the same day: a terminal profile can veto
   that blink, and the ask was a caret that always blinks. The wizard,
   admin rooms and web shell keep the steady `▏` for now.
+- **Bug: the genre switch stepped its mode ✅ 2026-09-23** — in the Auto
+  DJ room a click on the checked Genre filter with Whitelist chosen landed
+  on Blacklist, and only a second click switched it off, because the
+  switch and the radios shared one three-way `genre_mode`. Decoupled the
+  record's way: `genre_filter` (the switch) beside a two-way `genre_mode`,
+  in `[player.dj]` and on a server entry (`dj_genre_filter`), old "off"
+  values reading as the switch off; `DjEdit::GenreFilter` / `GenreCycle`
+  on the App, the TUI row keeping its three-state ←→ walk, its picker
+  reading the DJ library's genres. Tests on the model, the App, the GUI.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the

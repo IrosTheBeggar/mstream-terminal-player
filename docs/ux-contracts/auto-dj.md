@@ -445,13 +445,15 @@ keyword_filter = false
 keywords = []
 # the per-library fallbacks — a [[server]] entry may carry its own
 min_rating = 0
-genre_mode = "off"           # | "whitelist" | "blacklist"
+genre_filter = false         # the switch (2026-09-23; the record's autoDJGenreEnabled)
+genre_mode = "whitelist"     # | "blacklist" — kept while the switch is off
 genres = []
 
 [[server]]
 url = "http://…"
 dj_sources_off = ["Audiobooks"]   # vpaths switched OFF (clause 42)
 dj_min_rating = 6                 # optional, overrides [player.dj]
+dj_genre_filter = true
 dj_genre_mode = "whitelist"
 dj_genres = ["Jazz"]
 ```
@@ -462,7 +464,10 @@ old mode never named one); `sonic_tightness` → dropped (the record's model is 
 and a raw band; the default is on at .55); `tempo_tolerance` (a percent)
 → `bpm = tempo_tolerance > 0`, `bpm_tolerance = 8` (a percent cannot be
 reinterpreted); `key_matching` → `harmonic = key_matching != "off"`
-(strict is gone). Unknown keys survive through `extra` as they do today.
+(strict is gone). `genre_mode = "off"` and an entry's `dj_genre_mode =
+"off"` (files from before 2026-09-23, when the switch was a third value
+of the mode) → the switch off, the mode whitelist. Unknown keys survive
+through `extra` as they do today.
 
 ### What the tests pin
 
@@ -650,3 +655,16 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
   state as the record's card does — a `•` in the ok colour while armed.
   The tenth room has no digit (`0` is the Now Playing screen); `D` opens
   it, the capital pairing with `A`'s toggle.
+- **2026-09-23 — The genre switch and its mode become two fields**: the
+  first cut folded the record's `autoDJGenreEnabled` and
+  `autoDJGenreMode` into one three-way `genre_mode` (off · whitelist ·
+  blacklist), and the room's switch STEPPED it — so a click on a checked
+  whitelist landed on blacklist and a second click was needed to switch
+  off (found in use). Now `genre_filter` is the switch and `genre_mode`
+  the two-way mode, in `[player.dj]` and on a server entry alike; the
+  switch never touches the mode (blacklist survives a switch off) and the
+  radios never touch the switch. Old "off" values read as the switch off.
+  The TUI's single Genre filter row keeps its ←→ walk off → whitelist →
+  blacklist → off as a keyboard idiom (`DjEdit::GenreCycle`), and its
+  picker now shows the DJ's library's own genres rather than the
+  session-wide fallback.
