@@ -1678,10 +1678,11 @@ by 2/Σw, a linear-domain EMA of 0.27, and a dB window of −69.7…−20.7 mapp
   compiled in 26–292 ms and drew at 640×360 in 0.3–1.1 ms a frame. The frames were checked by
   eye — upright, 05's feedback trails, MountainBytes' terrain from its two buffers — and a
   debug and a release run drew them byte for byte alike: the probe is deterministic.
-- Linkage, on paper: every GPU and display library in the Linux graph is opened at run time —
-  ash `loaded`, khronos-egl `dynamic`, wayland-sys `dlopen` (declared so by wgpu-hal itself),
-  renderdoc through libloading, no drm. `test/linkage.sh` holds CI's x86_64 build and all
-  three shipped Linux binaries to it; its first real run is the next push.
+- Linkage: every GPU and display library in the Linux graph is opened at run time — ash
+  `loaded`, khronos-egl `dynamic`, wayland-sys `dlopen` (declared so by wgpu-hal itself),
+  renderdoc through libloading, no drm. `test/linkage.sh`'s first run, on PR #29's CI, read
+  the x86_64 binary's NEEDED as libasound, libgcc_s, libm, libc and the loader — nothing the
+  visualizer brought. The release workflow holds arm64 and armv7 to the same.
 - Size: 24.7 MB → 28.9 MB for aarch64-apple-darwin in the release profile (+4.2 MB, +17%),
   nearly all of it wgpu and naga — the eight embedded presets are 67 KB of it.
 - Unmeasured: any driver but this Mac's — DX12, Vulkan, a Mesa GL, a Pi. `viz-probe` is the
@@ -1709,7 +1710,9 @@ mobile response-curve divergence. And two in Android's engine, found porting it:
 with an index past 2³¹ (`// === channel image.9999999999 = music`) throws out of `std::stoi` on
 the compile worker's bare thread, which ends the app (reproduced off-device with the parser
 copied verbatim; the size line beside it was hardened against exactly this); and a buffer that
-reads a later buffer gets the frame before last, not the last frame.
+reads a later buffer gets the frame before last, not the last frame. Both fixed, with the
+curve divergence, in mstream_music#207 (2026-09-22) — reproduced on the Android emulator
+before the fix and gone after it, and the Dart curve held to the same golden bytes as ours.
 
 ## Smoke testing
 
