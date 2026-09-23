@@ -27,7 +27,7 @@ use crate::kit::theme::{legacy_conhost, th};
 use crate::tui::worker::{ApiCmd, Event};
 use crate::tui::app::Effect;
 
-use super::{Act, Gui, accent, bright_bold, put, sel};
+use super::{Act, Gui, SettingsRoom, accent, bright_bold, put, sel};
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -174,8 +174,6 @@ struct Outcome {
 pub(crate) struct ServersUi {
     /// The header dropdown is open.
     pub drop_open: bool,
-    /// The Manage Servers room replaces the Settings rows.
-    pub room: bool,
     /// Row cursor in the room: an index into the saved list, or the add
     /// row at `len`.
     pub cursor: usize,
@@ -205,7 +203,6 @@ impl ServersUi {
         let (tx, rx) = channel();
         ServersUi {
             drop_open: false,
-            room: false,
             cursor: 0,
             form: None,
             confirm: None,
@@ -239,7 +236,7 @@ impl ServersUi {
 /// that can be asked directly. A tunnel identity is not an address; the one
 /// exception is the live session, whose loopback bridge can answer for it.
 pub(crate) fn open_room(gui: &mut Gui) {
-    gui.servers.room = true;
+    gui.settings_room = Some(SettingsRoom::Servers);
     gui.servers.cursor = 0;
     let entries: Vec<(String, bool, bool)> = gui
         .config
@@ -777,7 +774,7 @@ pub(crate) fn submit_form(gui: &mut Gui) {
             let shown = crate::quickconnect::display_server(&new_url);
             gui.note = Some((t!("gui.srv.saved", server = shown).to_string(), false));
             gui.servers.form = None;
-            if gui.servers.room {
+            if gui.settings_room == Some(SettingsRoom::Servers) {
                 probe_version(gui, new_url.clone(), new_url, self_signed);
             }
         }
@@ -930,7 +927,7 @@ fn apply_outcome(gui: &mut Gui, outcome: Outcome) {
     } else {
         gui.note = Some((t!("gui.srv.saved", server = shown).to_string(), false));
     }
-    if gui.servers.room {
+    if gui.settings_room == Some(SettingsRoom::Servers) {
         probe_version(gui, url.clone(), url, self_signed);
     }
 }
@@ -1271,7 +1268,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
         return None;
     }
 
-    if gui.servers.room && gui.active == super::SETTINGS_NAV {
+    if gui.in_settings_room(SettingsRoom::Servers) {
         let rows = gui.config.servers.len(); // + the add row at `rows`
         // The cursor walks display order (peers under their parent); the
         // verbs key on the stored entry under it.
@@ -1279,7 +1276,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
         let entry = stored.and_then(|i| gui.config.servers.get(i)).cloned();
         let peer = entry.as_ref().and_then(|e| e.peer.clone());
         match key.code {
-            KeyCode::Esc => gui.servers.room = false,
+            KeyCode::Esc => gui.settings_room = None,
             KeyCode::Down => gui.servers.cursor = (gui.servers.cursor + 1).min(rows),
             KeyCode::Up => gui.servers.cursor = gui.servers.cursor.saturating_sub(1),
             KeyCode::Enter => match stored {
@@ -2875,7 +2872,7 @@ mod tests {
         // and the room hands the browser back to the parent. The room is
         // closed for these looks so the screen holds only the dropdown.
         gui.app.connected = true;
-        gui.servers.room = false;
+        gui.settings_room = None;
         gui.servers.drop_open = true;
         let text = draw(&mut gui).join("\n");
         assert!(text.contains("Paul's NAS"), "{text}");
@@ -2981,13 +2978,13 @@ mod tests {
         let mut gui = two_server_gui();
         gui.active = super::super::SETTINGS_NAV;
         gui.act(Act::Row(super::super::ROW_MANAGE));
-        assert!(gui.servers.room);
+        assert!(gui.settings_room == Some(SettingsRoom::Servers));
         let all = draw(&mut gui).join("\n");
         assert!(all.contains(&t!("gui.srv.title").to_string()));
 
         let handled =
             handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(handled, Some(false));
-        assert!(!gui.servers.room, "Esc closes the room");
+        assert!(gui.settings_room != Some(SettingsRoom::Servers), "Esc closes the room");
     }
 }

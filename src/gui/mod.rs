@@ -313,6 +313,15 @@ impl List {
     }
 }
 
+/// The sub-view a Settings room shows in place of its rows. At most one is
+/// open, so the three flags this replaces can no longer disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsRoom {
+    Servers,
+    Torrent,
+    Dj,
+}
+
 /// What a click on a pane row meant: the row itself, or one of the hover
 /// verbs the track-actions contract names (clause 32 of multi-server for
 /// their meanings).
@@ -449,9 +458,6 @@ pub(crate) struct Gui {
     /// One line above the bar: (text, is_error). Gui-local; the App's own
     /// message shows when this is empty.
     note: Option<(String, bool)>,
-    /// The bar's view of what is playing, rebuilt each pass from the App
-    /// (or the demo seat when nothing real is on).
-    bar_now: Option<Now>,
     /// `MSTREAM_GUI_DEMO=1`: a fixed track shown while the App is idle.
     demo: Option<Now>,
     demo_paused: bool,
@@ -474,6 +480,8 @@ pub(crate) struct Gui {
     /// album wall's grid geometry).
     last_width: u16,
     last_height: u16,
+    /// The Settings sub-view standing in for its rows, when one is open.
+    settings_room: Option<SettingsRoom>,
     /// The saved-server surfaces: dropdown, form, room, pairing QR.
     servers: servers::ServersUi,
     /// The album wall: its page, cell cursor, and per-slot cover caches.
@@ -515,7 +523,6 @@ impl Gui {
             cursor: None,
             queue_open: true,
             note: None,
-            bar_now: None,
             demo: None,
             demo_paused: false,
             files_view: ListView::default(),
@@ -526,6 +533,7 @@ impl Gui {
             last_current: None,
             last_width: MIN_W,
             last_height: MIN_H,
+            settings_room: None,
             servers: servers::ServersUi::new(),
             albums: albums::AlbumsUi::new(),
             queue: queue::QueueUi::new(),
@@ -696,9 +704,7 @@ impl Gui {
                 // Leaving for a section stows every servers surface; the
                 // room is a Settings sub-view, not a place to come back to.
                 self.servers.drop_open = false;
-                self.servers.room = false;
-                self.torrent.room = false;
-                self.dj.room = false;
+                self.settings_room = None;
                 // The shell's own note was about the room being left.
                 self.note = None;
                 // The Library rooms open their root list fresh on every
@@ -775,7 +781,7 @@ impl Gui {
             Act::VolSet(i) => self.set_volume((i as f32 + 1.0) / 10.0),
             Act::Seek(frac) => {
                 if self.app.now_playing.is_some() {
-                    let duration = self.bar_now.as_ref().map_or(0.0, |n| n.duration);
+                    let duration = self.bar_now().map_or(0.0, |n| n.duration);
                     let effects = self.app.seek_to(frac * duration);
                     self.pend(effects);
                 } else if let Some(demo) = &mut self.demo {
@@ -857,9 +863,10 @@ impl Gui {
     }
 
     /// The bar's view of what is playing: the App's track, timestamps and
-    /// waveform — or the demo seat while the App is idle.
-    fn refresh_bar_now(&mut self) {
-        self.bar_now = match &self.app.now_playing {
+    /// waveform — or the demo seat while the App is idle. Computed when
+    /// asked: nothing in it outlives the frame.
+    fn bar_now(&self) -> Option<Now> {
+        match &self.app.now_playing {
             Some(track) => {
                 let duration = if self.app.status.duration > 0.0 {
                     self.app.status.duration
@@ -880,7 +887,7 @@ impl Gui {
                 })
             }
             None => self.demo.clone(),
-        };
+        }
     }
 
     fn bar_paused(&self) -> bool {
@@ -982,7 +989,6 @@ fn clip_lead(text: &str, max: usize) -> String {
 
 /// One frame. Public to the crate so render tests can drive it.
 pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
-    gui.refresh_bar_now();
     gui.ui.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
     let area = frame.area();
@@ -1065,7 +1071,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         std::borrow::Cow::from(playlists::tips(gui))
     } else if matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_))) {
         t!("gui.tips.sonic_pick")
-    } else if gui.servers.room && gui.active == SETTINGS_NAV {
+    } else if gui.in_settings_room(SettingsRoom::Servers) {
         // The bundled server's row has no remove key to name; a peer's row
         // has its own verbs.
         if servers::cursor_on_bundled(gui) {
@@ -1077,7 +1083,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
                 None => t!("gui.tips.servers"),
             }
         }
-    } else if gui.torrent.room && gui.active == SETTINGS_NAV {
+    } else if gui.in_settings_room(SettingsRoom::Torrent) {
         std::borrow::Cow::from(torrent::tips(gui))
     } else {
         match gui.active {
@@ -1109,8 +1115,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     // While the pairing QR is up, the card cover stands down: the graphics
     // encode cache holds ONE image, and two per frame thrash it.
     let has_art = playing_cover_ready(&gui.app) && gui.servers.qr.is_none();
+    let now = gui.bar_now();
     let view = BarView {
-        now: gui.bar_now.as_ref(),
+        now: now.as_ref(),
         paused: gui.bar_paused(),
         volume: gui.app.volume,
         shuffle: gui.app.queue.shuffle,
@@ -1690,14 +1697,11 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 }
 
 fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
-    if gui.servers.room {
-        return servers::draw_room(frame, gui, content);
-    }
-    if gui.torrent.room {
-        return torrent::draw_room(frame, gui, content);
-    }
-    if gui.dj.room {
-        return dj::draw_room(frame, gui, content);
+    match gui.settings_room {
+        Some(SettingsRoom::Servers) => return servers::draw_room(frame, gui, content),
+        Some(SettingsRoom::Torrent) => return torrent::draw_room(frame, gui, content),
+        Some(SettingsRoom::Dj) => return dj::draw_room(frame, gui, content),
+        None => {}
     }
     let (check_on, check_off) = check_glyphs();
     put(frame, content.x, content.y, &t!("gui.set.playback"), dim());
@@ -1864,6 +1868,12 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         }
         return false;
     }
+    // The queue panel while it has the keys (track-actions contract,
+    // clause 19) — ahead of every room, so a room's Esc or Enter never
+    // takes what the panel was handed, whichever room is up.
+    if let Some(quit) = actions::queue_key(gui, key) {
+        return quit;
+    }
     // The bar's own keys, every browse room alike; Esc clears a standing
     // filter before it means anything else in the room.
     if browse {
@@ -1885,11 +1895,6 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         return quit;
     }
     if let Some(quit) = library::handle_key(gui, key) {
-        return quit;
-    }
-    // The queue panel while it has the keys (track-actions contract,
-    // clause 19).
-    if let Some(quit) = actions::queue_key(gui, key) {
         return quit;
     }
     if let Some(quit) = sonic::handle_key(gui, key) {
@@ -2212,6 +2217,11 @@ impl Gui {
         self.list_mut(list).reveal = true;
     }
 
+    /// Whether `room` stands where the Settings rows would be.
+    pub(crate) fn in_settings_room(&self, room: SettingsRoom) -> bool {
+        self.active == SETTINGS_NAV && self.settings_room == Some(room)
+    }
+
     /// Which App tab the active browse room's pane rides — the bar's acts
     /// and keys seat it before forwarding (docs/ux-contracts/browser-top-bar.md).
     fn browse_tab(&self) -> Tab {
@@ -2497,8 +2507,7 @@ mod tests {
         gui.app.status.position = 63.0;
         gui.app.status.duration = 252.0;
         gui.app.status.paused = false;
-        gui.refresh_bar_now();
-        let now = gui.bar_now.as_ref().unwrap();
+        let now = gui.bar_now().unwrap();
         assert_eq!(now.title, "Night Drive");
         assert_eq!(now.elapsed, 63.0);
         let all = draw(&mut gui).join("\n");
@@ -2629,11 +2638,9 @@ mod tests {
     #[test]
     fn the_demo_seat_yields_to_real_playback() {
         let mut gui = test_gui();
-        gui.refresh_bar_now();
-        assert_eq!(gui.bar_now.as_ref().unwrap().title, "Cassini IV");
+        assert_eq!(gui.bar_now().unwrap().title, "Cassini IV");
         gui.app.now_playing = Some(track("music/a.mp3", "Night Drive", 252.0));
-        gui.refresh_bar_now();
-        assert_eq!(gui.bar_now.as_ref().unwrap().title, "Night Drive");
+        assert_eq!(gui.bar_now().unwrap().title, "Night Drive");
     }
 
     #[test]

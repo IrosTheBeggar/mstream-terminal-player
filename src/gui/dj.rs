@@ -20,7 +20,7 @@ use crate::kit::theme::{legacy_conhost, th};
 use crate::kit::{ListView, Surface, cursor_ring, dim, input_display, modal_close, modal_frame_on, scroll_list, table_view, tall_button, tall_frame, wrap_words};
 use crate::tui::app::{Action, Capture, DjEdit, DjRow};
 
-use super::{Act, Gui, List, SETTINGS_NAV, accent, bright_bold, put, sel, text_button};
+use super::{Act, Gui, List, SettingsRoom, accent, bright_bold, put, sel, text_button};
 
 /// The chooser's three rows: the two answers, then the remember box.
 const ROWS: usize = 3;
@@ -39,7 +39,6 @@ const FIELD_W: u16 = 24;
 /// text fields, the pickers' cursors.
 #[derive(Debug, Default)]
 pub(crate) struct DjUi {
-    pub room: bool,
     /// The keyboard cursor: None is stowed (the kit's resting state).
     pub cursor: Option<Item>,
     /// The room's body: its first visible row, and whether the next draw
@@ -432,7 +431,7 @@ fn items(gui: &Gui) -> Vec<Item> {
 /// stowed and, with the DJ off, asks the session's server what it offers so
 /// the rows fit it (clause 50).
 pub(crate) fn open_room(gui: &mut Gui) {
-    gui.dj.room = true;
+    gui.settings_room = Some(SettingsRoom::Dj);
     gui.dj.cursor = None;
     gui.dj.body.scroll = 0;
     let effects = gui.app.dj_room_opened();
@@ -445,7 +444,7 @@ pub(crate) fn modal_open(gui: &Gui) -> bool {
 }
 
 fn in_room(gui: &Gui) -> bool {
-    gui.dj.room && gui.active == SETTINGS_NAV
+    gui.in_settings_room(SettingsRoom::Dj)
 }
 
 /// A row's label: the accent while the keyboard cursor is on it, bright
@@ -1440,7 +1439,7 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::DjPick => gui.forward(Action::DjPick),
         // The room.
         Act::DjBack => {
-            gui.dj.room = false;
+            gui.settings_room = None;
             gui.dj.cursor = None;
         }
         // Start rides the toggle (the opening question, the seed rule);
@@ -1608,7 +1607,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Position;
 
-    use super::super::{Act, Gui, ROW_DJ, SETTINGS_NAV, render};
+    use super::super::{Act, Gui, ROW_DJ, SETTINGS_NAV, SettingsRoom, render};
     use super::Item;
     use crate::api::types::{Genre, Track};
     use crate::config::{self, Config};
@@ -1653,7 +1652,7 @@ mod tests {
         let mut gui = session_gui();
         gui.act(Act::Nav(SETTINGS_NAV));
         gui.act(Act::Row(ROW_DJ));
-        assert!(gui.dj.room, "the doorway opens the room");
+        assert!(gui.settings_room == Some(SettingsRoom::Dj), "the doorway opens the room");
         gui
     }
 
@@ -1788,7 +1787,7 @@ mod tests {
         assert!(rows.iter().any(|r| r.contains("LISTEN")), "the group");
         assert_eq!(hit_text(&gui, &rows, "Auto DJ ▸"), Some(Act::Row(ROW_DJ)));
         gui.act(Act::Row(ROW_DJ));
-        assert!(gui.dj.room);
+        assert!(gui.settings_room == Some(SettingsRoom::Dj));
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(all.contains("• off") && all.contains("Auto DJ is off"), "{all}");
@@ -1799,9 +1798,9 @@ mod tests {
         assert_eq!(gui.dj.cursor, Some(Item::Toggle), "↓ picks the cursor up on the button");
         key(&mut gui, KeyCode::Esc);
         assert_eq!(gui.dj.cursor, None, "Esc stows it");
-        assert!(gui.dj.room);
+        assert!(gui.settings_room == Some(SettingsRoom::Dj));
         key(&mut gui, KeyCode::Esc);
-        assert!(!gui.dj.room, "and then leaves");
+        assert!(gui.settings_room != Some(SettingsRoom::Dj), "and then leaves");
     }
 
     #[test]

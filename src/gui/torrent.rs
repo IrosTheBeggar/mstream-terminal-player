@@ -48,7 +48,7 @@ use crate::kit::{
 use crate::tui::worker::Event;
 
 use super::torrent_meta::{self as meta, Confidence, TorrentMeta};
-use super::{Act, Gui, accent, bright_bold, put, sel, text_button};
+use super::{Act, Gui, SettingsRoom, accent, bright_bold, put, sel, text_button};
 
 // ── State ───────────────────────────────────────────────────────────────────
 
@@ -225,8 +225,6 @@ enum Reply {
 }
 
 pub(crate) struct TorrentUi {
-    /// The room replaces the Settings rows, like Manage servers.
-    pub room: bool,
     /// The keyboard cursor: None is stowed (↓ picks it up, Esc stows it,
     /// Esc again walks back to Settings).
     pub cursor: Option<Row>,
@@ -259,7 +257,6 @@ impl TorrentUi {
     pub(crate) fn new() -> Self {
         let (tx, rx) = channel();
         TorrentUi {
-            room: false,
             cursor: None,
             gate: Gate::NotAsked,
             gate_for: String::new(),
@@ -333,14 +330,6 @@ impl TorrentUi {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// The user's home, the meaning of a typed `~` (the wizard's rule).
-fn home() -> Option<String> {
-    std::env::var("HOME")
-        .ok()
-        .filter(|h| !h.is_empty())
-        .or_else(|| std::env::var("USERPROFILE").ok().filter(|h| !h.is_empty()))
-}
-
 fn sep_for(path: &str) -> char {
     if path.contains('\\') && !path.contains('/') { '\\' } else { '/' }
 }
@@ -349,7 +338,7 @@ fn sep_for(path: &str) -> char {
 /// always arrives through the browser (clause 2) — or the home when
 /// there is no such folder.
 fn picker_start() -> String {
-    let Some(home) = home() else { return String::new() };
+    let Some(home) = crate::setup::local_home() else { return String::new() };
     let home = home.trim_end_matches(['/', '\\']).to_string();
     let sep = sep_for(&home);
     let downloads = format!("{home}{sep}Downloads");
@@ -363,7 +352,7 @@ fn picker_start() -> String {
 /// A `~` at the front of a typed path, expanded.
 fn expand_tilde(path: &str) -> String {
     if (path == "~" || path.starts_with("~/") || path.starts_with("~\\"))
-        && let Some(home) = home()
+        && let Some(home) = crate::setup::local_home()
     {
         return path.replacen('~', home.trim_end_matches(['/', '\\']), 1);
     }
@@ -506,9 +495,8 @@ fn note(gui: &mut Gui, text: impl Into<String>, is_err: bool) {
 pub(crate) fn open_room(gui: &mut Gui) {
     gui.active = super::SETTINGS_NAV;
     gui.cursor = None;
-    gui.servers.room = false;
     gui.servers.drop_open = false;
-    gui.torrent.room = true;
+    gui.settings_room = Some(SettingsRoom::Torrent);
     gui.torrent.cursor = None;
     request_gate(gui);
 }
@@ -569,7 +557,7 @@ pub(crate) fn observe(gui: &mut Gui, event: &Event) {
         gui.torrent.gate_for.clear();
         gui.torrent.templates.clear();
         gui.torrent.vpath = 0;
-        if gui.torrent.room {
+        if gui.settings_room == Some(SettingsRoom::Torrent) {
             request_gate(gui);
         }
     }
@@ -989,26 +977,15 @@ fn picker_refresh(gui: &mut Gui) {
         picker.error = None;
         return;
     }
-    let expanded = expand_tilde(&raw);
-    let expanded = if raw == "~" { format!("{expanded}{}", sep_for(&expanded)) } else { expanded };
-    let mut cleaned = String::with_capacity(expanded.len());
-    let mut prev_sep = false;
-    for (i, ch) in expanded.chars().enumerate() {
-        let is_sep = ch == '/' || ch == '\\';
-        if is_sep && prev_sep && i != 1 {
-            continue;
-        }
-        prev_sep = is_sep;
-        cleaned.push(ch);
+    // The wizard's tidy: `~` expands, doubled separators collapse, the
+    // cursor keeps its distance from the end.
+    if let Some(tidied) = crate::setup::tidy_path_input(&picker.text) {
+        picker.text = tidied;
     }
-    if cleaned != raw {
-        let from_end = raw.chars().count().saturating_sub(picker.text.cursor());
-        let cursor = cleaned.chars().count().saturating_sub(from_end);
-        picker.text = Input::new(cleaned.clone()).with_cursor(cursor);
-    }
+    let cleaned = picker.text.value().to_string();
     let (dir, _) = crate::setup::split_input(&cleaned);
     let dir = if dir == "~" {
-        match home() {
+        match crate::setup::local_home() {
             Some(home) => format!("{}/", home.trim_end_matches(['/', '\\'])),
             None => return,
         }
@@ -1766,7 +1743,7 @@ fn move_cursor(gui: &mut Gui, delta: i32) {
 pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
     match act.clone() {
         Act::TorBack => {
-            gui.torrent.room = false;
+            gui.settings_room = None;
             gui.torrent.cursor = None;
         }
         Act::TorRow(row) => gui.torrent.cursor = Some(row),
@@ -1906,7 +1883,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         }
         return Some(false);
     }
-    if !(gui.torrent.room && gui.active == super::SETTINGS_NAV) {
+    if !(gui.in_settings_room(SettingsRoom::Torrent)) {
         return None;
     }
 
@@ -2082,13 +2059,13 @@ mod tests {
         assert!(text.contains("[✓] Ask what to do with torrents"), "ask is on by default:\n{text}");
 
         gui.act(Act::Row(super::super::ROW_TORRENT));
-        assert!(gui.torrent.room, "the doorway opens the room");
+        assert!(gui.settings_room == Some(SettingsRoom::Torrent), "the doorway opens the room");
         let text = draw(&mut gui).join("\n");
         assert!(text.contains("Add torrent"), "got:\n{text}");
         assert!(text.contains("Choose a .torrent file"), "the way in for a file:\n{text}");
         assert!(!text.contains("ARTIST"), "nothing below the source yet:\n{text}");
         key(&mut gui, KeyCode::Esc);
-        assert!(!gui.torrent.room, "Esc walks back to Settings");
+        assert!(gui.settings_room != Some(SettingsRoom::Torrent), "Esc walks back to Settings");
 
         // The ask row flips the persisted choice.
         gui.act(Act::Row(super::super::ROW_ASK));
@@ -2278,7 +2255,7 @@ mod tests {
         let mut gui = gui();
         arrive(&mut gui, MAGNET);
         assert!(matches!(gui.torrent.chooser, Some(Chooser { incoming: Incoming::Magnet(_), .. })));
-        assert!(!gui.torrent.room, "nothing opens until the answer");
+        assert!(gui.settings_room != Some(SettingsRoom::Torrent), "nothing opens until the answer");
         let text = draw(&mut gui).join("\n");
         for needed in ["Torrent received", "Add to mStream", "Open in another app", "don't ask again", "Vela - Cassini (2020)"] {
             assert!(text.contains(needed), "missing {needed:?}:\n{text}");
@@ -2291,7 +2268,7 @@ mod tests {
         key(&mut gui, KeyCode::Up);
         key(&mut gui, KeyCode::Enter);
         assert!(gui.torrent.chooser.is_none());
-        assert!(gui.torrent.room && gui.active == super::super::SETTINGS_NAV, "Add opens the room");
+        assert!(gui.in_settings_room(SettingsRoom::Torrent), "Add opens the room");
         assert_eq!(gui.torrent.magnet.value(), MAGNET);
         assert_eq!(gui.torrent.artist.value(), "Vela");
         assert!(!gui.config.torrent.ask, "the box flipped the setting (clause 51)");
@@ -2310,7 +2287,7 @@ mod tests {
         gui.config.torrent.ask = false;
         arrive(&mut gui, &path.to_string_lossy());
         assert!(gui.torrent.chooser.is_none());
-        assert!(gui.torrent.room);
+        assert!(gui.settings_room == Some(SettingsRoom::Torrent));
         assert_eq!(gui.torrent.file.as_ref().map(|f| f.name.as_str()), Some("vela.torrent"));
         assert_eq!(gui.torrent.album.value(), "Cassini");
 
@@ -2334,7 +2311,7 @@ mod tests {
         assert!(gui.config.torrent.ask, "asking is on");
         arrive(&mut gui, &path.to_string_lossy());
         assert!(gui.torrent.chooser.is_none(), "no chooser for our own file coming back");
-        assert!(gui.torrent.room, "the torrent is still taken");
+        assert!(gui.settings_room == Some(SettingsRoom::Torrent), "the torrent is still taken");
         let (words, is_err) = gui.note.clone().unwrap();
         assert!(words.contains("default app"), "{words}");
         assert!(is_err);
@@ -2410,7 +2387,7 @@ mod tests {
         assert_eq!(unescape_dropped("/Users/me/My\\ Music/x.torrent "), "/Users/me/My Music/x.torrent");
         assert_eq!(unescape_dropped("'/tmp/a b.torrent'"), "/tmp/a b.torrent");
         assert_eq!(unescape_dropped("\"/tmp/q.torrent\""), "/tmp/q.torrent");
-        if let Some(home) = home() {
+        if let Some(home) = crate::setup::local_home() {
             assert!(expand_tilde("~/Downloads/x.torrent").starts_with(home.trim_end_matches('/')));
         }
         assert_eq!(expand_tilde("/abs/x.torrent"), "/abs/x.torrent");
