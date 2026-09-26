@@ -1474,7 +1474,7 @@ gui:
     files: "↑ ↓ mover · Enter abrir/reproducir · h atrás · a a la cola · Tab cola · Space reproducir · q salir · f filtrar"
     rows: "↑ ↓ filas · ← → ajustar · Enter alternar · Esc listo · 1-8 secciones · q salir"
     base: "1-8 secciones · Tab cola · Space reproducir · -/+ volumen · D Auto DJ · q salir"
-    now: "0 biblioteca · Tab cola · Espacio reproducir/pausa · -/+ volumen · m acciones · q salir"
+    now: "1-5 pestañas · ↑ ↓ lista · Enter reproducir · Espacio reproducir/pausa · -/+ volumen · m acciones · 0 biblioteca"
     servers: "↑ ↓ filas · Enter cambiar · e editar · d predeterminado · p emparejar · x quitar · Esc volver"
     servers_bundled: "↑ ↓ filas · Enter cambiar · e editar · d predeterminado · p emparejar · Esc volver"
     servers_peer: "↑ ↓ filas · Enter cambiar · h ocultar/mostrar · d predeterminado · Esc volver"

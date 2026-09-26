@@ -156,6 +156,12 @@ pub(crate) enum Act {
     QueueGrip(usize),
     QueueClear,
     NowMore,
+    /// The Now Playing screen's own pointer ways (now-playing contract,
+    /// clauses 4–5): a tab of the view's strip, a step when the strip shows
+    /// arrows instead, a column of the band to seek to.
+    NowTab(usize),
+    NowTabStep(i32),
+    NowSeek(u16),
     MoreKey,
     SheetVerb(actions::SheetAction),
     Rate(u32),
@@ -730,6 +736,10 @@ impl Gui {
             Act::CaptureCancel => self.forward(Action::Cancel),
             Act::Screen(screen) => {
                 self.screen = screen;
+                // The App's full-screen flag follows the screen, so its keys
+                // mean here what they mean in the TUI's view (now-playing
+                // contract, the states).
+                self.app.fullscreen = screen == Screen::NowPlaying;
                 if screen == Screen::NowPlaying {
                     self.cursor = None;
                     self.servers.drop_open = false;
@@ -738,6 +748,7 @@ impl Gui {
             Act::Nav(i) => {
                 // A nav row is the Library's: it brings that screen back.
                 self.screen = Screen::Library;
+                self.app.fullscreen = false;
                 // The gated room: with the flag gone the row isn't drawn,
                 // and its digit must be as dead as the row (contract §1).
                 if i == SONIC_NAV && !self.app.capabilities.discovery_path {
@@ -930,6 +941,20 @@ impl Gui {
             Act::Row(i) => self.adjust_row(i, 1),
             Act::BlendDown => self.adjust_blend(-1),
             Act::BlendUp => self.adjust_blend(1),
+            Act::NowTab(index) => self.forward(Action::SelectNowTab(index)),
+            Act::NowTabStep(delta) => {
+                self.forward(if delta < 0 { Action::NowTabPrev } else { Action::NowTabNext })
+            }
+            Act::NowSeek(column) => {
+                // The TUI's own mapping of the band's columns onto the track:
+                // a click past the bar, or on a track of unknown length,
+                // seeks nowhere (now-playing contract, clause 4).
+                let width = self.now.band.width;
+                if let Some(position) = crate::tui::ui::seek_target(&self.app, width, column) {
+                    let effects = self.app.seek_to(position);
+                    self.pend(effects);
+                }
+            }
             // The servers acts were consumed by servers::act above.
             _ => {}
         }
@@ -971,6 +996,16 @@ impl Gui {
             }
             None => self.demo.clone(),
         }
+    }
+
+    /// The note to show: the shell's own first, else the App's words.
+    fn note_words(&self) -> Option<(String, bool)> {
+        self.note.clone().or_else(|| {
+            self.app
+                .message
+                .as_ref()
+                .map(|m| (m.text.clone(), matches!(m.kind, MessageKind::Error)))
+        })
     }
 
     fn bar_paused(&self) -> bool {
@@ -1169,28 +1204,28 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             }
         }
         Screen::NowPlaying => {
-            let mut stage = now::stage_rect(area, gui.queue_open, gui.footer());
+            // The TUI's view, whole, under the top bar — the queue panel and
+            // the bar stand down for it (now-playing contract, clauses 1–2);
+            // a pick's banner takes the row under the top bar first.
+            let view = now::view_rect(area, banner.is_some(), gui.footer());
             if let Some(text) = &banner {
-                draw_capture_banner(frame, gui, stage, text);
-                stage = Rect { y: stage.y + 1, height: stage.height.saturating_sub(1), ..stage };
+                draw_capture_banner(frame, gui, Rect { x: 1, y: 1, width: area.width - 2, height: 1 }, text);
             }
-            now::draw(frame, gui, stage);
+            now::draw(frame, gui, view);
         }
     }
 
-    if gui.queue_open {
+    if gui.queue_open && gui.screen == Screen::Library {
         queue::draw(frame, gui, area);
     }
 
     // The note rides the bar's bottom row (gui's own first, else the App's
-    // words); the keyboard tips, when shown, take the very last row.
-    let note = bar::note_rect(area, gui.footer());
-    if let Some((text, is_err)) = gui.note.clone().or_else(|| {
-        gui.app
-            .message
-            .as_ref()
-            .map(|m| (m.text.clone(), matches!(m.kind, MessageKind::Error)))
-    }) {
+    // words); the keyboard tips, when shown, take the very last row. The
+    // Now Playing screen has no bar and draws its note on its own row.
+    if gui.screen == Screen::Library
+        && let Some((text, is_err)) = gui.note_words()
+    {
+        let note = bar::note_rect(area, gui.footer());
         let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         put(frame, note.x, note.y, &bar::clip(&text, note.width as usize), style);
     }
@@ -1261,24 +1296,28 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         put(frame, 1, area.height - 1, &tips, dim());
     }
 
-    // While the pairing QR is up, the card cover stands down: the graphics
-    // encode cache holds ONE image, and two per frame thrash it.
-    let has_art = playing_cover_ready(&gui.app) && gui.servers.qr.is_none();
-    let now = gui.bar_now();
-    let view = BarView {
-        now: now.as_ref(),
-        paused: gui.bar_paused(),
-        volume: gui.app.volume,
-        shuffle: gui.app.queue.shuffle,
-        repeat: gui.app.queue.repeat != crate::tui::app::Repeat::Off,
-        autodj: gui.app.dj_armed(),
-        queue_open: gui.queue_open,
-        has_art,
-        footer: gui.footer(),
-    };
-    bar::draw(frame, &mut gui.ui, area, &view);
-    if has_art {
-        draw_card_cover(frame, bar::cover_rect(area, gui.footer()), &mut gui.app);
+    // The bar, under the Library alone: the Now Playing view carries its
+    // own scrubber and transport. While the pairing QR is up, the card
+    // cover stands down: the graphics encode cache holds ONE image, and two
+    // per frame thrash it.
+    if gui.screen == Screen::Library {
+        let has_art = playing_cover_ready(&gui.app) && gui.servers.qr.is_none();
+        let now = gui.bar_now();
+        let view = BarView {
+            now: now.as_ref(),
+            paused: gui.bar_paused(),
+            volume: gui.app.volume,
+            shuffle: gui.app.queue.shuffle,
+            repeat: gui.app.queue.repeat != crate::tui::app::Repeat::Off,
+            autodj: gui.app.dj_armed(),
+            queue_open: gui.queue_open,
+            has_art,
+            footer: gui.footer(),
+        };
+        bar::draw(frame, &mut gui.ui, area, &view);
+        if has_art {
+            draw_card_cover(frame, bar::cover_rect(area, gui.footer()), &mut gui.app);
+        }
     }
 
     // Overlays draw (and register) last, so their rects win the pointer.
@@ -2037,12 +2076,9 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if let Some(quit) = torrent::handle_key(gui, key) {
         return quit;
     }
-    // The Now Playing screen has no rooms: the queue's keys when it holds
-    // them, then the screen's own.
+    // The Now Playing screen has no rooms and no queue panel: the TUI's
+    // view has its own queue tab, and the screen's keys are the view's.
     if gui.screen == Screen::NowPlaying {
-        if let Some(quit) = actions::queue_key(gui, key) {
-            return quit;
-        }
         return now::handle_key(gui, key);
     }
     let browse = gui.browse_room()
@@ -2307,6 +2343,9 @@ fn event_loop(
         // caret wants its next frame ON the flip, not a poll tick after it.
         let wait = if gui.hot {
             Duration::from_millis(10)
+        } else if gui.app.drawing_audio() {
+            // The visualizer tab, moving: the TUI's thirty frames a second.
+            Duration::from_millis(33)
         } else {
             gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
         };
@@ -2331,6 +2370,9 @@ fn event_loop(
                 }
                 TermEvent::Mouse(mouse) => {
                     let at = Position { x: mouse.column, y: mouse.row };
+                    // The App keeps the pointer too: the Now Playing band
+                    // lights under it, the TUI's way.
+                    gui.app.note_pointer(at);
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             gui.ui.caret_touch();
@@ -2392,7 +2434,6 @@ fn event_loop(
                     gui.albums.on_resize();
                     gui.queue.on_resize();
                     gui.actions.on_resize();
-                    gui.now.on_resize();
                 }
                 _ => {}
             }
@@ -3058,26 +3099,89 @@ mod tests {
         assert!(rows.iter().any(|r| r.contains("Albums")), "the nav column is up");
         assert_eq!(gui.ui.hit(Position { x: nx + 1, y: 0 }), Some(Act::Screen(Screen::NowPlaying)));
 
-        // Now Playing: the nav and the room go, the demo seat's track stands
-        // large — its title, its byline and its facts under the cover slot.
+        // Now Playing: the nav, the room, the queue panel and the bar go;
+        // the TUI's view stands under the top bar (now-playing contract,
+        // clauses 1–2) with the App's full-screen flag up.
         gui.act(Act::Screen(Screen::NowPlaying));
+        assert!(gui.app.fullscreen, "the App's full-screen flag follows the screen");
         let rows = draw(&mut gui);
-        assert!(!rows.iter().any(|r| r.contains("Albums")), "the nav column is gone:\n{}", rows.join("\n"));
-        // The stage's title starts its row (the bar's card has frames before
-        // its own copy).
-        let title = rows.iter().position(|r| r.trim_start().starts_with("Cassini IV")).expect("the title stands on its own row");
-        assert!(rows[title + 1].contains("Vela — Cassini · Cassini · 2019"), "the byline: {:?}", rows[title + 1]);
-        assert!(rows[title + 2].contains("FLAC · 912 kbps"), "the spec: {:?}", rows[title + 2]);
-        assert!(rows[title + 3].contains("★★★★☆") && rows[title + 3].contains("120 BPM"), "the facts: {:?}", rows[title + 3]);
-        assert!(rows[3].contains('╭'), "the cover slot waits for the art: {:?}", rows[3]);
+        let all = rows.join("\n");
+        assert!(!all.contains("Albums"), "the nav column is gone:\n{all}");
+        assert!(!all.contains("auto-dj"), "the bar is gone:\n{all}");
+        assert!(all.contains("[1:Queue]"), "the view's tab strip:\n{all}");
+        assert!(all.contains("nothing playing"), "the view's card, idle:\n{all}");
 
-        // Esc and 0 go back and forth; a nav digit is the Library's.
+        // Esc and 0 go back and forth; a digit is the view's tab here, a nav
+        // row's click the Library's (contract clause 8).
         super::handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(gui.screen, Screen::Library);
+        assert_eq!((gui.screen, gui.app.fullscreen), (Screen::Library, false));
         super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
         assert_eq!(gui.screen, Screen::NowPlaying);
-        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
-        assert_eq!(gui.screen, Screen::Library);
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        assert_eq!(gui.screen, Screen::NowPlaying, "a digit picks a tab, not a room");
+        assert_eq!(gui.app.now_tab(), crate::tui::app::NowTab::AutoDj);
+        gui.act(Act::Nav(FILES_NAV));
+        assert_eq!((gui.screen, gui.app.fullscreen), (Screen::Library, false));
+    }
+
+    #[test]
+    fn the_now_playing_view_wears_the_transport_and_answers_the_pointer() {
+        use crate::tui::app::NowTab;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // A track on, 47 s into 4:12: the TUI's view — the card, the strip,
+        // the band with its time — with prev · play · next beneath the card
+        // (no cover in hand), the band's cells seeking, the tabs clicking
+        // (now-playing contract, clauses 3–5 and 8).
+        let mut gui = browsing_gui();
+        gui.app.now_playing = Some(track("music/a.mp3", "Night Drive", 252.0));
+        gui.app.status = crate::player::PlayerStatus {
+            playing: true,
+            position: 47.0,
+            duration: 252.0,
+            source: "x".into(),
+            ..Default::default()
+        };
+        gui.act(Act::Screen(Screen::NowPlaying));
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(all.contains("Night Drive"), "the card names the track:\n{all}");
+        assert!(all.contains("0:47 / 4:12"), "the band's time:\n{all}");
+        let hit = |gui: &Gui, rows: &[String], needle: &str| -> Option<Act> {
+            let y = rows.iter().position(|r| r.contains(needle))?;
+            let at = rows[y].find(needle)?;
+            let x = rows[y][..at].chars().count() as u16;
+            gui.ui.hit(Position { x, y: y as u16 })
+        };
+        assert_eq!(hit(&gui, &rows, "◂◂"), Some(Act::Prev), "prev under the card:\n{all}");
+        assert_eq!(hit(&gui, &rows, "▮▮"), Some(Act::PlayPause), "play, wearing ▮▮ while playing");
+        assert_eq!(hit(&gui, &rows, "▸▸"), Some(Act::Next));
+        let card = rows.iter().position(|r| r.contains("Night Drive")).unwrap();
+        let play = rows.iter().position(|r| r.contains("▮▮")).unwrap();
+        assert!(play > card, "the transport stands under the card");
+        assert_eq!(hit(&gui, &rows, "2:Auto-DJ"), Some(Act::NowTab(1)), "a tab clicks");
+        gui.act(Act::NowTab(1));
+        assert_eq!(gui.app.now_tab(), NowTab::AutoDj);
+
+        // The band: its first column seeks to the start; the time beside
+        // the bar seeks nowhere (the TUI's own mapping).
+        let band = gui.now.band;
+        assert!(band.width > 20 && band.height >= 1, "{band:?}");
+        assert_eq!(gui.ui.hit(Position { x: band.x, y: band.bottom() - 1 }), Some(Act::NowSeek(0)));
+        gui.act(Act::NowSeek(0));
+        assert!(
+            gui.pending.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Seek(to)) if *to == 0.0)),
+            "the first column is the start: {:?}",
+            gui.pending
+        );
+        gui.pending.clear();
+        gui.act(Act::NowSeek(band.width - 1));
+        assert!(gui.pending.is_empty(), "the time beside the bar seeks nowhere");
+
+        // The TUI's keys, forwarded: Tab and Shift-Tab cycle the tabs.
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(gui.app.now_tab(), NowTab::Visualizer);
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(gui.app.now_tab(), NowTab::AutoDj);
     }
 
     #[test]

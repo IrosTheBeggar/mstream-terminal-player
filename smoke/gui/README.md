@@ -81,6 +81,13 @@ url = "http://127.0.0.1:3041"
   bucket, a card into its tracks with the artist as the way back, Esc up
   twice, Genres with their counts into a genre's tracks under the bar's
   verbs, Recent as a hundred track rows without a strip.
+- `now` — the Now Playing screen on B (now-playing contract): `0` brings the
+  TUI's full-screen view under the top bar — the facts column with the
+  track's title, the tab strip `[1:Queue]`, the band's `position / total` —
+  with prev · play · next under the cover; `▸▸` steps to the next row, a
+  click on the band seeks, a click on `2:Auto-DJ` opens that tab, `0` goes
+  back to the Library. The GUI's bar (its `auto-dj` frame) is absent while
+  the screen is up.
 - `actions` — track actions on B (track-actions contract): a hovered Files
   row's `[⋯]` opens the sheet naming the track, a star rates it and the
   server keeps it (Song Info shows the rating back), Song Info lists the

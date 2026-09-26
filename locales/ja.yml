@@ -1474,7 +1474,7 @@ gui:
     files: "↑ ↓ 移動 · Enter 開く/再生 · h 戻る · a キューへ · Tab キュー · Space 再生/停止 · q 終了 · f 絞り込み"
     rows: "↑ ↓ 行 · ← → 調整 · Enter 切替 · Esc 完了 · 1-8 セクション · q 終了"
     base: "1-8 セクション · Tab キュー · Space 再生/停止 · -/+ 音量 · D Auto DJ · q 終了"
-    now: "0 ライブラリ · Tab キュー · Space 再生/一時停止 · -/+ 音量 · m 操作 · q 終了"
+    now: "1-5 タブ · ↑ ↓ リスト · Enter 再生 · Space 再生/一時停止 · -/+ 音量 · m 操作 · 0 ライブラリ"
     servers: "↑ ↓ 行 · Enter 切替 · e 編集 · d 既定 · p 連携 · x 削除 · Esc 戻る"
     servers_bundled: "↑ ↓ 行 · Enter 切替 · e 編集 · d 既定 · p 連携 · Esc 戻る"
     servers_peer: "↑ ↓ 行 · Enter 切替 · h 非表示/表示 · d 既定 · Esc 戻る"

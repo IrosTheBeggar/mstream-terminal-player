@@ -369,11 +369,50 @@ pub(crate) struct Regions {
 /// Body, then a rule, then the transport band and the key hints along the
 /// foot. The band spans the full width rather than sitting in a column, so
 /// the bar is long enough to read as a position rather than a stepper.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct NowRegions {
     pub body: Rect,
     pub rule: Rect,
     pub gauge: Rect,
     pub keys: Rect,
+}
+
+/// What a caller adds to the shared full-screen view. The GUI's Now
+/// Playing screen lays its transport under the cover and names its keys on
+/// its own footer (docs/ux-contracts/now-playing.md); the TUI passes the
+/// default and gets the view as it always was.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct NowExtras {
+    /// Rows kept free under the cover for the caller's controls.
+    pub reserve: u16,
+    /// Draw the cover as the mosaic even where pixels could go: an overlay
+    /// stood over it last frame, and a picture's cells are skipped by the
+    /// terminal writer (the GUI's rule for every cover).
+    pub mosaic: bool,
+    /// Leave the key hints off the last row; the modes readout draws
+    /// either way.
+    pub no_hints: bool,
+}
+
+/// Where the shared view put the parts a pointer surface wires up.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NowLayout {
+    /// The cover, when one was drawn.
+    pub cover: Option<Rect>,
+    /// The column's rows under the card and the cover — the caller's.
+    pub spare: Rect,
+    /// The tab strip's click targets.
+    pub strip: StripHits,
+    /// The band: the mirrored shape over the scrubber, one control.
+    pub band: Rect,
+}
+
+/// Where the tab strip's click targets landed: each tab by index when the
+/// strip fits, else the arrows either side of the one tab it names.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StripHits {
+    pub tabs: Vec<(usize, Rect)>,
+    pub arrows: Option<(Rect, Rect)>,
 }
 
 /// Rows the full-screen transport gives the waveform *above* the bar.
@@ -1272,19 +1311,33 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
         Paragraph::new(Span::styled(" Now Playing", Style::new().fg(dim()))),
         Rect { height: 1, ..inner },
     );
-    let inner = Rect { y: inner.y + 1, height: inner.height.saturating_sub(1), ..inner };
+    render_now_view(frame, &now_regions(area), app, &NowExtras::default());
+}
 
-    let NowRegions { body, rule, gauge: gauge_area, keys: keys_area } = now_regions(area);
+/// The full-screen view under its title: the facts column with the cover
+/// beneath, the tabbed panel, the rule, the band and the keys row. Shared
+/// with the GUI's Now Playing screen (docs/ux-contracts/now-playing.md),
+/// which draws it under its own top bar — the row this view spends on its
+/// title — and lays its transport in the rows `extras.reserve` keeps free
+/// under the cover. Returns where the parts a pointer surface wires up
+/// landed.
+pub(crate) fn render_now_view(
+    frame: &mut Frame,
+    regions: &NowRegions,
+    app: &mut App,
+    extras: &NowExtras,
+) -> NowLayout {
+    let NowRegions { body, rule, gauge: gauge_area, keys: keys_area } = *regions;
 
     // The tab strip gets the width it needs and the facts take what is left,
     // down to a floor where the labelled rows stop fitting. Splitting down the
     // middle instead truncated the last tab to "Vis" on an 88-column terminal.
     let strip = tab_strip_width(app);
-    let left_width = inner
+    let left_width = body
         .width
         .saturating_sub(strip + 2)
         .clamp(FACTS_MIN_WIDTH, FACTS_MAX_WIDTH)
-        .min(inner.width);
+        .min(body.width);
     let [facts_area, panel_area] =
         Layout::horizontal([Constraint::Length(left_width), Constraint::Min(0)]).areas(body);
 
@@ -1299,21 +1352,21 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
     let card = now_playing_card(app, facts_inner.width as usize);
     // The card takes the rows it filled and the cover gets what is left
     // under it, one blank row apart — pinned under the facts it belongs
-    // to rather than floating in the column's leftover space.
+    // to rather than floating in the column's leftover space — short of
+    // the rows a caller keeps for its own controls. Those begin under the
+    // cover, or under the card when no cover was drawn.
     let used = (card.len() as u16).saturating_add(1);
     frame.render_widget(Paragraph::new(card), facts_inner);
-    if facts_inner.height > used {
-        render_facts_cover(
-            frame,
-            Rect {
-                y: facts_inner.y + used,
-                height: facts_inner.height - used,
-                ..facts_inner
-            },
-            app,
-        );
-    }
-    render_now_panel(frame, panel_area, app);
+    let leftover = Rect {
+        y: facts_inner.y + used,
+        height: facts_inner.height.saturating_sub(used),
+        ..facts_inner
+    };
+    let room = Rect { height: leftover.height.saturating_sub(extras.reserve), ..leftover };
+    let cover = render_facts_cover(frame, room, app, extras.mosaic);
+    let spare_y = cover.map_or(leftover.y, |cover| cover.bottom());
+    let spare = Rect { y: spare_y, height: leftover.bottom().saturating_sub(spare_y), ..leftover };
+    let strip = render_now_panel(frame, panel_area, app);
 
     frame.render_widget(
         Paragraph::new(Span::styled(
@@ -1343,24 +1396,28 @@ fn render_now_playing(frame: &mut Frame, area: Rect, app: &mut App) {
 
     // The keys that work here, and the modes -- there is no footer down here
     // to carry either, and going full screen should not quietly hide whether
-    // shuffle is on.
+    // shuffle is on. (The GUI has a footer of its own and asks for the
+    // modes alone.)
     let modes = mode_readout(app, false);
     let [left, right] = Layout::horizontal([
         Constraint::Min(0),
         Constraint::Length((width_of(&modes) as u16).min(keys_area.width)),
     ])
     .areas(keys_area);
-    frame.render_widget(
-        Paragraph::new(Span::styled(
-            fit(&now_keys_hint(app), left.width as usize),
-            Style::new().fg(dim()),
-        )),
-        left,
-    );
+    if !extras.no_hints {
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                fit(&now_keys_hint(app), left.width as usize),
+                Style::new().fg(dim()),
+            )),
+            left,
+        );
+    }
     frame.render_widget(
         Paragraph::new(Span::styled(modes, Style::new().fg(dim()))).alignment(Alignment::Right),
         right,
     );
+    NowLayout { cover, spare, strip, band: gauge_area }
 }
 
 /// Bounds on the facts column. Below the floor the labelled rows stop fitting;
@@ -1385,8 +1442,10 @@ fn tab_strip_width(app: &App) -> u16 {
 
 /// The tab strip, or — when even the adaptive split can't fit it — just the
 /// one you are on, with arrows for the rest. A truncated last tab looks like a
-/// bug; naming the current one and pointing at the others does not.
-fn tab_strip(app: &App, width: u16) -> Line<'static> {
+/// bug; naming the current one and pointing at the others does not. Also
+/// where each tab (or each arrow) landed in `strip`, for a pointer surface's
+/// clicks — laid out here, once, so the hits cannot drift from the drawing.
+fn tab_strip(app: &App, strip: Rect) -> (Line<'static>, StripHits) {
     let current = app.now_tab();
     let active = Style::new().fg(accent()).add_modifier(Modifier::BOLD);
     let rest = Style::new();
@@ -1397,18 +1456,26 @@ fn tab_strip(app: &App, width: u16) -> Line<'static> {
         format!("{}:{}", at + 1, tab.title())
     };
 
-    if tab_strip_width(app) > width {
-        return Line::from(vec![
+    if tab_strip_width(app) > strip.width {
+        let label = numbered(current);
+        let back = Rect { x: strip.x, y: strip.y, width: 2, height: 1 };
+        let forward =
+            Rect { x: strip.x + 2 + width_of(&label) as u16, y: strip.y, width: 2, height: 1 };
+        let line = Line::from(vec![
             Span::styled("‹ ", Style::new().fg(dim())),
-            Span::styled(numbered(current), active),
+            Span::styled(label, active),
             Span::styled(" ›", Style::new().fg(dim())),
         ]);
+        return (line, StripHits { tabs: Vec::new(), arrows: Some((back, forward)) });
     }
 
     let mut spans = Vec::new();
-    for tab in tabs.iter().copied() {
+    let mut hits = Vec::new();
+    let mut x = strip.x;
+    for (index, tab) in tabs.iter().copied().enumerate() {
         if !spans.is_empty() {
             spans.push(Span::raw(TAB_GAP));
+            x += TAB_GAP.len() as u16;
         }
         // Brackets, not just colour. Colour is the first thing a terminal
         // takes away — NO_COLOR is a standard crossterm honours, and plenty of
@@ -1418,11 +1485,15 @@ fn tab_strip(app: &App, width: u16) -> Line<'static> {
         // shuffle as the selection moves.
         let (open, close) = if tab == current { ("[", "]") } else { (" ", " ") };
         let style = if tab == current { active } else { rest };
+        let label = numbered(tab);
+        let width = width_of(&label) as u16 + 2;
+        hits.push((index, Rect { x, y: strip.y, width, height: 1 }));
         spans.push(Span::styled(open, style));
-        spans.push(Span::styled(numbered(tab), style));
+        spans.push(Span::styled(label, style));
         spans.push(Span::styled(close, style));
+        x += width;
     }
-    Line::from(spans)
+    (Line::from(spans), StripHits { tabs: hits, arrows: None })
 }
 
 /// A horizontal rule that closes the column divider above it, rather than
@@ -1463,17 +1534,19 @@ fn now_keys_hint(app: &App) -> String {
     format!("{tabs}{rest}")
 }
 
-/// The tab strip, and whichever tab is open under it.
-fn render_now_panel(frame: &mut Frame, area: Rect, app: &mut App) {
+/// The tab strip, and whichever tab is open under it. Returns the strip's
+/// click targets — each tab, or the arrows — for the GUI's pointer.
+fn render_now_panel(frame: &mut Frame, area: Rect, app: &mut App) -> StripHits {
     if area.width < 12 || area.height < 3 {
-        return;
+        return StripHits::default();
     }
     let area = Block::default().padding(Padding::horizontal(1)).inner(area);
     let [strip, rule, content] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)])
             .areas(area);
 
-    frame.render_widget(Paragraph::new(tab_strip(app, strip.width)), strip);
+    let (line, hits) = tab_strip(app, strip);
+    frame.render_widget(Paragraph::new(line), strip);
     frame.render_widget(
         Paragraph::new(Span::styled("─".repeat(rule.width as usize), Style::new().fg(dim()))),
         rule,
@@ -1488,6 +1561,7 @@ fn render_now_panel(frame: &mut Frame, area: Rect, app: &mut App) {
         NowTab::Discover => render_now_discover(frame, content, app),
         NowTab::Visualizer => render_now_visualizer(frame, content, app),
     }
+    hits
 }
 
 /// Whichever visualiser is showing, drawn from the audio itself.
@@ -1654,8 +1728,8 @@ fn near_row(
 /// the tests and the browser build see always. A cover that is missing, or
 /// still on its way, draws nothing at all: the facts above are the
 /// information, and a placeholder under them would dress absence up as a
-/// fact.
-fn render_facts_cover(frame: &mut Frame, area: Rect, app: &mut App) {
+/// fact. Returns the cells the cover took.
+fn render_facts_cover(frame: &mut Frame, area: Rect, app: &mut App, mosaic: bool) -> Option<Rect> {
     // Spelled out field by field for the reason the visualiser spells its
     // cover out: the borrow checker has to see that the art cache and the
     // fields below are different fields, because those are taken mutably
@@ -1665,10 +1739,7 @@ fn render_facts_cover(frame: &mut Frame, area: Rect, app: &mut App) {
         .as_ref()
         .and_then(|track| track.metadata.album_art.as_deref())
         .and_then(|file| app.art.get(file))
-        .and_then(|art| art.as_ref());
-    let Some(cover) = cover else {
-        return;
-    };
+        .and_then(|art| art.as_ref())?;
 
     // Near-square, pinned to the top. A cell is about twice as tall as it
     // is wide, so width/2 rows is a square box; handed the whole leftover
@@ -1676,12 +1747,14 @@ fn render_facts_cover(frame: &mut Frame, area: Rect, app: &mut App) {
     // a cover floating mid-column, attached to nothing.
     let height = area.height.min(area.width / 2);
     if height < 3 {
-        return;
+        return None;
     }
     let area = Rect { height, ..area };
 
-    if app.graphics.draw(frame, area, cover) {
-        return;
+    // The mosaic on request: a caller whose overlay stood over these cells
+    // last frame needs plain cells there, not a picture's skipped ones.
+    if !mosaic && app.graphics.draw(frame, area, cover) {
+        return Some(area);
     }
 
     let mut canvas = crate::tui::canvas::Canvas::new(area);
@@ -1689,6 +1762,7 @@ fn render_facts_cover(frame: &mut Frame, area: Rect, app: &mut App) {
         app.cover_pane.draw(&mut canvas, cover);
         frame.render_widget(Paragraph::new(canvas.into_lines()), area);
     }
+    Some(area)
 }
 
 fn render_now_placeholder(frame: &mut Frame, area: Rect, what: &str, why: &str) {

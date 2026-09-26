@@ -1474,7 +1474,7 @@ gui:
     files: "↑ ↓ déplacer · Enter ouvrir/lire · h retour · a en file · Tab file · Space lecture · q quitter · f filtrer"
     rows: "↑ ↓ lignes · ← → régler · Enter basculer · Esc fini · 1-8 sections · q quitter"
     base: "1-8 sections · Tab file · Space lecture · -/+ volume · D Auto DJ · q quitter"
-    now: "0 bibliothèque · Tab file · Espace lecture/pause · -/+ volume · m actions · q quitter"
+    now: "1-5 onglets · ↑ ↓ liste · Entrée lire · Espace lecture/pause · -/+ volume · m actions · 0 bibliothèque"
     servers: "↑ ↓ lignes · Enter changer · e modifier · d défaut · p appairer · x retirer · Esc retour"
     servers_bundled: "↑ ↓ lignes · Enter changer · e modifier · d défaut · p appairer · Esc retour"
     servers_peer: "↑ ↓ lignes · Enter changer · h masquer/afficher · d défaut · Esc retour"

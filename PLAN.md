@@ -2067,9 +2067,22 @@ a LATER secondary screen (party view), Columns retired.
   nobody can see. The queue, Files, Search, the Library rooms and their
   wall, Playlists, the sonic results and the saved servers all follow;
   the tips line names how to pick the cursor up while it is stowed.
-- Next slices, in rough order: the Now Playing screen (big art; the
-  per-slot fork pattern from the wall applies; lyrics and the visualizer
-  tabs), Discover's room and its "Play a path to…" entry (revisits the
+- **The Now Playing screen is the TUI's view ✅ 2026-09-26**
+  (docs/ux-contracts/now-playing.md, the record turned from the mobile
+  player panel to this repo's own full-screen view on direction): the
+  facts column with the cover beneath, the tabbed panel (Queue · Lyrics ·
+  Discover · Auto-DJ · Visualizer as the session offers them), the rule,
+  the mirrored waveform band and the modes readout, drawn under the GUI's
+  top bar by the shared `render_now_view` (`NowExtras` for the rows kept
+  under the cover, the mosaic rule and the hints; `NowLayout` for where
+  the tabs, the band and the cover landed). The one addition: prev · play
+  · next in the bar's frames under the cover. The GUI's queue panel and
+  bar stand down on the screen, the band seeks and lights under the
+  pointer, the tabs click, the App's `fullscreen` flag follows the screen
+  so the TUI's keys mean the same here (digits pick tabs, `0`/Esc back),
+  and the visualizer gets its 33 ms cadence.
+- Next slices, in rough order: the shared view's Lyrics tab (the TUI's
+  placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with
   it), the Rated list (ratings exist now), then e2e legs (fake server
   needs player endpoints).

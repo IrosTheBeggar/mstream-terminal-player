@@ -133,7 +133,7 @@ pub(super) fn volume_cells(volume: f32) -> usize {
 // ── Small drawing helpers ───────────────────────────────────────────────────
 
 /// What a tall control is, color-wise.
-enum TallKind {
+pub(super) enum TallKind {
     /// The play/pause slot: the THICK frame in GOLD, always BOLD — the one
     /// primary action, in the colour of the seek rule above it (the
     /// "Player bar options" canvas, I).
@@ -148,7 +148,7 @@ enum TallKind {
 /// The bar's 3-row control at ONE space of label padding — the bar's dense
 /// form, so the controls, the volume and the card share a hundred columns.
 /// Hover brightens the control whole.
-fn tall_compact(
+pub(super) fn tall_compact(
     frame: &mut Frame,
     s: &mut Surface<Act>,
     x: u16,
@@ -218,7 +218,7 @@ fn draw_volume(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, volume: 
 
 /// The play/pause slot glyphs: a fixed two cells, so ▮▮ swaps in place and
 /// next never moves between states.
-fn play_glyphs(paused: bool) -> (&'static str, &'static str, &'static str) {
+pub(super) fn play_glyphs(paused: bool) -> (&'static str, &'static str, &'static str) {
     if legacy_conhost() {
         ("<<", if paused { "> " } else { "||" }, ">>")
     } else {

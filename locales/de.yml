@@ -1474,7 +1474,7 @@ gui:
     files: "↑ ↓ bewegen · Enter öffnen/abspielen · h zurück · a einreihen · Tab Warteschlange · Space Wiedergabe · q beenden · f filtern"
     rows: "↑ ↓ Zeilen · ← → ändern · Enter umschalten · Esc fertig · 1-8 Bereiche · q beenden"
     base: "1-8 Bereiche · Tab Warteschlange · Space Wiedergabe · -/+ Lautstärke · D Auto DJ · q beenden"
-    now: "0 Bibliothek · Tab Warteschlange · Leertaste Play/Pause · -/+ Lautstärke · m Aktionen · q Beenden"
+    now: "1-5 Tabs · ↑ ↓ Liste · Enter abspielen · Leertaste Play/Pause · -/+ Lautstärke · m Aktionen · 0 Bibliothek"
     servers: "↑ ↓ Zeilen · Enter wechseln · e bearbeiten · d Standard · p koppeln · x entfernen · Esc zurück"
     servers_bundled: "↑ ↓ Zeilen · Enter wechseln · e bearbeiten · d Standard · p koppeln · Esc zurück"
     servers_peer: "↑ ↓ Zeilen · Enter wechseln · h aus-/einblenden · d Standard · Esc zurück"

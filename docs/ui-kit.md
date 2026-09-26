@@ -440,9 +440,11 @@ LIBRARY group (Albums, Artists, Genres, Recent, Playlists, Last played,
 Most played), then a TOOLS group (Auto DJ, whose row wears a `•` in the ok
 colour while the DJ is armed, and the capability-gated Sonic path),
 Settings on the column's last row; fourteen rows, the 24-row minimum's
-worth with the footer on; Now Playing is the playing track
-large (`src/gui/now.rs`), a first cut ahead of its contract. The queue
-panel and the bar stand under both.
+worth with the footer on. Now Playing is the TUI's full-screen view,
+whole — the facts column with the cover beneath, the tabbed panel, the
+mirrored waveform band — with prev · play · next in the bar's frames
+under the cover (docs/ux-contracts/now-playing.md, `src/gui/now.rs`);
+the queue panel and the bar stand under the Library only.
 
 **The GUI player's bar** (the "Player bar options" canvas, A′; `src/gui/bar.rs`):
 five rows at the bottom, the tips line under them only while keyboard hints
