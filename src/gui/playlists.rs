@@ -158,6 +158,8 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let selected = gui.app.library.state.selected();
     let sel_pos = selected.and_then(|sel| names.iter().position(|i| *i == sel));
     let (first, visible) = gui.playlists.list.window(names.len(), sel_pos, list.height as usize);
+    // Lit only while the keyboard holds it (the kit's list-cursor law).
+    let shown = gui.playlists.list.shown(selected);
 
     let rename_label = t!("gui.pl.rename_verb").to_string();
     for (row, index) in names.iter().skip(first).take(visible).enumerate() {
@@ -165,7 +167,7 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         let y = list.y + row as u16;
         let rect = Rect { x: list.x, y, width: list.width, height: 1 };
         let hover = gui.ui.hovers(rect);
-        let is_sel = *index == selected.unwrap_or(usize::MAX);
+        let is_sel = *index == shown.unwrap_or(usize::MAX);
         if is_sel {
             frame.render_widget(ratatui::widgets::Block::default().style(sel()), rect);
         }
@@ -257,6 +259,7 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str) {
     };
     let selected = gui.app.library.state.selected();
     let (first, visible) = gui.playlists.tracks.window(entries.len(), selected, list.height as usize);
+    let shown = gui.playlists.tracks.shown(selected);
     let rows: Vec<(usize, &Entry)> =
         entries.iter().enumerate().skip(first).take(visible).collect();
     let len = entries.len();
@@ -267,7 +270,7 @@ fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name: &str) {
         playing,
         &rows,
         list,
-        selected,
+        shown,
         List::PlaylistTracks,
         gui.app.capture.is_none(),
     );
@@ -423,6 +426,10 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
             gui.app.focus = crate::tui::app::Focus::Browser;
             gui.app.library.state.select(Some(index));
             gui.playlists.list.reveal = true;
+            // A click opens unlit (the kit's list-cursor law); Enter picks
+            // the tracks' cursor back up after this.
+            gui.playlists.list.stow();
+            gui.playlists.tracks.stow();
             gui.forward(Action::Activate);
             gui.playlists.tracks.scroll = 0;
         }
@@ -475,62 +482,42 @@ pub(crate) fn handle_key(
     }
 
     match drilled(gui) {
+        // The kit's list-cursor law in both lists: a walking key picks the
+        // cursor up then walks, the row keys want it up, Esc stows it.
         Some(_) => match key.code {
-            KeyCode::Down => {
-                gui.playlists.tracks.reveal = true;
-                gui.forward(Action::Down);
-            }
-            KeyCode::Up => {
-                gui.playlists.tracks.reveal = true;
-                gui.forward(Action::Up);
-            }
-            KeyCode::Enter => gui.forward_capturing(Action::Activate),
+            KeyCode::Down => gui.walk(List::PlaylistTracks, Action::Down),
+            KeyCode::Up => gui.walk(List::PlaylistTracks, Action::Up),
+            KeyCode::Enter => gui.row_verb(List::PlaylistTracks, Action::Activate),
+            KeyCode::Esc if gui.playlists.tracks.held => gui.playlists.tracks.stow(),
             KeyCode::Char('h') | KeyCode::Backspace => gui.forward(Action::Back),
-            KeyCode::Char('a') => gui.forward(Action::AddToQueue),
+            KeyCode::Char('a') => gui.row_verb(List::PlaylistTracks, Action::AddToQueue),
             _ => return None,
         },
         None => match key.code {
-            // The list starts at row 1 — row 0 is the pane's Parent, a
-            // road the nav replaces.
-            KeyCode::Down => {
-                let len = gui.app.library.entries.len();
-                if len > 1 {
-                    let next = match gui.app.library.state.selected() {
-                        Some(i) => (i + 1).min(len - 1),
-                        None => 1,
-                    };
-                    gui.app.library.state.select(Some(next.max(1)));
-                    gui.playlists.list.reveal = true;
-                }
-            }
-            KeyCode::Up => {
-                let len = gui.app.library.entries.len();
-                if len > 1 {
-                    let next = match gui.app.library.state.selected() {
-                        Some(i) => i.saturating_sub(1).max(1),
-                        None => len - 1,
-                    };
-                    gui.app.library.state.select(Some(next));
-                    gui.playlists.list.reveal = true;
-                }
-            }
-            KeyCode::Esc => gui.app.library.state.select(None),
-            KeyCode::Enter => {
+            KeyCode::Down => step_names(gui, 1),
+            KeyCode::Up => step_names(gui, -1),
+            KeyCode::Esc => gui.playlists.list.stow(),
+            KeyCode::Enter if gui.playlists.list.held => {
                 if let Some(i) = gui.app.library.state.selected() {
-                    return Some(gui.act(Act::PlRow(i)));
+                    let quit = gui.act(Act::PlRow(i));
+                    // Opened by key: the hand stays up, on the tracks now.
+                    gui.playlists.tracks.pick_up();
+                    return Some(quit);
                 }
             }
             KeyCode::Char('n') => return Some(gui.act(Act::PlNew)),
-            KeyCode::Char('e') => {
+            KeyCode::Char('e') if gui.playlists.list.held => {
                 if let Some(i) = gui.app.library.state.selected() {
                     return Some(gui.act(Act::PlRename(i)));
                 }
             }
-            KeyCode::Char('x') => {
+            KeyCode::Char('x') if gui.playlists.list.held => {
                 if let Some(i) = gui.app.library.state.selected() {
                     return Some(gui.act(Act::PlDelete(i)));
                 }
             }
+            // The row keys with the cursor stowed: nothing.
+            KeyCode::Enter | KeyCode::Char('e' | 'x') => {}
             _ => return None,
         },
     }
@@ -545,10 +532,39 @@ pub(crate) fn tips(gui: &Gui) -> String {
     if gui.playlists.confirm.is_some() {
         return t!("gui.tips.pl_confirm").to_string();
     }
+    // Stowed, how to pick the cursor up and what works without a row (the
+    // kit's list-cursor law).
     if drilled(gui).is_some() {
-        return t!("gui.tips.pl_tracks").to_string();
+        return if gui.playlists.tracks.held {
+            t!("gui.tips.pl_tracks").to_string()
+        } else {
+            t!("gui.tips.tracks_stowed").to_string()
+        };
     }
-    t!("gui.tips.pl_list").to_string()
+    if gui.playlists.list.held {
+        t!("gui.tips.pl_list").to_string()
+    } else {
+        t!("gui.tips.pl_list_stowed").to_string()
+    }
+}
+
+/// ↓ ↑ on the names (the kit's list-cursor law): a stowed cursor is picked
+/// up where the pane rests it — never row 0, the Parent the nav replaces —
+/// and a held one walks between the first name and the last.
+pub(crate) fn step_names(gui: &mut Gui, delta: isize) {
+    let len = gui.app.library.entries.len();
+    if len <= 1 {
+        return;
+    }
+    let last = len - 1;
+    let at = gui.app.library.state.selected().unwrap_or(1).clamp(1, last);
+    let next = if gui.playlists.list.held {
+        (at as isize + delta).clamp(1, last as isize) as usize
+    } else {
+        at
+    };
+    gui.app.library.state.select(Some(next));
+    gui.playlists.list.pick_up();
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -645,6 +661,7 @@ mod tests {
     #[test]
     fn rename_prefills_and_the_unchanged_name_is_a_no_op() {
         let mut gui = pl_gui(&["Morning"]);
+        key(&mut gui, KeyCode::Down); // the cursor up, on Morning
         key(&mut gui, KeyCode::Char('e'));
         let dialog = gui.playlists.dialog.as_ref().expect("e opens rename");
         assert_eq!(dialog.name, "Morning", "prefilled with the current name");
@@ -668,9 +685,13 @@ mod tests {
 
     #[test]
     fn the_delete_gate_asks_and_x_answers() {
-        // The pane arrives with its cursor on the first playlist — the
-        // Files room's own resting state.
+        // The pane arrives with its cursor on the first playlist, unlit —
+        // x wants it up (the kit's list-cursor law), and ↓ lights it there.
         let mut gui = pl_gui(&["Morning", "Road Trip"]);
+        key(&mut gui, KeyCode::Char('x'));
+        assert!(gui.playlists.confirm.is_none(), "x on a stowed cursor asks nothing");
+        key(&mut gui, KeyCode::Down);
+        assert_eq!(gui.app.library.state.selected(), Some(1), "↓ picked the cursor up on the first name");
         key(&mut gui, KeyCode::Char('x'));
         assert_eq!(gui.playlists.confirm.as_deref(), Some("Morning"));
         let text = draw(&mut gui).join("\n");
@@ -698,7 +719,14 @@ mod tests {
     #[test]
     fn activation_drills_and_the_tracks_draw_the_shared_way() {
         let mut gui = pl_gui(&["Morning"]);
+        // Enter wants the cursor up (the kit's list-cursor law): ↓ picks it
+        // up on the first playlist, and the drill keeps the hand on the
+        // tracks.
         key(&mut gui, KeyCode::Enter);
+        assert!(gui.pending.is_empty(), "Enter on a stowed cursor asks nothing");
+        key(&mut gui, KeyCode::Down);
+        key(&mut gui, KeyCode::Enter);
+        assert!(gui.playlists.tracks.held, "opened by key, the tracks' cursor is up");
         assert!(
             gui.pending.iter().any(|e| matches!(
                 e,

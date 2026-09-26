@@ -56,6 +56,8 @@ fn is_room(gui: &Gui) -> bool {
 pub(crate) fn open(gui: &mut Gui, root: LibraryNode) {
     gui.library.view.scroll = 0;
     gui.library.view.reveal = false;
+    // Fresh, and with the cursor stowed (the kit's list-cursor law).
+    gui.library.view.stow();
     gui.library.wall = WallState::default();
     let effects = gui.app.open_library_node(root, true);
     gui.pend(effects);
@@ -188,6 +190,8 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let selected = gui.app.library.state.selected();
     let sel_pos = selected.and_then(|s| rows.iter().position(|(i, _)| *i == s));
     let (first, visible) = gui.library.view.window(rows.len(), sel_pos, list.height as usize);
+    // Lit only while the keyboard holds it (the kit's list-cursor law).
+    let lit = gui.library.view.shown(selected);
 
     let len = rows.len();
     let shown: Vec<(usize, &Entry)> = rows.into_iter().skip(first).take(visible).collect();
@@ -198,7 +202,7 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         playing,
         &shown,
         list,
-        selected,
+        lit,
         List::Library,
         gui.app.capture.is_none(),
     );
@@ -218,11 +222,13 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 // ── Acting ──────────────────────────────────────────────────────────────────
 
 /// The strip's jump (clause 10): the row at `pos` (in the drawn rows) comes
-/// to the top and takes the cursor.
+/// to the top and takes the cursor — unlit, the strip being a pointer tool
+/// (clause 13, the kit's list-cursor law); ↓ picks it up there.
 fn jump_list(gui: &mut Gui, pos: usize) {
     let target = rows(gui).get(pos).map(|(i, _)| *i);
     if let Some(index) = target {
         gui.library.view.scroll = pos;
+        gui.library.view.stow();
         gui.app.tab = Tab::Library;
         gui.app.library.state.select(Some(index));
     }
@@ -250,35 +256,30 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     if wall_view(gui) {
         return albums::handle_key(gui, key);
     }
+    // A walking key picks the cursor up, then walks it; the row verbs want
+    // it up; Esc stows it before it climbs (the kit's list-cursor law).
     match key.code {
-        KeyCode::Down => {
-            gui.library.view.reveal = true;
-            gui.forward(Action::Down);
-        }
+        KeyCode::Down => gui.walk(List::Library, Action::Down),
         KeyCode::Up => {
-            gui.library.view.reveal = true;
-            gui.forward(Action::Up);
+            gui.walk(List::Library, Action::Up);
             keep_off_parent(gui);
         }
-        KeyCode::PageDown => {
-            gui.library.view.reveal = true;
-            gui.forward(Action::PageDown);
-        }
+        KeyCode::PageDown => gui.walk(List::Library, Action::PageDown),
         KeyCode::PageUp => {
-            gui.library.view.reveal = true;
-            gui.forward(Action::PageUp);
+            gui.walk(List::Library, Action::PageUp);
             keep_off_parent(gui);
         }
-        KeyCode::Enter => gui.forward_capturing(Action::Activate),
+        KeyCode::Enter => gui.row_verb(List::Library, Action::Activate),
+        KeyCode::Esc if gui.library.view.held => gui.library.view.stow(),
         // Back climbs a level; a root has none, and says nothing.
         KeyCode::Char('h') | KeyCode::Backspace | KeyCode::Esc => {
             if !at_root(gui) {
                 gui.forward(Action::Back);
             }
         }
-        KeyCode::Char('a') => gui.forward(Action::AddToQueue),
-        KeyCode::Char('N') => gui.forward(Action::AddNext),
-        KeyCode::Char('P') => gui.forward(Action::PlayNow),
+        KeyCode::Char('a') => gui.row_verb(List::Library, Action::AddToQueue),
+        KeyCode::Char('N') => gui.row_verb(List::Library, Action::AddNext),
+        KeyCode::Char('P') => gui.row_verb(List::Library, Action::PlayNow),
         _ => return None,
     }
     Some(false)
@@ -289,9 +290,12 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
 pub(crate) fn tips(gui: &Gui) -> std::borrow::Cow<'static, str> {
     match gui.app.library_stack.here() {
         LibraryNode::Artist(_) => t!("gui.tips.albums"),
-        LibraryNode::Album { .. } => t!("gui.tips.album_tracks"),
+        LibraryNode::Album { .. } => albums::tracks_tips(gui),
         _ if gui.app.filtering => t!("gui.tips.filter"),
-        _ => t!("gui.tips.files"),
+        // Stowed, how to pick the cursor up and what works without a row
+        // (the kit's list-cursor law).
+        _ if gui.library.view.held => t!("gui.tips.files"),
+        _ => t!("gui.tips.files_stowed"),
     }
 }
 
@@ -440,6 +444,12 @@ mod tests {
         let mut gui = artists_gui(&["Bassnectar", "Portishead"]);
         // The footer is a setting on this surface, off by default.
         gui.config.gui.key_hints = true;
+        // Stowed, the line says how to pick the cursor up; up, the row
+        // keys (the kit's list-cursor law).
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("↓ pick a row · h back"), "a list stowed names the pick-up: {all}");
+        assert!(!all.contains("a queue"), "and no row verb: {all}");
+        super::super::handle_key(&mut gui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         let all = draw(&mut gui).join("\n");
         assert!(all.contains("h back · a queue"), "a list has the Files keys: {all}");
         gui.act(Act::PaneRow(List::Library, 2, RowVerb::Open));

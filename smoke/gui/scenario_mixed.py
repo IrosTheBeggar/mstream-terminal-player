@@ -51,7 +51,7 @@ def run(Gui):
     g.wait_for("Boukmanflow", 20)
     g.click_text("Boukmanflow", 10)
     g.wait_for("6AM", 20)
-    g.key("\x1b[B"); g.pump(0.2)   # Down: past '..'
+    g.key("\x1b[B"); g.pump(0.2)   # Down: the cursor up, on the first row past '..'
     g.key("a"); g.pump(1.0)
     g.dump("one row from the tunnel server queued")
 

@@ -34,6 +34,12 @@ Then `:3041/api/v1/ping` says `federationBrowse: true, federationDirect: true`, 
 
 ## The scenarios
 
+Keys, since 2026-09-26: a list's highlighted row is the keyboard cursor alone
+(docs/ui-kit.md, "List cursor") — nothing is lit until ↓ or ↑, the FIRST press
+only picks the cursor up where the pane rests it, and `a`, Enter and the queue
+panel's `d` do nothing until it is up. The scenarios walk Down + `a` until the
+queue's header counts a row, which absorbs both the pick-up and a cursor on `..`.
+
 Each run starts from a seed config in `$MSTREAM_RIG_DIR/gui-config/config.toml`:
 
 ```toml

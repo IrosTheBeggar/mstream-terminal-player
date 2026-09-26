@@ -252,3 +252,7 @@ Gaps in the shared App that this contract adds (verify at implementation):
   the room in the accent, with `[X]` beside it, and the room steps down a
   row for as long as the pick is armed. The DJ's opening-song pick wears
   the same row.
+- **2026-09-26 — A results row's click no longer seats the cursor**: it
+  plays from the row and leaves the highlight to the keyboard (the kit's
+  list-cursor law, docs/ui-kit.md); ↓ picks the cursor up at the top as
+  before, and `a` / Enter want it up.

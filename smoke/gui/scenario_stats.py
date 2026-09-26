@@ -24,7 +24,8 @@ def run(Gui):
     g.pump(0.5)
 
     # One row in the queue: walk into the folder and add the row under the
-    # cursor until the header says so (the cursor may rest on `..`).
+    # cursor until the header says so (the first Down only picks the cursor
+    # up — the kit's list-cursor law — and it may rest on `..`).
     g.click_text("Boukmanflow", 10)
     g.pump(1.0)
     for _ in range(4):

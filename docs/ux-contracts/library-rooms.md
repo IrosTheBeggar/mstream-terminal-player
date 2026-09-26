@@ -72,7 +72,9 @@ matches nothing keeps the bar contract's rule (the way back is one key).
 6. **Activate** on an artist opens its albums; on a genre, its tracks; on
    a track, clause 14. **Back** climbs one level, restoring the parent
    from the pane's trail — cursor, scroll and all — without asking the
-   server again.
+   server again. The cursor is drawn only while the keyboard holds it
+   (the kit's list-cursor law): a room opens with no row lit, ↓ shows the
+   cursor where the pane rests it, a click on a row stows it.
 
 ### The artist's albums
 
@@ -107,7 +109,9 @@ matches nothing keeps the bar contract's rule (the way back is one key).
     artist's albums (clause 7), not on a track list.
 13. **The strip is a pointer tool.** The keyboard has the filter and
     PageUp/PageDown; no letter key jumps, because the letters are the
-    room's verbs (`a` queues, `h` climbs, `f` filters).
+    room's verbs (`a` queues, `h` climbs, `f` filters). A jump seats the
+    pane's cursor on the row it brought to the top without lighting it,
+    so a ↓ after it picks the cursor up there.
 
 ### Playing
 
@@ -173,7 +177,7 @@ matches nothing keeps the bar contract's rule (the way back is one key).
 |---|---|
 | The drawer's Library entries | The nav rows Artists · Genres · Recent; each `Act::Nav` opens the root node fresh (`open_library_node(node, true)`) and points the App's tab at Library, the wall's way |
 | The webapp's side-nav entries Recently Played / Most Played | Two more rows at the LIBRARY group's end, Last played · Most played (2026-09-23), hidden for a peer like Playlists; no digit, so the pointer's; the heading is the nav label; the "Get last [n]" box is not ported — a fixed hundred, as Recent. The column grew to fourteen rows, so Files and Search now stand together at its top |
-| A list of DisplayItems | The App's Library pane drawn by `draw_pane_rows` (rows, cursor, hover verbs, kit scrollbar), under `draw_bar_controls` — the Files room's grammar with the pane swapped |
+| A list of DisplayItems | The App's Library pane drawn by `draw_pane_rows` (rows, the cursor while the keyboard holds it, hover verbs, kit scrollbar), under `draw_bar_controls` — the Files room's grammar with the pane swapped |
 | The album grid for an artist | `albums.rs` generalized: the wall draws whichever album list the App holds for the view on screen — `App.albums` for the root wall as today, and the artist's albums kept beside it for the `Artist` node — with the cells, pages, cover slots and keys shared |
 | The vertical letter strip | A one-line `# A B … Z` row under the bar's controls (a 22-row pane cannot stand 27 letters), a kit widget: each letter a click target, dim when absent, the row's tip "Jump to X"; a jump sets the list's first visible row (the pane's scroll) or the wall's page |
 | `getSubText` (the artist under a title) | The track row's `display_name` already reads "Artist - Title"; no second line |
@@ -213,3 +217,10 @@ and no strip, and hide for a peer.
   play counts on the peer. The reporting the lists feed on — a play
   session posted from the player — landed the same day (clause 24,
   docs/ux-contracts/play-reporting.md).
+- **2026-09-26 — No row lit until the keyboard walks** (clauses 6 and 13,
+  the list row of the translation table): the rooms lit their first row
+  on arrival and a click lit the row it opened or queued, since the
+  shared pane's cursor was drawn as is. The cursor now shows only while
+  the keyboard holds it — the kit's list-cursor law (docs/ui-kit.md) —
+  and the wall's cell cursor follows the same law: no cell lit until
+  ↑ ↓ ← → pick it up, a card's click stows it.

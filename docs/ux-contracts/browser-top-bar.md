@@ -145,3 +145,8 @@ drawing, the keys, and the three verbs composed from public App pieces
   grid, its paging and its clicks follow the filter. The grid keeps its
   row count by spending the last row's trailing blank on the controls
   line.
+- **2026-09-26 — Typing a filter picks the cursor up** (clause 22): with
+  the kit's list-cursor law the rooms open with no row lit; narrowing is
+  walking the list, so the first typed letter shows the cursor on the
+  first match, and Enter, Enter still opens it. Search's query box does
+  the same for its results.

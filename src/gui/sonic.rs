@@ -724,7 +724,9 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::SonRow(index) => {
             let effects = gui.app.play_sonic_from(index);
             gui.pend(effects);
-            gui.sonic.rcursor = Some(index);
+            // A click leaves the highlight to the keyboard (the kit's
+            // list-cursor law); Enter puts its cursor back after this.
+            gui.sonic.rcursor = None;
         }
         Act::SonQueueStop(index) => {
             let effects = gui.app.queue_sonic_stop(index);
@@ -877,7 +879,10 @@ pub(crate) fn handle_key(
             KeyCode::Esc => gui.sonic.rcursor = None,
             KeyCode::Enter => {
                 if let Some(index) = gui.sonic.rcursor {
-                    return Some(gui.act(Act::SonRow(index)));
+                    let quit = gui.act(Act::SonRow(index));
+                    // Played by key: the cursor stays up.
+                    gui.sonic.rcursor = Some(index);
+                    return Some(quit);
                 }
             }
             KeyCode::Char('a') => {
@@ -958,6 +963,9 @@ pub(crate) fn tips(gui: &Gui) -> String {
     }
     match gui.app.sonic.view {
         SonicView::Setup => t!("gui.tips.sonic_setup").to_string(),
-        SonicView::Results => t!("gui.tips.sonic_results").to_string(),
+        // Stowed, how to pick the cursor up and what works without a row
+        // (the kit's list-cursor law).
+        SonicView::Results if gui.sonic.rcursor.is_some() => t!("gui.tips.sonic_results").to_string(),
+        SonicView::Results => t!("gui.tips.sonic_results_stowed").to_string(),
     }
 }

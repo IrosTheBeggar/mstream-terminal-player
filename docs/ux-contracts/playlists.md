@@ -120,7 +120,7 @@ over from the record's `.arb` files.
 | Record | Here |
 |---|---|
 | Full-width "New playlist" button above the rows | The kit's **affirmative card** — its documented use is exactly "the add action above the table it feeds" |
-| Row ⋮ menu (Rename / Delete) | Hover reveals `rename` and the `[X]` remove on the row (the servers-room idiom); keys `e` / `x` on the cursor row |
+| Row ⋮ menu (Rename / Delete) | Hover reveals `rename` and the `[X]` remove on the row (the servers-room idiom); keys `e` / `x` on the cursor row once ↑ ↓ picked it up |
 | Name dialog | Kit modal with the line input — the sonic save prompt's shape |
 | Delete confirm dialog | The kit **warning modal**: gold border, no [X], explicit choice |
 | Generic failure toast | The note line, worded per failure (player rule) |
@@ -147,3 +147,8 @@ consumption.
   to an existing, already-drawn idiom (albums list/drill, affirmative
   card, servers-room row verbs, sonic name modal, kit warning modal); the
   translation table above is the whole design.
+- **2026-09-26 — No playlist lit by default**: the list opened with its
+  first playlist lit as the cursor row and `x`, `e` and Enter acted on it
+  at once. Now the cursor is stowed until ↓ or ↑ picks it up (on the
+  first playlist), a click on a row stows it, and the row keys wait for
+  it — the kit's list-cursor law (docs/ui-kit.md, "List cursor").

@@ -40,8 +40,20 @@ pub(crate) struct WallState {
     pub page: usize,
     /// The cell cursor within the page — the keyboard's hand on the grid.
     pub cursor: usize,
+    /// Whether the keyboard holds that hand: the cell is lit only then
+    /// (the kit's list-cursor law); a card's click stows it.
+    pub held: bool,
     /// The track view's viewport (the kit's table contract, same as Files).
     pub tracks: ListView,
+}
+
+impl WallState {
+    /// The pointer acted, or a room opened: the keyboard's hand is down on
+    /// the cells and the track list alike.
+    pub(crate) fn stow(&mut self) {
+        self.held = false;
+        self.tracks.stow();
+    }
 }
 
 pub(crate) struct AlbumsUi {
@@ -108,7 +120,7 @@ pub(super) fn wall(gui: &mut Gui) -> &mut WallState {
     if gui.active == super::ALBUMS_NAV { &mut gui.albums.wall } else { &mut gui.library.wall }
 }
 
-fn wall_ref(gui: &Gui) -> &WallState {
+pub(super) fn wall_ref(gui: &Gui) -> &WallState {
     if gui.active == super::ALBUMS_NAV { &gui.albums.wall } else { &gui.library.wall }
 }
 
@@ -205,7 +217,10 @@ fn open_album(gui: &mut Gui, index_on_page: usize) {
         let w = wall(gui);
         w.cursor = index_on_page;
         w.tracks.scroll = 0;
-        w.tracks.reveal = false;
+        // The track list inherits the hand: Enter keeps the keyboard's
+        // cursor up, a card's click (stowed already) opens it unlit.
+        w.tracks.held = w.held;
+        w.tracks.reveal = w.held;
     }
     let node = LibraryNode::Album {
         name: album.name.clone().unwrap_or_default(),
@@ -221,9 +236,20 @@ fn open_album(gui: &mut Gui, index_on_page: usize) {
 /// The albums side of [`Gui::act`]. Returns true when the act was ours.
 pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
     match act {
-        Act::AlbPage(delta) => turn_page(gui, *delta),
-        Act::AlbCell(i) => open_album(gui, *i),
-        Act::AlbJump(at) => jump_wall(gui, *at),
+        // The pointer's acts stow the cell cursor (the kit's list-cursor
+        // law): a card opens, a page turns, the strip jumps — nothing lit.
+        Act::AlbPage(delta) => {
+            wall(gui).held = false;
+            turn_page(gui, *delta);
+        }
+        Act::AlbCell(i) => {
+            wall(gui).held = false;
+            open_album(gui, *i);
+        }
+        Act::AlbJump(at) => {
+            wall(gui).held = false;
+            jump_wall(gui, *at);
+        }
         _ => return false,
     }
     true
@@ -236,28 +262,20 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
     use ratatui::crossterm::event::KeyCode;
 
     if drilled_album(gui).is_some() {
+        // The kit's list-cursor law, as the Files room: a walking key picks
+        // the cursor up then walks, Enter and `a` want it up, Esc stows it
+        // before it climbs.
         match key.code {
-            KeyCode::Down => {
-                wall(gui).tracks.reveal = true;
-                gui.forward(Action::Down);
-            }
-            KeyCode::Up => {
-                wall(gui).tracks.reveal = true;
-                gui.forward(Action::Up);
-            }
-            KeyCode::PageDown => {
-                wall(gui).tracks.reveal = true;
-                gui.forward(Action::PageDown);
-            }
-            KeyCode::PageUp => {
-                wall(gui).tracks.reveal = true;
-                gui.forward(Action::PageUp);
-            }
-            KeyCode::Enter => gui.forward_capturing(Action::Activate),
+            KeyCode::Down => gui.walk(List::AlbumTracks, Action::Down),
+            KeyCode::Up => gui.walk(List::AlbumTracks, Action::Up),
+            KeyCode::PageDown => gui.walk(List::AlbumTracks, Action::PageDown),
+            KeyCode::PageUp => gui.walk(List::AlbumTracks, Action::PageUp),
+            KeyCode::Enter => gui.row_verb(List::AlbumTracks, Action::Activate),
+            KeyCode::Esc if wall_ref(gui).tracks.held => wall(gui).tracks.stow(),
             KeyCode::Char('h') | KeyCode::Backspace | KeyCode::Esc => {
                 gui.forward(Action::Back);
             }
-            KeyCode::Char('a') => gui.forward(Action::AddToQueue),
+            KeyCode::Char('a') => gui.row_verb(List::AlbumTracks, Action::AddToQueue),
             _ => return None,
         }
         return Some(false);
@@ -268,22 +286,40 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
         (shape.capacity(), shape.cols)
     };
     let on_page = page_len(gui, capacity);
+    // A walking key picks the cell cursor up — the first press shows it
+    // where it rests, the next moves it — Enter wants it up, and Esc stows
+    // it before it climbs (the kit's list-cursor law). A page turn is its
+    // own feedback, so it turns at once.
     match key.code {
-        KeyCode::Left | KeyCode::PageUp => turn_page(gui, -1),
-        KeyCode::Right | KeyCode::PageDown => turn_page(gui, 1),
+        KeyCode::Left | KeyCode::PageUp => {
+            turn_page(gui, -1);
+            wall(gui).held = true;
+        }
+        KeyCode::Right | KeyCode::PageDown => {
+            turn_page(gui, 1);
+            wall(gui).held = true;
+        }
         KeyCode::Down => {
-            if on_page > 0 {
-                let w = wall(gui);
+            let w = wall(gui);
+            if w.held && on_page > 0 {
                 w.cursor = (w.cursor + cols).min(on_page - 1);
             }
+            w.held = true;
         }
         KeyCode::Up => {
             let w = wall(gui);
-            w.cursor = w.cursor.saturating_sub(cols);
+            if w.held {
+                w.cursor = w.cursor.saturating_sub(cols);
+            }
+            w.held = true;
         }
+        KeyCode::Esc if wall_ref(gui).held => wall(gui).held = false,
         KeyCode::Enter => {
-            let cursor = wall_ref(gui).cursor;
-            open_album(gui, cursor);
+            let w = wall_ref(gui);
+            if w.held {
+                let cursor = w.cursor;
+                open_album(gui, cursor);
+            }
         }
         // The artist wall climbs back to the artists; the root wall has
         // nowhere to go.
@@ -302,6 +338,12 @@ pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
     } else {
         turn_page(gui, delta);
     }
+}
+
+/// The drilled album's footer: the row keys once the cursor is up, else
+/// how to pick it up (the kit's list-cursor law).
+pub(crate) fn tracks_tips(gui: &Gui) -> std::borrow::Cow<'static, str> {
+    if wall_ref(gui).tracks.held { t!("gui.tips.album_tracks") } else { t!("gui.tips.tracks_stowed") }
 }
 
 /// How many albums the current page actually shows.
@@ -523,7 +565,7 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
             let name = album.name.clone().unwrap_or_else(|| t!("gui.lib.singles").to_string());
             let name = name.as_str();
             let name_y = cell.y + COVER_H;
-            let selected = wall.cursor == i;
+            let selected = wall.held && wall.cursor == i;
             let cell_hover = ui.hovers(cell);
             let name_rect = Rect { x: cell.x, y: name_y, width: COVER_W, height: 1 };
             if selected {
@@ -615,6 +657,8 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
     };
     let selected = gui.app.library.state.selected();
     let (first, visible) = wall(gui).tracks.window(len, selected, list.height as usize);
+    // Lit only while the keyboard holds it (the kit's list-cursor law).
+    let shown = wall_ref(gui).tracks.shown(selected);
     let entries = &gui.app.library.entries;
 
     let rows: Vec<(usize, &crate::tui::app::Entry)> =
@@ -627,7 +671,7 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
         playing,
         &rows,
         list,
-        selected,
+        shown,
         List::AlbumTracks,
         gui.app.capture.is_none(),
     );
@@ -773,6 +817,40 @@ mod tests {
         turn_page(&mut gui, -1);
         turn_page(&mut gui, -1);
         assert_eq!(gui.albums.wall.page, 0, "and the first of back");
+    }
+
+    #[test]
+    fn the_wall_lights_a_cell_only_for_the_keyboard() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // The kit's list-cursor law on the grid: no cell lit on arrival,
+        // Enter opens nothing yet, ↓ picks the cursor up where it rests,
+        // the next ↓ moves it a row, Esc stows it, a card's click stows it.
+        let mut gui = wall_gui(25);
+        draw(&mut gui);
+        gui.pending.clear(); // the nav's own fetch and the covers are not under test
+        assert!(!gui.albums.wall.held, "no cell lit on arrival");
+        let key = |gui: &mut Gui, code| {
+            super::super::handle_key(gui, KeyEvent::new(code, KeyModifiers::NONE));
+        };
+        let opened = |gui: &Gui| {
+            gui.pending.iter().any(|e| matches!(
+                e,
+                Effect::Api(ApiCmd::Library { node: LibraryNode::Album { .. }, .. })
+            ))
+        };
+        key(&mut gui, KeyCode::Enter);
+        assert!(!opened(&gui), "Enter on a stowed cursor opens nothing");
+        key(&mut gui, KeyCode::Down);
+        assert!(gui.albums.wall.held && gui.albums.wall.cursor == 0, "↓ lights the resting cell, unmoved");
+        key(&mut gui, KeyCode::Down);
+        assert!(gui.albums.wall.cursor > 0, "the next ↓ moves a row down");
+        key(&mut gui, KeyCode::Esc);
+        assert!(!gui.albums.wall.held, "Esc stows it");
+        key(&mut gui, KeyCode::Down);
+        gui.act(Act::AlbCell(1));
+        assert!(!gui.albums.wall.held, "a card's click stows the cursor");
+        assert!(!gui.albums.wall.tracks.held, "and the tracks open unlit");
+        assert!(opened(&gui), "but the album opens: {:?}", gui.pending);
     }
 
     #[test]

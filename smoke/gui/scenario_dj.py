@@ -32,8 +32,9 @@ def run(Gui):
     # DJ then opens on it — a one-row idle queue is the queue's end.
     g.click_text("Boukmanflow", 10)
     g.wait_for("6AM", 20)
-    # The pane's cursor is not visible in text (a painted row), and it may
-    # rest on the up-link: walk down until `a` queues a row.
+    # The pane's cursor is not visible in text (a painted row); the first
+    # Down only picks it up (the kit's list-cursor law), and it may rest on
+    # the up-link: walk down until `a` queues a row.
     for _ in range(4):
         g.key("\x1b[B"); g.pump(0.3)
         g.key("a"); g.pump(1.0)

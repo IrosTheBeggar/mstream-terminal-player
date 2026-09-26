@@ -140,11 +140,16 @@ drags it; `clear` empties the queue and ends playback.
     row keeps its identity wherever it lands (`move_row`). The DJ's badge
     travels with the row.
 19. **Reorder by key**: a click on a row gives the panel the keyboard (the
-    App's focus goes to the queue, the TUI's rule); then `<` and `>` move
-    the highlighted row, `↑ ↓` walk the rows, `Enter` plays the row, `d`
-    removes it, `C` clears, `i` jumps to the playing row, `m` opens its
-    sheet. A click in a browse room, or Esc, hands the keys back. The
-    footer names these keys while the panel has them.
+    App's focus goes to the queue, the TUI's rule) but highlights nothing
+    — the highlight is the keyboard's cursor alone (the kit's list-cursor
+    law). `↑ ↓` pick the cursor up on the row the click played, then walk
+    the rows; `i` picks it up on the playing row. With the cursor up, `<`
+    and `>` move the highlighted row, `Enter` plays it, `d` removes it and
+    `m` opens its sheet; stowed, those keys do nothing (`m` opens the
+    playing track's sheet). `C` clears either way. A click in a browse
+    room, or Esc, hands the keys back and stows the cursor. The footer
+    names how to pick the cursor up while the panel has the keys and the
+    cursor is stowed, and these keys once it is up.
 20. **Clear**: the header's `clear` empties the queue, ends playback, and
     ends a DJ session with it — no confirmation (the record has none; the
     verb is a small dim word, and the key is `C`, deliberate enough).
@@ -197,7 +202,7 @@ drags it; `clear` empties the queue and ends playback.
 | Song Info screen | A kit modal of label–value rows from the track's block, refreshed by `ApiCmd::TrackInfo { reach, filepath }` |
 | The queue row's grip and swipe | A hover `≡` on the row's first line and `[⋯]` beside it; the grip's press arms a row drag the event loop feeds (press, drag, release) — `move_row` on every crossing; the swipe's Info/Remove are the sheet's |
 | The queue header's Clear / Download all | `clear` as a dim text button beside QUEUE; Download all absent |
-| Focus | The App's `Focus::Queue` set by a click on a row; the panel draws the highlighted row; the GUI routes `< > d C i m Enter ↑ ↓` to the App while the queue has focus; Esc or a browse click returns to `Focus::Browser` |
+| Focus | The App's `Focus::Queue` set by a click on a row; the panel draws the highlighted row only while the keyboard holds the cursor (`queue_view.held`); the GUI routes `< > d C i m Enter ↑ ↓` to the App while the queue has focus, the row verbs only with the cursor up; Esc or a browse click returns to `Focus::Browser` and stows the cursor |
 | The playing card | The bar's card gets a hover `[⋯]` and `m` opens the sheet for `now_playing` |
 | Notes | The note line, the record's snackbar words |
 
@@ -235,3 +240,11 @@ while the queue has focus and stop when a browse click takes it back;
   "Player bar options" canvas, I) took the verb off the card so the title
   keeps its whole width; the card's ways to the sheet are the right click
   and `m`, which the contract already names.
+- **2026-09-26 — The highlight is the keyboard's alone** (clause 19
+  reworded, the Focus row): a click on a queue row played it and lit it
+  as the panel's cursor, and every list lit its first row on arrival. Now
+  nothing is highlighted until a walking key is pressed — the first press
+  shows the cursor on the row the click played, the next moves it — a
+  click stows it, and `< > d Enter m` wait for it to be up so no key acts
+  on a row nobody can see. The law for every list is docs/ui-kit.md,
+  "List cursor".

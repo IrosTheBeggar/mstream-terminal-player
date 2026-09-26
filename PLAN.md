@@ -2056,6 +2056,17 @@ a LATER secondary screen (party view), Columns retired.
   `ReportPlays` / `Scrobble` and its `[stats]` lines, the queue saver
   grown the second file. Last played and Most played now show this
   player's own listening (`scenario_stats.py` on the rig).
+- **The highlight is the keyboard's ✅ 2026-09-26** — every GUI list lit
+  its first row on arrival and a click lit the row it acted on, because
+  the shared pane's cursor (the TUI's, always visible there) was drawn as
+  is. The kit's list-cursor law (docs/ui-kit.md, "List cursor") now holds
+  everywhere: `ListView.held` gates the highlight, the first walking key
+  shows the cursor where the list rests it and the next moves it, a row
+  click or Esc stows it, typing a filter or a query picks it up, and the
+  row verbs (Enter `a N P d < > e x`) wait for it so no key acts on a row
+  nobody can see. The queue, Files, Search, the Library rooms and their
+  wall, Playlists, the sonic results and the saved servers all follow;
+  the tips line names how to pick the cursor up while it is stowed.
 - Next slices, in rough order: the Now Playing screen (big art; the
   per-slot fork pattern from the wall applies; lyrics and the visualizer
   tabs), Discover's room and its "Play a path to…" entry (revisits the

@@ -675,12 +675,16 @@ pub fn table_view(len: usize, reveal: Option<usize>, scroll: usize, avail: usize
 }
 
 /// A list's viewport state, the table contract in one place: the wheel
-/// offset, and whether the next frame reveals the cursor (a keyboard move,
-/// a fresh add; the wheel scrolls freely in between).
+/// offset, whether the next frame reveals the cursor (a keyboard move, a
+/// fresh add; the wheel scrolls freely in between), and whether the
+/// keyboard holds the cursor at all — the kit's list-cursor law. Stowed
+/// (`held` false) is the resting state: no row is lit, and only a walking
+/// key picks the cursor up; a row click or Esc puts it down again.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListView {
     pub scroll: usize,
     pub reveal: bool,
+    pub held: bool,
 }
 
 impl ListView {
@@ -698,6 +702,25 @@ impl ListView {
     /// A wheel or page step; the next frame clamps it.
     pub fn step(&mut self, delta: i32) {
         self.scroll = self.scroll.saturating_add_signed(delta as isize);
+    }
+
+    /// A walking key: the keyboard takes the cursor, and the next frame
+    /// brings it into view.
+    pub fn pick_up(&mut self) {
+        self.held = true;
+        self.reveal = true;
+    }
+
+    /// Esc, a row click, a room opening: the keyboard's hand is down.
+    pub fn stow(&mut self) {
+        self.held = false;
+    }
+
+    /// The row to paint as the cursor: the list's own while the keyboard
+    /// holds it, nothing otherwise. The viewport's reveal is not gated —
+    /// it takes the real cursor, so a click's drill still shows its top.
+    pub fn shown(&self, cursor: Option<usize>) -> Option<usize> {
+        self.held.then_some(cursor).flatten()
     }
 }
 
@@ -1163,6 +1186,24 @@ mod tests {
         assert_eq!(table_view(20, Some(6), 5, 8), (5, 8));
         assert_eq!(table_view(0, None, 0, 8), (0, 0));
         assert_eq!(table_view(5, None, 0, 0), (0, 0));
+    }
+
+    #[test]
+    fn the_list_view_shows_its_cursor_only_while_the_keyboard_holds_it() {
+        // The list-cursor law: stowed at rest, so the row is painted only
+        // after a walking key; the reveal comes with the pick-up and is
+        // spent by the next frame; a stow leaves the cursor unpainted but
+        // does not move it.
+        let mut view = ListView::default();
+        assert_eq!(view.shown(Some(3)), None, "nothing lit at rest");
+        view.pick_up();
+        assert_eq!(view.shown(Some(3)), Some(3), "picked up, the row paints");
+        assert!(view.reveal, "and the frame brings it into view");
+        assert_eq!(view.window(20, Some(15), 8), (8, 8), "the reveal yanks the window");
+        assert!(!view.reveal, "once");
+        view.stow();
+        assert_eq!(view.shown(Some(3)), None, "stowed, nothing lit");
+        assert_eq!(view.window(20, Some(3), 8), (8, 8), "and the window stays where it was");
     }
 
     #[test]

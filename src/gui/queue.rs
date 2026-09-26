@@ -130,8 +130,11 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // The view: the playing row is revealed only when it CHANGES, so the
     // wheel roams freely in between (the kit's table contract).
     let current = gui.app.queue.current;
+    // The panel's cursor shows only while it has the keys AND the keyboard
+    // holds the cursor (the kit's list-cursor law): a click hands the keys
+    // over unlit, ↓ lights the row it played.
     let focused = gui.app.focus == crate::tui::app::Focus::Queue;
-    let selected = focused.then_some(gui.app.queue.state.selected()).flatten();
+    let selected = if focused { gui.queue_view.shown(gui.app.queue.state.selected()) } else { None };
     let reveal = (current != gui.last_current)
         .then_some(current)
         .flatten()

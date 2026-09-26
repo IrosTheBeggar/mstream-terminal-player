@@ -148,9 +148,12 @@ fn open_for_playing(gui: &mut Gui) {
 }
 
 /// `m`: the queue's highlighted row while the panel has the keys, else the
-/// browse room's highlighted track, else what is playing.
+/// browse room's highlighted track, else what is playing — "highlighted"
+/// meaning the keyboard holds the cursor (the kit's list-cursor law):
+/// nothing lit, nothing aimed at.
 fn open_by_key(gui: &mut Gui) {
     if gui.app.focus == Focus::Queue
+        && gui.queue_view.held
         && let Some(index) = gui.app.queue.state.selected()
     {
         open_from_queue(gui, index);
@@ -158,7 +161,8 @@ fn open_by_key(gui: &mut Gui) {
     }
     if gui.browse_room() || gui.active == SEARCH_NAV {
         let tab = if gui.active == SEARCH_NAV { Tab::Search } else { gui.browse_tab() };
-        if let Some(index) = gui.app.pane_for(tab).state.selected()
+        if gui.room_list().is_some_and(|list| gui.list_view(list).held)
+            && let Some(index) = gui.app.pane_for(tab).state.selected()
             && matches!(gui.app.pane_for(tab).entries.get(index), Some(Entry::Track { .. }))
         {
             open_from_pane(gui, tab, index);
@@ -589,6 +593,8 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::QueueGrip(index) => {
             gui.app.focus = Focus::Queue;
             gui.app.queue.state.select(Some(index));
+            // The pointer's act: nothing lit (the kit's list-cursor law).
+            gui.queue_view.stow();
             gui.actions.drag = Some(index);
         }
         _ => return false,
@@ -688,22 +694,47 @@ pub(crate) fn queue_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     if !(gui.queue_open && gui.app.focus == Focus::Queue) {
         return None;
     }
+    // The kit's list-cursor law: a walking key picks the cursor up on the
+    // row the panel rests on, then walks; the row verbs want it up; Esc
+    // stows it with the hand-back.
+    let held = gui.queue_view.held;
     match key.code {
-        KeyCode::Down => gui.forward(Action::Down),
-        KeyCode::Up => gui.forward(Action::Up),
-        KeyCode::PageDown => gui.forward(Action::PageDown),
-        KeyCode::PageUp => gui.forward(Action::PageUp),
-        KeyCode::Enter => gui.forward(Action::Activate),
-        KeyCode::Char('d') | KeyCode::Delete => gui.forward(Action::RemoveFromQueue),
+        KeyCode::Down => walk_queue(gui, Action::Down),
+        KeyCode::Up => walk_queue(gui, Action::Up),
+        KeyCode::PageDown => walk_queue(gui, Action::PageDown),
+        KeyCode::PageUp => walk_queue(gui, Action::PageUp),
+        KeyCode::Enter if held => gui.forward(Action::Activate),
+        KeyCode::Char('d') | KeyCode::Delete if held => gui.forward(Action::RemoveFromQueue),
         KeyCode::Char('C') => gui.forward(Action::ClearQueue),
-        KeyCode::Char('<') => gui.forward(Action::MoveQueueUp),
-        KeyCode::Char('>') => gui.forward(Action::MoveQueueDown),
-        KeyCode::Char('i') => gui.forward(Action::JumpToPlaying),
+        KeyCode::Char('<') if held => gui.forward(Action::MoveQueueUp),
+        KeyCode::Char('>') if held => gui.forward(Action::MoveQueueDown),
+        KeyCode::Char('i') => {
+            gui.queue_view.pick_up();
+            gui.forward(Action::JumpToPlaying);
+        }
         KeyCode::Char('m') => return Some(gui.act(Act::MoreKey)),
-        KeyCode::Esc => gui.app.focus = Focus::Browser,
+        KeyCode::Esc => {
+            gui.queue_view.stow();
+            gui.app.focus = Focus::Browser;
+        }
+        // The row verbs with the cursor stowed: nothing — and not the
+        // room's keys either, the panel has the keyboard.
+        KeyCode::Enter | KeyCode::Char('d' | '<' | '>') | KeyCode::Delete => {}
         _ => return None,
     }
     Some(false)
+}
+
+/// A walking key in the panel (the kit's list-cursor law): a stowed cursor
+/// is picked up where the panel rests it — the row a click played, or the
+/// playing row — and nothing moves; a held one walks. A queue that never
+/// seated one forwards, so the App does.
+fn walk_queue(gui: &mut Gui, action: Action) {
+    let stowed = !gui.queue_view.held;
+    gui.queue_view.pick_up();
+    if !stowed || gui.app.queue.state.selected().is_none() {
+        gui.forward(action);
+    }
 }
 
 /// The footer for the sheet's layers and the focused queue.
@@ -721,7 +752,9 @@ pub(crate) fn tips(gui: &Gui) -> Option<String> {
         return Some(tip.to_string());
     }
     if gui.queue_open && gui.app.focus == Focus::Queue {
-        return Some(t!("gui.tips.queue").to_string());
+        // Stowed, how to pick the cursor up and what works without a row.
+        let tip = if gui.queue_view.held { t!("gui.tips.queue") } else { t!("gui.tips.queue_stowed") };
+        return Some(tip.to_string());
     }
     None
 }
@@ -1017,10 +1050,18 @@ mod tests {
         assert_eq!(hit_text(&gui, &rows, "≡"), Some(Act::QueueGrip(1)));
         assert_eq!(gui.ui.hit_context(Position { x: 80, y }), Some(Act::QueueMore(1)));
 
-        // A click on a row plays it and hands the panel the keys.
+        // A click on a row plays it and hands the panel the keys — and
+        // lights nothing (the kit's list-cursor law): the row verbs wait,
+        // ↓ picks the cursor up on the row it played, the next ↓ walks.
         gui.act(Act::QueueRow(0));
         assert_eq!(gui.app.focus, Focus::Queue);
         assert_eq!(gui.app.queue.current, Some(0));
+        assert!(!gui.queue_view.held, "the click lit no row");
+        key(&mut gui, KeyCode::Char('d'));
+        assert_eq!(gui.app.queue.items.len(), 3, "d waits for the cursor to be up");
+        key(&mut gui, KeyCode::Down);
+        assert!(gui.queue_view.held, "↓ picked the cursor up");
+        assert_eq!(gui.app.queue.state.selected(), Some(0), "on the row the click played");
         key(&mut gui, KeyCode::Down);
         assert_eq!(gui.app.queue.state.selected(), Some(1));
         key(&mut gui, KeyCode::Char('>'));
@@ -1030,9 +1071,10 @@ mod tests {
         assert_eq!(gui.app.queue.items.len(), 2, "d removes the highlighted row");
         key(&mut gui, KeyCode::Esc);
         assert_eq!(gui.app.focus, Focus::Browser, "Esc hands the keys back");
+        assert!(!gui.queue_view.held, "and stows the cursor");
         gui.act(Act::QueueRow(1));
         key(&mut gui, KeyCode::Char('C'));
-        assert!(gui.app.queue.items.is_empty(), "C clears");
+        assert!(gui.app.queue.items.is_empty(), "C clears with the cursor stowed");
     }
 
     #[test]

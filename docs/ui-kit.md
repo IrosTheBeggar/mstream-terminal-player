@@ -13,7 +13,8 @@ free functions (`tall_button` and `tall_secondary` over one
 `cursor_ring`, `modal_frame(_anchored)`,
 `modal_close`, `scroll_list`, `letter_strip`, `draw_tooltip`,
 `input_display`), the pure geometry (`table_view` and the `ListView`
-that carries a list's offset and reveal flag across frames, `letter_index`,
+that carries a list's offset, its reveal flag and whether the keyboard
+holds its cursor across frames, `letter_index`,
 `wrap_words`, `bar_jump`, `tooltip_rect`, `caret_cell`), the hover test
 (`Surface::hovers`), the pointer contract, and `kit::theme` (the fixed
 palette + the OSC 11
@@ -272,6 +273,35 @@ on/affirmative), `( )` fg DarkGray otherwise; chosen label BOLD; inline
 toggling (clicking the chosen row does nothing). Radios for 2–4 options;
 5+ becomes a list picker.
 
+### List cursor
+**Selection is the KEYBOARD cursor, nothing more** — in every list of
+rows: the folders table, the file browser and the library rooms, the
+playlists, the queue panel, the saved servers, the album wall's cells.
+No row is highlighted when a list appears, and the pointer never
+highlights one: a click acts on its row directly (opens, plays, queues,
+removes) and puts the keyboard's hand down. Only a **walking key** picks
+the cursor up — ↑ ↓, PageUp PageDown, the wall's ← →. The first press on
+a stowed cursor SHOWS it where the list keeps it and moves nothing; the
+next press moves it. A list with a resting place of its own picks up
+there — the App's panes rest on the first row past `..`, on the row a
+click last acted on, on the trail's row after Back; the queue on the
+playing row — and a list with none (the Settings rows, the Auto DJ room,
+the sonic setup) picks up at the top on ↓ and at the bottom on ↑. Typing
+into the bar's filter or the search box picks the cursor up too — the
+narrowing IS walking the list — so type, Enter, Enter opens the first
+match. **Esc stows it**, before Esc means anything else in the room
+(Back, handing the queue's keys back); a row click stows it; a room
+opens with it stowed. **The row verbs want the cursor up**: Enter, `a`,
+`N`, `P`, `d`, `<` `>`, `e`, `x` do nothing while it is stowed (`m` falls
+to the playing track), so no key ever acts on a row nobody can see.
+Keyboard-selected row: bg ACCENT fg ON-ACCENT; hover only brightens. The
+tips line, when it is on, names how to pick the cursor up while it is
+stowed and the row verbs only once it is up. `ListView { scroll, reveal,
+held }` carries all three across frames — `pick_up`, `stow`, and
+`shown(cursor)`, the row to paint: the list's cursor gated by `held`. The
+viewport's reveal keeps using the real cursor, so a click's drill still
+scrolls the new listing to its top.
+
 ### Table
 ratatui's `Table`: header row fg DarkGray UPPERCASE over a single `─`
 rule row (no vertical separators, no zebra). The rule spans the FULL
@@ -315,11 +345,10 @@ folder INSIDE another choice is marked (the server would scan it
 twice). Problems paint the row's path GOLD with a tooltip saying why
 and a one-time note — advisory only: warnings never block Continue,
 the server has final say at commit.
-**Selection is the KEYBOARD cursor, nothing more.** No row is selected
-by default and mouse actions never need one — every row action is
-directly clickable (the name chip, the [X]). Only ↑/↓ pick the cursor
-up (↓ from the top, ↑ from the bottom); Esc stows it. A fresh add
-scrolls its row into view but does not select it.
+**Selection follows the list-cursor law above**: no row is selected by
+default and mouse actions never need one — every row action is directly
+clickable (the name chip, the [X]); ↑/↓ pick the cursor up, Esc stows
+it. A fresh add scrolls its row into view but does not select it.
 **The tips line names only what works right now**: no rows → just the
 add actions; rows with the cursor stowed → how to pick it up, plus
 continue; a row under the cursor → the full set.

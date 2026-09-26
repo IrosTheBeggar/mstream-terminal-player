@@ -756,6 +756,14 @@ impl Gui {
                     self.app.filtering = false;
                     self.app.files.clear_filter();
                     self.app.library.clear_filter();
+                    // A room opens with its cursor stowed (the kit's
+                    // list-cursor law); the Library rooms' `open` and the
+                    // Auto DJ room's stow their own.
+                    self.files_view.stow();
+                    self.search_view.stow();
+                    self.playlists.list.stow();
+                    self.playlists.tracks.stow();
+                    self.albums.wall.stow();
                 }
                 self.active = i;
                 // Leaving for a section stows every servers surface; the
@@ -895,9 +903,12 @@ impl Gui {
             Act::ScrollTo(list, first) => self.list_mut(list).scroll = first,
             Act::QueueRow(i) => {
                 // A click plays the row and hands the panel the keys
-                // (track-actions contract, clauses 17 and 19).
+                // (track-actions contract, clauses 17 and 19) — without
+                // lighting the row: the highlight is the keyboard's, and
+                // ↓ picks it up here (the kit's list-cursor law).
                 self.app.focus = crate::tui::app::Focus::Queue;
                 self.app.queue.state.select(Some(i));
+                self.queue_view.stow();
                 let effects = self.app.play_index(i);
                 self.pend(effects);
             }
@@ -1217,7 +1228,10 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         match gui.active {
             SETTINGS_NAV if gui.cursor.is_some() => t!("gui.tips.rows"),
             FILES_NAV if gui.app.filtering => t!("gui.tips.filter"),
-            FILES_NAV => t!("gui.tips.files"),
+            // Stowed, the line says how to pick the cursor up and names
+            // only what works without a row (the kit's list-cursor law).
+            FILES_NAV if gui.files_view.held => t!("gui.tips.files"),
+            FILES_NAV => t!("gui.tips.files_stowed"),
             ARTISTS_NAV | GENRES_NAV | RECENT_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV if gui.app.connected => {
                 library::tips(gui)
             }
@@ -1226,13 +1240,14 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
                     gui.app.library_stack.here(),
                     crate::tui::worker::LibraryNode::Album { .. }
                 ) {
-                    t!("gui.tips.album_tracks")
+                    albums::tracks_tips(gui)
                 } else {
                     t!("gui.tips.albums")
                 }
             }
             SEARCH_NAV if gui.app.editing_query => t!("gui.tips.search_edit"),
-            SEARCH_NAV => t!("gui.tips.search"),
+            SEARCH_NAV if gui.search_view.held => t!("gui.tips.search"),
+            SEARCH_NAV => t!("gui.tips.search_stowed"),
             SONIC_NAV => std::borrow::Cow::from(sonic::tips(gui)),
             PLAYLISTS_NAV if gui.app.connected => {
                 std::borrow::Cow::from(playlists::tips(gui))
@@ -1443,6 +1458,8 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     };
     let selected = gui.app.files.state.selected();
     let (first, visible) = gui.files_view.window(entries.len(), selected, list.height as usize);
+    // Lit only while the keyboard holds it (the kit's list-cursor law).
+    let shown = gui.files_view.shown(selected);
 
     let len = entries.len();
     let rows: Vec<(usize, &Entry)> =
@@ -1454,7 +1471,7 @@ fn draw_files(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         playing,
         &rows,
         list,
-        selected,
+        shown,
         List::Files,
         gui.app.capture.is_none(),
     );
@@ -1855,6 +1872,7 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     let selected = gui.app.search.state.selected();
     let sel_pos = selected.and_then(|sel| visible_rows.iter().position(|(i, _)| *i == sel));
     let (first, visible) = gui.search_view.window(visible_rows.len(), sel_pos, list.height as usize);
+    let shown = gui.search_view.shown(selected);
     let playing = gui.app.now_playing.as_ref().map(|t| t.filepath.as_str());
     draw_pane_rows(
         frame,
@@ -1862,7 +1880,7 @@ fn draw_search(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         playing,
         &visible_rows[first..first + visible],
         list,
-        selected,
+        shown,
         List::Search,
         gui.app.capture.is_none(),
     );
@@ -2039,21 +2057,30 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     // the room handlers — a typed letter must never queue a row.
     if browse && gui.app.filtering {
         gui.app.tab = gui.browse_tab();
+        // Narrowing is walking the list (the kit's list-cursor law): the
+        // typed letters pick the cursor up on the first match, so Enter,
+        // Enter opens it (browser-top-bar contract, clause 22).
+        let list = gui.room_list();
+        let typed = |gui: &mut Gui, action: Action| {
+            gui.forward(action);
+            if let Some(list) = list.filter(|_| gui.app.filtering) {
+                gui.list_mut(list).pick_up();
+            }
+        };
         match key.code {
-            KeyCode::Enter => gui.forward(Action::Submit),
+            KeyCode::Enter => typed(gui, Action::Submit),
             KeyCode::Esc => gui.forward(Action::Cancel),
-            KeyCode::Backspace => gui.forward(Action::Backspace),
-            KeyCode::Down => {
-                gui.files_view.reveal = true;
-                gui.playlists.list.reveal = true;
-                gui.forward(Action::Down);
+            KeyCode::Backspace => typed(gui, Action::Backspace),
+            KeyCode::Down | KeyCode::Up => {
+                let down = key.code == KeyCode::Down;
+                let action = if down { Action::Down } else { Action::Up };
+                match list {
+                    Some(List::Playlists) => playlists::step_names(gui, if down { 1 } else { -1 }),
+                    Some(list) => gui.walk(list, action),
+                    None => gui.forward(action),
+                }
             }
-            KeyCode::Up => {
-                gui.files_view.reveal = true;
-                gui.playlists.list.reveal = true;
-                gui.forward(Action::Up);
-            }
-            KeyCode::Char(c) => gui.forward(Action::Input(c)),
+            KeyCode::Char(c) => typed(gui, Action::Input(c)),
             _ => {}
         }
         return false;
@@ -2112,8 +2139,10 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if search && gui.app.editing_query {
         match key.code {
             KeyCode::Enter => {
+                // The query typed is the list walked (the kit's list-cursor
+                // law): the hits arrive with the cursor up on the first.
                 gui.forward(Action::Submit);
-                gui.search_view.reveal = true;
+                gui.search_view.pick_up();
             }
             KeyCode::Esc => gui.forward(Action::Cancel),
             KeyCode::Backspace => gui.forward(Action::Backspace),
@@ -2146,42 +2175,28 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         }
         // The Files list is the App's own pane: arrows, Enter, back and
         // queue-add forward straight to the shared state machine.
-        KeyCode::Down if files => {
-            gui.files_view.reveal = true;
-            gui.forward(Action::Down);
-        }
-        KeyCode::Up if files => {
-            gui.files_view.reveal = true;
-            gui.forward(Action::Up);
-        }
-        KeyCode::PageDown if files => {
-            gui.files_view.reveal = true;
-            gui.forward(Action::PageDown);
-        }
-        KeyCode::PageUp if files => {
-            gui.files_view.reveal = true;
-            gui.forward(Action::PageUp);
-        }
-        KeyCode::Enter if files => gui.forward_capturing(Action::Activate),
+        // A walking key picks the cursor up, then walks it; the row verbs
+        // want it up; Esc stows it (the kit's list-cursor law).
+        KeyCode::Down if files => gui.walk(List::Files, Action::Down),
+        KeyCode::Up if files => gui.walk(List::Files, Action::Up),
+        KeyCode::PageDown if files => gui.walk(List::Files, Action::PageDown),
+        KeyCode::PageUp if files => gui.walk(List::Files, Action::PageUp),
+        KeyCode::Enter if files => gui.row_verb(List::Files, Action::Activate),
         KeyCode::Char('h') | KeyCode::Backspace if files => gui.forward(Action::Back),
-        KeyCode::Char('a') if files => gui.forward(Action::AddToQueue),
-        KeyCode::Char('N') if files => gui.forward(Action::AddNext),
-        KeyCode::Char('P') if files => gui.forward(Action::PlayNow),
+        KeyCode::Char('a') if files => gui.row_verb(List::Files, Action::AddToQueue),
+        KeyCode::Char('N') if files => gui.row_verb(List::Files, Action::AddNext),
+        KeyCode::Char('P') if files => gui.row_verb(List::Files, Action::PlayNow),
+        KeyCode::Esc if files => gui.files_view.stow(),
         // Search browsing: the same pane keys as Files, plus the chip
         // cursor on ←/→ and `t` to flip the class under it.
-        KeyCode::Down if search => {
-            gui.search_view.reveal = true;
-            gui.forward(Action::Down);
-        }
-        KeyCode::Up if search => {
-            gui.search_view.reveal = true;
-            gui.forward(Action::Up);
-        }
-        KeyCode::Enter if search => gui.forward_capturing(Action::Activate),
+        KeyCode::Down if search => gui.walk(List::Search, Action::Down),
+        KeyCode::Up if search => gui.walk(List::Search, Action::Up),
+        KeyCode::Enter if search => gui.row_verb(List::Search, Action::Activate),
         KeyCode::Char('h') | KeyCode::Backspace if search => gui.forward(Action::Back),
-        KeyCode::Char('a') if search => gui.forward(Action::AddToQueue),
-        KeyCode::Char('N') if search => gui.forward(Action::AddNext),
-        KeyCode::Char('P') if search => gui.forward(Action::PlayNow),
+        KeyCode::Char('a') if search => gui.row_verb(List::Search, Action::AddToQueue),
+        KeyCode::Char('N') if search => gui.row_verb(List::Search, Action::AddNext),
+        KeyCode::Char('P') if search => gui.row_verb(List::Search, Action::PlayNow),
+        KeyCode::Esc if search && gui.search_view.held => gui.search_view.stow(),
         KeyCode::Left if search => gui.chip = gui.chip.saturating_sub(1),
         KeyCode::Right if search => gui.chip = (gui.chip + 1).min(SEARCH_CLASSES.len() - 1),
         KeyCode::Char('t') if search => {
@@ -2330,6 +2345,7 @@ fn event_loop(
                                 && !(gui.queue_open && at.x >= gui.queue_panel_x())
                             {
                                 gui.app.focus = crate::tui::app::Focus::Browser;
+                                gui.queue_view.stow();
                             }
                             if let Some(act) = gui.ui.hit(at) {
                                 if gui.act(act) {
@@ -2410,13 +2426,88 @@ impl Gui {
 
     /// Seat a pane row for a forwarded verb: the App's tab and pane cursor
     /// go there, the keys come back to the browser (track-actions contract,
-    /// clause 19), and the list reveals the row.
+    /// clause 19), and the list reveals the row without lighting it — the
+    /// pointer acted, so the keyboard's hand is down (the kit's list-cursor
+    /// law); the reveal still scrolls a drill to its top.
     fn aim(&mut self, list: List, index: usize) {
         let Some(tab) = list.tab() else { return };
         self.app.tab = tab;
         self.app.focus = crate::tui::app::Focus::Browser;
         self.app.pane_for_mut(tab).state.select(Some(index));
-        self.list_mut(list).reveal = true;
+        let view = self.list_mut(list);
+        view.reveal = true;
+        view.stow();
+    }
+
+    /// The viewport a list scrolls, to read.
+    fn list_view(&self, list: List) -> &ListView {
+        match list {
+            List::Files => &self.files_view,
+            List::Search => &self.search_view,
+            List::Library => &self.library.view,
+            List::AlbumTracks => &albums::wall_ref(self).tracks,
+            List::Playlists => &self.playlists.list,
+            List::PlaylistTracks => &self.playlists.tracks,
+            List::Queue => &self.queue_view,
+            List::Sonic => &self.sonic.results,
+            List::DjRoom => &self.dj.body,
+            List::DjGenres => &self.dj.genres,
+        }
+    }
+
+    /// A walking key on a pane list (the kit's list-cursor law): a stowed
+    /// cursor is picked up where the pane rests it and nothing moves; a
+    /// held one walks through the App's own action. A pane with no cursor
+    /// at all forwards too, so the App seats one.
+    fn walk(&mut self, list: List, action: Action) {
+        let resting =
+            list.tab().is_some_and(|tab| self.app.pane_for(tab).state.selected().is_some());
+        let view = self.list_mut(list);
+        let stowed = !view.held;
+        view.pick_up();
+        if !stowed || !resting {
+            self.forward(action);
+        }
+    }
+
+    /// A row verb by key — Enter, `a`, `N`, `P`: it wants the cursor up
+    /// (the kit's list-cursor law), so no key acts on a row nobody can see.
+    fn row_verb(&mut self, list: List, action: Action) {
+        if !self.list_view(list).held {
+            return;
+        }
+        if matches!(action, Action::Activate) {
+            self.forward_capturing(action);
+        } else {
+            self.forward(action);
+        }
+    }
+
+    /// The list on screen in the active room, when the kit's cursor law
+    /// gates it through a [`ListView`]; the walls' cells and the rooms
+    /// without rows answer None.
+    fn room_list(&self) -> Option<List> {
+        use crate::tui::worker::LibraryNode;
+        match self.active {
+            FILES_NAV => Some(List::Files),
+            SEARCH_NAV => Some(List::Search),
+            ALBUMS_NAV => {
+                matches!(self.app.library_node(), LibraryNode::Album { .. }).then_some(List::AlbumTracks)
+            }
+            ARTISTS_NAV | GENRES_NAV | RECENT_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV => {
+                match self.app.library_node() {
+                    LibraryNode::Album { .. } => Some(List::AlbumTracks),
+                    LibraryNode::Artist(_) => None,
+                    _ => Some(List::Library),
+                }
+            }
+            PLAYLISTS_NAV => Some(if matches!(self.app.library_node(), LibraryNode::Playlist(_)) {
+                List::PlaylistTracks
+            } else {
+                List::Playlists
+            }),
+            _ => None,
+        }
     }
 
     /// Whether the screen keeps its tips line under the bar — the bar and
@@ -3056,13 +3147,61 @@ mod tests {
 
     #[test]
     fn files_keys_drive_the_shared_pane() {
-        // The pane arrives with the App's own resting cursor already
-        // picked; ↓ walks it forward one — GUI keys ARE the TUI's keys.
+        // The pane arrives with the App's own resting cursor seated but
+        // not lit (the kit's list-cursor law): the first ↓ picks it up
+        // where it rests, the next walks it forward one — GUI keys ARE
+        // the TUI's keys once the cursor is up.
         let mut gui = browsing_gui();
         let before = gui.app.files.state.selected().expect("the pane rests on a row");
+        assert!(!gui.files_view.held, "no row lit on arrival");
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         handle_key(&mut gui, down);
-        assert_eq!(gui.app.files.state.selected(), Some(before + 1), "↓ moved the shared cursor");
+        assert!(gui.files_view.held, "↓ picked the cursor up");
+        assert_eq!(gui.app.files.state.selected(), Some(before), "where the pane rests it, unmoved");
+        handle_key(&mut gui, down);
+        assert_eq!(gui.app.files.state.selected(), Some(before + 1), "the next ↓ moved the shared cursor");
+    }
+
+    #[test]
+    fn the_highlight_is_the_keyboards_alone() {
+        // The kit's list-cursor law in the Files room: nothing lit on
+        // arrival, ↓ lights the resting row, Esc stows it, a click acts and
+        // stows, and the row verbs wait for the cursor to be up.
+        let mut gui = browsing_gui();
+        gui.queue_open = false;
+        fn lit(gui: &mut Gui, needle: &str) -> bool {
+            let rows = draw(gui);
+            let y = rows.iter().position(|r| r.contains(needle)).expect(needle);
+            let x = rows[y].find(needle).unwrap();
+            draw_buffer(gui)[(x as u16, y as u16)].bg == th().accent
+        }
+        assert!(!lit(&mut gui, "Ambient"), "the resting row is not lit on arrival");
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(gui.pending.is_empty() && !gui.app.files.loading, "Enter on a stowed cursor is nothing");
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(gui.app.queue.items.is_empty(), "so is a");
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(lit(&mut gui, "Ambient"), "↓ lights the row the pane rests on");
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!lit(&mut gui, "Ambient"), "Esc stows it");
+        // A click queues its row and lights nothing — even with the cursor
+        // up beforehand; the next ↓ picks it up where the click left it.
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        gui.act(Act::PaneRow(List::Files, 2, RowVerb::Queue));
+        assert_eq!(gui.app.queue.items.len(), 1, "the click acted");
+        assert_eq!(gui.app.files.state.selected(), Some(2), "and seated the pane's cursor");
+        assert!(!lit(&mut gui, "Night Drive") && !lit(&mut gui, "Ambient"), "but lit nothing");
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert!(lit(&mut gui, "Night Drive"), "↓ picks the cursor up where the click left it");
+        // Typing a filter is walking the list: the first match lights up
+        // and Enter, Enter opens it (browser-top-bar contract, clause 22).
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        assert!(lit(&mut gui, "Ambient"), "the typed letter lit the match");
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(gui.app.files.loading, "and Enter, Enter opened the one folder");
     }
 
     #[test]
