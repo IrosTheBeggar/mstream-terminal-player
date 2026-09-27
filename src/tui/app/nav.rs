@@ -38,6 +38,12 @@ impl<N: PartialEq + Clone> Drill<N> {
         self.stack.is_empty()
     }
 
+    /// The view one step out, when there is one.
+    pub fn parent(&self) -> Option<&N> {
+        let n = self.stack.len();
+        if n >= 2 { self.stack.get(n - 2) } else { None }
+    }
+
     /// Step in.
     pub fn enter(&mut self, node: N) {
         self.stack.push(node);
