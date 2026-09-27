@@ -29,9 +29,9 @@ federated peer's parent serves it as it serves the queue.
 - **A server that cannot be reached right now** (a tunnel down): the
   reach's own reason on that line.
 - **The page**: loading on entry — every read of the page's, exactly as
-  `mstream-player stats` makes them — then the page as it is: the state
-  line, the tabs, the period controls, the log, the forget gate. A server
-  older than 6.27 says "no Stats API" the page's way.
+  `mstream-player stats` makes them — then the page as it is: the tabs,
+  the period control, the log, the forget gate. A server older than 6.27
+  says "no Stats API" the page's way.
 - **The session changes** while the screen is up (a switch, a pasted
   code's dial): the page is rebuilt on the new session's server.
 - **Leaving** drops the page; coming back builds it again and reloads.
@@ -108,6 +108,40 @@ The page's two column charts — plays per day (or week, or month) and the
     controls. The frames cost the rows under the tiles one row against the
     bare tiles; the charts yield as clause 10 says.
 
+### The period
+
+14. **The period is a dropdown.** On the Overview's controls row, after
+    PERIOD, the control is the period's name bold with a dim `▾` (`v` on
+    the legacy console), bright under the pointer: `This month ▾`. A click
+    on it or `p` drops the list under it — a rounded frame in the accent,
+    hanging from the name's first cell, kept inside the column — with
+    every period the log has data in, then All time, each with its dates
+    where it has them; the current one wears the `•`, the cursor the slab,
+    and the first play's date closes the list. `↑` `↓` and the wheel move
+    the cursor, Enter picks it, a click on a row picks that row; Esc, `p`
+    or a click anywhere else closes the list and keeps the period. `[` and
+    `]` still step the period without the list. On the Top and Recent
+    tabs, which have no controls row, the same control leads the tab
+    row's note at the right — `This month ▾ · the log, newest first` — so
+    every tab names the range it shows and can change it; the list drops
+    from there.
+15. **No state line.** The tabs are the body's first row; the row that
+    carried "• This month — 388 plays · 31h 12m · 188 tracks · times in
+    your zone" is gone, its facts being the tiles' own, and the Overview's
+    tab-row note ("the period's totals") with it. What the line said that
+    nothing else did moved: "no Stats API" and "no plays yet" are one gold
+    sentence at the top of the body; "times in UTC" ends the Recent tab's
+    note on a machine without a zone, and is not said when the zone is
+    known. The two rows go to the charts (clause 10).
+16. **A change keeps the page.** A new period or origin sends the reads
+    and leaves everything drawn as it is — the tiles, the charts, the
+    ranking, the log — under the new name, with the note row saying the
+    numbers are on their way; the new ones replace the old when they
+    land, and nothing blinks. Until then the tiles compare against, and
+    an empty period is named by, the period the numbers belong to, not
+    the one chosen. The row cursor lets go and the log's paging stops at
+    what is loaded, since those rows are about to change.
+
 ## Wording
 
 The page's own strings (`sta.*`). New: the tab is the page's title
@@ -142,4 +176,21 @@ the no-session sentence; `gui.tips.base` names `T`.
   own frame, rather than as a shared-border grid, which would have cost
   no row: the grid reads as a table, the cards as the webapp's tiles. The
   row the frames cost comes out of the charts' share — a 30-row hub
-  terminal keeps the day chart alone, a 24-row one the tiles alone.
+  terminal keeps the day chart alone, a 24-row one the tiles alone (both
+  undone by clause 15's two rows: at 30 both charts, at 24 the day chart).
+- **2026-09-27 — The period dropdown, the state line, the blink (clauses
+  14–16).** Asked for as four things: the state line was redundant with
+  the tiles; the Overview's "the period's totals" note said nothing; the
+  `‹ This month › [ ] step · p list` control should be a dropdown; and a
+  period change made the page blink. The dropdown follows the GUI
+  header's server switcher (the kit's one anchored list: `name ▾`, a
+  frame under the name, rows that pick on click, a click elsewhere that
+  closes) rather than the centred picker the page had, and lost the
+  picker's title bar and `[X]` with it. Because the state line was the
+  only place the Top and Recent tabs named their period, the control
+  leads their tab-row notes — an addition beyond the ask, made so no tab
+  shows a range it does not name. "times in your zone" was dropped rather
+  than moved: the zone being known is the expectation; only UTC is worth
+  a word. The blink was the page emptying itself on a change so the state
+  line could not name one period over another's totals; with the line
+  gone the page keeps its numbers and tracks which period they belong to.

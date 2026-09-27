@@ -3433,7 +3433,7 @@ mod tests {
         let all = rows.join("\n");
         assert!(!all.contains("Albums") && !all.contains("auto-dj"), "the nav and the bar stand down:\n{all}");
         assert!(rows[1].trim().is_empty(), "a blank row under the bar, where the page's own header would be");
-        assert!(rows[4].contains(" Overview ") && rows[4].contains(" Recent "), "the page's tab strip:\n{all}");
+        assert!(rows[2].contains(" Overview ") && rows[2].contains(" Recent "), "the page's tab strip is the page's first row:\n{all}");
         assert!(rows[29].contains("Esc library"), "the footer carries the way back after the page's hint: {}", rows[29]);
         let buf = draw_buffer(&mut gui);
         let sx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Stats ")).unwrap() as u16;

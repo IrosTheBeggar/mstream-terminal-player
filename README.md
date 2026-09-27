@@ -526,8 +526,9 @@ mstream-player stats --server http://nas:3000
 
 The server's `/stats` page (mStream 6.27 and up) as a page of its own, in the admin rooms'
 chrome and behind the same sign-in — but for any account, not an admin's, because the
-listening log is per account. One state line carries the period and its totals; `←`/`→`
-switch three tabs. **Overview** is the webapp's six tiles as cards (plays, listening time, tracks,
+listening log is per account. `←`/`→` switch three tabs, and the period is a dropdown
+(`This month ▾`) on the Overview's controls row — the other tabs carry it at the right of the
+tab row. **Overview** is the webapp's six tiles as cards (plays, listening time, tracks,
 skips, streak, sessions, each against the previous period), plays per day as a column
 chart on a whole-number scale with the busiest day named, the 24-hour profile with the peak hour, and — while the
 log holds federated peers' tracks — where the tracks live. **Top** ranks tracks, artists,
@@ -540,11 +541,12 @@ web player, this player, the mobile app — or *not counted* where the server di
 the play. `x` forgets a play behind a gate; the log and the totals reload.
 
 `[` and `]` step through the periods the log has data in — this and last week, month,
-quarter, half-year and year, the older months and years, all time — and `p` lists them;
-`o` cycles the origin (all, this server, peers) while peer plays exist. Everything loads on
-entry and on a change; there is no poll. Times are in the machine's zone, read the way
+quarter, half-year and year, the older months and years, all time — and `p` or a click on
+the period drops the list; `o` cycles the origin (all, this server, peers) while peer plays
+exist. Everything loads on entry and on a change, and a change keeps the page as it stands
+until the new numbers land; there is no poll. Times are in the machine's zone, read the way
 `date` reads it (`TZ`, else `/etc/localtime`), and the server is asked for its periods and
-buckets in that zone; a machine without a zone file gets UTC, and the state line says so.
+buckets in that zone; a machine without a zone file gets UTC, and the Recent tab says so.
 A server older than 6.27 has no Stats API, and the page says that instead. The player
 reports its own plays (see Play reporting below), and the log names them *this player*;
 a total under a minute reads in seconds.

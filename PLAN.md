@@ -542,8 +542,9 @@ line plus the webapp's two warnings; after the first user the room signs in as t
 **Stats page ✅ 2026-09-14** — `mstream-player stats` (`src/admin/stats.rs`, `src/admin/tz.rs`), per
 the "Player Stats" canvas: the server's `/stats` page (Stats API v2, mStream 6.27) as a standalone
 page on the hub's session and sign-in — any account, since the log is per account, so `run_stats`
-shares the preflight (`ensure_session`) with `admin::run` but is not a room. One state line (the
-period and its totals, "times in your zone" / "in UTC"), three tabs: Overview (the webapp's six
+shares the preflight (`ensure_session`) with `admin::run` but is not a room. Three tabs (the state
+line that carried the period's totals went 2026-09-27 as redundant with the tiles; "times in UTC" ends
+the Recent tab's note when the zone is unknown): Overview (the webapp's six
 tiles as rounded cards with the delta against the previous period — a second `/stats/summary` at offset−1 — plays
 per day/week/month as eighth-block columns from `/stats/timeseries` — on a whole-number scale with a
 ticked baseline, three to eight rows as the screen allows (2026-09-27) — the hourOfDay profile, the
@@ -552,8 +553,10 @@ local/peer split with the ▰▱ bar while peer plays exist), Top (`/stats/top`,
 paged by the cursor as the selection nears the end; outcome, listened and client words as the
 webapp's stats-view.js spells them; `x` → gold gate → `DELETE /stats/plays/:id`, then a quiet
 reload). Periods from `/stats/periods` in the webapp's `periodOptions` order, stepped on `[` `]`,
-listed on `p`; the default period with no data falls to the first with data, as the webapp does.
-Every read carries a `seq`; a stale answer is dropped. Time zone without a crate: `tz.rs` reads the
+dropped as a list under the `This month ▾` control on `p` or a click (2026-09-27; before, a centred
+picker); the default period with no data falls to the first with data, as the webapp does. A change
+keeps the page drawn as it stands until the new numbers land (the page tracks the period its numbers
+belong to), so nothing blinks. Every read carries a `seq`; a stale answer is dropped. Time zone without a crate: `tz.rs` reads the
 TZif file `/etc/localtime` points at (or `TZ` names) — transitions, then the POSIX footer rule — for
 the IANA name the server wants and the offsets the local clock needs; no file → UTC. Empty log,
 empty period, and a pre-6.27 server (404) are their own states. Not built from the canvas: the

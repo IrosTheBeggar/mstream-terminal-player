@@ -157,7 +157,7 @@ banned.
   Behavioral rules).
 
 ### Tabs
-One row, under the screen's state line: the ACTIVE tab is a 1-row filled
+One row, under the screen's state line (or first, on a page with none): the ACTIVE tab is a 1-row filled
 slab (bg LightBlue, fg Black BOLD, one cell of padding each side) — the
 kit's sanctioned dense-context button shape, so no third button style
 appears — and the others are text buttons (fg DarkGray; hover Cyan +
@@ -166,6 +166,21 @@ one fixed height whatever the tab, so nothing below it moves. The tab
 row's right edge may carry the active pane's one-line note (the log's
 "newest first"), dropped when the row is too narrow. First consumer:
 the admin panel's Discovery room.
+
+### Dropdown
+A choice among many that has one home on the screen: the current value
+as the control — `This month ▾`, the name in the row's own weight, the
+chevron DarkGray (`v` on the legacy console), both BRIGHT + BOLD under
+the pointer — and, on click or its key, a list hanging from the name's
+first cell: a Rounded frame (`frame_at`: `Clear`, ground, border in the
+accent — DarkGray where the control is chrome, as the GUI header's
+server switcher), kept inside the screen, `Surface::overlay`-registered.
+Rows: the current value wears `•` (fg LightBlue), the keyboard cursor
+the accent slab, hover BRIGHT + BOLD. A click on a row picks it and
+closes the list; Enter picks the cursor; Esc, the key again, or a click
+anywhere else closes and keeps — the whole screen registers that close
+under the rows. No title bar, no `[X]`. Consumers: the GUI header's
+server switcher, the stats page's period.
 
 ### State line
 One row under the header, on rooms that watch a live thing: `• word` in
