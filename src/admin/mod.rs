@@ -18,7 +18,7 @@ mod discovery;
 mod federation;
 mod libraries;
 mod login;
-mod stats;
+pub(crate) mod stats;
 mod tz;
 mod users;
 

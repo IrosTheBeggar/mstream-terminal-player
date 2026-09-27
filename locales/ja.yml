@@ -1729,13 +1729,16 @@ gui:
     received_add: "mStream に追加"
     received_dont_ask: "常に mStream に追加し、今後確認しない"
     back_tip: "設定に戻る — Esc"
+  stats:
+    no_session: "セッションがありません — サーバーに接続すると視聴ログがここに表示されます"
   tips:
     search_edit: "入力 · Enter 検索 · Esc 完了"
     search: "↑ ↓ 移動 · Enter 開く/再生 · h 戻る · ← → 分類 · t 切替 · / 編集 · a キューへ · q 終了"
     files: "↑ ↓ 移動 · Enter 開く · h 戻る · a キューへ · Tab キュー · Space 再生/停止 · q 終了 · f 絞り込み"
     rows: "↑ ↓ 行 · ← → 調整 · Enter 切替 · Esc 完了 · 1-8 セクション · q 終了"
-    base: "1-8 セクション · Tab キュー · Space 再生/停止 · -/+ 音量 · D Auto DJ · q 終了"
+    base: "1-8 セクション · Tab キュー · Space 再生/停止 · -/+ 音量 · D Auto DJ · T 統計 · q 終了"
     now: "1-5 タブ · ↑ ↓ リスト · Enter 再生 · Space 再生/一時停止 · -/+ 音量 · m 操作 · 0 ライブラリ"
+    stats_back: "Esc ライブラリ"
     servers: "↑ ↓ 行 · Enter 切替 · e 編集 · d 既定 · p 連携 · x 削除 · Esc 戻る"
     servers_bundled: "↑ ↓ 行 · Enter 切替 · e 編集 · d 既定 · p 連携 · Esc 戻る"
     servers_peer: "↑ ↓ 行 · Enter 切替 · h 非表示/表示 · d 既定 · Esc 戻る"

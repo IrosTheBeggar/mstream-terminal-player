@@ -2150,6 +2150,14 @@ a LATER secondary screen (party view), Columns retired.
   Create button in the name box; the keyword row names its key; an art
   cache that evicts its oldest unpinned cover; a GUI e2e leg with the
   demo seat; the replay harness redacts secrets.
+- **The Stats screen ✅ 2026-09-27** — the top bar's third tab hosts the
+  stats page whole (docs/ux-contracts/stats-screen.md): the page grew a
+  hosted mode (no header, no tips row — the bar and the footer carry
+  those), the GUI builds its client from the App's reach (a tunnel's
+  bridge, a peer's parent) and routes the keys and the pointer below the
+  bar to the page's own surface; `T` from anywhere, Esc back. A new
+  terminal window for the page was weighed and refused (the contract's
+  log says why).
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with

@@ -1729,13 +1729,16 @@ gui:
     received_add: "Zu mStream hinzufügen"
     received_dont_ask: "Immer zu mStream hinzufügen, nicht mehr fragen"
     back_tip: "Zurück zu den Einstellungen — Esc"
+  stats:
+    no_session: "keine Sitzung – mit einem Server verbinden, dann erscheint hier sein Hörprotokoll"
   tips:
     search_edit: "tippen · Enter suchen · Esc fertig"
     search: "↑ ↓ Zeile · Enter öffnen · h zurück · ← → Klasse · t umschalten · / Suche · a einreihen · q Ende"
     files: "↑↓ Zeile · Enter öffnen · h zurück · a einreihen · Tab Warteschl. · Space Pause · f Filter · q Ende"
     rows: "↑ ↓ Zeilen · ← → ändern · Enter umschalten · Esc fertig · 1-8 Bereiche · q beenden"
-    base: "1-8 Bereiche · Tab Warteschlange · Space Wiedergabe · -/+ Lautstärke · D Auto DJ · q beenden"
+    base: "1-8 Bereiche · Tab Warteschl. · Space Pause · -/+ Lautstärke · D Auto DJ · T Statistik · q Ende"
     now: "1-5 Tabs · ↑ ↓ Liste · Enter Play · Space Pause · -/+ Lautstärke · m Aktionen · 0 Bibliothek"
+    stats_back: "Esc Bibliothek"
     servers: "↑ ↓ Zeilen · Enter wechseln · e bearbeiten · d Standard · p koppeln · x entfernen · Esc zurück"
     servers_bundled: "↑ ↓ Zeilen · Enter wechseln · e bearbeiten · d Standard · p koppeln · Esc zurück"
     servers_peer: "↑ ↓ Zeilen · Enter wechseln · h aus-/einblenden · d Standard · Esc zurück"

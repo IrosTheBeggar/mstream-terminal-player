@@ -1729,13 +1729,16 @@ gui:
     received_add: "Dodaj do mStream"
     received_dont_ask: "Zawsze dodawaj do mStream, nie pytaj ponownie"
     back_tip: "Powrót do ustawień — Esc"
+  stats:
+    no_session: "brak sesji — połącz się z serwerem, a jego dziennik odsłuchów pojawi się tutaj"
   tips:
     search_edit: "pisz · Enter szukaj · Esc gotowe"
     search: "↑ ↓ ruch · Enter otwórz · h wstecz · ← → klasa · t przełącz · / edytuj · a do kolejki · q wyjdź"
     files: "↑ ↓ ruch · Enter otwórz · h wstecz · a kolejka · Tab kolejka · Space pauza · f filtr · q wyjdź"
     rows: "↑ ↓ wiersze · ← → zmień · Enter przełącz · Esc gotowe · 1-8 sekcje · q wyjdź"
-    base: "1-8 sekcje · Tab kolejka · Space odtwarzaj · -/+ głośność · D Auto DJ · q wyjdź"
+    base: "1-8 sekcje · Tab kolejka · Space odtwarzaj · -/+ głośność · D Auto DJ · T statystyki · q wyjdź"
     now: "1-5 karty · ↑ ↓ lista · Enter odtwórz · Spacja pauza · -/+ głośność · m akcje · 0 biblioteka"
+    stats_back: "Esc biblioteka"
     servers: "↑ ↓ wiersze · Enter przełącz · e edytuj · d domyślny · p paruj · x usuń · Esc wstecz"
     servers_bundled: "↑ ↓ wiersze · Enter przełącz · e edytuj · d domyślny · p paruj · Esc wstecz"
     servers_peer: "↑ ↓ wiersze · Enter przełącz · h ukryj/pokaż · d domyślny · Esc wstecz"

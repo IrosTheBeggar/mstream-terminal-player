@@ -29,6 +29,7 @@ mod playlists;
 mod queue;
 mod servers;
 mod sonic;
+mod stats;
 mod torrent;
 mod torrent_meta;
 
@@ -332,6 +333,8 @@ impl List {
 pub(crate) enum Screen {
     Library,
     NowPlaying,
+    /// The stats page, hosted (docs/ux-contracts/stats-screen.md).
+    Stats,
 }
 
 /// The sub-view a Settings room shows in place of its rows. At most one is
@@ -522,6 +525,8 @@ pub(crate) struct Gui {
     screen: Screen,
     /// The Now Playing screen's own state: its cover slot.
     now: now::NowUi,
+    /// The Stats screen's page, while the screen is up.
+    stats: stats::StatsUi,
     /// The Settings sub-view standing in for its rows, when one is open.
     settings_room: Option<SettingsRoom>,
     /// The saved-server surfaces: dropdown, form, room, pairing QR.
@@ -582,6 +587,7 @@ impl Gui {
             last_height: MIN_H,
             screen: Screen::Library,
             now: now::NowUi::new(),
+            stats: stats::StatsUi::default(),
             settings_room: None,
             servers: servers::ServersUi::new(),
             albums: albums::AlbumsUi::new(),
@@ -773,20 +779,30 @@ impl Gui {
                 }
             }
             Act::Screen(screen) => {
+                let was = self.screen;
                 self.screen = screen;
                 // The App's full-screen flag follows the screen, so its keys
                 // mean here what they mean in the TUI's view (now-playing
                 // contract, the states).
                 self.app.fullscreen = screen == Screen::NowPlaying;
-                if screen == Screen::NowPlaying {
+                if screen != Screen::Library {
                     self.cursor = None;
                     self.servers.drop_open = false;
+                }
+                // The Stats screen's page lives as long as the screen: built
+                // from the session on entry, dropped on leaving (stats-screen
+                // contract, the states).
+                if screen == Screen::Stats && was != Screen::Stats {
+                    stats::open(self);
+                } else if screen != Screen::Stats {
+                    stats::close(self);
                 }
             }
             Act::Nav(i) => {
                 // A nav row is the Library's: it brings that screen back.
                 self.screen = Screen::Library;
                 self.app.fullscreen = false;
+                stats::close(self);
                 // The gated room: with the flag gone the row isn't drawn,
                 // and its digit must be as dead as the row (contract §1).
                 if i == SONIC_NAV && !self.app.capabilities.discovery_path {
@@ -1115,7 +1131,12 @@ fn demo_now() -> Now {
 /// is up, dim text for the other, bright under the pointer.
 fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
     let mut x = 1;
-    for (screen, label) in [(Screen::Library, t!("gui.top.library")), (Screen::NowPlaying, t!("gui.top.now"))] {
+    let tabs = [
+        (Screen::Library, t!("gui.top.library")),
+        (Screen::NowPlaying, t!("gui.top.now")),
+        (Screen::Stats, t!("sta.title")),
+    ];
+    for (screen, label) in tabs {
         let text = format!(" {label} ");
         let rect = Rect { x, y: 0, width: text.chars().count() as u16, height: 1 };
         let style = if gui.screen == screen {
@@ -1312,6 +1333,16 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             }
             now::draw(frame, gui, view);
         }
+        Screen::Stats => {
+            // The stats page, whole, under the top bar (stats-screen
+            // contract, clauses 1–2); a pick's banner takes the row under
+            // the bar first, as on Now Playing.
+            let view = now::view_rect(area, banner.is_some(), gui.footer());
+            if let Some(text) = &banner {
+                draw_capture_banner(frame, gui, Rect { x: 1, y: 1, width: area.width - 2, height: 1 }, text);
+            }
+            stats::draw(frame, gui, view);
+        }
     }
 
     if gui.queue_open && gui.screen == Screen::Library {
@@ -1344,6 +1375,8 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         t!("gui.tips.sonic_pick")
     } else if gui.screen == Screen::NowPlaying {
         t!("gui.tips.now")
+    } else if gui.screen == Screen::Stats {
+        std::borrow::Cow::from(stats::tips(gui))
     } else if gui.in_settings_room(SettingsRoom::Servers) {
         // The bundled server's row has no remove key to name; a peer's row
         // has its own verbs.
@@ -2198,6 +2231,10 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     if gui.screen == Screen::NowPlaying {
         return now::handle_key(gui, key);
     }
+    // The Stats screen hosts the stats page: its keys are the page's.
+    if gui.screen == Screen::Stats {
+        return stats::handle_key(gui, key);
+    }
     let browse = gui.browse_room()
         && gui.app.connected
         && !actions::modal_open(gui)
@@ -2316,6 +2353,8 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             return gui.act(Act::Nav(c as usize - '1' as usize));
         }
         KeyCode::Char('0') => return gui.act(Act::Screen(Screen::NowPlaying)),
+        // The Stats screen, the third tab (stats-screen contract, entry 2).
+        KeyCode::Char('T') => return gui.act(Act::Screen(Screen::Stats)),
         // The tenth room has no digit; `D` is the capital beside `A`'s toggle.
         KeyCode::Char('D') => return gui.act(Act::Nav(DJ_NAV)),
         // `/` is the search key everywhere, the TUI's own habit: land on
@@ -2456,12 +2495,15 @@ fn event_loop(
             // server, or none: it asks this one now.
             if connected {
                 gui.reopen_room();
+                stats::reopen(gui);
             }
         }
         servers::poll(gui);
         torrent::poll(gui);
 
-        let over = gui.ui.hovering_clickable();
+        // The Stats screen's page pumps its worker and its controls here too.
+        let stats_over = stats::frame(gui);
+        let over = gui.ui.hovering_clickable() || stats_over;
         if over != hand {
             hand = over;
             set_pointer_shape(hand, mouse_on);
@@ -2507,6 +2549,16 @@ fn event_loop(
                     // The App keeps the pointer too: the Now Playing band
                     // lights under it, the TUI's way.
                     gui.app.note_pointer(at);
+                    // The Stats screen's page owns the pointer below the top
+                    // bar, on its own surface (stats-screen contract, clause
+                    // 5); the GUI's surface still follows the motion, so the
+                    // bar's own tabs light and dim as the pointer passes.
+                    if stats::pointer(gui, mouse) {
+                        if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
+                            gui.ui.motion(at);
+                        }
+                        continue;
+                    }
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             gui.ui.caret_touch();
@@ -2795,7 +2847,7 @@ impl Gui {
         }
         // A modal owns the pointer whole; the Now Playing screen scrolls
         // nothing yet (its queue panel is not on screen).
-        if self.modal_open() || self.screen == Screen::NowPlaying {
+        if self.modal_open() || matches!(self.screen, Screen::NowPlaying | Screen::Stats) {
             return;
         }
         if self.queue_open && at.x >= self.queue_panel_x() {
@@ -3309,6 +3361,58 @@ mod tests {
     }
 
     #[test]
+    fn the_stats_tab_hosts_the_stats_page_under_the_top_bar() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // The stats-screen contract: the page whole under the bar, the
+        // page's keys, Esc and T the way back, q the player's quit.
+        let mut gui = browsing_gui();
+        gui.config.gui.key_hints = true; // the footer row, where the page's hint goes
+        gui.app.session.server = "http://host.invalid:3000".into();
+        gui.app.session.server_id = "http://host.invalid:3000".into();
+        gui.app.session.username = Some("anna".into());
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+        assert_eq!(gui.screen, Screen::Stats);
+        assert!(!gui.app.fullscreen, "the App's full-screen flag is Now Playing's alone");
+        let page = gui.stats.page.as_ref().expect("a page on the session's server");
+        assert_eq!(page.username.as_deref(), Some("anna"), "the account is the session's");
+        let rows = draw(&mut gui);
+        let all = rows.join("\n");
+        assert!(!all.contains("Albums") && !all.contains("auto-dj"), "the nav and the bar stand down:\n{all}");
+        assert!(rows[1].trim().is_empty(), "a blank row under the bar, where the page's own header would be");
+        assert!(rows[4].contains(" Overview ") && rows[4].contains(" Recent "), "the page's tab strip:\n{all}");
+        assert!(rows[29].contains("Esc library"), "the footer carries the way back after the page's hint: {}", rows[29]);
+        let buf = draw_buffer(&mut gui);
+        let sx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Stats ")).unwrap() as u16;
+        assert_eq!(buf[(sx, 0)].bg, th().accent, "the Stats tab wears the slab");
+
+        // The page's keys are the page's: → walks its tabs.
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(gui.stats.page.as_ref().unwrap().tab, crate::admin::stats::Tab::Top);
+        // Esc with nothing selected or open is the way back; T toggles.
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(gui.screen, Screen::Library);
+        assert!(gui.stats.page.is_none(), "leaving drops the page");
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+        assert_eq!(gui.screen, Screen::Stats);
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE));
+        assert_eq!(gui.screen, Screen::Library);
+        gui.act(Act::Screen(Screen::Stats));
+        assert!(super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)), "q quits the player");
+        // A nav digit leaves for its room, as from anywhere.
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert_eq!((gui.screen, gui.active), (Screen::Library, FILES_NAV));
+
+        // No session: one sentence, and the way back.
+        let mut lone = test_gui();
+        lone.act(Act::Screen(Screen::Stats));
+        assert!(lone.stats.page.is_none());
+        let all = draw(&mut lone).join("\n");
+        assert!(all.contains("no session"), "{all}");
+        super::handle_key(&mut lone, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(lone.screen, Screen::Library);
+    }
+
+    #[test]
     fn the_top_bar_switches_between_the_library_and_now_playing() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut gui = browsing_gui();
@@ -3321,6 +3425,8 @@ mod tests {
         assert_ne!(buf[(nx, 0)].bg, th().accent, "the other tab does not");
         assert!(rows.iter().any(|r| r.contains("Albums")), "the nav column is up");
         assert_eq!(gui.ui.hit(Position { x: nx + 1, y: 0 }), Some(Act::Screen(Screen::NowPlaying)));
+        let sx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Stats ")).unwrap() as u16;
+        assert_eq!(gui.ui.hit(Position { x: sx + 1, y: 0 }), Some(Act::Screen(Screen::Stats)), "the third tab");
 
         // Now Playing: the nav, the room, the queue panel and the bar go;
         // the TUI's view stands under the top bar (now-playing contract,
