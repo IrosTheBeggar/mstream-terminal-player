@@ -150,3 +150,7 @@ drawing, the keys, and the three verbs composed from public App pieces
   walking the list, so the first typed letter shows the cursor on the
   first match, and Enter, Enter still opens it. Search's query box does
   the same for its results.
+- **2026-09-26 — The follow-up: footer hints under a hundred cells.** The
+  German, Spanish, French, Italian, Polish, Russian, Japanese and
+  Portuguese hint lines ran to 127 cells and clipped at the window's
+  edge; every line fits in 99 cells now.

@@ -224,3 +224,8 @@ validator wordings above quote the record's English.
   trust — a bare client was dropped by the bridge), refuses a read-only
   peer (multi-server clause 26), and drops a check's or an add's answer
   that lands after a server switch.
+- **2026-09-26 — The follow-up: glyphs out of the strings.** The path
+  preview's angle quotes (clause 14) come from code, behind the same
+  console gate as every other glyph; the locale strings carry words only
+  (docs/ui-kit.md, Glyphs). The same for the DJ room's bullet and the
+  rating's star.

@@ -259,3 +259,12 @@ while the queue has focus and stop when a browse click takes it back;
   rows. Play/pause starts a waiting queue and wears ▸ while idle. A modal's
   own frame is inert: only the backdrop closes it (clause 9 as written).
   The wording table names the keys that exist.
+- **2026-09-26 — The follow-ups.** A details block that answers after a
+  newer rating write is patched with the App's rating before it is kept
+  (clause 10): the sheet and the bar's card never show the older number
+  while the queue's row shows the new one. The sheet holds no copy of its
+  own; the stars read the App's nearest copy (clause 11) and fall back on
+  the sheet's block only for a track the App no longer holds. The
+  new-playlist name box has a Create button beside the field (clause 12).
+  The bar's time slots widen with the total, so a track past a hundred
+  minutes keeps its times off the seek cells.

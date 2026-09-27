@@ -107,6 +107,11 @@ border, pointing at the target) · `█▀▄` half-blocks (QR only).
   terminals).
 - `ratatui-image` is reserved for album-art surfaces only — never chrome,
   never icons — so screens render identically over SSH and in ratzilla.
+- Glyphs live in code, never in the locale strings: a string that carries
+  one bypasses the console gate (`legacy_conhost`) and draws as a question
+  mark on bare conhost. The GUI's `forward_glyph`, `check_glyphs`,
+  `bullet_glyph`, `star_glyph` and `angle_glyphs` are the gate; a string
+  says the words and the code puts the mark beside them.
 
 ## Elements
 

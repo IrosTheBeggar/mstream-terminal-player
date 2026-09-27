@@ -242,3 +242,11 @@ and no strip, and hide for a peer.
   new session's same-named list — a session generation on the library
   and search commands is the fix; the search query is cleared on a switch
   meanwhile.
+- **2026-09-26 — The follow-up: a session generation.** The library and
+  search asks carry the App's session generation and their replies echo
+  it; a reply under another generation — the server the session has since
+  left — fills nothing, whatever same-named list the new server has. A
+  switch also drops the submitted-search marker, so no stale search is
+  wanted either. The art cache lets go of its oldest cover that neither
+  the playing track nor a queued row needs (clause 6), instead of clearing
+  the lot at the cap.
