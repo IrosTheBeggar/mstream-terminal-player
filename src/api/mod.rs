@@ -340,6 +340,20 @@ impl DiscoverySetting {
     }
 }
 
+/// Minimal percent-encoding for a query-string value: everything that is
+/// not an unreserved character becomes %XX. Enough for tz names, cursors
+/// and event ids.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// Run the async core to completion for the sync (native) surface.
 ///
 /// The client is async at its core — one implementation serving both the
@@ -2200,6 +2214,89 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn admin_set_user_access(&self, username: &str, access: &UserAccess) -> Result<serde_json::Value, ApiError> {
         wait(self.admin_set_user_access_async(username, access))
+    }
+
+    // ── Stats API v2 (/api/v1/stats/*) — the read side, for `stats` ──
+    // Every read is scoped to the signed-in account (401 on a server with
+    // no accounts). `tz` is an IANA zone for the period and day boundaries;
+    // `origin` is all / local / peers; a period is `kind` + `offset` back
+    // from the current one, or `all`.
+
+    fn stats_range(&self, path: &str, period: &str, offset: i32, tz: &str, origin: Option<&str>) -> String {
+        let tz = urlencode(tz);
+        let mut q = format!("{path}?period={period}&offset={offset}&tz={tz}");
+        if let Some(origin) = origin {
+            q.push_str(&format!("&origin={origin}"));
+        }
+        q
+    }
+
+    pub async fn stats_summary_async(&self, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsSummary, ApiError> {
+        self.get(&self.stats_range("api/v1/stats/summary", period, offset, tz, Some(origin))).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn stats_summary(&self, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsSummary, ApiError> {
+        wait(self.stats_summary_async(period, offset, tz, origin))
+    }
+
+    /// Plays per bucket. Profile buckets (`hourOfDay`, `weekday`) are not
+    /// narrowed by origin, so this sends none.
+    pub async fn stats_timeseries_async(&self, bucket: &str, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsTimeseries, ApiError> {
+        let path = self.stats_range("api/v1/stats/timeseries", period, offset, tz, Some(origin));
+        self.get(&format!("{path}&bucket={bucket}")).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn stats_timeseries(&self, bucket: &str, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsTimeseries, ApiError> {
+        wait(self.stats_timeseries_async(bucket, period, offset, tz, origin))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stats_top_async(&self, entity: &str, metric: &str, period: &str, offset: i32, tz: &str, origin: &str, limit: u32) -> Result<StatsTop, ApiError> {
+        let path = self.stats_range("api/v1/stats/top", period, offset, tz, Some(origin));
+        self.get(&format!("{path}&entity={entity}&metric={metric}&limit={limit}")).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn stats_top(&self, entity: &str, metric: &str, period: &str, offset: i32, tz: &str, origin: &str, limit: u32) -> Result<StatsTop, ApiError> {
+        wait(self.stats_top_async(entity, metric, period, offset, tz, origin, limit))
+    }
+
+    /// A page of the log. `before` is the previous page's `next` cursor.
+    pub async fn stats_history_async(&self, period: &str, offset: i32, tz: &str, origin: &str, before: Option<&str>, limit: u32) -> Result<StatsHistory, ApiError> {
+        let mut path = self.stats_range("api/v1/stats/history", period, offset, tz, Some(origin));
+        path.push_str(&format!("&limit={limit}"));
+        if let Some(cursor) = before {
+            path.push_str(&format!("&before={}", urlencode(cursor)));
+        }
+        self.get(&path).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn stats_history(&self, period: &str, offset: i32, tz: &str, origin: &str, before: Option<&str>, limit: u32) -> Result<StatsHistory, ApiError> {
+        wait(self.stats_history_async(period, offset, tz, origin, before, limit))
+    }
+
+    pub async fn stats_periods_async(&self, tz: &str) -> Result<StatsPeriods, ApiError> {
+        self.get(&format!("api/v1/stats/periods?tz={}", urlencode(tz))).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn stats_periods(&self, tz: &str) -> Result<StatsPeriods, ApiError> {
+        wait(self.stats_periods_async(tz))
+    }
+
+    /// Forget one play: `DELETE /stats/plays/:id`. Its counters and its hour
+    /// in the rollup are decremented; a 404 means it was already gone.
+    pub async fn stats_forget_async(&self, id: &str) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::DELETE, &format!("api/v1/stats/plays/{}", urlencode(id)), None).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn stats_forget(&self, id: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.stats_forget_async(id))
     }
 
     /// Per-library scan progress (works for any signed-in user; on a fresh
