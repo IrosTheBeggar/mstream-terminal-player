@@ -3119,7 +3119,7 @@ mod tests {
         };
         let effects = gui
             .app
-            .apply_event(Event::SearchResults { query: "moon".into(), results: Box::new(results) });
+            .apply_event(Event::SearchResults { generation: gui.app.session_gen(), query: "moon".into(), results: Box::new(results) });
         gui.pend(effects);
         gui
     }
@@ -4075,6 +4075,7 @@ mod dump_tests {
             })
             .collect();
         let effects = gui.app.apply_event(Event::Library {
+            generation: gui.app.session_gen(),
             node: LibraryNode::Albums,
             dest: Tab::Library,
             data: LibraryData::Albums(albums),
@@ -4110,6 +4111,7 @@ mod dump_tests {
         gui.act(Act::AlbPage(-1));
         gui.act(Act::AlbCell(2)); // Discovery
         let effects = gui.app.apply_event(Event::Library {
+            generation: gui.app.session_gen(),
             node: LibraryNode::Album {
                 name: "Discovery".into(),
                 artist: Some("Artist 02".into()),

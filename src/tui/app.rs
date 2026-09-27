@@ -1633,6 +1633,11 @@ pub struct App {
     /// Replies answer on their own threads and can pass each other, so a
     /// result set has to name the search it belongs to.
     search_submitted: Option<String>,
+    /// The session generation: bumped whenever the browse state is shed
+    /// for another server, stamped on the library and search asks and
+    /// checked on their replies — a slow answer from the server the
+    /// session left never fills the new one's same-named list.
+    session_gen: u64,
 
     pub queue: Queue,
     /// What the connected server offers. Default (nothing) until a ping says
@@ -1894,6 +1899,7 @@ impl App {
             filtering: false,
             search_summary: None,
             search_submitted: None,
+            session_gen: 0,
             queue: Queue::default(),
             capabilities: Default::default(),
             libraries: Vec::new(),
@@ -2194,7 +2200,7 @@ impl App {
             let tab = match effect {
                 Effect::Api(ApiCmd::Browse(_)) => Tab::Files,
                 Effect::Api(ApiCmd::Library { dest, .. }) => *dest,
-                Effect::Api(ApiCmd::Search(_)) => Tab::Search,
+                Effect::Api(ApiCmd::Search { .. }) => Tab::Search,
                 Effect::Api(ApiCmd::Discover { .. }) => Tab::Discover,
                 _ => continue,
             };
@@ -2698,7 +2704,7 @@ impl App {
                 self.search_stack.reset();
                 self.search.trail.clear();
                 self.search_submitted = Some(query.clone());
-                Some(vec![Effect::Api(ApiCmd::Search(query))])
+                Some(vec![Effect::Api(ApiCmd::Search { query, generation: self.session_gen })])
             }
             _ => None,
         }
@@ -2895,14 +2901,14 @@ impl App {
                 self.search_stack.enter(SearchNode::Library(node.clone()));
                 self.search.set(Vec::new());
                 self.info(format!("loading {label}…"));
-                vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Search })]
+                vec![self.ask_library(node, Tab::Search)]
             }
             Entry::Node { node, label } => {
                 self.push_trail();
                 self.library_stack.enter(node.clone());
                 self.library.set(Vec::new());
                 self.info(format!("loading {label}…"));
-                vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Library })]
+                vec![self.ask_library(node, Tab::Library)]
             }
             Entry::Search { node, label, .. } => {
                 self.push_trail();
@@ -2916,7 +2922,7 @@ impl App {
                     SearchNode::Library(node) => {
                         self.search.set(Vec::new());
                         self.info(format!("loading {label}…"));
-                        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Search })]
+                        vec![self.ask_library(node, Tab::Search)]
                     }
                 }
             }
@@ -3068,7 +3074,7 @@ impl App {
                     }
                     SearchNode::Library(node) => {
                         self.search.set(Vec::new());
-                        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Search })]
+                        vec![self.ask_library(node, Tab::Search)]
                     }
                 }
             }
@@ -3083,7 +3089,7 @@ impl App {
                     }
                     node => {
                         self.library.set(Vec::new());
-                        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Library })]
+                        vec![self.ask_library(node, Tab::Library)]
                     }
                 }
             }
@@ -4986,6 +4992,17 @@ impl App {
         Some(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach }))
     }
 
+    /// The session generation (see the field): what a library or search ask
+    /// is stamped with, and what its reply must carry to be taken.
+    pub(crate) fn session_gen(&self) -> u64 {
+        self.session_gen
+    }
+
+    /// A library ask stamped with the session generation.
+    pub(crate) fn ask_library(&self, node: LibraryNode, dest: Tab) -> Effect {
+        Effect::Api(ApiCmd::Library { node, dest, generation: self.session_gen })
+    }
+
     /// Aim the Library drill at `node` and ask for it — the GUI's direct
     /// door to a library view its nav names outright (the TUI reaches the
     /// same nodes by drilling from the mode menu). `fresh` restarts the
@@ -5009,7 +5026,7 @@ impl App {
         }
         self.library_stack.enter(node.clone());
         self.library.set(Vec::new());
-        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Library })]
+        vec![self.ask_library(node, Tab::Library)]
     }
 
     /// Whether the Library pane's drill stands on the Albums wall, or on an
@@ -5398,7 +5415,13 @@ impl App {
                 self.files.set(entries_from_listing(&listing, &root));
                 Vec::new()
             }
-            Event::Library { node, dest, data } => {
+            Event::Library { node, dest, data, generation } => {
+                // A reply from the server the session has since left — the
+                // generation moved on — fills nothing here, whatever list
+                // of the same name the new server has.
+                if generation != self.session_gen {
+                    return Vec::new();
+                }
                 // Drop a reply for a view the user has already navigated away
                 // from, so a slow request can't overwrite the current screen.
                 // Which drill answers depends on who asked — the Search tab
@@ -5549,7 +5572,10 @@ impl App {
                 self.playlist_names = names.map_or(PlaylistNames::Failed, PlaylistNames::Listed);
                 Vec::new()
             }
-            Event::SearchResults { query, results } => {
+            Event::SearchResults { query, results, generation } => {
+                if generation != self.session_gen {
+                    return Vec::new();
+                }
                 // Replies can pass each other now that each answers on its
                 // own thread; only the search still standing in the box is
                 // the one anybody is waiting for.

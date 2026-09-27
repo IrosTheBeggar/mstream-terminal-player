@@ -306,9 +306,15 @@ impl App {
     /// actually answered.
     pub(crate) fn shed_server_state(&mut self) {
         // The Connected handler rebuilds capabilities, libraries and panes.
+        // Every library and search ask still out belongs to the old server:
+        // the generation moves on, so their answers are dropped on arrival.
+        self.session_gen = self.session_gen.wrapping_add(1);
         self.announced = None;
         self.search_hits = None;
         self.query.clear();
+        // The box is empty, so no search is wanted: the marker that guards
+        // stale results goes with it.
+        self.search_submitted = None;
         self.search.set(Vec::new());
         self.files.set(Vec::new());
         self.files.loading = true;

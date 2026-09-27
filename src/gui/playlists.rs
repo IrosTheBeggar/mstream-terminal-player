@@ -594,6 +594,7 @@ mod tests {
         let playlists =
             names.iter().map(|n| PlaylistSummary { name: n.to_string() }).collect();
         let effects = gui.app.apply_event(Event::Library {
+            generation: gui.app.session_gen(),
             node: LibraryNode::Playlists,
             dest: Tab::Library,
             data: LibraryData::Playlists(playlists),
@@ -739,6 +740,7 @@ mod tests {
             gui.pending
         );
         let effects = gui.app.apply_event(Event::Library {
+            generation: gui.app.session_gen(),
             node: LibraryNode::Playlist("Morning".into()),
             dest: Tab::Library,
             data: LibraryData::Tracks(vec![Track {
@@ -782,6 +784,7 @@ mod tests {
         gui.act(Act::PlRow(1));
         gui.pending.clear();
         let effects = gui.app.apply_event(Event::Library {
+            generation: gui.app.session_gen(),
             node: LibraryNode::Playlist("Morning".into()),
             dest: Tab::Library,
             data: LibraryData::Tracks(vec![

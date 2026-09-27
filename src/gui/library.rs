@@ -388,7 +388,7 @@ mod tests {
     }
 
     fn land(gui: &mut Gui, node: LibraryNode, data: LibraryData) {
-        let effects = gui.app.apply_event(Event::Library { node, dest: Tab::Library, data });
+        let effects = gui.app.apply_event(Event::Library { generation: gui.app.session_gen(), node, dest: Tab::Library, data });
         gui.pend(effects);
     }
 

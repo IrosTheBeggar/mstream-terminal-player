@@ -185,6 +185,7 @@ fn browsing_playlists(app: &mut App, names: &[&str]) {
     app.library.state.select(Some(at));
     app.handle_action(Action::Activate);
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlists,
         dest: Tab::Library,
         data: LibraryData::Playlists(
@@ -300,6 +301,7 @@ fn every_tab_filters_its_own_list() {
 
     app.handle_action(Action::SelectTab(1));
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Root,
         data: LibraryData::Artists(vec!["Bassnectar".into(), "Portishead".into()]),
@@ -1079,6 +1081,7 @@ fn opening_a_playlist_spins_instead_of_showing_the_list_of_playlists() {
     assert!(app.library.loading);
 
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlist("phone".into()),
         dest: Tab::Library,
         data: LibraryData::Tracks(vec![track("a")]),
@@ -1161,6 +1164,7 @@ fn every_class_a_search_matched_is_reachable() {
     };
     app.search_submitted = Some("moon".into());
     app.apply_event(Event::SearchResults {
+        generation: app.session_gen(),
         query: "moon".into(),
         results: Box::new(SearchResults {
             artists: vec![SearchGroup { name: "Moon Hooch".into(), album_art_file: None }],
@@ -1196,6 +1200,7 @@ fn every_class_a_search_matched_is_reachable() {
     assert_eq!(
         effects,
         vec![Effect::Api(ApiCmd::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Artist("Moon Hooch".into()),
             dest: Tab::Search,
         })]
@@ -3213,7 +3218,7 @@ fn searching_from_the_query_box_emits_one_search() {
         app.handle_action(Action::Input(c));
     }
     let effects = app.handle_action(Action::Submit);
-    assert_eq!(effects, vec![Effect::Api(ApiCmd::Search("moon".into()))]);
+    assert_eq!(effects, vec![Effect::Api(ApiCmd::Search { query: "moon".into(), generation: app.session_gen() })]);
     assert!(!app.editing_query);
 }
 
@@ -3235,6 +3240,7 @@ fn opening_the_playlists_node_asks_every_time() {
     };
     assert!(asked(&app.handle_action(Action::Activate)));
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlists,
         dest: Tab::Library,
         data: LibraryData::Playlists(vec![crate::api::types::PlaylistSummary {
@@ -3261,6 +3267,7 @@ fn a_pane_knows_when_its_contents_are_still_on_the_wire() {
     assert!(!app.files.loading && !app.search.loading);
 
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Artists,
         dest: Tab::Library,
         data: LibraryData::Artists(Vec::new()),
@@ -3289,12 +3296,14 @@ fn playlist_tracks_open_and_close() {
     assert_eq!(
         effects,
         vec![Effect::Api(ApiCmd::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Playlist("Roadtrip".into()),
             dest: Tab::Library,
         })]
     );
 
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlist("Roadtrip".into()),
         dest: Tab::Library,
         data: LibraryData::Tracks(vec![track("lib/a.mp3")]),
@@ -3323,6 +3332,7 @@ fn a_playlist_answering_after_it_was_left_does_not_open_over_the_top() {
     assert_eq!(app.library_node(), &LibraryNode::Playlists);
 
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlist("Roadtrip".into()),
         dest: Tab::Library,
         data: LibraryData::Tracks(vec![track("lib/a.mp3")]),
@@ -3335,6 +3345,7 @@ fn a_playlist_answering_after_it_was_left_does_not_open_over_the_top() {
     app.handle_action(Action::Activate);
     assert_eq!(app.library_node(), &LibraryNode::Playlist("Dinner".into()));
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlist("Roadtrip".into()),
         dest: Tab::Library,
         data: LibraryData::Tracks(vec![track("lib/a.mp3")]),
@@ -3343,6 +3354,7 @@ fn a_playlist_answering_after_it_was_left_does_not_open_over_the_top() {
     assert!(app.library.loading, "and Dinner is still coming");
 
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlist("Dinner".into()),
         dest: Tab::Library,
         data: LibraryData::Tracks(vec![track("lib/b.mp3")]),
@@ -3379,9 +3391,10 @@ fn drilling_from_artists_to_an_album_of_tracks() {
     let effects = app.handle_action(Action::Activate);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::Library { node: LibraryNode::Artists, dest: Tab::Library })]
+        vec![Effect::Api(ApiCmd::Library { generation: app.session_gen(), node: LibraryNode::Artists, dest: Tab::Library })]
     );
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Artists,
         data: LibraryData::Artists(vec!["Signal Chain".into(), "Terminal Test".into()]),
@@ -3393,11 +3406,13 @@ fn drilling_from_artists_to_an_album_of_tracks() {
     assert_eq!(
         effects,
         vec![Effect::Api(ApiCmd::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Artist("Signal Chain".into()),
             dest: Tab::Library,
         })]
     );
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Artist("Signal Chain".into()),
         data: LibraryData::Albums(vec![Album {
@@ -3413,6 +3428,7 @@ fn drilling_from_artists_to_an_album_of_tracks() {
     assert_eq!(
         effects,
         vec![Effect::Api(ApiCmd::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Album {
                 name: "Second Album".into(),
                 artist: Some("Signal Chain".into()),
@@ -3421,6 +3437,7 @@ fn drilling_from_artists_to_an_album_of_tracks() {
         })]
     );
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Album {
             name: "Second Album".into(),
@@ -3441,6 +3458,7 @@ fn back_walks_the_library_stack_to_the_menu() {
     app.handle_action(Action::SelectTab(1));
     app.handle_action(Action::Activate); // → Artists
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Artists,
         data: LibraryData::Artists(vec!["Solo".into()]),
@@ -3468,6 +3486,7 @@ fn a_reply_for_an_abandoned_view_is_discarded() {
     app.handle_action(Action::Back); // …then changed our mind
 
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Artists,
         data: LibraryData::Artists(vec!["Ghost".into()]),
@@ -3483,6 +3502,7 @@ fn genres_show_track_counts_and_lead_to_songs() {
     app.library_stack.restart();
     app.library_stack.enter(LibraryNode::Genres);
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Genres,
         data: LibraryData::Genres(vec![
@@ -3504,6 +3524,7 @@ fn genres_show_track_counts_and_lead_to_songs() {
     assert_eq!(
         effects,
         vec![Effect::Api(ApiCmd::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Genre("Ambient".into()),
             dest: Tab::Library,
         })]
@@ -3518,6 +3539,7 @@ fn albums_without_an_artist_still_resolve() {
     app.library_stack.restart();
     app.library_stack.enter(LibraryNode::Albums);
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Albums,
         data: LibraryData::Albums(vec![Album {
@@ -3543,6 +3565,7 @@ fn recently_added_lists_tracks_directly() {
     app.library_stack.restart();
     app.library_stack.enter(LibraryNode::Recent);
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Recent,
         data: LibraryData::Tracks(vec![track("testlib/new.mp3")]),
@@ -4710,6 +4733,7 @@ fn search_replies_that_pass_each_other_cannot_swap_the_results() {
     app.handle_action(Action::Submit);
 
     let stale = app.apply_event(Event::SearchResults {
+        generation: app.session_gen(),
         query: "one".into(),
         results: Box::default(),
     });
@@ -4717,6 +4741,7 @@ fn search_replies_that_pass_each_other_cannot_swap_the_results() {
     assert_eq!(app.search_summary, None, "the overtaken search says nothing");
 
     app.apply_event(Event::SearchResults {
+        generation: app.session_gen(),
         query: "two".into(),
         results: Box::default(),
     });
@@ -4765,6 +4790,7 @@ fn drilling_out_of_search_lights_the_search_tab_spinner() {
     app.handle_action(Action::SelectTab(2));
     app.search_submitted = Some("moon".into());
     app.apply_event(Event::SearchResults {
+        generation: app.session_gen(),
         query: "moon".into(),
         results: Box::new(crate::api::types::SearchResults {
             artists: vec![crate::api::types::SearchGroup {
@@ -6988,4 +7014,61 @@ fn a_restored_spot_follows_its_track_through_queue_edits() {
     let _ = app.remove_queue_row(1);
     let effects = app.handle_action(Action::PlayPause);
     assert!(!effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Seek(_)))), "no seek into another track: {effects:?}");
+}
+
+#[test]
+fn a_reply_from_the_server_the_session_left_fills_nothing() {
+    // The review's stale-reply hole: a slow Artists answer from the old
+    // server landed after the switch and filled the new server's Artists,
+    // and playing a hit stamped the new server as its origin. The ask is
+    // stamped with the session generation; a reply must carry it.
+    let mut app = connected_app();
+    app.handle_action(Action::SelectTab(1));
+    app.handle_action(Action::Activate); // into Artists on the old server
+    let old = app.session_gen();
+    app.shed_server_state();
+    assert_ne!(app.session_gen(), old, "a switch moves the generation on");
+    // The new server's own walk wants the same node.
+    app.library_stack.enter(LibraryNode::Artists);
+    app.apply_event(Event::Library {
+        generation: old,
+        dest: Tab::Library,
+        node: LibraryNode::Artists,
+        data: LibraryData::Artists(vec!["Old Server's Band".into()]),
+    });
+    assert!(app.library.entries.is_empty(), "the old server's answer is dropped: {:?}", labels(&app));
+    app.apply_event(Event::Library {
+        generation: app.session_gen(),
+        dest: Tab::Library,
+        node: LibraryNode::Artists,
+        data: LibraryData::Artists(vec!["Signal Chain".into()]),
+    });
+    assert_eq!(labels(&app), vec!["..", "Signal Chain"], "the new server's answer lands");
+}
+
+#[test]
+fn a_search_reply_from_the_server_the_session_left_is_dropped_even_for_the_same_words() {
+    let mut app = connected_app();
+    app.handle_action(Action::StartSearch);
+    for c in "moon".chars() {
+        app.handle_action(Action::Input(c));
+    }
+    app.handle_action(Action::Submit);
+    let old = app.session_gen();
+    app.shed_server_state();
+    assert!(app.search_submitted.is_none(), "a switch wants no search of the old server's");
+    // The same words, typed again on the new server.
+    app.handle_action(Action::StartSearch);
+    for c in "moon".chars() {
+        app.handle_action(Action::Input(c));
+    }
+    app.handle_action(Action::Submit);
+    app.apply_event(Event::SearchResults { generation: old, query: "moon".into(), results: Box::default() });
+    assert!(app.search_hits.is_none(), "the old server's hits are not the new server's");
+    app.apply_event(Event::SearchResults {
+        generation: app.session_gen(),
+        query: "moon".into(),
+        results: Box::default(),
+    });
+    assert!(app.search_hits.is_some());
 }

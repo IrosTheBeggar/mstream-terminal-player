@@ -718,10 +718,7 @@ impl App {
 
     fn refresh_playlists_view(&mut self) -> Vec<Effect> {
         if *self.library_node() == LibraryNode::Playlists {
-            return vec![Effect::Api(ApiCmd::Library {
-                node: LibraryNode::Playlists,
-                dest: Tab::Library,
-            })];
+            return vec![self.ask_library(LibraryNode::Playlists, Tab::Library)];
         }
         // Inside a playlist the list is the trail's cached parent: dropped,
         // so Back asks again and shows the new name (clause 14).

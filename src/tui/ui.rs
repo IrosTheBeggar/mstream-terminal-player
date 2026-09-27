@@ -4504,6 +4504,7 @@ mod tests {
 
         app.library_stack.enter(LibraryNode::Genre("Ambient".into()));
         app.apply_event(crate::tui::worker::Event::Library {
+            generation: app.session_gen(),
             dest: Tab::Library,
             node: LibraryNode::Genre("Ambient".into()),
             data: LibraryData::Tracks(vec![Track {
@@ -4981,6 +4982,7 @@ mod tests {
         let mut app = connected_app();
         app.handle_action(Action::SelectTab(1));
         app.apply_event(Event::Library {
+            generation: app.session_gen(),
             dest: Tab::Library,
             node: LibraryNode::Root,
             data: LibraryData::Artists(vec!["Bassnectar".into(), "ill Gates".into()]),
@@ -5516,6 +5518,7 @@ mod tests {
         assert!(!waiting.contains("(no playlists)"), "{waiting}");
 
         app.apply_event(Event::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Playlists,
             dest: Tab::Library,
             data: crate::tui::worker::LibraryData::Playlists(Vec::new()),
@@ -5532,6 +5535,7 @@ mod tests {
         let mut app = connected_app();
         on_the_playlists_node(&mut app);
         app.apply_event(Event::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Playlists,
             dest: Tab::Library,
             data: LibraryData::Playlists(vec![PlaylistSummary { name: "phone".into() }]),
@@ -5541,6 +5545,7 @@ mod tests {
         app.library.state.select(Some(1));
         app.handle_action(Action::Activate);
         app.apply_event(Event::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Playlist("phone".into()),
             dest: Tab::Library,
             data: LibraryData::Tracks(Vec::new()),
@@ -5593,6 +5598,7 @@ mod tests {
 
         app.handle_action(Action::Submit);
         app.apply_event(Event::SearchResults {
+            generation: app.session_gen(),
             query: "moon".into(),
             results: Box::default(),
         });
@@ -5615,6 +5621,7 @@ mod tests {
             metadata: TrackMetadata::default(),
         };
         app.apply_event(Event::SearchResults {
+            generation: app.session_gen(),
             query: "moon".into(),
             results: Box::new(SearchResults {
                 artists: vec![

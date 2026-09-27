@@ -161,7 +161,10 @@ pub enum ApiCmd {
     /// drilling into an artist or album it found. The destination travels
     /// with the command and comes back on the event, so a second view of
     /// the same data costs a field, not a duplicated command (audit #64).
-    Library { node: LibraryNode, dest: Tab },
+    /// `generation` is the session generation the ask was made under (the App's
+    /// `session_gen`), echoed on the reply: an answer from the server the
+    /// session has since left is dropped on arrival, however slow it was.
+    Library { node: LibraryNode, dest: Tab, generation: u64 },
     /// Ask for the next Auto-DJ track, seeded on what's playing now.
     AutoDj(Box<DjRequest>),
     /// Ask for several picks at once without queueing any of them, so the
@@ -196,7 +199,8 @@ pub enum ApiCmd {
     /// server 404s, and the arm words that as the server's age.
     RenamePlaylist { from: String, to: String },
     DeletePlaylist { name: String },
-    Search(String),
+    /// A search, stamped like `Library`.
+    Search { query: String, generation: u64 },
     /// Fetch and decode one cover, named by the art file a track's metadata
     /// carries. The app caches the answer under that name. `reach` names
     /// the row's own server when it is not the session's (contract clause
@@ -259,7 +263,7 @@ impl ApiCmd {
             | ApiCmd::CreatePlaylist { .. }
             | ApiCmd::RenamePlaylist { .. }
             | ApiCmd::DeletePlaylist { .. }
-            | ApiCmd::Search(_)
+            | ApiCmd::Search { .. }
             | ApiCmd::Shutdown => None,
         }
     }
@@ -475,7 +479,7 @@ pub enum Event {
     /// the tab they were fetched for — the same data serves the Library tab
     /// and a drill out of the search results, and carrying the destination
     /// is what replaced a wholesale second command and event (audit #64).
-    Library { node: LibraryNode, dest: Tab, data: LibraryData },
+    Library { node: LibraryNode, dest: Tab, data: LibraryData, generation: u64 },
     /// One Auto DJ turn's answer: the songs that passed, in the server's
     /// order, the cursor to round-trip, whether the pool shaped them, the
     /// degrade to say once per lane, and the failure when there is one.
@@ -547,7 +551,7 @@ pub enum Event {
     PlaylistNames { names: Option<Vec<String>> },
     /// `query` is the search these results answer — replies can pass each
     /// other now, and the box's contents name the one still wanted.
-    SearchResults { query: String, results: Box<SearchResults> },
+    SearchResults { query: String, results: Box<SearchResults>, generation: u64 },
     /// A cover, decoded and shrunk to terminal scale — or `None` with
     /// `settled` saying which kind of `None` it is: the server's word that
     /// there is no art (remembered), or a failure to ask (forgotten, so
@@ -1172,8 +1176,8 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::Browse(path) => {
             c.file_explorer(&path).map(|l| Event::Listing(Box::new(l)))
         }
-        ApiCmd::Library { node, dest } => crate::api::wait(load_library(c, &node))
-            .map(|data| Event::Library { node, dest, data }),
+        ApiCmd::Library { node, dest, generation } => crate::api::wait(load_library(c, &node))
+            .map(|data| Event::Library { node, dest, data, generation }),
         // Neither turn nor probe fails as an error: the App reads the answer.
         ApiCmd::AutoDj(request) => {
             crate::api::wait(async { Ok::<_, ApiError>(autodj_pick(c, &request).await) })
@@ -1239,8 +1243,8 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::DeletePlaylist { name } => {
             playlist_verb_event(PlaylistVerb::Delete(&name), c.playlist_delete(&name))
         }
-        ApiCmd::Search(query) => {
-            c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r) })
+        ApiCmd::Search { query, generation } => {
+            c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r), generation })
         }
         ApiCmd::AlbumArt { file, .. } => {
             // The waveform's rule, because this cache burned without it: a

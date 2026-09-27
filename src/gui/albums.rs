@@ -745,6 +745,7 @@ mod tests {
             })
             .collect();
         let effects = gui.app.apply_event(Event::Library {
+            generation: gui.app.session_gen(),
             node: LibraryNode::Albums,
             dest: Tab::Library,
             data: LibraryData::Albums(albums),
@@ -900,6 +901,7 @@ mod tests {
                 Effect::Api(ApiCmd::Library {
                     node: LibraryNode::Album { name, .. },
                     dest: Tab::Library,
+                    ..
                 }) if name == "Album 11"
             )),
             "the drill rode out as the App's own fetch: {:?}",
@@ -912,6 +914,7 @@ mod tests {
         // from the trail, without a request (library-rooms contract,
         // clause 6).
         let effects = gui.app.apply_event(Event::Library {
+            generation: gui.app.session_gen(),
             node: LibraryNode::Album { name: "Album 11".into(), artist: Some("Artist 11".into()) },
             dest: Tab::Library,
             data: LibraryData::Tracks(vec![crate::api::types::Track {
