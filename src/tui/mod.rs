@@ -313,6 +313,7 @@ pub(crate) fn known_servers(
             id: entry.url.clone(),
             name: config::display_name(entry),
             token: config::token_for(credentials, &entry.url),
+            username: entry.username.clone(),
             self_signed: entry.self_signed,
             peer: entry.peer.as_ref().map(|p| (p.parent.clone(), p.id)),
             // What a queued row on this server is dialled with, when the

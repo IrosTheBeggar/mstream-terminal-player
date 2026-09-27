@@ -1731,6 +1731,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             token: None,
+            username: None,
             self_signed: false,
             peer: None,
             pairing: None,

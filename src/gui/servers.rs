@@ -2414,6 +2414,7 @@ mod tests {
             id: attic.into(),
             name: "attic".into(),
             token: None,
+            username: None,
             self_signed: false,
             peer: None,
             pairing: None, dj: Default::default(),

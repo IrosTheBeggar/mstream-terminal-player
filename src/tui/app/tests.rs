@@ -1628,6 +1628,7 @@ fn a_remembered_tunnel_server_dials_with_the_code_from_the_book() {
         id: "mstream+iroh://endpointabc".into(),
         name: "quick connect · endpointabc".into(),
         token: None,
+        username: None,
         self_signed: false,
         peer: None,
         pairing: Some("mstr1:fromthebook".into()),
@@ -1681,6 +1682,7 @@ fn federated_app() -> App {
             id: ATTIC.into(),
             name: ATTIC.into(),
             token: Some("at".into()),
+            username: None,
             self_signed: false,
             peer: None,
             pairing: None, dj: Default::default(),
@@ -1689,6 +1691,7 @@ fn federated_app() -> App {
             id: nas(),
             name: "Nas".into(),
             token: None,
+            username: None,
             self_signed: false,
             peer: Some((ATTIC.into(), 3)),
             pairing: None, dj: Default::default(),
@@ -2086,7 +2089,7 @@ fn a_tunnel_parent_is_kept_for_the_access_call_and_let_go_once_the_peer_is_direc
     let parent = "mstream+iroh://faraway";
     let pid = crate::config::peer_identity(parent, 7);
     app.servers.push(faraway());
-    app.servers.push(KnownServer { id: pid.clone(), name: "Shed".into(), token: None, self_signed: false, peer: Some((parent.into(), 7)), pairing: None, dj: Default::default() });
+    app.servers.push(KnownServer { id: pid.clone(), name: "Shed".into(), token: None, username: None, self_signed: false, peer: Some((parent.into(), 7)), pairing: None, dj: Default::default() });
     app.direct_offered.insert(parent.into());
     app.queue.push(Queued { dj: None, origin: Origin { server: parent.into(), peer: Some(7) }, track: track("music/s.mp3") });
 
@@ -2122,6 +2125,7 @@ fn faraway() -> KnownServer {
         id: "mstream+iroh://faraway".into(),
         name: "quick connect · faraway".into(),
         token: Some("t".into()),
+        username: None,
         self_signed: false,
         peer: None,
         pairing: Some("mstr1:far".into()),
@@ -2609,11 +2613,13 @@ fn adopting_a_server_keeps_the_music_and_the_queue() {
             id: "http://attic.local:3000".into(),
             name: "http://attic.local:3000".into(),
             token: Some("attic-token".into()),
+            username: None,
             self_signed: false, peer: None, pairing: None, dj: Default::default() },
         KnownServer {
             id: "http://office.local:3000".into(),
             name: "http://office.local:3000".into(),
             token: Some("office-token".into()),
+            username: None,
             self_signed: true, peer: None, pairing: None, dj: Default::default() },
     ];
     app.push_queue(track("music/a.mp3"));
@@ -2667,6 +2673,7 @@ fn a_row_on_a_closed_tunnel_walks_on_like_a_refused_one() {
         id: "mstream+iroh://faraway".into(),
         name: "mstream+iroh://faraway".into(),
         token: Some("t".into()),
+        username: None,
         self_signed: false, peer: None, pairing: None, dj: Default::default() });
     app.queue.push(at("mstream+iroh://faraway", "music/far.mp3"));
     app.push_queue(track("music/near.mp3"));
@@ -2717,7 +2724,7 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
     // the playing row keeps its place, the position comes back, and
     // nothing plays until asked — then that row, from that second.
     let mut app = connected_app();
-    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: Some("bt".into()), self_signed: false , peer: None, pairing: None, dj: Default::default() }];
+    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: Some("bt".into()), username: None, self_signed: false , peer: None, pairing: None, dj: Default::default() }];
     let mut long = at("http://b", "music/2.mp3");
     long.track.metadata.duration = Some(300.0);
     let snapshot = QueueSnapshot {
@@ -2887,6 +2894,7 @@ fn a_peers_rows_play_through_the_parents_stream_proxy() {
         id: "http://attic:3000".into(),
         name: "http://attic:3000".into(),
         token: Some("at".into()),
+        username: None,
         self_signed: false,
         peer: None, pairing: None, dj: Default::default() }];
     app.queue.push(Queued {
@@ -2908,6 +2916,7 @@ fn a_peer_session_stamps_its_rows_and_keeps_none_of_the_optional_features() {
         id: "mstream+peer://3@http://attic:3000".into(),
         name: "Nas".into(),
         token: None,
+        username: None,
         self_signed: false,
         peer: Some(("http://attic:3000".into(), 3)), pairing: None, dj: Default::default() }];
     let effects = app.adopt_server(
@@ -2996,7 +3005,7 @@ fn a_removed_server_takes_its_rows_and_playback_lands_on_the_next_survivor() {
     // Playing row 0 on the session's server; removing that server plays
     // the survivor, which lives on the other one.
     let mut app = connected_app();
-    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: None, self_signed: false , peer: None, pairing: None, dj: Default::default() }];
+    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: None, username: None, self_signed: false , peer: None, pairing: None, dj: Default::default() }];
     app.queue.items = vec![at("http://host:3000", "music/1.mp3"), at("http://b", "music/2.mp3")];
     let effects = app.play_index(0);
     app.status = PlayerStatus { playing: true, source: played_url(&effects), ..Default::default() };
@@ -6622,6 +6631,7 @@ fn the_sources_chooser_keeps_one_library_on() {
         id: HOST.into(),
         name: "host".into(),
         token: None,
+        username: None,
         self_signed: false,
         peer: None,
         pairing: None,
@@ -6936,6 +6946,7 @@ fn one_kept_server_does_not_hold_another_servers_plays_behind_it() {
         id: "http://away:4000".into(),
         name: "away".into(),
         token: Some("ta".into()),
+        username: None,
         self_signed: false,
         peer: None,
         pairing: None,
@@ -7107,4 +7118,46 @@ fn a_re_login_on_a_proxied_peer_signs_in_through_the_parent_and_keeps_the_peer()
     // A sign-in at a server that is not the peer's parent carries none.
     app.session.peer = Some(("http://10.0.0.9:3000".into(), 3));
     assert_eq!(app.peer_behind(parent), None);
+}
+
+#[test]
+fn an_owed_play_waits_for_the_account_it_was_made_under() {
+    // The review's finding (a shared config directory): one user quits
+    // mid-song, another signs in to the same server, and the first user's
+    // play was posted as the second's listening. The play carries its
+    // account and waits for it.
+    let mut app = stats_app();
+    app.session.username = Some("alice".into());
+    let mut first = item("a.mp3");
+    first.track.metadata.duration = Some(200.0);
+    app.queue.replace(vec![first, item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    assert_eq!(app.stats.session.as_ref().and_then(|s| s.account.clone()).as_deref(), Some("alice"));
+    for p in 0..=12 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    app.apply_event(ended(&effects));
+    assert_eq!(app.stats.outbox[0].account.as_deref(), Some("alice"), "the play is stamped");
+
+    // Bob signs in before the flush: alice's play is held, not posted as his.
+    app.session.username = Some("bob".into());
+    assert!(reported(&app.tick()).is_none(), "nothing goes out under bob");
+    assert_eq!(app.stats.outbox.len(), 1, "and nothing is dropped");
+    // A play from before the stamp existed (no account) posts as it always did.
+    let mut legacy = app.stats.outbox[0].clone();
+    legacy.play.id = "legacy".into();
+    legacy.account = None;
+    app.stats.outbox.push(legacy);
+    app.stats.flush_wanted = true;
+    let (body, _, ids) = reported(&app.tick()).expect("the unstamped play goes out");
+    assert_eq!(ids, vec!["legacy".to_string()]);
+    assert_eq!(body["plays"].as_array().unwrap().len(), 1);
+    app.stats_reported(ids, crate::tui::worker::ReportOutcome::Settled(vec!["legacy".into()]));
+
+    // Alice is back: her play goes out.
+    app.session.username = Some("alice".into());
+    app.stats.flush_wanted = true;
+    let (_, _, ids) = reported(&app.tick()).expect("alice's play goes out under alice");
+    assert_eq!(ids.len(), 1);
 }

@@ -641,6 +641,9 @@ pub struct KnownServer {
     /// address.
     pub name: String,
     pub token: Option<String>,
+    /// Who the token signs in as — what an owed play is stamped with and
+    /// posted under (play-reporting clause 8). `None` for a public server.
+    pub username: Option<String>,
     pub self_signed: bool,
     /// A federated peer: the parent it is reached through, and its row id
     /// there. Everything else about it is the parent's.
