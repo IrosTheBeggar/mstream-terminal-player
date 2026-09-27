@@ -414,7 +414,7 @@ mstream-player admin --server http://nas:3000
 mstream-player admin --same-machine          # this terminal runs on the server: add folders with the OS dialog
 ```
 
-Two rooms. **Libraries** (the default) is the server's music folders — each folder's name,
+Six rooms. **Libraries** (the default) is the server's music folders — each folder's name,
 its path as the server sees it, and whether the scanner follows symlinks (`s` flips it, from
 the next scan on). `b` browses the server's own disk; with `--same-machine` it opens the OS
 folder dialog instead, the same picker the setup wizard uses. `t` types a path, with
@@ -491,28 +491,58 @@ more than one user. Client shows the connection: `t` tests, `c` switches client,
 disconnects behind a gate.
 
 ```
-mstream-player admin torrents                # the torrent client and what it does for you
+mstream-player admin users                   # who has an account, what each may do, which libraries they see
 ```
 
-**Torrents** is the webapp's Torrent Client page, beta there too. Until a client is chosen and
-connected, the page is the setup: the client as a radio group (Transmission, qBittorrent,
-Deluge), who may add torrents beneath it when the server has more than one user, and the
-connect form where `^T` probes without saving and Enter saves after a good probe. Connected,
-one state line carries the daemon's status and five tabs follow. Torrents is the daemon's
-list with a progress bar, a name-or-hash filter and `r` to drop an mStream-added torrent (the
-files stay). Libraries shows the daemon-side path of each library with the verified /
-inferred / probing / unconfirmed ladder and its destination template: `d` re-probes, `m` maps
-a path by hand, `t` edits the template with a live preview. Seeding hands the server a
-`.torrent` for content already on disk (`a`, a typed path or the OS dialog with
-`--same-machine`). Access holds the policy and the per-user whitelist, and only exists with
-more than one user. Client shows the connection: `t` tests, `c` switches client, `x`
-disconnects behind a gate.
+**Users** is the webapp's Users page as one table: USER · ADMIN · LIBRARIES · FOLDERS · UPLOAD ·
+AUDIO · MODIFY, every permission a checkbox cell that `1`–`5` (or a click) flips at once. `l`
+edits the library grant, `p` sets a new password (typed twice, since the terminal masks it),
+`r` removes behind a gate that names what goes with the account — playlists, play history and
+library grants; the music files stay — and warns when the row is the only admin, who also
+cannot be un-admined. `a` adds a user with the webapp's defaults: every library ticked, admin
+only on a server with no users yet, folders and uploads on, server audio off. A server with no
+users runs without logins; the room says so in gold, and once the first user is created it
+signs itself in as that user and keeps the session, so the panel stays open instead of
+bouncing to the sign-in page. MODIFY is the file-change permission the API carries and the
+webapp no longer shows.
 
 Without a saved session for that server — or with one the server no longer accepts — the
 hub opens a sign-in page first and keeps the session for next time, the way `login` does.
 The account must be an admin's. Two server settings answer with errors the room
 explains in words: `lockAdmin` (the panel is locked, HTTP 405) and an address-restricted admin
 panel (403 from another machine).
+
+## Stats
+
+```
+mstream-player stats                         # your listening on the saved session's server
+mstream-player stats --server http://nas:3000
+```
+
+The server's `/stats` page (mStream 6.27 and up) as a page of its own, in the admin rooms'
+chrome and behind the same sign-in — but for any account, not an admin's, because the
+listening log is per account. One state line carries the period and its totals; `←`/`→`
+switch three tabs. **Overview** is the webapp's six tiles (plays, listening time, tracks,
+skips, streak, sessions, each against the previous period), plays per day as a column
+chart with the busiest day named, the 24-hour profile with the peak hour, and — while the
+log holds federated peers' tracks — where the tracks live. **Top** ranks tracks, artists,
+albums or genres (`t` cycles) by plays or by time (`m` flips), with the share bar, the
+plays, the time and, for tracks, the last play; the cursor row's rest goes on the note line.
+**Recent** is the log, newest first, paged as the cursor nears the end: the time and day,
+the track, the outcome in the webapp's words (completed, skipped at 0:08, stopped at 5:40,
+scrobbled at 0:30 for a play an older client sent), what was listened, and the client —
+web player, this player, the mobile app — or *not counted* where the server did not count
+the play. `x` forgets a play behind a gate; the log and the totals reload.
+
+`[` and `]` step through the periods the log has data in — this and last week, month,
+quarter, half-year and year, the older months and years, all time — and `p` lists them;
+`o` cycles the origin (all, this server, peers) while peer plays exist. Everything loads on
+entry and on a change; there is no poll. Times are in the machine's zone, read the way
+`date` reads it (`TZ`, else `/etc/localtime`), and the server is asked for its periods and
+buckets in that zone; a machine without a zone file gets UTC, and the state line says so.
+A server older than 6.27 has no Stats API, and the page says that instead. The player
+reports its own plays (see Play reporting below), and the log names them *this player*;
+a total under a minute reads in seconds.
 
 ## Now playing
 

@@ -218,8 +218,10 @@ enum Command {
     Play(cmd_play::PlayArgs),
     /// First-run setup for a fresh mStream server: folders, login, extras
     Setup(setup::SetupArgs),
-    /// Manage the server: libraries, discovery, federation, backups, torrents (needs an admin session)
+    /// Manage the server: libraries, discovery, federation, backups, torrents, users (needs an admin session)
     Admin(admin::AdminArgs),
+    /// Your listening on the server: the period's totals, top tracks, the log (mStream 6.27 and up)
+    Stats(admin::StatsArgs),
     /// Show the server's Quick Connect code as a scannable QR page
     Qr(setup::QrArgs),
     /// Authenticate against an mStream server and save the session
@@ -417,6 +419,7 @@ fn main() {
         (Some(Command::Play(args)), _) => std::process::exit(cmd_play::run(args)),
         (Some(Command::Setup(args)), _) => std::process::exit(setup::run(args)),
         (Some(Command::Admin(args)), _) => std::process::exit(admin::run(args)),
+        (Some(Command::Stats(args)), _) => std::process::exit(admin::run_stats(args)),
         (Some(Command::Qr(args)), _) => std::process::exit(setup::run_qr(args)),
         (Some(Command::Login(args)), _) => std::process::exit(cmd_library::login(args)),
         (Some(Command::Logout), _) => std::process::exit(cmd_library::logout()),

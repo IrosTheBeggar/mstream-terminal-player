@@ -196,6 +196,69 @@ impl TorrentCreds {
     }
 }
 
+/// What `PUT /admin/users` takes: the account and its first grants. The
+/// server has no `allowFileModify` here — that flag starts on and is set
+/// afterwards through [`UserAccess`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewUser {
+    pub username: String,
+    pub password: String,
+    pub vpaths: Vec<String>,
+    pub admin: bool,
+    pub allow_mkdir: bool,
+    pub allow_upload: bool,
+    pub allow_server_audio: bool,
+}
+
+impl NewUser {
+    fn body(&self) -> serde_json::Value {
+        serde_json::json!({
+            "username": self.username,
+            "password": self.password,
+            "vpaths": self.vpaths,
+            "admin": self.admin,
+            "allowMkdir": self.allow_mkdir,
+            "allowUpload": self.allow_upload,
+            "allowServerAudio": self.allow_server_audio,
+        })
+    }
+}
+
+/// The five flags `POST /admin/users/access` sets as one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserAccess {
+    pub admin: bool,
+    pub allow_mkdir: bool,
+    pub allow_upload: bool,
+    pub allow_file_modify: bool,
+    pub allow_server_audio: bool,
+}
+
+impl UserAccess {
+    /// A user's flags as the server holds them — the base every toggle
+    /// echoes.
+    pub fn of(user: &AdminUser) -> Self {
+        UserAccess {
+            admin: user.admin,
+            allow_mkdir: user.allow_mkdir,
+            allow_upload: user.allow_upload,
+            allow_file_modify: user.allow_file_modify,
+            allow_server_audio: user.allow_server_audio,
+        }
+    }
+
+    fn body(&self, username: &str) -> serde_json::Value {
+        serde_json::json!({
+            "username": username,
+            "admin": self.admin,
+            "allowMkdir": self.allow_mkdir,
+            "allowUpload": self.allow_upload,
+            "allowFileModify": self.allow_file_modify,
+            "allowServerAudio": self.allow_server_audio,
+        })
+    }
+}
+
 /// The fields a `PATCH` may carry; None leaves a field alone.
 /// `exclude_globs`: None = untouched, Some(None) = back to the server's
 /// defaults, Some(Some(list)) = pinned to that list.
@@ -283,6 +346,20 @@ impl DiscoverySetting {
             DiscoverySetting::SidecarMaxRssMb => (0, 100_000),
         }
     }
+}
+
+/// Minimal percent-encoding for a query-string value: everything that is
+/// not an unreserved character becomes %XX. Enough for tz names, cursors
+/// and event ids.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Run the async core to completion for the sync (native) surface.
@@ -2414,6 +2491,144 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn admin_users(&self) -> Result<std::collections::BTreeMap<String, AdminUser>, ApiError> {
         wait(self.admin_users_async())
+    }
+
+    /// Create a user: `PUT /admin/users`. The server refuses a taken name
+    /// with a bare 500, so callers check the list first.
+    pub async fn admin_add_user_async(&self, user: &NewUser) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::PUT, "api/v1/admin/users", Some(user.body())).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_add_user(&self, user: &NewUser) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_add_user_async(user))
+    }
+
+    /// Delete a user: `DELETE /admin/users {username}`. The server cascades
+    /// the user's playlists, play history and library grants; files stay.
+    pub async fn admin_delete_user_async(&self, username: &str) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::DELETE, "api/v1/admin/users", Some(serde_json::json!({ "username": username }))).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_delete_user(&self, username: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_delete_user_async(username))
+    }
+
+    /// Set a user's password: `POST /admin/users/password`.
+    pub async fn admin_set_user_password_async(&self, username: &str, password: &str) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/users/password", serde_json::json!({ "username": username, "password": password })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_set_user_password(&self, username: &str, password: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_set_user_password_async(username, password))
+    }
+
+    /// Replace a user's library grant: `POST /admin/users/vpaths` with the
+    /// whole list.
+    pub async fn admin_set_user_vpaths_async(&self, username: &str, vpaths: &[String]) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/users/vpaths", serde_json::json!({ "username": username, "vpaths": vpaths })).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_set_user_vpaths(&self, username: &str, vpaths: &[String]) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_set_user_vpaths_async(username, vpaths))
+    }
+
+    /// Set a user's five access flags as one: `POST /admin/users/access`.
+    /// The route defaults any flag it does not see (file changes on,
+    /// server audio off), so a caller changing one flag echoes them all.
+    pub async fn admin_set_user_access_async(&self, username: &str, access: &UserAccess) -> Result<serde_json::Value, ApiError> {
+        self.post("api/v1/admin/users/access", access.body(username)).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn admin_set_user_access(&self, username: &str, access: &UserAccess) -> Result<serde_json::Value, ApiError> {
+        wait(self.admin_set_user_access_async(username, access))
+    }
+
+    // ── Stats API v2 (/api/v1/stats/*) — the read side, for `stats` ──
+    // Every read is scoped to the signed-in account (401 on a server with
+    // no accounts). `tz` is an IANA zone for the period and day boundaries;
+    // `origin` is all / local / peers; a period is `kind` + `offset` back
+    // from the current one, or `all`.
+
+    fn stats_range(&self, path: &str, period: &str, offset: i32, tz: &str, origin: Option<&str>) -> String {
+        let tz = urlencode(tz);
+        let mut q = format!("{path}?period={period}&offset={offset}&tz={tz}");
+        if let Some(origin) = origin {
+            q.push_str(&format!("&origin={origin}"));
+        }
+        q
+    }
+
+    pub async fn stats_summary_async(&self, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsSummary, ApiError> {
+        self.get(&self.stats_range("api/v1/stats/summary", period, offset, tz, Some(origin))).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn stats_summary(&self, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsSummary, ApiError> {
+        wait(self.stats_summary_async(period, offset, tz, origin))
+    }
+
+    /// Plays per bucket. Profile buckets (`hourOfDay`, `weekday`) are not
+    /// narrowed by origin, so this sends none.
+    pub async fn stats_timeseries_async(&self, bucket: &str, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsTimeseries, ApiError> {
+        let path = self.stats_range("api/v1/stats/timeseries", period, offset, tz, Some(origin));
+        self.get(&format!("{path}&bucket={bucket}")).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn stats_timeseries(&self, bucket: &str, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsTimeseries, ApiError> {
+        wait(self.stats_timeseries_async(bucket, period, offset, tz, origin))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stats_top_async(&self, entity: &str, metric: &str, period: &str, offset: i32, tz: &str, origin: &str, limit: u32) -> Result<StatsTop, ApiError> {
+        let path = self.stats_range("api/v1/stats/top", period, offset, tz, Some(origin));
+        self.get(&format!("{path}&entity={entity}&metric={metric}&limit={limit}")).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn stats_top(&self, entity: &str, metric: &str, period: &str, offset: i32, tz: &str, origin: &str, limit: u32) -> Result<StatsTop, ApiError> {
+        wait(self.stats_top_async(entity, metric, period, offset, tz, origin, limit))
+    }
+
+    /// A page of the log. `before` is the previous page's `next` cursor.
+    pub async fn stats_history_async(&self, period: &str, offset: i32, tz: &str, origin: &str, before: Option<&str>, limit: u32) -> Result<StatsHistory, ApiError> {
+        let mut path = self.stats_range("api/v1/stats/history", period, offset, tz, Some(origin));
+        path.push_str(&format!("&limit={limit}"));
+        if let Some(cursor) = before {
+            path.push_str(&format!("&before={}", urlencode(cursor)));
+        }
+        self.get(&path).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn stats_history(&self, period: &str, offset: i32, tz: &str, origin: &str, before: Option<&str>, limit: u32) -> Result<StatsHistory, ApiError> {
+        wait(self.stats_history_async(period, offset, tz, origin, before, limit))
+    }
+
+    pub async fn stats_periods_async(&self, tz: &str) -> Result<StatsPeriods, ApiError> {
+        self.get(&format!("api/v1/stats/periods?tz={}", urlencode(tz))).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn stats_periods(&self, tz: &str) -> Result<StatsPeriods, ApiError> {
+        wait(self.stats_periods_async(tz))
+    }
+
+    /// Forget one play: `DELETE /stats/plays/:id`. Its counters and its hour
+    /// in the rollup are decremented; a 404 means it was already gone.
+    pub async fn stats_forget_async(&self, id: &str) -> Result<serde_json::Value, ApiError> {
+        self.send(Method::DELETE, &format!("api/v1/stats/plays/{}", urlencode(id)), None).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn stats_forget(&self, id: &str) -> Result<serde_json::Value, ApiError> {
+        wait(self.stats_forget_async(id))
     }
 
     /// Per-library scan progress (works for any signed-in user; on a fresh

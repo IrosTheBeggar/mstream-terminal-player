@@ -627,6 +627,13 @@ pub fn modal_frame_anchored(
 /// remove's destructive red. Esc remains the keyboard path (the tip
 /// says so — the same words on every modal in the family).
 pub fn modal_close<A: Clone>(frame: &mut Frame, s: &mut Surface<A>, inner: Rect, act: A) {
+    let rect = modal_close_plain(frame, s, inner, act);
+    s.tip_keyed(rect, rust_i18n::t!("path_modal.tip_close").to_string());
+}
+
+/// The same `[X]` close control without a tooltip — the admin rooms' choice:
+/// their controls carry no tips, the tips line names the keys.
+pub fn modal_close_plain<A: Clone>(frame: &mut Frame, s: &mut Surface<A>, inner: Rect, act: A) -> Rect {
     let rect = Rect { x: inner.right().saturating_sub(3), y: inner.y, width: 3, height: 1 };
     let hovered = s.hovers(rect);
     let style = if hovered {
@@ -636,7 +643,7 @@ pub fn modal_close<A: Clone>(frame: &mut Frame, s: &mut Surface<A>, inner: Rect,
     };
     frame.render_widget(Paragraph::new(Span::styled("[X]", style)), rect);
     s.click(rect, act);
-    s.tip_keyed(rect, rust_i18n::t!("path_modal.tip_close").to_string());
+    rect
 }
 
 // ── Scrolling ────────────────────────────────────────────────────────────────
