@@ -92,6 +92,11 @@ pub struct Config {
     /// --torrent …`) does on arrival.
     #[serde(default, skip_serializing_if = "TorrentPrefs::is_default")]
     pub torrent: TorrentPrefs,
+    /// `[visualizer]` — the visualizer window's choices: the preset it
+    /// opens on, the response curve, and each preset's knobs as its tuning
+    /// panel left them.
+    #[serde(default, skip_serializing_if = "VisualizerPrefs::is_default")]
+    pub visualizer: VisualizerPrefs,
     /// `[keys]` — action name to the keys that should fire it. Empty means
     /// the built-in bindings, and only the actions named here are changed.
     /// See `mstream-player keys` for the full list in this format.
@@ -121,6 +126,7 @@ impl Default for Config {
             mouse: MousePrefs::default(),
             gui: GuiPrefs::default(),
             torrent: TorrentPrefs::default(),
+            visualizer: VisualizerPrefs::default(),
             keys: std::collections::BTreeMap::new(),
             servers: Vec::new(),
             extra: Keep::new(),
@@ -544,6 +550,41 @@ impl Default for TorrentPrefs {
 impl TorrentPrefs {
     fn is_default(&self) -> bool {
         *self == TorrentPrefs::default()
+    }
+}
+
+/// `[visualizer]` — what the visualizer window's controls leave behind
+/// (docs/ux-contracts/visualizer-window.md, clauses 9–15). Written by the
+/// player, never by the window: the window reports what changed down its
+/// stdout, and the player saves it the way every other setting is saved.
+/// Unset is the calibrated default, so an untouched window writes nothing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VisualizerPrefs {
+    /// The preset in front when the window last changed presets, by its
+    /// file name — the name both apps number their presets by.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    /// The response curve (`shader::audio::Curve`), one value at a time:
+    /// the dB mapped to silence, the dB mapped to full, and the smoothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_db: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_db: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smoothing: Option<f32>,
+    /// `[visualizer.knobs."<file>"]` — a preset's `// param:` knobs by name,
+    /// only those turned away from the file's default. A name the preset no
+    /// longer declares is ignored, not an error.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub knobs: std::collections::BTreeMap<String, std::collections::BTreeMap<String, f32>>,
+    #[serde(flatten)]
+    pub extra: Keep,
+}
+
+impl VisualizerPrefs {
+    fn is_default(&self) -> bool {
+        *self == VisualizerPrefs::default()
     }
 }
 
@@ -1513,7 +1554,10 @@ mod tests {
         // this file in front of this binary.
         // This test's example future key keeps coming true: it was
         // `crossfade_seconds` until Phase C3 shipped it, then `gapless`
-        // until C4 did. `replaygain` now carries the torch.
+        // until C4 did. `replaygain` now carries the torch. Its example
+        // unknown section did too: `[visualizer]` was one until the window's
+        // tuning panel made it real, and `[lyrics]` stands in for it now —
+        // while `mode` rides along inside the real one.
         fs::write(
             scratch.dir.join(CONFIG_FILE),
             "version = 1\n\
@@ -1526,6 +1570,9 @@ mod tests {
              \n\
              [player.dj]\n\
              energy_curve = \"rising\"\n\
+             \n\
+             [lyrics]\n\
+             source = \"embedded\"\n\
              \n\
              [visualizer]\n\
              mode = \"bars\"\n",
@@ -1554,7 +1601,12 @@ mod tests {
         let again = load().unwrap();
         let int = |t: &Keep, k: &str| t.get(k).and_then(toml::Value::as_integer);
         assert_eq!(int(&again.extra, "lyrics_offset"), Some(250));
-        assert!(again.extra.contains_key("visualizer"), "a whole unknown section survived");
+        assert!(again.extra.contains_key("lyrics"), "a whole unknown section survived");
+        assert_eq!(
+            again.visualizer.extra.get("mode").and_then(toml::Value::as_str),
+            Some("bars"),
+            "an unknown key in a known section survived"
+        );
         assert_eq!(
             again.player.extra.get("replaygain").and_then(toml::Value::as_str),
             Some("album")
@@ -1567,7 +1619,38 @@ mod tests {
         assert_eq!(again.player.volume, 0.8);
 
         let raw = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
-        assert!(raw.contains("[visualizer]"), "written as a section, not inlined:\n{raw}");
+        assert!(raw.contains("[lyrics]"), "written as a section, not inlined:\n{raw}");
+        assert!(raw.contains("[visualizer]"), "and the known section too:\n{raw}");
+    }
+
+    #[test]
+    fn the_visualizers_choices_round_trip_and_an_untouched_window_writes_nothing() {
+        let scratch = Scratch::new("visualizer");
+        save(&Config::default()).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(!text.contains("[visualizer"), "nothing tuned, nothing written: {text}");
+
+        let mut config = Config::default();
+        config.visualizer.preset = Some("05-hex-marching.glsl".into());
+        config.visualizer.min_db = Some(-80.0);
+        config.visualizer.smoothing = Some(0.5);
+        let knobs = config.visualizer.knobs.entry("01-spectrum-bars.glsl".into()).or_default();
+        knobs.insert("bars".into(), 48.0);
+        save(&config).unwrap();
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert!(!text.contains("max_db"), "an unset value stays out of the file: {text}");
+        assert!(text.contains("[visualizer.knobs.\"01-spectrum-bars.glsl\"]"), "{text}");
+
+        let loaded = load().unwrap();
+        assert_eq!(loaded.visualizer, config.visualizer);
+
+        // Hand-written, a knob is a whole number more often than not.
+        fs::write(
+            scratch.dir.join(CONFIG_FILE),
+            "[visualizer.knobs.\"01-spectrum-bars.glsl\"]\nbars = 48\n",
+        )
+        .unwrap();
+        assert_eq!(load().unwrap().visualizer.knobs["01-spectrum-bars.glsl"]["bars"], 48.0);
     }
 
     #[test]

@@ -2743,6 +2743,24 @@ Left: the display kept awake while fullscreen, and the TUI's own key for it.
 `// param:` defaults with config overrides; Android's crossfade between presets
 (`uCurrent`/`uOld`/`uMixT`).
 
+**11.2 — the window's controls and tunables landed 2026-09-27** (visualizer-window contract,
+clauses 9–15; 05 and 09 were already in with 11.1): over the picture, a bar that shows while the
+pointer moves — `‹` `›`, a dropdown of every built-in preset, the tuning toggle, fullscreen — and
+the mobile app's tuning panel as a sheet down the right edge: the response curve (dB floor, dB
+ceiling, smoothing, the ranges mobile's panel uses) and a slider per `// param:` knob, with Reset.
+Drawn by egui 0.36 on the window's own wgpu device, after the blit, in the same submission. The
+knobs reach `iParams[]` in the window; the curve is the texture's, so the window reports it up its
+stdout (`preset` / `curve` / `knobs` lines) and the player builds the next texture with it. The
+player keeps all three in `[visualizer]` in `config.toml` — written only by the player, a second
+after the last change and when the window closes; read by both at open through one function — and
+the window reopens on its last preset. Tested without a display: the controls' egui pass is pure
+CPU, so the tests click the arrows and the dropdown rows and drag the sliders; an ignored GPU test
+paints the bar, the open dropdown and the panel (in English, Russian, Japanese, Chinese) to PNGs.
+Size: 32.5 MB → 36.1 MB for aarch64-apple-darwin in the release profile (+3.6 MB, +11%), main at
+`0b5d2e7` against this, both on rustc 1.98.1 — egui's code and its two text faces; its two emoji
+faces (0.7 MB) are left out. egui 0.36 wants rustc 1.95; CI's `stable` is 1.98.
+Left: the crossfade; 04 (its license).
+
 **11.3 — `serve --visualizer`.** The jukebox on a TV. `Engine::attach_tap` already exists, so
 `serve` feeds the same host side and the window opens fullscreen on the jukebox's display.
 

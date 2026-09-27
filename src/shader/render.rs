@@ -310,6 +310,16 @@ impl Scene {
         self.passes.len()
     }
 
+    /// The preset's knobs as the tuning panel has them: `iParams[]` in
+    /// `// param:` order, zero past the last — what [`Preset::default_params`]
+    /// gives before anyone turns one. Drawn from the next frame on.
+    pub fn set_params(&mut self, values: &[f32]) {
+        self.params = [0.0; MAX_PARAMS];
+        for (slot, value) in self.params.iter_mut().zip(values) {
+            *slot = *value;
+        }
+    }
+
     /// Draw one frame into `target`, which must be [`FORMAT`] and the size
     /// last given to [`Scene::resize`]. `time` is seconds since the preset
     /// started and `delta` since the last frame; the audio texture is

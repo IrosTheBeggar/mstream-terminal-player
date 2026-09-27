@@ -3,34 +3,51 @@
 //! here from the player's own tap and written down its stdin thirty times a
 //! second, and the top bar's word on whether a window is open. The child
 //! only draws; if it dies the note says so and the player plays on.
+//!
+//! The way back is the child's stdout: what its controls changed, a line
+//! each (clauses 13–14). The curve applies to the texture at once — it is
+//! built here — and everything is kept in `[visualizer]`, saved the way the
+//! GUI saves its settings, a moment after the last change.
 
 use std::process::Child;
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rust_i18n::t;
 
 use super::Gui;
+use crate::config::{self, VisualizerPrefs};
 use crate::engine::tap::TapFrame;
-use crate::shader::audio::AudioTexture;
-use crate::viz_window::pipe::Message;
+use crate::shader::audio::{AudioTexture, Curve};
+use crate::viz_window::controls::curve_from;
+use crate::viz_window::pipe::{Message, Report};
 
 /// How often the texture goes down the pipe: Android's own batch rate,
 /// which the curve's smoothing was tuned at.
 const FEED: Duration = Duration::from_millis(33);
 /// How long a window gets to close on EOF before it is killed.
 const GRACE: Duration = Duration::from_millis(800);
+/// How long the choices rest before they are saved: a slider being dragged
+/// reports every frame, and the file is written once, after.
+const SAVE_AFTER: Duration = Duration::from_secs(1);
 
 pub(crate) struct VizWindow {
     child: Option<Child>,
     to_writer: Option<SyncSender<Vec<u8>>>,
+    /// The window's reports, parsed off its stdout by a thread of their own.
+    from_window: Option<Receiver<Report>>,
     texture: AudioTexture,
     frame: TapFrame,
     mono: Vec<f32>,
     last_feed: Instant,
     /// The child's last stderr line: what a failed open is explained with.
     last_words: Arc<Mutex<Option<String>>>,
+    /// `[visualizer]` as the window's controls have left it: read when the
+    /// window opens, changed by its reports.
+    pub(crate) prefs: VisualizerPrefs,
+    /// When the choices last changed, while they are not yet saved.
+    unsaved: Option<Instant>,
     /// Tests never spawn a process: the window is a flag there.
     #[cfg(test)]
     pub(crate) dry_open: bool,
@@ -43,11 +60,14 @@ impl VizWindow {
         VizWindow {
             child: None,
             to_writer: None,
+            from_window: None,
             texture: AudioTexture::new(),
             frame: TapFrame { samples: Vec::new(), rate: 0, channels: 0 },
             mono: Vec::new(),
             last_feed: Instant::now(),
             last_words: Arc::new(Mutex::new(None)),
+            prefs: VisualizerPrefs::default(),
+            unsaved: None,
             #[cfg(test)]
             dry_open: false,
             #[cfg(test)]
@@ -92,27 +112,41 @@ pub(crate) fn toggle(gui: &mut Gui) {
     open(gui);
 }
 
+/// The saved choices, read fresh as the window will read them, and the
+/// texture's curve set from them by the same function the window's panel
+/// uses — so the curve the panel shows is the curve the presets hear.
+fn remember(gui: &mut Gui) {
+    let prefs = config::load().map(|config| config.visualizer).unwrap_or_default();
+    gui.vizwin.texture.set_curve(curve_from(&prefs));
+    gui.vizwin.prefs = prefs;
+    gui.vizwin.unsaved = None;
+}
+
+/// Under test the window is a flag, and the config is left alone: a test
+/// that wants the saved choices read calls [`remember`] itself.
 #[cfg(test)]
 fn open(gui: &mut Gui) {
     gui.vizwin.dry_open = true;
 }
 
-/// Spawn the child, and the two threads that serve it: the writer that
+/// Spawn the child, and the three threads that serve it: the writer that
 /// takes frames off a two-deep channel — a window that stalls costs frames,
-/// never the player's loop (contract clause 3) — and the stderr reader.
+/// never the player's loop (contract clause 3) — the stderr reader, and the
+/// reader of its reports.
 #[cfg(not(test))]
 fn open(gui: &mut Gui) {
     use std::io::{BufRead, Write};
     use std::process::{Command, Stdio};
-    use std::sync::mpsc::sync_channel;
+    use std::sync::mpsc::{channel, sync_channel};
     const IN_FLIGHT: usize = 2;
 
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => return failed(gui, e.to_string()),
     };
+    remember(gui);
     let mut command = Command::new(exe);
-    command.arg("viz-window").stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
+    command.arg("viz-window").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
         // No console window for the child (contract clause 3).
@@ -146,8 +180,26 @@ fn open(gui: &mut Gui) {
             }
         });
     }
+    // Its reports (clause 13). A line that is not one goes to the log with
+    // the stderr lines, and costs nothing else.
+    let (report_tx, report_rx) = channel();
+    if let Some(stdout) = child.stdout.take() {
+        let _ = std::thread::Builder::new().name("viz-window reports".into()).spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+                match Report::parse(&line) {
+                    Some(report) => {
+                        if report_tx.send(report).is_err() {
+                            break;
+                        }
+                    }
+                    None => tracing::info!("[viz-window] {line}"),
+                }
+            }
+        });
+    }
     gui.vizwin.child = Some(child);
     gui.vizwin.to_writer = Some(tx);
+    gui.vizwin.from_window = Some(report_rx);
     gui.vizwin.last_feed = Instant::now();
 }
 
@@ -155,15 +207,21 @@ fn failed(gui: &mut Gui, why: String) {
     gui.note = Some((t!("gui.viz.failed", why = why).to_string(), true));
 }
 
-/// Once a frame: the child's exit, if it exited, and the next texture down
-/// the pipe when the last is a batch old (contract clause 2).
+/// Once a frame: the window's reports, the child's exit if it exited, the
+/// choices saved once they rest, and the next texture down the pipe when
+/// the last is a batch old (contract clause 2).
 pub(crate) fn tick(gui: &mut Gui) {
+    take_reports(gui, false);
+    if gui.vizwin.unsaved.is_some_and(|since| since.elapsed() >= SAVE_AFTER) {
+        save(gui);
+    }
     let Some(child) = gui.vizwin.child.as_mut() else { return };
     match child.try_wait() {
         Ok(None) => {}
         Ok(Some(status)) => {
             gui.vizwin.child = None;
             gui.vizwin.to_writer = None;
+            gone(gui);
             if !status.success() {
                 let why = gui.vizwin.last_words.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 failed(gui, why.unwrap_or_else(|| status.to_string()));
@@ -173,11 +231,89 @@ pub(crate) fn tick(gui: &mut Gui) {
         Err(_) => {
             gui.vizwin.child = None;
             gui.vizwin.to_writer = None;
+            gone(gui);
             return;
         }
     }
     if gui.vizwin.last_feed.elapsed() >= FEED {
         feed(gui);
+    }
+}
+
+/// Every report the window has sent so far. With `to_the_end`, the reader
+/// is waited for until it reaches the end of the pipe — the window is gone,
+/// and a pick made on its way out is still kept.
+fn take_reports(gui: &mut Gui, to_the_end: bool) {
+    let Some(rx) = gui.vizwin.from_window.as_ref() else { return };
+    let mut reports = Vec::new();
+    loop {
+        let next = if to_the_end { rx.recv_timeout(GRACE).ok() } else { rx.try_recv().ok() };
+        match next {
+            Some(report) => reports.push(report),
+            None => break,
+        }
+    }
+    for report in reports {
+        observe(gui, report);
+    }
+}
+
+/// The window closed: its last words heard, its choices saved now rather
+/// than a moment from now.
+fn gone(gui: &mut Gui) {
+    take_reports(gui, true);
+    gui.vizwin.from_window = None;
+    save(gui);
+}
+
+/// One report from the window (contract clauses 13–14). The curve reaches
+/// the texture at once; everything is kept for the next time the window
+/// opens. The calibrated curve is kept as no curve at all, and a preset's
+/// knobs all at their defaults as no line for it.
+pub(crate) fn observe(gui: &mut Gui, report: Report) {
+    let vizwin = &mut gui.vizwin;
+    let prefs = &mut vizwin.prefs;
+    match report {
+        Report::Preset(file) => prefs.preset = Some(file),
+        Report::Curve(curve) => {
+            vizwin.texture.set_curve(curve);
+            (prefs.min_db, prefs.max_db, prefs.smoothing) = if curve == Curve::default() {
+                (None, None, None)
+            } else {
+                (Some(curve.min_db), Some(curve.max_db), Some(curve.smoothing))
+            };
+        }
+        Report::Knobs { file, turned } => {
+            if turned.is_empty() {
+                prefs.knobs.remove(&file);
+            } else {
+                prefs.knobs.insert(file, turned.into_iter().collect());
+            }
+        }
+    }
+    vizwin.unsaved = Some(Instant::now());
+}
+
+/// `[visualizer]` to disk, the way the GUI saves its settings: the file
+/// loaded fresh — other flows write it behind this copy's back — its
+/// section's fields replaced, keys a newer player wrote there kept, and
+/// nothing written over a file that would not load at start.
+fn save(gui: &mut Gui) {
+    if gui.vizwin.unsaved.take().is_none() || !gui.config_ok {
+        return;
+    }
+    let mut config = match config::load() {
+        Ok(config) => config,
+        Err(e) => {
+            gui.note = Some((t!("note.settings_save_failed", err = e).to_string(), true));
+            return;
+        }
+    };
+    let extra = std::mem::take(&mut config.visualizer.extra);
+    config.visualizer = VisualizerPrefs { extra, ..gui.vizwin.prefs.clone() };
+    match config::save(&config) {
+        Ok(()) => gui.config = config,
+        Err(e) => gui.note = Some((t!("note.settings_save_failed", err = e).to_string(), true)),
     }
 }
 
@@ -201,17 +337,120 @@ fn feed(gui: &mut Gui) {
 }
 
 /// The player is quitting: the pipe's end is the window's cue to quit; one
-/// that lingers is killed.
+/// that lingers is killed. What it reported on the way out is saved.
 pub(crate) fn close(gui: &mut Gui) {
     gui.vizwin.to_writer = None;
-    let Some(mut child) = gui.vizwin.child.take() else { return };
-    let deadline = Instant::now() + GRACE;
-    while Instant::now() < deadline {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return;
+    if let Some(mut child) = gui.vizwin.child.take() {
+        let deadline = Instant::now() + GRACE;
+        while Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
-        std::thread::sleep(Duration::from_millis(20));
+        if !matches!(child.try_wait(), Ok(Some(_))) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    gone(gui);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::config::testing::Scratch;
+    use crate::tui::app::App;
+
+    fn gui() -> Gui {
+        Gui::new(config::Config::default(), true, App::new(None, None, None))
+    }
+
+    /// The spectrum row's brightest bin for a steady -40 dB tone: where the
+    /// texture's dB window puts it.
+    fn peak(gui: &mut Gui) -> u8 {
+        let tone: Vec<f32> = (0..1024).map(|i| 0.01 * (i as f32 * 0.4).sin()).collect();
+        *gui.vizwin.texture.update(&tone, 1.0).iter().take(512).max().unwrap()
+    }
+
+    #[test]
+    fn the_saved_curve_and_the_windows_reports_reach_the_texture() {
+        let scratch = Scratch::new("vizwin-curve");
+        let mut gui = gui();
+        let calibrated = peak(&mut gui);
+
+        // A window that sets -40 dB lower down, saved: the texture opens on it.
+        let saved = "[visualizer]\nmin_db = -60.0\nmax_db = -10.0\n";
+        std::fs::write(scratch.dir.join("config.toml"), saved).unwrap();
+        remember(&mut gui);
+        assert_eq!(gui.vizwin.prefs.min_db, Some(-60.0));
+        let saved = peak(&mut gui);
+        assert!(saved < calibrated, "{saved} vs {calibrated}");
+
+        // The panel moves it back while the window is open.
+        observe(&mut gui, Report::Curve(Curve::default()));
+        let prefs = &gui.vizwin.prefs;
+        let curve = (prefs.min_db, prefs.max_db, prefs.smoothing);
+        assert_eq!(curve, (None, None, None), "the calibrated curve is kept as no curve at all");
+        assert_eq!(peak(&mut gui), calibrated);
+        let tuned = Curve { min_db: -90.0, max_db: -30.0, smoothing: 0.5 };
+        observe(&mut gui, Report::Curve(tuned));
+        let prefs = &gui.vizwin.prefs;
+        assert_eq!((prefs.min_db, prefs.max_db, prefs.smoothing), (Some(-90.0), Some(-30.0), Some(0.5)));
+    }
+
+    #[test]
+    fn the_choices_are_saved_once_they_rest_and_when_the_window_goes() {
+        let scratch = Scratch::new("vizwin-save");
+        let mut gui = gui();
+        config::save(&gui.config).unwrap();
+        toggle(&mut gui);
+        observe(&mut gui, Report::Preset("05-hex-marching.glsl".into()));
+        let turned = vec![("bars".into(), 48.0)];
+        observe(&mut gui, Report::Knobs { file: "01-spectrum-bars.glsl".into(), turned });
+        tick(&mut gui);
+        let early = config::load().unwrap().visualizer;
+        assert!(early.preset.is_none(), "not while the choices are still moving");
+
+        // A while later, one save carries both.
+        gui.vizwin.unsaved = Some(Instant::now() - SAVE_AFTER);
+        tick(&mut gui);
+        let saved = config::load().unwrap().visualizer;
+        assert_eq!(saved.preset.as_deref(), Some("05-hex-marching.glsl"));
+        assert_eq!(saved.knobs["01-spectrum-bars.glsl"]["bars"], 48.0);
+        assert_eq!(gui.config.visualizer, saved, "the GUI's copy follows the file");
+
+        // Knobs all back at their defaults leave no line behind; the window
+        // closing saves at once.
+        observe(&mut gui, Report::Knobs { file: "01-spectrum-bars.glsl".into(), turned: Vec::new() });
+        close(&mut gui);
+        assert!(config::load().unwrap().visualizer.knobs.is_empty());
+        let _ = &scratch;
+    }
+
+    #[test]
+    fn a_key_a_newer_player_wrote_in_the_section_survives_the_save() {
+        let scratch = Scratch::new("vizwin-keep");
+        std::fs::write(scratch.dir.join("config.toml"), "[visualizer]\nmode = \"bars\"\n").unwrap();
+        let mut gui = gui();
+        toggle(&mut gui);
+        observe(&mut gui, Report::Preset("02-audio-tunnel.glsl".into()));
+        close(&mut gui);
+        let saved = config::load().unwrap().visualizer;
+        assert_eq!(saved.preset.as_deref(), Some("02-audio-tunnel.glsl"));
+        assert_eq!(saved.extra.get("mode").and_then(toml::Value::as_str), Some("bars"));
+    }
+
+    #[test]
+    fn a_config_that_would_not_load_at_start_is_not_written_over() {
+        let scratch = Scratch::new("vizwin-guard");
+        std::fs::write(scratch.dir.join("config.toml"), "version = 1\n[player\n").unwrap();
+        let mut gui = Gui::new(config::Config::default(), false, App::new(None, None, None));
+        toggle(&mut gui);
+        observe(&mut gui, Report::Preset("02-audio-tunnel.glsl".into()));
+        close(&mut gui);
+        let raw = std::fs::read_to_string(scratch.dir.join("config.toml")).unwrap();
+        assert_eq!(raw, "version = 1\n[player\n", "the broken file is the user's to fix");
+    }
 }

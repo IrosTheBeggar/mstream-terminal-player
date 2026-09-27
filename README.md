@@ -381,8 +381,13 @@ action keeps a key. It needs a terminal at least 100×24 cells.
   log of `mstream-player stats` on the session's server, whole: the same
   tabs, periods and keys, Esc back to the Library. Beside them, the
   **Visualizer** item (`V`) opens the mobile app's shader presets in a
-  window of their own, moving to what is playing; `←` `→` change the
-  preset there, `f` goes fullscreen, Esc closes it.
+  window of their own, moving to what is playing. Move the pointer over it
+  for its controls: `‹` `›` and a dropdown of every preset, fullscreen,
+  and the mobile app's tuning panel — the response curve every preset
+  hears, and the knobs the preset in front declares — kept in
+  `[visualizer]` in `config.toml` and the window reopens where you left
+  it. The keys work too: `←` `→` presets, `t` tuning, `f` fullscreen, Esc
+  closes the innermost thing and then the window.
 - **Rooms**: Files, Search, then Albums (a wall of covers), Artists, Genres,
   Recent, Playlists, Last played and Most played, then the tools — Auto DJ
   and Sonic path — and Settings. Digits `1`–`9` and `D` reach them; the

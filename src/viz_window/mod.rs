@@ -1,5 +1,5 @@
 //! `viz-window`: the visualizer's window, a child process of the player
-//! (PLAN.md, Phase 11.1; docs/ux-contracts/visualizer-window.md).
+//! (PLAN.md, Phase 11.1–11.2; docs/ux-contracts/visualizer-window.md).
 //!
 //! A process of its own because AppKit wants the process's first thread for
 //! the event loop and the player's belongs to the terminal — and because a
@@ -9,7 +9,14 @@
 //! winit for the window and its keys, the same wgpu [`Scene`] the probe
 //! draws with, at the window's logical size, scaled onto the surface by one
 //! blit. EOF on stdin is the parent gone, and the window closes with it.
+//!
+//! Over the picture egui draws the window's [`controls`]: the arrows and the
+//! dropdown that pick a preset, and the tuning panel. What they change goes
+//! back up this process's stdout as [`pipe::Report`] lines — the curve
+//! because the parent builds the texture with it, the rest so the parent
+//! can keep it.
 
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -20,13 +27,19 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
+use crate::config::VisualizerPrefs;
 use crate::runtime::block_on;
 use crate::shader::library::BUILTIN;
 use crate::shader::preset::Preset;
 use crate::shader::render::{Gpu, Offscreen, Scene};
 
+pub mod controls;
+mod overlay;
 pub mod pipe;
-use pipe::Message;
+
+use controls::{Command, Controls, Entry, Tuning, View};
+use overlay::Overlay;
+use pipe::{Message, Report};
 
 const TITLE: &str = "mStream Visualizer";
 /// The window as it opens: the presets' 16:9, at a size that sits beside a
@@ -35,9 +48,10 @@ const OPENING: (u32, u32) = (960, 540);
 
 #[derive(clap::Args)]
 pub struct WindowArgs {
-    /// The preset to open on, by its number in the library's order (1-based)
-    #[arg(long, default_value_t = 1)]
-    pub preset: usize,
+    /// The preset to open on, by its number in the library's order
+    /// (1-based); without it, the one the window last showed
+    #[arg(long)]
+    pub preset: Option<usize>,
 
     /// Open fullscreen
     #[arg(long)]
@@ -45,6 +59,13 @@ pub struct WindowArgs {
 }
 
 pub fn run(args: WindowArgs) -> i32 {
+    // The controls speak the player's language: the same detection, so the
+    // same answer.
+    crate::setup::boot_language();
+    // What the controls were left at, and whether the player shows key
+    // hints. Read here and written only by the player (contract clause
+    // 14); a file that will not read is the defaults.
+    let config = crate::config::load().unwrap_or_default();
     let event_loop = match EventLoop::<Message>::with_user_event().build() {
         Ok(event_loop) => event_loop,
         Err(e) => {
@@ -54,7 +75,8 @@ pub fn run(args: WindowArgs) -> i32 {
     };
     event_loop.set_control_flow(ControlFlow::Wait);
     spawn_reader(event_loop.create_proxy());
-    let mut app = App::new(args);
+    let mut app = App::new(args, &config.visualizer);
+    app.controls.key_hints = config.gui.key_hints;
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("viz-window: {e}");
         return 1;
@@ -86,16 +108,32 @@ fn spawn_reader(proxy: EventLoopProxy<Message>) {
         .expect("a thread for stdin");
 }
 
+/// The window closes, saying why on stderr — which the player keeps in
+/// its log, so "the window went away" has an answer.
+fn close(event_loop: &ActiveEventLoop, why: &str) {
+    eprintln!("viz-window: closed by {why}");
+    event_loop.exit();
+}
+
+/// A report up to the player (contract clause 13). A player that stopped
+/// reading is a player gone, and stdin's EOF brings the window down after
+/// it; nothing here needs to hear about it twice.
+fn report(report: &Report) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{}", report.line()).and_then(|()| out.flush());
+}
+
 struct App {
     fullscreen_at_open: bool,
     window: Option<Arc<Window>>,
     gfx: Option<Gfx>,
     /// The preset in front, by its index in `BUILTIN`.
     preset: usize,
-    titles: Vec<String>,
+    /// Every built-in preset, as the controls offer them.
+    entries: Vec<Entry>,
     scenes: Vec<Option<Scene>>,
-    /// A preset this GPU refused: skipped rather than retried.
-    refused: Vec<bool>,
+    tuning: Tuning,
+    controls: Controls,
     audio: Vec<u8>,
     audio_fresh: bool,
     occluded: bool,
@@ -111,26 +149,29 @@ struct Gfx {
     /// The preset draws here at logical size; the blit scales it up.
     target: Offscreen,
     blit: Blit,
+    /// The controls, painted over the blit.
+    overlay: Overlay,
 }
 
 impl App {
-    fn new(args: WindowArgs) -> App {
-        let count = BUILTIN.len();
-        let titles = BUILTIN
-            .iter()
-            .map(|builtin| {
-                let title = Preset::parse(builtin.source).ok().and_then(|p| p.title);
-                format!("{} {}", &builtin.file[..2], title.unwrap_or_else(|| builtin.file.to_string()))
-            })
-            .collect();
+    fn new(args: WindowArgs, prefs: &VisualizerPrefs) -> App {
+        let entries = controls::entries();
+        let count = entries.len();
+        let last = prefs.preset.as_deref().and_then(|file| entries.iter().position(|e| e.file == file));
+        let preset = match args.preset {
+            Some(number) => number.clamp(1, count) - 1,
+            None => last.unwrap_or(0),
+        };
+        let tuning = Tuning::from_prefs(prefs, &entries);
         App {
             fullscreen_at_open: args.fullscreen,
             window: None,
             gfx: None,
-            preset: args.preset.clamp(1, count) - 1,
-            titles,
+            preset,
+            entries,
             scenes: (0..count).map(|_| None).collect(),
-            refused: vec![false; count],
+            tuning,
+            controls: Controls::default(),
             audio: vec![0; pipe::AUDIO_LEN],
             audio_fresh: false,
             occluded: false,
@@ -188,7 +229,8 @@ impl App {
         let target = Offscreen::for_display(&gpu, logical_size(&window));
         let mut blit = Blit::new(&gpu, format);
         blit.bind(&gpu, &target.view);
-        self.gfx = Some(Gfx { surface, config, gpu, target, blit });
+        let overlay = Overlay::new(&window, &gpu, format);
+        self.gfx = Some(Gfx { surface, config, gpu, target, blit, overlay });
 
         window.focus_window();
         if self.fullscreen_at_open {
@@ -201,7 +243,7 @@ impl App {
     }
 
     fn retitle(&self, window: &Window) {
-        window.set_title(&format!("{TITLE} — {}", self.titles[self.preset]));
+        window.set_title(&format!("{TITLE} — {}", self.entries[self.preset].label));
     }
 
     /// The window changed size or scale: the surface follows the pixels,
@@ -229,51 +271,92 @@ impl App {
         }
     }
 
-    /// The preset in front, compiled on first sight. A preset the GPU
-    /// refuses is skipped; refused all round, the window gives up.
-    fn ensure_scene(&mut self, event_loop: &ActiveEventLoop) -> bool {
+    /// Preset `i`, compiled for this GPU on first sight with its knobs as
+    /// the panel has them. One the GPU refuses is marked, and never offered
+    /// or tried again (contract clauses 7, 11).
+    fn load(&mut self, i: usize) -> bool {
+        if self.scenes[i].is_some() {
+            return true;
+        }
         let Some(gfx) = self.gfx.as_ref() else { return false };
-        for _ in 0..BUILTIN.len() {
-            if self.scenes[self.preset].is_some() {
-                return true;
+        if self.entries[i].refused {
+            return false;
+        }
+        let builtin = &BUILTIN[i];
+        let loaded = Preset::parse(builtin.source)
+            .map_err(|e| e.to_string())
+            .and_then(|preset| gfx.gpu.load(&preset, gfx.target.size));
+        match loaded {
+            Ok(mut scene) => {
+                scene.set_params(&self.tuning.knobs[i]);
+                self.scenes[i] = Some(scene);
+                true
             }
-            if !self.refused[self.preset] {
-                let builtin = &BUILTIN[self.preset];
-                let loaded = Preset::parse(builtin.source)
-                    .map_err(|e| e.to_string())
-                    .and_then(|preset| gfx.gpu.load(&preset, gfx.target.size));
-                match loaded {
-                    Ok(scene) => {
-                        self.scenes[self.preset] = Some(scene);
-                        return true;
-                    }
-                    Err(e) => {
-                        eprintln!("viz-window: {} does not draw on this GPU: {e}", builtin.file);
-                        self.refused[self.preset] = true;
-                    }
-                }
+            Err(e) => {
+                eprintln!("viz-window: {} does not draw on this GPU: {e}", builtin.file);
+                self.entries[i].refused = true;
+                false
             }
-            self.preset = (self.preset + 1) % BUILTIN.len();
+        }
+    }
+
+    /// Preset `i` in front: the title follows, the bar wakes to name it,
+    /// and the player hears which it is (contract clause 13).
+    fn front(&mut self, i: usize) {
+        let changed = i != self.preset;
+        self.preset = i;
+        if let Some(window) = &self.window {
+            self.retitle(window);
+            window.request_redraw();
+        }
+        if changed {
+            self.controls.wake();
+            report(&Report::Preset(self.entries[i].file.to_string()));
+        }
+    }
+
+    /// A dropdown row, or the player's choice: that preset if this GPU
+    /// draws it; if it does not, the row is marked and the picture stays
+    /// (contract clause 11). Before the window opens there is nothing to
+    /// compile with, and the choice is simply where it will open.
+    fn pick(&mut self, i: usize) {
+        let i = i.min(self.entries.len() - 1);
+        if self.gfx.is_none() {
+            self.preset = i;
+        } else if self.load(i) {
+            self.front(i);
+        }
+    }
+
+    /// `←` `→` and the arrows: the next preset this GPU draws, that way,
+    /// wrapping (contract clause 7). Where no other draws, the picture
+    /// stays.
+    fn step(&mut self, by: isize) {
+        let count = self.entries.len() as isize;
+        let mut i = self.preset as isize;
+        for _ in 1..count {
+            i = (i + by).rem_euclid(count);
+            if self.load(i as usize) {
+                self.front(i as usize);
+                return;
+            }
+        }
+    }
+
+    /// The preset in front, ready to draw. One the GPU refuses gives way to
+    /// the next that draws; refused all round, the window gives up.
+    fn ensure_scene(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        if self.load(self.preset) {
+            return true;
+        }
+        self.step(1);
+        if self.scenes[self.preset].is_some() {
+            return true;
         }
         eprintln!("viz-window: no preset draws on this GPU");
         self.exit_code = 1;
         event_loop.exit();
         false
-    }
-
-    /// `←` `→`: the next preset that draws (contract clause 7).
-    fn step(&mut self, by: isize) {
-        let count = BUILTIN.len() as isize;
-        for _ in 0..count {
-            self.preset = ((self.preset as isize + by).rem_euclid(count)) as usize;
-            if !self.refused[self.preset] {
-                break;
-            }
-        }
-        if let Some(window) = &self.window {
-            self.retitle(window);
-            window.request_redraw();
-        }
     }
 
     fn toggle_fullscreen(&self) {
@@ -283,7 +366,41 @@ impl App {
         }
     }
 
+    /// The controls' pass: what they turned goes where it acts — the knobs
+    /// to the preset, the curve up to the player that builds the texture —
+    /// and what they asked for is done, before this frame is drawn.
+    fn run_controls(&mut self, window: &Window) {
+        let Some(gfx) = self.gfx.as_mut() else { return };
+        let i = self.preset;
+        let (curve, knobs) = (self.tuning.curve, self.tuning.knobs[i].clone());
+        let view = View { entries: &self.entries, current: i, fullscreen: window.fullscreen().is_some() };
+        let mut commands = Vec::new();
+        let (state, tuning) = (&mut self.controls, &mut self.tuning);
+        gfx.overlay.run(window, &gfx.gpu, |ui| commands = controls::show(ui, state, &view, tuning));
+
+        if self.tuning.curve != curve {
+            report(&Report::Curve(self.tuning.curve));
+        }
+        if self.tuning.knobs[i] != knobs {
+            if let Some(scene) = self.scenes[i].as_mut() {
+                scene.set_params(&self.tuning.knobs[i]);
+            }
+            let turned = self.tuning.turned(&self.entries, i);
+            report(&Report::Knobs { file: self.entries[i].file.to_string(), turned });
+        }
+        for command in commands {
+            match command {
+                Command::Step(by) => self.step(by),
+                Command::Pick(i) => self.pick(i),
+                Command::Fullscreen => self.toggle_fullscreen(),
+            }
+        }
+    }
+
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(window) = self.window.clone() else { return };
+        // The controls first, so what they ask for is what this frame shows.
+        self.run_controls(&window);
         if !self.ensure_scene(event_loop) {
             return;
         }
@@ -313,7 +430,12 @@ impl App {
             | wgpu::CurrentSurfaceTexture::Validation => return,
         };
         let view = frame.texture.create_view(&Default::default());
-        gfx.blit.draw(&gfx.gpu, &view);
+        let mut encoder = gfx.gpu.device.create_command_encoder(&Default::default());
+        gfx.blit.draw(&mut encoder, &view);
+        let size = [gfx.config.width, gfx.config.height];
+        let first = gfx.overlay.paint(&gfx.gpu, &mut encoder, &view, size);
+        gfx.gpu.queue.submit(first.into_iter().chain([encoder.finish()]));
+        gfx.overlay.release();
         gfx.gpu.queue.present(frame);
     }
 }
@@ -336,25 +458,41 @@ impl ApplicationHandler<Message> for App {
                 self.audio = bytes;
                 self.audio_fresh = true;
             }
-            Message::Preset(index) => {
-                self.preset = (index as usize).min(BUILTIN.len() - 1);
-                if let Some(window) = &self.window {
-                    self.retitle(window);
-                    window.request_redraw();
-                }
-            }
+            Message::Preset(index) => self.pick(index as usize),
             Message::Raise => {
                 if let Some(window) = &self.window {
                     window.focus_window();
+                    self.controls.wake();
                 }
             }
-            Message::Quit => event_loop.exit(),
+            Message::Quit => close(event_loop, "the player's pipe closed"),
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // egui sees every event first. While one of its widgets has the
+        // keyboard it claims every key, but only these move or press a
+        // widget; the letters stay the window's (contract clause 15).
+        let claimed = match (&self.window, self.gfx.as_mut()) {
+            (Some(window), Some(gfx)) => gfx.overlay.on_event(window, &event),
+            _ => false,
+        };
+        let kept = claimed
+            && matches!(&event, WindowEvent::KeyboardInput { event, .. } if matches!(
+                event.logical_key.as_ref(),
+                Key::Named(
+                    NamedKey::ArrowLeft
+                        | NamedKey::ArrowRight
+                        | NamedKey::ArrowUp
+                        | NamedKey::ArrowDown
+                        | NamedKey::Tab
+                        | NamedKey::Space
+                        | NamedKey::Enter
+                        | NamedKey::Escape
+                )
+            ));
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => close(event_loop, "its close control"),
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => self.resize(),
             // Behind another window or minimized: nothing is drawn until it
             // shows again (contract clause 6).
@@ -364,12 +502,22 @@ impl ApplicationHandler<Message> for App {
                     window.request_redraw();
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && !event.repeat => {
+            WindowEvent::KeyboardInput { event, .. }
+                if !kept && event.state == ElementState::Pressed && !event.repeat =>
+            {
                 match event.logical_key.as_ref() {
-                    Key::Named(NamedKey::Escape) | Key::Character("q") => event_loop.exit(),
+                    // Innermost first: an open dropdown, then the tuning
+                    // panel, then the window.
+                    Key::Named(NamedKey::Escape) => {
+                        if !self.controls.escape() {
+                            close(event_loop, "Esc");
+                        }
+                    }
+                    Key::Character("q") => close(event_loop, "q"),
                     Key::Named(NamedKey::ArrowRight) => self.step(1),
                     Key::Named(NamedKey::ArrowLeft) => self.step(-1),
                     Key::Character("f") => self.toggle_fullscreen(),
+                    Key::Character("t") => self.controls.toggle_tuning(),
                     _ => {}
                 }
             }
@@ -506,27 +654,25 @@ impl Blit {
         }));
     }
 
-    fn draw(&self, gpu: &Gpu, surface_view: &wgpu::TextureView) {
+    /// The picture onto the surface, recorded into the frame's encoder:
+    /// the controls are painted after it, in the same submission.
+    fn draw(&self, encoder: &mut wgpu::CommandEncoder, surface_view: &wgpu::TextureView) {
         let Some(group) = &self.group else { return };
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("blit"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: surface_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        gpu.queue.submit([encoder.finish()]);
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("blit"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: surface_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, group, &[]);
+        pass.draw(0..3, 0..1);
     }
 }
