@@ -1540,6 +1540,7 @@ fn a_tunnel_session_is_remembered_by_identity_not_by_its_loopback_port() {
             password: "pw".into(),
             self_signed: false,
             local_token: Some("lt".into()),
+            peer: None,
         })]
     );
     app.apply_event(Event::Connected {
@@ -2434,6 +2435,7 @@ fn an_expired_tunnel_session_signs_back_in_over_the_open_bridge() {
             password: "pw".into(),
             self_signed: false,
             local_token: Some("lt".into()),
+            peer: None,
         })]
     );
 }
@@ -3054,6 +3056,7 @@ fn login_effect_carries_credentials_and_clears_the_password() {
             password: "secret".into(),
             self_signed: false,
             local_token: None,
+            peer: None,
         })]
     );
     assert!(app.connect.password.is_empty(), "password is not kept in memory after use");
@@ -3138,6 +3141,7 @@ fn sending_a_password_over_plain_http_asks_first() {
             password: "secret".into(),
             self_signed: false,
             local_token: None,
+            peer: None,
         })]
     );
 }
@@ -7071,4 +7075,36 @@ fn a_search_reply_from_the_server_the_session_left_is_dropped_even_for_the_same_
         results: Box::default(),
     });
     assert!(app.search_hits.is_some());
+}
+
+#[test]
+fn a_re_login_on_a_proxied_peer_signs_in_through_the_parent_and_keeps_the_peer() {
+    // The review's finding: the parent's token expired while a peer was
+    // browsed through it; the sign-in pinged the parent plainly, so the
+    // header named the peer while the browser listed the parent's library
+    // and new rows carried the wrong origin. The login names the peer.
+    let mut app = App::new(None, None, None);
+    let parent = "http://10.0.0.5:3000";
+    app.connected = true;
+    app.session.server = parent.into();
+    app.session.server_id = crate::config::peer_identity(parent, 3);
+    app.session.peer = Some((parent.into(), 3));
+    app.session.token = Some("stale".into());
+
+    app.apply_event(Event::Unauthorized);
+    assert_eq!(app.connect.stage, ConnectStage::Direct);
+    assert_eq!(app.connect.server, parent, "the form aims at the parent, which holds the accounts");
+    app.connect.username = "alice".into();
+    app.connect.password = "pw".into();
+    let effects = app.handle_action(Action::Submit);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCmd::Login { identity, peer: Some(3), .. })] if identity == parent
+        ),
+        "the sign-in is the parent's and carries the peer: {effects:?}"
+    );
+    // A sign-in at a server that is not the peer's parent carries none.
+    app.session.peer = Some(("http://10.0.0.9:3000".into(), 3));
+    assert_eq!(app.peer_behind(parent), None);
 }

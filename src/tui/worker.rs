@@ -116,6 +116,11 @@ pub enum ApiCmd {
         password: String,
         self_signed: bool,
         local_token: Option<String>,
+        /// A peer's session signing back in: the sign-in itself goes to the
+        /// parent (`server` is the parent's), and the session that follows
+        /// rides the parent's proxies for this peer, as it did before the
+        /// token went stale (multi-server contract, clause 26).
+        peer: Option<i64>,
     },
     /// Dial `credential` — a Quick Connect pairing code or a federation
     /// guest ticket — and keep the tunnel under `id` until it is closed,
@@ -992,8 +997,8 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 connect(&mut client, &server, &identity, token, self_signed, peer, local_token)
             }
 
-            ApiCmd::Login { server, identity, username, password, self_signed, local_token } => {
-                login(&mut client, &server, &identity, &username, &password, self_signed, local_token)
+            ApiCmd::Login { server, identity, username, password, self_signed, local_token, peer } => {
+                login(&mut client, &server, &identity, &username, &password, self_signed, local_token, peer)
             }
 
             ApiCmd::TunnelOpen { id, credential } => {
@@ -1493,6 +1498,7 @@ fn login(
     password: &str,
     self_signed: bool,
     local_token: Option<String>,
+    peer: Option<i64>,
 ) -> Option<Event> {
     let mut c = match Client::new_with(server, self_signed) {
         Ok(c) => c.with_local_token(local_token),
@@ -1505,6 +1511,11 @@ fn login(
         }
         Err(e) => return Some(Event::Error(e.to_string())),
     };
+    // The sign-in was the parent's own route; the session it opens browses
+    // the peer through the parent's proxies, exactly as before the token
+    // expired — a plain client here listed the parent's library under the
+    // peer's name (the review's finding).
+    let c = c.with_peer(peer);
     match establish(client, c, id, Some(username.to_string()), Some(token)) {
         Ok(event) => Some(event),
         Err(e) => Some(Event::Error(e.to_string())),

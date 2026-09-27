@@ -738,10 +738,12 @@ pub(crate) fn submit_form(gui: &mut Gui) {
             Some((id, token)) => (id.to_string(), Some(token.to_string())),
             None => (server.clone(), None),
         };
+        // A peer session's parent asked: the sign-in keeps the peer (clause 26).
+        let peer = gui.app.peer_behind(&identity);
         let effect = if public {
-            Effect::Api(ApiCmd::Connect { server, identity, token: None, self_signed, peer: None, local_token })
+            Effect::Api(ApiCmd::Connect { server, identity, token: None, self_signed, peer, local_token })
         } else {
-            Effect::Api(ApiCmd::Login { server, identity, username, password, self_signed, local_token })
+            Effect::Api(ApiCmd::Login { server, identity, username, password, self_signed, local_token, peer })
         };
         if let Some(form) = gui.servers.form.as_mut() {
             form.submitting = true;

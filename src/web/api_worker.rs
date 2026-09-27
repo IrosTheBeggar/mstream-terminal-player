@@ -68,7 +68,7 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         // The browser owns the network: a failed open is the source's fault.
         ApiCmd::Probe { server, .. } => Some(Event::Reachable { server, reachable: true }),
 
-        ApiCmd::Login { server, identity, username, password, self_signed: _, local_token: _ } => {
+        ApiCmd::Login { server, identity, username, password, self_signed: _, local_token: _, peer: _ } => {
             Some(login(session, &server, &identity, &username, &password).await)
         }
 

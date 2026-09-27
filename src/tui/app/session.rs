@@ -281,6 +281,19 @@ impl App {
         }
     }
 
+    /// The peer a sign-in at `identity` is for: the session's own, when
+    /// the identity is that peer's parent. A peer has no accounts of its
+    /// own — the parent's token went stale, the parent takes the sign-in —
+    /// and the session that follows must go on browsing the peer
+    /// (multi-server contract, clause 26), not the parent's library.
+    pub(crate) fn peer_behind(&self, identity: &str) -> Option<i64> {
+        self.session
+            .peer
+            .as_ref()
+            .filter(|(parent, _)| crate::config::same_server(parent, identity))
+            .map(|(_, id)| *id)
+    }
+
     /// Point the session at another saved server and reconnect — the GUI's
     /// server switch. The same door as [`App::begin`], with the teardown a
     /// mid-session change needs first.
@@ -532,6 +545,7 @@ impl App {
         self.connect.submitting = true;
         self.message = None;
         let (identity, local_token) = self.identity_at(&server);
+        let peer = self.peer_behind(&identity);
         vec![Effect::Api(ApiCmd::Login {
             server,
             identity,
@@ -539,6 +553,7 @@ impl App {
             password: std::mem::take(&mut self.connect.password),
             self_signed: self.session.self_signed,
             local_token,
+            peer,
         })]
     }
 

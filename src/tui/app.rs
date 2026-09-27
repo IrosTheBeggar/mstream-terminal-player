@@ -4994,6 +4994,7 @@ impl App {
 
     /// The session generation (see the field): what a library or search ask
     /// is stamped with, and what its reply must carry to be taken.
+    #[cfg(test)]
     pub(crate) fn session_gen(&self) -> u64 {
         self.session_gen
     }
