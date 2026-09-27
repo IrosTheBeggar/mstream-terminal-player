@@ -152,3 +152,8 @@ consumption.
   at once. Now the cursor is stowed until ↓ or ↑ picks it up (on the
   first playlist), a click on a row stows it, and the row keys wait for
   it — the kit's list-cursor law (docs/ui-kit.md, "List cursor").
+- **2026-09-26 — The review's fixes**: the drilled playlist's rows take
+  `N` and `P` like every track row; the name dialogs outrank the queue
+  panel's keys (a `C` in a name cleared the queue); adding a track to a
+  new playlist from inside another playlist drops the cached parent so
+  Back lists the new name (clause 14).

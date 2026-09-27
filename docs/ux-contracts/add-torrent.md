@@ -213,3 +213,14 @@ validator wordings above quote the record's English.
   screen; the room has nowhere to pop to, so a success (added, seeded,
   already there) clears the source and keeps the library and toggles
   for the next one.
+- **2026-09-26 — The review's fixes** (the security lane). The Windows
+  hand-off goes through Explorer, not `cmd /c start`, which read `&`, `|`,
+  `^` and `%VAR%` in a magnet or a file name as its own syntax (a magnet's
+  `&dn=…` became a command). A typed path or `--torrent` must be a regular
+  file of at most 16 MiB before it is read. Staged files go under the
+  user's own config directory (0700), created fresh, never through a file
+  another user planted in the shared temp dir. The room reaches the
+  server the session's way (a tunnel bridge's loopback token, the entry's
+  trust — a bare client was dropped by the bridge), refuses a read-only
+  peer (multi-server clause 26), and drops a check's or an add's answer
+  that lands after a server switch.

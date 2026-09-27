@@ -136,3 +136,13 @@ names the tab, `gui.tips.now` the keys on the footer (ten locales).
   on the screen; the digits pick the view's tabs while it is up; the
   panel's lists keep the TUI's visible cursor; the view's words stay
   English; there is no volume control on the screen.
+- **2026-09-26 — The review's fixes.** The screen serves the App's input
+  modes first: the Auto-DJ tab's keyword field takes the letters, Enter
+  and Esc, and its sources picker (the TUI's overlay, lent here) takes the
+  list keys — Enter on those rows opened a mode nothing could serve or
+  leave, and every later action fell into it. The shell follows the App
+  when it leaves its full-screen view on its own (arming a pick, the pick
+  banner's [X] going home), so the keys never drive a pane off screen.
+  The Settings sub-rooms are the Library screen's. The GUI boots the
+  system language now, as the wizard does; the view's own words stay the
+  TUI's English.

@@ -4,7 +4,7 @@
 |---|---|
 | **Design of record** | `mstream_music` @ `origin/master` (`439b4de4`, 2026-09-19) — `lib/screens/auto_dj.dart` (the settings screen: status, Queue, Continuity, Filters, Sources, and the multi-server body this surface does not port), `lib/widgets/auto_dj_start_sheet.dart` (the empty-queue chooser), `lib/widgets/queue_list.dart` (`toggleAutoDJ`, `_seedRandom` / `_armLibraryPick`, the `_EmptyQueue` opening-song buttons, the labelled `AutoDjButton`, the queue-row badge), `lib/widgets/player_panel.dart` (the same button on the player), `lib/singletons/auto_dj_manager.dart` (the settings, their persistence, `libraryFilters`, `batchParams`), `lib/media/audio_stuff.dart` (the session: `setAutoDJ`, `startAutoDJFromSeed`, `_startAutoDJFromSeed`, `_autoDJPick`, `sonicParams`, `shouldTopUpAutoDJ`, `shouldDeferDJPick`, `_resetAutoDJSession`, `_queueAutoDJSongs`, `restoreAutoDJ`), `lib/singletons/server_capabilities.dart` + `lib/util/server_version.dart` (the capability learner and the version floors), `lib/singletons/api.dart` (`fetchAutoDjSeed`, the opener). **Re-extracted 2026-09-20** from the 2026-09-06 pin (`695f4d0`); what moved in between: songs per fetch (`limit`, mStream #966), a federated peer hosts the DJ (mStream #946), sonic waits for the discovery scan (`discoveryReady`, mStream #879), opening-song buttons under an empty armed queue, multi-server sessions with vector seeds (out of scope here), and the toasts name the server by its display name. The screen is itself a port of the webapp's panel (`webapp/velvet/app.js viewAutoDJ`; `webapp/alpha/auto-dj.js` for the anchor semantics) — where they disagree, this contract says so. |
 | **Server API** | `POST /api/v1/db/random-songs` — one call, every knob (mStream `src/api/random.js`, Joi-validated with no unknown keys): `limit` (1–25, default 1; 6.26.0) · `ignoreList` (round-trip cursor, ≤ 500 ids; the server keeps the last 50) · `ignoreVPaths` (≤ 50) · `minRating` (0–10; ignored for a caller with no user — a federation key or guest) · `genres` (≤ 200) + `genreMode` (`whitelist` default / `blacklist`) · `bpmRanges` + `bpmRangesWide` (≤ 16 windows each, 0–1000) + `requireBpm` · `musicalKeys` (≤ 24 Camelot codes) + `requireMusicalKey` · `ignoreArtists` (≤ 100) · `similarTo` (1–8 paths) + `minSimilarity` (both or neither) · `similarToVector` + `similarToModelId` (6.26.0, out of scope) · `minDuration` + `maxDuration` (seconds, ≤ 86400) + `allowUnknownDuration` (6.25.0). Answers `{songs: [..], ignoreList, sonic?: {similarity, similarities, poolSize}}`. Its refusals, all as `{"error": "..."}`: a **schema rejection** `"<key>" is not allowed` (400 from 6.12.0, 403 before — the body is the signal); nothing left in a sonic pool → 400 `No songs within the similarity range match criteria`; an unanalysed seed → 400 `Sonic seed track has not been analyzed yet`, an unscanned library → 400 `No tracks have been analyzed yet`; discovery switched off → 403 containing `discovery is disabled`; an expired token → 401/403 without a not-allowed body. `GET /api/v1/db/genres`. `GET /api/` is the capability source: `server` (the version), `features.discovery`, `features.discoveryReady` (whether the scan has produced vectors — `/api/v1/ping` never carries it), `user.vpaths`. Version floors the record keeps: 4.6.0 `ignoreVPaths` · 6.7.1 the BPM / key / genre / cooldown block · 6.15.2 the sonic pair · 6.25.0 the length window · 6.26.0 `limit`. random-songs is on the federation allowlist (mStream #946): a peer session — through the parent's proxy or over the peer's own tunnel with a guest token — can run the DJ. |
-| **Already in this repo** | Most of a DJ, in the older three-mode shape: `src/dj.rs` (Camelot math, same/half/double windows, the perceptual sonic slider, `build_random_request`, `Settings`), `[player.dj]` prefs and `player.autodj`, `AutoDjMode` and the `A` cycle, `maybe_autodj` (the queue-end top-up), `consume_dj` (queue the pick, start it if idle, the cursor), `autodj_pick` (`Similar` via nearest neighbours, `BpmKey` via random-songs, the sonic 400 retried once without the pool), `autodj_sample` (three picks without queueing), the TUI's Auto-DJ tab (`DjPanel` / `DjRow`) with its genre picker, `Event::{AutoDjPick, AutoDjSample, Genres}`, and the GUI bar's `auto-dj` toggle. Since 2026-09-06 the multi-server contract landed and gives this one its footing: every queued row carries its `Origin` and plays from its own server (`Reach`, `reach()`), federated peers are sessions of their own (proxied or direct), tunnels follow the queue with a hold for a row whose tunnel is down, the layered `/api/` payload is parsed (`LayeredInfo`), and the GUI queue panel has rows of its own to badge. **Missing**: the on/off-plus-toggles model, sources (`ignoreVPaths`), the length window, the keyword filter, `requireBpm` / `requireMusicalKey`, the session-locked Camelot anchor, the rolling / locked sonic anchors as the record defines them, songs per fetch, the readiness gate, the one-shot seed and the start chooser, the empty-queue openers, lane resets with in-flight discards, the capability learner, the failure taxonomy, the queue badge, the armed-not-playing restore, and the room itself. |
+| **Already in this repo** | (As found at extraction on 2026-09-06 — the names are that day's code, since reworked.) Most of a DJ, in the older three-mode shape: `src/dj.rs` (Camelot math, same/half/double windows, the perceptual sonic slider, `build_random_request`, `Settings`), `[player.dj]` prefs and `player.autodj`, `AutoDjMode` and the `A` cycle, `maybe_autodj` (the queue-end top-up), `consume_dj` (queue the pick, start it if idle, the cursor), `autodj_pick` (`Similar` via nearest neighbours, `BpmKey` via random-songs, the sonic 400 retried once without the pool), `autodj_sample` (three picks without queueing), the TUI's Auto-DJ tab (`DjPanel` / `DjRow`) with its genre picker, `Event::{AutoDjPick, AutoDjSample, Genres}`, and the GUI bar's `auto-dj` toggle. Since 2026-09-06 the multi-server contract landed and gives this one its footing: every queued row carries its `Origin` and plays from its own server (`Reach`, `reach()`), federated peers are sessions of their own (proxied or direct), tunnels follow the queue with a hold for a row whose tunnel is down, the layered `/api/` payload is parsed (`LayeredInfo`), and the GUI queue panel has rows of its own to badge. **Missing**: the on/off-plus-toggles model, sources (`ignoreVPaths`), the length window, the keyword filter, `requireBpm` / `requireMusicalKey`, the session-locked Camelot anchor, the rolling / locked sonic anchors as the record defines them, songs per fetch, the readiness gate, the one-shot seed and the start chooser, the empty-queue openers, lane resets with in-flight discards, the capability learner, the failure taxonomy, the queue badge, the armed-not-playing restore, and the room itself. |
 | **Target surface** | the GUI player — the bar toggle, the queue panel (its badge and its empty state), and the **Auto DJ room** — a Library nav room under TOOLS since 2026-09-23 (Settings › `Auto DJ ▸` before); the TUI's `A` and Auto-DJ tab follow through the shared App |
 | **Status** | contract extracted 2026-09-06; **re-extracted against the moved record and settled 2026-09-20** — the open questions are decided below, and decision 10 was rewritten the same day to the record's model (the DJ is armed FOR a server, the session browses where it likes); implementation began 2026-09-20 (PLAN.md, Phase 10): **slices A1–A5 landed 2026-09-20/21** — the model, the worker, the GUI room and its surfaces, the TUI's keyword entry, and the rig run (`smoke/gui/scenario_dj.py`: the room, a batch, Preview, the server picker moving the DJ to a proxied peer with the next turn picked from there). Left for a server with discovery data: the sonic path end to end (a pool answered, clause 30's degrade) and a direct-tunnel peer lane. **2026-09-23** — the room moved from Settings to the Library's nav column, a TOOLS group beside the sonic room, where the record's browse root and desktop rail keep it (decision 5 amended; the deviations log) |
 
@@ -23,7 +23,9 @@ falling silent.
 ## Entry points
 
 1. **The toggle** — the bar's `auto-dj` control, lit while the DJ runs
-   anywhere, and `A` in both shells. It works the record's way: with the
+   anywhere, and `A` in the TUI (in the GUI's browse rooms `A` is the
+   bar's queue-all; the bar's control, `D`'s room and `A` elsewhere arm
+   it there). It works the record's way: with the
    DJ off it arms it FOR the session's server; with the DJ on that same
    server it switches it off; with the DJ on another server it moves the
    DJ here. The note line confirms "Auto DJ on" / "Auto DJ off" ("Auto DJ
@@ -198,8 +200,9 @@ at once. A lane picks from ONE server: the DJ's.
     slow tunnel never leaves the queue dry between turns, small enough
     that a changed setting shows within a few songs. At 1 the key is left
     off (the pre-batch wire shape); the opener never carries it; a server
-    known to predate 6.26.0 never sees it and its row is hidden (clause
-    50); the learner covers the rest.
+    known to predate 6.26.0 has its row hidden (clause 50) — a stored
+    value above one is still sent and left to the learner (deviation
+    2026-09-26); the learner covers the rest.
 28. Every request is **bounded** (the record's 15 s; here the api client's
     own timeouts) so a black-hole server cannot hang a turn; a timeout is
     a network failure (clause 33).
@@ -395,7 +398,7 @@ room, the chooser and the panel, and `dj.<name>` for the shared App's notes
 
 | Record | Here |
 |---|---|
-| The labelled Auto DJ button (queue header + player) | The bar's `auto-dj` toggle, lit while the DJ runs anywhere — arm here / off / move here (decision 1, entry point 1); `A` in both shells; the confirmation on the note line names the server when several are saved |
+| The labelled Auto DJ button (queue header + player) | The bar's `auto-dj` toggle, lit while the DJ runs anywhere — arm here / off / move here (decision 1, entry point 1); `A` in the TUI and outside the GUI's browse rooms (where `A` is queue-all); the confirmation on the note line names the server when several are saved |
 | The settings screen | The **Auto DJ room**, a Library nav room (since 2026-09-23; behind Settings › `Auto DJ ▸` with a `◂` back before): a TOOLS group under Search in the nav column — `Auto DJ`, then `Sonic path` — the row dim, bright under the pointer, the accent when active like every nav row, plus a `•` in the ok colour while the DJ is armed (the record's card line "On"/"Off"); `D` from anywhere (the tenth room: digits stop at 9 and `0` is the Now Playing screen). Inside, the sonic room's grammar — BOLD title, the state line at the right of the title row ("• on · picking from {server}" Green / "• off" DarkGray), then rows under dim UPPERCASE section labels QUEUE · CONTINUITY · FILTERS · SOURCES with a blank row between settings, the status as one line (`● Auto DJ is on`, its detail wrapped under it) with Start / Stop at the right (the canvas "Auto DJ room options", board E′, 2026-09-23); ↑↓ walk the rows, Esc stows the cursor, the tips line names the keys |
 | The browse-root card's On/Off line and the desktop rail's TOOLS header | The nav row's `•` while armed; the TOOLS label over Auto DJ and Sonic path (the record's rail says TOOLS; its browse root groups the same feature cards after the library's) |
 | Start / Stop button | The room's one primary (3-row Rounded frame) under STATUS: "Start Auto DJ ▸", or "Stop Auto DJ" in the destructive colour |
@@ -677,3 +680,26 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
   the volume widget's `- ▰▰▱ +` grammar with a step at each end, the
   status as one line with Start / Stop at its right. Clauses 40–53 stand;
   only the room's grammar moved.
+- **2026-09-26 — The review's fixes.** The top-up (clause 13) looked at
+  the queue's end only when a row started, while the status was still
+  idle: a last row started from a stopped player never got its turn and
+  the music stopped with the DJ on. It looks again on the play's first
+  status, and the queue's end with the DJ armed asks for the turn that
+  never came or was owed (clauses 32–33 as written). The genre picker
+  lists the genres of the library the rule is for — the DJ's server —
+  not the browsed one (clauses 48, 51). A late opener joins a queue built
+  meanwhile at its end instead of wiping it (clause 5's "the queue becomes
+  the seed" is the empty case); arming clears a dropped opener's target.
+  The capability learner retries only a key the body carried (clause 25's
+  "terminates by construction" did not hold for a refusal it could not
+  mend). The room's radios stack one per row rather than drop options
+  that do not fit the column (the default layout lost one). The sources
+  rule reads and writes the library the rules are for (clause 42), the
+  room forgets the previous server's capabilities on a new connection
+  while off (clause 50), the toggle with no session switches an armed DJ
+  off, and no probe goes out before a session exists. Left for later:
+  keys below a known version floor are still sent and left to the learner
+  (clauses 25, 27); the sonic badge follows the ask, not the body that
+  went out (clause 60); Preview's degrade suppresses the lane's sonic
+  pool; the migration reads the old panel's defaults as a wish for BPM
+  and harmonic continuity; the Esc wording on the chooser is English.

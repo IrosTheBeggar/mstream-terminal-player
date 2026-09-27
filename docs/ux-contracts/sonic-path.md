@@ -256,3 +256,9 @@ Gaps in the shared App that this contract adds (verify at implementation):
   plays from the row and leaves the highlight to the keyboard (the kit's
   list-cursor law, docs/ui-kit.md); ↓ picks the cursor up at the top as
   before, and `a` / Enter want it up.
+- **2026-09-26 — Clause 1's refusal, live**: "Use playing song" and `J`
+  accept the playing row only when it is the session's server's — per-row
+  origins made the guard the 2026-08-31 entry called vacuous a real one.
+  A failed probe of why the path is off no longer leaves "asking the
+  server why…" standing. The pick's Esc outranks the rooms' own Esc, and
+  re-entering the room disarms a stale pick (clause 13).

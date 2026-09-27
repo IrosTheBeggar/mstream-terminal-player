@@ -1797,7 +1797,7 @@ a LATER secondary screen (party view), Columns retired.
   Per-server tunnels (clause 38) and the guest-ticket direct path to a
   peer landed 2026-09-19 on the shared tunnel crate — T1–T3 below — and
   T4's two-server rig proved them live on 2026-09-20. A drag grip for
-  reorder stays deferred. **Offline switch (2026-09-20)**: a switch to a
+  reorder landed on 2026-09-21 with the track actions (the grip, `<`/`>`). **Offline switch (2026-09-20)**: a switch to a
   server that will not answer used to hide the header's picker and route
   every action into the TUI's connect screen (the GUI's transport died
   while queue clicks still played); now the label and picker stay, the
@@ -2017,7 +2017,7 @@ a LATER secondary screen (party view), Columns retired.
   switch and the radios shared one three-way `genre_mode`. Decoupled the
   record's way: `genre_filter` (the switch) beside a two-way `genre_mode`,
   in `[player.dj]` and on a server entry (`dj_genre_filter`), old "off"
-  values reading as the switch off; `DjEdit::GenreFilter` / `GenreCycle`
+  values reading as the switch off; `DjEdit::GenreCycle`
   on the App, the TUI row keeping its three-state ←→ walk, its picker
   reading the DJ library's genres. Tests on the model, the App, the GUI.
 - **The Auto DJ room re-laid ✅ 2026-09-23** — the canvas "Auto DJ room
@@ -2041,9 +2041,7 @@ a LATER secondary screen (party view), Columns retired.
   `stats/recently-played` and `stats/most-played` with the hundred, the
   TUI's root menu with them too, hidden for a peer, no strip, no digit.
   The nav grew to fourteen rows (Files and Search together at the top).
-  Open: the player does not report plays yet, so the lists show what the
-  server counted from other clients — play sessions are the next slice
-  (their own contract).
+  The reporting that feeds them landed the same day (the next bullet).
 - **Play reporting ✅ 2026-09-23** (docs/ux-contracts/play-reporting.md,
   the webapp's play sessions as the record): one session per song start
   folded from the engine's status — forward steps under three seconds
@@ -2065,7 +2063,8 @@ a LATER secondary screen (party view), Columns retired.
   click or Esc stows it, typing a filter or a query picks it up, and the
   row verbs (Enter `a N P d < > e x`) wait for it so no key acts on a row
   nobody can see. The queue, Files, Search, the Library rooms and their
-  wall, Playlists, the sonic results and the saved servers all follow;
+  wall, Playlists and the sonic results follow (the saved-servers room
+  keeps its lit row: its click is a choice its verbs line acts on);
   the tips line names how to pick the cursor up while it is stowed.
 - **The Now Playing screen is the TUI's view ✅ 2026-09-26**
   (docs/ux-contracts/now-playing.md, the record turned from the mobile
@@ -2081,6 +2080,24 @@ a LATER secondary screen (party view), Columns retired.
   pointer, the tabs click, the App's `fullscreen` flag follows the screen
   so the TUI's keys mean the same here (digits pick tabs, `0`/Esc back),
   and the visualizer gets its 33 ms cadence.
+- **The adversarial review ✅ 2026-09-26** — eight reviewers, one per
+  risk area, before the merge. Fixed at the root: room keys and the nav
+  seat the App's pane and focus (the Files keys drove the last room's
+  pane; a folded queue panel kept the keys); Settings sub-rooms and
+  dialogs are gated by screen and outrank the queue panel's keys; the Now
+  Playing screen serves the App's input modes; `put`/`clip` measure cells
+  and the GUI boots the system language; the unplayable-row walk is a
+  loop, not a recursion; Auto DJ tops up on a play's first status and at
+  the queue's end; a session knows its stream, one kept server backs off
+  alone, the browser flushes its outbox, repeat-one's laps are plays; the
+  resume spot follows its track; a pasted code's Connected is a fresh
+  session (no token carried over), a direct peer's 401 opens no sign-in,
+  an unreadable credentials file is never written over, a peer launch
+  entry resolves through its parent, the Windows hand-off skips cmd.exe.
+  Logged for later: owed plays stamped with their account, URL-edit
+  propagation to peers and rows, a peer re-login keeping the peer, the
+  rating/details race, version-floor stripping, the saved-servers list
+  scrolling, a GUI e2e leg.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with

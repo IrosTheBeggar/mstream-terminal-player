@@ -86,7 +86,8 @@ matches nothing keeps the bar contract's rule (the way back is one key).
 8. **The singles bucket**: the server's name-less album — the artist's
    loose tracks — is one card labelled **Singles**, no year, its art the
    server's pick; opening it asks album-songs with no album name and the
-   artist (the webapp's `album: null`). The record labels the bucket
+   artist (the webapp's `album: null`; this client sends `album: ""`, which
+   the server reads the same way). The record labels the bucket
    `SINGLES` and notes that opening it errors; here it opens.
 9. **A card opens the album's tracks** — the drilled album view that
    exists — and that view's Back reads the artist's name, not "Albums",
@@ -181,7 +182,7 @@ matches nothing keeps the bar contract's rule (the way back is one key).
 | The album grid for an artist | `albums.rs` generalized: the wall draws whichever album list the App holds for the view on screen — `App.albums` for the root wall as today, and the artist's albums kept beside it for the `Artist` node — with the cells, pages, cover slots and keys shared |
 | The vertical letter strip | A one-line `# A B … Z` row under the bar's controls (a 22-row pane cannot stand 27 letters), a kit widget: each letter a click target, dim when absent, the row's tip "Jump to X"; a jump sets the list's first visible row (the pane's scroll) or the wall's page |
 | `getSubText` (the artist under a title) | The track row's `display_name` already reads "Artist - Title"; no second line |
-| The singles bucket | `album_songs` grows an `Option<&str>` album so a name-less album asks with `album: null` |
+| The singles bucket | `album_songs` grows an `Option<&str>` album so a name-less album asks with an empty `album` (`""` — the server reads it as the webapp's `null`) |
 | Loading / empty | `busy.listing` / `gui.lib.empty` |
 
 ### What the tests pin
@@ -224,3 +225,20 @@ and no strip, and hide for a peer.
   the keyboard holds it — the kit's list-cursor law (docs/ui-kit.md) —
   and the wall's cell cursor follows the same law: no cell lit until
   ↑ ↓ ← → pick it up, a card's click stows it.
+- **2026-09-26 — The review's fixes.** A room open through a switch or a
+  late connect asks the new server (its opener had run against the old
+  one), and a peer's hidden rooms yield to Files (clause 23). The Albums
+  wall stands over its own drill on a return from another room, seated
+  from the cache (its verbs, count and Back ran on the other room's list).
+  The wall's keys and clicks use the frame's own geometry, a row lower
+  under a pick's banner (a click opened an album a page away). Another
+  artist's wall starts on its own first page. The drilled rooms take `N`
+  and `P` (clause 14), read "Nothing here yet" after a failed listing
+  instead of "listing…" forever, and their `◂` is Back itself. A peer's
+  heading says read-only (clause 16). Back reveals the parent's cursor
+  (clause 6). The art cache holds a wall's page plus the queue's rows
+  (ninety covers over a cap of sixty-four re-asked for every frame).
+  Left for later: a reply from the previous server can still land on the
+  new session's same-named list — a session generation on the library
+  and search commands is the fix; the search query is cleared on a switch
+  meanwhile.

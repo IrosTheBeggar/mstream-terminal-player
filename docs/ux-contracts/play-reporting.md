@@ -145,3 +145,20 @@ Most played.
   404 from a server the ping never described drops the batch (the record
   keeps everything but a 400; a server without the route would keep it
   forever).
+- **2026-09-26 — The review's fixes.** A session knows its stream: a status
+  from another source — the tail of a track that failed to give way, which
+  the engine keeps sounding — folds nothing (it was reported as the new
+  row's play, completed). Gapless repeat-one's laps reach this side as a
+  position falling from the end to the start; each lap is a play of its
+  own (clause 1). A server whose batch was kept backs off alone, so the
+  other servers' plays go out (clause 8 per server; one unreachable
+  server held every play behind it until the cap dropped them — the trim
+  is logged now). The browser build flushes its outbox each frame (it
+  never posted). `stats.json` always keeps the install's id (clause 9).
+  A blend into a queue edited underneath closes the old track as completed;
+  a row parked for its tunnel closes the one it left as a skip (clause 5).
+  The GUI's direct calls run the App's effect hook, so a click's Play arms
+  the starting gate and its Stop closes the session as the TUI's do. Left
+  for later: an owed play is posted with whichever account holds the
+  server's token at flush time (clause 8's "the reach its stream used"
+  on a shared machine) — stamping the play with its user is the fix.

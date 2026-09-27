@@ -150,9 +150,10 @@ drags it; `clear` empties the queue and ends playback.
     room, or Esc, hands the keys back and stows the cursor. The footer
     names how to pick the cursor up while the panel has the keys and the
     cursor is stowed, and these keys once it is up.
-20. **Clear**: the header's `clear` empties the queue, ends playback, and
-    ends a DJ session with it — no confirmation (the record has none; the
-    verb is a small dim word, and the key is `C`, deliberate enough).
+20. **Clear**: the header's `clear` empties the queue and ends playback —
+    the DJ, armed, stays armed and opens the next queue (auto-dj clause
+    12) — no confirmation (the record has none; the verb is a small dim
+    word, and the key is `C`, deliberate enough).
 21. **Removing the playing row stops playback** (this player's standing
     rule: nothing plays that is no longer queued); removing any other row
     leaves playback alone.
@@ -168,9 +169,9 @@ drags it; `clear` empties the queue and ends playback.
 | Song info | `gui.act.info` — `songInfoTitle` |
 | Remove from queue | `gui.act.remove` — the record's desktop literal; `gui.queue.remove_tip` exists for the `[x]` |
 | More actions (the `[⋯]` tip) | `gui.act.more_tip` — `browserMoreActions` |
-| 1 song added to queue · {n} songs added to queue | `gui.act.added_one` · `gui.act.added_many` — `browserSongsAdded` |
-| Rate · Could not save rating | `gui.act.rate` · `gui.act.rating_failed` — `ratingTitle` · `ratingFailed` |
-| New playlist · No playlists yet — New playlist creates one ⚑ · Added to {name} · Couldn't add to the playlist. | `gui.pl.new` (exists) · `gui.act.no_playlists` · `gui.act.added_to` · `gui.act.add_failed` — `playlistsNew` · `addToPlaylistEmpty` · `addedToPlaylist` · `trackAddToPlaylistFailed` |
+| 1 song added to queue · {n} songs added to queue | the App's own notes — "queued {title}", "{title} — next" (the deviations log) — `browserSongsAdded` |
+| Rate · Could not save rating | `gui.act.rate` · `act.rating_failed` — `ratingTitle` · `ratingFailed` |
+| New playlist · No playlists yet — New playlist creates one ⚑ · Added to {name} · Couldn't add to the playlist. | `gui.pl.new` (exists) · `gui.act.no_playlists` · `act.added_to` · `act.add_failed_why` — `playlistsNew` · `addToPlaylistEmpty` · `addedToPlaylist` · `trackAddToPlaylistFailed` |
 | Lyrics (the badge) | `gui.act.lyrics` — `lyricsTitle` |
 | Track N of M · Disc N of M · Length · BPM · Key · Genre · Format · Bitrate · Sample rate · Bit depth · Channels · File size · Play count · Path | `gui.info.*` — the record's chips are self-labelling; the labels here are this surface's |
 | clear (the header verb) · Clear queue (its tip) | `gui.queue.clear` · `gui.queue.clear_tip` — `mainClearQueue` |
@@ -248,3 +249,13 @@ while the queue has focus and stop when a browse click takes it back;
   click stows it, and `< > d Enter m` wait for it to be up so no key acts
   on a row nobody can see. The law for every list is docs/ui-kit.md,
   "List cursor".
+- **2026-09-26 — The review's fixes.** Clause 20 reworded: Clear keeps the
+  DJ armed (auto-dj clause 12 already said so; this clause said the
+  opposite). The queue panel's keys: a folded panel hands them back (they
+  drove a list nobody could see), a dialog taking text outranks them (a
+  `C` in a playlist's name cleared the queue), the row verbs wait for the
+  cursor (the list-cursor law), the panel reveals the playing row when the
+  TRACK changes rather than its index, and a grip drag lands only on drawn
+  rows. Play/pause starts a waiting queue and wears ▸ while idle. A modal's
+  own frame is inert: only the backdrop closes it (clause 9 as written).
+  The wording table names the keys that exist.

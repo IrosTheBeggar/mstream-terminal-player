@@ -368,6 +368,44 @@ mstream-player logout
 Servers running in public mode (no users configured) need no login — just pass
 `--server <url>`. `--server` accepts the same shorthand as the connect screen.
 
+## The GUI player
+
+`mstream-player gui` opens the mouse-first surface the installers launch —
+the same player, drawn for the pointer: everything is clickable and every
+action keeps a key. It needs a terminal at least 100×24 cells.
+
+- **Two screens** on the top bar: **Library** (the nav column and its rooms)
+  and **Now Playing** (`0`), which is the classic player's full-screen view —
+  the facts, the cover, the tabbed panel and the waveform band — with
+  prev · play · next under the cover.
+- **Rooms**: Files, Search, then Albums (a wall of covers), Artists, Genres,
+  Recent, Playlists, Last played and Most played, then the tools — Auto DJ
+  and Sonic path — and Settings. Digits `1`–`9` and `D` reach them; the
+  browse bar above a listing filters it and plays, queues or shuffles the
+  whole list. A row's hover verbs play it now, add it next, queue it, or
+  open its sheet (rating, add to playlist, song info); a right click opens
+  the sheet too.
+- **The queue panel** at the right (Tab shows or hides it): rows with
+  covers, a hover `[x]`, a grip to drag rows, `clear` in its header. Rows
+  carry the server they came from, so a queue can span servers.
+- **Servers**: the header's dropdown switches between saved servers and adds
+  one — a standard address or a Quick Connect pairing code; Settings ›
+  Manage servers edits, pairs a phone by QR, makes a default, removes.
+  Federated peers a server lists are browsable (read-only).
+- **Play reporting** is on in both shells: what you play is posted to your
+  server's play history, so Last played and Most played show your own
+  listening.
+- **Settings**: crossfade, gapless, resume the queue at launch, torrents,
+  and **keyboard hints** (off by default — the footer names the keys when
+  it is on). The GUI speaks the ten locales the wizard does, from your
+  system language.
+
+Launch options: `--server`, `--token`, `--bundled-server` (the installer's
+server, never removable), `--torrent` (open with a `.torrent` or a magnet).
+`MSTREAM_GUI_DEMO=1` seats a fixed track so the bar can be seen without a
+server; `MSTREAM_NO_OPEN=1` keeps hand-offs from popping other apps. The
+pty scenarios under `smoke/gui/` drive it against a local two-server rig.
+
 ## Admin panel
 
 ```
@@ -587,44 +625,36 @@ To look around from something *other* than what is playing, that is the
 [Discover tab](#discover)'s job — this is a panel you glance at, not one you
 steer.
 
-## Auto-DJ
+## Auto DJ
 
-Press `A` to cycle Auto-DJ: **off → similar → tempo+key**. When the queue has
-nothing left after the track that's playing, it quietly adds one more. The
-rest of it lives on the **Auto-DJ tab of the full-screen player** — `0`, then
-across to it.
+Auto DJ keeps the music going: when the queue has nothing left after the
+track that is playing, it asks the server for the next songs and adds them.
+It is **on or off, per server**: press `A` (or click the bar's `auto-dj`
+control) to arm it for the server you are browsing; press it again to switch
+it off; press it while browsing another server to move it there. Its picks
+wear a badge in the queue. Armed on an empty queue it asks how to start —
+**Surprise me** (a random song under your filters), **Choose a song** (pick
+one from the library), or it waits for you to queue something.
 
-- **similar** uses the server's audio-embedding index (`discovery`), so picks
-  sound like what you're listening to rather than merely sharing a tag.
-- **tempo+key** matches harmonically: the seed's key is converted to its
-  Camelot code and matched against its wheel neighbours and relative
-  major/minor, with tempo windows at the same, half and double time.
-
-**similar** only appears where the server has the index — `A` cycles straight
-past it otherwise, and a remembered `similar` setting is dropped (with a note)
-when you connect somewhere that lacks one. If the index is there but the track
-hasn't been analysed yet, it falls back to tempo+key and says so instead of
-going quiet. `mstream-player info` lists what a given server has enabled.
-
-### The tab (`0`, then the Auto-DJ tab)
+The settings live in the **Auto DJ room** — in the GUI under TOOLS in the
+nav (or `D`), in the classic player on the Auto-DJ tab of the full-screen
+view (`0`, then across):
 
 | Setting | |
 |---|---|
-| **Sonic pool** | only pick tracks that *sound* like the session, as a tightness slider. Shows the raw cosine it maps to, and how many tracks are inside it. |
-| **Anchor** | `current` follows each track; `session` averages the recent picks, so a set drifts as a whole instead of walking away one song at a time. |
-| **Tempo window** | how far either side of the seed's BPM, at the same, half and double time. The server widens to twice this before giving up on tempo. |
-| **Key matching** | `compatible` is the Camelot neighbourhood; `strict` never leaves the seed's key. |
-| **Rating floor** · **Artist cooldown** | skip anything below a rating; keep the last N artists out. |
-| **Genres** | whitelist or blacklist. A whitelist also excludes untagged tracks — "only these" is the stricter promise. |
-| **Sample** | `Enter` asks for three picks, so you can see what a setting does before committing to it. |
+| **Songs per fetch** | how many the DJ adds at a time (mStream 6.26 and later; one before). |
+| **Sonic similarity** | only pick songs that *sound* like the session, with a strictness and an anchor — follow the mood as it drifts, or hold the song you started from. Needs the server's discovery index. |
+| **BPM continuity** · **Harmonic mixing** | stay near the tempo, with a tolerance; stay in a compatible key (the Camelot wheel's neighbours). |
+| **Minimum rating** · **Track length** | skip anything rated below, or outside a length window. |
+| **Genres** | a whitelist or a blacklist of the server's genres. |
+| **Keyword filter** | words a title, artist or album must not contain. |
+| **Sources** | which of the server's libraries the DJ may draw from. |
+| **Preview** | three picks with the current settings, none of them queued. |
 
-`↑↓` choose · `←→` adjust · `Enter` sets · `1`–`5` leaves for another tab.
-Settings persist.
-
-The sonic pool is a **hard** constraint: tempo, key and artist all relax
-inside it, but it never widens. If nothing is similar enough the player says
-so and loosens for that one pick rather than quietly playing something else.
-Rows that need the server's embedding index only appear where it exists.
+The rules are kept per server, with the global settings behind them. A
+server that does not know a setting is told once: the DJ learns which keys
+it rejects and drops them for the session, so an older mStream still plays.
+`mstream-player info` lists what a given server has enabled.
 
 ## Discover
 

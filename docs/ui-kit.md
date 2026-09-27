@@ -276,7 +276,9 @@ toggling (clicking the chosen row does nothing). Radios for 2–4 options;
 ### List cursor
 **Selection is the KEYBOARD cursor, nothing more** — in every list of
 rows: the folders table, the file browser and the library rooms, the
-playlists, the queue panel, the saved servers, the album wall's cells.
+playlists, the queue panel, the album wall's cells. (The saved-servers
+room is the one exception: its row click is a choice the verbs line under
+the list acts on, so that row stays lit.)
 No row is highlighted when a list appears, and the pointer never
 highlights one: a click acts on its row directly (opens, plays, queues,
 removes) and puts the keyboard's hand down. Only a **walking key** picks
@@ -537,6 +539,12 @@ owned `String`s so they translate like everything else.
 
 ## Behavioral rules
 
+- **Widths are cells, not characters.** ratatui spends a cell per column
+  and a CJK glyph takes two; a budget counted in characters halved every
+  wide label (`put` cut them, `clip` never marked them). `kit::width` and
+  `kit::char_width` measure; `put` writes the whole text and lets the
+  buffer's edge clip; `bar::clip` cuts by cells; padding to a column is
+  `width` spaces, never `{:<n}`.
 - **Headless is first-class.** These screens are reached over SSH
   (docker/npm installs, launcher-less bundles). Every action keeps a key
   binding and a named hint in the tips line — hints compress, never
