@@ -545,7 +545,8 @@ page on the hub's session and sign-in — any account, since the log is per acco
 shares the preflight (`ensure_session`) with `admin::run` but is not a room. One state line (the
 period and its totals, "times in your zone" / "in UTC"), three tabs: Overview (the webapp's six
 tiles with the delta against the previous period — a second `/stats/summary` at offset−1 — plays
-per day/week/month as eighth-block columns from `/stats/timeseries`, the hourOfDay profile, the
+per day/week/month as eighth-block columns from `/stats/timeseries` — on a whole-number scale with a
+ticked baseline, three to eight rows as the screen allows (2026-09-27) — the hourOfDay profile, the
 local/peer split with the ▰▱ bar while peer plays exist), Top (`/stats/top`, entity on `t`, metric on
 `m`, the share bar following the metric, `via <peer>` from peerName), Recent (`/stats/history`
 paged by the cursor as the selection nears the end; outcome, listened and client words as the

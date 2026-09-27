@@ -43,10 +43,18 @@ const HISTORY_PAGE: u32 = 50;
 const PAGE_AHEAD: usize = 10;
 const TAB_GAP: u16 = 2;
 const TEXT_MAX: usize = 120;
-/// Both charts are four rows of eighth-block columns.
-const CHART_ROWS: u16 = 4;
+/// Both charts are eighth-block columns: three rows on a short terminal,
+/// up to eight as the screen grows (stats-screen contract, clause 10).
+const CHART_ROWS_MIN: u16 = 3;
+const CHART_ROWS_MAX: u16 = 8;
+/// The rows a chart spends around its columns: the title above, the
+/// baseline and the labels below.
+const CHART_FRAME: u16 = 3;
 /// The share bar's cells.
 const SHARE_W: usize = 10;
+/// The fewest cells the split's bar beside the hours chart shrinks to
+/// before the split gives way (stats-screen contract, clause 12).
+const SHARE_MIN: usize = 4;
 
 // ── The page's vocabulary ─────────────────────────────────────────────────
 
@@ -1164,8 +1172,10 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
     }
     y += 8;
 
-    // Plays per day (or week, or month): one eighth-block column per bucket.
-    if y + CHART_ROWS + 2 > body.bottom() {
+    // Plays per day (or week, or month): one eighth-block column per
+    // bucket, on a scale. The two charts share the rows under the tiles.
+    let rows = chart_rows(body.bottom().saturating_sub(y));
+    if y + rows + CHART_FRAME > body.bottom() {
         return;
     }
     let from = match (page.period.period.as_str(), data.periods.as_ref().and_then(|p| p.earliest.as_deref())) {
@@ -1176,8 +1186,20 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
     };
     let (keys, values, bucket) = calendar_series(&data.series, &from, &data.summary.period.to, |t| page.offset_at(t));
     let width = body.width as usize;
-    let fold = values.len().div_ceil(width.max(1)).max(1);
-    let values: Vec<u64> = values.chunks(fold).map(|c| c.iter().sum()).collect();
+    // Buckets fold into pairs (or more) when the row is too narrow for a
+    // column each. The axis takes a gutter sized by the tallest folded
+    // column — which folding raises — so fold, size, and fold again while
+    // the gutter grows.
+    let mut gutter_w = gutter(values.iter().copied().max().unwrap_or(0), rows) as usize;
+    let (values, fold) = loop {
+        let fold = values.len().div_ceil(width.saturating_sub(gutter_w).max(1)).max(1);
+        let folded: Vec<u64> = values.chunks(fold).map(|c| c.iter().sum()).collect();
+        let wide = gutter(folded.iter().copied().max().unwrap_or(0), rows) as usize;
+        if wide <= gutter_w {
+            break (folded, fold);
+        }
+        gutter_w = wide;
+    };
     let title = match (bucket, fold) {
         ("day", 1) => t!("sta.chart_days").to_string(),
         ("day", n) => t!("sta.chart_days_folded", n = n).to_string(),
@@ -1189,25 +1211,32 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
     if title.chars().count() + 2 + days_note.chars().count() <= width {
         frame.render_widget(Paragraph::new(Span::styled(days_note, dim())).alignment(Alignment::Right), line(y));
     }
-    let cell_w = ((width / values.len().max(1)) as u16).clamp(1, 3);
-    columns(frame, Rect { x: body.x, y: y + 1, width: body.width, height: CHART_ROWS }, &values, cell_w);
+    let cell_w = ((width.saturating_sub(gutter_w) / values.len().max(1)) as u16).clamp(1, 3);
     let labels: Vec<(usize, String)> = match bucket {
         "day" => day_axis(&keys, fold),
         "week" => week_axis(&keys, fold),
         _ => month_axis(&keys, fold),
     };
-    axis(frame, line(y + 1 + CHART_ROWS), &labels, cell_w);
-    y += CHART_ROWS + 2;
+    chart(frame, Rect { x: body.x, y: y + 1, width: body.width, height: rows + 2 }, &values, cell_w, &labels);
+    y += rows + CHART_FRAME;
 
     // When you listen — the 24-hour profile — and, beside it, where the
     // tracks live, while the log holds peer plays.
-    if y + CHART_ROWS + 2 > body.bottom() {
+    if y + rows + CHART_FRAME > body.bottom() {
         return;
     }
     let hours = hour_series(&data.hours);
-    let hours_w: u16 = 48;
+    let hours_w: u16 = gutter(hours.iter().copied().max().unwrap_or(0), rows) + 48;
+    // Beside it, where the tracks live, while the log holds peer plays and
+    // the row has room for the split's words on a bar of at least
+    // SHARE_MIN cells.
+    let o = &data.summary.origins;
+    let name_w = [t!("sta.origin_local_row"), t!("sta.origin_peers_row")].iter().map(|s| s.chars().count()).max().unwrap_or(0) + 1;
+    let words = |plays: u64, ms: u64| t!("sta.plays_time", plays = plays_words(plays), time = fmt_duration(ms)).to_string();
+    let (local_words, peer_words) = (words(o.local.plays, o.local.listened_ms), words(o.peers.plays, o.peers.listened_ms));
+    let widest = local_words.chars().count().max(peer_words.chars().count());
     let right_w = body.width.saturating_sub(hours_w + 3);
-    let left_w = if page.peer_plays() && right_w >= 40 { hours_w } else { body.width };
+    let left_w = if page.peer_plays() && right_w as usize >= name_w + SHARE_MIN + 2 + widest { hours_w } else { body.width };
     let title = t!("sta.chart_hours").to_string();
     frame.render_widget(Paragraph::new(Span::styled(title.clone(), dim())), line(y));
     if let Some(note) = hours_note(&data.summary)
@@ -1218,31 +1247,30 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
             Rect { x: body.x + title.chars().count() as u16 + 2, y, width: left_w - title.chars().count() as u16 - 2, height: 1 },
         );
     }
-    columns(frame, Rect { x: body.x, y: y + 1, width: hours_w.min(body.width), height: CHART_ROWS }, &hours, 2);
     let hour_labels: Vec<(usize, String)> = [0, 6, 12, 18, 23].iter().map(|h| (*h, h.to_string())).collect();
-    axis(frame, Rect { x: body.x, y: y + 1 + CHART_ROWS, width: hours_w.min(body.width), height: 1 }, &hour_labels, 2);
+    chart(frame, Rect { x: body.x, y: y + 1, width: hours_w.min(body.width), height: rows + 2 }, &hours, 2, &hour_labels);
 
     if left_w < body.width {
         let x = body.x + left_w + 3;
         let w = body.right().saturating_sub(x);
         let row = |dy: u16| Rect { x, y: y + dy, width: w, height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(t!("sta.origins_title").to_string(), dim())), row(0));
-        let o = &data.summary.origins;
+        // The bar: ten cells, fewer when the row is short of them.
+        let bar_w = (w as usize).saturating_sub(name_w + 2 + widest).min(SHARE_W);
         let total = (o.local.plays + o.peers.plays).max(1);
-        let local_share = ((o.local.plays * SHARE_W as u64 + total / 2) / total) as usize;
-        let name_w = [t!("sta.origin_local_row"), t!("sta.origin_peers_row")].iter().map(|s| s.chars().count()).max().unwrap_or(0) + 1;
-        let split = |frame: &mut Frame, at: Rect, name: String, filled: usize, plays: u64, ms: u64| {
+        let local_share = ((o.local.plays * bar_w as u64 + total / 2) / total) as usize;
+        let split = |frame: &mut Frame, at: Rect, name: String, filled: usize, words: &str| {
             let spans = vec![
                 Span::raw(format!("{name:<name_w$}")),
                 Span::styled(g("▰", "■").repeat(filled), Style::default().fg(th().accent)),
-                Span::styled(g("▱", "·").repeat(SHARE_W - filled), dim()),
-                Span::raw(format!("  {}", t!("sta.plays_time", plays = plays_words(plays), time = fmt_duration(ms)))),
+                Span::styled(g("▱", "·").repeat(bar_w - filled), dim()),
+                Span::raw(format!("  {words}")),
             ];
             frame.render_widget(Paragraph::new(Line::from(spans)), at);
         };
-        split(frame, row(1), t!("sta.origin_local_row").to_string(), local_share, o.local.plays, o.local.listened_ms);
+        split(frame, row(1), t!("sta.origin_local_row").to_string(), local_share, &local_words);
         frame.render_widget(Paragraph::new(Span::styled(t!("sta.origin_local_note").to_string(), dim())), Rect { x: x + name_w as u16, ..row(2) });
-        split(frame, row(3), t!("sta.origin_peers_row").to_string(), SHARE_W - local_share, o.peers.plays, o.peers.listened_ms);
+        split(frame, row(3), t!("sta.origin_peers_row").to_string(), bar_w - local_share, &peer_words);
         frame.render_widget(Paragraph::new(Span::styled(t!("sta.origin_peers_note_1").to_string(), dim())), Rect { x: x + name_w as u16, ..row(4) });
         if y + 5 < body.bottom() {
             frame.render_widget(Paragraph::new(Span::styled(t!("sta.origin_peers_note_2").to_string(), dim())), Rect { x: x + name_w as u16, ..row(5) });
@@ -1250,40 +1278,101 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
     }
 }
 
-/// A column chart in eighth blocks: `values` left to right, each `cell_w`
-/// cells wide (the last cell a gap when there is room), `at.height` rows
-/// tall, scaled to the tallest.
-fn columns(frame: &mut Frame, at: Rect, values: &[u64], cell_w: u16) {
-    let rows = at.height as usize;
-    let vmax = values.iter().copied().max().unwrap_or(0).max(1);
-    let glyphs = crate::tui::ui::glyphs();
+/// The rows for each of the two charts, from the rows left under the
+/// tiles: an equal share, three at the least — a short terminal still
+/// gets a chart — and eight at the most (stats-screen contract, clause
+/// 10).
+fn chart_rows(avail: u16) -> u16 {
+    (avail.saturating_sub(2 * CHART_FRAME) / 2).clamp(CHART_ROWS_MIN, CHART_ROWS_MAX)
+}
+
+/// The scale a chart of `rows` rows draws `vmax` on (stats-screen
+/// contract, clause 8): the axis's top, and for each row from the top
+/// down the value at its upper edge when that is a whole number — those
+/// rows get a tick and a label. Once the tallest column reaches the rows'
+/// count every row is the same whole number of plays and every row is
+/// labelled; below that the tallest column takes the whole height and the
+/// whole numbers fall where they fall.
+fn scale(vmax: u64, rows: u16) -> (u64, Vec<Option<u64>>) {
+    let rows = u64::from(rows.max(1));
+    let top = if vmax >= rows { vmax.div_ceil(rows) * rows } else { vmax.max(1) };
+    let ticks = (0..rows)
+        .map(|r| {
+            let edge = top * (rows - r);
+            (edge % rows == 0).then_some(edge / rows)
+        })
+        .collect();
+    (top, ticks)
+}
+
+/// The cells a chart's axis takes before its first column: the widest
+/// tick label, a space, the axis, a space.
+fn gutter(vmax: u64, rows: u16) -> u16 {
+    fmt_count(scale(vmax, rows).0).chars().count() as u16 + 3
+}
+
+/// A column chart with its furniture (stats-screen contract, clauses 8
+/// and 9): `values` left to right in eighth-block columns `cell_w` cells
+/// wide (the last cell a gap when there is room) on all of `at`'s rows
+/// but the last two, scaled to [`scale`]'s top; down the left the ticks
+/// and their labels, `0` at the foot; under the columns the baseline, a
+/// tick under every column that carries one of `labels`; the labels on
+/// the last row, each under its tick, none overlapping the last.
+fn chart(frame: &mut Frame, at: Rect, values: &[u64], cell_w: u16, labels: &[(usize, String)]) {
+    let rows = at.height.saturating_sub(2);
+    if rows == 0 {
+        return;
+    }
+    let vmax = values.iter().copied().max().unwrap_or(0);
+    let (top, ticks) = scale(vmax, rows);
+    let label_w = fmt_count(top).chars().count();
+    let plot_x = at.x + label_w as u16 + 3;
+    let plot_w = at.right().saturating_sub(plot_x);
+    let cell_w = cell_w.max(1);
     let bar_w = if cell_w > 1 { cell_w as usize - 1 } else { 1 };
-    let per_row = (at.width / cell_w.max(1)) as usize;
-    for row in 0..rows {
-        let mut spans = Vec::with_capacity(values.len());
-        for v in values.iter().take(per_row) {
-            let eighths = ((*v as f64 / vmax as f64) * (rows * 8) as f64).round() as i64;
-            let level = (eighths - ((rows - 1 - row) * 8) as i64).clamp(0, 8) as usize;
-            spans.push(Span::styled(glyphs.eighths[level].repeat(bar_w), Style::default().fg(th().accent)));
+    let n = values.len().min((plot_w / cell_w) as usize);
+    let glyphs = crate::tui::ui::glyphs();
+    let ink = Style::default().fg(th().accent);
+    for (row, tick) in ticks.iter().enumerate() {
+        let (label, axis) = match tick {
+            Some(v) => (fmt_count(*v), "┤"),
+            None => (String::new(), "│"),
+        };
+        let mut spans = vec![Span::styled(format!("{label:>label_w$} {axis} "), dim())];
+        for v in &values[..n] {
+            let eighths = ((*v as f64 / top as f64) * (rows as usize * 8) as f64).round() as i64;
+            let level = (eighths - ((rows as usize - 1 - row) * 8) as i64).clamp(0, 8) as usize;
+            spans.push(Span::styled(glyphs.eighths[level].repeat(bar_w), ink));
             if cell_w > 1 {
                 spans.push(Span::raw(" "));
             }
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), Rect { x: at.x, y: at.y + row as u16, width: at.width, height: 1 });
     }
-}
-
-/// The labels under a chart, at their columns, none overlapping the last.
-fn axis(frame: &mut Frame, at: Rect, labels: &[(usize, String)], cell_w: u16) {
-    let mut end = at.x;
+    // The labels with room, left to right; then the baseline, a tick under
+    // each of them.
+    let mut placed: Vec<(u16, &str)> = Vec::new();
+    let mut end = plot_x;
     for (i, text) in labels {
-        let x = at.x + *i as u16 * cell_w;
+        if *i >= n {
+            continue;
+        }
+        let x = plot_x + *i as u16 * cell_w;
         let w = text.chars().count() as u16;
         if x < end || x + w > at.right() {
             continue;
         }
-        frame.render_widget(Paragraph::new(Span::styled(text.clone(), dim())), Rect { x, y: at.y, width: w, height: 1 });
+        placed.push((x, text.as_str()));
         end = x + w + 1;
+    }
+    let base_y = at.y + rows;
+    let mut base = format!("{:>label_w$} ┼─", fmt_count(0));
+    for px in 0..(n as u16 * cell_w).min(plot_w) {
+        base.push(if placed.iter().any(|(x, _)| *x == plot_x + px) { '┴' } else { '─' });
+    }
+    frame.render_widget(Paragraph::new(Span::styled(base, dim())), Rect { x: at.x, y: base_y, width: at.width, height: 1 });
+    for (x, text) in placed {
+        frame.render_widget(Paragraph::new(Span::styled(text.to_string(), dim())), Rect { x, y: base_y + 1, width: text.chars().count() as u16, height: 1 });
     }
 }
 
@@ -2370,8 +2459,85 @@ mod tests {
         assert!(!footer_hint(&p).is_empty(), "the host asks for the hint instead");
     }
 
+    #[test]
+    fn a_chart_reads_on_a_whole_number_scale_and_grows_with_the_screen() {
+        // stats-screen contract, clause 8: once the tallest column reaches
+        // the rows' count every row is the same whole number of plays…
+        assert_eq!(scale(4, 4), (4, vec![Some(4), Some(3), Some(2), Some(1)]));
+        assert_eq!(scale(37, 4), (40, vec![Some(40), Some(30), Some(20), Some(10)]));
+        assert_eq!(scale(5, 4), (8, vec![Some(8), Some(6), Some(4), Some(2)]));
+        assert_eq!(scale(41, 8).0, 48);
+        // …below it the tallest column takes the whole height and only the
+        // whole numbers are labelled.
+        assert_eq!(scale(2, 4), (2, vec![Some(2), None, Some(1), None]));
+        assert_eq!(scale(3, 4), (3, vec![Some(3), None, None, None]));
+        assert_eq!(scale(0, 4), (1, vec![Some(1), None, None, None]));
+        // The gutter: the widest label, a space, the axis, a space.
+        assert_eq!(gutter(4, 4), 4);
+        assert_eq!(gutter(37, 4), 5);
+        assert_eq!(gutter(9_999, 4), 9, "10,000 with its comma");
+        // Clause 10: the rows under the tiles, shared by two charts, three
+        // to eight.
+        assert_eq!(chart_rows(6), 3);
+        assert_eq!(chart_rows(12), 3);
+        assert_eq!(chart_rows(14), 4);
+        assert_eq!(chart_rows(18), 6);
+        assert_eq!(chart_rows(22), 8);
+        assert_eq!(chart_rows(90), 8);
+    }
+
+    #[test]
+    fn the_charts_wear_their_axes_and_take_the_rows_the_screen_has() {
+        // stats-screen contract, clauses 8–11: whole-number ticks down the
+        // left, `0 ┼` at the foot, a baseline with a tick under every
+        // label, the labels under their ticks, no gridlines; three rows of
+        // columns on a 30-row terminal, six on 36, eight on 46 and on 70.
+        let _en = english();
+        let mut p = ready();
+        for (height, rows) in [(30u16, 3usize), (36, 6), (46, 8), (70, 8)] {
+            let frame = draw_at(&mut p, 100, height);
+            let lines: Vec<&str> = frame.lines().collect();
+            let title = lines.iter().position(|l| l.contains("PLAYS PER DAY")).unwrap_or_else(|| panic!("no day chart at {height} rows:\n{frame}"));
+            let base = lines.iter().position(|l| l.contains(" ┼─")).unwrap_or_else(|| panic!("no baseline at {height} rows:\n{frame}"));
+            assert_eq!(base - title - 1, rows, "rows of columns at {height} rows:\n{frame}");
+            let (top, ticks) = scale(41, rows as u16);
+            assert!(lines[title + 1].starts_with(&format!("  {top} ┤ ")), "the top row carries the scale's top:\n{frame}");
+            for (r, tick) in ticks.iter().enumerate() {
+                let want = match tick {
+                    Some(v) => format!("{v} ┤ "),
+                    None => "   │ ".to_string(),
+                };
+                assert!(lines[title + 1 + r].contains(&want), "row {r} at {height} rows:\n{frame}");
+            }
+            assert!(lines[base].starts_with("   0 ┼─┴"), "0 at the foot, the first day's tick right after:\n{frame}");
+            // Every tick has a label starting under it, and no label starts
+            // anywhere else.
+            let ticks_at: Vec<usize> = lines[base].chars().enumerate().filter(|(_, c)| *c == '┴').map(|(x, _)| x).collect();
+            let under: Vec<char> = lines[base + 1].chars().collect();
+            let starts: Vec<usize> = (0..under.len()).filter(|&i| under[i].is_ascii_digit() && (i == 0 || under[i - 1] == ' ')).collect();
+            assert!(ticks_at.len() >= 6, "{frame}");
+            assert_eq!(starts, ticks_at, "labels under their ticks at {height} rows:\n{frame}");
+            assert!(lines[base + 1].trim().starts_with('1') && lines[base + 1].trim().ends_with("30"), "the first and last day:\n{frame}");
+            // The hours chart: the same furniture, the same rows.
+            let hours = lines.iter().position(|l| l.contains("WHEN YOU LISTEN")).unwrap_or_else(|| panic!("no hours chart at {height} rows:\n{frame}"));
+            assert!(lines[hours + 1].starts_with(&format!("  {} ┤ ", scale(47, rows as u16).0)), "{frame}");
+            assert!(lines[hours + 1 + rows].starts_with("   0 ┼─┴") && lines[hours + 2 + rows].trim_start().starts_with("0 "), "{frame}");
+            assert!(lines[hours + 2 + rows].contains("23"), "the last hour:\n{frame}");
+            assert!(!frame.contains('┈') && !frame.contains('╌'), "no gridlines:\n{frame}");
+        }
+        // The classic 80×24: the day chart alone, on three rows, and the
+        // hours chart yields, as before.
+        let small = draw_at(&mut p, 80, 24);
+        assert!(small.contains("PLAYS PER DAY") && small.contains("   0 ┼─┴"), "{small}");
+        assert!(!small.contains("WHEN YOU LISTEN"), "{small}");
+    }
+
     fn draw(page: &mut Page) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        draw_at(page, 100, 30)
+    }
+
+    fn draw_at(page: &mut Page, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, page)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let mut out = String::new();
@@ -2417,8 +2583,14 @@ mod tests {
         assert!(row(&frame, "PLAYS PER DAY").contains("most on Tue 8 · 41 plays, 2h 10m"), "{frame}");
         assert!(frame.contains("WHEN YOU LISTEN  most around 21:00, Sundays"), "{frame}");
         assert!(frame.contains("WHERE THE TRACKS LIVE"), "{frame}");
-        assert!(row(&frame, "this server   ▰").contains("▰▰▰▰▰▰▰▰▰▱  374 plays · 28h 40m"), "{frame}");
-        assert!(row(&frame, "peers’ tracks").contains("▰▱▱▱▱▱▱▱▱▱  38 plays · 2h 32m"), "{frame}");
+        // At 100 columns the split beside the hours chart is short of its
+        // ten cells and keeps its words on a shorter bar (stats-screen
+        // contract, clause 12); ten columns wider, the bar is whole.
+        assert!(row(&frame, "this server   ▰").contains("▰▰▰▰▰  374 plays · 28h 40m"), "{frame}");
+        assert!(row(&frame, "peers’ tracks").contains("▱▱▱▱▱  38 plays · 2h 32m"), "{frame}");
+        let wide = draw_at(&mut p, 110, 30);
+        assert!(row(&wide, "this server   ▰").contains("▰▰▰▰▰▰▰▰▰▱  374 plays · 28h 40m"), "{wide}");
+        assert!(row(&wide, "peers’ tracks").contains("▰▱▱▱▱▱▱▱▱▱  38 plays · 2h 32m"), "{wide}");
         assert!(frame.contains("█"), "the tallest day is a full column:\n{frame}");
         assert!(frame.contains("←→ tab · [ ] period · p pick a period · o origin · q quit"), "{frame}");
         // Every period the fixture names, in the webapp's order, then All time.
