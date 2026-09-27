@@ -1321,7 +1321,6 @@ sta:
 gui:
   top:
     library: "Libreria"
-    now: "In riproduzione"
     viz: "Visualizzatore"
     viz_tip: "Apri il visualizzatore in una finestra — V"
   nav:

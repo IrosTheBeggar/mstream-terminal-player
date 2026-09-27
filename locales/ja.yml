@@ -1321,7 +1321,6 @@ sta:
 gui:
   top:
     library: "ライブラリ"
-    now: "再生中"
     viz: "ビジュアライザー"
     viz_tip: "ビジュアライザーを別ウィンドウで開く — V"
   nav:

@@ -1321,7 +1321,6 @@ sta:
 gui:
   top:
     library: "Biblioteca"
-    now: "Reproduciendo"
     viz: "Visualizador"
     viz_tip: "Abrir el visualizador en su propia ventana — V"
   nav:

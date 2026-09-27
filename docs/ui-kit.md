@@ -454,9 +454,11 @@ rule; screens have no top rule) · the **bottom bar** (3 rows): the scan
 widget on the left (empty until a scan is actually running), the screen's
 forward action as a tall primary on the right.
 
-**The GUI player's top bar**: two tabs at the left — Library, Now Playing
-— worn as the kit's tab slab for the screen that is up and dim text for
-the other, and the session's server label with `[+]` at the right. The
+**The GUI player's top bar**: two tabs at the left — Library, Stats —
+worn as the kit's tab slab for the screen that is up and dim text for
+the other (Now Playing, on `0`, has no tab and lights none while it is
+up), the Visualizer item after them, and the session's server label with
+`[+]` at the right. The
 Library is the nav column and its rooms — Files and Search at the top, the
 LIBRARY group (Albums, Artists, Genres, Recent, Playlists, Last played,
 Most played), then a TOOLS group (Auto DJ, whose row wears a `•` in the ok

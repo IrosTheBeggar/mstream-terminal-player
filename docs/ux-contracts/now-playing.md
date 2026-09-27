@@ -17,10 +17,10 @@ pointer needs to drive the view: the transport under the cover.
 
 ## Entry points
 
-1. The top bar's **Now Playing** tab; the **Library** tab beside it is the
-   way back.
-2. **`0`** from any room; **`0`** or **Esc** back to the Library.
-3. A nav row's click leaves for that room. **The digits mean the view's
+1. **`0`** from any room; **`0`** or **Esc** back to the Library. The top
+   bar has no tab for this screen (hidden 2026-09-27); its **Library** tab
+   is the way back, and no tab wears the slab while the screen is up.
+2. A nav row's click leaves for that room. **The digits mean the view's
    tabs while it is up** (clause 8): the rooms are one `0` away.
 
 ## States & flows
@@ -146,6 +146,11 @@ names the tab, `gui.tips.now` the keys on the footer (ten locales).
   The Settings sub-rooms are the Library screen's. The GUI boots the
   system language now, as the wizard does; the view's own words stay the
   TUI's English.
+- **2026-09-27 — No tab.** The top bar's Now Playing tab was taken off at
+  the user's ask, later the same day: `0` (and Esc back) is the way in and
+  out, the Library tab the way back, and no tab wears the slab while the
+  screen is up. The screen itself is unchanged; the bar's tabs are Library
+  and Stats.
 - **2026-09-27 — A third tab.** Stats stands beside Now Playing on the
   top bar and hosts the stats page the same way this screen hosts the
   TUI's view (the stats-screen contract); `T` opens it from anywhere as

@@ -374,12 +374,13 @@ Servers running in public mode (no users configured) need no login — just pass
 the same player, drawn for the pointer: everything is clickable and every
 action keeps a key. It needs a terminal at least 100×24 cells.
 
-- **Three screens** on the top bar: **Library** (the nav column and its rooms),
-  **Now Playing** (`0`), which is the classic player's full-screen view —
-  the facts, the cover, the tabbed panel and the waveform band — with
-  prev · play · next under the cover, and **Stats** (`T`), the listening
-  log of `mstream-player stats` on the session's server, whole: the same
-  tabs, periods and keys, Esc back to the Library. Beside them, the
+- **Three screens**: **Library** (the nav column and its rooms) and **Stats**
+  (`T`) are the top bar's tabs; **Now Playing** (`0`, no tab of its own) is
+  the classic player's full-screen view — the facts, the cover, the tabbed
+  panel and the waveform band — with prev · play · next under the cover;
+  Stats is the listening log of `mstream-player stats` on the session's
+  server, whole: the same tabs, periods and keys, Esc back to the Library.
+  Beside them, the
   **Visualizer** item (`V`) opens the mobile app's shader presets in a
   window of their own, moving to what is playing; `←` `→` change the
   preset there, `f` goes fullscreen, Esc closes it.

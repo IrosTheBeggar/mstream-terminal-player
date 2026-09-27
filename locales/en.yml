@@ -1321,7 +1321,6 @@ sta:
 gui:
   top:
     library: "Library"
-    now: "Now Playing"
     viz: "Visualizer"
     viz_tip: "Open the visualizer in its own window — V"
   nav:

@@ -2025,7 +2025,9 @@ a LATER secondary screen (party view), Columns retired.
   auto-dj then padded three columns in from the edge.
 - **The top bar and a first Now Playing screen ✅ 2026-09-22** — the
   wordmark gives way to two tabs, Library and Now Playing (`Screen`,
-  `Act::Screen`, `0`/Esc between them; a nav digit is the Library's). Now
+  `Act::Screen`, `0`/Esc between them; a nav digit is the Library's; the
+  Now Playing tab was hidden 2026-09-27 — `0` alone opens the screen, the
+  bar's tabs are Library and Stats). Now
   Playing (`src/gui/now.rs`) is the slot the contract's tabs will fill: the
   playing track's cover as large as the stage allows through the cover
   slot machinery, its title, byline, spec and facts beneath; the queue

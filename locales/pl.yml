@@ -1321,7 +1321,6 @@ sta:
 gui:
   top:
     library: "Biblioteka"
-    now: "Teraz gra"
     viz: "Wizualizacja"
     viz_tip: "Otwórz wizualizację w osobnym oknie — V"
   nav:

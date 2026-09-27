@@ -16,8 +16,9 @@ federated peer's parent serves it as it serves the queue.
 
 ## Entry points
 
-1. The top bar's **Stats** tab, third after Library and Now Playing; the
-   **Library** tab beside it is the way back.
+1. The top bar's **Stats** tab, second after Library (the Now Playing tab
+   was hidden 2026-09-27; `0` opens that screen); the **Library** tab
+   beside it is the way back.
 2. **`T`** from any screen; **`T`** or **Esc** back to the Library.
 3. A nav digit or `D` leaves for that room; `0` for Now Playing.
 

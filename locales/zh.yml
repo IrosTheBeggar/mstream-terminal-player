@@ -1321,7 +1321,6 @@ sta:
 gui:
   top:
     library: "音乐库"
-    now: "正在播放"
     viz: "可视化"
     viz_tip: "在独立窗口中打开可视化 — V"
   nav:
