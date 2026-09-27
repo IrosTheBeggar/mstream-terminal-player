@@ -100,6 +100,12 @@ jobs:
             cargo build --release --target ${{ matrix.target }}
           fi
 
+      # CI runs the same guard on its native build; this is the one that
+      # sees the binaries that ship, arm64 and armv7 included.
+      - name: Linkage guard (Linux)
+        if: runner.os == 'Linux'
+        run: sh test/linkage.sh target/${{ matrix.target }}/release/mstream-player
+
       # Developer ID signing + notarization, only where the secrets exist:
       # a fork or a dry run still builds, just unsigned. Bare Mach-O
       # binaries cannot be stapled, so the notarization ticket lives on

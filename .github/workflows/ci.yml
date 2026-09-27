@@ -30,6 +30,13 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      # The visualizer brought a GPU stack; it must open its drivers at run
+      # time, never link them, or the binary stops starting on headless
+      # boxes. See the script.
+      - name: Linkage guard (Linux)
+        if: runner.os == 'Linux'
+        run: sh test/linkage.sh target/release/mstream-player
+
   # The browser build has no test runner, but it has a type system: a plain
   # check catches the native-only import or the unhandled worker command that
   # main once grew without noticing, and costs a minute. Everything in plain

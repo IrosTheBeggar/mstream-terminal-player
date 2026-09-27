@@ -223,8 +223,9 @@ const HIGH_HZ: f32 = 10_000.0;
 
 /// In-place radix-2 Cooley-Tukey. Twiddles accumulate in f64 — in f32 the
 /// rounding walks far enough over a 2048-point transform to tilt the top
-/// octave.
-fn fft(re: &mut [f32], im: &mut [f32]) {
+/// octave. Also the transform behind the window visualizer's audio texture
+/// (`shader::audio`), which wants 1024 points of the same thing.
+pub(crate) fn fft(re: &mut [f32], im: &mut [f32]) {
     let n = re.len();
     debug_assert!(n.is_power_of_two() && im.len() == n);
 
