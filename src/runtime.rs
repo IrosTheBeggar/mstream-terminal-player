@@ -12,6 +12,12 @@ use std::sync::OnceLock;
 
 use tokio::runtime::Runtime;
 
+/// The shared runtime itself, for callers that hand it to code which
+/// spawns on it — the tunnel client's in-place operations take a `&Runtime`.
+pub(crate) fn handle() -> Result<&'static Runtime, String> {
+    runtime()
+}
+
 fn runtime() -> Result<&'static Runtime, String> {
     // An init failure (no threads available) is unrecoverable, so caching the
     // error rather than retrying per call is fine.

@@ -57,6 +57,13 @@ const LEGACY_SESSION_FILE: &str = "session.json";
 pub struct Config {
     #[serde(default = "current_version")]
     pub version: u32,
+    /// The server the player opens with, when set — outranking the
+    /// most-recently-used order below. Holds the entry's identity (its URL,
+    /// or a tunnel id); a value naming no saved server is ignored rather
+    /// than repaired, so a hand-edit is never silently deleted.
+    /// Top-level scalar, so it must serialize before the first table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_server: Option<String>,
     #[serde(default)]
     pub player: PlayerPrefs,
     #[serde(default, skip_serializing_if = "CachePrefs::is_unset")]
@@ -78,6 +85,13 @@ pub struct Config {
     /// `[mouse]` — the wheel and clicking the progress bar.
     #[serde(default, skip_serializing_if = "MousePrefs::is_default")]
     pub mouse: MousePrefs,
+    /// `[gui]` — the GUI player surface's own choices (`mstream-player gui`).
+    #[serde(default, skip_serializing_if = "GuiPrefs::is_default")]
+    pub gui: GuiPrefs,
+    /// `[torrent]` — what a torrent handed to the GUI (`mstream-player gui
+    /// --torrent …`) does on arrival.
+    #[serde(default, skip_serializing_if = "TorrentPrefs::is_default")]
+    pub torrent: TorrentPrefs,
     /// `[keys]` — action name to the keys that should fire it. Empty means
     /// the built-in bindings, and only the actions named here are changed.
     /// See `mstream-player keys` for the full list in this format.
@@ -98,12 +112,15 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             version: SCHEMA_VERSION,
+            default_server: None,
             player: PlayerPrefs::default(),
             cache: CachePrefs::default(),
             log: LogPrefs::default(),
             theme: ThemePrefs::default(),
             display: DisplayPrefs::default(),
             mouse: MousePrefs::default(),
+            gui: GuiPrefs::default(),
+            torrent: TorrentPrefs::default(),
             keys: std::collections::BTreeMap::new(),
             servers: Vec::new(),
             extra: Keep::new(),
@@ -118,7 +135,16 @@ pub struct PlayerPrefs {
     /// "off", "all" or "one".
     pub repeat: String,
     pub shuffle: bool,
-    /// "off", "similar" or "tempo+key".
+    /// The server Auto DJ is armed FOR — a URL, a tunnel id or a peer
+    /// identity — absent when it is off (auto-dj contract, clause 19).
+    /// Remembered as on brings it back ARMED at launch, never playing
+    /// (clause 61).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autodj_server: Option<String>,
+    /// The old mode — "off", "similar" or "tempo+key" — read once for the
+    /// migration (a mode other than off arms the DJ on the remembered
+    /// session's server) and never written again.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub autodj: String,
     /// Seconds of blend when one track ends and the next begins; 0 is off.
     /// Also adjustable live from the Settings tab (Phase C5).
@@ -134,6 +160,10 @@ pub struct PlayerPrefs {
     pub blend_skips: bool,
     /// Pause and resume ride a short ramp instead of landing mid-wave (C6).
     pub pause_fade: bool,
+    /// Save the play queue and your place, and restore them when the player
+    /// reopens — paused at the spot, never auto-played (contract clauses
+    /// 39–40). Off blocks the restore and drops the snapshot.
+    pub resume_queue: bool,
     /// How Auto-DJ chooses, beyond the mode.
     pub dj: AutoDjPrefs,
     #[serde(flatten)]
@@ -146,11 +176,13 @@ impl Default for PlayerPrefs {
             volume: 1.0,
             repeat: "off".to_string(),
             shuffle: false,
-            autodj: "off".to_string(),
+            autodj_server: None,
+            autodj: String::new(),
             crossfade_seconds: 0.0,
             gapless: true,
             blend_skips: false,
             pause_fade: false,
+            resume_queue: true,
             dj: AutoDjPrefs::default(),
             extra: Keep::new(),
         }
@@ -174,33 +206,68 @@ impl PlayerPrefs {
     }
 }
 
-/// `[player.dj]` — the Auto-DJ panel's settings.
+/// `[player.dj]` — Auto DJ's session-wide settings (auto-dj contract,
+/// clause 51), plus the library rules that stand behind a server entry
+/// that carries none of its own (`ServerEntry::dj_*`).
 ///
 /// Kept as plain scalars and strings rather than enums so an unrecognised
 /// value from a newer player degrades to the default instead of failing the
-/// whole config load; the app parses each one leniently.
+/// whole config load; the app parses each one leniently. The three legacy
+/// keys are read for the migration and never written again.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AutoDjPrefs {
-    /// Percent either side of the seed tempo for the tight window. The wide
-    /// window the server falls back to is twice this.
-    pub tempo_tolerance: u32,
-    /// "off", "compatible" (Camelot neighbours) or "strict" (the same key).
-    pub key_matching: String,
-    /// Minimum rating, 1–10. Zero means no floor, which is also what the
-    /// server reads a zero as.
-    pub min_rating: u32,
-    /// How many recently-played artists to keep out of the next pick.
-    pub artist_cooldown: u32,
-    /// Perceptual 1–100 slider onto a cosine threshold; 0 switches the sonic
-    /// pool off entirely. See `dj::sonic_threshold`.
-    pub sonic_tightness: u32,
-    /// "current" (just what's playing) or "session" (recent picks averaged
-    /// into a centroid, so a set drifts as a whole rather than song by song).
+    /// How many songs one turn asks for — random-songs' `limit`, 1–25.
+    pub songs_per_fetch: u32,
+    /// Sonic similarity: only songs that sound like the session.
+    pub sonic: bool,
+    /// The raw cosine floor the pool is drawn at, .30–.80.
+    pub sonic_min_similarity: f64,
+    /// "rolling" (follow the vibe) or "locked" (stay on seed).
     pub sonic_anchor: String,
-    /// "off", "whitelist" (only these) or "blacklist" (anything but these).
+    /// What switching on with nothing queued does: "ask", "random", "pick".
+    pub empty_queue: String,
+    /// BPM continuity around the playing track.
+    pub bpm: bool,
+    /// ± BPM, 1–20; the wide set the server relaxes to is this plus two.
+    pub bpm_tolerance: u32,
+    /// Harmonic mixing on the session's Camelot anchor.
+    pub harmonic: bool,
+    /// How many recently-played artists to keep out of the next pick;
+    /// zero is off. Kept from the player's own panel (decision 9).
+    pub artist_cooldown: u32,
+    /// The track-length window, in seconds; a bound on its rail (0 below,
+    /// 1200 above) is not sent.
+    pub length: bool,
+    pub min_seconds: u32,
+    pub max_seconds: u32,
+    pub allow_unknown_length: bool,
+    /// The client-side keyword filter over title, artist, album, filepath.
+    pub keyword_filter: bool,
+    pub keywords: Vec<String>,
+    /// Minimum rating, 1–10; zero means no floor. A server entry's own
+    /// `dj_min_rating` overrides it.
+    pub min_rating: u32,
+    /// The genre filter's switch, apart from its mode (the record's
+    /// `autoDJGenreEnabled` beside `autoDJGenreMode`). Absent in a file from
+    /// before it existed — there `genre_mode = "off"` was the switch off,
+    /// and the migration reads it so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genre_filter: Option<bool>,
+    /// "whitelist" (only these) or "blacklist" (anything but these), kept
+    /// while the switch is off; a server entry's own `dj_genre_filter` /
+    /// `dj_genre_mode` / `dj_genres` override.
     pub genre_mode: String,
     pub genres: Vec<String>,
+    /// Legacy (the three-mode panel): a percent, "off" / "compatible" /
+    /// "strict", and the perceptual 1–100 slider. Read for the migration,
+    /// dropped on the next write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tempo_tolerance: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_matching: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sonic_tightness: Option<u32>,
     #[serde(flatten)]
     pub extra: Keep,
 }
@@ -208,19 +275,55 @@ pub struct AutoDjPrefs {
 impl Default for AutoDjPrefs {
     fn default() -> Self {
         AutoDjPrefs {
-            tempo_tolerance: crate::dj::DEFAULT_TEMPO_TOLERANCE,
-            key_matching: "compatible".to_string(),
-            min_rating: 0,
+            songs_per_fetch: crate::dj::DEFAULT_SONGS_PER_FETCH,
+            // On by default: it is what makes a DJ more than shuffle, and
+            // safe because a failing pool degrades instead of stopping
+            // (contract clauses 30 and 43).
+            sonic: true,
+            sonic_min_similarity: crate::dj::DEFAULT_SONIC_MIN_SIMILARITY,
+            sonic_anchor: "rolling".to_string(),
+            empty_queue: "ask".to_string(),
+            bpm: false,
+            bpm_tolerance: crate::dj::DEFAULT_BPM_TOLERANCE,
+            harmonic: false,
             // A little variety by default; a session that repeats an artist
             // immediately reads as broken even when the pick was legitimate.
             artist_cooldown: 3,
-            sonic_tightness: 0,
-            sonic_anchor: "session".to_string(),
+            length: false,
+            min_seconds: 0,
+            max_seconds: crate::dj::LENGTH_RAIL_SECONDS,
+            allow_unknown_length: false,
+            keyword_filter: false,
+            keywords: Vec::new(),
+            min_rating: 0,
+            // The legacy spelling on purpose: with `genre_filter` absent, a
+            // mode of "off" is what reads as the switch off (see
+            // `dj::Settings::from_prefs`) — for a config with no key at all
+            // as much as for a file from before the switch had one. A
+            // player never writes "off" itself.
+            genre_filter: None,
             genre_mode: "off".to_string(),
             genres: Vec::new(),
+            tempo_tolerance: None,
+            key_matching: None,
+            sonic_tightness: None,
             extra: Keep::new(),
         }
     }
+}
+
+/// A server entry's own Auto DJ library rules, as the App's book carries
+/// them (contract clause 51): the libraries switched off, and the rating
+/// floor and genre filter when set here rather than in `[player.dj]`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DjLibraryOverrides {
+    pub sources_off: Vec<String>,
+    pub min_rating: Option<u32>,
+    /// The genre filter's switch and mode, two fields; an entry from before
+    /// the switch had its own said "off" in the mode.
+    pub genre_filter: Option<bool>,
+    pub genre_mode: Option<String>,
+    pub genres: Option<Vec<String>>,
 }
 
 /// `[cache]` — where scratch data lives. Today that is only the streaming
@@ -397,6 +500,53 @@ impl MousePrefs {
     }
 }
 
+/// `[gui]`. The GUI player surface (`mstream-player gui`) keeps its own
+/// choices here, apart from the classic TUI's — the two are different
+/// rooms. (The bottom-bar choice lived here until 2026-08-29, when the
+/// waveform bar was retired and the gold line became THE bar; a leftover
+/// `bar` key rides `extra` harmlessly.)
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GuiPrefs {
+    /// Show the keyboard's names: the footer line of keys, and the
+    /// ` — key` tail on a tooltip. Off by default — this surface is the
+    /// pointer's, and the classic TUI is the keyboard's room.
+    pub key_hints: bool,
+    #[serde(flatten)]
+    pub extra: Keep,
+}
+
+impl GuiPrefs {
+    fn is_default(&self) -> bool {
+        *self == GuiPrefs::default()
+    }
+}
+
+/// `[torrent]` — the Add-torrent room's one persisted choice: whether a
+/// torrent that arrives from outside (the `--torrent` seam the installers'
+/// file associations will launch) asks "add here, or hand it on?" first.
+/// The arrival chooser's don't-ask-again box turns it off; the Settings
+/// row is the way back (docs/ux-contracts/add-torrent.md, clause 51).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TorrentPrefs {
+    pub ask: bool,
+    #[serde(flatten)]
+    pub extra: Keep,
+}
+
+impl Default for TorrentPrefs {
+    fn default() -> Self {
+        TorrentPrefs { ask: true, extra: Keep::new() }
+    }
+}
+
+impl TorrentPrefs {
+    fn is_default(&self) -> bool {
+        *self == TorrentPrefs::default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ServerEntry {
     pub url: String,
@@ -406,8 +556,194 @@ pub struct ServerEntry {
     /// Where you were last browsing on this server.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_path: Option<String>,
+    /// Trust this server's own TLS certificate (self-signed, or an internal
+    /// CA the OS doesn't know). Scoped to the one entry: every client built
+    /// for this server skips verification, and no other server's does.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub self_signed: bool,
+    /// A federated peer: reached through `peer.parent`, with no address,
+    /// credentials or transport of its own (contract clauses 20–28). The
+    /// entry's `url` is then the synthetic identity [`peer_identity`] mints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer: Option<PeerEntry>,
+    /// Auto DJ's rules for this library (auto-dj contract, clause 51): the
+    /// sources switched OFF, and — when set here rather than in
+    /// `[player.dj]` — the rating floor and the genre filter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dj_sources_off: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dj_min_rating: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dj_genre_filter: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dj_genre_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dj_genres: Option<Vec<String>>,
     #[serde(flatten)]
     pub extra: Keep,
+}
+
+/// A federated peer as the config keeps it: another server's peer, reached
+/// through that parent's browse and byte proxies.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PeerEntry {
+    /// The parent's identity — the saved entry it is reached through.
+    pub parent: String,
+    /// The peer's row id on that parent, which every proxy route keys on.
+    pub id: i64,
+    /// The peer's name as the parent reports it; a rename there is a new
+    /// label, never a new identity.
+    pub name: String,
+    /// The parent stopped listing it: flagged, not deleted, since queued
+    /// tracks point at it (contract clause 23). Forget drops the record.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub missing: bool,
+    /// Parked by the user, and kept that way across every reconcile — a
+    /// removal would only last until the parent's list was mirrored again
+    /// (contract clause 24).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
+}
+
+/// Marks a saved peer's identity: `mstream+peer://<id>@<parent identity>`.
+/// Not a scheme anything may dial — like the tunnel prefix, it names a
+/// row, and the parent's address is inside it.
+pub const PEER_ID_PREFIX: &str = "mstream+peer://";
+
+pub fn peer_identity(parent: &str, id: i64) -> String {
+    format!("{PEER_ID_PREFIX}{id}@{}", parent.trim_end_matches('/'))
+}
+
+/// What to call an entry: a peer's name, a tunnel's short identity, a
+/// standard server's address.
+pub fn display_name(entry: &ServerEntry) -> String {
+    match &entry.peer {
+        Some(peer) => peer.name.clone(),
+        None => crate::quickconnect::display_server(&entry.url),
+    }
+}
+
+/// Whether the picker may offer the entry: every server of its own, and a
+/// peer its parent still lists that the user has not parked.
+pub fn selectable(entry: &ServerEntry) -> bool {
+    entry.peer.as_ref().is_none_or(|peer| !peer.missing && !peer.hidden)
+}
+
+/// The list in display order — every server in its stored order, each
+/// peer directly under the parent it is reached through, a peer whose
+/// parent is gone at the end — as indices into the stored list, which is
+/// what every action keys on.
+pub fn grouped_order(servers: &[ServerEntry]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(servers.len());
+    let mut placed = vec![false; servers.len()];
+    for (i, entry) in servers.iter().enumerate() {
+        if entry.peer.is_some() {
+            continue;
+        }
+        out.push(i);
+        placed[i] = true;
+        for (j, other) in servers.iter().enumerate() {
+            if other.peer.as_ref().is_some_and(|p| same_server(&p.parent, &entry.url)) {
+                out.push(j);
+                placed[j] = true;
+            }
+        }
+    }
+    out.extend((0..servers.len()).filter(|&i| !placed[i]));
+    out
+}
+
+/// Fold a parent's peer list into the config (contract clauses 20–23):
+/// a listed peer is matched by id, then by name — the admin removing and
+/// re-adding a peer hands out a fresh id, and the old record's queued
+/// tracks must keep resolving — else appended; a rename updates the
+/// label only; a peer no longer listed is flagged missing, never deleted;
+/// one listed again is unflagged. Returns whether anything changed.
+pub fn reconcile_peers(config: &mut Config, parent: &str, listed: &[(i64, String)]) -> bool {
+    let mut changed = false;
+    let mut seen: Vec<usize> = Vec::new();
+    for (id, name) in listed {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let by_id = config
+            .servers
+            .iter()
+            .position(|e| e.peer.as_ref().is_some_and(|p| same_server(&p.parent, parent) && p.id == *id));
+        let found = by_id.or_else(|| {
+            // Adoptable: the same name under this parent, whose own id is
+            // no longer in the list.
+            config.servers.iter().position(|e| {
+                e.peer.as_ref().is_some_and(|p| {
+                    same_server(&p.parent, parent)
+                        && p.name == name
+                        && !listed.iter().any(|(other, _)| *other == p.id)
+                })
+            })
+        });
+        match found {
+            Some(index) => {
+                let entry = &mut config.servers[index];
+                let peer = entry.peer.as_mut().expect("matched on a peer");
+                if peer.id != *id || peer.name != name || peer.missing {
+                    peer.id = *id;
+                    peer.name = name.to_string();
+                    peer.missing = false;
+                    entry.url = peer_identity(parent, *id);
+                    changed = true;
+                }
+                seen.push(index);
+            }
+            None => {
+                config.servers.push(ServerEntry {
+                    url: peer_identity(parent, *id),
+                    peer: Some(PeerEntry {
+                        parent: parent.trim_end_matches('/').to_string(),
+                        id: *id,
+                        name: name.to_string(),
+                        missing: false,
+                        hidden: false,
+                    }),
+                    ..Default::default()
+                });
+                seen.push(config.servers.len() - 1);
+                changed = true;
+            }
+        }
+    }
+    for (index, entry) in config.servers.iter_mut().enumerate() {
+        if let Some(peer) = entry.peer.as_mut()
+            && same_server(&peer.parent, parent)
+            && !seen.contains(&index)
+            && !peer.missing
+        {
+            peer.missing = true;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Park a peer, or offer it again (contract clause 24). Returns whether the
+/// entry was a peer whose flag changed.
+pub fn set_peer_hidden(config: &mut Config, url: &str, hidden: bool) -> bool {
+    let Some(entry) = config.servers.iter_mut().find(|e| same_server(&e.url, url)) else {
+        return false;
+    };
+    match entry.peer.as_mut() {
+        Some(peer) if peer.hidden != hidden => {
+            peer.hidden = hidden;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// serde's `skip_serializing_if` for a bool that is only worth writing when
+/// set — an absent key and `false` read back the same.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -498,6 +834,68 @@ pub fn credentials_path() -> Result<PathBuf, String> {
 /// deliberately *not* the OS temp dir, which is RAM-backed tmpfs on many
 /// Linux systems, where a spooled FLAC silently costs its size in memory.
 /// `None` (no usable location at all) lets the engine fall back to OS temp.
+/// The saved queue — the rows, the playing one and the position — next to
+/// the config (contract clause 39). JSON, since the rows carry the API's
+/// own track shape; not precious, so a corrupt file is ignored, never
+/// repaired.
+pub fn queue_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("queue.json"))
+}
+
+/// The saved queue's text, or `None` when there is none.
+pub fn load_queue_file() -> Result<Option<String>, String> {
+    let path = queue_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("could not read {}: {e}", path.display())),
+    }
+}
+
+pub fn save_queue_file(body: &str) -> Result<(), String> {
+    write_atomic(&queue_path()?, body, false)
+}
+
+/// `stats.json` — the play reporter's outbox and its checkpointed session
+/// (play-reporting contract, clause 9), beside the queue's file and as
+/// disposable: a corrupt file is ignored, never repaired.
+pub fn stats_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("stats.json"))
+}
+
+pub fn load_stats_file() -> Result<Option<String>, String> {
+    let path = stats_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("could not read {}: {e}", path.display())),
+    }
+}
+
+pub fn save_stats_file(body: &str) -> Result<(), String> {
+    write_atomic(&stats_path()?, body, false)
+}
+
+pub fn delete_stats_file() -> Result<(), String> {
+    let path = stats_path()?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("could not remove {}: {e}", path.display())),
+    }
+}
+
+/// Drop the saved queue: a cleared queue must not come back on the next
+/// launch, and neither may one the setting was turned off for.
+pub fn delete_queue_file() -> Result<(), String> {
+    let path = queue_path()?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("could not remove {}: {e}", path.display())),
+    }
+}
+
 pub fn spool_dir() -> Option<PathBuf> {
     cache_root().map(|root| root.join("spool"))
 }
@@ -691,6 +1089,22 @@ pub fn load() -> Result<Config, String> {
     }
 }
 
+/// Write a server entry's Auto DJ library rules (auto-dj contract, clause
+/// 51): the sources switched off, and the rating floor and genre filter
+/// when the entry has its own. A server not in the file is nothing to save.
+pub fn save_dj_library(identity: &str, overrides: &DjLibraryOverrides) -> Result<(), String> {
+    let mut config = load()?;
+    let Some(entry) = config.servers.iter_mut().find(|e| same_server(&e.url, identity)) else {
+        return Ok(());
+    };
+    entry.dj_sources_off = overrides.sources_off.clone();
+    entry.dj_min_rating = overrides.min_rating;
+    entry.dj_genre_filter = overrides.genre_filter;
+    entry.dj_genre_mode = overrides.genre_mode.clone();
+    entry.dj_genres = overrides.genres.clone();
+    save(&config)
+}
+
 pub fn save(config: &Config) -> Result<(), String> {
     let body = toml::to_string_pretty(config)
         .map_err(|e| format!("could not encode config: {e}"))?;
@@ -715,10 +1129,42 @@ pub fn same_server(a: &str, b: &str) -> bool {
     a.trim_end_matches('/') == b.trim_end_matches('/')
 }
 
-/// The server to reconnect to, if any.
-pub fn most_recent_server(config: &Config) -> Option<&ServerEntry> {
-    config.servers.first()
+/// The server to reconnect to, if any: the chosen default when one is set
+/// and still saved, otherwise the most recently used.
+///
+/// A `default_server` naming no saved entry falls through to the MRU order
+/// rather than failing — the pointer may outlive the entry it named.
+pub fn preferred_server(config: &Config) -> Option<&ServerEntry> {
+    config
+        .default_server
+        .as_deref()
+        .and_then(|wanted| config.servers.iter().find(|s| same_server(&s.url, wanted)))
+        .or_else(|| config.servers.first())
 }
+
+/// Make `url` the server the player opens with, or clear the choice with
+/// `None` — the MRU order takes over again.
+pub fn set_default_server(config: &mut Config, url: Option<&str>) {
+    config.default_server = url.map(str::to_string);
+}
+
+/// Forget a server: its entry, its token, and — the irreversible part — its
+/// pairing code. A code can only be re-fetched over a live connection by an
+/// admin, which is why removal is the ONE flow allowed to drop it (see
+/// [`forget_all_tokens`]); callers confirm with the user first.
+pub fn remove_server(config: &mut Config, credentials: &mut Credentials, url: &str) {
+    // A peer is only reachable through its parent, so the parent's removal
+    // takes its peers along (contract clause 28).
+    config.servers.retain(|s| {
+        !same_server(&s.url, url) && !s.peer.as_ref().is_some_and(|p| same_server(&p.parent, url))
+    });
+    if config.default_server.as_deref().is_some_and(|d| same_server(d, url)) {
+        config.default_server = None;
+    }
+    credentials.tokens.retain(|entry| !same_server(&entry.server, url));
+    credentials.pairings.retain(|entry| !same_server(&entry.server, url));
+}
+
 
 pub fn token_for(credentials: &Credentials, server: &str) -> Option<String> {
     credentials
@@ -884,6 +1330,87 @@ fn restrict_permissions(_path: &Path) {}
 mod tests {
     use super::*;
     use super::testing::Scratch;
+
+    fn peer_of(parent: &str, id: i64, name: &str) -> ServerEntry {
+        ServerEntry {
+            url: peer_identity(parent, id),
+            peer: Some(PeerEntry {
+                parent: parent.into(),
+                id,
+                name: name.into(),
+                missing: false,
+                hidden: false,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_parents_peer_list_reconciles_by_id_then_name_and_flags_the_unlisted() {
+        // Contract clauses 20–23.
+        let mut config = Config::default();
+        config.servers.push(ServerEntry { url: "http://attic:3000".into(), ..Default::default() });
+        assert!(reconcile_peers(&mut config, "http://attic:3000", &[(3, "Nas".into()), (4, "Loft".into())]));
+        assert_eq!(config.servers.len(), 3);
+        assert_eq!(config.servers[1].url, "mstream+peer://3@http://attic:3000");
+        assert_eq!(config.servers[1].peer.as_ref().unwrap().name, "Nas");
+
+        // Nothing changed: nothing to write.
+        assert!(!reconcile_peers(&mut config, "http://attic:3000", &[(3, "Nas".into()), (4, "Loft".into())]));
+
+        // A rename is a new label under the same identity.
+        assert!(reconcile_peers(&mut config, "http://attic:3000", &[(3, "The NAS".into()), (4, "Loft".into())]));
+        assert_eq!(config.servers[1].peer.as_ref().unwrap().name, "The NAS");
+        assert_eq!(config.servers[1].url, "mstream+peer://3@http://attic:3000", "the identity stays");
+
+        // Removed and re-added on the parent under a fresh id: the old
+        // record is adopted by name, so its queued tracks keep resolving.
+        assert!(reconcile_peers(&mut config, "http://attic:3000", &[(9, "The NAS".into()), (4, "Loft".into())]));
+        assert_eq!(config.servers.len(), 3, "adopted, not appended");
+        assert_eq!(config.servers[1].peer.as_ref().unwrap().id, 9);
+        assert_eq!(config.servers[1].url, "mstream+peer://9@http://attic:3000");
+
+        // Unlisted: flagged missing, never deleted; listed again: unflagged.
+        assert!(reconcile_peers(&mut config, "http://attic:3000", &[(9, "The NAS".into())]));
+        assert!(config.servers[2].peer.as_ref().unwrap().missing);
+        assert_eq!(config.servers.len(), 3);
+        assert!(reconcile_peers(&mut config, "http://attic:3000", &[(9, "The NAS".into()), (4, "Loft".into())]));
+        assert!(!config.servers[2].peer.as_ref().unwrap().missing);
+
+        // An empty list — the parent stopped browsing — marks them all.
+        assert!(reconcile_peers(&mut config, "http://attic:3000", &[]));
+        assert!(config.servers.iter().filter_map(|e| e.peer.as_ref()).all(|p| p.missing));
+        // Another parent's peers are none of this reconcile's business.
+        config.servers.push(peer_of("http://office:3000", 1, "Desk"));
+        assert!(!reconcile_peers(&mut config, "http://attic:3000", &[]));
+        assert!(!config.servers[3].peer.as_ref().unwrap().missing);
+    }
+
+    #[test]
+    fn peers_group_under_their_parent_and_leave_with_it() {
+        // Contract clauses 4 and 28.
+        let mut config = Config {
+            servers: vec![
+                ServerEntry { url: "http://attic:3000".into(), ..Default::default() },
+                ServerEntry { url: "http://office:3000".into(), ..Default::default() },
+                peer_of("http://attic:3000", 3, "Nas"),
+                peer_of("http://gone:3000", 7, "Orphan"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(grouped_order(&config.servers), [0, 2, 1, 3], "peer under its parent, orphan last");
+        assert!(selectable(&config.servers[2]));
+        let peer_url = config.servers[2].url.clone();
+        assert!(set_peer_hidden(&mut config, &peer_url, true));
+        assert!(!selectable(&config.servers[2]));
+        assert!(!set_peer_hidden(&mut config, "http://attic:3000", true), "not a peer");
+
+        let mut credentials = Credentials::default();
+        remove_server(&mut config, &mut credentials, "http://attic:3000");
+        let left: Vec<&str> = config.servers.iter().map(|e| e.url.as_str()).collect();
+        assert_eq!(left, ["http://office:3000", "mstream+peer://7@http://gone:3000"]);
+        assert_eq!(display_name(&config.servers[1]), "Orphan");
+    }
 
     #[test]
     fn round_trips_config_and_credentials_separately() {
@@ -1139,8 +1666,64 @@ mod tests {
         touch_server(&mut config, "http://one:3000", Some("alice".into()));
 
         assert_eq!(config.servers.len(), 2, "revisiting doesn't duplicate");
-        assert_eq!(most_recent_server(&config).unwrap().url, "http://one:3000");
+        assert_eq!(preferred_server(&config).unwrap().url, "http://one:3000");
         assert_eq!(config.servers[0].username.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn a_default_server_outranks_the_mru_order() {
+        let mut config = Config::default();
+        touch_server(&mut config, "http://one:3000", None);
+        touch_server(&mut config, "http://two:3000", None);
+        assert_eq!(preferred_server(&config).unwrap().url, "http://two:3000");
+
+        set_default_server(&mut config, Some("http://one:3000"));
+        assert_eq!(preferred_server(&config).unwrap().url, "http://one:3000");
+
+        // A default pointing at nothing saved falls back rather than failing.
+        set_default_server(&mut config, Some("http://gone:3000"));
+        assert_eq!(preferred_server(&config).unwrap().url, "http://two:3000");
+    }
+
+    #[test]
+    fn removing_a_server_forgets_its_secrets_and_its_default_slot() {
+        let mut config = Config::default();
+        let mut credentials = Credentials::default();
+        touch_server(&mut config, "http://one:3000", Some("alice".into()));
+        touch_server(&mut config, "mstream+iroh://endpointabc", None);
+        set_default_server(&mut config, Some("http://one:3000"));
+        store_token(&mut credentials, "http://one:3000", Some("jwt".into()));
+        store_pairing(&mut credentials, "mstream+iroh://endpointabc", Some("mstr1:code".into()));
+
+        remove_server(&mut config, &mut credentials, "http://one:3000");
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.default_server, None, "the default slot doesn't dangle");
+        assert_eq!(token_for(&credentials, "http://one:3000"), None);
+
+        remove_server(&mut config, &mut credentials, "mstream+iroh://endpointabc");
+        assert!(config.servers.is_empty());
+        assert_eq!(pairing_for(&credentials, "mstream+iroh://endpointabc"), None);
+    }
+
+    #[test]
+    fn self_signed_rides_the_entry_and_round_trips() {
+        let scratch = Scratch::new("self-signed");
+        let _ = &scratch;
+        let mut config = Config::default();
+        touch_server(&mut config, "https://attic.local:3000", None);
+        config.servers[0].self_signed = true;
+        touch_server(&mut config, "https://office.local:3000", None);
+        save(&config).unwrap();
+
+        let reloaded = load().unwrap();
+        let flag = |url: &str| {
+            reloaded.servers.iter().any(|s| same_server(&s.url, url) && s.self_signed)
+        };
+        assert!(flag("https://attic.local:3000/"));
+        assert!(!flag("https://office.local:3000"));
+        // Only the entry that opted in carries the key at all.
+        let text = fs::read_to_string(scratch.dir.join(CONFIG_FILE)).unwrap();
+        assert_eq!(text.matches("self_signed").count(), 1);
     }
 
     #[test]
@@ -1186,7 +1769,7 @@ mod tests {
         // Next launch: the identity is remembered, and both secrets come back
         // with it — the token to stay signed in, the code to get there at all.
         let reloaded = load().unwrap();
-        assert_eq!(most_recent_server(&reloaded).unwrap().url, id);
+        assert_eq!(preferred_server(&reloaded).unwrap().url, id);
         assert_eq!(reloaded.servers[0].last_path.as_deref(), Some("music/Artist"));
         let credentials = load_credentials().unwrap();
         assert_eq!(token_for(&credentials, id), Some("jwt-token".into()));

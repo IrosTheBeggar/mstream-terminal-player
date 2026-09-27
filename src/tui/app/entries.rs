@@ -8,8 +8,10 @@
 //! interleaved between the event handler and the keymap (audit #61).
 
 use super::*;
-/// The Library tab's mode menu — static, so opening the tab costs no request.
-pub(super) fn library_root_entries() -> Vec<Entry> {
+/// The Library tab's mode menu — static, so opening the tab costs no
+/// request. A federated peer is read-only and has no playlists to list
+/// (contract clause 26), so that row is left off for one.
+pub(super) fn library_root_entries(peer: bool) -> Vec<Entry> {
     [
         ("Artists", LibraryNode::Artists),
         ("Albums", LibraryNode::Albums),
@@ -18,13 +20,21 @@ pub(super) fn library_root_entries() -> Vec<Entry> {
         // Last because the four above are ways the tags cut the library and
         // this is the one you cut yourself — not because it matters least.
         ("Playlists", LibraryNode::Playlists),
+        // The play lists: the server's own count of what you played
+        // (library-rooms contract, clauses 21–24); a peer keeps no such
+        // count for a guest, so they hide for one like Playlists.
+        ("Recently Played", LibraryNode::RecentlyPlayed),
+        ("Most Played", LibraryNode::MostPlayed),
     ]
     .into_iter()
+    .filter(|(_, node)| {
+        !(peer && matches!(node, LibraryNode::Playlists | LibraryNode::RecentlyPlayed | LibraryNode::MostPlayed))
+    })
     .map(|(label, node)| Entry::Node { label: label.to_string(), node })
     .collect()
 }
 
-pub(super) fn album_label(album: &Album) -> String {
+pub(crate) fn album_label(album: &Album) -> String {
     let name = album.name.as_deref().unwrap_or("(untitled album)");
     let year = album.year.map(|y| format!(" ({y})")).unwrap_or_default();
     match album.artist.as_deref() {

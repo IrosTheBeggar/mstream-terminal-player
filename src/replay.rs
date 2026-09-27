@@ -166,9 +166,12 @@ fn parse_step(raw: &str, app_server: &str) -> Result<Step, String> {
                 }
             }
             "unauthorized" => Event::Unauthorized,
-            "tunnel" => Event::TunnelReady {
-                local_url: arg.unwrap_or_else(|| "http://127.0.0.1:7000".to_string()),
+            // The tunnel under the scripted identity is up at `arg` (or the
+            // default port); a session waiting on it connects through it.
+            "tunnel" => Event::TunnelUp {
                 id: format!("{}{}", crate::quickconnect::TUNNEL_ID_PREFIX, "replaytestendpoint"),
+                local_url: arg.unwrap_or_else(|| "http://127.0.0.1:7000".to_string()),
+                local_token: String::new(),
             },
             "error" => Event::Error(arg.unwrap_or_else(|| "something went wrong".into())),
             other => return Err(format!("unknown event '@{other}'")),
@@ -433,7 +436,7 @@ pub fn run(args: ReplayArgs) -> i32 {
     // stored server, token, browse path and preferences.
     let mut app = if args.live {
         let start =
-            crate::tui::startup(args.conn.server.clone(), args.conn.token.clone());
+            crate::tui::startup(args.conn.server.clone(), args.conn.token.clone(), None);
         // Same palette the real binary would draw with, so a replay is a
         // faithful picture of what someone's config actually produces.
         ui::set_theme(crate::tui::theme_for(&start.theme));

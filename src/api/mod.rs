@@ -59,6 +59,14 @@ fn daemon_ceiling() -> Option<std::time::Duration> {
 #[cfg(not(target_arch = "wasm32"))]
 const FETCH_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// The torrent routes' ceiling: a seed check hashes the torrent's files
+/// on the server's disk and auto-detect may reach for tags, both slower
+/// than any listing. The record waits 45 seconds too.
+/// Spelled out rather than gated: the browser build passes it through
+/// [`Client::post_multipart`], which drops it there (the fetch backend
+/// owns its own ceiling).
+const DETECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
 /// The directory to ask [`Client::file_explorer`] for when what you want is
 /// "wherever it makes sense to start".
 ///
@@ -294,6 +302,13 @@ pub struct Client {
     /// segment — required for servers hosted under a reverse-proxy subpath.
     base: Url,
     token: Option<String>,
+    /// Aimed at a federated peer: every API path is rewritten onto the
+    /// parent's browse proxy, art onto its art proxy (contract clause 27).
+    /// `base` and `token` are then the parent's.
+    peer: Option<i64>,
+    /// Aimed at a tunnel's loopback bridge: the token every request must
+    /// carry as `__lt=…`, or the shared tunnel client drops the connection.
+    local_token: Option<String>,
     /// Set once this server has shown it can't answer a listing that asks for
     /// metadata, so the fallback costs one wasted request per session rather
     /// than one per folder.
@@ -307,6 +322,14 @@ pub struct Client {
 
 impl Client {
     pub fn new(server: &str) -> Result<Self, ApiError> {
+        Self::new_with(server, false)
+    }
+
+    /// [`Client::new`], with the per-server trust knob: `self_signed` skips
+    /// TLS verification, for a server presenting its own certificate. Only
+    /// callers holding that server's saved entry pass true — the flag lives
+    /// on [`crate::config::ServerEntry`], never process-wide.
+    pub fn new_with(server: &str, self_signed: bool) -> Result<Self, ApiError> {
         let mut base = Url::parse(server)
             .map_err(|e| ApiError::Config(format!("invalid server URL '{server}': {e}")))?;
         if !matches!(base.scheme(), "http" | "https") {
@@ -324,17 +347,24 @@ impl Client {
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
+            .danger_accept_invalid_certs(self_signed)
             .build()
             .map_err(|e| ApiError::Config(format!("could not build http client: {e}")))?;
         // The fetch backend has no connect timeout to set; the browser owns
-        // the socket and applies its own.
+        // the socket and applies its own — TLS trust included, so the flag
+        // cannot mean anything there.
         #[cfg(target_arch = "wasm32")]
-        let http = reqwest::Client::new();
+        let http = {
+            let _ = self_signed;
+            reqwest::Client::new()
+        };
 
         Ok(Client {
             http,
             base,
             token: None,
+            peer: None,
+            local_token: None,
             plain_listings: AtomicBool::new(false),
             no_waveforms: AtomicBool::new(false),
         })
@@ -342,6 +372,25 @@ impl Client {
 
     pub fn with_token(mut self, token: Option<String>) -> Self {
         self.token = token;
+        self
+    }
+
+    /// Aim this client at the parent's federated peer `id`: reads go
+    /// through `/api/v1/federation/peers/{id}/api/…`, art through
+    /// `…/art/…`. `None` is the parent itself.
+    pub fn with_peer(mut self, peer: Option<i64>) -> Self {
+        self.peer = peer;
+        self
+    }
+
+    pub fn peer(&self) -> Option<i64> {
+        self.peer
+    }
+
+    /// Every request to a tunnel bridge carries its loopback token as
+    /// `__lt=…`; `None` for a server reached directly.
+    pub fn with_local_token(mut self, token: Option<String>) -> Self {
+        self.local_token = token;
         self
     }
 
@@ -377,7 +426,7 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     fn remembered_server() -> Result<String, ApiError> {
         let config = crate::config::load().map_err(ApiError::Config)?;
-        match crate::config::most_recent_server(&config) {
+        match crate::config::preferred_server(&config) {
             // A tunnel server is remembered by identity, not address, and
             // reaching it means dialling its pairing code — which only the
             // player does. Say so rather than failing on a parse.
@@ -413,9 +462,23 @@ impl Client {
     // ── Plumbing ────────────────────────────────────────────────────────────
 
     fn endpoint(&self, path: &str) -> Result<Url, ApiError> {
-        self.base
-            .join(path)
-            .map_err(|e| ApiError::Config(format!("could not build URL for {path}: {e}")))
+        let path = match self.peer {
+            // The proxy takes the peer's own API path whole after `/api/`,
+            // so `api/v1/db/albums` becomes `…/peers/3/api/api/v1/db/albums`.
+            Some(peer) => match path.strip_prefix("album-art/") {
+                Some(file) => format!("api/v1/federation/peers/{peer}/art/{file}"),
+                None => format!("api/v1/federation/peers/{peer}/api/{path}"),
+            },
+            None => path.to_string(),
+        };
+        let mut url = self
+            .base
+            .join(&path)
+            .map_err(|e| ApiError::Config(format!("could not build URL for {path}: {e}")))?;
+        if let Some(token) = &self.local_token {
+            url.query_pairs_mut().append_pair("__lt", token);
+        }
+        Ok(url)
     }
 
     async fn send<T: DeserializeOwned>(
@@ -457,32 +520,16 @@ impl Client {
                     .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?,
             );
         }
-        self.finish(path, req).await
+        self.finish(req, path).await
     }
 
-    /// A request whose body is raw bytes under its own content type — the
-    /// multipart upload the seed-existing route takes.
-    async fn send_bytes<T: DeserializeOwned>(
-        &self,
-        method: Method,
-        path: &str,
-        content_type: &str,
-        body: Vec<u8>,
-    ) -> Result<T, ApiError> {
-        let url = self.endpoint(path)?;
-        let mut req = self.http.request(method, url);
-        if let Some(token) = &self.token {
-            req = req.header("x-access-token", token);
-        }
-        req = req.header("Content-Type", content_type).body(body);
-        self.finish(path, req).await
-    }
-
-    /// Send, map the status codes, decode the body.
+    /// Send a built request and map the answer: only 401 is a session
+    /// problem, the other failures carry the server's words as
+    /// [`extract_error`] reads them out of the body.
     async fn finish<T: DeserializeOwned>(
         &self,
-        path: &str,
         req: reqwest::RequestBuilder,
+        path: &str,
     ) -> Result<T, ApiError> {
         let resp = req.send().await.map_err(|e| ApiError::Network(e.to_string()))?;
         let status = resp.status();
@@ -493,10 +540,7 @@ impl Client {
             StatusCode::FORBIDDEN => return Err(ApiError::Forbidden(extract_error(&text))),
             StatusCode::NOT_FOUND => return Err(ApiError::NotFound(path.to_string())),
             s if !s.is_success() => {
-                return Err(ApiError::Server {
-                    status: s.as_u16(),
-                    message: extract_error(&text),
-                });
+                return Err(ApiError::Server { status: s.as_u16(), message: extract_error(&text) });
             }
             _ => {}
         }
@@ -505,6 +549,32 @@ impl Client {
             endpoint: path.to_string(),
             message: e.to_string(),
         })
+    }
+
+    /// A multipart POST — the torrent routes' shape, the user's and the
+    /// admin's. `longest` is the request's own ceiling: a seed check
+    /// hashes files on the server.
+    async fn post_multipart<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        form: Multipart,
+        longest: Option<std::time::Duration>,
+    ) -> Result<T, ApiError> {
+        let url = self.endpoint(path)?;
+        let (content_type, body) = form.finish();
+        #[allow(unused_mut)]
+        let mut req = self.http.request(Method::POST, url);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(longest) = longest {
+            req = req.timeout(longest);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = longest;
+        if let Some(token) = &self.token {
+            req = req.header("x-access-token", token);
+        }
+        req = req.header("Content-Type", content_type).body(body);
+        self.finish(req, path).await
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
@@ -569,6 +639,74 @@ impl Client {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn ping(&self) -> Result<Ping, ApiError> {
         wait(self.ping_async())
+    }
+
+    /// The capability bootstrap for a federated peer: `/api/v1/ping` is
+    /// off the federation allowlist, but the layered `GET /api` is on it
+    /// and carries the same keys — the libraries the parent's key may
+    /// read, and the flags a peer never gets to keep (contract clause 26).
+    pub async fn ping_via_info_async(&self) -> Result<Ping, ApiError> {
+        // The layered payload nests the flags and the libraries under
+        // `user` and the transcode under `features`; the ping is composed
+        // from them (mStream #932).
+        let info: crate::api::types::LayeredInfo = self.get("api/").await?;
+        Ok(Ping::from(info))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn ping_via_info(&self) -> Result<Ping, ApiError> {
+        wait(self.ping_via_info_async())
+    }
+
+    /// The peers this user may browse through the server (contract clause
+    /// 20): `GET /api/v1/federation/peers`, answered only while federation
+    /// is on there.
+    pub async fn federation_peers_async(&self) -> Result<Vec<PeerListing>, ApiError> {
+        self.get::<PeerListingResponse>("api/v1/federation/peers").await.map(|r| r.peers)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn federation_peers(&self) -> Result<Vec<PeerListing>, ApiError> {
+        wait(self.federation_peers_async())
+    }
+
+    /// `GET /api/v1/federation/peers/{id}/access` — direct access to one
+    /// of this server's peers for the caller's own device (mStream #943).
+    /// Always on the parent's plain client, never through a peer client's
+    /// rewrite. `refresh` asks the parent to re-mint a token the peer just
+    /// refused.
+    pub async fn federation_access_async(
+        &self,
+        id: i64,
+        refresh: bool,
+    ) -> Result<crate::api::types::DirectAccessResponse, ApiError> {
+        let path = if refresh {
+            format!("api/v1/federation/peers/{id}/access?refresh=1")
+        } else {
+            format!("api/v1/federation/peers/{id}/access")
+        };
+        self.get(&path).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn federation_access(
+        &self,
+        id: i64,
+        refresh: bool,
+    ) -> Result<crate::api::types::DirectAccessResponse, ApiError> {
+        wait(self.federation_access_async(id, refresh))
+    }
+
+    /// `GET /api/` — the server's version and API generations. The one
+    /// endpoint that answers without auth, which is what lets the Manage
+    /// Servers screen show a version for servers it holds no token for.
+    pub async fn server_info_async(&self) -> Result<ServerInfo, ApiError> {
+        self.get("api/").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn server_info(&self) -> Result<ServerInfo, ApiError> {
+        wait(self.server_info_async())
     }
 
     /// Browse a directory.
@@ -655,20 +793,34 @@ impl Client {
 
     /// Ask the Auto-DJ picker for one track matching the given constraints.
     ///
-    /// The server answers 400 when nothing survives its fallback waterfall;
-    /// that's an ordinary "no pick", so it comes back as an empty `songs`
-    /// list rather than an error.
+    /// The server answers 400 when nothing survives its fallback waterfall,
+    /// when a sonic pool is empty or unanalysed, and when a key it does not
+    /// know is sent — each with its own words in the body, and the DJ's
+    /// failure taxonomy turns on them (auto-dj contract, clauses 25 and
+    /// 30), so the error comes back whole rather than as an empty answer.
     pub async fn random_song_async(
         &self,
         request: &RandomSongRequest,
     ) -> Result<RandomSongsResponse, ApiError> {
         let body = serde_json::to_value(request)
             .map_err(|e| ApiError::Config(format!("could not encode request: {e}")))?;
-        match self.post("api/v1/db/random-songs", body).await {
-            Ok(response) => Ok(response),
-            Err(ApiError::Server { status: 400, .. }) => Ok(RandomSongsResponse::default()),
-            Err(e) => Err(e),
-        }
+        self.random_songs_raw_async(body).await
+    }
+
+    /// The body as JSON, for the DJ's capability filter (auto-dj contract,
+    /// clause 25): the keys a server will not take are dropped before it
+    /// is sent, and a rejection comes back whole to be learned from.
+    pub async fn random_songs_raw_async(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<RandomSongsResponse, ApiError> {
+        self.post("api/v1/db/random-songs", body).await
+    }
+
+    /// The layered `/api/` payload whole — the DJ's probe reads a server's
+    /// version, its discovery readiness and its libraries off it (clause 19).
+    pub async fn layered_info_async(&self) -> Result<LayeredInfo, ApiError> {
+        self.get("api/").await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -788,6 +940,36 @@ impl Client {
         wait(self.recently_added_async(limit))
     }
 
+    /// The signed-in user's play history, newest first — mStream's
+    /// `stats/recently-played`, `limit` required. A caller with no user
+    /// there (a federation key, a guest) is answered with an empty list.
+    pub async fn recently_played_async(&self, limit: u32) -> Result<Vec<Track>, ApiError> {
+        self.post("api/v1/db/stats/recently-played", serde_json::json!({ "limit": limit })).await
+    }
+
+    /// The user's most played tracks, most first — `stats/most-played`.
+    pub async fn most_played_async(&self, limit: u32) -> Result<Vec<Track>, ApiError> {
+        self.post("api/v1/db/stats/most-played", serde_json::json!({ "limit": limit })).await
+    }
+
+    /// Report a batch of finished plays (play-reporting contract, clause
+    /// 8): the Stats API's write side. A caller with no account there — a
+    /// federation key, a guest — is refused with 403.
+    pub async fn report_plays_async(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<crate::api::types::PlaysAnswer, ApiError> {
+        self.post("api/v1/stats/plays", body).await
+    }
+
+    /// The legacy thirty-second scrobble, for a server without the Stats
+    /// API (clause 10): one play of `filepath`, counted by decree.
+    pub async fn scrobble_async(&self, filepath: &str) -> Result<(), ApiError> {
+        let _: serde_json::Value =
+            self.post("api/v1/lastfm/scrobble-by-filepath", serde_json::json!({ "filePath": filepath })).await?;
+        Ok(())
+    }
+
     /// Metadata for one track — used to fill the engine's duration hint
     /// without making it probe the remote stream.
     pub async fn metadata_async(&self, filepath: &str) -> Result<Track, ApiError> {
@@ -855,6 +1037,164 @@ impl Client {
         wait(self.playlist_save_async(title, files))
     }
 
+    /// Create an EMPTY playlist. The server answers 400 when the name is
+    /// already taken; the error carries its words.
+    /// Rate a track on the server's 0–10 scale, `None` to clear
+    /// (track-actions contract, clause 10). The path is the vpath-relative
+    /// one a listing carries.
+    pub async fn rate_song_async(&self, filepath: &str, rating: Option<u32>) -> Result<(), ApiError> {
+        let _: serde_json::Value = self
+            .post("api/v1/db/rate-song", serde_json::json!({ "filepath": filepath, "rating": rating }))
+            .await?;
+        Ok(())
+    }
+
+    /// Append a track to a playlist — the server creates the playlist when
+    /// it does not exist yet (track-actions contract, clause 12).
+    pub async fn playlist_add_song_async(&self, playlist: &str, song: &str) -> Result<(), ApiError> {
+        let _: serde_json::Value = self
+            .post("api/v1/playlist/add-song", serde_json::json!({ "playlist": playlist, "song": song }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn playlist_new_async(&self, title: &str) -> Result<(), ApiError> {
+        let _: serde_json::Value =
+            self.post("api/v1/playlist/new", serde_json::json!({ "title": title })).await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn playlist_new(&self, title: &str) -> Result<(), ApiError> {
+        wait(self.playlist_new_async(title))
+    }
+
+    /// Rename a playlist. The route arrived in mStream 5.16.0 — an older
+    /// server 404s, which callers word as the missing feature it is.
+    pub async fn playlist_rename_async(&self, from: &str, to: &str) -> Result<(), ApiError> {
+        let _: serde_json::Value = self
+            .post(
+                "api/v1/playlist/rename",
+                serde_json::json!({ "oldName": from, "newName": to }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn playlist_rename(&self, from: &str, to: &str) -> Result<(), ApiError> {
+        wait(self.playlist_rename_async(from, to))
+    }
+
+    pub async fn playlist_delete_async(&self, name: &str) -> Result<(), ApiError> {
+        let _: serde_json::Value = self
+            .post("api/v1/playlist/delete", serde_json::json!({ "playlistname": name }))
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn playlist_delete(&self, name: &str) -> Result<(), ApiError> {
+        wait(self.playlist_delete_async(name))
+    }
+
+    // ── Torrents (docs/ux-contracts/add-torrent.md) ─────────────────────────
+
+    /// Whether this server takes a torrent from this user, and why not
+    /// when it doesn't — the Add-torrent room's gate (no ping flag exists).
+    /// Asked with an empty path: the global gates only; the per-library
+    /// mapping is `/torrent/add`'s own check.
+    pub async fn torrent_preflight_async(&self) -> Result<TorrentPreflight, ApiError> {
+        self.get("api/v1/torrent/preflight?path=").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn torrent_preflight(&self) -> Result<TorrentPreflight, ApiError> {
+        wait(self.torrent_preflight_async())
+    }
+
+    /// Per-library destination templates. Best-effort for callers: an
+    /// older server without the route answers 404, and the legacy
+    /// `Artist/Album` layout still applies.
+    pub async fn torrent_path_templates_async(&self) -> Result<TorrentTemplates, ApiError> {
+        self.get("api/v1/torrent/path-templates").await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn torrent_path_templates(&self) -> Result<TorrentTemplates, ApiError> {
+        wait(self.torrent_path_templates_async())
+    }
+
+    /// Ask the server to read artist/album/year out of a `.torrent`.
+    /// `vpath` lets the server use that library's tag knowledge.
+    pub async fn torrent_auto_detect_async(
+        &self,
+        bytes: &[u8],
+        filename: &str,
+        vpath: Option<&str>,
+    ) -> Result<TorrentDetect, ApiError> {
+        let mut form = Multipart::new();
+        if let Some(vpath) = vpath.filter(|v| !v.is_empty()) {
+            form.field("vpath", vpath);
+        }
+        form.file("torrentFile", filename, bytes);
+        self.post_multipart("api/v1/torrent/auto-detect", form, Some(DETECT_TIMEOUT)).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn torrent_auto_detect(
+        &self,
+        bytes: &[u8],
+        filename: &str,
+        vpath: Option<&str>,
+    ) -> Result<TorrentDetect, ApiError> {
+        wait(self.torrent_auto_detect_async(bytes, filename, vpath))
+    }
+
+    /// Are the torrent's files already on disk somewhere the user can
+    /// see? Scans every library the user has (the server intersects with
+    /// their access), and seeds outright when everything is there.
+    pub async fn torrent_seed_existing_async(
+        &self,
+        bytes: &[u8],
+        filename: &str,
+    ) -> Result<SeedCheck, ApiError> {
+        let mut form = Multipart::new();
+        form.file("torrentFile", filename, bytes);
+        self.post_multipart("api/v1/torrent/seed-existing", form, Some(DETECT_TIMEOUT)).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn torrent_seed_existing(&self, bytes: &[u8], filename: &str) -> Result<SeedCheck, ApiError> {
+        wait(self.torrent_seed_existing_async(bytes, filename))
+    }
+
+    /// Hand the torrent to the server's client, to land at
+    /// `<vpath>/<sub_path>/<directory_name>`.
+    pub async fn torrent_add_async(&self, req: &TorrentAddRequest) -> Result<TorrentAdded, ApiError> {
+        let mut form = Multipart::new();
+        form.field("vpath", &req.vpath);
+        if !req.sub_path.is_empty() {
+            form.field("subPath", &req.sub_path);
+        }
+        form.field("directoryName", &req.directory_name);
+        form.field("renameRoot", if req.rename_root { "true" } else { "false" });
+        match &req.source {
+            TorrentSource::Magnet(magnet) => {
+                form.field("magnet", magnet);
+            }
+            TorrentSource::File { name, bytes } => {
+                form.file("torrentFile", name, bytes);
+            }
+        }
+        self.post_multipart("api/v1/torrent/add", form, Some(DETECT_TIMEOUT)).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn torrent_add(&self, req: &TorrentAddRequest) -> Result<TorrentAdded, ApiError> {
+        wait(self.torrent_add_async(req))
+    }
+
     /// The shape of a track, for drawing under the progress bar.
     ///
     /// `None` is every flavour of "there isn't one", and none of them is an
@@ -917,7 +1257,12 @@ impl Client {
     /// version of [`Client::send`]: same header auth, same status mapping,
     /// but the body stays bytes instead of being read as text.
     pub async fn album_art_async(&self, file: &str) -> Result<Vec<u8>, ApiError> {
-        let url = urls::album_art_url(&self.server(), file).map_err(ApiError::Config)?;
+        let url = match self.peer {
+            Some(peer) => urls::peer_art_url(&self.server(), peer, file),
+            None => urls::album_art_url(&self.server(), file),
+        }
+        .map_err(ApiError::Config)?;
+        let url = urls::with_local_token(url, self.local_token.as_deref());
         let mut req = self.http.get(&url);
         if let Some(token) = &self.token {
             req = req.header("x-access-token", token);
@@ -947,7 +1292,9 @@ impl Client {
 
     /// Direct (untranscoded) stream URL for a track's vpath.
     pub fn media_url(&self, filepath: &str) -> Result<String, ApiError> {
-        urls::media_url(&self.server(), filepath, self.token.as_deref()).map_err(ApiError::Config)
+        urls::media_url(&self.server(), filepath, self.token.as_deref())
+            .map(|url| urls::with_local_token(url, self.local_token.as_deref()))
+            .map_err(ApiError::Config)
     }
 
     /// Transcoded stream URL. The codec is always explicit — see
@@ -959,6 +1306,7 @@ impl Client {
         bitrate: Option<&str>,
     ) -> Result<String, ApiError> {
         urls::transcode_url(&self.server(), filepath, codec, bitrate, self.token.as_deref())
+            .map(|url| urls::with_local_token(url, self.local_token.as_deref()))
             .map_err(ApiError::Config)
     }
 
@@ -2037,36 +2385,20 @@ impl Client {
 
     /// Hand the server a `.torrent` for content already on disk: multipart,
     /// one file, the libraries to search (none = every library). Always HTTP
-    /// 200 — the outcome is in the body.
+    /// 200 — the outcome is in the body. The server hashes the files before
+    /// it answers, so the call gets the torrent routes' own ceiling.
     pub async fn admin_torrent_seed_existing_async(
         &self,
         file_name: &str,
         bytes: &[u8],
         vpaths: &[String],
     ) -> Result<SeedOutcome, ApiError> {
-        let boundary = format!("----mstream-player-{:016x}{:016x}", fastrand::u64(..), fastrand::u64(..));
-        let mut body = Vec::with_capacity(bytes.len() + 512);
+        let mut form = Multipart::new();
         if !vpaths.is_empty() {
-            body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"vpaths\"\r\n\r\n").as_bytes());
-            body.extend_from_slice(serde_json::to_string(vpaths).unwrap_or_default().as_bytes());
-            body.extend_from_slice(b"\r\n");
+            form.field("vpaths", &serde_json::to_string(vpaths).unwrap_or_default());
         }
-        let safe_name: String = file_name.chars().filter(|c| *c != '"' && *c != '\r' && *c != '\n').collect();
-        body.extend_from_slice(
-            format!(
-                "--{boundary}\r\nContent-Disposition: form-data; name=\"torrentFile\"; filename=\"{safe_name}\"\r\nContent-Type: application/x-bittorrent\r\n\r\n"
-            )
-            .as_bytes(),
-        );
-        body.extend_from_slice(bytes);
-        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-        self.send_bytes(
-            Method::POST,
-            "api/v1/admin/torrent/seed-existing",
-            &format!("multipart/form-data; boundary={boundary}"),
-            body,
-        )
-        .await
+        form.file("torrentFile", file_name, bytes);
+        self.post_multipart("api/v1/admin/torrent/seed-existing", form, Some(DETECT_TIMEOUT)).await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2108,8 +2440,64 @@ impl Client {
 
 }
 
+/// A `multipart/form-data` body, assembled by hand: the torrent routes
+/// are the API's only multipart, and reqwest's feature for it would pull
+/// a MIME-guessing dependency in for one boundary string. Same encoding
+/// on both builds.
+pub(crate) struct Multipart {
+    boundary: String,
+    body: Vec<u8>,
+}
+
+impl Multipart {
+    pub(crate) fn new() -> Self {
+        Multipart {
+            boundary: format!("----mstream-player-{:016x}{:016x}", fastrand::u64(..), fastrand::u64(..)),
+            body: Vec::new(),
+        }
+    }
+
+    /// A header parameter value: quotes and line breaks would end the
+    /// part early, so they are replaced rather than escaped (the server
+    /// only ever shows the filename back).
+    fn param(value: &str) -> String {
+        value.chars().map(|c| if c == '"' || c == '\r' || c == '\n' { '_' } else { c }).collect()
+    }
+
+    pub(crate) fn field(&mut self, name: &str, value: &str) -> &mut Self {
+        self.body.extend(format!(
+            "--{}\r\nContent-Disposition: form-data; name=\"{}\"\r\n\r\n",
+            self.boundary,
+            Self::param(name)
+        ).into_bytes());
+        self.body.extend(value.as_bytes());
+        self.body.extend(b"\r\n");
+        self
+    }
+
+    pub(crate) fn file(&mut self, name: &str, filename: &str, bytes: &[u8]) -> &mut Self {
+        self.body.extend(format!(
+            "--{}\r\nContent-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\nContent-Type: application/x-bittorrent\r\n\r\n",
+            self.boundary,
+            Self::param(name),
+            Self::param(filename)
+        ).into_bytes());
+        self.body.extend(bytes);
+        self.body.extend(b"\r\n");
+        self
+    }
+
+    /// The `Content-Type` header value and the finished body.
+    pub(crate) fn finish(mut self) -> (String, Vec<u8>) {
+        self.body.extend(format!("--{}--\r\n", self.boundary).into_bytes());
+        (format!("multipart/form-data; boundary={}", self.boundary), self.body)
+    }
+}
+
 /// Pull mStream's `{"error": "..."}` out of a failure body, falling back to a
-/// trimmed excerpt of whatever was actually returned.
+/// trimmed excerpt of whatever was actually returned. The torrent routes'
+/// shape — `{ ok: false, error: <code>, message: <words> }` — reads as the
+/// sentence, never the code.
 fn extract_error(body: &str) -> String {
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
         // Newer routes answer `{error: <code>, message: <sentence>}`; the
@@ -2130,6 +2518,43 @@ fn extract_error(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_peer_client_rewrites_every_path_onto_the_parents_proxies() {
+        // Contract clause 27: reads through the browse proxy, art through
+        // the art proxy; the parent's base and token throughout.
+        let client = Client::new("http://parent:3000/").unwrap().with_token(Some("pt".into())).with_peer(Some(3));
+        assert_eq!(
+            client.endpoint("api/v1/db/albums").unwrap().as_str(),
+            "http://parent:3000/api/v1/federation/peers/3/api/api/v1/db/albums"
+        );
+        assert_eq!(
+            client.endpoint("album-art/cover.jpeg").unwrap().as_str(),
+            "http://parent:3000/api/v1/federation/peers/3/art/cover.jpeg"
+        );
+        assert_eq!(client.server(), "http://parent:3000", "the base is the parent's");
+        assert_eq!(client.peer(), Some(3));
+        let plain = Client::new("http://parent:3000").unwrap();
+        assert_eq!(plain.endpoint("api/v1/db/albums").unwrap().as_str(), "http://parent:3000/api/v1/db/albums");
+    }
+
+    #[test]
+    fn a_multipart_body_carries_fields_and_the_file_between_its_boundary() {
+        let mut form = Multipart::new();
+        form.field("vpath", "music").field("renameRoot", "true");
+        form.file("torrentFile", "vela \"deluxe\".torrent", b"d4:infod4:name4:Velaee");
+        let (content_type, body) = form.finish();
+        let boundary = content_type.strip_prefix("multipart/form-data; boundary=").unwrap().to_string();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.starts_with(&format!("--{boundary}\r\nContent-Disposition: form-data; name=\"vpath\"\r\n\r\nmusic\r\n")));
+        assert!(text.contains("name=\"renameRoot\"\r\n\r\ntrue\r\n"));
+        assert!(
+            text.contains("name=\"torrentFile\"; filename=\"vela _deluxe_.torrent\"\r\nContent-Type: application/x-bittorrent\r\n\r\nd4:infod4:name4:Velaee\r\n"),
+            "quotes in a filename cannot end the part early: {text}"
+        );
+        assert!(text.ends_with(&format!("--{boundary}--\r\n")));
+        assert_eq!(text.matches(&format!("--{boundary}")).count(), 4, "three parts and the close");
+    }
 
     #[test]
     fn the_flags_that_exist_to_route_round_the_config_do_not_need_it() {
@@ -2181,6 +2606,30 @@ mod tests {
     }
 
     #[test]
+    fn server_info_reads_the_version_and_tolerates_its_absence() {
+        // `GET /api/` — "server" is the mStream version; a future shape
+        // that drops or adds fields must not break the read.
+        let info: ServerInfo = serde_json::from_str(
+            r#"{"server":"5.13.2","apiVersions":["1"],"features":{"subsonic":false}}"#,
+        )
+        .unwrap();
+        assert_eq!(info.version.as_deref(), Some("5.13.2"));
+        assert_eq!(info.api_versions, vec!["1"]);
+
+        let bare: ServerInfo = serde_json::from_str("{}").unwrap();
+        assert_eq!(bare.version, None);
+    }
+
+    #[test]
+    fn a_self_signed_client_still_builds_on_the_verified_path() {
+        // The flag only loosens TLS verification; everything else about the
+        // client — base URL handling above all — is the same construction.
+        let c = Client::new_with("https://attic.local:3000", true).unwrap();
+        assert_eq!(c.server(), "https://attic.local:3000");
+        assert!(Client::new_with("not a url", true).is_err());
+    }
+
+    #[test]
     fn flags_plaintext_remote_servers_only() {
         assert!(Client::new("http://music.example.com").unwrap().is_insecure_remote());
         assert!(!Client::new("https://music.example.com").unwrap().is_insecure_remote());
@@ -2196,5 +2645,11 @@ mod tests {
         assert_eq!(extract_error(r#"{"error":"Playlist not found"}"#), "Playlist not found");
         assert_eq!(extract_error("boom"), "boom");
         assert_eq!(extract_error("   "), "(empty response)");
+        // The torrent routes carry a code under `error` and the sentence
+        // under `message`: the sentence is the one for a human.
+        assert_eq!(
+            extract_error(r#"{"ok":false,"error":"no_source","message":"Provide a .torrent file"}"#),
+            "Provide a .torrent file"
+        );
     }
 }
