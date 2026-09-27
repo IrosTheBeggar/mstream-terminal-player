@@ -1,5 +1,6 @@
 //! Rendering. Reads app state, draws widgets — no decisions of its own.
 
+use rust_i18n::t;
 use std::sync::OnceLock;
 
 use ratatui::Frame;
@@ -2977,8 +2978,11 @@ pub(crate) fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
     lines.push(Line::raw(""));
+    // Through the locale table: the GUI lends this picker on its Now
+    // Playing screen, where the rest of the words are the user's language;
+    // the TUI boots no language, so here it stays English.
     lines.push(Line::from(Span::styled(
-        "  ↑↓ move · Space toggle · Enter done",
+        format!("  {}", t!("gui.dj.picker_keys")),
         Style::new().fg(dim()),
     )));
 
@@ -3020,7 +3024,7 @@ fn render_dj_chooser(frame: &mut Frame, area: Rect, app: &App) {
     let check = if chooser.remember { "[x]" } else { "[ ]" };
     lines.extend(option(2, format!("{check} Remember this"), "Skip this question next time and always start this way."));
     lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled("  ↑↓ move · Enter choose · Space remember · Esc cancel", faint)));
+    lines.push(Line::from(Span::styled(format!("  {}", t!("gui.dj.start_keys")), faint)));
 
     let height = (lines.len() as u16 + 2).min(area.height);
     let box_area = centered_rect(72, height, area);

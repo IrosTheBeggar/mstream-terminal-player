@@ -1536,7 +1536,7 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     frame.render_widget(block, rect);
 
     let marker = super::forward_glyph();
-    let star = if legacy_conhost() { "*" } else { "★" };
+    let star = super::star_glyph();
     // The rows that fit, from the wheel's scroll: past a dozen servers the
     // list ran under the frame's edge with no way to the rest.
     let fit = (inner.height as usize).max(1);
@@ -1581,7 +1581,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 
     let servers = gui.config.servers.clone();
     let default = gui.config.default_server.clone();
-    let star = if legacy_conhost() { "*" } else { "★" };
+    let star = super::star_glyph();
     let marker = super::forward_glyph();
 
     let name_w = content.width.saturating_sub(30) as usize;

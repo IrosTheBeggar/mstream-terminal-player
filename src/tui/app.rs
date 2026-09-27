@@ -5,6 +5,7 @@
 //! channels. That keeps the interesting behaviour — navigation, queue
 //! advancement, repeat/shuffle — testable without a terminal or a server.
 
+use rust_i18n::t;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -4313,10 +4314,10 @@ impl App {
             self.failures = 0;
             self.now_playing = None;
             self.queue.current = None;
-            self.error("Can't play these tracks — check the files or server.");
+            self.error(t!("play.unplayable_all"));
             return Err(vec![Effect::Audio(AudioCmd::Stop)]);
         }
-        self.error(format!("Skipping a track that won’t play — {what}: {why}"));
+        self.error(t!("play.skipping_why", what = what, why = why));
         // Manual, so repeat-one doesn't sit on the broken track.
         match self.queue.next_index(true) {
             Some(next) => Ok(next),
@@ -4429,12 +4430,12 @@ impl App {
             self.failures = 0;
             self.now_playing = None;
             self.queue.current = None;
-            self.error("Can't play these tracks — check the files or server.");
+            self.error(t!("play.unplayable_all"));
             return vec![Effect::Audio(AudioCmd::Stop)];
         }
         match reason {
-            Some(reason) => self.error(format!("Skipping a track that won’t play — {what}: {reason}")),
-            None => self.error(format!("Skipping a track that won’t play — {what}")),
+            Some(reason) => self.error(t!("play.skipping_why", what = what, why = reason)),
+            None => self.error(t!("play.skipping", what = what)),
         }
         // Manual, so repeat-one doesn't sit on the broken track.
         self.skip(true)

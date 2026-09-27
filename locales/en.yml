@@ -70,6 +70,12 @@ act:
   added_to: "Added to %{name}"
   add_failed_why: "Couldn't add to the playlist — %{why}"
 
+# The shared App's playback notes (both shells show them).
+play:
+  unplayable_all: "Can't play these tracks — check the files or server."
+  skipping_why: "Skipping a track that won’t play — %{what}: %{why}"
+  skipping: "Skipping a track that won’t play — %{what}"
+
 login_problem:
   username: "pick a username"
   password: "pick a password"
@@ -1129,9 +1135,10 @@ gui:
     remember_sub: "Skip this question next time and always start this way."
     pick_banner: "Pick the opening song — choose a track anywhere in the library"
     start_keys: "↑↓ move · Enter choose · Space remember · Esc cancel"
+    picker_keys: "↑↓ move · Space toggle · Enter done"
     title: "Auto DJ"
-    state_on: "• on · picking from %{server}"
-    state_off: "• off"
+    state_on: "on · picking from %{server}"
+    state_off: "off"
     status_on: "Auto DJ is on"
     status_on_detail: "Songs are picked from %{server} when the queue runs low."
     status_off: "Auto DJ is off"
@@ -1181,7 +1188,6 @@ gui:
     rating: "Minimum rating"
     rating_sub: "Only pick songs at or above this rating."
     rating_any: "Any"
-    rating_value: "%{stars} ★"
     length: "Track length"
     length_sub: "Skip interludes and long mixes by only picking tracks in a length range"
     length_any: "Any length"
@@ -1432,8 +1438,8 @@ gui:
     year: "YEAR"
     path: "PATH"
     path_tip: "Path in the library — a hand edit sticks until a new source"
-    preview_no_library: "‹no library›/%{path}"
-    preview_contents: "‹torrent contents›"
+    preview_no_library: "no library"
+    preview_contents: "torrent contents"
     rename_root: "Rename the torrent's root folder"
     rename_root_desc: "Match the destination folder name"
     force_fresh: "Force fresh download"

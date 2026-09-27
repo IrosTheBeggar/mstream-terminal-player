@@ -547,10 +547,11 @@ fn help_for(gui: &mut Gui, focused: bool, hover: bool, text: String) {
 /// room has no way back — the nav column is right there.
 pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     put(frame, content.x, content.y, &t!("gui.dj.title"), Style::default().add_modifier(Modifier::BOLD));
+    let bullet = super::bullet_glyph();
     let (state, style) = if gui.app.dj_armed() {
-        (t!("gui.dj.state_on", server = gui.app.dj_server_name()).to_string(), Style::default().fg(th().ok))
+        (format!("{bullet} {}", t!("gui.dj.state_on", server = gui.app.dj_server_name())), Style::default().fg(th().ok))
     } else {
-        (t!("gui.dj.state_off").to_string(), dim())
+        (format!("{bullet} {}", t!("gui.dj.state_off")), dim())
     };
     let shown = super::bar::clip(&state, content.width.saturating_sub(14) as usize);
     put(frame, content.right().saturating_sub(shown.chars().count() as u16), content.y, &shown, style);
@@ -955,7 +956,7 @@ fn bar_spec(gui: &Gui, row: DjRow) -> Option<BarSpec> {
                 words: if rating == 0 {
                     t!("gui.dj.rating_any").to_string()
                 } else {
-                    t!("gui.dj.rating_value", stars = format!("{:.1}", f64::from(rating) / 2.0)).to_string()
+                    format!("{:.1} {}", f64::from(rating) / 2.0, super::star_glyph())
                 },
                 note: String::new(),
                 tip: t!("gui.dj.rating_sub").to_string(),

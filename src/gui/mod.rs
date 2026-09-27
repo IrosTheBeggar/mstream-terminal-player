@@ -1179,6 +1179,23 @@ fn check_glyphs() -> (&'static str, &'static str) {
     if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") }
 }
 
+// Glyphs live in code, never in the locale strings: a string that carries
+// one bypasses these gates and draws as a question mark on bare conhost
+// (the review's finding — the rating's star, the DJ's bullet, the torrent
+// preview's angle quotes).
+fn bullet_glyph() -> &'static str {
+    if legacy_conhost() { "*" } else { "•" }
+}
+
+fn star_glyph() -> &'static str {
+    if legacy_conhost() { "*" } else { "★" }
+}
+
+/// The marks around a placeholder in a path preview.
+fn angle_glyphs() -> (&'static str, &'static str) {
+    if legacy_conhost() { ("<", ">") } else { ("‹", "›") }
+}
+
 /// A 1-row text button: dim at rest, bright under the pointer; the
 /// accent when it is the row's one way forward. Returns its width.
 fn text_button(frame: &mut Frame, gui: &mut Gui, x: u16, y: u16, label: &str, lead: bool, act: Act) -> u16 {
