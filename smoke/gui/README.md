@@ -88,6 +88,16 @@ url = "http://127.0.0.1:3041"
   click on the band seeks, a click on `2:Auto-DJ` opens that tab, `0` goes
   back to the Library. The GUI's bar (its `auto-dj` frame) is absent while
   the screen is up.
+- `vizwindow` — the visualizer window on B (visualizer-window contract):
+  a row playing, `V` spawns the `viz-window` child and the top bar's item
+  lights, a second `V` raises rather than spawns, and quitting the player
+  takes the child with it. Proves the process and the pipe; the window's
+  pixels are a manual look (the window is titled `mStream Visualizer — …`).
+- `statspage` — the Stats screen on B (stats-screen contract): the top
+  bar's third tab hosts the stats page whole under the bar, loading the
+  period's totals on entry; `→` walks the page's tabs, Esc and `T` go
+  back to the Library, `T` opens it again; the GUI's bar and nav are
+  absent while the screen is up.
 - `actions` — track actions on B (track-actions contract): a hovered Files
   row's `[⋯]` opens the sheet naming the track, a star rates it and the
   server keeps it (Song Info shows the rating back), Song Info lists the

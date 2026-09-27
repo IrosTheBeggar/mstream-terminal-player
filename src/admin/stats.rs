@@ -377,10 +377,14 @@ pub(crate) struct Page {
     tscroll: usize,
     sel_anchor: Option<usize>,
     ui: Surface<Act>,
+    /// Drawn inside another shell — the GUI's Stats screen (the stats-screen
+    /// contract): no header row and no tips row of its own, the host's top
+    /// bar and footer carry those, and the ground is the host's.
+    hosted: bool,
 }
 
 /// The page, loading: what `mstream-player stats` opens.
-pub(super) fn start(client: Client, username: Option<String>) -> Page {
+pub(crate) fn start(client: Client, username: Option<String>) -> Page {
     let mut page = Page::new(client, username, tz::local());
     page.reload(true);
     page
@@ -418,6 +422,7 @@ impl Page {
             tscroll: 0,
             sel_anchor: None,
             ui: Surface::new(),
+            hosted: false,
         }
     }
 
@@ -455,6 +460,18 @@ impl Page {
     }
 
     /// Ask for everything again, for the period and origin as they stand.
+    /// The page as the GUI's Stats screen hosts it.
+    pub(crate) fn hosted(mut self) -> Self {
+        self.hosted = true;
+        self
+    }
+
+    /// Whether one of the page's own modals — the period list, the forget
+    /// gate — is up: it keeps every key while it is.
+    pub(crate) fn modal_open(&self) -> bool {
+        !matches!(self.modal, Modal::None)
+    }
+
     fn reload(&mut self, loud: bool) {
         self.seq += 1;
         let op = Op::Load {
@@ -840,7 +857,26 @@ fn handle_key(page: &mut Page, key: KeyEvent) -> Option<Outcome> {
 fn render(frame: &mut Frame, page: &mut Page) {
     page.ui.begin_frame();
     let Some(area) = frame_ground(frame, MIN_W, MIN_H) else { return };
+    let host = host_of(&page.client);
+    let right = match &page.username {
+        Some(user) => format!("{host} · {}", printable(user, 64)),
+        None => host,
+    };
+    draw_header_as(frame, area, &t!("sta.title"), &right);
+    draw_page(frame, page, area);
+}
 
+/// The page inside another shell's area (the GUI's Stats screen): no
+/// header — the host's top bar names the server — and no tips row — the
+/// host's footer carries [`footer_hint`] — on the ground the host painted.
+/// The area's first row stays blank, as the page's own header row does,
+/// and the note takes the last.
+pub(crate) fn render_hosted(frame: &mut Frame, page: &mut Page, area: Rect) {
+    page.ui.begin_frame();
+    draw_page(frame, page, area);
+}
+
+fn draw_page(frame: &mut Frame, page: &mut Page, area: Rect) {
     // A modal makes the page beneath INERT: the base draw sees no pointer,
     // and every rect it registered is dropped before the modal draws.
     let modal_open = !matches!(page.modal, Modal::None);
@@ -849,15 +885,17 @@ fn render(frame: &mut Frame, page: &mut Page) {
         page.ui.pointer = None;
     }
 
-    let host = host_of(&page.client);
-    let right = match &page.username {
-        Some(user) => format!("{host} · {}", printable(user, 64)),
-        None => host,
-    };
-    draw_header_as(frame, area, &t!("sta.title"), &right);
     // The bottom edge is the note and the tips; the page keeps the row
     // above them, which the rooms leave blank — a chart's axis lands there.
-    let column = Rect { x: 2, y: 2, width: area.width.saturating_sub(4), height: area.height.saturating_sub(4) };
+    // Hosted, the header row and the tips row are the host's: one blank
+    // row under its bar, the note on the area's last row.
+    let (top, bottom) = if page.hosted { (1, 1) } else { (2, 2) };
+    let column = Rect {
+        x: area.x + 2,
+        y: area.y + top,
+        width: area.width.saturating_sub(4),
+        height: area.height.saturating_sub(top + bottom),
+    };
     draw_body(frame, page, column);
 
     // The cursor row's own line, when nothing louder holds the note line.
@@ -866,7 +904,18 @@ fn render(frame: &mut Frame, page: &mut Page) {
         _ => None,
     };
     let note = page.note.clone().or(row_note);
-    draw_bottom(frame, area, note.as_ref(), page.busy.as_deref(), &footer_hint(page));
+    if page.hosted {
+        let line = Rect { x: area.x + 2, y: area.bottom().saturating_sub(1), width: area.width.saturating_sub(4), height: 1 };
+        if let Some((text, is_err)) = &note {
+            let style = if *is_err { Style::default().fg(th().gold) } else { dim() };
+            frame.render_widget(Paragraph::new(Span::styled(text.clone(), style)), line);
+        }
+        if let Some(busy) = &page.busy {
+            frame.render_widget(Paragraph::new(Span::styled(busy.clone(), crate::kit::accent())), line);
+        }
+    } else {
+        draw_bottom(frame, area, note.as_ref(), page.busy.as_deref(), &footer_hint(page));
+    }
 
     if modal_open {
         page.ui.pointer = live_pointer;
@@ -881,7 +930,7 @@ fn render(frame: &mut Frame, page: &mut Page) {
 
 /// The tips line: what the keys do here, in the order the design lists
 /// them — the origin only while the control is drawn.
-fn footer_hint(page: &Page) -> String {
+pub(crate) fn footer_hint(page: &Page) -> String {
     match &page.modal {
         Modal::Period(_) => return t!("sta.hint_period_modal", period = page.period.name.clone()).to_string(),
         Modal::Forget(_) => return t!("sta.hint_forget_modal").to_string(),
@@ -2297,6 +2346,28 @@ mod tests {
 
     fn note(page: &Page) -> String {
         page.note.as_ref().map(|(text, _)| text.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn hosted_the_page_draws_no_header_and_no_tips_and_puts_its_note_last() {
+        // The GUI's Stats screen (stats-screen contract, clause 1): the top
+        // bar is the header and the footer carries the hint, so the page
+        // draws neither; its note keeps the area's last row.
+        let _en = english();
+        let mut p = ready().hosted();
+        press(&mut p, KeyCode::Right);
+        assert_eq!(p.tab, Tab::Top);
+        press(&mut p, KeyCode::Down);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let area = Rect { x: 0, y: 1, width: 100, height: 28 };
+        terminal.draw(|frame| render_hosted(frame, &mut p, area)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row = |y: u16| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>();
+        assert!(row(0).trim().is_empty() && row(1).trim().is_empty(), "no header, and the row under the host's bar stays blank");
+        assert!(row(2).contains("388 plays"), "the state line is the body's first row: {}", row(2));
+        assert!(row(28).contains(" · "), "the cursor row's words take the area's last row: {}", row(28));
+        assert!(row(29).trim().is_empty(), "no tips row of its own: {}", row(29));
+        assert!(!footer_hint(&p).is_empty(), "the host asks for the hint instead");
     }
 
     fn draw(page: &mut Page) -> String {

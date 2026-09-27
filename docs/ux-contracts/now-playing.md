@@ -146,6 +146,10 @@ names the tab, `gui.tips.now` the keys on the footer (ten locales).
   The Settings sub-rooms are the Library screen's. The GUI boots the
   system language now, as the wizard does; the view's own words stay the
   TUI's English.
+- **2026-09-27 — A third tab.** Stats stands beside Now Playing on the
+  top bar and hosts the stats page the same way this screen hosts the
+  TUI's view (the stats-screen contract); `T` opens it from anywhere as
+  `0` opens this one, and from here too.
 - **2026-09-26 — The follow-ups.** The note on the keys row stops short
   of the modes readout wherever the view put it (clause 9), instead of
   forty fixed cells. An e2e leg (`test/e2e/legs/gui-now.exp`) drives the

@@ -1326,6 +1326,8 @@ gui:
   top:
     library: "音乐库"
     now: "正在播放"
+    viz: "可视化"
+    viz_tip: "在独立窗口中打开可视化 — V"
   nav:
     files: "文件"
     library: "媒体库"
@@ -1729,13 +1731,18 @@ gui:
     received_add: "添加到 mStream"
     received_dont_ask: "始终添加到 mStream，不再询问"
     back_tip: "返回设置 — Esc"
+  stats:
+    no_session: "没有会话 — 连接服务器后，收听记录会显示在这里"
+  viz:
+    failed: "无法打开可视化窗口 — %{why}"
   tips:
     search_edit: "输入 · Enter 搜索 · Esc 完成"
     search: "↑ ↓ 移动 · Enter 打开/播放 · h 返回 · ← → 类别 · t 切换 · / 编辑 · a 入队 · q 退出"
     files: "↑ ↓ 移动 · Enter 打开/播放 · h 返回 · a 入队 · Tab 队列 · Space 播放/暂停 · q 退出 · f 筛选"
     rows: "↑ ↓ 行 · ← → 调整 · Enter 切换 · Esc 完成 · 1-8 版块 · q 退出"
-    base: "1-8 版块 · Tab 队列 · Space 播放/暂停 · -/+ 音量 · D Auto DJ · q 退出"
+    base: "1-8 版块 · Tab 队列 · Space 播放/暂停 · -/+ 音量 · D Auto DJ · T 统计 · q 退出"
     now: "1-5 标签 · ↑ ↓ 列表 · Enter 播放 · 空格 播放/暂停 · -/+ 音量 · m 操作 · 0 音乐库"
+    stats_back: "Esc 曲库"
     servers: "↑ ↓ 行 · Enter 切换 · e 编辑 · d 默认 · p 配对 · x 移除 · Esc 返回"
     servers_bundled: "↑ ↓ 行 · Enter 切换 · e 编辑 · d 默认 · p 配对 · Esc 返回"
     servers_peer: "↑ ↓ 行 · Enter 切换 · h 隐藏/显示 · d 默认 · Esc 返回"

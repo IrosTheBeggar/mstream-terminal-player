@@ -1326,6 +1326,8 @@ gui:
   top:
     library: "Biblioteca"
     now: "Reproduciendo"
+    viz: "Visualizador"
+    viz_tip: "Abrir el visualizador en su propia ventana — V"
   nav:
     files: "Archivos"
     library: "BIBLIOTECA"
@@ -1729,13 +1731,18 @@ gui:
     received_add: "Añadir a mStream"
     received_dont_ask: "Añadir siempre a mStream, no volver a preguntar"
     back_tip: "Volver a Ajustes — Esc"
+  stats:
+    no_session: "sin sesión — conéctate a un servidor y su registro de escucha aparecerá aquí"
+  viz:
+    failed: "no se pudo abrir la ventana del visualizador — %{why}"
   tips:
     search_edit: "escribe · Enter buscar · Esc listo"
     search: "↑ ↓ mover · Enter abrir · h atrás · ← → clase · t alternar · / editar · a encolar · q salir"
     files: "↑ ↓ mover · Enter abrir · h atrás · a encolar · Tab cola · Espacio pausa · f filtrar · q salir"
     rows: "↑ ↓ filas · ← → ajustar · Enter alternar · Esc listo · 1-8 secciones · q salir"
-    base: "1-8 secciones · Tab cola · Space reproducir · -/+ volumen · D Auto DJ · q salir"
+    base: "1-8 secciones · Tab cola · Space reproducir · -/+ volumen · D Auto DJ · T estadísticas · q salir"
     now: "1-5 pestañas · ↑ ↓ lista · Enter reproducir · Espacio pausa · -/+ vol · m acciones · 0 biblioteca"
+    stats_back: "Esc biblioteca"
     servers: "↑ ↓ filas · Enter cambiar · e editar · d predeterminado · p emparejar · x quitar · Esc volver"
     servers_bundled: "↑ ↓ filas · Enter cambiar · e editar · d predeterminado · p emparejar · Esc volver"
     servers_peer: "↑ ↓ filas · Enter cambiar · h ocultar/mostrar · d predeterminado · Esc volver"

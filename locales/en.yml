@@ -1326,6 +1326,8 @@ gui:
   top:
     library: "Library"
     now: "Now Playing"
+    viz: "Visualizer"
+    viz_tip: "Open the visualizer in its own window — V"
   nav:
     files: "Files"
     library: "LIBRARY"
@@ -1729,13 +1731,18 @@ gui:
     received_add: "Add to mStream"
     received_dont_ask: "Always add to mStream, don't ask again"
     back_tip: "Back to Settings — Esc"
+  stats:
+    no_session: "no session — connect to a server and its listening log opens here"
+  viz:
+    failed: "the visualizer window could not open — %{why}"
   tips:
     search_edit: "type · Enter search · Esc done"
     search: "↑ ↓ move · Enter open/play · h back · ← → class · t toggle · / edit · a queue · q quit"
     files: "↑ ↓ move · Enter open/play · h back · a queue · Tab queue · Space play/pause · f filter · q quit"
     rows: "↑ ↓ rows · ← → adjust · Enter toggle · Esc done · 1-8 sections · q quit"
-    base: "1-8 sections · Tab queue · Space play/pause · -/+ volume · D Auto DJ · q quit"
+    base: "1-8 sections · Tab queue · Space play/pause · -/+ volume · D Auto DJ · T stats · q quit"
     now: "1-5 tabs · ↑ ↓ list · Enter play · Space play/pause · -/+ volume · m actions · 0 library"
+    stats_back: "Esc library"
     servers: "↑ ↓ rows · Enter switch · e edit · d default · p pair · x remove · Esc back"
     servers_bundled: "↑ ↓ rows · Enter switch · e edit · d default · p pair · Esc back"
     servers_peer: "↑ ↓ rows · Enter switch · h hide/show · d default · Esc back"

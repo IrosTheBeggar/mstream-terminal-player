@@ -37,6 +37,10 @@ mod serve;
 /// no GPU path yet, and none of this belongs in it until it does.
 #[cfg(not(target_arch = "wasm32"))]
 mod shader;
+/// The visualizer's window: a child process of the player (PLAN.md, Phase
+/// 11.1; docs/ux-contracts/visualizer-window.md).
+#[cfg(not(target_arch = "wasm32"))]
+mod viz_window;
 #[cfg(not(target_arch = "wasm32"))]
 mod gui;
 #[cfg(not(target_arch = "wasm32"))]
@@ -251,6 +255,9 @@ enum Command {
     GraphicsProbe,
     /// Draw the visualizer presets on this machine's GPU (diagnostic)
     VizProbe(cmd_viz::VizProbeArgs),
+    /// The visualizer's window — the player opens it as a child process
+    #[command(hide = true)]
+    VizWindow(viz_window::WindowArgs),
     /// Drive the interactive player from a script (smoke testing)
     Replay(replay::ReplayArgs),
     /// Print the key bindings as a config.toml section, ready to edit
@@ -442,6 +449,7 @@ fn main() {
         }
         (Some(Command::GraphicsProbe), _) => std::process::exit(cmd_graphics::run()),
         (Some(Command::VizProbe(args)), _) => std::process::exit(cmd_viz::run(args)),
+        (Some(Command::VizWindow(args)), _) => std::process::exit(viz_window::run(args)),
         (Some(Command::Replay(args)), _) => std::process::exit(replay::run(args)),
         (Some(Command::Keys), _) => {
             // The bindings in force, not the built-in ones: someone asking
