@@ -773,14 +773,17 @@ pub(crate) fn submit_form(gui: &mut Gui) {
                 }
                 entry.self_signed = self_signed;
             }
-            if moved
-                && config.default_server.as_deref().is_some_and(|d| config::same_server(d, &old))
-            {
-                config.default_server = Some(new_url.clone());
+            if moved {
+                config::follow_rename(config, &old, &new_url);
             }
         });
         if saved {
             if moved {
+                // What the App holds under the old identity — queued rows,
+                // owed plays, the session, the DJ — follows, and the book is
+                // reread.
+                gui.app.rename_server(&old, &new_url);
+                super::refresh_book(gui);
                 // The token was issued to the same server under its old
                 // spelling; it moves with the entry.
                 if let Some(token) = config::token_for(&credentials, &old) {
@@ -911,10 +914,10 @@ fn apply_outcome(gui: &mut Gui, outcome: Outcome) {
                     entry.username = username.clone();
                     entry.self_signed = self_signed;
                 }
-                if moved
-                    && config.default_server.as_deref().is_some_and(|d| config::same_server(d, old))
-                {
-                    config.default_server = Some(url.clone());
+                // The URL is the identity (contract clause 1): the default,
+                // the peers reached through it and the DJ's server follow.
+                if moved {
+                    config::follow_rename(config, old, &url);
                 }
             }
             None => {
@@ -939,6 +942,10 @@ fn apply_outcome(gui: &mut Gui, outcome: Outcome) {
             config::store_token(credentials, old, None);
         }
         gui.servers.versions.remove(old);
+        // What the App holds under the old identity — queued rows, owed
+        // plays, the session, the DJ — follows too, and the book is reread.
+        gui.app.rename_server(old, &url);
+        super::refresh_book(gui);
     }
     if let Some(mut credentials) = credentials {
         config::store_token(&mut credentials, &url, token);
@@ -2770,6 +2777,54 @@ mod tests {
         let credentials = config::load_credentials().unwrap();
         assert_eq!(config::token_for(&credentials, "http://attic.lan:3000"), Some("jwt".into()));
         assert_eq!(config::token_for(&credentials, "http://attic.local:3000"), None);
+    }
+
+    #[test]
+    fn editing_a_parents_url_carries_its_peers_its_rows_and_the_dj_along() {
+        // The review's finding: the URL is the identity, and an edit
+        // rewrote only the entry — its peers said they had no parent at the
+        // next switch, and the queued rows failed at the next launch.
+        let scratch = Scratch::new("gui-edit-parent");
+        let _ = &scratch;
+        let (old, new) = ("http://attic.local:3000", "http://attic.lan:3000");
+        let mut config = Config::default();
+        let mut shed = entry(&config::peer_identity(old, 7), None);
+        shed.peer = Some(config::PeerEntry {
+            parent: old.into(),
+            id: 7,
+            name: "Shed".into(),
+            missing: false,
+            hidden: false,
+        });
+        config.servers = vec![entry(old, Some("paul")), shed];
+        config.player.autodj_server = Some(config::peer_identity(old, 7));
+        config::save(&config).unwrap();
+
+        let mut gui = Gui::new(config, true, App::new(None, None, None));
+        let mut on_parent = crate::tui::app::Queued {
+            dj: None,
+            origin: crate::tui::app::Origin { server: old.into(), peer: None },
+            track: crate::api::types::Track { filepath: "a.mp3".into(), metadata: Default::default() },
+        };
+        let mut on_peer = on_parent.clone();
+        on_peer.origin.peer = Some(7);
+        on_parent.track.filepath = "b.mp3".into();
+        gui.app.queue.items = vec![on_parent, on_peer];
+        gui.app.dj_server = Some(config::peer_identity(old, 7));
+
+        open_edit(&mut gui, 0);
+        gui.servers.form.as_mut().unwrap().server = new.into();
+        submit_form(&mut gui);
+
+        let reloaded = config::load().unwrap();
+        let peer = reloaded.servers.iter().find(|s| s.peer.is_some()).expect("the peer entry stays");
+        assert_eq!(peer.peer.as_ref().unwrap().parent, new, "the peer's parent link follows");
+        assert_eq!(peer.url, config::peer_identity(new, 7), "and so does its minted identity");
+        assert_eq!(reloaded.player.autodj_server.as_deref(), Some(config::peer_identity(new, 7).as_str()));
+        assert!(gui.app.queue.items.iter().all(|i| i.origin.server == new), "{:?}", gui.app.queue.items);
+        assert_eq!(gui.app.dj_server.as_deref(), Some(config::peer_identity(new, 7).as_str()));
+        assert!(gui.app.servers.iter().any(|s| s.id == new), "the App's book is reread");
+        assert!(gui.app.servers.iter().any(|s| s.peer.as_ref().is_some_and(|(p, _)| p == new)));
     }
 
     #[test]

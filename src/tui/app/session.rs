@@ -281,6 +281,45 @@ impl App {
         }
     }
 
+    /// The saved server `old` was re-addressed as `new` (the servers room's
+    /// edit; multi-server clause 1): every reference the App holds follows
+    /// — the queued rows' origins and the plays owed under them, the
+    /// session's own identity or its peer's parent, the DJ's server.
+    pub(crate) fn rename_server(&mut self, old: &str, new: &str) {
+        let rename = |id: &mut String| {
+            if let Some(renamed) = crate::config::renamed_identity(id, old, new) {
+                *id = renamed;
+            }
+        };
+        for item in &mut self.queue.items {
+            rename(&mut item.origin.server);
+        }
+        for owed in &mut self.stats.outbox {
+            rename(&mut owed.origin.server);
+        }
+        if let Some(session) = self.stats.session.as_mut() {
+            rename(&mut session.origin.server);
+        }
+        let backoff = std::mem::take(&mut self.stats.backoff);
+        self.stats.backoff = backoff
+            .into_iter()
+            .map(|(mut server, until)| {
+                rename(&mut server);
+                (server, until)
+            })
+            .collect();
+        rename(&mut self.session.server_id);
+        if let Some((parent, _)) = self.session.peer.as_mut() {
+            rename(parent);
+        }
+        if let Some(server) = self.dj_server.as_mut() {
+            rename(server);
+        }
+        if let Some(target) = self.dj_target.as_mut() {
+            rename(target);
+        }
+    }
+
     /// The peer a sign-in at `identity` is for: the session's own, when
     /// the identity is that peer's parent. A peer has no accounts of its
     /// own — the parent's token went stale, the parent takes the sign-in —
