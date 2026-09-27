@@ -1747,6 +1747,21 @@ fn dj_log_name(identity: &str) -> String {
 /// The two keys a pool is asked with, let go of together (clause 30).
 const SONIC_KEYS: [&str; 2] = ["similarTo", "minSimilarity"];
 
+/// Whether the body that went out carried the pool — the queue's badge
+/// follows this, not the ask (clause 60): the learner may have dropped the
+/// keys between the two.
+fn sent_with_pool(body: &serde_json::Value) -> bool {
+    SONIC_KEYS.iter().all(|key| body.get(*key).is_some())
+}
+
+/// A preview's lane, apart from the lane it previews (clause 53): what its
+/// degrade lets go of is its own, never the running lane's pool.
+const PREVIEW_LANE: u64 = 1 << 63;
+
+fn preview_lane(epoch: u64) -> u64 {
+    epoch | PREVIEW_LANE
+}
+
 
 /// Which keys a server will not take — learned from a `"<key>" is not
 /// allowed` rejection for the rest of the process (clause 25) — and which a
@@ -1758,7 +1773,9 @@ const SONIC_KEYS: [&str; 2] = ["similarTo", "minSimilarity"];
 #[derive(Default)]
 struct DjLearner {
     rejected: std::collections::HashMap<String, std::collections::HashSet<String>>,
-    suppressed: std::collections::HashMap<String, (u64, std::collections::HashSet<String>)>,
+    /// By server, then by lane: a preview's lane and the running lane's
+    /// never read or write each other's.
+    suppressed: std::collections::HashMap<String, std::collections::HashMap<u64, std::collections::HashSet<String>>>,
 }
 
 fn learner() -> std::sync::MutexGuard<'static, DjLearner> {
@@ -1772,8 +1789,7 @@ impl DjLearner {
         let mut dropped = Vec::new();
         let Some(map) = body.as_object_mut() else { return dropped };
         let rejected = self.rejected.get(identity);
-        let suppressed =
-            self.suppressed.get(identity).filter(|(e, _)| *e == epoch).map(|(_, keys)| keys);
+        let suppressed = self.suppressed.get(identity).and_then(|lanes| lanes.get(&epoch));
         map.retain(|key, _| {
             let gone = rejected.is_some_and(|r| r.contains(key))
                 || suppressed.is_some_and(|s| s.contains(key));
@@ -1794,20 +1810,21 @@ impl DjLearner {
     /// Keys a lane lets go of — valid, but the server cannot act on them
     /// now (a pool with nothing in range, a library not yet scanned).
     fn suppress(&mut self, identity: &str, epoch: u64, keys: &[&str]) {
-        let entry = self.suppressed.entry(identity.to_string()).or_insert((epoch, Default::default()));
-        if entry.0 != epoch {
-            *entry = (epoch, Default::default());
-        }
+        let lanes = self.suppressed.entry(identity.to_string()).or_default();
+        // A new lane of the running kind supersedes the old one; a
+        // preview's lane sits beside whatever is running.
+        lanes.retain(|lane, _| *lane & PREVIEW_LANE != 0 || *lane == epoch || epoch & PREVIEW_LANE != 0);
+        let set = lanes.entry(epoch).or_default();
         for key in keys {
-            entry.1.insert((*key).to_string());
+            set.insert((*key).to_string());
         }
     }
 
     fn all_suppressed(&self, identity: &str, epoch: u64, keys: &[&str]) -> bool {
         self.suppressed
             .get(identity)
-            .filter(|(e, _)| *e == epoch)
-            .is_some_and(|(_, set)| keys.iter().all(|k| set.contains(*k)))
+            .and_then(|lanes| lanes.get(&epoch))
+            .is_some_and(|set| keys.iter().all(|k| set.contains(*k)))
     }
 }
 
@@ -1895,7 +1912,8 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
         ask = ask.without_sonic();
     }
     let mut note: Option<DjNote> = None;
-    let mut last: Option<crate::api::types::RandomSongsResponse> = None;
+    // The last answer blocked in full, and whether its body carried the pool.
+    let mut last: Option<(crate::api::types::RandomSongsResponse, bool)> = None;
     let mut attempts = 0;
     while attempts < 5 {
         attempts += 1;
@@ -1928,7 +1946,7 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
         }
         match answer {
             Ok(response) => {
-                let sonic = ask.sonic_asked();
+                let sonic = sent_with_pool(&sent);
                 if response.songs.is_empty() {
                     return Picked { failure: Some(DjFailure::NoMatch), ..Picked { songs: Vec::new(), ignore_list: response.ignore_list, sonic, note, pool: response.sonic, failure: None } };
                 }
@@ -1941,7 +1959,7 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
                 // is different candidates.
                 dj_log(format!("[dj] {name}: every song of the answer was a keyword hit — asking again"));
                 ask.ignore_list = response.ignore_list.clone();
-                last = Some(response);
+                last = Some((response, sonic));
             }
             Err(err) => match classify(&err, ask.sonic_asked()) {
                 Refusal::Degrade(say) => {
@@ -1970,10 +1988,10 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
     // Every try was blocked in full: the last answer whole, rather than a
     // queue stalled forever by an over-eager filter (clause 26).
     match last {
-        Some(response) => Picked {
+        Some((response, sonic)) => Picked {
             songs: response.songs,
             ignore_list: response.ignore_list,
-            sonic: ask.sonic_asked(),
+            sonic,
             note,
             pool: response.sonic,
             failure: None,
@@ -2004,6 +2022,9 @@ pub(crate) async fn autodj_sample(
 ) -> Result<Event, ApiError> {
     let mut scratch = request.clone();
     scratch.ask.opener = false;
+    // Its own lane: a pool this preview cannot honour is let go of here
+    // and nowhere else — the running lane keeps asking for its pool.
+    scratch.epoch = preview_lane(request.epoch);
     let mut tracks: Vec<Track> = Vec::new();
     let mut pool = None;
     let mut note = None;
@@ -2505,6 +2526,31 @@ mod tests {
         assert!(learned.filter("http://other", 7, &mut other).is_empty(), "keyed by server");
         assert!(learned.all_suppressed("http://s", 7, &SONIC_KEYS));
         assert!(!learned.all_suppressed("http://s", 8, &SONIC_KEYS));
+        // The running lane moved on: the old lane's pool is forgotten.
+        learned.suppress("http://s", 8, &SONIC_KEYS);
+        assert!(!learned.all_suppressed("http://s", 7, &SONIC_KEYS));
+    }
+
+    #[test]
+    fn a_previews_degrade_is_its_own_lanes_not_the_running_ones() {
+        // The review's finding: a Preview whose pool failed suppressed the
+        // running lane's pool, so the next real turn went out plain.
+        let mut learned = DjLearner::default();
+        learned.suppress("http://s", preview_lane(7), &SONIC_KEYS);
+        assert!(!learned.all_suppressed("http://s", 7, &SONIC_KEYS), "the lane keeps its pool");
+        assert!(learned.all_suppressed("http://s", preview_lane(7), &SONIC_KEYS), "the preview remembers its own");
+        let mut lane = serde_json::json!({"similarTo": ["a"], "minSimilarity": 0.5});
+        assert!(learned.filter("http://s", 7, &mut lane).is_empty());
+        // And the lane's degrade leaves the preview's lane standing.
+        learned.suppress("http://s", 7, &SONIC_KEYS);
+        assert!(learned.all_suppressed("http://s", preview_lane(7), &SONIC_KEYS));
+        assert!(learned.all_suppressed("http://s", 7, &SONIC_KEYS));
+    }
+
+    #[test]
+    fn the_badge_follows_the_body_that_went_out() {
+        assert!(sent_with_pool(&serde_json::json!({"similarTo": ["a"], "minSimilarity": 0.5})));
+        assert!(!sent_with_pool(&serde_json::json!({"limit": 4})), "the learner dropped the pool: no badge");
     }
 
     /// The rig leg (plan T4): the real api thread against two live mStream

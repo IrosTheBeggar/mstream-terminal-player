@@ -2030,7 +2030,7 @@ impl App {
         self.blend_skips = prefs.blend_skips;
         self.pause_fade = prefs.pause_fade;
         self.resume_queue = prefs.resume_queue;
-        self.dj = dj::Settings::from_prefs(&prefs.dj);
+        self.dj = dj::Settings::from_prefs(&prefs.dj, &prefs.autodj);
         self
     }
 

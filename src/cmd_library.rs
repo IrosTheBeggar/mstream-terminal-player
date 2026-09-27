@@ -180,7 +180,7 @@ pub fn dj(args: DjArgs) -> i32 {
             // (finding #65). A config too broken to read is not worth
             // failing over here: the defaults are what a fresh install runs.
             let settings = match config::load() {
-                Ok(config) => crate::dj::Settings::from_prefs(&config.player.dj),
+                Ok(config) => crate::dj::Settings::from_prefs(&config.player.dj, &config.player.autodj),
                 Err(e) => {
                     eprintln!("warning: using default Auto-DJ settings — {e}");
                     crate::dj::Settings::default()
@@ -226,6 +226,7 @@ pub fn dj(args: DjArgs) -> i32 {
                 ignore_list: Vec::new(),
                 recent_artists: Vec::new(),
                 opener: false,
+                server_version: None,
                 settings,
             };
             let mut request = ask.request();
