@@ -147,6 +147,10 @@ impl Action {
             Action::Activate => "open",
             Action::Back => "back",
             Action::AddToQueue => "add-to-queue",
+            Action::AddNext => "add-next",
+            Action::PlayNow => "play-now",
+            Action::MoveQueueUp => "queue-row-up",
+            Action::MoveQueueDown => "queue-row-down",
             Action::CycleFocus => "switch-pane",
             Action::SelectTab(0) => "tab-1",
             Action::SelectTab(1) => "tab-2",
@@ -174,6 +178,8 @@ impl Action {
             Action::ToggleRepeat => "repeat",
             Action::ToggleShuffle => "shuffle",
             Action::ToggleAutoDj => "auto-dj",
+            Action::DjSurprise => "dj-surprise",
+            Action::DjPick => "dj-pick",
             Action::StartJourney => "sonic-path",
             Action::ToggleHelp => "help",
             // Nameable because the browser binds it: it is what Esc means
@@ -253,6 +259,8 @@ fn default_normal() -> Vec<Binding> {
         help: Some("go back"),
     },
     Binding { keys: vec![ch('a')], action: Action::AddToQueue, help: Some("add to queue") },
+    Binding { keys: vec![ch('N')], action: Action::AddNext, help: Some("add next") },
+    Binding { keys: vec![ch('P')], action: Action::PlayNow, help: Some("play now") },
     Binding {
         keys: vec![key(KeyCode::Tab)],
         action: Action::CycleFocus,
@@ -321,6 +329,8 @@ fn default_normal() -> Vec<Binding> {
         help: Some("remove from queue"),
     },
     Binding { keys: vec![ch('C')], action: Action::ClearQueue, help: Some("clear the queue") },
+    Binding { keys: vec![ch('<')], action: Action::MoveQueueUp, help: Some("queued row up") },
+    Binding { keys: vec![ch('>')], action: Action::MoveQueueDown, help: Some("queued row down") },
     Binding { keys: vec![ch('r')], action: Action::ToggleRepeat, help: Some("repeat") },
     Binding { keys: vec![ch('s')], action: Action::ToggleShuffle, help: Some("shuffle") },
     Binding { keys: vec![ch('A')], action: Action::ToggleAutoDj, help: Some("auto-dj on / off") },
@@ -563,6 +573,18 @@ impl Keymap {
         None
     }
 
+    /// The keys bound to `action` in the normal table, as the help screen
+    /// writes them — for a hint that names a key rather than assumes one.
+    /// Empty when the user unbound it.
+    pub fn keys_of(&self, action: &Action) -> String {
+        self.normal
+            .iter()
+            .filter(|binding| binding.action == *action)
+            .flat_map(|binding| binding.keys.iter().map(|k| k.label()))
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
     /// The rows the help screen draws, in table order.
     pub fn help_rows(&self) -> Vec<(String, &'static str)> {
         self.normal
@@ -595,6 +617,15 @@ impl Keymap {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_hint_can_ask_which_key_an_action_wears() {
+        // The Auto-DJ tab's keyword row said `x removes the last` while
+        // nothing bound x (the review's finding): the hint asks the map.
+        let map = super::Keymap::default();
+        assert_eq!(map.keys_of(&super::Action::RemoveFromQueue), "d");
+        assert_eq!(map.keys_of(&super::Action::VolumeUp), "+/=");
+    }
+
     use super::*;
 
     #[test]

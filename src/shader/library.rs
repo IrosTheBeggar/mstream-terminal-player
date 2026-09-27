@@ -22,7 +22,7 @@ macro_rules! builtin {
 /// All of them but `04-cyber-fuji.glsl`, which is CC BY 3.0 where every
 /// other preset is MIT or CC0. It stays vendored, and the tests still hold
 /// it to the same bar, but it is not compiled into a GPL-3.0 binary until
-/// that combination is settled (PLAN.md, Phase 10 watch items).
+/// that combination is settled (PLAN.md, Phase 11 watch items).
 pub const BUILTIN: [Builtin; 8] = [
     builtin!("01-spectrum-bars.glsl"),
     builtin!("02-audio-tunnel.glsl"),

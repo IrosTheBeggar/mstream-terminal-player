@@ -3,7 +3,7 @@
 # NAS and Raspberry Pi installs `serve` runs on. A library in NEEDED that the
 # box lacks stops the process before main, whatever it was linked for. So
 # nothing that talks to a display or a GPU may be linked: wgpu and winit open
-# theirs at run time instead (PLAN.md, Phase 10), and this holds the build to
+# theirs at run time instead (PLAN.md, Phase 11), and this holds the build to
 # that. Prints the whole NEEDED list either way, for the record.
 #
 # usage: test/linkage.sh <ELF binary>

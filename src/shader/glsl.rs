@@ -6,7 +6,7 @@
 //! source becomes Metal, HLSL, SPIR-V or desktop GLSL — and naga reads
 //! Vulkan-flavoured GLSL 4.50 with three differences that matter, each
 //! found by compiling all fifteen passes of the nine presets through every
-//! backend (PLAN.md, Phase 10):
+//! backend (PLAN.md, Phase 11):
 //!
 //! - **No combined samplers.** A `uniform sampler2D` is refused outright.
 //!   So each channel is a `texture2D` beside one shared `sampler`, and

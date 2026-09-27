@@ -7,7 +7,7 @@
 //! a ping-pong pair per buffer — and draws a frame into any RGBA8 view.
 //!
 //! Offscreen for now: `viz-probe` draws every preset into a texture and
-//! reads it back. The window (Phase 10.1) hands the same [`Scene::draw`]
+//! reads it back. The window (Phase 11.1) hands the same [`Scene::draw`]
 //! its surface's view instead.
 
 use std::borrow::Cow;

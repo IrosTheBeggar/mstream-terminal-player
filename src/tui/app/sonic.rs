@@ -67,7 +67,9 @@ impl App {
         self.sonic.fetched = false;
         self.sonic.note = None;
         self.sonic.end = Some(picked);
-        if self.sonic.start.is_none() {
+        // What is playing is the natural start — when it is this server's
+        // (clause 1); a row from another server leaves the start open.
+        if self.sonic.start.is_none() && self.playing_is_sessions() {
             self.sonic.start = self.now_playing.clone();
         }
         self.sonic_stack.restart();
@@ -84,7 +86,7 @@ impl App {
 
     /// Everything about the path forgotten — what a fresh connection gets,
     /// and what "Start over" does.
-    pub(super) fn reset_sonic_path(&mut self) {
+    pub(crate) fn reset_sonic_path(&mut self) {
         self.sonic = SonicPath::default();
         self.capture = None;
         self.sonic_playlist_name = None;
@@ -231,6 +233,9 @@ impl App {
     /// that it is still waiting, why it came back empty, or the server's own
     /// note about a short or short-circuited arc.
     fn sonic_status(&self) -> Option<String> {
+        if self.sonic.probe {
+            return Some("asking the server why\u{2026}".to_string());
+        }
         if self.sonic.pending {
             return Some("plotting the path\u{2026}".to_string());
         }
@@ -331,7 +336,7 @@ impl App {
 
     // ── Doing things ────────────────────────────────────────────────────────
 
-    pub(super) fn activate_sonic_row(&mut self, row: SonicRow) -> Vec<Effect> {
+    pub(crate) fn activate_sonic_row(&mut self, row: SonicRow) -> Vec<Effect> {
         match row {
             SonicRow::End(side) => {
                 self.sonic_stack.enter(SonicNode::Side(side));
@@ -354,6 +359,12 @@ impl App {
                     self.error("nothing is playing right now");
                     return Vec::new();
                 };
+                // A path is plotted on ONE server's index (clause 1): a row
+                // playing from another server is not a seed here.
+                if !self.playing_is_sessions() {
+                    self.error(format!("pick a track on {}", self.server_display()));
+                    return Vec::new();
+                }
                 self.capture_sonic_side(side, track)
             }
             SonicRow::PickFromLibrary => {
@@ -370,7 +381,8 @@ impl App {
                 if self.sonic.stops.is_empty() {
                     return Vec::new();
                 }
-                self.queue.replace(self.sonic.tracks());
+                let tracks = self.queued_all(self.sonic.tracks());
+                self.queue.replace(tracks);
                 self.play_index(0)
             }
             SonicRow::QueueAll => {
@@ -380,7 +392,7 @@ impl App {
                 }
                 let count = tracks.len();
                 let was_empty = self.queue.items.is_empty();
-                for track in tracks {
+                for track in self.queued_all(tracks) {
                     self.queue.push(track);
                 }
                 self.info(format!("queued {count} stops"));
@@ -407,6 +419,34 @@ impl App {
             // for, and inventing something would be worse than nothing.
             SonicRow::Status => Vec::new(),
         }
+    }
+
+    /// Play the whole journey from stop `index` — the GUI's click on a row.
+    /// The same replace-the-queue contract as the Play row; starting from a
+    /// stop is starting the journey there, not auditioning one track.
+    pub(crate) fn play_sonic_from(&mut self, index: usize) -> Vec<Effect> {
+        if index >= self.sonic.stops.len() {
+            return Vec::new();
+        }
+        let tracks = self.queued_all(self.sonic.tracks());
+        self.queue.replace(tracks);
+        self.play_index(index)
+    }
+
+    /// Queue just stop `index` — the GUI's hover [+], the TUI's `a`.
+    pub(crate) fn queue_sonic_stop(&mut self, index: usize) -> Vec<Effect> {
+        let Some(stop) = self.sonic.stops.get(index) else {
+            return Vec::new();
+        };
+        let track = stop.to_track();
+        self.info(format!("queued {}", track.display_name()));
+        let was_empty = self.queue.items.is_empty();
+        let track = self.queued(track);
+        self.queue.push(track);
+        if was_empty && self.status.is_idle() {
+            return self.play_index(0);
+        }
+        Vec::new()
     }
 
     /// Which end the open menu belongs to. `Start` is the fallback rather
@@ -447,7 +487,7 @@ impl App {
         }
     }
 
-    fn adjust_sonic_length(&mut self, delta: i32) -> Vec<Effect> {
+    pub(crate) fn adjust_sonic_length(&mut self, delta: i32) -> Vec<Effect> {
         use crate::api::types::{JOURNEY_MAX_LENGTH, JOURNEY_MIN_LENGTH};
         let length = (self.sonic.length as i32 + delta)
             .clamp(JOURNEY_MIN_LENGTH as i32, JOURNEY_MAX_LENGTH as i32) as u32;
@@ -476,7 +516,7 @@ impl App {
     /// from anywhere — search, albums, a playlist — so the file browser is a
     /// starting point rather than a requirement, and the arming carries who
     /// is waiting rather than each caller keeping its own flag.
-    pub(super) fn arm_capture(&mut self, who: Capture) -> Vec<Effect> {
+    pub(crate) fn arm_capture(&mut self, who: Capture) -> Vec<Effect> {
         self.capture = Some(who);
         self.message = None;
         // The picking happens in the browser, so the browser has to be on
@@ -500,11 +540,14 @@ impl App {
             Capture::Sonic(side) => self.capture_sonic_side(side, track),
             // Back to the tab that asked, on the two ways of looking.
             Capture::Discover => self.seed_discover(track),
+            // The opening song: the DJ arms for the server it was chosen
+            // from and the session starts there (auto-dj contract, clause 4).
+            Capture::DjSeed => self.dj_seed_chosen(track),
         }
     }
 
     /// A track chosen for one end, however it was chosen.
-    pub(super) fn capture_sonic_side(&mut self, side: SonicSide, track: Track) -> Vec<Effect> {
+    pub(crate) fn capture_sonic_side(&mut self, side: SonicSide, track: Track) -> Vec<Effect> {
         let label = track.display_name();
         self.sonic.set_side(side, Some(track));
         self.capture = None;
@@ -524,13 +567,15 @@ impl App {
 
     // ── Building it ─────────────────────────────────────────────────────────
 
-    pub(super) fn build_sonic_path(&mut self) -> Vec<Effect> {
+    pub(crate) fn build_sonic_path(&mut self) -> Vec<Effect> {
         let (Some(start), Some(end)) = (&self.sonic.start, &self.sonic.end) else {
             return Vec::new();
         };
         let (start, end) = (start.filepath.clone(), end.filepath.clone());
         self.sonic.view = SonicView::Results;
         self.sonic.pending = true;
+        self.sonic.probe = false;
+        self.sonic.empty = SonicEmpty::Plain;
         self.sonic.stops.clear();
         self.sonic.note = None;
         self.message = None;
@@ -549,7 +594,9 @@ impl App {
         stops: Vec<crate::api::types::JourneyStop>,
         note: Option<String>,
         length: u32,
+        issue: crate::tui::worker::JourneyIssue,
     ) -> Vec<Effect> {
+        use crate::tui::worker::JourneyIssue;
         if self.sonic.length != length || self.sonic.view != SonicView::Results {
             return Vec::new();
         }
@@ -557,7 +604,42 @@ impl App {
         self.sonic.fetched = true;
         self.sonic.stops = stops;
         self.sonic.note = note;
+        self.sonic.empty = match issue {
+            JourneyIssue::NotAnalyzed => SonicEmpty::NotAnalyzed,
+            JourneyIssue::None | JourneyIssue::Disabled => SonicEmpty::Plain,
+        };
+        if issue == JourneyIssue::Disabled {
+            // Ask before naming a reason: the ping's flag tells "switched
+            // off" from "nothing scanned yet", and one cheap GET is nothing
+            // next to telling the user the wrong thing and retracting it.
+            self.sonic.probe = true;
+            self.refresh_sonic_rows();
+            return vec![Effect::Api(ApiCmd::DiscoveryProbe)];
+        }
         self.sonic_pane.state.select(Some(0));
+        self.refresh_sonic_rows();
+        Vec::new()
+    }
+
+    /// The probe's verdict. A flag still on means the scan simply hasn't
+    /// run — worth retrying later; a flag gone means the feature was
+    /// switched off under us, and the next real ping takes the entry point
+    /// with it.
+    pub(super) fn consume_discovery_probe(&mut self, available: bool) -> Vec<Effect> {
+        if !self.sonic.probe {
+            return Vec::new();
+        }
+        self.sonic.probe = false;
+        let (kind, note) = if available {
+            (
+                SonicEmpty::ScanPending,
+                "the server hasn't analyzed any music yet — a path needs the discovery scan to have run",
+            )
+        } else {
+            (SonicEmpty::TurnedOff, "sonic discovery has been switched off on this server")
+        };
+        self.sonic.empty = kind;
+        self.sonic.note = Some(note.to_string());
         self.refresh_sonic_rows();
         Vec::new()
     }
@@ -623,12 +705,34 @@ impl App {
     /// that view — is asked for again.
     pub(super) fn consume_playlist_saved(&mut self, name: String, count: usize) -> Vec<Effect> {
         self.info(format!("saved {name} — {count} tracks"));
+        self.refresh_playlists_view()
+    }
+
+    /// A management verb landed (create, rename, delete). No message — the
+    /// row appearing, renaming or vanishing IS the confirmation (the
+    /// playlists contract, clauses 12 and 31) — but an open Playlists view
+    /// is looking at a list that just changed, so it re-asks.
+    pub(crate) fn consume_playlist_changed(&mut self) -> Vec<Effect> {
+        self.refresh_playlists_view()
+    }
+
+    fn refresh_playlists_view(&mut self) -> Vec<Effect> {
         if *self.library_node() == LibraryNode::Playlists {
-            return vec![Effect::Api(ApiCmd::Library {
-                node: LibraryNode::Playlists,
-                dest: Tab::Library,
-            })];
+            return vec![self.ask_library(LibraryNode::Playlists, Tab::Library)];
+        }
+        // Inside a playlist the list is the trail's cached parent: dropped,
+        // so Back asks again and shows the new name (clause 14).
+        if matches!(self.library_node(), LibraryNode::Playlist(_)) {
+            self.library.trail.clear();
         }
         Vec::new()
+    }
+
+    /// Whether the playing row is the session's own server's.
+    fn playing_is_sessions(&self) -> bool {
+        self.queue
+            .current
+            .and_then(|i| self.queue.items.get(i))
+            .is_some_and(|item| self.is_session_origin(&item.origin))
     }
 }

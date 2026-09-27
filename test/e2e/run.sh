@@ -157,5 +157,12 @@ assert cfg and 'alice' in cfg[0].read_text(), 'the server entry does not name th
 leg admin-room admin-room.exp "$WORK/h7" "$WORK/admin-room.out"
 stop_fake
 
+# ── Scenario H: the GUI player with no server — the demo seat, the Now Playing keys
+# No fake at all: the review's key-routing bug (a digit on the Now Playing
+# screen drove the nav) showed with no server, and nothing automated
+# launched the GUI until this leg.
+ARGS=(gui)
+leg gui-now gui-now.exp "$WORK/h8" "$WORK/gui-now.out"
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "e2e: ALL PASS"; else echo "e2e: $FAILS FAILURE(S)"; exit 1; fi

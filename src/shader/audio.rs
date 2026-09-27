@@ -103,7 +103,7 @@ impl AudioTexture {
     /// Replace the curve. A window with nothing in it (max at or below min)
     /// is refused and the old one kept; smoothing is held to 0..=0.99.
     /// Android's `setParams`, rule for rule. Only the golden run turns these
-    /// knobs until the tunables arrive (PLAN.md, 10.2).
+    /// knobs until the tunables arrive (PLAN.md, 11.2).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_curve(&mut self, curve: Curve) {
         if curve.max_db > curve.min_db {

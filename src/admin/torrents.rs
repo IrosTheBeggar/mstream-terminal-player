@@ -44,7 +44,7 @@ use crate::api::{ApiError, Client, TorrentCreds};
 use crate::kit::theme::th;
 use crate::kit::{self, Surface, bold, dim};
 use crate::setup::g;
-use crate::setup::picker::{self, FilePick};
+use crate::setup::picker::{self, Pick};
 
 /// The daemon's list, while the Torrents tab shows.
 const POLL_LIST: Duration = Duration::from_secs(5);
@@ -378,7 +378,7 @@ enum Done {
     Mapped { vpath: String, result: Result<serde_json::Value, ApiError> },
     TemplateSaved { vpath: String, result: Result<TemplateSaved, ApiError> },
     Seeded { file: String, result: Result<SeedOutcome, String> },
-    Picked(FilePick),
+    Picked(Pick),
 }
 
 fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
@@ -424,7 +424,7 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
                     };
                     Done::Seeded { file, result }
                 }
-                Op::PickFile => Done::Picked(picker::pick_file(&t!("tor.seed_path_title"))),
+                Op::PickFile => Done::Picked(picker::pick_torrent(&t!("tor.seed_path_title"), None)),
             };
             if done_tx.send(done).is_err() {
                 return;
@@ -1135,15 +1135,17 @@ impl Room {
                     self.queued = Some(Op::List);
                 }
             }
-            Done::Picked(FilePick::File(path)) => {
+            Done::Picked(Pick::File(path)) => {
                 if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("torrent")) {
                     self.seed(path);
                 } else {
                     self.note = Some((t!("tor.err_seed_ext").to_string(), true));
                 }
             }
-            Done::Picked(FilePick::Cancelled) => {}
-            Done::Picked(FilePick::Unavailable(e)) => {
+            // A folder from the file dialog cannot happen; said rather
+            // than assumed.
+            Done::Picked(Pick::Cancelled | Pick::Folder(_)) => {}
+            Done::Picked(Pick::Unavailable(e)) => {
                 self.note = Some((t!("tor.picker_unavailable", err = printable(&e, 120)).to_string(), true));
                 self.open_seed_path();
             }
@@ -2856,7 +2858,7 @@ fn draw_entry_modal(
     let w = inner.width.saturating_sub(2);
     let line = |y: u16| Rect { x, y, width: w, height: 1 };
     frame.render_widget(Paragraph::new(Span::styled(clip(&title, w.saturating_sub(4)), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))), line(inner.y));
-    kit::modal_close(frame, &mut room.ui, inner, Act::ModalCancel, t!("path_modal.tip_close"));
+    kit::modal_close(frame, &mut room.ui, inner, Act::ModalCancel);
     field_box(frame, room, Rect { x, y: inner.y + 2, width: w, height: 4 }, &label, input, true, false, placeholder, Act::ModalSubmit);
     let mut y = inner.y + 7;
     for l in body {

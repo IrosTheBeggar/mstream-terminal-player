@@ -2,7 +2,7 @@
 
 `bash test/e2e/run.sh` drives the real binary through the real event
 loop with expect(1), against a **stateful fake mStream**
-(`fake_mstream.py`) — no Node, no real server, no audio files. Seven
+(`fake_mstream.py`) — no Node, no real server, no audio files. Eight
 scenarios, each on a fresh fake and a fresh `$HOME`:
 
 - **A** — the full English walk (folders → extras → login → Done), then
@@ -26,6 +26,12 @@ scenarios, each on a fresh fake and a fresh `$HOME`:
   `$HOME` gets the sign-in page, a good name + password opens the
   Libraries room, the session lands in `credentials.toml`, and the
   second run goes straight to the room.
+- **H** — the GUI player (`mstream-player gui`) with no server saved and
+  no fake at all: the demo seat (`MSTREAM_GUI_DEMO=1`) fills the bar,
+  `0` opens the Now Playing screen (the TUI's view), a digit there picks
+  one of its tabs rather than a nav room, Esc returns to the Library
+  screen, `q` quits clean. The review's key-routing bug showed with no
+  server; this leg would have caught it.
 
 ## The two harness laws (learned the hard way)
 

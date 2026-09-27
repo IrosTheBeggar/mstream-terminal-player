@@ -1,7 +1,7 @@
 # Visualizer presets
 
 The ShaderToy-convention presets the mobile app ships, vendored so the desktop
-visualizer runs the same files (PLAN.md, Phase 10). They are data, not code:
+visualizer runs the same files (PLAN.md, Phase 11). They are data, not code:
 each file is a complete preset in the single-file format Android's ShaderEngine
 parses — `// === pass: <name> ===` sections, `// === channel` and `// === size`
 routing in the header, `// param:` tunables, and title/author/license lines.
@@ -35,5 +35,5 @@ files stay the mobile app's.
 | `09-mountainbytes.glsl` | MountainBytes — Phosphorescent Purple Pixel Peaks | mrange (Mårten Rånge); music by Virgill — [lX2GzD](https://www.shadertoy.com/view/lX2GzD) | CC0 |
 
 `04-cyber-fuji.glsl` is the one preset that is not MIT or CC0, and it is kept
-out of the binary until that is settled (PLAN.md, Phase 10 watch items). It is
+out of the binary until that is settled (PLAN.md, Phase 11 watch items). It is
 here, attributed, so the tests can hold it to the same bar as the rest.

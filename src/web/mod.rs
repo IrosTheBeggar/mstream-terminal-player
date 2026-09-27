@@ -72,6 +72,11 @@ impl Shell {
             // Nothing durable to save to in a spike. localStorage is the
             // obvious home when this grows up.
             Effect::SaveSession => {}
+            // The browser's fetch owns TLS; nothing to register.
+            Effect::Trust(_) => {}
+            // One server, no saved list to fold peers into.
+            Effect::SavePeers { .. } => {}
+            Effect::SaveDjLibrary { .. } => {}
         }
     }
 }
@@ -130,16 +135,24 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("no window.location.origin — not running in a browser?")?;
 
     let start = Startup {
+        stats: None,
+        peer: None,
+        server_id: None,
         server: Some(origin),
         token: None,
         username: None,
         last_path: None,
         prefs: config::PlayerPrefs::default(),
         tunnel_code: None,
+        self_signed: false,
         keys: Default::default(),
         theme: config::ThemePrefs::default(),
         display: config::DisplayPrefs::default(),
         mouse: config::MousePrefs::default(),
+        // One server, the session's; nothing else to reach.
+        servers: Vec::new(),
+        bundled: None,
+        queue: None,
     };
     let (theme, _warnings) = ui::Theme::from_prefs(&start.theme);
     ui::set_theme(theme);
@@ -220,6 +233,12 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
             shell.app.spinner = shell.app.spinner.wrapping_add(1);
             shell.spun = Instant::now();
         }
+        // The plays owed go out from here too (play-reporting clause 8):
+        // the native shells post from their tick, and this frame is the
+        // browser's. Not the whole tick — its reconcile reads the system
+        // clock, which wasm32 has none of.
+        let owed = shell.app.stats_flush_due(Instant::now());
+        shell.pending.extend(owed);
         // There is no process to quit in a tab; parking the flag turns Quit
         // into a no-op instead of a frozen screen.
         shell.app.should_quit = false;

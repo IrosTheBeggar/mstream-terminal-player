@@ -1,4 +1,4 @@
-//! The mobile app's visualizers, on the desktop (PLAN.md, Phase 10).
+//! The mobile app's visualizers, on the desktop (PLAN.md, Phase 11).
 //!
 //! mstream_music runs ShaderToy-convention fragment shaders over an audio
 //! texture, and so does this: the same preset files, vendored verbatim in
