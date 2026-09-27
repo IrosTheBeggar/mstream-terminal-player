@@ -540,9 +540,9 @@ quarter, half-year and year, the older months and years, all time — and `p` li
 entry and on a change; there is no poll. Times are in the machine's zone, read the way
 `date` reads it (`TZ`, else `/etc/localtime`), and the server is asked for its periods and
 buckets in that zone; a machine without a zone file gets UTC, and the state line says so.
-A server older than 6.27 has no Stats API, and the page says that instead. The terminal
-player does not yet report its own plays — the log shows what the web player and the apps
-reported.
+A server older than 6.27 has no Stats API, and the page says that instead. The player
+reports its own plays (see Play reporting below), and the log names them *this player*;
+a total under a minute reads in seconds.
 
 ## Now playing
 

@@ -1205,6 +1205,7 @@ sta:
   plays_n: "%{n} reproducciones"
   tracks_one: "1 pista"
   tracks_n: "%{n} pistas"
+  seconds: "%{n} s"
   minutes: "%{n} min"
   hours: "%{h}h"
   hours_minutes: "%{h}h %{m}m"

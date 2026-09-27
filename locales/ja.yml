@@ -1205,6 +1205,7 @@ sta:
   plays_n: "%{n}回"
   tracks_one: "1トラック"
   tracks_n: "%{n}トラック"
+  seconds: "%{n}秒"
   minutes: "%{n}分"
   hours: "%{h}時間"
   hours_minutes: "%{h}時間%{m}分"

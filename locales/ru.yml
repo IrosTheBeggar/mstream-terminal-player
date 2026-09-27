@@ -1205,6 +1205,7 @@ sta:
   plays_n: "%{n} прослушиваний"
   tracks_one: "1 трек"
   tracks_n: "%{n} треков"
+  seconds: "%{n} с"
   minutes: "%{n} мин"
   hours: "%{h} ч"
   hours_minutes: "%{h} ч %{m} м"

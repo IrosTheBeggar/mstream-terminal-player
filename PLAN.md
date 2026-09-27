@@ -560,7 +560,11 @@ empty period, and a pre-6.27 server (404) are their own states. Not built from t
 plays too (a 403 there only means a federation key or guest token, said in one sentence). Deferred:
 the player reporting its own plays (`POST /stats/plays`) — the log shows other clients' listening
 until then. Locales `sta:` (177 keys × 10). Live-checked against a 6.27 scratch server seeded with
-252 plays.
+252 plays. 2026-09-27, once the page met the player's own reporting on main: the client column
+knows the player's reports by the shared `CLIENT_NAME` (they had drifted — `mstream-player` vs
+`mstream-terminal-player`, so the player's own plays showed a clipped name instead of "this
+player"), and totals under a minute read in seconds (`7 s`) where the webapp rounds to `0 minutes`
+— a Top row ranked by seconds of listening read as nothing.
 
 Build, in order of fit: **logs** (`/api/v1/admin/logs/recent?since=<seq>` is a purpose-built
 tail-poll API with a cursor), **scan progress** (use the *non-admin* `/api/v1/scan/progress` and

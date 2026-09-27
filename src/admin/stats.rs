@@ -1946,8 +1946,14 @@ fn hours_note(s: &StatsSummary) -> Option<String> {
 
 // ── Words ─────────────────────────────────────────────────────────────────
 
-/// `9h 24m` · `2h` · `44 min` · `0 min` — for totals, the webapp's shape.
+/// `9h 24m` · `2h` · `44 min` · `7 s` — for totals, the webapp's shape,
+/// except under a minute: the webapp rounds to `0 minutes`, which made a
+/// Top row ranked by a few seconds of listening read as nothing at all.
 pub(crate) fn fmt_duration(ms: u64) -> String {
+    let secs = (ms + 500) / 1000;
+    if secs < 60 {
+        return t!("sta.seconds", n = secs).to_string();
+    }
     let mins = (ms + 30_000) / 60_000;
     if mins < 60 {
         return t!("sta.minutes", n = mins).to_string();
@@ -2039,7 +2045,9 @@ fn client_words(item: &HistoryItem) -> (String, String) {
         both(t!("sta.client_web_old").to_string())
     } else if c.starts_with("mstream-webapp") {
         both(t!("sta.client_web").to_string())
-    } else if c.starts_with("mstream-player") {
+    } else if c.starts_with(crate::tui::app::stats::CLIENT_NAME) {
+        // The name the player's own reporting sends (play-reporting
+        // contract) — one constant, so the two can never drift apart again.
         both(t!("sta.client_this").to_string())
     } else {
         let (name, version) = c.split_once('/').unwrap_or((c, ""));
@@ -2263,7 +2271,7 @@ mod tests {
         let history = StatsHistory {
             items: vec![
                 play("p1", n + 1200, "completed", 151_000, Some(151_000), true, Some("mstream-webapp/6.27.0"), Some("manual")),
-                play("p2", n + 600, "skipped", 8_000, Some(495_000), false, Some("mstream-player/0.7.0"), Some("shuffle")),
+                play("p2", n + 600, "skipped", 8_000, Some(495_000), false, Some("mstream-terminal-player/0.7.0"), Some("shuffle")),
                 play("p3", n - 86_400 + 3600, "stopped", 340_000, Some(545_000), true, Some("mStream Mobile/2.4.1"), Some("manual")),
                 play("p4", n - 86_400 * 9, "completed", 30_000, None, true, None, Some("legacy")),
             ],
@@ -2476,6 +2484,18 @@ mod tests {
     }
 
     #[test]
+    fn the_client_column_knows_this_players_reports_by_the_shared_name() {
+        // The page once looked for `mstream-player`; the player reports as
+        // `mstream-terminal-player`, so its own plays showed a clipped name.
+        let _en = english();
+        let own = format!("{}/0.7.0", crate::tui::app::stats::CLIENT_NAME);
+        let mine = play("p9", today0(), "completed", 300_000, Some(300_000), true, Some(&own), Some("manual"));
+        assert_eq!(client_words(&mine).0, "this player");
+        let other = play("p8", today0(), "completed", 300_000, Some(300_000), true, Some("mstream-player/0.7.0"), Some("manual"));
+        assert_eq!(client_words(&other).0, "mstream-player 0.7.0", "a name that is not the player's is spelled out");
+    }
+
+    #[test]
     fn the_recent_tab_words_each_play_and_pages_as_the_cursor_nears_the_end() {
         let _en = english();
         let mut p = ready();
@@ -2631,7 +2651,10 @@ mod tests {
     #[test]
     fn the_words_follow_the_webapp() {
         let _en = english();
-        assert_eq!(fmt_duration(0), "0 min");
+        assert_eq!(fmt_duration(0), "0 s");
+        assert_eq!(fmt_duration(7_000), "7 s", "seconds under a minute, not `0 min`");
+        assert_eq!(fmt_duration(59_400), "59 s");
+        assert_eq!(fmt_duration(59_600), "1 min", "the minute boundary rounds as the webapp's does");
         assert_eq!(fmt_duration(58 * 60_000), "58 min");
         assert_eq!(fmt_duration(2 * 3_600_000), "2h");
         assert_eq!(fmt_duration(9 * 3_600_000 + 24 * 60_000 + 40_000), "9h 25m");

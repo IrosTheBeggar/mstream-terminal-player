@@ -1205,6 +1205,7 @@ sta:
   plays_n: "%{n} 次播放"
   tracks_one: "1 首曲目"
   tracks_n: "%{n} 首曲目"
+  seconds: "%{n} 秒"
   minutes: "%{n} 分钟"
   hours: "%{h} 小时"
   hours_minutes: "%{h} 小时 %{m} 分"
