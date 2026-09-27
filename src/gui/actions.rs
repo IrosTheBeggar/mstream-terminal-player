@@ -451,12 +451,18 @@ fn draw_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let failed = matches!(app.playlist_names, PlaylistNames::Failed);
     let width: u16 = 52.min(area.width.saturating_sub(2)).max(36);
     if let Some((name, cursor)) = naming {
-        // New playlist: the name, then the add (clause 12).
+        // New playlist: the name, then the add (clause 12) — Enter, or the
+        // Create button beside the field for the pointer.
         let inner = modal_frame_on(frame, ui, area, width, 7, th().accent);
         guard_frame(ui, inner);
         put(frame, inner.x + 1, inner.y, &t!("gui.pl.new"), accent().add_modifier(Modifier::BOLD));
         modal_close(frame, ui, inner, Act::PickClose);
-        super::text_field(frame, ui, inner.x + 1, inner.y + 2, &name, cursor, inner.width.saturating_sub(2), Style::default());
+        let label = t!("gui.pl.create").to_string();
+        let button_w = crate::kit::width(&label) as u16 + 4;
+        let field_w = inner.width.saturating_sub(3 + button_w);
+        super::text_field(frame, ui, inner.x + 1, inner.y + 2, &name, cursor, field_w, Style::default());
+        let at = Rect { x: inner.x + 2 + field_w, y: inner.y + 2, width: button_w, height: 1 };
+        crate::kit::button(frame, ui, at, &label, true, Act::PickCreate);
         put(frame, inner.x + 1, inner.y + 4, &t!("gui.act.name_hint", title = title_of(&sheet.track)), dim());
         return;
     }
@@ -603,6 +609,18 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::PickNew => {
             if let Some(picker) = gui.actions.picker.as_mut() {
                 picker.naming = Some(Input::default());
+            }
+        }
+        Act::PickCreate => {
+            let name = gui
+                .actions
+                .picker
+                .as_ref()
+                .and_then(|p| p.naming.as_ref())
+                .map(|input| input.value().trim().to_string())
+                .filter(|name| !name.is_empty());
+            if let Some(name) = name {
+                gui.act(Act::PickPlaylist(name));
             }
         }
         Act::PickClose => gui.actions.picker = None,
@@ -1041,6 +1059,25 @@ mod tests {
         gui.pending.clear();
         key(&mut gui, KeyCode::Enter);
         assert!(gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::AddToPlaylist { playlist, .. }) if playlist == "Fresh")));
+    }
+
+    #[test]
+    fn the_name_box_has_a_create_button_beside_the_field() {
+        // The review's finding: Enter was the only way to add through a
+        // new name — no clickable Create for the pointer.
+        let mut gui = files_gui();
+        gui.act(Act::More(Tab::Files, 0));
+        gui.act(Act::SheetVerb(SheetAction::AddPlaylist));
+        gui.act(Act::PickNew);
+        for c in "Fresh".chars() {
+            key(&mut gui, KeyCode::Char(c));
+        }
+        let rows = draw(&mut gui);
+        assert_eq!(hit_text(&gui, &rows, "Create"), Some(Act::PickCreate), "{}", rows.join("\n"));
+        gui.pending.clear();
+        gui.act(Act::PickCreate);
+        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::AddToPlaylist { playlist, .. }) if playlist == "Fresh")));
+        assert!(gui.actions.sheet.is_none(), "added: the sheet closes");
     }
 
     #[test]

@@ -343,14 +343,19 @@ fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, 
     let line = top;
     match v.now {
         Some(now) => {
-            put(frame, 1, line, &fmt_time(now.elapsed), dim());
-            let cells = (area.width - 12) as usize;
-            let preview = draw_seek_cells(frame, s, 6, line, cells, now);
-            if let Some(time) = preview {
-                put(frame, 1, line, &format!("{time:>4}"), bright_bold());
-            }
+            // Both time slots are as wide as the total: a track past a
+            // hundred minutes reads 100:00, and the cells start after it
+            // rather than under it.
             let total = fmt_time(now.duration);
-            put(frame, area.width - 1 - total.chars().count() as u16, line, &total, dim());
+            let slot = total.chars().count().max(4);
+            put(frame, 1, line, &format!("{:>slot$}", fmt_time(now.elapsed)), dim());
+            let cells_x = 2 + slot as u16;
+            let cells = area.width.saturating_sub(2 * (slot as u16 + 2)) as usize;
+            let preview = draw_seek_cells(frame, s, cells_x, line, cells, now);
+            if let Some(time) = preview {
+                put(frame, 1, line, &format!("{time:>slot$}"), bright_bold());
+            }
+            put(frame, area.width - 1 - slot as u16, line, &total, dim());
         }
         // Idle, the line is exactly the wizard's gold rule.
         None => gold_rule(frame, line, area.width),

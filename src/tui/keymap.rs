@@ -573,6 +573,18 @@ impl Keymap {
         None
     }
 
+    /// The keys bound to `action` in the normal table, as the help screen
+    /// writes them — for a hint that names a key rather than assumes one.
+    /// Empty when the user unbound it.
+    pub fn keys_of(&self, action: &Action) -> String {
+        self.normal
+            .iter()
+            .filter(|binding| binding.action == *action)
+            .flat_map(|binding| binding.keys.iter().map(|k| k.label()))
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
     /// The rows the help screen draws, in table order.
     pub fn help_rows(&self) -> Vec<(String, &'static str)> {
         self.normal
@@ -605,6 +617,15 @@ impl Keymap {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_hint_can_ask_which_key_an_action_wears() {
+        // The Auto-DJ tab's keyword row said `x removes the last` while
+        // nothing bound x (the review's finding): the hint asks the map.
+        let map = super::Keymap::default();
+        assert_eq!(map.keys_of(&super::Action::RemoveFromQueue), "d");
+        assert_eq!(map.keys_of(&super::Action::VolumeUp), "+/=");
+    }
+
     use super::*;
 
     #[test]

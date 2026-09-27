@@ -108,7 +108,9 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
     // The screen's note, where the TUI's key hints would be (clause 9): the
     // GUI names its keys on the footer, and the row's right is the modes.
     if let Some((text, is_err)) = gui.note_words() {
-        let room = regions.keys.width.saturating_sub(40) as usize;
+        // Up to the modes readout, whatever it is wearing: a fixed forty
+        // cells let a long note run into a wide readout.
+        let room = layout.modes.x.saturating_sub(regions.keys.x + 1) as usize;
         let style = if is_err { Style::default().fg(th().gold) } else { dim() };
         put(frame, regions.keys.x, regions.keys.y, &super::bar::clip(&text, room), style);
     }

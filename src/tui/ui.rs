@@ -406,6 +406,9 @@ pub(crate) struct NowLayout {
     pub strip: StripHits,
     /// The band: the mirrored shape over the scrubber, one control.
     pub band: Rect,
+    /// The modes readout at the keys row's right: a note the caller puts
+    /// on that row stops short of it.
+    pub modes: Rect,
 }
 
 /// Where the tab strip's click targets landed: each tab by index when the
@@ -1418,7 +1421,7 @@ pub(crate) fn render_now_view(
         Paragraph::new(Span::styled(modes, Style::new().fg(dim()))).alignment(Alignment::Right),
         right,
     );
-    NowLayout { cover, spare, strip, band: gauge_area }
+    NowLayout { cover, spare, strip, band: gauge_area, modes: right }
 }
 
 /// Bounds on the facts column. Below the floor the labelled rows stop fitting;
@@ -2861,7 +2864,11 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
             if s.keywords.is_empty() {
                 spans.push(note("no keywords · Enter types one".into()));
             } else {
-                spans.push(note(format!("{}: {} · x removes the last", s.keywords.len(), s.keywords.join(", "))));
+                // The bound key, not an assumed one: the keymap's word for
+                // remove-from-queue takes the last keyword on this row.
+                let remove = app.keymap.keys_of(&crate::tui::app::Action::RemoveFromQueue);
+                let removes = if remove.is_empty() { String::new() } else { format!(" · {remove} removes the last") };
+                spans.push(note(format!("{}: {}{removes}", s.keywords.len(), s.keywords.join(", "))));
             }
             spans
         }

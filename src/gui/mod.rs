@@ -168,6 +168,8 @@ pub(crate) enum Act {
     SheetClose,
     PickPlaylist(String),
     PickNew,
+    /// The name box's Create button: the typed name, as Enter takes it.
+    PickCreate,
     PickClose,
     InfoClose,
     /// The Library rooms (library-rooms contract): the strip's jump and
@@ -3343,6 +3345,27 @@ mod tests {
         assert_eq!(gui.app.now_tab(), crate::tui::app::NowTab::AutoDj);
         gui.act(Act::Nav(FILES_NAV));
         assert_eq!((gui.screen, gui.app.fullscreen), (Screen::Library, false));
+    }
+
+    #[test]
+    fn a_track_past_a_hundred_minutes_keeps_its_times_off_the_cells() {
+        let mut gui = browsing_gui();
+        gui.demo = Some(bar::Now {
+            title: "Long".into(),
+            artist: String::new(),
+            album: String::new(),
+            elapsed: 3700.0,
+            duration: 6100.0,
+            year: None,
+            spec: String::new(),
+            rating: None,
+            key: None,
+            bpm: None,
+        });
+        let rows = draw(&mut gui);
+        let line = rows.iter().find(|r| r.contains("101:40")).expect("the total is drawn whole");
+        let at = line.find(" 61:40 ").expect("the elapsed time sits in a slot as wide as the total, with air after it");
+        assert!(line[at + 7..].trim_start().starts_with(|c: char| c == '━' || c == '█'), "the cells start after the slot: {line}");
     }
 
     #[test]
