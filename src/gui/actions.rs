@@ -371,9 +371,10 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let by = inner.y + 3;
     let mut bx = inner.x + 1;
     if own {
-        // The App's copy first: a refused write reverts there, and the
-        // sheet's own block is only the optimistic fallback.
-        let rating = app.rating_of(&track.filepath).or(track.metadata.rating);
+        // The App's copy: a write lands there at once and a refused one
+        // reverts there (clause 11). The sheet's own block speaks only for
+        // a track the App no longer holds a copy of.
+        let rating = app.rating_known(&track.filepath).unwrap_or(track.metadata.rating);
         let glyphs = stars(rating);
         let v = rating.unwrap_or(0).min(10);
         for (i, glyph) in glyphs.chars().enumerate() {
@@ -576,11 +577,10 @@ fn run(gui: &mut Gui, action: SheetAction) {
 fn rate(gui: &mut Gui, rating: u32) {
     let Some(sheet) = gui.actions.sheet.clone() else { return };
     let rating = (rating > 0).then_some(rating.min(10));
+    // No copy of its own: the App's is what the sheet shows, so a refused
+    // write's revert reaches the stars too (clause 11).
     let effects = gui.app.rate_track(&sheet.origin, &sheet.track.filepath, rating);
     gui.pend(effects);
-    if let Some(open) = gui.actions.sheet.as_mut() {
-        open.track.metadata.rating = rating;
-    }
 }
 
 /// The verbs' side of [`Gui::act`]. True when the act was ours.
@@ -686,7 +686,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     let sheet = gui.actions.sheet.as_mut()?;
     let own = sheet.origin.peer.is_none();
     let actions = actions_for(sheet, own);
-    let rating = gui.app.rating_of(&sheet.track.filepath).unwrap_or(0).min(10);
+    let rating = gui.app.rating_known(&sheet.track.filepath).unwrap_or(sheet.track.metadata.rating).unwrap_or(0).min(10);
     match key.code {
         KeyCode::Esc => close(gui),
         KeyCode::Up => sheet.row = sheet.row.saturating_sub(1),

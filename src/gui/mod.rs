@@ -1058,7 +1058,7 @@ impl Gui {
                     spec: actions::spec_parts(m).join(" · "),
                     // The App's copy first: an optimistic rating lands here
                     // the moment it is given (track-actions clause 11).
-                    rating: self.app.rating_of(&track.filepath).or(m.rating),
+                    rating: self.app.rating_known(&track.filepath).unwrap_or(m.rating),
                     key: m.musical_key.clone(),
                     bpm: m.bpm,
                 })

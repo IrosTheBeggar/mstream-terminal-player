@@ -7161,3 +7161,29 @@ fn an_owed_play_waits_for_the_account_it_was_made_under() {
     let (_, _, ids) = reported(&app.tick()).expect("alice's play goes out under alice");
     assert_eq!(ids.len(), 1);
 }
+
+#[test]
+fn a_details_block_answering_after_a_newer_rating_keeps_the_new_rating() {
+    // The review's race: rate a track while its details fetch is still out,
+    // and the older reply's rating won in the sheet and the bar's card while
+    // the queue's copy was right.
+    let mut app = connected_app();
+    app.queue.replace(vec![item("a.mp3")]);
+    let origin = Origin { server: "http://host:3000".into(), peer: None };
+    let asked = app.fetch_track_info(&origin, "a.mp3");
+    assert!(matches!(asked.as_slice(), [Effect::Api(ApiCmd::TrackInfo { .. })]), "{asked:?}");
+    app.rate_track(&origin, "a.mp3", Some(8));
+    let mut block = track("a.mp3");
+    block.metadata.rating = Some(4); // the server's copy from before the write
+    app.consume_track_info("a.mp3".into(), Some(block));
+    assert_eq!(app.track_info.as_ref().and_then(|t| t.metadata.rating), Some(8), "the newer write stands in the block");
+    assert_eq!(app.rating_of("a.mp3"), Some(8));
+
+    // A block asked for after the write is the truth and is taken whole.
+    app.fetch_track_info(&origin, "a.mp3");
+    let mut block = track("a.mp3");
+    block.metadata.rating = Some(2);
+    app.consume_track_info("a.mp3".into(), Some(block));
+    assert_eq!(app.rating_of("a.mp3"), Some(2));
+    assert_eq!(app.rating_known("nowhere.mp3"), None, "no copy, no word");
+}

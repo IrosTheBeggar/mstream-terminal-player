@@ -1604,6 +1604,11 @@ pub struct App {
     /// The rating writes out, for the latest-wins revert (clause 11).
     pub(crate) rating_writes: Vec<RatingWrite>,
     rating_seq: u64,
+    /// The latest rating write per track (its `rating_seq`), and the
+    /// `rating_seq` a details fetch went out under: a block that answers
+    /// after a newer write cannot put the older rating back (clause 10).
+    rated_at: HashMap<String, u64>,
+    info_asked: HashMap<String, u64>,
     /// The whole search reply, kept rather than flattened. Every class comes
     /// back in one response, so moving between them costs nothing.
     pub search_hits: Option<Box<crate::api::types::SearchResults>>,
@@ -1886,6 +1891,8 @@ impl App {
             playlist_names: PlaylistNames::Unasked,
             rating_writes: Vec::new(),
             rating_seq: 0,
+            rated_at: HashMap::new(),
+            info_asked: HashMap::new(),
             search_hits: None,
             search_stack: Drill::new(SearchNode::Root),
             queue_column: false,
