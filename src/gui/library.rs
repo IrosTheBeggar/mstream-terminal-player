@@ -94,7 +94,7 @@ fn rows(gui: &Gui) -> Vec<(usize, &Entry)> {
 }
 
 /// A root list's cursor never rests on the hidden `..`.
-fn keep_off_parent(gui: &mut Gui) {
+pub(super) fn keep_off_parent(gui: &mut Gui) {
     if at_root(gui)
         && gui.app.library.state.selected() == Some(0)
         && gui.app.library.entries.len() > 1
@@ -118,6 +118,14 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         return;
     }
     if wall_view(gui) {
+        // Another artist's wall starts on its own first page with the cursor
+        // stowed: the page and the cell were the last artist's.
+        if let LibraryNode::Artist(name) = gui.app.library_stack.here()
+            && gui.library.wall.of.as_deref() != Some(name.as_str())
+        {
+            let name = name.clone();
+            gui.library.wall = WallState { of: Some(name), ..WallState::default() };
+        }
         albums::draw(frame, gui, content);
         return;
     }
@@ -144,9 +152,14 @@ fn draw_heading(frame: &mut Frame, gui: &mut Gui, content: Rect) -> u16 {
             x + shown.chars().count() as u16 + 2
         }
         _ => {
-            let heading = super::NAV[gui.active].label();
+            let mut heading = super::NAV[gui.active].label().to_string();
+            // A peer is read-only, and the crumb says so (multi-server
+            // clause 26, library-rooms clause 16) — as the Files bar does.
+            if gui.app.session.peer.is_some() {
+                heading = format!("{heading} · {}", t!("gui.srv.read_only"));
+            }
             put(frame, content.x, content.y, &heading, Style::default().add_modifier(Modifier::BOLD));
-            content.x + heading.chars().count() as u16 + 2
+            content.x + crate::kit::width(&heading) as u16 + 2
         }
     }
 }
@@ -241,6 +254,8 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::LibBack => {
             gui.app.tab = Tab::Library;
             gui.forward(Action::Back);
+            // The parent comes back with its cursor (clause 6): in view.
+            gui.library.view.reveal = true;
         }
         _ => return false,
     }
@@ -275,6 +290,8 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
         KeyCode::Char('h') | KeyCode::Backspace | KeyCode::Esc => {
             if !at_root(gui) {
                 gui.forward(Action::Back);
+                // The parent's cursor, restored from the trail, in view.
+                gui.library.view.reveal = true;
             }
         }
         KeyCode::Char('a') => gui.row_verb(List::Library, Action::AddToQueue),

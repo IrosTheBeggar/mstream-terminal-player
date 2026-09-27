@@ -208,6 +208,10 @@ impl App {
     /// off; on elsewhere → move here.
     pub(super) fn toggle_autodj(&mut self) -> Vec<Effect> {
         let Some(here) = self.session_identity() else {
+            // No session to arm for; an armed DJ can still be switched off.
+            if self.dj_armed() {
+                return self.disarm_dj();
+            }
             self.info(t!("dj.needs_server"));
             return Vec::new();
         };
@@ -229,6 +233,9 @@ impl App {
         }
         self.dj_server = Some(identity);
         self.dj_chooser = None;
+        // An opener still out was asked for another start: its target must
+        // not re-arm the DJ elsewhere when it lands.
+        self.dj_target = None;
         self.say_armed();
         let mut effects = self.probe_dj();
         effects.extend(self.dj_look_at_the_end());
@@ -370,10 +377,21 @@ impl App {
         self.lane.reset();
         let origin = self.origin_of(&seed.server);
         let mark = seed.picked_by_dj.then_some(DjMark { sonic: false });
-        self.queue.replace(vec![Queued { origin, dj: mark, track: seed.track }]);
+        let row = Queued { origin, dj: mark, track: seed.track };
+        // The seed opens an empty queue; a queue built while the opener
+        // was out (or while the pick's banner stood) stays, and the seed
+        // joins its end and plays from there — never wiped from under the
+        // user (clause 5's "the queue becomes the seed" is the empty case).
+        let index = if self.queue.items.is_empty() {
+            self.queue.replace(vec![row]);
+            0
+        } else {
+            self.queue.push(row);
+            self.queue.items.len() - 1
+        };
         self.say_armed();
         let mut effects = self.probe_dj();
-        effects.extend(self.play_index(0));
+        effects.extend(self.play_index(index));
         self.lane.followers = true;
         effects.extend(self.request_turn());
         effects
@@ -447,7 +465,7 @@ impl App {
 
     /// One turn on the DJ's server — or an owed one, when its tunnel is
     /// not up (clause 35).
-    fn request_turn(&mut self) -> Vec<Effect> {
+    pub(super) fn request_turn(&mut self) -> Vec<Effect> {
         let Some(identity) = self.dj_server.clone() else { return Vec::new() };
         if self.lane.pending {
             return Vec::new();
@@ -586,7 +604,14 @@ impl App {
     /// The session reconnected to what the DJ is armed on: its capabilities
     /// are the session's until the probe says more.
     pub(super) fn dj_session_connected(&mut self) -> Vec<Effect> {
-        if self.dj_server.is_some() && self.dj_info.is_none() {
+        if self.dj_server.is_none() {
+            // Off, what the room knew was the previous server's: the room
+            // probes the new one when it opens (clause 50).
+            self.dj_info = None;
+            self.dj_panel.rebuild(&self.dj, None, self.dj_is_peer());
+            return Vec::new();
+        }
+        if self.dj_info.is_none() {
             return self.probe_dj();
         }
         Vec::new()
@@ -1152,7 +1177,10 @@ impl App {
 
     pub(crate) fn open_genre_picker(&mut self) -> Vec<Effect> {
         self.dj_panel.genres = Some(GenrePicker { loading: true, ..Default::default() });
-        vec![Effect::Api(ApiCmd::Genres)]
+        // The genres of the library the rule is FOR — the DJ's server while
+        // armed — not whichever server is browsed (clauses 48 and 51).
+        let reach = self.dj_library_target().and_then(|target| self.reach_for(&target).ok()).flatten();
+        vec![Effect::Api(ApiCmd::Genres { reach })]
     }
 
     /// The sources picker (clause 42): the DJ server's libraries, each a
@@ -1165,7 +1193,10 @@ impl App {
 
     /// The libraries switched off for the DJ's server.
     pub fn dj_sources_off(&self) -> Vec<String> {
-        let Some(id) = self.dj_server.as_deref() else { return Vec::new() };
+        // The library the rules are for: the DJ's server while armed, else
+        // the session's — the other per-library rules' target.
+        let Some(id) = self.dj_library_target() else { return Vec::new() };
+        let id = id.as_str();
         self.servers
             .iter()
             .find(|s| crate::config::same_server(&s.id, id))
@@ -1176,7 +1207,7 @@ impl App {
     /// Switch one of the DJ server's libraries on or off (clause 42); the
     /// change is the server entry's, so the shells persist it.
     pub(crate) fn toggle_dj_source(&mut self, library: &str) -> Vec<Effect> {
-        let Some(id) = self.dj_server.clone() else { return Vec::new() };
+        let Some(id) = self.dj_library_target() else { return Vec::new() };
         let all = self.dj_info.as_ref().map(|i| i.libraries.len()).unwrap_or(0);
         let Some(known) = self.servers.iter_mut().find(|s| crate::config::same_server(&s.id, &id)) else {
             return Vec::new();

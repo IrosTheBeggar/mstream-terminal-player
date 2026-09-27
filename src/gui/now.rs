@@ -98,6 +98,13 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
         tall_compact(frame, &mut gui.ui, x, y, next, TallKind::Strong, Act::Next);
     }
 
+    // The Auto-DJ tab's sources picker is the TUI's own overlay: the GUI
+    // draws its genre picker and chooser as kit modals; this one it lends
+    // from the view it reuses.
+    if gui.app.dj_panel.sources.is_some() {
+        crate::tui::ui::render_dj_picker(frame, view, &gui.app);
+    }
+
     // The screen's note, where the TUI's key hints would be (clause 9): the
     // GUI names its keys on the footer, and the row's right is the modes.
     if let Some((text, is_err)) = gui.note_words() {
@@ -111,6 +118,30 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
 /// forwarded to the App with its `fullscreen` flag up, and the GUI's own
 /// transport letters. Returns true to quit.
 pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
+    // The App's own input modes first, the TUI keymap's way: the Auto-DJ
+    // tab's keyword field takes the letters, and its sources picker (the
+    // TUI's overlay, drawn here) takes the list keys — else Enter on those
+    // rows left a mode nothing could serve or leave.
+    if gui.app.dj_keyword.is_some() {
+        match key.code {
+            KeyCode::Char(c) => gui.forward(Action::Input(c)),
+            KeyCode::Backspace => gui.forward(Action::Backspace),
+            KeyCode::Enter => gui.forward(Action::Submit),
+            KeyCode::Esc => gui.forward(Action::Cancel),
+            _ => {}
+        }
+        return false;
+    }
+    if gui.app.dj_panel.sources.is_some() {
+        match key.code {
+            KeyCode::Up => gui.forward(Action::Up),
+            KeyCode::Down => gui.forward(Action::Down),
+            KeyCode::Char(' ') => gui.forward(Action::PlayPause),
+            KeyCode::Enter | KeyCode::Esc => gui.forward(Action::Cancel),
+            _ => {}
+        }
+        return false;
+    }
     match key.code {
         KeyCode::Char('q') => return true,
         KeyCode::Esc | KeyCode::Char('0') => return gui.act(Act::Screen(Screen::Library)),

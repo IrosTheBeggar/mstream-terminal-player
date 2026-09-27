@@ -403,12 +403,24 @@ fn chevron_glyph(queue_open: bool) -> &'static str {
 
 /// Truncate at the cell edge with the kit's clip mark. Borrowed when it
 /// fits — the common case, and it is asked for every label on every frame.
+/// Measured in cells, not characters: a CJK label is two cells a glyph,
+/// and a budget counted in characters let it run into its neighbours.
 pub(super) fn clip(text: &str, max: usize) -> Cow<'_, str> {
-    // A char past the limit is what makes the text too long.
-    if text.char_indices().nth(max).is_none() {
+    if crate::kit::width(text) <= max {
         return Cow::Borrowed(text);
     }
-    let cut = text.char_indices().nth(max.saturating_sub(1)).map_or(0, |(i, _)| i);
+    // Keep what fits before the mark's own cell.
+    let room = max.saturating_sub(1);
+    let mut kept = 0;
+    let mut cut = 0;
+    for (i, c) in text.char_indices() {
+        let w = crate::kit::char_width(c);
+        if kept + w > room {
+            break;
+        }
+        kept += w;
+        cut = i + c.len_utf8();
+    }
     let mut out = String::with_capacity(cut + 3);
     out.push_str(&text[..cut]);
     out.push(if legacy_conhost() { '»' } else { '…' });

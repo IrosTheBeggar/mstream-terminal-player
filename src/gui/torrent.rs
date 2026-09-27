@@ -384,7 +384,43 @@ fn basename(path: &str) -> String {
 /// file coming back, which means this player is the system's default for
 /// torrents and the loop must be named, not repeated.
 fn handoff_dir() -> PathBuf {
-    std::env::temp_dir().join("mstream-player-torrents")
+    // The user's own directory, not the shared temp dir: there another
+    // local user can pre-create the folder, plant a symlink where the file
+    // is written, or swap the staged file before the other app reads it.
+    crate::config::config_dir()
+        .map(|dir| dir.join("torrents"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("mstream-player-torrents"))
+}
+
+/// The most a `.torrent` can reasonably be: a typed path or `--torrent`
+/// that names something else (a video, `/dev/zero`) is refused before it
+/// is read, not after it filled memory.
+const TORRENT_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Stage a hand-off file under `dir`: created fresh (never through a file
+/// or link already there), a numbered name when the name is taken.
+fn stage_file(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::io::Result<String> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let mut path = dir.join(name);
+    let mut n = 1;
+    loop {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                std::io::Write::write_all(&mut file, bytes)?;
+                return Ok(path.to_string_lossy().into_owned());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 100 => {
+                path = dir.join(format!("{n}-{name}"));
+                n += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// List a LOCAL folder for the picker: sub-folders (symlinks resolved)
@@ -423,7 +459,16 @@ fn load_path(path: &str) -> Result<Loaded, String> {
     if md.is_dir() {
         return Ok(Loaded::Dir);
     }
-    std::fs::read(path).map(Loaded::File).map_err(|e| e.to_string())
+    // A regular file of a torrent's size: not a device, a pipe, or a video
+    // read whole before its shape is even looked at.
+    if !md.is_file() || md.len() > TORRENT_MAX_BYTES {
+        return Err(t!("gui.tor.not_a_torrent", name = path).to_string());
+    }
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, TORRENT_MAX_BYTES + 1), &mut bytes)
+        .map_err(|e| e.to_string())?;
+    Ok(Loaded::File(bytes))
 }
 
 /// Hand a file or a magnet link to the OS's opener and see whether
@@ -439,10 +484,13 @@ fn open_target(target: &str) -> Result<HandOff, String> {
         c.arg(target);
         c
     };
+    // Not `cmd /c start`: cmd.exe reads `&`, `|`, `^` and `%VAR%` in the
+    // target as its own syntax, so a magnet's `&dn=…` became a command.
+    // Explorer hands the file or URL to its registered handler untouched.
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut c = std::process::Command::new("cmd");
-        c.args(["/c", "start", ""]).arg(target);
+        let mut c = std::process::Command::new("explorer.exe");
+        c.arg(target);
         c
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -475,8 +523,16 @@ fn session_client(gui: &Gui) -> Result<Client, String> {
     if !gui.app.connected || session.server.is_empty() {
         return Err(t!("gui.no_server").to_string());
     }
-    Client::new_with(&session.server, session.self_signed)
-        .map(|c| c.with_token(session.token.clone()))
+    // A peer is read-only (multi-server clause 26): nothing is added to it,
+    // and nothing goes to its parent in its name.
+    if session.peer.is_some() {
+        return Err(t!("gui.srv.read_only").to_string());
+    }
+    // The session's own way in — a tunnel bridge's loopback token, the
+    // entry's trust — not a bare client the bridge would drop.
+    let reach = gui.app.reach(&gui.app.origin())?;
+    Client::new_with(&reach.base, reach.self_signed)
+        .map(|c| c.with_token(reach.token).with_local_token(reach.local_token).with_peer(reach.peer))
         .map_err(|e| e.to_string())
 }
 
@@ -557,6 +613,10 @@ pub(crate) fn observe(gui: &mut Gui, event: &Event) {
         gui.torrent.gate_for.clear();
         gui.torrent.templates.clear();
         gui.torrent.vpath = 0;
+        // A check or an add still out was asked of the server just left:
+        // its answer must not add to this one.
+        gui.torrent.busy = None;
+        gui.torrent.matches = None;
         if gui.settings_room == Some(SettingsRoom::Torrent) {
             request_gate(gui);
         }
@@ -917,13 +977,7 @@ fn hand_off(gui: &mut Gui, incoming: Option<Incoming>) {
         let target = match incoming {
             Incoming::Magnet(link) => Ok(link),
             Incoming::File(file) => {
-                let dir = handoff_dir();
-                std::fs::create_dir_all(&dir)
-                    .and_then(|()| {
-                        let path = dir.join(&file.name);
-                        std::fs::write(&path, &file.bytes).map(|()| path.to_string_lossy().into_owned())
-                    })
-                    .map_err(|e| e.to_string())
+                stage_file(&handoff_dir(), &file.name, &file.bytes).map_err(|e| e.to_string())
             }
         };
         let result = target.and_then(|t| open_target(&t));
@@ -1183,18 +1237,26 @@ fn apply_reply(gui: &mut Gui, reply: Reply) {
                 Err(e) => note(gui, e, true),
             }
         }
+        // An answer nothing waits for any more — the server changed under
+        // the request — is dropped rather than added to the new server.
         Reply::Checked(result) => {
+            let stale = gui.torrent.busy.is_none();
             gui.torrent.busy = None;
-            match result {
-                Ok(check) => apply_check(gui, check),
-                Err(e) => note(gui, e, true),
+            if !stale {
+                match result {
+                    Ok(check) => apply_check(gui, check),
+                    Err(e) => note(gui, e, true),
+                }
             }
         }
         Reply::Added(result) => {
+            let stale = gui.torrent.busy.is_none();
             gui.torrent.busy = None;
-            match result {
-                Ok(added) => apply_added(gui, added),
-                Err(e) => note(gui, t!("gui.tor.add_failed", err = e), true),
+            if !stale {
+                match result {
+                    Ok(added) => apply_added(gui, added),
+                    Err(e) => note(gui, t!("gui.tor.add_failed", err = e), true),
+                }
             }
         }
         Reply::HandedOff(result) => {

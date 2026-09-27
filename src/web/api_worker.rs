@@ -143,7 +143,7 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
-        ApiCmd::Genres => {
+        ApiCmd::Genres { .. } => {
             with_session(session, async |s| worker::genres_event(s.client.genres_async().await)).await
         }
 

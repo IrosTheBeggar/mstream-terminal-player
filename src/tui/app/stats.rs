@@ -112,6 +112,10 @@ pub struct Session {
     /// When the file last saw this session: recovery's end time.
     #[serde(default)]
     pub checkpoint_at: Option<u64>,
+    /// The stream this session listens to: a status naming another source
+    /// (the tail of a track that failed to give way) folds nothing here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
 }
 
 impl Session {
@@ -220,6 +224,12 @@ pub struct Stats {
     pub in_flight: Option<Vec<String>>,
     /// A kept batch's next try (clause 8).
     pub retry_at: Option<crate::clock::Instant>,
+    /// The server the batch in flight went to.
+    pub in_flight_server: Option<String>,
+    /// Servers whose last batch was kept, and when each may be tried again:
+    /// one server that cannot be reached must not hold every other
+    /// server's plays behind it.
+    pub backoff: std::collections::HashMap<String, crate::clock::Instant>,
     /// Something changed: try the outbox at the next tick.
     pub flush_wanted: bool,
     /// How the open session will be closed by the Play that follows — set
@@ -237,6 +247,8 @@ impl Default for Stats {
             outbox: Vec::new(),
             in_flight: None,
             retry_at: None,
+            in_flight_server: None,
+            backoff: std::collections::HashMap::new(),
             flush_wanted: false,
             ending: None,
             counter: 0,
@@ -269,7 +281,7 @@ impl App {
         };
         self.stats.counter += 1;
         let now = crate::clock::epoch_ms();
-        let short = &self.stats.instance_id[..self.stats.instance_id.len().min(8)];
+        let short: String = self.stats.instance_id.chars().take(8).collect();
         self.stats.session = Some(Session {
             id: format!("{short}-{now:x}-{}", self.stats.counter),
             origin: item.origin.clone(),
@@ -286,7 +298,16 @@ impl App {
             snapshot: item.origin.peer.map(|_| Snapshot::of(&item.track)),
             scrobbled: false,
             checkpoint_at: None,
+            source_url: None,
         });
+    }
+
+    /// The stream the open session listens to, from the Play just asked
+    /// for (or the URL the engine moved to).
+    pub(crate) fn stats_stream(&mut self, url: &str) {
+        if let Some(session) = self.stats.session.as_mut() {
+            session.source_url = Some(url.to_string());
+        }
     }
 
     /// The engine's status (clauses 2–4): listened time from the position,
@@ -294,6 +315,31 @@ impl App {
     /// server without the Stats API, the legacy scrobble at thirty seconds
     /// (clause 10).
     pub(crate) fn stats_tick(&mut self, status: &PlayerStatus) -> Vec<Effect> {
+        let Some(session) = self.stats.session.as_ref() else { return Vec::new() };
+        if session.source_url.as_deref().is_some_and(|url| url != status.source) {
+            return Vec::new();
+        }
+        // Gapless repeat-one loops its seam without a word to this side:
+        // the position falling from the track's end to its start is a lap,
+        // and a lap is a play of its own (clause 1 — one session per song
+        // start), completed, with a fresh session for the next.
+        let lapped = session.last_pos.is_some_and(|last| {
+            let end = session.duration_ms.map(|d| d as f64 / 1000.0);
+            status.playing
+                && status.position < SEEK_JUMP_S
+                && end.is_some_and(|end| last >= end - END_SLACK_S - SEEK_JUMP_S && last > status.position)
+        });
+        if lapped {
+            let again = self.queue.current.and_then(|i| self.queue.items.get(i)).cloned();
+            if let Some(item) = again {
+                let url = session.source_url.clone();
+                self.stats.ending = Some(Outcome::Completed);
+                self.stats_begin(&item);
+                if let Some(url) = url {
+                    self.stats_stream(&url);
+                }
+            }
+        }
         let Some(session) = self.stats.session.as_mut() else { return Vec::new() };
         if status.paused {
             session.pause();
@@ -331,7 +377,13 @@ impl App {
         self.stats.outbox.retain(|o| o.play.id != owed.play.id);
         self.stats.outbox.push(owed);
         while self.stats.outbox.len() > OUTBOX_CAP {
-            self.stats.outbox.remove(0);
+            let dropped = self.stats.outbox.remove(0);
+            // Said in the log (the browser build has no tracing): a play
+            // that leaves the outbox unposted is not silent.
+            #[cfg(not(target_arch = "wasm32"))]
+            tracing::info!("[stats] outbox full: the oldest play ({}) dropped unposted", dropped.play.file_path);
+            #[cfg(target_arch = "wasm32")]
+            drop(dropped);
         }
         self.stats.flush_wanted = true;
     }
@@ -347,10 +399,13 @@ impl App {
             return Vec::new();
         }
         self.stats.flush_wanted = false;
+        self.stats.backoff.retain(|_, until| *until > now);
         let effects = self.stats_flush();
         if effects.is_empty() {
-            // Nothing could go out (no way to reach a server): the minute.
-            self.stats.retry_at = Some(now + RETRY_AFTER);
+            // Nothing could go out (no way to reach a server, or every
+            // owed server waiting out its minute): the earliest of those.
+            let soonest = self.stats.backoff.values().min().copied();
+            self.stats.retry_at = Some(soonest.unwrap_or(now + RETRY_AFTER));
         }
         effects
     }
@@ -359,7 +414,9 @@ impl App {
     /// own, a peer's parent (clauses 8, 11). A server the ping said has no
     /// Stats API cannot take them, and its plays leave the outbox.
     pub(crate) fn stats_flush(&mut self) -> Vec<Effect> {
-        let mut passed: Vec<String> = Vec::new();
+        // A server whose last batch was kept waits out its minute while
+        // the others' plays go out (clause 8, per server).
+        let mut passed: Vec<String> = self.stats.backoff.keys().cloned().collect();
         loop {
             let Some(server) = self
                 .stats
@@ -396,6 +453,7 @@ impl App {
                 "plays": batch,
             });
             self.stats.in_flight = Some(ids.clone());
+            self.stats.in_flight_server = Some(server);
             return vec![Effect::Api(ApiCmd::ReportPlays { reach, body, ids })];
         }
     }
@@ -403,9 +461,13 @@ impl App {
     /// The server's word on the batch in flight (clause 8).
     pub(crate) fn stats_reported(&mut self, ids: Vec<String>, outcome: ReportOutcome) {
         self.stats.in_flight = None;
+        let server = self.stats.in_flight_server.take();
         match outcome {
             ReportOutcome::Settled(settled) => {
                 self.stats.outbox.retain(|o| !settled.contains(&o.play.id));
+                if let Some(server) = &server {
+                    self.stats.backoff.remove(server);
+                }
                 self.stats.retry_at = None;
                 self.stats.flush_wanted = true;
             }
@@ -415,7 +477,14 @@ impl App {
                 self.stats.flush_wanted = true;
             }
             ReportOutcome::Kept(_) => {
-                self.stats.retry_at = Some(crate::clock::Instant::now() + RETRY_AFTER);
+                // This server waits its minute; the others' plays may still
+                // go out on the next tick.
+                let until = crate::clock::Instant::now() + RETRY_AFTER;
+                if let Some(server) = server {
+                    self.stats.backoff.insert(server, until);
+                }
+                self.stats.retry_at = Some(until);
+                self.stats.flush_wanted = true;
             }
         }
     }
@@ -423,9 +492,8 @@ impl App {
     /// What `stats.json` keeps (clause 9), or `None` when there is nothing
     /// to keep and the file may go.
     pub fn stats_snapshot(&self) -> Option<StatsSnapshot> {
-        if self.stats.outbox.is_empty() && self.stats.session.is_none() {
-            return None;
-        }
+        // Always something: the install's id lives here (clause 9), so the
+        // file stays even with nothing owed and no session open.
         let inflight = self.stats.session.clone().map(|mut s| {
             s.checkpoint_at = Some(crate::clock::epoch_ms());
             s
@@ -481,6 +549,7 @@ mod tests {
             snapshot: None,
             scrobbled: false,
             checkpoint_at: None,
+            source_url: None,
         }
     }
 

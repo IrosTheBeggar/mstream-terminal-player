@@ -654,6 +654,17 @@ pub fn bar_jump(bar: Rect, max_scroll: usize, y: u16) -> usize {
     (rel * max_scroll + (span - 1) / 2) / (span - 1)
 }
 
+/// Display width in cells — what ratatui spends, so budgets and cut points
+/// agree with the drawing: a CJK character is two cells, not one.
+pub fn width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
+}
+
+/// One character's cells (zero for a combining mark).
+pub fn char_width(c: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
 /// A list viewport: given the row count, a row to reveal (a moved
 /// keyboard cursor, or a fresh add), the wheel offset and the available
 /// height → (first visible index, visible count). The wheel scrolls

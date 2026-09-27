@@ -49,10 +49,10 @@ def run(Gui):
     # ▸▸ plays the next row: the card's title (the facts column, at the
     # left — the queue tab at the right names the row too) changes.
     def card_title():
-        for i in range(1, 12):
-            cells = g.screen.display[i][:45]
-            if "6AM" in cells or "Boukmanflow" in cells:
-                return i, cells.strip()
+        # The facts card: the title stands on the row above the artist's.
+        for i in range(2, 12):
+            if "Boukmanflow" in g.screen.display[i][:45]:
+                return g.screen.display[i - 1][:45].strip()
         return None
     before_title = card_title()
     if not before_title:

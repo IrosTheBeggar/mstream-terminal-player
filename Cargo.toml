@@ -25,6 +25,9 @@ fastrand = "2"
 # in the tree through tracing-subscriber's env-filter; shared because the
 # parser is pure string work.
 regex = "1"
+# Display width for the GUI's cell budgets: a CJK label is two cells a
+# character, and ratatui measures the same way.
+unicode-width = "0.2"
 toml = "1.1.4"
 # Shared: on wasm this is the fetch backend (its TLS/socket internals are
 # target-gated inside reqwest itself), which is what makes api::Client's

@@ -546,6 +546,26 @@ impl App {
     pub(super) fn consume_session(&mut self, event: Event) -> Vec<Effect> {
         match event {
             Event::Connected { server, id, username, token, ping } => {
+                // A Connected for a server this session was never seated on
+                // — a pasted code's dial answering while another server is
+                // up — is a fresh session: nothing of the old one's
+                // identity, token, name or place may carry over, or the old
+                // server's token rides every request to the new one (the
+                // review's token leak). A reconnect to the same identity,
+                // or to a peer's parent, keeps what it had.
+                let fresh = !self.session.server_id.is_empty()
+                    && !crate::config::same_server(&id, &self.session.server_id)
+                    && !self.session.peer.as_ref().is_some_and(|(parent, _)| crate::config::same_server(parent, &id));
+                if fresh {
+                    self.session.peer = None;
+                    self.session.server_id = id.clone();
+                    self.session.token = None;
+                    self.session.username = None;
+                    if !crate::quickconnect::is_tunnel_id(&id) {
+                        self.session.tunnel_code = None;
+                    }
+                    self.shed_server_state();
+                }
                 // A fresh session starts with no verdict on how its tunnel
                 // runs; the sampler speaks within a couple of seconds when
                 // there is one, and a direct server never sets it at all.

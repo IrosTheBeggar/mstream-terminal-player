@@ -67,7 +67,9 @@ impl App {
         self.sonic.fetched = false;
         self.sonic.note = None;
         self.sonic.end = Some(picked);
-        if self.sonic.start.is_none() {
+        // What is playing is the natural start — when it is this server's
+        // (clause 1); a row from another server leaves the start open.
+        if self.sonic.start.is_none() && self.playing_is_sessions() {
             self.sonic.start = self.now_playing.clone();
         }
         self.sonic_stack.restart();
@@ -357,6 +359,12 @@ impl App {
                     self.error("nothing is playing right now");
                     return Vec::new();
                 };
+                // A path is plotted on ONE server's index (clause 1): a row
+                // playing from another server is not a seed here.
+                if !self.playing_is_sessions() {
+                    self.error(format!("pick a track on {}", self.server_display()));
+                    return Vec::new();
+                }
                 self.capture_sonic_side(side, track)
             }
             SonicRow::PickFromLibrary => {
@@ -715,6 +723,19 @@ impl App {
                 dest: Tab::Library,
             })];
         }
+        // Inside a playlist the list is the trail's cached parent: dropped,
+        // so Back asks again and shows the new name (clause 14).
+        if matches!(self.library_node(), LibraryNode::Playlist(_)) {
+            self.library.trail.clear();
+        }
         Vec::new()
+    }
+
+    /// Whether the playing row is the session's own server's.
+    fn playing_is_sessions(&self) -> bool {
+        self.queue
+            .current
+            .and_then(|i| self.queue.items.get(i))
+            .is_some_and(|item| self.is_session_origin(&item.origin))
     }
 }

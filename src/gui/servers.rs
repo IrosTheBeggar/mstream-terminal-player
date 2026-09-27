@@ -238,6 +238,9 @@ impl ServersUi {
 pub(crate) fn open_room(gui: &mut Gui) {
     gui.settings_room = Some(SettingsRoom::Servers);
     gui.servers.cursor = 0;
+    // The Settings rows' cursor stows: their keys (Space, ← →) would flip
+    // a hidden row under this room otherwise.
+    gui.cursor = None;
     let entries: Vec<(String, bool, bool)> = gui
         .config
         .servers
@@ -496,15 +499,26 @@ fn remove_server(gui: &mut Gui, index: usize) {
         gui.servers.cursor = gui.servers.cursor.min(rows);
         return;
     }
+    // An unreadable credentials file is left alone: writing defaults over
+    // it would drop every other server's token and pairing code (the rule
+    // every other writer follows) — the entry goes, its secrets stay put.
     let mut credentials = match config::load_credentials() {
-        Ok(credentials) => credentials,
-        Err(_) => config::Credentials::default(),
+        Ok(credentials) => Some(credentials),
+        Err(e) => {
+            gui.note = Some((t!("note.settings_save_failed", err = e).to_string(), true));
+            None
+        }
     };
-    let saved = update_config(gui, |config| {
-        config::remove_server(config, &mut credentials, &url);
+    let saved = update_config(gui, |config| match credentials.as_mut() {
+        Some(credentials) => config::remove_server(config, credentials, &url),
+        None => config.servers.retain(|e| !config::same_server(&e.url, &url)),
     });
     if saved {
-        if config::save_credentials(&credentials).is_err() {
+        let Some(credentials) = &credentials else {
+            // Said above; the entry is gone all the same.
+            return;
+        };
+        if config::save_credentials(credentials).is_err() {
             gui.note = Some((t!("note.settings_save_failed", err = "credentials").to_string(), true));
         } else {
             let shown = crate::quickconnect::display_server(&url);
@@ -658,6 +672,9 @@ pub(crate) fn submit_form(gui: &mut Gui) {
             }
             gui.servers.pending_code = Some(code.clone());
             gui.servers.pending_dial = Some(id.clone());
+            // Held up until its Connected seats the session: a sign-in typed
+            // on it can take longer than the idle release grace.
+            gui.app.tunnel_hold = Some(id.clone());
             gui.pend(vec![Effect::Api(ApiCmd::TunnelOpen { id, credential: code })]);
             return;
         }
@@ -872,7 +889,15 @@ fn apply_outcome(gui: &mut Gui, outcome: Outcome) {
     }
 
     let Outcome { url, username, token, self_signed, switch, editing, .. } = outcome;
-    let mut credentials = config::load_credentials().unwrap_or_default();
+    // An unreadable credentials file is not written over with the one token
+    // in hand (every other server's would go with it): said, and skipped.
+    let mut credentials = match config::load_credentials() {
+        Ok(credentials) => Some(credentials),
+        Err(e) => {
+            gui.note = Some((t!("note.settings_save_failed", err = e).to_string(), true));
+            None
+        }
+    };
     let moved = editing.as_deref().is_some_and(|old| !config::same_server(old, &url));
     let saved = update_config(gui, |config| {
         match &editing {
@@ -908,12 +933,16 @@ fn apply_outcome(gui: &mut Gui, outcome: Outcome) {
         return;
     }
     if let Some(old) = editing.as_deref().filter(|_| moved) {
-        config::store_token(&mut credentials, old, None);
+        if let Some(credentials) = credentials.as_mut() {
+            config::store_token(credentials, old, None);
+        }
         gui.servers.versions.remove(old);
     }
-    config::store_token(&mut credentials, &url, token);
-    if config::save_credentials(&credentials).is_err() {
-        gui.note = Some((t!("note.settings_save_failed", err = "credentials").to_string(), true));
+    if let Some(mut credentials) = credentials {
+        config::store_token(&mut credentials, &url, token);
+        if config::save_credentials(&credentials).is_err() {
+            gui.note = Some((t!("note.settings_save_failed", err = "credentials").to_string(), true));
+        }
     }
 
     gui.servers.form = None;
@@ -939,18 +968,24 @@ fn apply_outcome(gui: &mut Gui, outcome: Outcome) {
 /// open the form instead.
 pub(crate) fn observe(gui: &mut Gui, event: &Event) {
     match event {
-        Event::Connected { .. } => {
+        Event::Connected { id, .. } => {
             // The switch landed: its "reaching…" note has nothing more to say.
             if gui.servers.switching.take().is_some() {
                 gui.note = None;
             }
-            // A pairing-code dial just answered: the session about to be
-            // seated by this event is the tunnel's, so the code goes in
+            // A pairing-code dial answered — THIS dial's identity, not any
+            // Connected that lands while a code waits (a launch dial
+            // finishing meanwhile once took the code, and the other
+            // server's pairing code was written over): the session the App
+            // seats from this event is the tunnel's, so the code goes in
             // now — nothing later knows it — and the old server's browse
             // state is shed the way a switch sheds it (the queue stays).
-            if let Some(code) = gui.servers.pending_code.take() {
+            if gui.servers.pending_dial.as_deref() == Some(id.as_str()) {
                 gui.servers.pending_dial = None;
-                gui.app.session.tunnel_code = Some(code);
+                gui.app.tunnel_hold = None;
+                if let Some(code) = gui.servers.pending_code.take() {
+                    gui.app.session.tunnel_code = Some(code);
+                }
                 gui.app.shed_server_state();
             }
             if gui.servers.form.as_ref().is_some_and(|f| f.session_login || f.switch) {
@@ -985,16 +1020,16 @@ pub(crate) fn observe(gui: &mut Gui, event: &Event) {
             })]);
         }
         Event::NeedsLogin { server }
-            if gui.servers.switching.is_some() || gui.servers.pending_code.is_some() =>
+            if gui.servers.switching.is_some()
+                || gui.servers.pending_dial.as_deref().is_some_and(|dial| {
+                    gui.app.tunnel_at(server).is_some_and(|(id, _)| id == dial)
+                }) =>
         {
-            // A fresh dial's code is seated now — the sign-in about to
-            // happen ends in a Connected whose save needs it. The pending
-            // marker stays armed until then, so that Connected still
-            // sheds the old server's state.
-            let fresh_tunnel = gui.servers.pending_code.is_some();
-            if let Some(code) = gui.servers.pending_code.clone() {
-                gui.app.session.tunnel_code = Some(code);
-            }
+            // A fresh dial asked to sign in: the form aims at its bridge. The
+            // code is seated by the Connected the sign-in ends in — its
+            // pending marker stays armed until then — never now, into the
+            // session that is still another server's.
+            let fresh_tunnel = gui.servers.pending_dial.is_some();
             let identity = gui.servers.switching.clone().unwrap_or_default();
             let entry = gui
                 .config
@@ -1014,7 +1049,11 @@ pub(crate) fn observe(gui: &mut Gui, event: &Event) {
             let note = if fresh_tunnel { t!("gui.srv.tunnel_signin") } else { t!("gui.srv.sign_in") };
             gui.note = Some((note.to_string(), false));
         }
-        Event::Unauthorized if gui.app.connected => {
+        // A direct peer's wall refusing its guest token is renewed through
+        // the parent by the App (contract clause 27): no sign-in form aimed
+        // at the peer's own bridge, where a password would go to another
+        // operator's server.
+        Event::Unauthorized if gui.app.connected && !gui.app.session_is_direct() => {
             // An established session went bad; offer the sign-in for the
             // server we were already on, the way the TUI does.
             gui.servers.form = Some(Form {
@@ -1057,6 +1096,7 @@ fn dial_failed(gui: &mut Gui, message: &str) {
         form.error = Some(message.to_string());
     }
     if dialling {
+        gui.app.tunnel_hold = None;
         gui.servers.pending_code = None;
         gui.servers.pending_dial = None;
     }
@@ -1135,9 +1175,11 @@ pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
         Act::FormSubmit => submit_form(gui),
         Act::FormCancel => {
             gui.servers.form = None;
-            // A dial walked away from must not ambush a later connect.
+            // A dial walked away from must not ambush a later connect, and
+            // its tunnel is not held any longer.
             gui.servers.pending_code = None;
             gui.servers.pending_dial = None;
+            gui.app.tunnel_hold = None;
         }
         Act::QrClose => gui.servers.qr = None,
         Act::Guard => {}
@@ -2578,8 +2620,8 @@ mod tests {
             gui.pending
         );
 
-        // The tunnel answers: the code is seated for the save, the queue
-        // stays (its rows know their server), the form closes.
+        // Another server's Connected landing meanwhile — a launch dial that
+        // finished — takes nothing: the code is this dial's alone.
         gui.app.push_queue(crate::api::types::Track {
             filepath: "music/a.mp3".into(),
             metadata: Default::default(),
@@ -2587,14 +2629,31 @@ mod tests {
         observe(
             &mut gui,
             &Event::Connected {
+                server: "http://127.0.0.1:40000".into(),
+                id: "mstream+iroh://someoneelse".into(),
+                username: None,
+                token: None,
+                ping: Box::default(),
+            },
+        );
+        assert!(gui.app.session.tunnel_code.is_none(), "another identity's Connected seats nothing");
+        assert_eq!(gui.servers.pending_dial.as_deref(), Some(id.as_str()), "the dial stays pending");
+
+        // The tunnel answers under the identity the Connect named: the code
+        // is seated for the save, the queue stays (its rows know their
+        // server), the form closes.
+        observe(
+            &mut gui,
+            &Event::Connected {
                 server: "http://127.0.0.1:51234".into(),
-                id: "mstream+iroh://endpointabc".into(),
+                id: id.clone(),
                 username: None,
                 token: None,
                 ping: Box::default(),
             },
         );
         assert_eq!(gui.app.session.tunnel_code.as_deref(), Some(code.as_str()));
+        assert!(gui.app.tunnel_hold.is_none(), "the dial's hold on its tunnel is let go");
         assert_eq!(gui.app.queue.items.len(), 1, "the queue is kept across the dial");
         assert!(gui.servers.pending_code.is_none());
         assert!(gui.servers.form.is_none());
@@ -2977,5 +3036,24 @@ mod tests {
             handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(handled, Some(false));
         assert!(gui.settings_room != Some(SettingsRoom::Servers), "Esc closes the room");
+    }
+
+    #[test]
+    fn the_manage_room_lets_go_of_the_keys_on_the_now_playing_screen() {
+        use super::super::Screen;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        // The room's keys ran under the Now Playing screen: Enter there
+        // switched servers instead of playing the queue row in hand.
+        let mut gui = two_server_gui();
+        gui.queue_open = false;
+        gui.active = super::super::SETTINGS_NAV;
+        open_room(&mut gui);
+        gui.servers.cursor = 1;
+        gui.act(super::super::Act::Screen(Screen::NowPlaying));
+        super::super::handle_key(&mut gui, KeyEvent::from(KeyCode::Enter));
+        assert!(gui.servers.switching.is_none(), "Enter on the screen switches nothing");
+        super::super::handle_key(&mut gui, KeyEvent::from(KeyCode::Esc));
+        assert_eq!(gui.screen, Screen::Library, "Esc leaves the screen, not the hidden room");
+        assert!(gui.in_settings_room(SettingsRoom::Servers), "which stands where it was");
     }
 }

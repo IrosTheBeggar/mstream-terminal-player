@@ -505,11 +505,12 @@ pub(crate) struct Gui {
     /// one reply, so the choice is instant and free to change.
     chip: usize,
     classes_on: [bool; 5],
-    /// The queue panel's viewport, and the playing index last seen — the
-    /// panel reveals the playing row only when it CHANGES, so the wheel
-    /// can roam freely in between (the kit's table contract).
+    /// The queue panel's viewport, and the playing track last seen — the
+    /// panel reveals the playing row only when the TRACK changes (a row
+    /// removed above it moves its index, not the music), so the wheel can
+    /// roam freely in between (the kit's table contract).
     queue_view: ListView,
-    last_current: Option<usize>,
+    last_playing: Option<String>,
     /// The size of the last drawn frame, for hit zones the event loop
     /// needs outside a draw (the wheel's queue-vs-content split, the
     /// album wall's grid geometry).
@@ -549,6 +550,9 @@ pub(crate) struct Gui {
 
 impl Gui {
     fn new(config: Config, config_ok: bool, mut app: App) -> Self {
+        // The tests assert the modern glyphs whatever console runs them.
+        #[cfg(test)]
+        crate::kit::theme::pin_modern_terminal();
         // No connect screen here: the servers surfaces are this shell's own,
         // and the transport keeps working while a session is down.
         app.connect_screen = false;
@@ -571,7 +575,7 @@ impl Gui {
             chip: 0,
             classes_on: [true; 5],
             queue_view: ListView::default(),
-            last_current: None,
+            last_playing: None,
             last_width: MIN_W,
             last_height: MIN_H,
             screen: Screen::Library,
@@ -592,12 +596,34 @@ impl Gui {
     }
 
     fn pend(&mut self, effects: Vec<Effect>) {
+        // The App's own bookkeeping for what is about to go out — the Play
+        // that arms the starting gate, the Stop that closes the play's
+        // session — runs for a direct call the way it runs inside
+        // `handle_action` (idempotent for effects that already had it).
+        self.app.note_pending(&effects);
         self.pending.extend(effects);
     }
 
     fn forward(&mut self, action: Action) {
         let effects = self.app.handle_action(action);
         self.pend(effects);
+        self.sync_screen();
+    }
+
+    /// The App can leave its full-screen view on its own — arming a pick
+    /// puts the browser up, the sonic tab opens on the browser screen — and
+    /// this shell's screen must follow, else the keys drive a pane nobody
+    /// can see (now-playing contract, the states).
+    fn sync_screen(&mut self) {
+        if self.screen == Screen::NowPlaying && !self.app.fullscreen {
+            self.screen = Screen::Library;
+            self.active = match self.app.tab {
+                Tab::SonicPath => SONIC_NAV,
+                Tab::Files => FILES_NAV,
+                Tab::Search => SEARCH_NAV,
+                _ => self.active,
+            };
+        }
     }
 
     /// Forward an Activate that may answer an armed sonic pick — and when
@@ -733,7 +759,17 @@ impl Gui {
             return false;
         }
         match act {
-            Act::CaptureCancel => self.forward(Action::Cancel),
+            Act::CaptureCancel => {
+                // The banner's [X] is Esc: a sonic pick let go goes home to
+                // the room that asked (sonic-path contract, clause 12).
+                let sonic = matches!(self.app.capture, Some(crate::tui::app::Capture::Sonic(_)));
+                self.forward(Action::Cancel);
+                if sonic {
+                    self.screen = Screen::Library;
+                    self.active = SONIC_NAV;
+                    self.app.tab = Tab::SonicPath;
+                }
+            }
             Act::Screen(screen) => {
                 self.screen = screen;
                 // The App's full-screen flag follows the screen, so its keys
@@ -777,6 +813,16 @@ impl Gui {
                     self.albums.wall.stow();
                 }
                 self.active = i;
+                // The keys are the room's now: the App's focus comes back
+                // to the browser (the queue panel's cursor stows), and the
+                // Files room seats its own pane — the other rooms seat
+                // theirs below. Without this the room's keys drove whatever
+                // pane and focus the App had last.
+                self.app.focus = crate::tui::app::Focus::Browser;
+                self.queue_view.stow();
+                if i == FILES_NAV {
+                    self.app.tab = Tab::Files;
+                }
                 // Leaving for a section stows every servers surface; the
                 // room is a Settings sub-view, not a place to come back to.
                 self.servers.drop_open = false;
@@ -809,6 +855,13 @@ impl Gui {
                             .app
                             .open_library_node(crate::tui::worker::LibraryNode::Albums, true);
                         self.pend(effects);
+                    } else if !self.app.on_albums_drill() {
+                        // The shared pane holds another room's list: the wall
+                        // stands over the Albums drill again, seated from the
+                        // cache without a request — else its verbs, its count
+                        // and its Back ran on that other list.
+                        self.app.seat_albums_from_cache();
+                        self.albums.wall.stow();
                     } else {
                         self.app.tab = Tab::Library;
                     }
@@ -823,8 +876,14 @@ impl Gui {
                     }
                 }
                 // The sonic room keeps the App's tab honest for the shared
-                // machinery (capture answers check the pane in focus).
+                // machinery (capture answers check the pane in focus) — and
+                // re-entering it disarms a pick left standing (sonic-path
+                // contract, clause 13): a stale pick must not swallow a
+                // later browse click.
                 if i == SONIC_NAV {
+                    if matches!(self.app.capture, Some(crate::tui::app::Capture::Sonic(_))) {
+                        self.forward(Action::Cancel);
+                    }
                     self.app.tab = Tab::SonicPath;
                 }
                 // Playlists: a fresh visit fetches the list; a return finds
@@ -845,9 +904,19 @@ impl Gui {
                     }
                 }
             }
-            Act::ToggleQueue => self.queue_open = !self.queue_open,
+            Act::ToggleQueue => {
+                self.queue_open = !self.queue_open;
+                // A folded panel cannot hold the keys: they come back to the
+                // browser, else ↑↓ and Enter drove a list nobody could see.
+                if !self.queue_open && self.app.focus == crate::tui::app::Focus::Queue {
+                    self.app.focus = crate::tui::app::Focus::Browser;
+                    self.queue_view.stow();
+                }
+            }
             Act::PlayPause => {
-                if self.app.now_playing.is_some() {
+                // A loaded track, or a queue waiting to start (the TUI's
+                // Space starts it too); the demo seat only with nothing at all.
+                if self.app.now_playing.is_some() || !self.app.queue.items.is_empty() {
                     self.forward(Action::PlayPause);
                 } else if self.demo.is_some() {
                     self.demo_paused = !self.demo_paused;
@@ -1065,8 +1134,10 @@ fn put(frame: &mut Frame, x: u16, y: u16, text: &str, style: Style) {
     if !buf.area.contains(Position { x, y }) {
         return;
     }
-    let width = text.chars().count();
-    buf.set_stringn(x, y, text, width, style);
+    // The whole text; the budget is the buffer's edge. (Counting the text's
+    // characters here cut every CJK label to half its width: the budget is
+    // in cells, and those glyphs take two.)
+    buf.set_stringn(x, y, text, usize::MAX, style);
 }
 
 /// A text field with the keyboard in it: the value windowed around the
@@ -1137,8 +1208,15 @@ fn accent() -> Style {
 /// The content column: from under the header to the row above the bar's
 /// seek line, and one row shorter when the screen keeps its tips line.
 fn content_rect(width: u16, height: u16, queue_open: bool, footer: bool) -> Rect {
-    let right = if queue_open { width - 36 } else { width - 3 };
-    Rect { x: 17, y: 2, width: right - 17, height: height - 2 - bar::BAR_ROWS - u16::from(footer) }
+    // Saturating: a key can arrive with the window under the minimum, and
+    // the geometry it asks for must not overflow on the way to doing nothing.
+    let right = if queue_open { width.saturating_sub(36) } else { width.saturating_sub(3) };
+    Rect {
+        x: 17,
+        y: 2,
+        width: right.saturating_sub(17),
+        height: height.saturating_sub(2 + bar::BAR_ROWS + u16::from(footer)),
+    }
 }
 
 /// A path clipped LEADING, so the leaf stays visible (the kit's path law:
@@ -1158,8 +1236,6 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     gui.ui.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
     let area = frame.area();
-    gui.last_width = area.width;
-    gui.last_height = area.height;
     if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
         frame.render_widget(
             ratatui::widgets::Block::default().style(Style::default().bg(ground).fg(th().text)),
@@ -1170,6 +1246,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         frame.render_widget(Paragraph::new(t!("resize").to_string()).style(dim()), area);
         return;
     }
+    // The size the hit zones outside a draw reason from — a drawable one.
+    gui.last_width = area.width;
+    gui.last_height = area.height;
 
     draw_top_tabs(frame, gui);
     servers::draw_header(frame, gui, area);
@@ -1185,10 +1264,11 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             // The content column, between the nav rule and the queue (when
             // open). Exhaustive over the nav, like the wheel: a room cannot
             // ship without a body.
-            let mut content = content_rect(area.width, area.height, gui.queue_open, gui.footer());
+            // The room's rect — a row lower under a pick's banner — from the
+            // one place the rooms' key and click geometry reads it too.
+            let content = gui.room_rect();
             if let Some(text) = &banner {
-                draw_capture_banner(frame, gui, content, text);
-                content = Rect { y: content.y + 1, height: content.height.saturating_sub(1), ..content };
+                draw_capture_banner(frame, gui, Rect { y: content.y - 1, height: 1, ..content }, text);
             }
             match NAV[gui.active] {
                 NavId::Files => draw_files(frame, gui, content),
@@ -1316,7 +1396,11 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
         };
         bar::draw(frame, &mut gui.ui, area, &view);
         if has_art {
-            draw_card_cover(frame, bar::cover_rect(area, gui.footer()), &mut gui.app);
+            let cover = bar::cover_rect(area, gui.footer());
+            // The mosaic where an overlay stood last frame — the rule every
+            // other cover follows, since a picture's cells are skipped.
+            let mosaic = gui.ui.covered_last_frame(cover);
+            draw_card_cover(frame, cover, &mut gui.app, mosaic);
         }
     }
 
@@ -1351,7 +1435,7 @@ fn playing_cover_ready(app: &App) -> bool {
 /// terminal can (kitty · sixel · iTerm2), the ▀-mosaic everywhere else —
 /// the same two paths the TUI's facts column walks. The kit's rule holds:
 /// pixels are for album art only, never chrome.
-fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App) {
+fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App, mosaic: bool) {
     // Field by field, the way the TUI spells it: the art cache's borrow
     // must be visibly disjoint from the graphics and cover-pane fields
     // taken mutably below.
@@ -1364,7 +1448,7 @@ fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App) {
     let Some(cover) = cover else {
         return;
     };
-    if app.graphics.draw(frame, rect, cover) {
+    if !mosaic && app.graphics.draw(frame, rect, cover) {
         return;
     }
     let mut canvas = crate::tui::canvas::Canvas::new(rect);
@@ -1948,9 +2032,18 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     put(frame, content.x, content.y + 10, &t!("gui.set.torrents_group"), dim());
     put(frame, content.x, content.y + 14, &t!("gui.set.display_group"), dim());
 
+    // The blend row's label pads to a column in cells (a translation may be
+    // wider than the English), and its - and + cells are placed off that
+    // same width below, so the drawn glyphs and their hit cells agree.
+    let blend_name = t!("gui.set.blend").to_string();
+    let blend_w = crate::kit::width(&blend_name).max(14);
     let rows: [(String, String); SET_ROWS] = [
         (
-            format!("{:<14} -  {:>4}  +", t!("gui.set.blend"), fmt_blend(gui.app.crossfade)),
+            format!(
+                "{blend_name}{} -  {:>4}  +",
+                " ".repeat(blend_w - crate::kit::width(&blend_name)),
+                fmt_blend(gui.app.crossfade)
+            ),
             t!("gui.set.blend_desc").to_string(),
         ),
         (
@@ -2001,6 +2094,11 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 
     for (i, (label, desc)) in rows.iter().enumerate() {
         let y = row_y(content.y, i);
+        // A row the column has no line for (a pick's banner at the minimum
+        // height) is not drawn, so it cannot land on the bar's seek line.
+        if y >= content.bottom() {
+            continue;
+        }
         let rect = Rect { x: content.x, y, width: content.width, height: 1 };
         let selected = gui.cursor == Some(i);
         let hover = gui.ui.hovers(rect);
@@ -2020,7 +2118,7 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         // full sentence returns the moment the queue folds away. A label
         // wider than the column (a translation, the torrents switch)
         // pushes it over rather than being written through.
-        let desc_x = content.x + (label.chars().count() as u16 + 2).max(27);
+        let desc_x = content.x + (crate::kit::width(label) as u16 + 2).max(27);
         let avail = rect.right().saturating_sub(desc_x) as usize;
         if avail >= 10 {
             put(frame, desc_x, y, &bar::clip(desc, avail), desc_style);
@@ -2029,8 +2127,8 @@ fn draw_settings(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         // The blend's - and + are their own targets, drawn after the row so
         // the later rect wins the hit (the kit's overlay rule).
         if i == ROW_BLEND {
-            let minus = Rect { x: content.x + 15, y, width: 1, height: 1 };
-            let plus = Rect { x: content.x + 24, y, width: 1, height: 1 };
+            let minus = Rect { x: content.x + blend_w as u16 + 1, y, width: 1, height: 1 };
+            let plus = Rect { x: content.x + blend_w as u16 + 10, y, width: 1, height: 1 };
             gui.ui.click(minus, Act::BlendDown);
             gui.ui.click(plus, Act::BlendUp);
         }
@@ -2112,6 +2210,10 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
                 let action = if down { Action::Down } else { Action::Up };
                 match list {
                     Some(List::Playlists) => playlists::step_names(gui, if down { 1 } else { -1 }),
+                    Some(List::Library) => {
+                        gui.walk(List::Library, action);
+                        library::keep_off_parent(gui);
+                    }
                     Some(list) => gui.walk(list, action),
                     None => gui.forward(action),
                 }
@@ -2141,6 +2243,18 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             _ => {}
         }
     }
+    // An armed pick is the loudest thing on screen after the filter: Esc
+    // stops picking before it stows a cursor or climbs a level, and goes
+    // home to the room that asked — the App's own Cancel contract,
+    // followed on this surface too.
+    if key.code == KeyCode::Esc
+        && matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_)))
+    {
+        gui.forward(Action::Cancel);
+        gui.active = SONIC_NAV;
+        gui.app.tab = Tab::SonicPath;
+        return false;
+    }
     if gui.active == ALBUMS_NAV
         && gui.app.connected
         && let Some(quit) = albums::handle_key(gui, key)
@@ -2155,17 +2269,6 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
     }
     if let Some(quit) = playlists::handle_key(gui, key) {
         return quit;
-    }
-    // An armed pick is the loudest thing on screen: Esc stops picking
-    // before it means anything else, and goes home to the room that asked
-    // — the App's own Cancel contract, followed on this surface too.
-    if key.code == KeyCode::Esc
-        && matches!(gui.app.capture, Some(crate::tui::app::Capture::Sonic(_)))
-    {
-        gui.forward(Action::Cancel);
-        gui.active = SONIC_NAV;
-        gui.app.tab = Tab::SonicPath;
-        return false;
     }
     let settings = gui.active == SETTINGS_NAV;
     let files = gui.active == FILES_NAV;
@@ -2218,7 +2321,10 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::PageDown if files => gui.walk(List::Files, Action::PageDown),
         KeyCode::PageUp if files => gui.walk(List::Files, Action::PageUp),
         KeyCode::Enter if files => gui.row_verb(List::Files, Action::Activate),
-        KeyCode::Char('h') | KeyCode::Backspace if files => gui.forward(Action::Back),
+        KeyCode::Char('h') | KeyCode::Backspace if files => {
+            gui.seat(List::Files);
+            gui.forward(Action::Back);
+        }
         KeyCode::Char('a') if files => gui.row_verb(List::Files, Action::AddToQueue),
         KeyCode::Char('N') if files => gui.row_verb(List::Files, Action::AddNext),
         KeyCode::Char('P') if files => gui.row_verb(List::Files, Action::PlayNow),
@@ -2228,7 +2334,10 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Down if search => gui.walk(List::Search, Action::Down),
         KeyCode::Up if search => gui.walk(List::Search, Action::Up),
         KeyCode::Enter if search => gui.row_verb(List::Search, Action::Activate),
-        KeyCode::Char('h') | KeyCode::Backspace if search => gui.forward(Action::Back),
+        KeyCode::Char('h') | KeyCode::Backspace if search => {
+            gui.seat(List::Search);
+            gui.forward(Action::Back);
+        }
         KeyCode::Char('a') if search => gui.row_verb(List::Search, Action::AddToQueue),
         KeyCode::Char('N') if search => gui.row_verb(List::Search, Action::AddNext),
         KeyCode::Char('P') if search => gui.row_verb(List::Search, Action::PlayNow),
@@ -2317,11 +2426,17 @@ fn event_loop(
             // rebuild — clause 22's promise, kept here because the App
             // consumes the pick into the setup view first.
             let sonic_random = matches!(ev, Event::SonicRandom { .. });
+            let connected = matches!(ev, Event::Connected { .. });
             let was_results = gui.app.sonic.view == crate::tui::app::SonicView::Results;
             let effects = gui.app.apply_event(ev);
             gui.pend(effects);
             if sonic_random {
                 sonic::random_landed(gui, was_results);
+            }
+            // A room open through a switch or a late connect asked the old
+            // server, or none: it asks this one now.
+            if connected {
+                gui.reopen_room();
             }
         }
         servers::poll(gui);
@@ -2398,8 +2513,11 @@ fn event_loop(
                             gui.ui.arm_bars(at);
                         }
                         // A right click on a row is its sheet (entry point 1).
+                        // A right click on a row is its sheet (entry point 1) —
+                        // never through a modal, which owns the pointer whole.
                         MouseEventKind::Down(MouseButton::Right) => {
-                            if let Some(act) = gui.ui.hit_context(at)
+                            if !gui.modal_open()
+                                && let Some(act) = gui.ui.hit_context(at)
                                 && gui.act(act)
                             {
                                 saver.flush(&gui.app);
@@ -2501,6 +2619,7 @@ impl Gui {
     /// held one walks through the App's own action. A pane with no cursor
     /// at all forwards too, so the App seats one.
     fn walk(&mut self, list: List, action: Action) {
+        self.seat(list);
         let resting =
             list.tab().is_some_and(|tab| self.app.pane_for(tab).state.selected().is_some());
         let view = self.list_mut(list);
@@ -2514,6 +2633,7 @@ impl Gui {
     /// A row verb by key — Enter, `a`, `N`, `P`: it wants the cursor up
     /// (the kit's list-cursor law), so no key acts on a row nobody can see.
     fn row_verb(&mut self, list: List, action: Action) {
+        self.seat(list);
         if !self.list_view(list).held {
             return;
         }
@@ -2522,6 +2642,16 @@ impl Gui {
         } else {
             self.forward(action);
         }
+    }
+
+    /// A key for a pane list: the App's tab and focus go to that pane first
+    /// (what `aim` does for a click), so the App's own key handling acts on
+    /// the list in front of the user and not on the pane a room left behind.
+    fn seat(&mut self, list: List) {
+        if let Some(tab) = list.tab() {
+            self.app.tab = tab;
+        }
+        self.app.focus = crate::tui::app::Focus::Browser;
     }
 
     /// The list on screen in the active room, when the kit's cursor law
@@ -2551,6 +2681,45 @@ impl Gui {
         }
     }
 
+    /// The content column a Library room draws in this frame: the nav's
+    /// right, the queue panel's left, the bar's top — and a row lower while
+    /// a pick's banner stands over it. The wall's keys and clicks compute
+    /// their grid from this same rect, so they agree with the drawing.
+    fn room_rect(&self) -> Rect {
+        let content = content_rect(self.last_width, self.last_height, self.queue_open, self.footer());
+        if capture_banner(self).is_some() {
+            Rect { y: content.y + 1, height: content.height.saturating_sub(1), ..content }
+        } else {
+            content
+        }
+    }
+
+    /// A session (re)connected: the active room opens on the new server —
+    /// its opener ran against the old one, or before any — and a peer's
+    /// hidden rooms yield to Files (library-rooms clause 23, playlists
+    /// clause 26).
+    fn reopen_room(&mut self) {
+        if self.screen != Screen::Library || !self.app.connected {
+            return;
+        }
+        if self.app.session.peer.is_some()
+            && matches!(self.active, PLAYLISTS_NAV | LAST_PLAYED_NAV | MOST_PLAYED_NAV)
+        {
+            self.act(Act::Nav(FILES_NAV));
+            return;
+        }
+        if let Some(root) = library::root_of(self.active) {
+            library::open(self, root);
+        } else if self.active == ALBUMS_NAV {
+            self.albums.wall = albums::WallState::default();
+            let effects = self.app.open_library_node(crate::tui::worker::LibraryNode::Albums, true);
+            self.pend(effects);
+        } else if self.active == PLAYLISTS_NAV {
+            let effects = self.app.open_library_node(crate::tui::worker::LibraryNode::Playlists, true);
+            self.pend(effects);
+        }
+    }
+
     /// Whether the screen keeps its tips line under the bar — the bar and
     /// the content sit one row higher while it does.
     fn footer(&self) -> bool {
@@ -2559,7 +2728,22 @@ impl Gui {
 
     /// Whether `room` stands where the Settings rows would be.
     pub(crate) fn in_settings_room(&self, room: SettingsRoom) -> bool {
-        self.active == SETTINGS_NAV && self.settings_room == Some(room)
+        // A Settings sub-room is the Library screen's: on the Now Playing
+        // screen it is off screen and must not take the keys (the DJ
+        // room's rule).
+        self.screen == Screen::Library && self.active == SETTINGS_NAV && self.settings_room == Some(room)
+    }
+
+    /// Whether any modal owns the pointer — the sheet and its layers, the
+    /// DJ's choosers, the sonic and playlist dialogs, the servers and
+    /// torrent surfaces.
+    fn modal_open(&self) -> bool {
+        actions::modal_open(self)
+            || dj::modal_open(self)
+            || sonic::modal_open(self)
+            || playlists::modal_open(self)
+            || self.servers.modal_open()
+            || self.torrent.modal_open()
     }
 
     /// Which App tab the active browse room's pane rides — the bar's acts
@@ -2585,12 +2769,17 @@ impl Gui {
     /// that, and swipes silently went nowhere).
     fn wheel(&mut self, at: Position, delta: i32) {
         self.ui.pointer = Some(at);
+        // A modal owns the pointer whole; the Now Playing screen scrolls
+        // nothing yet (its queue panel is not on screen).
+        if self.modal_open() || self.screen == Screen::NowPlaying {
+            return;
+        }
         if self.queue_open && at.x >= self.queue_panel_x() {
             self.act(Act::ScrollBy(List::Queue, delta));
             return;
         }
-        // The Now Playing screen scrolls nothing yet; the nav column never.
-        if self.screen == Screen::NowPlaying || at.x < 17 {
+        // The nav column never scrolls.
+        if at.x < 17 {
             return;
         }
         match NAV[self.active] {
@@ -2633,6 +2822,9 @@ pub fn run(
     torrent: Option<String>,
     bundled: Option<String>,
 ) -> i32 {
+    // The language first — the wizard's rule, from the system locale — so
+    // the ten locales the strings carry reach the screen.
+    crate::setup::boot_language();
     // The player's own tolerant load first — it may seed the bundled
     // server — then the GUI's read of what is on disk (the [gui] section,
     // and the save guard).
@@ -3267,6 +3459,69 @@ mod tests {
     }
 
     #[test]
+    fn the_files_keys_act_on_the_files_pane_whatever_room_came_before() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // The room keys used to drive whatever pane the App had last: after
+        // Search (its own pane) the Files room's ↓ and `a` walked and queued
+        // the hidden search hits.
+        let mut gui = browsing_gui();
+        gui.act(Act::Nav(SEARCH_NAV));
+        assert_eq!(gui.app.tab, Tab::Search);
+        gui.act(Act::Nav(FILES_NAV));
+        assert_eq!(gui.app.tab, Tab::Files, "the room seats its own pane");
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(gui.app.queue.items.len(), 1);
+        assert!(gui.app.queue.items[0].filepath.starts_with("music/"), "a Files row: {:?}", gui.app.queue.items[0].filepath);
+
+        // A folded queue panel cannot hold the keys: they come back to the
+        // browser, else ↑↓ and Enter drove a list nobody could see.
+        gui.app.session.server = "http://host:3000".into();
+        gui.app.session.server_id = "http://host:3000".into();
+        gui.act(Act::QueueRow(0));
+        assert_eq!(gui.app.focus, crate::tui::app::Focus::Queue);
+        gui.act(Act::ToggleQueue);
+        assert!(!gui.queue_open);
+        assert_eq!(gui.app.focus, crate::tui::app::Focus::Browser, "the fold hands the keys back");
+    }
+
+    #[test]
+    fn a_wide_label_draws_whole() {
+        // `put` budgeted characters where ratatui spends cells: a CJK label
+        // showed half its glyphs.
+        let mut gui = browsing_gui();
+        gui.app.files.set(vec![
+            Entry::Parent,
+            Entry::Dir { label: "坂本龍一".into(), path: "music/坂本龍一".into() },
+        ]);
+        // The test buffer joins a wide glyph's second cell as a blank; the
+        // glyphs themselves must all be there.
+        let all = draw(&mut gui).join("\n").replace(' ', "");
+        assert!(all.contains("坂本龍一"), "every glyph drawn:\n{all}");
+    }
+
+    #[test]
+    fn the_now_playing_screen_serves_the_apps_keyword_field() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // Enter on the Auto-DJ tab's keyword row opens a text mode the TUI's
+        // keymap serves; the screen's fixed keys left it unserved and every
+        // later action swallowed by it.
+        let mut gui = browsing_gui();
+        gui.act(Act::Screen(Screen::NowPlaying));
+        gui.app.dj_keyword = Some(String::new());
+        for c in "lo".chars() {
+            handle_key(&mut gui, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(gui.app.dj_keyword.as_deref(), Some("lo"), "the letters reach the field");
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(gui.app.dj_keyword.is_none(), "Esc leaves the field");
+        assert_eq!(gui.screen, Screen::NowPlaying, "and stays on the screen");
+        handle_key(&mut gui, KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Audio(_))) || gui.app.now_playing.is_none(), "the transport is the screen's again");
+    }
+
+    #[test]
     fn the_highlight_is_the_keyboards_alone() {
         // The kit's list-cursor law in the Files room: nothing lit on
         // arrival, ↓ lights the resting row, Esc stows it, a click acts and
@@ -3593,7 +3848,8 @@ mod tests {
         assert!(lines[2].contains("Pick the start song") && lines[2].contains("[X]"), "{:?}", lines[2]);
         assert!(!lines[2].contains("Esc cancels"), "{:?}", lines[2]);
         assert!(lines[3].contains("Files"), "the room a row lower: {:?}", lines[3]);
-        assert!(!lines[lines.len() - 2].contains("Pick the start song"), "not on the note row");
+        let note_row = bar::note_rect(Rect { x: 0, y: 0, width: 100, height: 30 }, false).y as usize;
+        assert!(!lines[note_row].contains("Pick the start song"), "not on the note row");
         let close_x = lines[2].chars().position(|c| c == '[').unwrap() as u16;
         assert_eq!(gui.ui.hit(Position { x: close_x, y: 2 }), Some(Act::CaptureCancel), "[X] lets the pick go");
         assert!(
@@ -3952,5 +4208,4 @@ mod dump_tests {
             println!("|{row}|");
         }
     }
-
 }

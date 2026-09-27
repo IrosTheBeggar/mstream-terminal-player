@@ -74,6 +74,10 @@ pub(crate) struct Startup {
     /// Pairing code for the remembered server, when it is one reached through
     /// a tunnel. Without it that server cannot be dialled again.
     pub tunnel_code: Option<String>,
+    /// A federated peer as the launch server: reached through its parent —
+    /// `server` and `token` are the parent's — under its own identity.
+    pub peer: Option<(String, i64)>,
+    pub server_id: Option<String>,
     /// The chosen entry trusts its own TLS certificate.
     pub self_signed: bool,
     /// The `[keys]` section, unvalidated — the app reports what it can't use.
@@ -373,6 +377,26 @@ pub(crate) fn startup(
             .or(Some(config::ServerEntry { url: server.clone(), ..Default::default() })),
         None => config::preferred_server(&config).cloned(),
     };
+    // A peer entry is reached through its parent (contract clause 27):
+    // the parent's address, token and trust, the peer's own identity and
+    // place. Dialled as a URL it was refused at every launch after a
+    // session on a peer had made it the most recent entry.
+    let mut peer = None;
+    let mut server_id = None;
+    let chosen = chosen.map(|entry| match &entry.peer {
+        Some(link) => {
+            let parent = config
+                .servers
+                .iter()
+                .find(|e| config::same_server(&e.url, &link.parent))
+                .cloned()
+                .unwrap_or_else(|| config::ServerEntry { url: link.parent.clone(), ..Default::default() });
+            peer = Some((link.parent.clone(), link.id));
+            server_id = Some(entry.url.clone());
+            config::ServerEntry { last_path: entry.last_path.clone(), ..parent }
+        }
+        None => entry,
+    });
     let (server, username, last_path, self_signed) = match chosen {
         Some(entry) => (Some(entry.url), entry.username, entry.last_path, entry.self_signed),
         None => (None, None, None, false),
@@ -388,6 +412,8 @@ pub(crate) fn startup(
     let queue = if config.player.resume_queue { load_queue_snapshot() } else { None };
     Startup {
         stats: load_stats_snapshot(),
+        peer,
+        server_id,
         server,
         token,
         username,
@@ -453,6 +479,10 @@ pub(crate) fn app_from(start: Startup) -> App {
         .with_keys(&start.keys)
         .with_tunnel(start.tunnel_code);
     app.session.self_signed = start.self_signed;
+    if let Some(id) = start.server_id {
+        app.session.server_id = id;
+    }
+    app.session.peer = start.peer;
     app.servers = start.servers;
     app.bundled_server = start.bundled;
     // After the servers, which decide which rows can come back at all.
@@ -583,7 +613,12 @@ pub(crate) fn remember(app: &App) {
     adopt_log_level(&mut config, &app);
     // Keyed on the identity, never the endpoint: a tunnel session's loopback
     // port is meaningless by the next run.
-    if !app.session.server_id.is_empty() {
+    // A tunnel identity removed from the list is not put back by
+    // remembering where it was: the entry would come back without its
+    // pairing code, become the launch server, and fail every launch.
+    let saved = config.servers.iter().any(|s| config::same_server(&s.url, &app.session.server_id));
+    let resurrects_tunnel = !saved && crate::quickconnect::is_tunnel_id(&app.session.server_id);
+    if !app.session.server_id.is_empty() && !resurrects_tunnel {
         config::touch_server(&mut config, &app.session.server_id, app.session.username.clone());
         config::set_last_path(&mut config, &app.session.server_id, &app.path);
     }

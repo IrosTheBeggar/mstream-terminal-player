@@ -302,6 +302,20 @@ pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     }
 }
 
+/// The modal's own cells are inert: a click INSIDE the frame — on its
+/// title, a badge, the typed name — does nothing, and only the backdrop
+/// closes it (track-actions clause 9). Registered right after the frame so
+/// the rows and buttons drawn after it win their cells.
+fn guard_frame(ui: &mut crate::kit::Surface<Act>, inner: Rect) {
+    let frame = Rect {
+        x: inner.x.saturating_sub(1),
+        y: inner.y.saturating_sub(1),
+        width: inner.width + 2,
+        height: inner.height + 2,
+    };
+    ui.click(frame, Act::Guard);
+}
+
 fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // Drawn from the sheet in place: the track and its decoded cover are
     // read each frame, not copied.
@@ -315,6 +329,7 @@ fn draw_sheet(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let width: u16 = 66.min(area.width.saturating_sub(2)).max(44);
     let height = (3 + 1 + 1 + rows.len() + 1) as u16 + 2;
     let inner = modal_frame_on(frame, ui, area, width, height, th().accent);
+    guard_frame(ui, inner);
     modal_close(frame, ui, inner, Act::SheetClose);
 
     // The header (clause 2): the cover when there is one, the words beside.
@@ -437,6 +452,7 @@ fn draw_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     if let Some((name, cursor)) = naming {
         // New playlist: the name, then the add (clause 12).
         let inner = modal_frame_on(frame, ui, area, width, 7, th().accent);
+        guard_frame(ui, inner);
         put(frame, inner.x + 1, inner.y, &t!("gui.pl.new"), accent().add_modifier(Modifier::BOLD));
         modal_close(frame, ui, inner, Act::PickClose);
         super::text_field(frame, ui, inner.x + 1, inner.y + 2, &name, cursor, inner.width.saturating_sub(2), Style::default());
@@ -449,6 +465,7 @@ fn draw_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let shown_rows = rows.min(max_rows.max(1));
     let height = (shown_rows + 2 + usize::from(listed == 0)) as u16 + 2;
     let inner = modal_frame_on(frame, ui, area, width, height, th().accent);
+    guard_frame(ui, inner);
     put(frame, inner.x + 1, inner.y, &t!("gui.act.add_playlist"), accent().add_modifier(Modifier::BOLD));
     modal_close(frame, ui, inner, Act::PickClose);
     let mut y = inner.y + 2;
@@ -498,6 +515,7 @@ fn draw_info(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let width: u16 = 70.min(area.width.saturating_sub(2)).max(40);
     let height = (rows.len() as u16 + 2 + 2).min(area.height.saturating_sub(2));
     let inner = modal_frame_on(frame, ui, area, width, height, th().accent);
+    guard_frame(ui, inner);
     put(frame, inner.x + 1, inner.y, &t!("gui.act.info"), accent().add_modifier(Modifier::BOLD));
     modal_close(frame, ui, inner, Act::InfoClose);
     let label_w: u16 = 14;
@@ -694,6 +712,11 @@ pub(crate) fn queue_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
     if !(gui.queue_open && gui.app.focus == Focus::Queue) {
         return None;
     }
+    // A dialog taking text owns the keyboard outright: a playlist's name
+    // must not clear the queue because it held a `C`.
+    if super::playlists::modal_open(gui) || super::sonic::modal_open(gui) {
+        return None;
+    }
     // The kit's list-cursor law: a walking key picks the cursor up on the
     // row the panel rests on, then walks; the row verbs want it up; Esc
     // stows it with the hand-back.
@@ -812,7 +835,6 @@ mod tests {
         let mut gui = session_gui();
         gui.queue_open = false;
         gui.act(Act::Nav(FILES_NAV));
-        gui.app.tab = Tab::Files;
         gui.app.files.set(vec![
             Entry::Track { label: "Mysterons".into(), track: Box::new(track("p/mysterons.flac", "Mysterons")) },
             Entry::Track { label: "Sour Times".into(), track: Box::new(track("p/sour.flac", "Sour Times")) },

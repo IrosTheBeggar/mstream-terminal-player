@@ -19,7 +19,7 @@ use crate::api::types::Album;
 use crate::tui::worker::LibraryNode;
 
 use super::cover::{Pace, Slot};
-use super::{Act, Gui, List, RowVerb, accent, bright_bold, put, sel};
+use super::{Act, Gui, List, accent, bright_bold, put, sel};
 
 /// The cover's cells: 12x6 is square at the common 10x20 font.
 const COVER_W: u16 = 12;
@@ -43,6 +43,9 @@ pub(crate) struct WallState {
     /// Whether the keyboard holds that hand: the cell is lit only then
     /// (the kit's list-cursor law); a card's click stows it.
     pub held: bool,
+    /// The artist this wall is, when it is an artist's: another artist's
+    /// wall starts on its own first page, not the last one's.
+    pub of: Option<String>,
     /// The track view's viewport (the kit's table contract, same as Files).
     pub tracks: ListView,
 }
@@ -177,7 +180,9 @@ fn visible_albums(gui: &Gui) -> Option<Vec<usize>> {
 /// The grid geometry the last frame drew with — recomputed from the same
 /// inputs, so key handling agrees with the pointer about where cells are.
 fn shape(gui: &Gui) -> GridShape {
-    GridShape::for_content(super::content_rect(gui.last_width, gui.last_height, gui.queue_open, gui.footer()))
+    // The same rect the frame drew the grid in — a row lower under a pick's
+    // banner — else a click opened the album a page's worth away.
+    GridShape::for_content(gui.room_rect())
 }
 
 fn turn_page(gui: &mut Gui, delta: i32) {
@@ -276,6 +281,8 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
                 gui.forward(Action::Back);
             }
             KeyCode::Char('a') => gui.row_verb(List::AlbumTracks, Action::AddToQueue),
+            KeyCode::Char('N') => gui.row_verb(List::AlbumTracks, Action::AddNext),
+            KeyCode::Char('P') => gui.row_verb(List::AlbumTracks, Action::PlayNow),
             _ => return None,
         }
         return Some(false);
@@ -622,7 +629,9 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
     };
     let hover = gui.ui.hovers(back);
     put(frame, content.x, content.y, &back_label, if hover { bright_bold() } else { dim() });
-    gui.ui.click(back, Act::PaneRow(List::AlbumTracks, 0, RowVerb::Open)); // row 0 is the Parent row: Back
+    // Back itself, not the Parent row's activation: the row is not there
+    // while the tracks are still being asked for.
+    gui.ui.click(back, Act::LibBack);
 
     let title_x = back.right() + 2;
     let name = if name.is_empty() { t!("gui.lib.singles").to_string() } else { name.to_string() };
@@ -645,7 +654,13 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
 
     let len = gui.app.library.entries.len();
     if len <= 1 {
-        put(frame, content.x, content.y + 3, &t!("busy.listing"), accent());
+        // The wait while the tracks are asked for; after a failed or empty
+        // answer, the empty words — "listing…" forever said nothing true.
+        if gui.app.library.loading {
+            put(frame, content.x, content.y + 3, &t!("busy.listing"), accent());
+        } else {
+            put(frame, content.x, content.y + 3, &t!("gui.lib.empty"), dim());
+        }
         return;
     }
 
@@ -692,6 +707,7 @@ pub(crate) fn draw_tracks(frame: &mut Frame, gui: &mut Gui, content: Rect, name:
 
 #[cfg(test)]
 mod tests {
+    use super::super::RowVerb;
     use super::*;
     use crate::tui::app::{Tab};
     use crate::api::types::Album;
@@ -851,6 +867,25 @@ mod tests {
         assert!(!gui.albums.wall.held, "a card's click stows the cursor");
         assert!(!gui.albums.wall.tracks.held, "and the tracks open unlit");
         assert!(opened(&gui), "but the album opens: {:?}", gui.pending);
+    }
+
+    #[test]
+    fn a_return_to_the_wall_stands_over_its_own_drill() {
+        use crate::tui::worker::LibraryNode;
+        // The wall drew the cached albums over whatever list the shared pane
+        // held from another room: its verbs, count and Back ran on that.
+        let mut gui = wall_gui(5);
+        let effects = gui.app.open_library_node(LibraryNode::Recent, true);
+        gui.pend(effects);
+        gui.pending.clear();
+        gui.act(Act::Nav(super::super::ALBUMS_NAV));
+        assert!(matches!(gui.app.library_node(), LibraryNode::Albums), "the drill is the wall's again");
+        assert_eq!(gui.app.library.entries.len(), 6, "seated from the cache: the parent and five albums");
+        assert!(
+            !gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Library { .. }))),
+            "without a request: {:?}",
+            gui.pending
+        );
     }
 
     #[test]

@@ -136,6 +136,8 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
 
     let start = Startup {
         stats: None,
+        peer: None,
+        server_id: None,
         server: Some(origin),
         token: None,
         username: None,
@@ -231,6 +233,12 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
             shell.app.spinner = shell.app.spinner.wrapping_add(1);
             shell.spun = Instant::now();
         }
+        // The plays owed go out from here too (play-reporting clause 8):
+        // the native shells post from their tick, and this frame is the
+        // browser's. Not the whole tick — its reconcile reads the system
+        // clock, which wasm32 has none of.
+        let owed = shell.app.stats_flush_due(Instant::now());
+        shell.pending.extend(owed);
         // There is no process to quit in a tab; parking the flag turns Quit
         // into a no-op instead of a frozen screen.
         shell.app.should_quit = false;

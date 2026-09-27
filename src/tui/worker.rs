@@ -171,8 +171,9 @@ pub enum ApiCmd {
     /// discovery flags and its libraries (auto-dj contract, clause 19).
     /// `reach` as for [`ApiCmd::AlbumArt`]; `None` asks the session's server.
     DjProbe { identity: String, reach: Option<crate::tui::app::Reach> },
-    /// Every genre in the library, for the Auto-DJ genre filter.
-    Genres,
+    /// Every genre in the library the DJ's rule is for — the DJ's server
+    /// while armed, reached its own way — for the genre picker.
+    Genres { reach: Option<crate::tui::app::Reach> },
     /// Walk from one track to another through the embedding space.
     Journey { start: String, end: String, length: u32 },
     /// One random library track for a Sonic Path end. The side travels with
@@ -232,6 +233,7 @@ impl ApiCmd {
             | ApiCmd::RateSong { reach, .. }
             | ApiCmd::AddToPlaylist { reach, .. }
             | ApiCmd::TrackInfo { reach, .. }
+            | ApiCmd::Genres { reach }
             | ApiCmd::PlaylistNames { reach } => reach.as_ref(),
             // The DJ's turns go to ITS server (auto-dj contract, clause 19).
             ApiCmd::AutoDj(request) | ApiCmd::AutoDjSample { request, .. } => request.reach.as_ref(),
@@ -249,7 +251,6 @@ impl ApiCmd {
             | ApiCmd::Probe { .. }
             | ApiCmd::Browse(_)
             | ApiCmd::Library { .. }
-            | ApiCmd::Genres
             | ApiCmd::Journey { .. }
             | ApiCmd::SonicRandom { .. }
             | ApiCmd::DiscoveryProbe
@@ -1208,7 +1209,7 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
             Ok(track_info_event(filepath, result))
         }
         ApiCmd::PlaylistNames { .. } => Ok(playlist_names_event(c.playlists())),
-        ApiCmd::Genres => genres_event(c.genres()),
+        ApiCmd::Genres { .. } => genres_event(c.genres()),
         ApiCmd::Journey { start, end, length } => {
             crate::api::wait(journey(c, &start, &end, length))
         }
@@ -1891,16 +1892,23 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
         if !dropped.is_empty() {
             dj_log(format!("[dj] {name}: dropped for this server: {}", dropped.join(", ")));
         }
+        let mut sent = body.clone();
         let mut answer = client.random_songs_raw_async(body).await;
-        // The learner's loop: every pass removes one key for good, so it
-        // ends by construction. Only a not-allowed body retries here.
+        // The learner's loop: every pass removes one key the body carried,
+        // so it ends by construction — a key the body never carried is a
+        // refusal this loop cannot mend, and retrying it would run
+        // unbounded (the review's nine thousand requests in two seconds).
         while let Err(err) = &answer {
             let Refusal::Learn(key) = classify(err, ask.sonic_asked()) else { break };
+            if sent.get(&key).is_none() {
+                break;
+            }
             if learner().learn(identity, &key) {
                 dj_log(format!("[dj] {name}: rejected \"{key}\" — dropping it for the rest of this session"));
             }
             let mut body = serde_json::to_value(ask.request()).unwrap_or_default();
             learner().filter(identity, epoch, &mut body);
+            sent = body.clone();
             answer = client.random_songs_raw_async(body).await;
         }
         match answer {

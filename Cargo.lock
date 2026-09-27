@@ -2881,6 +2881,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tui-input",
+ "unicode-width",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",

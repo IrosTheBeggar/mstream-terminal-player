@@ -2930,7 +2930,7 @@ fn render_dj_overlays(frame: &mut Frame, area: Rect, app: &App) {
 /// Whether a picker row is switched on, however the picker decides that.
 type Chosen<'a> = Box<dyn Fn(&str) -> bool + 'a>;
 
-fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) {
+pub(crate) fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) {
     let sources_off = app.dj_sources_off();
     let (picker, title, empty, chosen): (&crate::tui::app::GenrePicker, String, &str, Chosen<'_>) =
         if let Some(picker) = app.dj_panel.sources.as_ref() {

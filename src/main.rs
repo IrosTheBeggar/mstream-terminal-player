@@ -209,8 +209,8 @@ struct Cli {
 enum Command {
     /// Launch the interactive terminal player (the default)
     Tui(TuiArgs),
-    /// Launch the GUI player — the mouse-first surface the installers open
-    /// (preview: Files browsing and playback, the bottom bar, Settings)
+    /// Launch the GUI player — the mouse-first surface the installers open:
+    /// the library rooms, the queue, Auto DJ, servers and tunnels, Now Playing
     Gui(GuiArgs),
     /// Run the headless server-audio engine (jukebox mode)
     Serve(ServeArgs),
@@ -270,6 +270,11 @@ struct TuiArgs {
     /// usual. A launch property: nothing is persisted about the mode.
     #[arg(long, value_name = "URL")]
     bundled_server: Option<String>,
+
+    /// The launcher passes it beside `--bundled-server` (multi-server
+    /// contract, clause 57); the player has nothing to do with it yet.
+    #[arg(long, hide = true)]
+    same_machine: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -291,6 +296,11 @@ struct GuiArgs {
     /// (Settings › Torrents decides whether it keeps asking).
     #[arg(long, value_name = "FILE-OR-MAGNET")]
     torrent: Option<String>,
+
+    /// The launcher passes it beside `--bundled-server` (multi-server
+    /// contract, clause 57); the player has nothing to do with it yet.
+    #[arg(long, hide = true)]
+    same_machine: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]

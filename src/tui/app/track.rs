@@ -106,13 +106,21 @@ impl App {
         if !self.track_is_own(origin) {
             return Vec::new();
         }
+        // The write goes to the row's own server or nowhere: a server that
+        // cannot be reached right now is said, not swapped for the session's.
+        let reach = match self.row_reach_checked(origin) {
+            Ok(reach) => reach,
+            Err(why) => {
+                self.error(why);
+                return Vec::new();
+            }
+        };
         let rating = rating.map(|r| r.min(10));
         let previous = self.rating_of(filepath);
         self.rating_seq += 1;
         let seq = self.rating_seq;
         self.rating_writes.push(RatingWrite { filepath: filepath.to_string(), previous, seq });
         self.patch_rating(filepath, rating);
-        let reach = self.row_reach(origin);
         vec![Effect::Api(ApiCmd::RateSong { filepath: filepath.to_string(), rating, seq, reach })]
     }
 
@@ -148,7 +156,13 @@ impl App {
         if !self.track_is_own(origin) || playlist.trim().is_empty() {
             return Vec::new();
         }
-        let reach = self.row_reach(origin);
+        let reach = match self.row_reach_checked(origin) {
+            Ok(reach) => reach,
+            Err(why) => {
+                self.error(why);
+                return Vec::new();
+            }
+        };
         vec![Effect::Api(ApiCmd::AddToPlaylist {
             playlist: playlist.trim().to_string(),
             song: filepath.to_string(),
@@ -173,7 +187,13 @@ impl App {
 
     /// Ask a track's server for its full block (clause 8).
     pub(crate) fn fetch_track_info(&mut self, origin: &Origin, filepath: &str) -> Vec<Effect> {
-        let reach = self.row_reach(origin);
+        let reach = match self.row_reach_checked(origin) {
+            Ok(reach) => reach,
+            Err(why) => {
+                self.error(why);
+                return Vec::new();
+            }
+        };
         vec![Effect::Api(ApiCmd::TrackInfo { filepath: filepath.to_string(), reach })]
     }
 
@@ -215,7 +235,13 @@ impl App {
     /// Ask a track's server for its playlist names (clause 12).
     pub(crate) fn fetch_playlist_names(&mut self, origin: &Origin) -> Vec<Effect> {
         self.playlist_names = PlaylistNames::Unasked;
-        let reach = self.row_reach(origin);
+        let reach = match self.row_reach_checked(origin) {
+            Ok(reach) => reach,
+            Err(why) => {
+                self.error(why);
+                return Vec::new();
+            }
+        };
         vec![Effect::Api(ApiCmd::PlaylistNames { reach })]
     }
 }

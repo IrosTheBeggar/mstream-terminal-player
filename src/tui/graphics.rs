@@ -338,6 +338,12 @@ mod native {
             if self.picker.as_ref().is_some_and(|p| p.protocol_type() == ProtocolType::Kitty) {
                 self.cached = None;
             }
+            // A resize is what the half-second font check exists to catch:
+            // the next draw re-reads the cell size rather than encoding
+            // against the old one for up to half a second.
+            self.font_checked = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_millis(500))
+                .unwrap_or_else(std::time::Instant::now);
         }
 
         /// Keep the picker's cell size current. Cmd+minus mid-session

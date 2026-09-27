@@ -91,7 +91,13 @@ pub(crate) fn row_at(gui: &Gui, y: u16) -> Option<usize> {
     if y < TOP {
         return None;
     }
-    let index = gui.queue_view.scroll + usize::from((y - TOP) / ROW_H);
+    // Only the rows on screen: a drag past the last drawn row lands nowhere,
+    // not on a row nobody can see.
+    let row = usize::from((y - TOP) / ROW_H);
+    if row >= rows_that_fit(gui.last_height, gui.footer()) {
+        return None;
+    }
+    let index = gui.queue_view.scroll + row;
     (index < gui.app.queue.items.len()).then_some(index)
 }
 
@@ -135,11 +141,15 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     // over unlit, ↓ lights the row it played.
     let focused = gui.app.focus == crate::tui::app::Focus::Queue;
     let selected = if focused { gui.queue_view.shown(gui.app.queue.state.selected()) } else { None };
-    let reveal = (current != gui.last_current)
+    // The playing TRACK, not its index: a row removed above it moves the
+    // index and not the music, and must not yank the view.
+    let playing_now = current.and_then(|i| gui.app.queue.items.get(i)).map(|t| t.filepath.clone());
+    let started = playing_now != gui.last_playing;
+    let reveal = started
         .then_some(current)
         .flatten()
         .or_else(|| (selected != gui.last_qsel).then_some(selected).flatten());
-    gui.last_current = current;
+    gui.last_playing = playing_now;
     gui.last_qsel = selected;
     let (first, visible) = table_view(len, reveal, gui.queue_view.scroll, rows_that_fit(area.height, footer));
     gui.queue_view.scroll = first;

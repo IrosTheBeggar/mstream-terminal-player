@@ -491,6 +491,8 @@ pub(crate) fn handle_key(
             KeyCode::Esc if gui.playlists.tracks.held => gui.playlists.tracks.stow(),
             KeyCode::Char('h') | KeyCode::Backspace => gui.forward(Action::Back),
             KeyCode::Char('a') => gui.row_verb(List::PlaylistTracks, Action::AddToQueue),
+            KeyCode::Char('N') => gui.row_verb(List::PlaylistTracks, Action::AddNext),
+            KeyCode::Char('P') => gui.row_verb(List::PlaylistTracks, Action::PlayNow),
             _ => return None,
         },
         None => match key.code {
@@ -810,5 +812,25 @@ mod tests {
         wheel(&mut gui, 1);
         assert_eq!(gui.playlists.list.scroll, 2, "the list level's wheel");
         assert_eq!(gui.playlists.tracks.scroll, 0, "the drilled level stood still");
+    }
+
+    #[test]
+    fn a_name_typed_into_the_dialog_never_reaches_the_queue_panel() {
+        // With the panel holding the keys, the dialog's letters went to the
+        // queue first: a `C` in a playlist's name cleared it.
+        let mut gui = pl_gui(&["Morning"]);
+        gui.queue_open = true;
+        gui.app.queue.items = vec![crate::tui::app::Queued {
+            dj: None,
+            origin: crate::tui::app::Origin { server: "http://host:3000".into(), peer: None },
+            track: Track { filepath: "q/a.mp3".into(), metadata: Default::default() },
+        }];
+        gui.app.focus = crate::tui::app::Focus::Queue;
+        key(&mut gui, KeyCode::Char('n'));
+        for c in "Chill".chars() {
+            key(&mut gui, KeyCode::Char(c));
+        }
+        assert_eq!(gui.playlists.dialog.as_ref().map(|d| d.name.as_str()), Some("Chill"));
+        assert_eq!(gui.app.queue.items.len(), 1, "the queue is untouched");
     }
 }

@@ -1647,12 +1647,10 @@ fn open_url(url: &str) -> bool {
     }
     #[cfg(target_os = "macos")]
     let launched = std::process::Command::new("open").arg(url).spawn().is_ok();
+    // Explorer, not `cmd /c start`: cmd.exe reads `&` and `%VAR%` in the
+    // URL as its own syntax.
     #[cfg(target_os = "windows")]
-    let launched = std::process::Command::new("cmd")
-        .args(["/c", "start", ""])
-        .arg(url)
-        .spawn()
-        .is_ok();
+    let launched = std::process::Command::new("explorer.exe").arg(url).spawn().is_ok();
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let launched = std::process::Command::new("xdg-open").arg(url).spawn().is_ok();
     launched

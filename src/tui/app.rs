@@ -48,7 +48,11 @@ const PAGE_STEP: isize = 10;
 /// player left running for a week cannot grow without bound. Wholesale
 /// rather than LRU because correctness needs only the bound, and by the
 /// time it is hit the oldest entries are hours stale anyway.
-const ART_CACHE_CAP: usize = 64;
+/// Covers and shapes kept decoded. Sized for the largest wall page plus
+/// the queue panel's rows: a page of ninety covers over a cap of sixty-four
+/// cleared the cache while claiming it and re-asked for the evicted ones
+/// every frame.
+const ART_CACHE_CAP: usize = 256;
 
 /// A side effect for the run loop to dispatch to a worker.
 #[derive(Debug, Clone, PartialEq)]
@@ -1541,6 +1545,13 @@ pub struct App {
     /// which starts that row there; kept as the saved position until then,
     /// so a checkpoint written before anything plays keeps the spot.
     pub resume_spot: Option<(usize, f64)>,
+    /// The track that spot belongs to: queue edits before the first play
+    /// re-index the rows, so the seek applies only where THIS track stands.
+    pub resume_track: Option<String>,
+    /// A tunnel dialled from a pasted code, held up until its Connected
+    /// seats the session or the dial is walked away from: a sign-in form
+    /// can stand on it for longer than the idle release grace.
+    pub tunnel_hold: Option<String>,
     pub connected: bool,
     pub connecting: bool,
     /// Whether this shell draws the App's own connect screen while no
@@ -1678,6 +1689,11 @@ pub struct App {
     /// the source we are waiting for lets a status about anything else be
     /// recognised as describing where we no longer are.
     starting: Option<String>,
+    /// The URL of the last play this side asked for (or the engine moved
+    /// to): a status naming any other source is a track we are past — the
+    /// tail of one that failed to open's predecessor, say — and resets
+    /// nothing about this row.
+    current_url: Option<String>,
     /// Tracks that failed to start since the last one that played. Bounds the
     /// skipping so a queue of nothing but broken files stops rather than
     /// looping.
@@ -1843,6 +1859,8 @@ impl App {
             bundled_server: None,
             resume_queue: true,
             resume_spot: None,
+            resume_track: None,
+            tunnel_hold: None,
             connected: false,
             connecting: false,
             connect_screen: true,
@@ -1896,6 +1914,7 @@ impl App {
             autodj_recent: Vec::new(),
             status: PlayerStatus::default(),
             starting: None,
+            current_url: None,
             failures: 0,
             retries: 0,
             probing: None,
@@ -2037,7 +2056,7 @@ impl App {
         }
         // Remembered as on comes back ARMED, never playing (clause 61); its
         // server is probed as soon as it can be reached.
-        if self.dj_armed() {
+        if self.dj_armed() && self.connected {
             effects.extend(self.probe_dj());
         }
         self.note_pending(&effects);
@@ -2142,7 +2161,7 @@ impl App {
     /// that were just produced rather than asking every call site to remember.
     /// Tagging by the command means a reply for a tab you have since left
     /// still clears the right spinner.
-    fn note_pending(&mut self, effects: &[Effect]) {
+    pub(crate) fn note_pending(&mut self, effects: &[Effect]) {
         for effect in effects {
             // Playback is answered by the audio thread rather than a pane, so
             // it gets recorded here rather than lighting a spinner.
@@ -2245,6 +2264,12 @@ impl App {
         if self.sonic.pending {
             self.sonic.pending = false;
             self.sonic.fetched = true;
+            self.refresh_sonic_rows();
+        }
+        // And its probe of why the path is off: a ping that failed leaves
+        // an "asking the server why…" nothing will answer.
+        if self.sonic.probe {
+            self.sonic.probe = false;
             self.refresh_sonic_rows();
         }
         // So does the full-screen Discover panel. Its wait is only ever
@@ -4161,7 +4186,9 @@ impl App {
             return None;
         }
         let (index, position) = match (self.resume_spot, self.queue.current) {
-            (Some((index, position)), _) if self.status.is_idle() => (Some(index), position),
+            // The held spot rides the row the queue keeps current — edits
+            // before the first play re-index the rows under the spot.
+            (Some((_, position)), _) if self.status.is_idle() => (self.queue.current, position),
             (_, Some(current)) => {
                 let position = if self.status.is_idle() { 0.0 } else { self.status.position };
                 (Some(current), position)
@@ -4216,6 +4243,7 @@ impl App {
             self.queue.state.select(Some(index));
             self.now_playing = Some(self.queue.items[index].track.clone());
             self.resume_spot = Some((index, clamp_resume_position(snapshot.position, duration)));
+            self.resume_track = Some(self.queue.items[index].filepath.clone());
         }
         true
     }
@@ -4224,12 +4252,65 @@ impl App {
     /// from the list, its tunnel is closed. It walks on exactly as a track
     /// the engine refused would (contract clause 37).
     fn unplayable(&mut self, index: usize, why: String) -> Vec<Effect> {
+        // A walk, not a recursion: a restored queue can hold hundreds of
+        // rows from a server that is gone, and re-entering `play_index`
+        // once per row overflowed the stack (the review's 450 rows on a
+        // Windows main thread). Each row that cannot be named is counted
+        // and passed here; the first that can be is played once.
+        let (mut index, mut why) = (index, why);
+        loop {
+            let next = match self.unplayable_step(index, why) {
+                Ok(next) => next,
+                Err(effects) => return effects,
+            };
+            let Some(item) = self.queue.items.get(next).cloned() else { return Vec::new() };
+            match self.stream_url(&item) {
+                Ok(_) => return self.play_index(next),
+                Err(_) if self.tunnel_pending_for(&item.origin) => return self.hold_for_tunnel(next, &item),
+                Err(e) => {
+                    index = next;
+                    why = e;
+                }
+            }
+        }
+    }
+
+    /// One row of the failure walk: the row is current and named, the
+    /// failure counted and said (contract clause 37), and the answer is
+    /// the row to try next — or the Stop that ends the walk once every
+    /// row has failed, or the queue has.
+    fn unplayable_step(&mut self, index: usize, why: String) -> Result<usize, Vec<Effect>> {
         self.queue.start(index);
         self.now_playing = self.queue.items.get(index).map(|item| item.track.clone());
         self.starting = None;
         self.tunnel_wait = None;
-        // Nothing to probe: the server could not even be named.
-        self.skip_failed(Some(&why))
+        let what = self
+            .now_playing
+            .as_ref()
+            .map(Track::display_name)
+            .unwrap_or_else(|| "that track".to_string());
+        self.retries = 0;
+        self.failures += 1;
+        // A queue where nothing plays must not be walked forever — with
+        // repeat on, skipping would go round and round.
+        if self.failures >= self.queue.items.len().max(1) {
+            self.failures = 0;
+            self.now_playing = None;
+            self.queue.current = None;
+            self.error("Can't play these tracks — check the files or server.");
+            return Err(vec![Effect::Audio(AudioCmd::Stop)]);
+        }
+        self.error(format!("Skipping a track that won’t play — {what}: {why}"));
+        // Manual, so repeat-one doesn't sit on the broken track.
+        match self.queue.next_index(true) {
+            Some(next) => Ok(next),
+            None => {
+                self.now_playing = None;
+                self.queue.current = None;
+                self.failures = 0;
+                Err(vec![Effect::Audio(AudioCmd::Stop)])
+            }
+        }
     }
 
     /// Park on row `index` until its tunnel is up (contract clause 37's
@@ -4256,7 +4337,12 @@ impl App {
     /// The spot is spent by the play itself, so a row parked for its tunnel
     /// keeps it for when the tunnel comes up.
     pub(crate) fn play_row_resuming(&mut self, index: usize) -> Vec<Effect> {
-        let spot = self.resume_spot.filter(|(row, _)| *row == index);
+        // The spot belongs to the restored TRACK, wherever queue edits have
+        // moved it since: the seek applies only where that track stands.
+        let spot = self.resume_spot.filter(|_| {
+            let row = self.queue.items.get(index).map(|item| item.filepath.as_str());
+            self.resume_track.as_deref().is_none_or(|track| row == Some(track))
+        });
         let mut effects = self.play_index(index);
         if let Some((_, position)) = spot
             && position > 0.0
@@ -4491,6 +4577,10 @@ impl App {
         }
         // And the DJ's server while it is armed (auto-dj contract, clause 19).
         self.dj_tunnel_target(&mut wanted);
+        // And a dial whose sign-in is still being typed.
+        if let Some(hold) = &self.tunnel_hold {
+            wanted.insert(hold.clone());
+        }
         wanted
     }
 
@@ -4769,12 +4859,20 @@ impl App {
             // A tunnel that is not up yet is waited for, not skipped
             // (contract clause 37); anything else walks on like a row the
             // engine refused.
-            Err(_) if self.tunnel_pending_for(&item.origin) => return self.hold_for_tunnel(index, &item),
+            Err(_) if self.tunnel_pending_for(&item.origin) => {
+                // The track left behind closes as the skip it was
+                // (play-reporting clause 5) before the row parks.
+                let requested = self.stats.ending.take().unwrap_or(stats::Outcome::Skipped);
+                self.stats_end(requested);
+                return self.hold_for_tunnel(index, &item);
+            }
             Err(why) => return self.unplayable(index, why),
         };
         self.queue.start(index);
         // Any play spends a restored spot: playback is somewhere real now.
         self.resume_spot = None;
+        self.resume_track = None;
+        self.current_url = Some(url.clone());
         // And ends a hold: the user (or the probe) moved things along.
         self.stall = None;
         self.probing = None;
@@ -4786,6 +4884,7 @@ impl App {
         // The play's session (play-reporting contract, clause 1) — the one
         // before it closes as the end-of-track path said, else as a skip.
         self.stats_begin(&item);
+        self.stats_stream(&url);
         self.remember_played(&item.track);
         self.now_playing = Some(item.track);
         // Every Play wipes the engine's pending next (play_source clears
@@ -4816,25 +4915,34 @@ impl App {
     /// skipping n-n-n through one album costs one request, not five.
     fn fetch_art(&mut self) -> Option<Effect> {
         let file = self.now_playing.as_ref()?.metadata.album_art.clone()?;
-        let reach = self.playing_row_reach();
+        // A row whose own server cannot be reached shows no cover rather
+        // than the session server's file of the same name.
+        let reach = self.playing_row_reach().ok()?;
         self.fetch_art_from(&file, reach)
     }
 
     /// The playing row's own server when it is not the session's (contract
     /// clause 30): its cover and its shape come from where the track lives,
     /// not from the browsed server.
-    fn playing_row_reach(&self) -> Option<Reach> {
-        let item = self.queue.current.and_then(|index| self.queue.items.get(index))?;
-        self.row_reach(&item.origin)
+    fn playing_row_reach(&self) -> Result<Option<Reach>, String> {
+        let Some(item) = self.queue.current.and_then(|index| self.queue.items.get(index)) else {
+            return Ok(None);
+        };
+        self.row_reach_checked(&item.origin)
     }
 
     /// A row's reach for a read, or `None` for the session's own rows —
     /// the session client serves those.
-    fn row_reach(&self, origin: &Origin) -> Option<Reach> {
+    /// A row's own server when it is not the session's (contract clause 30)
+    /// — `None` means the session's client. A row whose server cannot be
+    /// reached is refused rather than answered `None`: the worker would read
+    /// that as the session's client and send the row's rating, playlist add
+    /// or shape ask to the wrong server (the review's dialling-tunnel row).
+    pub(crate) fn row_reach_checked(&self, origin: &Origin) -> Result<Option<Reach>, String> {
         if self.is_session_origin(origin) {
-            return None;
+            return Ok(None);
         }
-        self.reach(origin).ok()
+        self.reach(origin).map(Some)
     }
 
     /// Ask for one cover by the art file that names it, unless the cache
@@ -4904,6 +5012,26 @@ impl App {
         vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Library })]
     }
 
+    /// Whether the Library pane's drill stands on the Albums wall, or on an
+    /// album opened from it.
+    pub(crate) fn on_albums_drill(&self) -> bool {
+        matches!(self.library_stack.here(), LibraryNode::Albums)
+            || (matches!(self.library_stack.here(), LibraryNode::Album { .. })
+                && matches!(self.library_stack.parent(), Some(LibraryNode::Albums)))
+    }
+
+    /// The Albums wall seated over its own drill from the cached list, no
+    /// request: a return to the room found the shared pane holding another
+    /// room's list, and the wall's verbs, count and Back ran on that.
+    pub(crate) fn seat_albums_from_cache(&mut self) {
+        let Some(albums) = self.albums.clone() else { return };
+        self.tab = Tab::Library;
+        self.library_stack = Drill::new(LibraryNode::Root);
+        self.library.trail.clear();
+        self.library_stack.enter(LibraryNode::Albums);
+        self.library.set(entries::entries_from_library(LibraryData::Albums(albums)));
+    }
+
     /// Ask for a track's shape, unless the cache already holds it — or the
     /// placeholder a previous ask left, which is what stops the same track
     /// being asked for twice.
@@ -4918,7 +5046,7 @@ impl App {
         if origin.peer.is_some() {
             return None;
         }
-        let reach = self.row_reach(origin);
+        let reach = self.row_reach_checked(origin).ok()?;
         if self.waveforms.contains_key(filepath) {
             return None;
         }
@@ -4966,8 +5094,17 @@ impl App {
             // A restored queue resumes where it was left (contract clause
             // 40): that row, and the seconds into it — a seek right behind
             // the play, which the engine answers once the source is open.
-            if let Some((index, _)) = self.resume_spot {
-                return self.play_row_resuming(index);
+            if self.resume_spot.is_some() {
+                // The restored row is wherever the queue keeps `current`
+                // now (edits re-index the rows); a spot whose row is gone
+                // is spent, and the queue starts as it would fresh.
+                match self.queue.current {
+                    Some(current) => return self.play_row_resuming(current),
+                    None => {
+                        self.resume_spot = None;
+                        self.resume_track = None;
+                    }
+                }
             }
             // Nothing loaded — start the queue if there is one.
             return match self.queue.next_index(true) {
@@ -5005,7 +5142,14 @@ impl App {
                 // of everything ("nor could the rest") on a queue that was
                 // otherwise fine.
                 self.failures = 0;
-                vec![Effect::Audio(AudioCmd::Stop)]
+                let mut effects = vec![Effect::Audio(AudioCmd::Stop)];
+                // The queue's end with the DJ armed (auto-dj clauses 32–33):
+                // the turn that was owed, or never asked for, is asked now;
+                // its landing plays at once on an idle queue.
+                if self.dj_armed() {
+                    effects.extend(self.request_turn());
+                }
+                effects
             }
         }
     }
@@ -5071,16 +5215,22 @@ impl App {
                 // out, or the last of a track being skipped away from. Taking
                 // it would hang that track's position and its "stopped" under
                 // the name of the one coming up.
+                let mut just_started = false;
                 if let Some(wanted) = &self.starting {
                     if status.source != *wanted {
                         return Vec::new();
                     }
                     self.starting = None;
+                    just_started = true;
                 }
                 // Something loaded and is playing, so whatever went wrong
                 // before is behind us — the run of failures starts over,
                 // and so do the retries of the row (contract clause 37).
-                if !status.source.is_empty() {
+                // Only the row's own source says so: after a failed open
+                // the engine keeps the previous track sounding, and its
+                // tail must not be taken for the row that never played.
+                let ours = self.current_url.as_deref().is_none_or(|url| url == status.source);
+                if !status.source.is_empty() && ours {
                     self.failures = 0;
                     self.retries = 0;
                 }
@@ -5096,7 +5246,15 @@ impl App {
                 // The session folds every status of the track it is on
                 // (play-reporting contract, clauses 2–4).
                 let status = self.status.clone();
-                self.stats_tick(&status)
+                let mut effects = self.stats_tick(&status);
+                // A play that just began stands on a row the top-up rule
+                // could not see while the status was still idle (auto-dj
+                // clause 13): the last row started from a stopped player
+                // asks for its turn now.
+                if just_started {
+                    effects.extend(self.maybe_autodj());
+                }
+                effects
             }
             Event::TrackEnded { source } => {
                 // The end of a track we are no longer on. Advancing on it
@@ -5137,6 +5295,8 @@ impl App {
                         self.stats.ending = Some(stats::Outcome::Completed);
                         let adopted = self.queue.items[index].clone();
                         self.stats_begin(&adopted);
+                        self.stats_stream(&to);
+                        self.current_url = Some(to.clone());
                         self.remember_played(&track);
                         self.now_playing = Some(track);
                         // Spent; the refresh at the end of this dispatch
@@ -5153,8 +5313,10 @@ impl App {
                         // air, and the engine finished a plan this queue no
                         // longer describes. Put the right track on properly —
                         // a hard cut, once, in a race that takes deliberate
-                        // timing to hit.
+                        // timing to hit. The blended-out track ran to its
+                        // end all the same (play-reporting clause 5).
                         self.announced = None;
+                        self.stats.ending = Some(stats::Outcome::Completed);
                         self.skip(false)
                     }
                 }

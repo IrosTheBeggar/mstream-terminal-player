@@ -60,6 +60,8 @@ def run(Gui):
         g.wait_for("▸ " + label, 10, f"{label} active in the nav")
         g.pump(2.0)
         g.dump(label)
-        if g.find("Nothing here yet") or not g.find("1 item"):
+        # The rig keeps its history between runs (and the other scenarios
+        # play too): the play just made must be listed, whatever the count.
+        if g.find("Nothing here yet") or not g.find(" item") or not g.find("6AM"):
             raise SystemExit(f"FAIL: {label} does not list the play")
     g.quit()

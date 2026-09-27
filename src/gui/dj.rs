@@ -116,7 +116,9 @@ enum L {
     Bar(DjRow),
     /// A sub-label and its `(•)` choices: on one row when they fit at the
     /// value column, else the choices on the row below (`wrapped`).
-    Choice { label: Option<String>, options: Vec<(Item, String, String)>, wrapped: bool },
+    /// `wrapped`: under the label rather than at the value column;
+    /// `stacked`: one option a row — none fit side by side.
+    Choice { label: Option<String>, options: Vec<(Item, String, String)>, wrapped: bool, stacked: bool },
     Chips(Item),
     PickGenres,
     KeywordInput,
@@ -129,7 +131,12 @@ impl L {
     fn height(&self) -> usize {
         match self {
             L::Status => 3,
-            L::Choice { wrapped, .. } => 1 + usize::from(*wrapped),
+            // Stacked, one row per option under the label (or from the first
+            // row without one); side by side, the label's row and the one
+            // under it when wrapped.
+            L::Choice { label, options, wrapped, stacked } => {
+                if *stacked { usize::from(label.is_some()) + options.len() } else { 1 + usize::from(*wrapped) }
+            }
             _ => 1,
         }
     }
@@ -305,10 +312,19 @@ fn lines(gui: &Gui, width: usize) -> Vec<L> {
     // A sub-label's choices sit at the value column when they fit the
     // body, else on the row below the label.
     let choice = |label: Option<String>, options: Vec<(Item, String, String)>| -> L {
-        let w: usize = options.iter().map(|(_, name, _)| name.chars().count() + 4).sum::<usize>()
+        let w: usize = options.iter().map(|(_, name, _)| crate::kit::width(name) + 4).sum::<usize>()
             + 2 * options.len().saturating_sub(1);
         let wrapped = label.is_some() && VALUE_X as usize + w > width;
-        L::Choice { label, options, wrapped }
+        // Options that fit on no single row stack one per row: an option
+        // the column cannot show is an option nobody can click (the
+        // default layout, the queue open at a hundred columns, lost one).
+        let avail = if label.is_some() && !wrapped {
+            width.saturating_sub(VALUE_X as usize)
+        } else {
+            width.saturating_sub(SUB_X as usize)
+        };
+        let stacked = w > avail;
+        L::Choice { label, options, wrapped, stacked }
     };
     let mut section: Option<&str> = None;
     let mut first = true;
@@ -646,7 +662,9 @@ fn draw_line(frame: &mut Frame, gui: &mut Gui, body: Rect, y: u16, line: &L) {
         }
         L::Switch(row) => draw_switch(frame, gui, x, y, w, *row, check_on, check_off),
         L::Bar(row) => draw_bar(frame, gui, x, y, w, *row),
-        L::Choice { label, options, wrapped } => draw_choice(frame, gui, x, y, w, label.as_deref(), options, *wrapped),
+        L::Choice { label, options, wrapped, stacked } => {
+            draw_choice(frame, gui, x, y, w, label.as_deref(), options, *wrapped, *stacked)
+        }
         L::Chips(item) => draw_chips(frame, gui, x + SUB_X, y, w.saturating_sub(SUB_X), *item),
         L::PickGenres => {
             let label = format!("{} {forward}", t!("gui.dj.pick_genres"));
@@ -743,20 +761,22 @@ fn draw_choice(
     label: Option<&str>,
     options: &[(Item, String, String)],
     wrapped: bool,
+    stacked: bool,
 ) {
     let (mut cx, mut cy) = (x + SUB_X, y);
     if let Some(label) = label {
         put(frame, x + SUB_X, y, label, Style::default());
-        if wrapped {
+        if wrapped || stacked {
             cy = y + 1;
         } else {
             cx = x + VALUE_X;
         }
     }
+    let start = cx;
     let on_glyph = if legacy_conhost() { "(*)" } else { "(•)" };
     for (item, name, hint) in options {
         let on = radio_on(gui, *item);
-        let width = name.chars().count() as u16 + 4;
+        let width = crate::kit::width(name) as u16 + 4;
         if cx + width > x + w {
             break;
         }
@@ -773,7 +793,12 @@ fn draw_choice(
         put(frame, cx + 4, cy, name, style);
         gui.ui.click(rect, radio_act(*item));
         help_for(gui, focused, hover, hint.clone());
-        cx += width + 2;
+        if stacked {
+            cy += 1;
+            cx = start;
+        } else {
+            cx += width + 2;
+        }
     }
 }
 
@@ -2032,7 +2057,7 @@ mod tests {
         gui.act(Act::AutoDj);
         gui.pending.clear();
         gui.act(Act::DjPickGenres);
-        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Genres))), "the list is asked for");
+        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Genres { .. }))), "the list is asked for");
         let effects = gui.app.apply_event(Event::Genres(vec![
             Genre { name: "Ambient".into(), track_count: Some(4) },
             Genre { name: "Techno".into(), track_count: Some(9) },

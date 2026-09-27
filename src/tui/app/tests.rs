@@ -5129,7 +5129,7 @@ fn choosing_a_genre_switches_the_filter_on() {
     assert_eq!(app.dj_panel.selected(), DjRow::Genres);
 
     let effects = app.handle_action(Action::Activate);
-    assert_eq!(effects, vec![Effect::Api(ApiCmd::Genres)]);
+    assert!(matches!(effects.as_slice(), [Effect::Api(ApiCmd::Genres { .. })]), "{effects:?}");
     assert!(app.dj_panel.genres.as_ref().unwrap().loading);
 
     app.apply_event(Event::Genres(vec![
@@ -6811,4 +6811,181 @@ fn the_outbox_and_a_checkpointed_session_survive_a_restart() {
     assert_eq!((recovered.outcome, recovered.played_ms), (super::stats::Outcome::Stopped, 7_000));
     let (body, ..) = reported(&next.tick()).expect("owed plays go out on the first tick");
     assert_eq!(body["plays"].as_array().unwrap().len(), 2);
+}
+
+// ── The adversarial review's regressions (2026-09-26) ───────────────────────
+
+#[test]
+fn a_long_run_of_unreachable_rows_walks_without_recursing() {
+    // Hundreds of restored rows from a server that is gone used to re-enter
+    // `play_index` once per row and overflow the stack (the review's 450
+    // rows on a Windows main thread). A thread with a small stack proves
+    // the walk is flat: it ends in the one Stop, with the rows counted.
+    let walked = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            let mut app = connected_app();
+            let rows: Vec<Queued> = (0..600).map(|i| at("http://gone", &format!("music/lost{i}.mp3"))).collect();
+            app.queue.replace(rows);
+            let effects = app.play_index(0);
+            assert_eq!(effects, vec![Effect::Audio(AudioCmd::Stop)], "every row failed: the walk ends in one Stop");
+            assert!(app.queue.current.is_none() && app.now_playing.is_none());
+            app.message.as_ref().map(|m| m.text.clone()).unwrap_or_default()
+        })
+        .unwrap()
+        .join()
+        .expect("the walk must not overflow the stack");
+    assert!(walked.contains("Can't play these tracks"), "{walked}");
+}
+
+#[test]
+fn a_last_row_started_from_idle_asks_for_its_turn_when_it_starts_playing() {
+    // Arm, then start the one row from a stopped player: the top-up rule saw
+    // an idle status when the row started; the first status of the play is
+    // when it can see a live last row (auto-dj clause 13).
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    assert!(app.dj_armed());
+    app.lane.pending = false;
+    let effects = app.play_index(0);
+    app.note_pending(&effects); // the shells' hook: the Play arms the starting gate
+    assert!(dj_request(&effects).is_none(), "idle at the start: nothing yet");
+    let url = played_url(&effects);
+    let effects = app.apply_event(status_at(&url, 0.0, false));
+    assert!(dj_request(&effects).is_some(), "the play's first status looks at the queue's end: {effects:?}");
+}
+
+#[test]
+fn the_queues_end_with_the_dj_armed_asks_for_the_turn_that_never_came() {
+    // A turn that failed (owed) or never fired: the end of the queue is the
+    // retry (auto-dj clauses 32–33) rather than silence with the DJ on.
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a")]);
+    app.handle_action(Action::ToggleAutoDj);
+    playing(&mut app);
+    let _ = app.play_index(0);
+    app.lane.pending = false;
+    let effects = app.skip(true);
+    assert!(effects.contains(&Effect::Audio(AudioCmd::Stop)));
+    assert!(dj_request(&effects).is_some(), "the queue's end asks again: {effects:?}");
+}
+
+#[test]
+fn a_stray_status_folds_nothing_and_a_lap_of_a_looping_track_is_a_play_of_its_own() {
+    let mut app = stats_app();
+    let mut first = item("a.mp3");
+    first.track.metadata.duration = Some(10.0);
+    app.queue.replace(vec![first, item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    // The tail of a track that failed to give way names another source:
+    // it adds nothing to this row's session, and resets no failure count.
+    app.failures = 2;
+    app.apply_event(status_at("http://host:3000/media/other.mp3", 50.0, false));
+    assert_eq!(app.stats.session.as_ref().unwrap().played_ms, 0, "a foreign source folds nothing");
+    assert_eq!(app.failures, 2, "and resets nothing about this row");
+    // Gapless repeat-one: the position runs to the end and starts over on
+    // the same source. That is a completed play and a fresh session.
+    for p in 0..=9 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    app.apply_event(status_at(&url, 0.5, false));
+    assert_eq!(app.stats.outbox.len(), 1, "the lap posted a play");
+    assert_eq!(app.stats.outbox[0].play.outcome, super::stats::Outcome::Completed);
+    let again = app.stats.session.as_ref().expect("a fresh session opened for the next lap");
+    assert_eq!(again.source_url.as_deref(), Some(url.as_str()));
+    assert!(again.played_ms < 1000, "the new lap starts from nothing");
+}
+
+#[test]
+fn one_kept_server_does_not_hold_another_servers_plays_behind_it() {
+    use crate::tui::worker::ReportOutcome;
+    let mut app = stats_app();
+    app.servers.push(KnownServer {
+        id: "http://away:4000".into(),
+        name: "away".into(),
+        token: Some("ta".into()),
+        self_signed: false,
+        peer: None,
+        pairing: None,
+        dj: Default::default(),
+    });
+    let away = Queued { dj: None, origin: Origin { server: "http://away:4000".into(), peer: None }, track: track("far.mp3") };
+    app.queue.replace(vec![away, item("home.mp3")]);
+    // The away row plays and is skipped: its play is owed to away.
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    for p in 0..=5 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    let effects = app.skip(true);
+    let url = played_url(&effects);
+    for p in 0..=5 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    // The away server keeps the batch: the home play, ended now, still goes
+    // out while away waits its minute — before, away's batch was retried
+    // forever first and home's plays never left.
+    let (_, reach, ids) = reported(&app.tick()).expect("away's batch");
+    assert!(reach.base.starts_with("http://away:4000"), "{reach:?}");
+    app.apply_event(Event::PlaysReported { ids, outcome: ReportOutcome::Kept("offline".into()) });
+    let effects = app.skip(true);
+    app.note_pending(&effects);
+    let now = crate::clock::Instant::now();
+    let (_, reach, _) = reported(&app.tick_at(now)).expect("home's batch goes out at once");
+    assert!(reach.base.starts_with("http://host:3000"), "{reach:?}");
+}
+
+#[test]
+fn a_connected_for_another_identity_starts_a_fresh_session_without_the_old_token() {
+    let mut app = connected_app();
+    app.session.token = Some("tok-a".into());
+    app.session.username = Some("paul".into());
+    app.apply_event(Event::Connected {
+        server: "http://127.0.0.1:5000".into(),
+        id: "mstream+iroh://endpointb".into(),
+        username: None,
+        token: None,
+        ping: Box::default(),
+    });
+    assert_eq!(app.session.server_id, "mstream+iroh://endpointb");
+    assert!(app.session.token.is_none(), "the old server's token does not ride to the new one");
+    assert!(app.session.username.is_none());
+    // A reconnect to the same identity keeps what it had.
+    app.session.token = Some("tok-b".into());
+    app.apply_event(Event::Connected {
+        server: "http://127.0.0.1:5000".into(),
+        id: "mstream+iroh://endpointb".into(),
+        username: None,
+        token: None,
+        ping: Box::default(),
+    });
+    assert_eq!(app.session.token.as_deref(), Some("tok-b"));
+}
+
+#[test]
+fn a_restored_spot_follows_its_track_through_queue_edits() {
+    let mut app = stats_app();
+    app.queue.replace(vec![item("a.mp3"), item("b.mp3"), item("c.mp3"), item("d.mp3")]);
+    app.queue.current = Some(2);
+    app.now_playing = Some(track("c.mp3"));
+    app.resume_spot = Some((2, 95.0));
+    app.resume_track = Some("c.mp3".into());
+    // A row removed above: Space still resumes C at 1:35, where it stands now.
+    let _ = app.remove_queue_row(0);
+    assert_eq!(app.queue.current, Some(1));
+    let effects = app.handle_action(Action::PlayPause);
+    assert!(played_url(&effects).contains("c.mp3"), "{effects:?}");
+    assert!(effects.contains(&Effect::Audio(AudioCmd::Seek(95.0))));
+    // The spot's own row removed: whatever plays next starts from nothing.
+    let mut app = stats_app();
+    app.queue.replace(vec![item("a.mp3"), item("c.mp3"), item("d.mp3")]);
+    app.queue.current = Some(1);
+    app.now_playing = Some(track("c.mp3"));
+    app.resume_spot = Some((1, 95.0));
+    app.resume_track = Some("c.mp3".into());
+    let _ = app.remove_queue_row(1);
+    let effects = app.handle_action(Action::PlayPause);
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Seek(_)))), "no seek into another track: {effects:?}");
 }
