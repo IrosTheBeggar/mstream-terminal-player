@@ -1326,6 +1326,8 @@ gui:
   top:
     library: "音乐库"
     now: "正在播放"
+    viz: "可视化"
+    viz_tip: "在独立窗口中打开可视化 — V"
   nav:
     files: "文件"
     library: "媒体库"
@@ -1731,6 +1733,8 @@ gui:
     back_tip: "返回设置 — Esc"
   stats:
     no_session: "没有会话 — 连接服务器后，收听记录会显示在这里"
+  viz:
+    failed: "无法打开可视化窗口 — %{why}"
   tips:
     search_edit: "输入 · Enter 搜索 · Esc 完成"
     search: "↑ ↓ 移动 · Enter 打开/播放 · h 返回 · ← → 类别 · t 切换 · / 编辑 · a 入队 · q 退出"

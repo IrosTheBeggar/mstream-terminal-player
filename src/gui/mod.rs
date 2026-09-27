@@ -32,6 +32,7 @@ mod sonic;
 mod stats;
 mod torrent;
 mod torrent_meta;
+mod vizwin;
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
@@ -102,6 +103,9 @@ pub(crate) enum Act {
     EditQuery,
     /// A top-bar tab: the Library, or Now Playing.
     Screen(Screen),
+    /// The top bar's Visualizer item: open the window, or bring it to the
+    /// front (docs/ux-contracts/visualizer-window.md).
+    VizWindow,
     /// A settings row, activated (click, Enter, Space).
     Row(usize),
     BlendDown,
@@ -527,6 +531,8 @@ pub(crate) struct Gui {
     now: now::NowUi,
     /// The Stats screen's page, while the screen is up.
     stats: stats::StatsUi,
+    /// The visualizer window's child process, while one is open.
+    vizwin: vizwin::VizWindow,
     /// The Settings sub-view standing in for its rows, when one is open.
     settings_room: Option<SettingsRoom>,
     /// The saved-server surfaces: dropdown, form, room, pairing QR.
@@ -588,6 +594,7 @@ impl Gui {
             screen: Screen::Library,
             now: now::NowUi::new(),
             stats: stats::StatsUi::default(),
+            vizwin: vizwin::VizWindow::new(),
             settings_room: None,
             servers: servers::ServersUi::new(),
             albums: albums::AlbumsUi::new(),
@@ -798,6 +805,7 @@ impl Gui {
                     stats::close(self);
                 }
             }
+            Act::VizWindow => vizwin::toggle(self),
             Act::Nav(i) => {
                 // A nav row is the Library's: it brings that screen back.
                 self.screen = Screen::Library;
@@ -1150,6 +1158,20 @@ fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
         gui.ui.click(rect, Act::Screen(screen));
         x += rect.width + 1;
     }
+    // The Visualizer item: not a screen but a window (visualizer-window
+    // contract, entry 1) — lit while one is open, bright under the pointer.
+    let text = format!(" {} ", t!("gui.top.viz"));
+    let rect = Rect { x, y: 0, width: text.chars().count() as u16, height: 1 };
+    let style = if vizwin::is_open(gui) {
+        Style::default().fg(th().accent).add_modifier(Modifier::BOLD)
+    } else if gui.ui.hovers(rect) {
+        bright_bold()
+    } else {
+        dim()
+    };
+    put(frame, x, 0, &text, style);
+    gui.ui.click(rect, Act::VizWindow);
+    gui.ui.tip_keyed(rect, t!("gui.top.viz_tip").to_string());
 }
 
 fn put(frame: &mut Frame, x: u16, y: u16, text: &str, style: Style) {
@@ -2355,6 +2377,8 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
         KeyCode::Char('0') => return gui.act(Act::Screen(Screen::NowPlaying)),
         // The Stats screen, the third tab (stats-screen contract, entry 2).
         KeyCode::Char('T') => return gui.act(Act::Screen(Screen::Stats)),
+        // The visualizer's window (visualizer-window contract, entry 2).
+        KeyCode::Char('V') => return gui.act(Act::VizWindow),
         // The tenth room has no digit; `D` is the capital beside `A`'s toggle.
         KeyCode::Char('D') => return gui.act(Act::Nav(DJ_NAV)),
         // `/` is the search key everywhere, the TUI's own habit: land on
@@ -2503,6 +2527,8 @@ fn event_loop(
 
         // The Stats screen's page pumps its worker and its controls here too.
         let stats_over = stats::frame(gui);
+        // The visualizer window's host: the child's exit, the next texture.
+        vizwin::tick(gui);
         let over = gui.ui.hovering_clickable() || stats_over;
         if over != hand {
             hand = over;
@@ -2519,8 +2545,9 @@ fn event_loop(
         // caret wants its next frame ON the flip, not a poll tick after it.
         let wait = if gui.hot {
             Duration::from_millis(10)
-        } else if gui.app.drawing_audio() {
-            // The visualizer tab, moving: the TUI's thirty frames a second.
+        } else if gui.app.drawing_audio() || vizwin::is_open(gui) {
+            // The visualizer tab, moving: the TUI's thirty frames a second —
+            // and the visualizer window's feed, at the same pace.
             Duration::from_millis(33)
         } else {
             gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
@@ -2968,6 +2995,8 @@ pub fn run(
     ratatui::restore();
     crate::console::release_terminal();
     drop(ground_guard);
+    // The visualizer window, if one is open, closes with the player.
+    vizwin::close(&mut gui);
     let _ = audio_tx.send(AudioCmd::Shutdown);
     // The player prefs, the session and the last path persist the TUI's own
     // way; the GUI's bar choice rides its own section afterwards.
@@ -3358,6 +3387,31 @@ mod tests {
 
     fn rows_of(buf: &ratatui::buffer::Buffer, y: u16) -> String {
         (0..buf.area().width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn the_top_bar_has_a_visualizer_item_that_opens_the_window() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // The visualizer-window contract, entries 1–2: the item after the
+        // tabs opens the window (a flag under test), lit while it is open,
+        // and a second ask brings it to the front; `V` from any screen.
+        let mut gui = browsing_gui();
+        let rows = draw(&mut gui);
+        let vx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Visualizer ")).expect("the item") as u16;
+        assert_eq!(gui.ui.hit(Position { x: vx + 1, y: 0 }), Some(Act::VizWindow));
+        assert!(!vizwin::is_open(&gui));
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE));
+        assert!(vizwin::is_open(&gui), "V opens the window");
+        let buf = draw_buffer(&mut gui);
+        assert_eq!(buf[(vx + 1, 0)].fg, th().accent, "the item is lit while the window is open");
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE));
+        assert_eq!(gui.vizwin.raised, 1, "a second V brings the open window to the front");
+        gui.act(Act::Screen(Screen::NowPlaying));
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE));
+        assert_eq!(gui.vizwin.raised, 2, "and from Now Playing");
+        gui.act(Act::Screen(Screen::Stats));
+        super::handle_key(&mut gui, KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE));
+        assert_eq!(gui.vizwin.raised, 3, "and from Stats");
     }
 
     #[test]

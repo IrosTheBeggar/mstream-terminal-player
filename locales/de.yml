@@ -1326,6 +1326,8 @@ gui:
   top:
     library: "Bibliothek"
     now: "Jetzt läuft"
+    viz: "Visualizer"
+    viz_tip: "Visualizer in eigenem Fenster öffnen – V"
   nav:
     files: "Dateien"
     library: "BIBLIOTHEK"
@@ -1731,6 +1733,8 @@ gui:
     back_tip: "Zurück zu den Einstellungen — Esc"
   stats:
     no_session: "keine Sitzung – mit einem Server verbinden, dann erscheint hier sein Hörprotokoll"
+  viz:
+    failed: "Das Visualizer-Fenster ließ sich nicht öffnen – %{why}"
   tips:
     search_edit: "tippen · Enter suchen · Esc fertig"
     search: "↑ ↓ Zeile · Enter öffnen · h zurück · ← → Klasse · t umschalten · / Suche · a einreihen · q Ende"

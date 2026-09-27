@@ -1326,6 +1326,8 @@ gui:
   top:
     library: "Library"
     now: "Now Playing"
+    viz: "Visualizer"
+    viz_tip: "Open the visualizer in its own window — V"
   nav:
     files: "Files"
     library: "LIBRARY"
@@ -1731,6 +1733,8 @@ gui:
     back_tip: "Back to Settings — Esc"
   stats:
     no_session: "no session — connect to a server and its listening log opens here"
+  viz:
+    failed: "the visualizer window could not open — %{why}"
   tips:
     search_edit: "type · Enter search · Esc done"
     search: "↑ ↓ move · Enter open/play · h back · ← → class · t toggle · / edit · a queue · q quit"

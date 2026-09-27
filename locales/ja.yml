@@ -1326,6 +1326,8 @@ gui:
   top:
     library: "ライブラリ"
     now: "再生中"
+    viz: "ビジュアライザー"
+    viz_tip: "ビジュアライザーを別ウィンドウで開く — V"
   nav:
     files: "ファイル"
     library: "ライブラリ"
@@ -1731,6 +1733,8 @@ gui:
     back_tip: "設定に戻る — Esc"
   stats:
     no_session: "セッションがありません — サーバーに接続すると視聴ログがここに表示されます"
+  viz:
+    failed: "ビジュアライザーのウィンドウを開けませんでした — %{why}"
   tips:
     search_edit: "入力 · Enter 検索 · Esc 完了"
     search: "↑ ↓ 移動 · Enter 開く/再生 · h 戻る · ← → 分類 · t 切替 · / 編集 · a キューへ · q 終了"

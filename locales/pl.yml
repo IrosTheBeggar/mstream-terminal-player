@@ -1326,6 +1326,8 @@ gui:
   top:
     library: "Biblioteka"
     now: "Teraz gra"
+    viz: "Wizualizacja"
+    viz_tip: "Otwórz wizualizację w osobnym oknie — V"
   nav:
     files: "Pliki"
     library: "BIBLIOTEKA"
@@ -1731,6 +1733,8 @@ gui:
     back_tip: "Powrót do ustawień — Esc"
   stats:
     no_session: "brak sesji — połącz się z serwerem, a jego dziennik odsłuchów pojawi się tutaj"
+  viz:
+    failed: "nie udało się otworzyć okna wizualizacji — %{why}"
   tips:
     search_edit: "pisz · Enter szukaj · Esc gotowe"
     search: "↑ ↓ ruch · Enter otwórz · h wstecz · ← → klasa · t przełącz · / edytuj · a do kolejki · q wyjdź"

@@ -1326,6 +1326,8 @@ gui:
   top:
     library: "Bibliothèque"
     now: "En cours"
+    viz: "Visualiseur"
+    viz_tip: "Ouvrir le visualiseur dans sa fenêtre — V"
   nav:
     files: "Fichiers"
     library: "BIBLIOTHÈQUE"
@@ -1731,6 +1733,8 @@ gui:
     back_tip: "Retour aux réglages — Échap"
   stats:
     no_session: "pas de session — connectez-vous à un serveur et son journal d'écoute s'ouvrira ici"
+  viz:
+    failed: "la fenêtre du visualiseur n'a pas pu s'ouvrir — %{why}"
   tips:
     search_edit: "tapez · Enter chercher · Esc fini"
     search: "↑ ↓ ligne · Enter ouvrir · h retour · ← → classe · t basculer · / éditer · a en file · q quitter"

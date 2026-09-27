@@ -1326,6 +1326,8 @@ gui:
   top:
     library: "Biblioteca"
     now: "Reproduciendo"
+    viz: "Visualizador"
+    viz_tip: "Abrir el visualizador en su propia ventana — V"
   nav:
     files: "Archivos"
     library: "BIBLIOTECA"
@@ -1731,6 +1733,8 @@ gui:
     back_tip: "Volver a Ajustes — Esc"
   stats:
     no_session: "sin sesión — conéctate a un servidor y su registro de escucha aparecerá aquí"
+  viz:
+    failed: "no se pudo abrir la ventana del visualizador — %{why}"
   tips:
     search_edit: "escribe · Enter buscar · Esc listo"
     search: "↑ ↓ mover · Enter abrir · h atrás · ← → clase · t alternar · / editar · a encolar · q salir"

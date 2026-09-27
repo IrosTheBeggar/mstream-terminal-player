@@ -137,6 +137,12 @@ wgpu = { version = "30", default-features = false, features = [
     "wgsl",
     "glsl",
 ] }
+# The visualizer's window (src/viz_window; PLAN.md, Phase 11.1): winit for
+# the window and its keys, on the same wgpu. Its default features are what
+# keeps the Linux binary loadable on a headless box — `wayland-dlopen` and
+# `x11-dl` open their libraries at run time — and CI's NEEDED guard holds
+# the build to that.
+winit = "0.30"
 
 # The setup wizard's native folder picker. Split by backend on purpose
 # (the picker spike, mStream-side, 2026-08-21): rfd's Linux portal backend

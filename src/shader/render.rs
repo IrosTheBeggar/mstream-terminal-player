@@ -456,6 +456,15 @@ impl Offscreen {
         Offscreen { texture, view, size }
     }
 
+    /// A [`FORMAT`] target the window draws the preset into at logical size
+    /// and then samples, upscaled, onto its surface (Phase 11.1).
+    pub fn for_display(gpu: &Gpu, size: (u32, u32)) -> Offscreen {
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        let texture = texture(&gpu.device, "display", size, FORMAT, usage);
+        let view = texture.create_view(&Default::default());
+        Offscreen { texture, view, size }
+    }
+
     /// Wait for the GPU, then copy the picture out as tightly packed RGBA.
     pub fn read(&self, gpu: &Gpu) -> Result<Vec<u8>, String> {
         let (width, height) = self.size;

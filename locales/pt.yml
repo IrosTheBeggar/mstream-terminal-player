@@ -1326,6 +1326,8 @@ gui:
   top:
     library: "Biblioteca"
     now: "Tocando agora"
+    viz: "Visualizador"
+    viz_tip: "Abrir o visualizador em sua própria janela — V"
   nav:
     files: "Arquivos"
     library: "BIBLIOTECA"
@@ -1731,6 +1733,8 @@ gui:
     back_tip: "Voltar às definições — Esc"
   stats:
     no_session: "sem sessão — conecte-se a um servidor e seu registro de audição aparecerá aqui"
+  viz:
+    failed: "a janela do visualizador não pôde abrir — %{why}"
   tips:
     search_edit: "digite · Enter buscar · Esc pronto"
     search: "↑ ↓ mover · Enter abrir · h voltar · ← → classe · t alternar · / editar · a para a fila · q sair"

@@ -1326,6 +1326,8 @@ gui:
   top:
     library: "Libreria"
     now: "In riproduzione"
+    viz: "Visualizzatore"
+    viz_tip: "Apri il visualizzatore in una finestra — V"
   nav:
     files: "File"
     library: "LIBRERIA"
@@ -1731,6 +1733,8 @@ gui:
     back_tip: "Torna alle impostazioni — Esc"
   stats:
     no_session: "nessuna sessione — collegati a un server e il suo registro d'ascolto apparirà qui"
+  viz:
+    failed: "la finestra del visualizzatore non si è aperta — %{why}"
   tips:
     search_edit: "scrivi · Enter cerca · Esc fine"
     search: "↑ ↓ muovi · Enter apri · h indietro · ← → classe · t attiva · / modifica · a in coda · q esci"

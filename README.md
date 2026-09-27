@@ -379,7 +379,10 @@ action keeps a key. It needs a terminal at least 100×24 cells.
   the facts, the cover, the tabbed panel and the waveform band — with
   prev · play · next under the cover, and **Stats** (`T`), the listening
   log of `mstream-player stats` on the session's server, whole: the same
-  tabs, periods and keys, Esc back to the Library.
+  tabs, periods and keys, Esc back to the Library. Beside them, the
+  **Visualizer** item (`V`) opens the mobile app's shader presets in a
+  window of their own, moving to what is playing; `←` `→` change the
+  preset there, `f` goes fullscreen, Esc closes it.
 - **Rooms**: Files, Search, then Albums (a wall of covers), Artists, Genres,
   Recent, Playlists, Last played and Most played, then the tools — Auto DJ
   and Sonic path — and Settings. Digits `1`–`9` and `D` reach them; the

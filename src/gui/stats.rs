@@ -93,6 +93,7 @@ pub(crate) fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
             KeyCode::Char('q') => return true,
             KeyCode::Char('T') => return gui.act(Act::Screen(Screen::Library)),
             KeyCode::Char('0') => return gui.act(Act::Screen(Screen::NowPlaying)),
+            KeyCode::Char('V') => return gui.act(Act::VizWindow),
             KeyCode::Char(c @ '1'..='9') => return gui.act(Act::Nav(c as usize - '1' as usize)),
             KeyCode::Char('D') => return gui.act(Act::Nav(DJ_NAV)),
             _ => {}
