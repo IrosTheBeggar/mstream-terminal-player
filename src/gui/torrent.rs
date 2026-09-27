@@ -2360,9 +2360,19 @@ mod tests {
 
     #[test]
     fn a_bounced_hand_off_is_named_not_looped() {
+        // handoff_dir() follows MSTREAM_PLAYER_CONFIG_DIR, which the config
+        // tests repoint process-wide under their scratch lock. Unheld, the
+        // folder could move between this write and arrive()'s own look (our
+        // file taken for a stranger's: a chooser), or the file could land
+        // in another test's scratch and vanish with it (nothing read, no
+        // room) — and with no scratch live it landed in the developer's
+        // REAL config. Holding a scratch pins the folder for the whole test,
+        // and its drop cleans up.
+        let scratch = crate::config::testing::Scratch::new("torrent-bounce");
         let dir = handoff_dir();
+        assert!(dir.starts_with(&scratch.dir), "the hand-off folder is in the scratch: {dir:?}");
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("bounce-{}.torrent", std::process::id()));
+        let path = dir.join("bounce.torrent");
         std::fs::write(&path, torrent("Vela - Cassini (2020)")).unwrap();
         let mut gui = gui();
         assert!(gui.config.torrent.ask, "asking is on");
@@ -2372,7 +2382,6 @@ mod tests {
         let (words, is_err) = gui.note.clone().unwrap();
         assert!(words.contains("default app"), "{words}");
         assert!(is_err);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
