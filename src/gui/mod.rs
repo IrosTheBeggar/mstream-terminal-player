@@ -2769,6 +2769,11 @@ impl Gui {
     /// that, and swipes silently went nowhere).
     fn wheel(&mut self, at: Position, delta: i32) {
         self.ui.pointer = Some(at);
+        // The header dropdown is on top of everything while it is open.
+        if self.servers.drop_open {
+            servers::wheel_dropdown(self, delta);
+            return;
+        }
         // A modal owns the pointer whole; the Now Playing screen scrolls
         // nothing yet (its queue panel is not on screen).
         if self.modal_open() || self.screen == Screen::NowPlaying {
@@ -2792,9 +2797,16 @@ impl Gui {
             }
             NavId::Sonic => sonic::wheel(self, delta),
             NavId::Playlists => playlists::wheel(self, delta),
-            // Settings scrolls nothing itself; its Add-torrent room's file
-            // picker does. The Auto DJ room's body and genre picker scroll.
-            NavId::Settings => torrent::wheel(self, delta),
+            // Settings scrolls nothing itself; its Manage-servers room's
+            // list and its Add-torrent room's file picker do. The Auto DJ
+            // room's body and genre picker scroll.
+            NavId::Settings => {
+                if self.in_settings_room(SettingsRoom::Servers) {
+                    servers::wheel(self, delta)
+                } else {
+                    torrent::wheel(self, delta)
+                }
+            }
             NavId::Dj => {
                 dj::wheel(self, delta);
             }
