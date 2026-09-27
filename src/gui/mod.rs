@@ -3365,7 +3365,7 @@ mod tests {
         let rows = draw(&mut gui);
         let line = rows.iter().find(|r| r.contains("101:40")).expect("the total is drawn whole");
         let at = line.find(" 61:40 ").expect("the elapsed time sits in a slot as wide as the total, with air after it");
-        assert!(line[at + 7..].trim_start().starts_with(|c: char| c == '━' || c == '█'), "the cells start after the slot: {line}");
+        assert!(line[at + 7..].trim_start().starts_with(['━', '█']), "the cells start after the slot: {line}");
     }
 
     #[test]

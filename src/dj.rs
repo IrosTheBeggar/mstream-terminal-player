@@ -802,11 +802,7 @@ mod tests {
         // The review's finding: songs-per-fetch above one went out to a
         // server known to predate the batch, and the learner dropped it
         // after one refusal — a request wasted on every server, every run.
-        let mut s = Settings::default();
-        s.bpm = true;
-        s.harmonic = true;
-        s.length = true;
-        s.min_seconds = 60;
+        let s = Settings { bpm: true, harmonic: true, length: true, min_seconds: 60, ..Settings::default() };
         let mut a = ask(s);
         a.sonic_seeds = vec!["lib/a.mp3".into()];
         a.library.genre_filter = true;

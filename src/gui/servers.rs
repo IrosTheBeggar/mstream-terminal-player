@@ -2881,8 +2881,10 @@ mod tests {
         // onto rows that were never drawn and the add row was gone. Peers
         // are added automatically, so the count is reachable.
         use ratatui::crossterm::event::{KeyCode, KeyEvent};
-        let mut config = Config::default();
-        config.servers = (0..30).map(|i| entry(&format!("http://srv{i:02}.local:3000"), None)).collect();
+        let config = Config {
+            servers: (0..30).map(|i| entry(&format!("http://srv{i:02}.local:3000"), None)).collect(),
+            ..Config::default()
+        };
         let mut gui = Gui::new(config, false, App::new(None, None, None));
         gui.active = super::super::SETTINGS_NAV;
         gui.queue_open = false;
