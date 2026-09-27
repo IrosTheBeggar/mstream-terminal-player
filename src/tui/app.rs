@@ -5,7 +5,8 @@
 //! channels. That keeps the interesting behaviour — navigation, queue
 //! advancement, repeat/shuffle — testable without a terminal or a server.
 
-use std::collections::HashMap;
+use rust_i18n::t;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 // Key handling lives in `super::keymap` now; the app only meets key events
@@ -605,6 +606,18 @@ pub struct Origin {
     pub peer: Option<i64>,
 }
 
+/// Drop the oldest entry of a full cache that nothing pinned needs — or
+/// nothing, when every entry is pinned. A name the map no longer holds (an
+/// unanswered ask gave its slot back) is forgotten on the way.
+fn evict_oldest<T>(map: &mut HashMap<String, T>, order: &mut VecDeque<String>, pinned: &HashSet<String>) {
+    order.retain(|name| map.contains_key(name));
+    if let Some(at) = order.iter().position(|name| !pinned.contains(name))
+        && let Some(name) = order.remove(at)
+    {
+        map.remove(&name);
+    }
+}
+
 /// Why Auto DJ picked a row, for the queue's badge (auto-dj contract,
 /// clause 60): a sonic pick and a classic random one wear it differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -641,6 +654,9 @@ pub struct KnownServer {
     /// address.
     pub name: String,
     pub token: Option<String>,
+    /// Who the token signs in as — what an owed play is stamped with and
+    /// posted under (play-reporting clause 8). `None` for a public server.
+    pub username: Option<String>,
     pub self_signed: bool,
     /// A federated peer: the parent it is reached through, and its row id
     /// there. Everything else about it is the parent's.
@@ -1601,6 +1617,11 @@ pub struct App {
     /// The rating writes out, for the latest-wins revert (clause 11).
     pub(crate) rating_writes: Vec<RatingWrite>,
     rating_seq: u64,
+    /// The latest rating write per track (its `rating_seq`), and the
+    /// `rating_seq` a details fetch went out under: a block that answers
+    /// after a newer write cannot put the older rating back (clause 10).
+    rated_at: HashMap<String, u64>,
+    info_asked: HashMap<String, u64>,
     /// The whole search reply, kept rather than flattened. Every class comes
     /// back in one response, so moving between them costs nothing.
     pub search_hits: Option<Box<crate::api::types::SearchResults>>,
@@ -1633,6 +1654,11 @@ pub struct App {
     /// Replies answer on their own threads and can pass each other, so a
     /// result set has to name the search it belongs to.
     search_submitted: Option<String>,
+    /// The session generation: bumped whenever the browse state is shed
+    /// for another server, stamped on the library and search asks and
+    /// checked on their replies — a slow answer from the server the
+    /// session left never fills the new one's same-named list.
+    session_gen: u64,
 
     pub queue: Queue,
     /// What the connected server offers. Default (nothing) until a ping says
@@ -1770,6 +1796,8 @@ pub struct App {
     /// waiting" — the two draw the same, and the entry is what stops a
     /// second request either way.
     pub art: HashMap<String, Option<Art>>,
+    /// The cache's insertion order, oldest first: what goes when it fills.
+    art_order: VecDeque<String>,
     /// Track shapes fetched this session, keyed by filepath. `None` records
     /// both "asked, nothing there" and "asked, still waiting" — the bar draws
     /// the same either way, and the entry is what stops a second request.
@@ -1778,6 +1806,7 @@ pub struct App {
     /// belongs to one recording where a cover belongs to a whole album — so
     /// this turns over faster than [`App::art`] does.
     pub waveforms: HashMap<String, Option<Vec<u8>>>,
+    waveform_order: VecDeque<String>,
     /// What the terminal can draw as pixels rather than characters, and the
     /// cover encoded for it. Starts off and is only ever turned on by the
     /// real binary against a real terminal — a test, a replay run and the
@@ -1878,6 +1907,8 @@ impl App {
             playlist_names: PlaylistNames::Unasked,
             rating_writes: Vec::new(),
             rating_seq: 0,
+            rated_at: HashMap::new(),
+            info_asked: HashMap::new(),
             search_hits: None,
             search_stack: Drill::new(SearchNode::Root),
             queue_column: false,
@@ -1894,6 +1925,7 @@ impl App {
             filtering: false,
             search_summary: None,
             search_submitted: None,
+            session_gen: 0,
             queue: Queue::default(),
             capabilities: Default::default(),
             libraries: Vec::new(),
@@ -1936,7 +1968,9 @@ impl App {
             stats: stats::Stats::default(),
             now_playing: None,
             art: HashMap::new(),
+            art_order: VecDeque::new(),
             waveforms: HashMap::new(),
+            waveform_order: VecDeque::new(),
             graphics: crate::tui::graphics::Graphics::disabled(),
             audio_available: true,
             tap: None,
@@ -2014,7 +2048,7 @@ impl App {
         self.blend_skips = prefs.blend_skips;
         self.pause_fade = prefs.pause_fade;
         self.resume_queue = prefs.resume_queue;
-        self.dj = dj::Settings::from_prefs(&prefs.dj);
+        self.dj = dj::Settings::from_prefs(&prefs.dj, &prefs.autodj);
         self
     }
 
@@ -2194,7 +2228,7 @@ impl App {
             let tab = match effect {
                 Effect::Api(ApiCmd::Browse(_)) => Tab::Files,
                 Effect::Api(ApiCmd::Library { dest, .. }) => *dest,
-                Effect::Api(ApiCmd::Search(_)) => Tab::Search,
+                Effect::Api(ApiCmd::Search { .. }) => Tab::Search,
                 Effect::Api(ApiCmd::Discover { .. }) => Tab::Discover,
                 _ => continue,
             };
@@ -2698,7 +2732,7 @@ impl App {
                 self.search_stack.reset();
                 self.search.trail.clear();
                 self.search_submitted = Some(query.clone());
-                Some(vec![Effect::Api(ApiCmd::Search(query))])
+                Some(vec![Effect::Api(ApiCmd::Search { query, generation: self.session_gen })])
             }
             _ => None,
         }
@@ -2895,14 +2929,14 @@ impl App {
                 self.search_stack.enter(SearchNode::Library(node.clone()));
                 self.search.set(Vec::new());
                 self.info(format!("loading {label}…"));
-                vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Search })]
+                vec![self.ask_library(node, Tab::Search)]
             }
             Entry::Node { node, label } => {
                 self.push_trail();
                 self.library_stack.enter(node.clone());
                 self.library.set(Vec::new());
                 self.info(format!("loading {label}…"));
-                vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Library })]
+                vec![self.ask_library(node, Tab::Library)]
             }
             Entry::Search { node, label, .. } => {
                 self.push_trail();
@@ -2916,7 +2950,7 @@ impl App {
                     SearchNode::Library(node) => {
                         self.search.set(Vec::new());
                         self.info(format!("loading {label}…"));
-                        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Search })]
+                        vec![self.ask_library(node, Tab::Search)]
                     }
                 }
             }
@@ -3068,7 +3102,7 @@ impl App {
                     }
                     SearchNode::Library(node) => {
                         self.search.set(Vec::new());
-                        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Search })]
+                        vec![self.ask_library(node, Tab::Search)]
                     }
                 }
             }
@@ -3083,7 +3117,7 @@ impl App {
                     }
                     node => {
                         self.library.set(Vec::new());
-                        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Library })]
+                        vec![self.ask_library(node, Tab::Library)]
                     }
                 }
             }
@@ -4297,10 +4331,10 @@ impl App {
             self.failures = 0;
             self.now_playing = None;
             self.queue.current = None;
-            self.error("Can't play these tracks — check the files or server.");
+            self.error(t!("play.unplayable_all"));
             return Err(vec![Effect::Audio(AudioCmd::Stop)]);
         }
-        self.error(format!("Skipping a track that won’t play — {what}: {why}"));
+        self.error(t!("play.skipping_why", what = what, why = why));
         // Manual, so repeat-one doesn't sit on the broken track.
         match self.queue.next_index(true) {
             Some(next) => Ok(next),
@@ -4413,12 +4447,12 @@ impl App {
             self.failures = 0;
             self.now_playing = None;
             self.queue.current = None;
-            self.error("Can't play these tracks — check the files or server.");
+            self.error(t!("play.unplayable_all"));
             return vec![Effect::Audio(AudioCmd::Stop)];
         }
         match reason {
-            Some(reason) => self.error(format!("Skipping a track that won’t play — {what}: {reason}")),
-            None => self.error(format!("Skipping a track that won’t play — {what}")),
+            Some(reason) => self.error(t!("play.skipping_why", what = what, why = reason)),
+            None => self.error(t!("play.skipping", what = what)),
         }
         // Manual, so repeat-one doesn't sit on the broken track.
         self.skip(true)
@@ -4980,10 +5014,39 @@ impl App {
             return None;
         }
         if self.art.len() >= ART_CACHE_CAP {
-            self.art.clear();
+            // The oldest cover nothing on screen needs goes — never the
+            // playing track's or a queued row's; the wall's page is the
+            // newest and stays by age. Clearing the lot re-asked for
+            // ninety covers a frame (the review's finding).
+            let pinned = self.pinned_art();
+            evict_oldest(&mut self.art, &mut self.art_order, &pinned);
         }
         self.art.insert(file.to_string(), None);
+        self.art_order.push_back(file.to_string());
         Some(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach }))
+    }
+
+    /// The covers on screen whatever else is: the playing track's and the
+    /// queue's rows'.
+    fn pinned_art(&self) -> HashSet<String> {
+        self.queue
+            .items
+            .iter()
+            .filter_map(|item| item.metadata.album_art.clone())
+            .chain(self.now_playing.as_ref().and_then(|t| t.metadata.album_art.clone()))
+            .collect()
+    }
+
+    /// The session generation (see the field): what a library or search ask
+    /// is stamped with, and what its reply must carry to be taken.
+    #[cfg(test)]
+    pub(crate) fn session_gen(&self) -> u64 {
+        self.session_gen
+    }
+
+    /// A library ask stamped with the session generation.
+    pub(crate) fn ask_library(&self, node: LibraryNode, dest: Tab) -> Effect {
+        Effect::Api(ApiCmd::Library { node, dest, generation: self.session_gen })
     }
 
     /// Aim the Library drill at `node` and ask for it — the GUI's direct
@@ -5009,7 +5072,7 @@ impl App {
         }
         self.library_stack.enter(node.clone());
         self.library.set(Vec::new());
-        vec![Effect::Api(ApiCmd::Library { node, dest: Tab::Library })]
+        vec![self.ask_library(node, Tab::Library)]
     }
 
     /// Whether the Library pane's drill stands on the Albums wall, or on an
@@ -5051,9 +5114,12 @@ impl App {
             return None;
         }
         if self.waveforms.len() >= ART_CACHE_CAP {
-            self.waveforms.clear();
+            // The same rule as the covers': the queue's shapes stay.
+            let pinned: HashSet<String> = self.queue.items.iter().map(|item| item.filepath.clone()).collect();
+            evict_oldest(&mut self.waveforms, &mut self.waveform_order, &pinned);
         }
         self.waveforms.insert(filepath.to_string(), None);
+        self.waveform_order.push_back(filepath.to_string());
         Some(Effect::Api(ApiCmd::Waveform { filepath: filepath.to_string(), reach }))
     }
 
@@ -5398,7 +5464,13 @@ impl App {
                 self.files.set(entries_from_listing(&listing, &root));
                 Vec::new()
             }
-            Event::Library { node, dest, data } => {
+            Event::Library { node, dest, data, generation } => {
+                // A reply from the server the session has since left — the
+                // generation moved on — fills nothing here, whatever list
+                // of the same name the new server has.
+                if generation != self.session_gen {
+                    return Vec::new();
+                }
                 // Drop a reply for a view the user has already navigated away
                 // from, so a slow request can't overwrite the current screen.
                 // Which drill answers depends on who asked — the Search tab
@@ -5549,7 +5621,10 @@ impl App {
                 self.playlist_names = names.map_or(PlaylistNames::Failed, PlaylistNames::Listed);
                 Vec::new()
             }
-            Event::SearchResults { query, results } => {
+            Event::SearchResults { query, results, generation } => {
+                if generation != self.session_gen {
+                    return Vec::new();
+                }
                 // Replies can pass each other now that each answers on its
                 // own thread; only the search still standing in the box is
                 // the one anybody is waiting for.

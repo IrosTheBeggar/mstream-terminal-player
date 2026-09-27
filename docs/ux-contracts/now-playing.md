@@ -146,3 +146,8 @@ names the tab, `gui.tips.now` the keys on the footer (ten locales).
   The Settings sub-rooms are the Library screen's. The GUI boots the
   system language now, as the wizard does; the view's own words stay the
   TUI's English.
+- **2026-09-26 — The follow-ups.** The note on the keys row stops short
+  of the modes readout wherever the view put it (clause 9), instead of
+  forty fixed cells. An e2e leg (`test/e2e/legs/gui-now.exp`) drives the
+  screen under a pty with the demo seat and no server: `0`, a digit
+  picking a tab, Esc, `q`.

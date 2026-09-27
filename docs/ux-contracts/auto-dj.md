@@ -703,3 +703,15 @@ flagged ones were confirmed on 2026-09-20 (decision 10 rewritten).
   went out (clause 60); Preview's degrade suppresses the lane's sonic
   pool; the migration reads the old panel's defaults as a wish for BPM
   and harmonic continuity; the Esc wording on the chooser is English.
+- **2026-09-26 — The follow-ups.** The ask carries the probed version and
+  leaves out what the server is known to predate (clauses 25, 27, 50)
+  rather than sending the key and learning it back. The queue's badge
+  reads the body that went out, not the ask (clause 60). A Preview runs
+  in a lane of its own, so its degrade never lets go of the running
+  lane's pool (clause 53). The migration from the three-mode panel
+  switches BPM and harmonic continuity on only when the old mode was
+  tempo+key — the panel wrote its defaults on every quit. The picker the
+  GUI lends from the TUI view and the TUI's chooser draw their key hints
+  through the locale table (the TUI boots no language and stays English).
+  The Auto-DJ tab's keyword row names the key the keymap binds to
+  remove-from-queue instead of an unbound `x`.

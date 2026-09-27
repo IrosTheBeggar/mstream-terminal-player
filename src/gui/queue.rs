@@ -494,6 +494,7 @@ mod tests {
             id: other.into(),
             name: "Other".into(),
             token: Some("tok".into()),
+            username: None,
             self_signed: false,
             peer: None,
             pairing: None, dj: Default::default(),

@@ -116,6 +116,11 @@ pub enum ApiCmd {
         password: String,
         self_signed: bool,
         local_token: Option<String>,
+        /// A peer's session signing back in: the sign-in itself goes to the
+        /// parent (`server` is the parent's), and the session that follows
+        /// rides the parent's proxies for this peer, as it did before the
+        /// token went stale (multi-server contract, clause 26).
+        peer: Option<i64>,
     },
     /// Dial `credential` — a Quick Connect pairing code or a federation
     /// guest ticket — and keep the tunnel under `id` until it is closed,
@@ -161,7 +166,10 @@ pub enum ApiCmd {
     /// drilling into an artist or album it found. The destination travels
     /// with the command and comes back on the event, so a second view of
     /// the same data costs a field, not a duplicated command (audit #64).
-    Library { node: LibraryNode, dest: Tab },
+    /// `generation` is the session generation the ask was made under (the App's
+    /// `session_gen`), echoed on the reply: an answer from the server the
+    /// session has since left is dropped on arrival, however slow it was.
+    Library { node: LibraryNode, dest: Tab, generation: u64 },
     /// Ask for the next Auto-DJ track, seeded on what's playing now.
     AutoDj(Box<DjRequest>),
     /// Ask for several picks at once without queueing any of them, so the
@@ -196,7 +204,8 @@ pub enum ApiCmd {
     /// server 404s, and the arm words that as the server's age.
     RenamePlaylist { from: String, to: String },
     DeletePlaylist { name: String },
-    Search(String),
+    /// A search, stamped like `Library`.
+    Search { query: String, generation: u64 },
     /// Fetch and decode one cover, named by the art file a track's metadata
     /// carries. The app caches the answer under that name. `reach` names
     /// the row's own server when it is not the session's (contract clause
@@ -259,7 +268,7 @@ impl ApiCmd {
             | ApiCmd::CreatePlaylist { .. }
             | ApiCmd::RenamePlaylist { .. }
             | ApiCmd::DeletePlaylist { .. }
-            | ApiCmd::Search(_)
+            | ApiCmd::Search { .. }
             | ApiCmd::Shutdown => None,
         }
     }
@@ -475,7 +484,7 @@ pub enum Event {
     /// the tab they were fetched for — the same data serves the Library tab
     /// and a drill out of the search results, and carrying the destination
     /// is what replaced a wholesale second command and event (audit #64).
-    Library { node: LibraryNode, dest: Tab, data: LibraryData },
+    Library { node: LibraryNode, dest: Tab, data: LibraryData, generation: u64 },
     /// One Auto DJ turn's answer: the songs that passed, in the server's
     /// order, the cursor to round-trip, whether the pool shaped them, the
     /// degrade to say once per lane, and the failure when there is one.
@@ -547,7 +556,7 @@ pub enum Event {
     PlaylistNames { names: Option<Vec<String>> },
     /// `query` is the search these results answer — replies can pass each
     /// other now, and the box's contents name the one still wanted.
-    SearchResults { query: String, results: Box<SearchResults> },
+    SearchResults { query: String, results: Box<SearchResults>, generation: u64 },
     /// A cover, decoded and shrunk to terminal scale — or `None` with
     /// `settled` saying which kind of `None` it is: the server's word that
     /// there is no art (remembered), or a failure to ask (forgotten, so
@@ -988,8 +997,8 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 connect(&mut client, &server, &identity, token, self_signed, peer, local_token)
             }
 
-            ApiCmd::Login { server, identity, username, password, self_signed, local_token } => {
-                login(&mut client, &server, &identity, &username, &password, self_signed, local_token)
+            ApiCmd::Login { server, identity, username, password, self_signed, local_token, peer } => {
+                login(&mut client, &server, &identity, &username, &password, self_signed, local_token, peer)
             }
 
             ApiCmd::TunnelOpen { id, credential } => {
@@ -1172,8 +1181,8 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::Browse(path) => {
             c.file_explorer(&path).map(|l| Event::Listing(Box::new(l)))
         }
-        ApiCmd::Library { node, dest } => crate::api::wait(load_library(c, &node))
-            .map(|data| Event::Library { node, dest, data }),
+        ApiCmd::Library { node, dest, generation } => crate::api::wait(load_library(c, &node))
+            .map(|data| Event::Library { node, dest, data, generation }),
         // Neither turn nor probe fails as an error: the App reads the answer.
         ApiCmd::AutoDj(request) => {
             crate::api::wait(async { Ok::<_, ApiError>(autodj_pick(c, &request).await) })
@@ -1239,8 +1248,8 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::DeletePlaylist { name } => {
             playlist_verb_event(PlaylistVerb::Delete(&name), c.playlist_delete(&name))
         }
-        ApiCmd::Search(query) => {
-            c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r) })
+        ApiCmd::Search { query, generation } => {
+            c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r), generation })
         }
         ApiCmd::AlbumArt { file, .. } => {
             // The waveform's rule, because this cache burned without it: a
@@ -1489,6 +1498,7 @@ fn login(
     password: &str,
     self_signed: bool,
     local_token: Option<String>,
+    peer: Option<i64>,
 ) -> Option<Event> {
     let mut c = match Client::new_with(server, self_signed) {
         Ok(c) => c.with_local_token(local_token),
@@ -1501,6 +1511,11 @@ fn login(
         }
         Err(e) => return Some(Event::Error(e.to_string())),
     };
+    // The sign-in was the parent's own route; the session it opens browses
+    // the peer through the parent's proxies, exactly as before the token
+    // expired — a plain client here listed the parent's library under the
+    // peer's name (the review's finding).
+    let c = c.with_peer(peer);
     match establish(client, c, id, Some(username.to_string()), Some(token)) {
         Ok(event) => Some(event),
         Err(e) => Some(Event::Error(e.to_string())),
@@ -1732,6 +1747,21 @@ fn dj_log_name(identity: &str) -> String {
 /// The two keys a pool is asked with, let go of together (clause 30).
 const SONIC_KEYS: [&str; 2] = ["similarTo", "minSimilarity"];
 
+/// Whether the body that went out carried the pool — the queue's badge
+/// follows this, not the ask (clause 60): the learner may have dropped the
+/// keys between the two.
+fn sent_with_pool(body: &serde_json::Value) -> bool {
+    SONIC_KEYS.iter().all(|key| body.get(*key).is_some())
+}
+
+/// A preview's lane, apart from the lane it previews (clause 53): what its
+/// degrade lets go of is its own, never the running lane's pool.
+const PREVIEW_LANE: u64 = 1 << 63;
+
+fn preview_lane(epoch: u64) -> u64 {
+    epoch | PREVIEW_LANE
+}
+
 
 /// Which keys a server will not take — learned from a `"<key>" is not
 /// allowed` rejection for the rest of the process (clause 25) — and which a
@@ -1743,7 +1773,9 @@ const SONIC_KEYS: [&str; 2] = ["similarTo", "minSimilarity"];
 #[derive(Default)]
 struct DjLearner {
     rejected: std::collections::HashMap<String, std::collections::HashSet<String>>,
-    suppressed: std::collections::HashMap<String, (u64, std::collections::HashSet<String>)>,
+    /// By server, then by lane: a preview's lane and the running lane's
+    /// never read or write each other's.
+    suppressed: std::collections::HashMap<String, std::collections::HashMap<u64, std::collections::HashSet<String>>>,
 }
 
 fn learner() -> std::sync::MutexGuard<'static, DjLearner> {
@@ -1757,8 +1789,7 @@ impl DjLearner {
         let mut dropped = Vec::new();
         let Some(map) = body.as_object_mut() else { return dropped };
         let rejected = self.rejected.get(identity);
-        let suppressed =
-            self.suppressed.get(identity).filter(|(e, _)| *e == epoch).map(|(_, keys)| keys);
+        let suppressed = self.suppressed.get(identity).and_then(|lanes| lanes.get(&epoch));
         map.retain(|key, _| {
             let gone = rejected.is_some_and(|r| r.contains(key))
                 || suppressed.is_some_and(|s| s.contains(key));
@@ -1779,20 +1810,21 @@ impl DjLearner {
     /// Keys a lane lets go of — valid, but the server cannot act on them
     /// now (a pool with nothing in range, a library not yet scanned).
     fn suppress(&mut self, identity: &str, epoch: u64, keys: &[&str]) {
-        let entry = self.suppressed.entry(identity.to_string()).or_insert((epoch, Default::default()));
-        if entry.0 != epoch {
-            *entry = (epoch, Default::default());
-        }
+        let lanes = self.suppressed.entry(identity.to_string()).or_default();
+        // A new lane of the running kind supersedes the old one; a
+        // preview's lane sits beside whatever is running.
+        lanes.retain(|lane, _| *lane & PREVIEW_LANE != 0 || *lane == epoch || epoch & PREVIEW_LANE != 0);
+        let set = lanes.entry(epoch).or_default();
         for key in keys {
-            entry.1.insert((*key).to_string());
+            set.insert((*key).to_string());
         }
     }
 
     fn all_suppressed(&self, identity: &str, epoch: u64, keys: &[&str]) -> bool {
         self.suppressed
             .get(identity)
-            .filter(|(e, _)| *e == epoch)
-            .is_some_and(|(_, set)| keys.iter().all(|k| set.contains(*k)))
+            .and_then(|lanes| lanes.get(&epoch))
+            .is_some_and(|set| keys.iter().all(|k| set.contains(*k)))
     }
 }
 
@@ -1880,7 +1912,8 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
         ask = ask.without_sonic();
     }
     let mut note: Option<DjNote> = None;
-    let mut last: Option<crate::api::types::RandomSongsResponse> = None;
+    // The last answer blocked in full, and whether its body carried the pool.
+    let mut last: Option<(crate::api::types::RandomSongsResponse, bool)> = None;
     let mut attempts = 0;
     while attempts < 5 {
         attempts += 1;
@@ -1913,7 +1946,7 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
         }
         match answer {
             Ok(response) => {
-                let sonic = ask.sonic_asked();
+                let sonic = sent_with_pool(&sent);
                 if response.songs.is_empty() {
                     return Picked { failure: Some(DjFailure::NoMatch), ..Picked { songs: Vec::new(), ignore_list: response.ignore_list, sonic, note, pool: response.sonic, failure: None } };
                 }
@@ -1926,7 +1959,7 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
                 // is different candidates.
                 dj_log(format!("[dj] {name}: every song of the answer was a keyword hit — asking again"));
                 ask.ignore_list = response.ignore_list.clone();
-                last = Some(response);
+                last = Some((response, sonic));
             }
             Err(err) => match classify(&err, ask.sonic_asked()) {
                 Refusal::Degrade(say) => {
@@ -1955,10 +1988,10 @@ pub(crate) async fn autodj_pick(client: &Client, request: &DjRequest) -> Picked 
     // Every try was blocked in full: the last answer whole, rather than a
     // queue stalled forever by an over-eager filter (clause 26).
     match last {
-        Some(response) => Picked {
+        Some((response, sonic)) => Picked {
             songs: response.songs,
             ignore_list: response.ignore_list,
-            sonic: ask.sonic_asked(),
+            sonic,
             note,
             pool: response.sonic,
             failure: None,
@@ -1989,6 +2022,9 @@ pub(crate) async fn autodj_sample(
 ) -> Result<Event, ApiError> {
     let mut scratch = request.clone();
     scratch.ask.opener = false;
+    // Its own lane: a pool this preview cannot honour is let go of here
+    // and nowhere else — the running lane keeps asking for its pool.
+    scratch.epoch = preview_lane(request.epoch);
     let mut tracks: Vec<Track> = Vec::new();
     let mut pool = None;
     let mut note = None;
@@ -2490,6 +2526,31 @@ mod tests {
         assert!(learned.filter("http://other", 7, &mut other).is_empty(), "keyed by server");
         assert!(learned.all_suppressed("http://s", 7, &SONIC_KEYS));
         assert!(!learned.all_suppressed("http://s", 8, &SONIC_KEYS));
+        // The running lane moved on: the old lane's pool is forgotten.
+        learned.suppress("http://s", 8, &SONIC_KEYS);
+        assert!(!learned.all_suppressed("http://s", 7, &SONIC_KEYS));
+    }
+
+    #[test]
+    fn a_previews_degrade_is_its_own_lanes_not_the_running_ones() {
+        // The review's finding: a Preview whose pool failed suppressed the
+        // running lane's pool, so the next real turn went out plain.
+        let mut learned = DjLearner::default();
+        learned.suppress("http://s", preview_lane(7), &SONIC_KEYS);
+        assert!(!learned.all_suppressed("http://s", 7, &SONIC_KEYS), "the lane keeps its pool");
+        assert!(learned.all_suppressed("http://s", preview_lane(7), &SONIC_KEYS), "the preview remembers its own");
+        let mut lane = serde_json::json!({"similarTo": ["a"], "minSimilarity": 0.5});
+        assert!(learned.filter("http://s", 7, &mut lane).is_empty());
+        // And the lane's degrade leaves the preview's lane standing.
+        learned.suppress("http://s", 7, &SONIC_KEYS);
+        assert!(learned.all_suppressed("http://s", preview_lane(7), &SONIC_KEYS));
+        assert!(learned.all_suppressed("http://s", 7, &SONIC_KEYS));
+    }
+
+    #[test]
+    fn the_badge_follows_the_body_that_went_out() {
+        assert!(sent_with_pool(&serde_json::json!({"similarTo": ["a"], "minSimilarity": 0.5})));
+        assert!(!sent_with_pool(&serde_json::json!({"limit": 4})), "the learner dropped the pool: no badge");
     }
 
     /// The rig leg (plan T4): the real api thread against two live mStream

@@ -2098,6 +2098,19 @@ a LATER secondary screen (party view), Columns retired.
   propagation to peers and rows, a peer re-login keeping the peer, the
   rating/details race, version-floor stripping, the saved-servers list
   scrolling, a GUI e2e leg.
+- **The review's follow-ups ✅ 2026-09-26** — the second PR, everything
+  the review logged for later: a session generation on the library and
+  search asks (a stale reply fills nothing); a peer re-login signs in at
+  the parent and keeps the peer; a URL edit carries the peers, the rows,
+  the owed plays and the DJ along; owed plays stamped with their
+  account; the rating/details race; the DJ's version floors trim the
+  ask, the badge reads the body sent, a Preview's lane is its own, the
+  migration reads the old mode; the Manage-servers list and dropdown
+  scroll; footer hints under a hundred cells in every locale; glyphs out
+  of the strings; the playback toasts keyed; the transport's widths; a
+  Create button in the name box; the keyword row names its key; an art
+  cache that evicts its oldest unpinned cover; a GUI e2e leg with the
+  demo seat; the replay harness redacts secrets.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with

@@ -162,3 +162,9 @@ Most played.
   for later: an owed play is posted with whichever account holds the
   server's token at flush time (clause 8's "the reach its stream used"
   on a shared machine) — stamping the play with its user is the fix.
+- **2026-09-26 — The follow-up: a play knows its account** (clause 8). A
+  session records the account signed in at its server when it opens, the
+  owed play inherits it (kept in `stats.json`), and the flush posts a play
+  only under that account — held for its return, never posted as another
+  user's listening. A play from before the stamp carries none and posts
+  as before.

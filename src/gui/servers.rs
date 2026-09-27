@@ -177,6 +177,14 @@ pub(crate) struct ServersUi {
     /// Row cursor in the room: an index into the saved list, or the add
     /// row at `len`.
     pub cursor: usize,
+    /// The first display row the room shows. The list scrolls (the
+    /// review's finding: past a dozen entries the cursor walked onto rows
+    /// never drawn and the add row was gone) — the wheel moves the window,
+    /// and a key move asks the next draw to bring the cursor into view.
+    pub scroll: usize,
+    pub reveal: bool,
+    /// The header dropdown's first shown row, for the same reason.
+    pub drop_scroll: usize,
     pub form: Option<Form>,
     /// Remove confirmation, by index into the saved list.
     pub confirm: Option<usize>,
@@ -204,6 +212,9 @@ impl ServersUi {
         ServersUi {
             drop_open: false,
             cursor: 0,
+            scroll: 0,
+            reveal: false,
+            drop_scroll: 0,
             form: None,
             confirm: None,
             qr: None,
@@ -238,6 +249,7 @@ impl ServersUi {
 pub(crate) fn open_room(gui: &mut Gui) {
     gui.settings_room = Some(SettingsRoom::Servers);
     gui.servers.cursor = 0;
+    gui.servers.scroll = 0;
     // The Settings rows' cursor stows: their keys (Space, ← →) would flip
     // a hidden row under this room otherwise.
     gui.cursor = None;
@@ -738,10 +750,12 @@ pub(crate) fn submit_form(gui: &mut Gui) {
             Some((id, token)) => (id.to_string(), Some(token.to_string())),
             None => (server.clone(), None),
         };
+        // A peer session's parent asked: the sign-in keeps the peer (clause 26).
+        let peer = gui.app.peer_behind(&identity);
         let effect = if public {
-            Effect::Api(ApiCmd::Connect { server, identity, token: None, self_signed, peer: None, local_token })
+            Effect::Api(ApiCmd::Connect { server, identity, token: None, self_signed, peer, local_token })
         } else {
-            Effect::Api(ApiCmd::Login { server, identity, username, password, self_signed, local_token })
+            Effect::Api(ApiCmd::Login { server, identity, username, password, self_signed, local_token, peer })
         };
         if let Some(form) = gui.servers.form.as_mut() {
             form.submitting = true;
@@ -771,14 +785,17 @@ pub(crate) fn submit_form(gui: &mut Gui) {
                 }
                 entry.self_signed = self_signed;
             }
-            if moved
-                && config.default_server.as_deref().is_some_and(|d| config::same_server(d, &old))
-            {
-                config.default_server = Some(new_url.clone());
+            if moved {
+                config::follow_rename(config, &old, &new_url);
             }
         });
         if saved {
             if moved {
+                // What the App holds under the old identity — queued rows,
+                // owed plays, the session, the DJ — follows, and the book is
+                // reread.
+                gui.app.rename_server(&old, &new_url);
+                super::refresh_book(gui);
                 // The token was issued to the same server under its old
                 // spelling; it moves with the entry.
                 if let Some(token) = config::token_for(&credentials, &old) {
@@ -909,10 +926,10 @@ fn apply_outcome(gui: &mut Gui, outcome: Outcome) {
                     entry.username = username.clone();
                     entry.self_signed = self_signed;
                 }
-                if moved
-                    && config.default_server.as_deref().is_some_and(|d| config::same_server(d, old))
-                {
-                    config.default_server = Some(url.clone());
+                // The URL is the identity (contract clause 1): the default,
+                // the peers reached through it and the DJ's server follow.
+                if moved {
+                    config::follow_rename(config, old, &url);
                 }
             }
             None => {
@@ -937,6 +954,10 @@ fn apply_outcome(gui: &mut Gui, outcome: Outcome) {
             config::store_token(credentials, old, None);
         }
         gui.servers.versions.remove(old);
+        // What the App holds under the old identity — queued rows, owed
+        // plays, the session, the DJ — follows too, and the book is reread.
+        gui.app.rename_server(old, &url);
+        super::refresh_book(gui);
     }
     if let Some(mut credentials) = credentials {
         config::store_token(&mut credentials, &url, token);
@@ -1108,7 +1129,10 @@ fn dial_failed(gui: &mut Gui, message: &str) {
 /// ours.
 pub(crate) fn act(gui: &mut Gui, act: &Act) -> bool {
     match act {
-        Act::SrvMenu => gui.servers.drop_open = !gui.servers.drop_open,
+        Act::SrvMenu => {
+            gui.servers.drop_open = !gui.servers.drop_open;
+            gui.servers.drop_scroll = 0;
+        }
         Act::SrvCloseDrop => gui.servers.drop_open = false,
         Act::SrvRetry => retry(gui),
         Act::SrvAdd => open_add(gui),
@@ -1319,8 +1343,14 @@ pub(crate) fn handle_key(gui: &mut Gui, key: ratatui::crossterm::event::KeyEvent
         let peer = entry.as_ref().and_then(|e| e.peer.clone());
         match key.code {
             KeyCode::Esc => gui.settings_room = None,
-            KeyCode::Down => gui.servers.cursor = (gui.servers.cursor + 1).min(rows),
-            KeyCode::Up => gui.servers.cursor = gui.servers.cursor.saturating_sub(1),
+            KeyCode::Down => {
+                gui.servers.cursor = (gui.servers.cursor + 1).min(rows);
+                gui.servers.reveal = true;
+            }
+            KeyCode::Up => {
+                gui.servers.cursor = gui.servers.cursor.saturating_sub(1);
+                gui.servers.reveal = true;
+            }
             KeyCode::Enter => match stored {
                 Some(index) => switch_to(gui, index),
                 None => open_add(gui),
@@ -1506,12 +1536,15 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     frame.render_widget(block, rect);
 
     let marker = super::forward_glyph();
-    let star = if legacy_conhost() { "*" } else { "★" };
-    for (row, (i, label, current, default)) in entries.iter().enumerate() {
-        let y = inner.y + row as u16;
-        if y >= inner.bottom() {
-            break;
-        }
+    let star = super::star_glyph();
+    // The rows that fit, from the wheel's scroll: past a dozen servers the
+    // list ran under the frame's edge with no way to the rest.
+    let fit = (inner.height as usize).max(1);
+    let total = entries.len() + 1;
+    gui.servers.drop_scroll = gui.servers.drop_scroll.min(total.saturating_sub(fit));
+    let scroll = gui.servers.drop_scroll;
+    for (row, (i, label, current, default)) in entries.iter().enumerate().skip(scroll).take(fit) {
+        let y = inner.y + (row - scroll) as u16;
         let row = Rect { x: inner.x, y, width: inner.width, height: 1 };
         let hover = gui.ui.hovers(row);
         let style = match (current, hover) {
@@ -1527,8 +1560,9 @@ pub(crate) fn draw_dropdown(frame: &mut Frame, gui: &mut Gui, area: Rect) {
         }
         gui.ui.click(row, Act::SrvSwitch(*i));
     }
-    let add_y = inner.y + entries.len() as u16;
-    if add_y < inner.bottom() {
+    let add_pos = entries.len();
+    if add_pos >= scroll && add_pos < scroll + fit {
+        let add_y = inner.y + (add_pos - scroll) as u16;
         let row = Rect { x: inner.x, y: add_y, width: inner.width, height: 1 };
         let hover = gui.ui.hovers(row);
         put(frame, inner.x + 2, add_y, &add_label, if hover { bright_bold() } else { dim() });
@@ -1547,18 +1581,26 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 
     let servers = gui.config.servers.clone();
     let default = gui.config.default_server.clone();
-    let star = if legacy_conhost() { "*" } else { "★" };
+    let star = super::star_glyph();
     let marker = super::forward_glyph();
 
     let name_w = content.width.saturating_sub(30) as usize;
     let branch = if legacy_conhost() { "+" } else { "└" };
     let order = order(gui);
-    for (pos, &i) in order.iter().enumerate() {
+    // The rows that fit under the title, over the gap and the actions line.
+    // The window follows the cursor when a key moved it, else the wheel.
+    let total = order.len() + 1; // the add row closes the list
+    let fit = (content.height.saturating_sub(5) as usize).max(1);
+    let cursor = gui.servers.cursor.min(total - 1);
+    if std::mem::take(&mut gui.servers.reveal) {
+        gui.servers.scroll = gui.servers.scroll.clamp((cursor + 1).saturating_sub(fit), cursor);
+    }
+    gui.servers.scroll = gui.servers.scroll.min(total.saturating_sub(fit));
+    let scroll = gui.servers.scroll;
+    let shown = total.saturating_sub(scroll).min(fit);
+    for (pos, &i) in order.iter().enumerate().skip(scroll).take(fit) {
         let entry = &servers[i];
-        let y = content.y + 2 + pos as u16;
-        if y + 3 >= content.bottom() {
-            break;
-        }
+        let y = content.y + 2 + (pos - scroll) as u16;
         let row = Rect { x: content.x, y, width: content.width, height: 1 };
         let selected = gui.servers.cursor == pos;
         let hover = gui.ui.hovers(row);
@@ -1619,9 +1661,10 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
 
     // The add row closes the list, cursor-reachable like any other.
-    let add_y = content.y + 2 + servers.len() as u16;
+    let add_pos = order.len();
     let add_label = format!("+ {}", t!("gui.srv.add"));
-    if add_y + 3 < content.bottom() {
+    if add_pos >= scroll && add_pos < scroll + fit {
+        let add_y = content.y + 2 + (add_pos - scroll) as u16;
         let row = Rect { x: content.x, y: add_y, width: content.width, height: 1 };
         let selected = gui.servers.cursor == servers.len();
         let hover = gui.ui.hovers(row);
@@ -1642,7 +1685,7 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     // The cursored row's actions, on their own line under the list.
     let Some(index) = order.get(gui.servers.cursor).copied() else { return };
     let Some(entry) = servers.get(index) else { return };
-    let actions_y = (add_y + 2).min(content.bottom().saturating_sub(1));
+    let actions_y = (content.y + 2 + shown as u16 + 1).min(content.bottom().saturating_sub(1));
     let tunnel = crate::quickconnect::is_tunnel_id(&entry.url);
     let current = gui.app.connected && config::same_server(&gui.app.session.server_id, &entry.url);
     let is_default = default.as_deref().is_some_and(|d| config::same_server(d, &entry.url));
@@ -2269,6 +2312,19 @@ fn draw_qr(frame: &mut Frame, gui: &mut Gui, area: Rect) {
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
+/// The wheel in the room: the window moves; the cursor stays put until a
+/// key moves it, which brings it back into view.
+pub(crate) fn wheel(gui: &mut Gui, delta: i32) {
+    let last = gui.config.servers.len() as i64; // the add row
+    gui.servers.scroll = (gui.servers.scroll as i64 + i64::from(delta)).clamp(0, last) as usize;
+}
+
+/// The wheel over the open header dropdown.
+pub(crate) fn wheel_dropdown(gui: &mut Gui, delta: i32) {
+    let last = gui.config.servers.len() as i64;
+    gui.servers.drop_scroll = (gui.servers.drop_scroll as i64 + i64::from(delta)).clamp(0, last) as usize;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2405,6 +2461,7 @@ mod tests {
             id: attic.into(),
             name: "attic".into(),
             token: None,
+            username: None,
             self_signed: false,
             peer: None,
             pairing: None, dj: Default::default(),
@@ -2768,6 +2825,97 @@ mod tests {
         let credentials = config::load_credentials().unwrap();
         assert_eq!(config::token_for(&credentials, "http://attic.lan:3000"), Some("jwt".into()));
         assert_eq!(config::token_for(&credentials, "http://attic.local:3000"), None);
+    }
+
+    #[test]
+    fn editing_a_parents_url_carries_its_peers_its_rows_and_the_dj_along() {
+        // The review's finding: the URL is the identity, and an edit
+        // rewrote only the entry — its peers said they had no parent at the
+        // next switch, and the queued rows failed at the next launch.
+        let scratch = Scratch::new("gui-edit-parent");
+        let _ = &scratch;
+        let (old, new) = ("http://attic.local:3000", "http://attic.lan:3000");
+        let mut config = Config::default();
+        let mut shed = entry(&config::peer_identity(old, 7), None);
+        shed.peer = Some(config::PeerEntry {
+            parent: old.into(),
+            id: 7,
+            name: "Shed".into(),
+            missing: false,
+            hidden: false,
+        });
+        config.servers = vec![entry(old, Some("paul")), shed];
+        config.player.autodj_server = Some(config::peer_identity(old, 7));
+        config::save(&config).unwrap();
+
+        let mut gui = Gui::new(config, true, App::new(None, None, None));
+        let mut on_parent = crate::tui::app::Queued {
+            dj: None,
+            origin: crate::tui::app::Origin { server: old.into(), peer: None },
+            track: crate::api::types::Track { filepath: "a.mp3".into(), metadata: Default::default() },
+        };
+        let mut on_peer = on_parent.clone();
+        on_peer.origin.peer = Some(7);
+        on_parent.track.filepath = "b.mp3".into();
+        gui.app.queue.items = vec![on_parent, on_peer];
+        gui.app.dj_server = Some(config::peer_identity(old, 7));
+
+        open_edit(&mut gui, 0);
+        gui.servers.form.as_mut().unwrap().server = new.into();
+        submit_form(&mut gui);
+
+        let reloaded = config::load().unwrap();
+        let peer = reloaded.servers.iter().find(|s| s.peer.is_some()).expect("the peer entry stays");
+        assert_eq!(peer.peer.as_ref().unwrap().parent, new, "the peer's parent link follows");
+        assert_eq!(peer.url, config::peer_identity(new, 7), "and so does its minted identity");
+        assert_eq!(reloaded.player.autodj_server.as_deref(), Some(config::peer_identity(new, 7).as_str()));
+        assert!(gui.app.queue.items.iter().all(|i| i.origin.server == new), "{:?}", gui.app.queue.items);
+        assert_eq!(gui.app.dj_server.as_deref(), Some(config::peer_identity(new, 7).as_str()));
+        assert!(gui.app.servers.iter().any(|s| s.id == new), "the App's book is reread");
+        assert!(gui.app.servers.iter().any(|s| s.peer.as_ref().is_some_and(|(p, _)| p == new)));
+    }
+
+    #[test]
+    fn the_room_and_the_dropdown_scroll_to_the_cursor_and_under_the_wheel() {
+        // The review's finding: past about twelve entries the cursor walked
+        // onto rows that were never drawn and the add row was gone. Peers
+        // are added automatically, so the count is reachable.
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let config = Config {
+            servers: (0..30).map(|i| entry(&format!("http://srv{i:02}.local:3000"), None)).collect(),
+            ..Config::default()
+        };
+        let mut gui = Gui::new(config, false, App::new(None, None, None));
+        gui.active = super::super::SETTINGS_NAV;
+        gui.queue_open = false;
+        open_room(&mut gui);
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("srv00.local") && !all.contains("srv29.local"), "a window of rows:\n{all}");
+        for _ in 0..30 {
+            handle_key(&mut gui, KeyEvent::from(KeyCode::Down));
+        }
+        assert_eq!(gui.servers.cursor, 30, "the add row");
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("srv29.local") && !all.contains("srv00.local"), "the window followed the cursor:\n{all}");
+        assert!(all.contains(&format!("+ {}", t!("gui.srv.add"))), "the add row is drawn under the cursor");
+        wheel(&mut gui, -40);
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("srv00.local"), "the wheel scrolls back without moving the cursor:\n{all}");
+        assert_eq!(gui.servers.cursor, 30);
+        handle_key(&mut gui, KeyEvent::from(KeyCode::Up));
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("srv29.local"), "a key brings the cursor back into view:\n{all}");
+
+        // The header dropdown windows its rows the same way (the room is
+        // closed first, so its rows are not what the buffer shows).
+        handle_key(&mut gui, KeyEvent::from(KeyCode::Esc));
+        assert!(gui.settings_room.is_none());
+        gui.act(Act::SrvMenu);
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("srv00.local") && !all.contains("srv28.local"), "{all}");
+        wheel_dropdown(&mut gui, 40);
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("srv28.local") && !all.contains("srv00.local"), "{all}");
     }
 
     #[test]

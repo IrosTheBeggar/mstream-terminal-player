@@ -515,6 +515,9 @@ impl App {
             ignore_list: self.lane.ignore.clone(),
             recent_artists: self.recent_artists(),
             opener: false,
+            // What the probe learned of the server: a key it is known to
+            // predate stays out of the body (clauses 25, 27, 50).
+            server_version: self.dj_info.as_ref().and_then(|info| info.version.clone()),
         }
     }
 

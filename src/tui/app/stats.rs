@@ -116,6 +116,11 @@ pub struct Session {
     /// (the tail of a track that failed to give way) folds nothing here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
+    /// The account signed in at the row's server when the session opened:
+    /// the play it becomes is posted under this account or held (clause
+    /// 8), never under whoever signed in since. Absent on a public server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 impl Session {
@@ -199,6 +204,10 @@ impl Session {
 pub struct Owed {
     pub origin: Origin,
     pub play: Play,
+    /// The session's account (see [`Session::account`]); `None` also for a
+    /// file from before the stamp, which posts as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 /// `stats.json` (clause 9): the owed plays and the checkpointed session,
@@ -282,6 +291,7 @@ impl App {
         self.stats.counter += 1;
         let now = crate::clock::epoch_ms();
         let short: String = self.stats.instance_id.chars().take(8).collect();
+        let account = self.account_at(&item.origin.server);
         self.stats.session = Some(Session {
             id: format!("{short}-{now:x}-{}", self.stats.counter),
             origin: item.origin.clone(),
@@ -299,7 +309,27 @@ impl App {
             scrobbled: false,
             checkpoint_at: None,
             source_url: None,
+            account,
         });
+    }
+
+    /// The account signed in at `server` right now: the session's own for
+    /// its server (a peer's plays are its parent's), the book's for any
+    /// other saved server.
+    pub(crate) fn account_at(&self, server: &str) -> Option<String> {
+        let same = |id: &str| crate::config::same_server(id, server);
+        if same(&self.session.server_id)
+            || self.session.peer.as_ref().is_some_and(|(parent, _)| same(parent))
+        {
+            return self.session.username.clone();
+        }
+        self.servers.iter().find(|s| same(&s.id)).and_then(|s| s.username.clone())
+    }
+
+    /// Whether an owed play may go out now (clause 8): under the account
+    /// it was made with, or under any when it carries none.
+    fn account_matches(&self, owed: &Owed) -> bool {
+        owed.account.as_deref().is_none_or(|made| self.account_at(&owed.origin.server).as_deref() == Some(made))
     }
 
     /// The stream the open session listens to, from the Play just asked
@@ -369,7 +399,7 @@ impl App {
     pub(crate) fn stats_end(&mut self, requested: Outcome) {
         let Some(session) = self.stats.session.take() else { return };
         if let Some(play) = session.finish(requested, crate::clock::epoch_ms()) {
-            self.stats_enqueue(Owed { origin: session.origin, play });
+            self.stats_enqueue(Owed { origin: session.origin, play, account: session.account });
         }
     }
 
@@ -418,10 +448,14 @@ impl App {
         // the others' plays go out (clause 8, per server).
         let mut passed: Vec<String> = self.stats.backoff.keys().cloned().collect();
         loop {
+            // A play made under another account than the one signed in now
+            // waits for its own (clause 8): it is never posted as someone
+            // else's listening.
             let Some(server) = self
                 .stats
                 .outbox
                 .iter()
+                .filter(|o| self.account_matches(o))
                 .map(|o| o.origin.server.clone())
                 .find(|s| !passed.iter().any(|p| crate::config::same_server(p, s)))
             else {
@@ -443,7 +477,7 @@ impl App {
                 .stats
                 .outbox
                 .iter()
-                .filter(|o| crate::config::same_server(&o.origin.server, &server))
+                .filter(|o| crate::config::same_server(&o.origin.server, &server) && self.account_matches(o))
                 .take(BATCH_MAX)
                 .map(|o| o.play.clone())
                 .collect();
@@ -522,7 +556,7 @@ impl App {
         if let Some(session) = snapshot.inflight {
             let ended = session.checkpoint_at.unwrap_or_else(crate::clock::epoch_ms);
             if let Some(play) = session.finish(Outcome::Stopped, ended) {
-                self.stats_enqueue(Owed { origin: session.origin, play });
+                self.stats_enqueue(Owed { origin: session.origin, play, account: session.account });
             }
         }
     }
@@ -550,6 +584,7 @@ mod tests {
             scrobbled: false,
             checkpoint_at: None,
             source_url: None,
+            account: None,
         }
     }
 

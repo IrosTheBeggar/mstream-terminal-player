@@ -1,0 +1,38 @@
+#!/usr/bin/expect -f
+# The GUI player under a pty with no server saved at all: the demo seat
+# fills the bar, `0` opens the Now Playing screen (the TUI's view), a digit
+# there picks one of its tabs rather than a nav room (the review's
+# key-routing bug, which needed no server to show), Esc comes back to the
+# Library screen, q quits clean. Gates on first-paint words only: the
+# strip's `1:Queue` and the visualizer tab's own line.
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(MSTREAM_NO_OPEN) 1
+set env(MSTREAM_GUI_DEMO) 1
+set env(HOME) $::env(WIZHOME)
+set env(MSTREAM_PLAYER_CONFIG_DIR) $::env(WIZHOME)/player
+proc drain {secs} { expect -timeout $secs timeout {} }
+spawn {*}$argv
+exec stty rows 34 columns 120 < $spawn_out(slave,name)
+expect {
+    "Add a server" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { puts "NO-LIBRARY-SCREEN"; exec kill -9 [exp_pid]; expect eof; exit 2 }
+}
+expect { "Cassini IV" {} timeout { puts "NO-DEMO-SEAT"; exec kill -9 [exp_pid]; expect eof; exit 3 } }
+drain 1
+send "0"
+expect { "1:Queue" {} timeout { puts "NO-NOW-PLAYING"; exec kill -9 [exp_pid]; expect eof; exit 4 } }
+drain 1
+send "3"
+expect { "visualiser goes here" {} timeout { puts "DIGIT-LEFT-THE-SCREEN"; exec kill -9 [exp_pid]; expect eof; exit 5 } }
+drain 1
+send "\x1b"
+expect { "Add a server" {} timeout { puts "NO-WAY-BACK"; exec kill -9 [exp_pid]; expect eof; exit 7 } }
+drain 1
+send "q"
+expect { eof {} timeout { exec kill -9 [exp_pid]; expect eof; exit 8 } }
+catch wait result
+exit [lindex $result 3]

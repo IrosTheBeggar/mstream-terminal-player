@@ -168,6 +168,8 @@ pub(crate) enum Act {
     SheetClose,
     PickPlaylist(String),
     PickNew,
+    /// The name box's Create button: the typed name, as Enter takes it.
+    PickCreate,
     PickClose,
     InfoClose,
     /// The Library rooms (library-rooms contract): the strip's jump and
@@ -1058,7 +1060,7 @@ impl Gui {
                     spec: actions::spec_parts(m).join(" · "),
                     // The App's copy first: an optimistic rating lands here
                     // the moment it is given (track-actions clause 11).
-                    rating: self.app.rating_of(&track.filepath).or(m.rating),
+                    rating: self.app.rating_known(&track.filepath).unwrap_or(m.rating),
                     key: m.musical_key.clone(),
                     bpm: m.bpm,
                 })
@@ -1177,6 +1179,23 @@ fn back_glyph() -> &'static str {
 /// The checkbox pair: checked, unchecked.
 fn check_glyphs() -> (&'static str, &'static str) {
     if legacy_conhost() { ("[x]", "[ ]") } else { ("[✓]", "[ ]") }
+}
+
+// Glyphs live in code, never in the locale strings: a string that carries
+// one bypasses these gates and draws as a question mark on bare conhost
+// (the review's finding — the rating's star, the DJ's bullet, the torrent
+// preview's angle quotes).
+fn bullet_glyph() -> &'static str {
+    if legacy_conhost() { "*" } else { "•" }
+}
+
+fn star_glyph() -> &'static str {
+    if legacy_conhost() { "*" } else { "★" }
+}
+
+/// The marks around a placeholder in a path preview.
+fn angle_glyphs() -> (&'static str, &'static str) {
+    if legacy_conhost() { ("<", ">") } else { ("‹", "›") }
 }
 
 /// A 1-row text button: dim at rest, bright under the pointer; the
@@ -2769,6 +2788,11 @@ impl Gui {
     /// that, and swipes silently went nowhere).
     fn wheel(&mut self, at: Position, delta: i32) {
         self.ui.pointer = Some(at);
+        // The header dropdown is on top of everything while it is open.
+        if self.servers.drop_open {
+            servers::wheel_dropdown(self, delta);
+            return;
+        }
         // A modal owns the pointer whole; the Now Playing screen scrolls
         // nothing yet (its queue panel is not on screen).
         if self.modal_open() || self.screen == Screen::NowPlaying {
@@ -2792,9 +2816,16 @@ impl Gui {
             }
             NavId::Sonic => sonic::wheel(self, delta),
             NavId::Playlists => playlists::wheel(self, delta),
-            // Settings scrolls nothing itself; its Add-torrent room's file
-            // picker does. The Auto DJ room's body and genre picker scroll.
-            NavId::Settings => torrent::wheel(self, delta),
+            // Settings scrolls nothing itself; its Manage-servers room's
+            // list and its Add-torrent room's file picker do. The Auto DJ
+            // room's body and genre picker scroll.
+            NavId::Settings => {
+                if self.in_settings_room(SettingsRoom::Servers) {
+                    servers::wheel(self, delta)
+                } else {
+                    torrent::wheel(self, delta)
+                }
+            }
             NavId::Dj => {
                 dj::wheel(self, delta);
             }
@@ -3119,7 +3150,7 @@ mod tests {
         };
         let effects = gui
             .app
-            .apply_event(Event::SearchResults { query: "moon".into(), results: Box::new(results) });
+            .apply_event(Event::SearchResults { generation: gui.app.session_gen(), query: "moon".into(), results: Box::new(results) });
         gui.pend(effects);
         gui
     }
@@ -3314,6 +3345,27 @@ mod tests {
         assert_eq!(gui.app.now_tab(), crate::tui::app::NowTab::AutoDj);
         gui.act(Act::Nav(FILES_NAV));
         assert_eq!((gui.screen, gui.app.fullscreen), (Screen::Library, false));
+    }
+
+    #[test]
+    fn a_track_past_a_hundred_minutes_keeps_its_times_off_the_cells() {
+        let mut gui = browsing_gui();
+        gui.demo = Some(bar::Now {
+            title: "Long".into(),
+            artist: String::new(),
+            album: String::new(),
+            elapsed: 3700.0,
+            duration: 6100.0,
+            year: None,
+            spec: String::new(),
+            rating: None,
+            key: None,
+            bpm: None,
+        });
+        let rows = draw(&mut gui);
+        let line = rows.iter().find(|r| r.contains("101:40")).expect("the total is drawn whole");
+        let at = line.find(" 61:40 ").expect("the elapsed time sits in a slot as wide as the total, with air after it");
+        assert!(line[at + 7..].trim_start().starts_with(['━', '█']), "the cells start after the slot: {line}");
     }
 
     #[test]
@@ -4075,6 +4127,7 @@ mod dump_tests {
             })
             .collect();
         let effects = gui.app.apply_event(Event::Library {
+            generation: gui.app.session_gen(),
             node: LibraryNode::Albums,
             dest: Tab::Library,
             data: LibraryData::Albums(albums),
@@ -4110,6 +4163,7 @@ mod dump_tests {
         gui.act(Act::AlbPage(-1));
         gui.act(Act::AlbCell(2)); // Discovery
         let effects = gui.app.apply_event(Event::Library {
+            generation: gui.app.session_gen(),
             node: LibraryNode::Album {
                 name: "Discovery".into(),
                 artist: Some("Artist 02".into()),

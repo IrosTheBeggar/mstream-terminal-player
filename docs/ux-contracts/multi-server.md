@@ -613,3 +613,13 @@ additions to drawn idioms. Revisit if discussion disagrees.
   written promise it); a re-login on a proxied peer reconnects to the
   parent's library rather than the peer's; the Manage-servers list does
   not scroll past the rows that fit.
+- **2026-09-26 — The follow-ups.** Editing a server's URL carries its
+  peers (their parent link and the identity minted from it), the queued
+  rows' origins, the plays owed under them, the session's identity and
+  the DJ's server along (clauses 1 and 28 as written). A re-login on a
+  proxied peer signs in at the parent — the peer has no accounts — and
+  the session that follows goes on browsing the peer through the parent's
+  proxies (clause 26); the account and the token are filed under the
+  parent. The Manage-servers list and the header dropdown scroll: a
+  window of rows follows the cursor under the keys and the wheel
+  otherwise.

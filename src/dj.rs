@@ -308,7 +308,7 @@ pub const HISTORY_LEN: usize = 5;
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings::from_prefs(&crate::config::AutoDjPrefs::default())
+        Settings::from_prefs(&crate::config::AutoDjPrefs::default(), "")
     }
 }
 
@@ -322,13 +322,17 @@ pub fn clamp_similarity(raw: f64) -> f64 {
 
 impl Settings {
     /// From the file — clamped, and migrated from the three-mode panel's
-    /// keys when they are still there: a tempo percent above zero means
-    /// BPM continuity was wanted, a key matching other than off means
-    /// harmonic mixing was, and the perceptual slider is let go (the
-    /// record's model is a switch and a raw band).
-    pub fn from_prefs(prefs: &crate::config::AutoDjPrefs) -> Self {
-        let bpm = prefs.bpm || prefs.tempo_tolerance.is_some_and(|t| t > 0);
-        let harmonic = prefs.harmonic || prefs.key_matching.as_deref().is_some_and(|k| k != "off");
+    /// keys when they are still there AND the old mode was tempo+key: the
+    /// panel wrote its tempo and key defaults on every quit, so the keys
+    /// alone are no wish (the review's finding); under that mode a tempo
+    /// percent above zero means BPM continuity was wanted, a key matching
+    /// other than off means harmonic mixing was, and the perceptual slider
+    /// is let go (the record's model is a switch and a raw band).
+    pub fn from_prefs(prefs: &crate::config::AutoDjPrefs, legacy_mode: &str) -> Self {
+        let continuity = matches!(legacy_mode.trim(), "tempo+key" | "tempo" | "bpm");
+        let bpm = prefs.bpm || (continuity && prefs.tempo_tolerance.is_some_and(|t| t > 0));
+        let harmonic =
+            prefs.harmonic || (continuity && prefs.key_matching.as_deref().is_some_and(|k| k != "off"));
         let max_seconds = prefs.max_seconds.clamp(0, LENGTH_RAIL_SECONDS);
         Settings {
             songs_per_fetch: prefs.songs_per_fetch.clamp(1, SONGS_PER_FETCH_MAX),
@@ -475,6 +479,11 @@ pub struct Ask {
     /// The "Surprise me" opener: the library filters and nothing else, one
     /// song (clause 3).
     pub opener: bool,
+    /// The DJ server's version when it is known (clause 50): a key the
+    /// server is KNOWN to predate is left out of the body rather than sent
+    /// and learned back from a refusal (clauses 25, 27). `None`, or a
+    /// string that does not read as a version, hides nothing.
+    pub server_version: Option<String>,
 }
 
 impl Ask {
@@ -482,6 +491,9 @@ impl Ask {
     pub fn request(&self) -> RandomSongRequest {
         let s = &self.settings;
         let lib = &self.library;
+        // What this server may be asked: everything, less what its version
+        // is known to predate.
+        let takes = |floor| !known_older(self.server_version.as_deref(), floor);
         let mut r = RandomSongRequest { ignore_list: self.ignore_list.clone(), ..Default::default() };
 
         // The library filters, shared with the opener (clause 20).
@@ -489,11 +501,11 @@ impl Ask {
         if lib.min_rating > 0 && !lib.is_peer {
             r.min_rating = Some(lib.min_rating.min(RATING_MAX));
         }
-        if lib.genre_filter && !lib.genres.is_empty() {
+        if lib.genre_filter && !lib.genres.is_empty() && takes(FLOOR_FILTERS) {
             r.genres = lib.genres.clone();
             r.genre_mode = Some(lib.genre_mode.label().to_string());
         }
-        if s.length {
+        if s.length && takes(FLOOR_LENGTH) {
             if s.min_seconds > 0 {
                 r.min_duration = Some(s.min_seconds);
             }
@@ -509,11 +521,11 @@ impl Ask {
         }
 
         // The batch (clause 27): at one the key is left off.
-        if s.songs_per_fetch > 1 {
+        if s.songs_per_fetch > 1 && takes(FLOOR_BATCH) {
             r.limit = Some(s.songs_per_fetch.min(SONGS_PER_FETCH_MAX));
         }
         // BPM continuity (clause 21): windows only around a tagged track.
-        if s.bpm && let Some(bpm) = self.playing_bpm.filter(|b| *b > 0) {
+        if s.bpm && takes(FLOOR_FILTERS) && let Some(bpm) = self.playing_bpm.filter(|b| *b > 0) {
             let tolerance = f64::from(s.bpm_tolerance);
             r.bpm_ranges = bpm_windows(f64::from(bpm), tolerance);
             r.bpm_ranges_wide = bpm_windows(f64::from(bpm), tolerance + f64::from(BPM_WIDE_EXTRA));
@@ -521,7 +533,7 @@ impl Ask {
         }
         // Harmonic mixing (clause 22): the anchor's neighbourhood, and keyed
         // tracks only even before there is one, so the first pick can lock it.
-        if s.harmonic {
+        if s.harmonic && takes(FLOOR_FILTERS) {
             if let Some(anchor) = &self.camelot_anchor {
                 r.musical_keys = compatible_keys(Some(anchor));
             }
@@ -533,14 +545,17 @@ impl Ask {
                 self.recent_artists.iter().take(s.artist_cooldown as usize).cloned().collect();
         }
         // The pool (clause 23): both keys or neither.
-        let threshold =
-            (!self.sonic_seeds.is_empty()).then(|| clamp_similarity(s.sonic_min_similarity));
-        r.with_sonic_pool(&self.sonic_seeds, threshold)
+        let threshold = self.sonic_asked().then(|| clamp_similarity(s.sonic_min_similarity));
+        let seeds: &[String] = if self.sonic_asked() { &self.sonic_seeds } else { &[] };
+        r.with_sonic_pool(seeds, threshold)
     }
 
-    /// Whether this ask carries a sonic pool at all.
+    /// Whether this ask carries a sonic pool at all: seeds, on a server
+    /// not known to predate the index.
     pub fn sonic_asked(&self) -> bool {
-        !self.opener && !self.sonic_seeds.is_empty()
+        !self.opener
+            && !self.sonic_seeds.is_empty()
+            && !known_older(self.server_version.as_deref(), FLOOR_SONIC)
     }
 
     /// The same ask with the pool let go — the degrade of clause 30.
@@ -778,7 +793,34 @@ mod tests {
             ignore_list: vec![4, 5],
             recent_artists: vec!["Alpha".into(), "Beta".into(), "Gamma".into()],
             opener: false,
+            server_version: None,
         }
+    }
+
+    #[test]
+    fn a_server_known_to_predate_a_floor_is_not_sent_the_key() {
+        // The review's finding: songs-per-fetch above one went out to a
+        // server known to predate the batch, and the learner dropped it
+        // after one refusal — a request wasted on every server, every run.
+        let s = Settings { bpm: true, harmonic: true, length: true, min_seconds: 60, ..Settings::default() };
+        let mut a = ask(s);
+        a.sonic_seeds = vec!["lib/a.mp3".into()];
+        a.library.genre_filter = true;
+        a.library.genres = vec!["Ambient".into()];
+        a.server_version = Some("6.5.0".into());
+        let body = json(&a);
+        for absent in ["limit", "bpmRanges", "requireBpm", "requireMusicalKey", "genres", "minDuration", "similarTo", "minSimilarity"] {
+            assert!(body.get(absent).is_none(), "{absent} went out to 6.5.0: {body}");
+        }
+        assert!(!a.sonic_asked(), "no pool is asked of a server without the index");
+        a.server_version = Some("6.28.0".into());
+        let body = json(&a);
+        for present in ["limit", "bpmRanges", "requireMusicalKey", "genres", "minDuration", "similarTo"] {
+            assert!(body.get(present).is_some(), "{present} missing for 6.28.0: {body}");
+        }
+        assert!(a.sonic_asked());
+        a.server_version = Some("fork".into());
+        assert!(json(&a).get("limit").is_some(), "an unreadable version hides nothing");
     }
 
     fn json(ask: &Ask) -> serde_json::Value {
@@ -940,11 +982,11 @@ mod tests {
         let mut prefs = crate::config::AutoDjPrefs::default();
         prefs.genre_mode = "off".to_string();
         prefs.genre_filter = None;
-        let s = Settings::from_prefs(&prefs);
+        let s = Settings::from_prefs(&prefs, "");
         assert!(!s.genre_filter, "a file from before the switch had its own key");
         assert_eq!(s.genre_mode, GenreMode::Whitelist);
         prefs.genre_mode = "blacklist".to_string();
-        let s = Settings::from_prefs(&prefs);
+        let s = Settings::from_prefs(&prefs, "");
         assert!(s.genre_filter && s.genre_mode == GenreMode::Blacklist, "an old on reads on, its mode kept");
         let written = s.to_prefs();
         assert_eq!((written.genre_filter, written.genre_mode.as_str()), (Some(true), "blacklist"), "two keys");
@@ -1004,7 +1046,7 @@ mod tests {
         s.max_seconds = 600;
         s.keyword_filter = true;
         s.keywords = vec!["live".into()];
-        let back = Settings::from_prefs(&s.to_prefs());
+        let back = Settings::from_prefs(&s.to_prefs(), "");
         assert_eq!(back, s);
         assert!(s.to_prefs().tempo_tolerance.is_none(), "the legacy keys are never written");
 
@@ -1016,16 +1058,20 @@ mod tests {
             sonic_tightness: Some(40),
             ..Default::default()
         };
-        let migrated = Settings::from_prefs(&legacy);
+        let migrated = Settings::from_prefs(&legacy, "tempo+key");
         assert!(migrated.bpm && migrated.harmonic);
         assert_eq!(migrated.bpm_tolerance, DEFAULT_BPM_TOLERANCE, "a percent cannot be a BPM");
         assert!(migrated.sonic, "the record's default stands");
+        // The same keys under another mode: the panel wrote them on every
+        // quit, so they are defaults, not a wish.
+        let similar = Settings::from_prefs(&legacy, "similar");
+        assert!(!similar.bpm && !similar.harmonic, "the old defaults switch nothing on");
         let off = crate::config::AutoDjPrefs {
             tempo_tolerance: Some(0),
             key_matching: Some("off".into()),
             ..Default::default()
         };
-        let migrated = Settings::from_prefs(&off);
+        let migrated = Settings::from_prefs(&off, "tempo+key");
         assert!(!migrated.bpm && !migrated.harmonic);
     }
 
@@ -1041,7 +1087,7 @@ mod tests {
             sonic_anchor: "sideways".into(),
             ..Default::default()
         };
-        let s = Settings::from_prefs(&prefs);
+        let s = Settings::from_prefs(&prefs, "");
         assert_eq!(s.songs_per_fetch, SONGS_PER_FETCH_MAX);
         assert_eq!(s.bpm_tolerance, BPM_TOLERANCE_MIN);
         assert_eq!(s.sonic_min_similarity, DEFAULT_SONIC_MIN_SIMILARITY);

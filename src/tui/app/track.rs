@@ -79,24 +79,31 @@ impl App {
 
     /// The rating a track wears right now, from whichever copy is nearest.
     pub(crate) fn rating_of(&self, filepath: &str) -> Option<u32> {
+        self.rating_known(filepath).flatten()
+    }
+
+    /// The nearest copy's rating — `Some(None)` for a copy that is unrated,
+    /// `None` when the App holds no copy of the track at all, so a caller
+    /// with a block of its own knows when to fall back on it.
+    pub(crate) fn rating_known(&self, filepath: &str) -> Option<Option<u32>> {
         if let Some(info) = &self.track_info
             && info.filepath == filepath
         {
-            return info.metadata.rating;
+            return Some(info.metadata.rating);
         }
         if let Some(item) = self.queue.items.iter().find(|i| i.filepath == filepath) {
-            return item.metadata.rating;
+            return Some(item.metadata.rating);
         }
         for pane in [&self.files, &self.library, &self.search, &self.discover] {
             for entry in &pane.entries {
                 if let Entry::Track { track, .. } = entry
                     && track.filepath == filepath
                 {
-                    return track.metadata.rating;
+                    return Some(track.metadata.rating);
                 }
             }
         }
-        self.now_playing.as_ref().filter(|t| t.filepath == filepath).and_then(|t| t.metadata.rating)
+        self.now_playing.as_ref().filter(|t| t.filepath == filepath).map(|t| t.metadata.rating)
     }
 
     /// Rate a track (clauses 10–11): every copy changes at once, the write
@@ -119,6 +126,7 @@ impl App {
         let previous = self.rating_of(filepath);
         self.rating_seq += 1;
         let seq = self.rating_seq;
+        self.rated_at.insert(filepath.to_string(), seq);
         self.rating_writes.push(RatingWrite { filepath: filepath.to_string(), previous, seq });
         self.patch_rating(filepath, rating);
         vec![Effect::Api(ApiCmd::RateSong { filepath: filepath.to_string(), rating, seq, reach })]
@@ -194,15 +202,28 @@ impl App {
                 return Vec::new();
             }
         };
+        // Stamped with the rating clock, so a block that answers after a
+        // newer write is known to carry an older rating.
+        self.info_asked.insert(filepath.to_string(), self.rating_seq);
         vec![Effect::Api(ApiCmd::TrackInfo { filepath: filepath.to_string(), reach })]
     }
 
     /// The block arrived: kept for the sheet, and its facts patched into the
     /// listing's copies where they were thinner.
     pub(super) fn consume_track_info(&mut self, filepath: String, track: Option<Track>) {
-        let Some(track) = track else { return };
+        let asked = self.info_asked.remove(&filepath);
+        let Some(mut track) = track else { return };
         if track.filepath != filepath {
             return;
+        }
+        // A rating written since the block was asked for is newer than the
+        // block's copy (clause 10): the App's stands, in the block too, or
+        // the sheet and the bar's card would show the older number while
+        // the queue's row showed the new one (the review's race).
+        if let (Some(asked), Some(&written)) = (asked, self.rated_at.get(&filepath))
+            && written > asked
+        {
+            track.metadata.rating = self.rating_of(&filepath);
         }
         let block = track.metadata.clone();
         let fill = |m: &mut TrackMetadata| {

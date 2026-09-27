@@ -68,7 +68,7 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         // The browser owns the network: a failed open is the source's fault.
         ApiCmd::Probe { server, .. } => Some(Event::Reachable { server, reachable: true }),
 
-        ApiCmd::Login { server, identity, username, password, self_signed: _, local_token: _ } => {
+        ApiCmd::Login { server, identity, username, password, self_signed: _, local_token: _, peer: _ } => {
             Some(login(session, &server, &identity, &username, &password).await)
         }
 
@@ -100,11 +100,11 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
-        ApiCmd::Library { node, dest } => {
+        ApiCmd::Library { node, dest, generation } => {
             with_session(session, async |s| {
                 worker::load_library(&s.client, &node)
                     .await
-                    .map(|data| Event::Library { node: node.clone(), dest, data })
+                    .map(|data| Event::Library { node: node.clone(), dest, data, generation })
             })
             .await
         }
@@ -248,11 +248,12 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             .await
         }
 
-        ApiCmd::Search(query) => {
+        ApiCmd::Search { query, generation } => {
             with_session(session, async |s| {
                 s.client.search_async(&query).await.map(|r| Event::SearchResults {
                     query: query.clone(),
                     results: Box::new(r),
+                    generation,
                 })
             })
             .await

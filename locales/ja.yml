@@ -70,6 +70,12 @@ act:
   added_to: "%{name} に追加しました"
   add_failed_why: "プレイリストに追加できませんでした — %{why}"
 
+# The shared App's playback notes (both shells show them).
+play:
+  unplayable_all: "これらのトラックは再生できません — ファイルまたはサーバーを確認してください"
+  skipping_why: "再生できないトラックをスキップします — %{what}: %{why}"
+  skipping: "再生できないトラックをスキップします — %{what}"
+
 login_problem:
   username: "ユーザー名を入力してください"
   password: "パスワードを入力してください"
@@ -1129,9 +1135,10 @@ gui:
     remember_sub: "次回からこの質問を省き、常にこの方法で始めます。"
     pick_banner: "最初の曲を選んでください — ライブラリのどこからでも"
     start_keys: "↑↓ 移動 · Enter 選択 · Space 記憶 · Esc キャンセル"
+    picker_keys: "↑↓ 移動 · Space 切替 · Enter 完了"
     title: "Auto DJ"
-    state_on: "• オン · %{server} から選曲"
-    state_off: "• オフ"
+    state_on: "オン · %{server} から選曲"
+    state_off: "オフ"
     status_on: "Auto DJ はオンです"
     status_on_detail: "キューが少なくなると %{server} から曲が選ばれます。"
     status_off: "Auto DJ はオフです"
@@ -1181,7 +1188,6 @@ gui:
     rating: "最低評価"
     rating_sub: "この評価以上の曲のみを選びます。"
     rating_any: "指定なし"
-    rating_value: "%{stars} ★"
     length: "曲の長さ"
     length_sub: "インタールードや長いミックスを避け、指定した長さの曲だけを選びます"
     length_any: "長さの指定なし"
@@ -1432,8 +1438,8 @@ gui:
     year: "年"
     path: "保存先"
     path_tip: "ライブラリ内のパス — 手で編集すると次のソースまで保持されます"
-    preview_no_library: "‹ライブラリ未選択›/%{path}"
-    preview_contents: "‹トレントの内容›"
+    preview_no_library: "ライブラリ未選択"
+    preview_contents: "トレントの内容"
     rename_root: "トレントのルートフォルダ名を変更"
     rename_root_desc: "保存先フォルダ名に合わせる"
     force_fresh: "強制的に新規ダウンロード"
@@ -1470,7 +1476,7 @@ gui:
   tips:
     search_edit: "入力 · Enter 検索 · Esc 完了"
     search: "↑ ↓ 移動 · Enter 開く/再生 · h 戻る · ← → 分類 · t 切替 · / 編集 · a キューへ · q 終了"
-    files: "↑ ↓ 移動 · Enter 開く/再生 · h 戻る · a キューへ · Tab キュー · Space 再生/停止 · q 終了 · f 絞り込み"
+    files: "↑ ↓ 移動 · Enter 開く · h 戻る · a キューへ · Tab キュー · Space 再生/停止 · q 終了 · f 絞り込み"
     rows: "↑ ↓ 行 · ← → 調整 · Enter 切替 · Esc 完了 · 1-8 セクション · q 終了"
     base: "1-8 セクション · Tab キュー · Space 再生/停止 · -/+ 音量 · D Auto DJ · q 終了"
     now: "1-5 タブ · ↑ ↓ リスト · Enter 再生 · Space 再生/一時停止 · -/+ 音量 · m 操作 · 0 ライブラリ"

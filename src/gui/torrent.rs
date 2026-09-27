@@ -1521,9 +1521,10 @@ pub(crate) fn draw_room(frame: &mut Frame, gui: &mut Gui, content: Rect) {
                 // The preview line (clause 14): the real landing spot.
                 y += 1;
                 let path = gui.torrent.path.value().trim().trim_end_matches('/').to_string();
+                let (open, close) = super::angle_glyphs();
                 let preview = match library(gui) {
-                    Some(vpath) => format!("/{vpath}/{path}/{}", t!("gui.tor.preview_contents")),
-                    None => t!("gui.tor.preview_no_library", path = path).to_string(),
+                    Some(vpath) => format!("/{vpath}/{path}/{open}{}{close}", t!("gui.tor.preview_contents")),
+                    None => format!("{open}{}{close}/{path}", t!("gui.tor.preview_no_library")),
                 };
                 put(frame, content.x + lw, y, &super::clip_lead(&preview, content.width.saturating_sub(lw) as usize), dim());
             }

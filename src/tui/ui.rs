@@ -1,5 +1,6 @@
 //! Rendering. Reads app state, draws widgets — no decisions of its own.
 
+use rust_i18n::t;
 use std::sync::OnceLock;
 
 use ratatui::Frame;
@@ -405,6 +406,9 @@ pub(crate) struct NowLayout {
     pub strip: StripHits,
     /// The band: the mirrored shape over the scrubber, one control.
     pub band: Rect,
+    /// The modes readout at the keys row's right: a note the caller puts
+    /// on that row stops short of it.
+    pub modes: Rect,
 }
 
 /// Where the tab strip's click targets landed: each tab by index when the
@@ -1417,7 +1421,7 @@ pub(crate) fn render_now_view(
         Paragraph::new(Span::styled(modes, Style::new().fg(dim()))).alignment(Alignment::Right),
         right,
     );
-    NowLayout { cover, spare, strip, band: gauge_area }
+    NowLayout { cover, spare, strip, band: gauge_area, modes: right }
 }
 
 /// Bounds on the facts column. Below the floor the labelled rows stop fitting;
@@ -2860,7 +2864,11 @@ fn dj_value_spans(row: DjRow, app: &App) -> Vec<Span<'static>> {
             if s.keywords.is_empty() {
                 spans.push(note("no keywords · Enter types one".into()));
             } else {
-                spans.push(note(format!("{}: {} · x removes the last", s.keywords.len(), s.keywords.join(", "))));
+                // The bound key, not an assumed one: the keymap's word for
+                // remove-from-queue takes the last keyword on this row.
+                let remove = app.keymap.keys_of(&crate::tui::app::Action::RemoveFromQueue);
+                let removes = if remove.is_empty() { String::new() } else { format!(" · {remove} removes the last") };
+                spans.push(note(format!("{}: {}{removes}", s.keywords.len(), s.keywords.join(", "))));
             }
             spans
         }
@@ -2977,8 +2985,11 @@ pub(crate) fn render_dj_picker(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
     lines.push(Line::raw(""));
+    // Through the locale table: the GUI lends this picker on its Now
+    // Playing screen, where the rest of the words are the user's language;
+    // the TUI boots no language, so here it stays English.
     lines.push(Line::from(Span::styled(
-        "  ↑↓ move · Space toggle · Enter done",
+        format!("  {}", t!("gui.dj.picker_keys")),
         Style::new().fg(dim()),
     )));
 
@@ -3020,7 +3031,7 @@ fn render_dj_chooser(frame: &mut Frame, area: Rect, app: &App) {
     let check = if chooser.remember { "[x]" } else { "[ ]" };
     lines.extend(option(2, format!("{check} Remember this"), "Skip this question next time and always start this way."));
     lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled("  ↑↓ move · Enter choose · Space remember · Esc cancel", faint)));
+    lines.push(Line::from(Span::styled(format!("  {}", t!("gui.dj.start_keys")), faint)));
 
     let height = (lines.len() as u16 + 2).min(area.height);
     let box_area = centered_rect(72, height, area);
@@ -4504,6 +4515,7 @@ mod tests {
 
         app.library_stack.enter(LibraryNode::Genre("Ambient".into()));
         app.apply_event(crate::tui::worker::Event::Library {
+            generation: app.session_gen(),
             dest: Tab::Library,
             node: LibraryNode::Genre("Ambient".into()),
             data: LibraryData::Tracks(vec![Track {
@@ -4981,6 +4993,7 @@ mod tests {
         let mut app = connected_app();
         app.handle_action(Action::SelectTab(1));
         app.apply_event(Event::Library {
+            generation: app.session_gen(),
             dest: Tab::Library,
             node: LibraryNode::Root,
             data: LibraryData::Artists(vec!["Bassnectar".into(), "ill Gates".into()]),
@@ -5516,6 +5529,7 @@ mod tests {
         assert!(!waiting.contains("(no playlists)"), "{waiting}");
 
         app.apply_event(Event::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Playlists,
             dest: Tab::Library,
             data: crate::tui::worker::LibraryData::Playlists(Vec::new()),
@@ -5532,6 +5546,7 @@ mod tests {
         let mut app = connected_app();
         on_the_playlists_node(&mut app);
         app.apply_event(Event::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Playlists,
             dest: Tab::Library,
             data: LibraryData::Playlists(vec![PlaylistSummary { name: "phone".into() }]),
@@ -5541,6 +5556,7 @@ mod tests {
         app.library.state.select(Some(1));
         app.handle_action(Action::Activate);
         app.apply_event(Event::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Playlist("phone".into()),
             dest: Tab::Library,
             data: LibraryData::Tracks(Vec::new()),
@@ -5593,6 +5609,7 @@ mod tests {
 
         app.handle_action(Action::Submit);
         app.apply_event(Event::SearchResults {
+            generation: app.session_gen(),
             query: "moon".into(),
             results: Box::default(),
         });
@@ -5615,6 +5632,7 @@ mod tests {
             metadata: TrackMetadata::default(),
         };
         app.apply_event(Event::SearchResults {
+            generation: app.session_gen(),
             query: "moon".into(),
             results: Box::new(SearchResults {
                 artists: vec![

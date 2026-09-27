@@ -281,6 +281,58 @@ impl App {
         }
     }
 
+    /// The saved server `old` was re-addressed as `new` (the servers room's
+    /// edit; multi-server clause 1): every reference the App holds follows
+    /// — the queued rows' origins and the plays owed under them, the
+    /// session's own identity or its peer's parent, the DJ's server.
+    pub(crate) fn rename_server(&mut self, old: &str, new: &str) {
+        let rename = |id: &mut String| {
+            if let Some(renamed) = crate::config::renamed_identity(id, old, new) {
+                *id = renamed;
+            }
+        };
+        for item in &mut self.queue.items {
+            rename(&mut item.origin.server);
+        }
+        for owed in &mut self.stats.outbox {
+            rename(&mut owed.origin.server);
+        }
+        if let Some(session) = self.stats.session.as_mut() {
+            rename(&mut session.origin.server);
+        }
+        let backoff = std::mem::take(&mut self.stats.backoff);
+        self.stats.backoff = backoff
+            .into_iter()
+            .map(|(mut server, until)| {
+                rename(&mut server);
+                (server, until)
+            })
+            .collect();
+        rename(&mut self.session.server_id);
+        if let Some((parent, _)) = self.session.peer.as_mut() {
+            rename(parent);
+        }
+        if let Some(server) = self.dj_server.as_mut() {
+            rename(server);
+        }
+        if let Some(target) = self.dj_target.as_mut() {
+            rename(target);
+        }
+    }
+
+    /// The peer a sign-in at `identity` is for: the session's own, when
+    /// the identity is that peer's parent. A peer has no accounts of its
+    /// own — the parent's token went stale, the parent takes the sign-in —
+    /// and the session that follows must go on browsing the peer
+    /// (multi-server contract, clause 26), not the parent's library.
+    pub(crate) fn peer_behind(&self, identity: &str) -> Option<i64> {
+        self.session
+            .peer
+            .as_ref()
+            .filter(|(parent, _)| crate::config::same_server(parent, identity))
+            .map(|(_, id)| *id)
+    }
+
     /// Point the session at another saved server and reconnect — the GUI's
     /// server switch. The same door as [`App::begin`], with the teardown a
     /// mid-session change needs first.
@@ -306,9 +358,15 @@ impl App {
     /// actually answered.
     pub(crate) fn shed_server_state(&mut self) {
         // The Connected handler rebuilds capabilities, libraries and panes.
+        // Every library and search ask still out belongs to the old server:
+        // the generation moves on, so their answers are dropped on arrival.
+        self.session_gen = self.session_gen.wrapping_add(1);
         self.announced = None;
         self.search_hits = None;
         self.query.clear();
+        // The box is empty, so no search is wanted: the marker that guards
+        // stale results goes with it.
+        self.search_submitted = None;
         self.search.set(Vec::new());
         self.files.set(Vec::new());
         self.files.loading = true;
@@ -526,6 +584,7 @@ impl App {
         self.connect.submitting = true;
         self.message = None;
         let (identity, local_token) = self.identity_at(&server);
+        let peer = self.peer_behind(&identity);
         vec![Effect::Api(ApiCmd::Login {
             server,
             identity,
@@ -533,6 +592,7 @@ impl App {
             password: std::mem::take(&mut self.connect.password),
             self_signed: self.session.self_signed,
             local_token,
+            peer,
         })]
     }
 

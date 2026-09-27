@@ -185,6 +185,7 @@ fn browsing_playlists(app: &mut App, names: &[&str]) {
     app.library.state.select(Some(at));
     app.handle_action(Action::Activate);
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlists,
         dest: Tab::Library,
         data: LibraryData::Playlists(
@@ -300,6 +301,7 @@ fn every_tab_filters_its_own_list() {
 
     app.handle_action(Action::SelectTab(1));
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Root,
         data: LibraryData::Artists(vec!["Bassnectar".into(), "Portishead".into()]),
@@ -1079,6 +1081,7 @@ fn opening_a_playlist_spins_instead_of_showing_the_list_of_playlists() {
     assert!(app.library.loading);
 
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlist("phone".into()),
         dest: Tab::Library,
         data: LibraryData::Tracks(vec![track("a")]),
@@ -1161,6 +1164,7 @@ fn every_class_a_search_matched_is_reachable() {
     };
     app.search_submitted = Some("moon".into());
     app.apply_event(Event::SearchResults {
+        generation: app.session_gen(),
         query: "moon".into(),
         results: Box::new(SearchResults {
             artists: vec![SearchGroup { name: "Moon Hooch".into(), album_art_file: None }],
@@ -1196,6 +1200,7 @@ fn every_class_a_search_matched_is_reachable() {
     assert_eq!(
         effects,
         vec![Effect::Api(ApiCmd::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Artist("Moon Hooch".into()),
             dest: Tab::Search,
         })]
@@ -1535,6 +1540,7 @@ fn a_tunnel_session_is_remembered_by_identity_not_by_its_loopback_port() {
             password: "pw".into(),
             self_signed: false,
             local_token: Some("lt".into()),
+            peer: None,
         })]
     );
     app.apply_event(Event::Connected {
@@ -1622,6 +1628,7 @@ fn a_remembered_tunnel_server_dials_with_the_code_from_the_book() {
         id: "mstream+iroh://endpointabc".into(),
         name: "quick connect · endpointabc".into(),
         token: None,
+        username: None,
         self_signed: false,
         peer: None,
         pairing: Some("mstr1:fromthebook".into()),
@@ -1675,6 +1682,7 @@ fn federated_app() -> App {
             id: ATTIC.into(),
             name: ATTIC.into(),
             token: Some("at".into()),
+            username: None,
             self_signed: false,
             peer: None,
             pairing: None, dj: Default::default(),
@@ -1683,6 +1691,7 @@ fn federated_app() -> App {
             id: nas(),
             name: "Nas".into(),
             token: None,
+            username: None,
             self_signed: false,
             peer: Some((ATTIC.into(), 3)),
             pairing: None, dj: Default::default(),
@@ -2080,7 +2089,7 @@ fn a_tunnel_parent_is_kept_for_the_access_call_and_let_go_once_the_peer_is_direc
     let parent = "mstream+iroh://faraway";
     let pid = crate::config::peer_identity(parent, 7);
     app.servers.push(faraway());
-    app.servers.push(KnownServer { id: pid.clone(), name: "Shed".into(), token: None, self_signed: false, peer: Some((parent.into(), 7)), pairing: None, dj: Default::default() });
+    app.servers.push(KnownServer { id: pid.clone(), name: "Shed".into(), token: None, username: None, self_signed: false, peer: Some((parent.into(), 7)), pairing: None, dj: Default::default() });
     app.direct_offered.insert(parent.into());
     app.queue.push(Queued { dj: None, origin: Origin { server: parent.into(), peer: Some(7) }, track: track("music/s.mp3") });
 
@@ -2116,6 +2125,7 @@ fn faraway() -> KnownServer {
         id: "mstream+iroh://faraway".into(),
         name: "quick connect · faraway".into(),
         token: Some("t".into()),
+        username: None,
         self_signed: false,
         peer: None,
         pairing: Some("mstr1:far".into()),
@@ -2429,6 +2439,7 @@ fn an_expired_tunnel_session_signs_back_in_over_the_open_bridge() {
             password: "pw".into(),
             self_signed: false,
             local_token: Some("lt".into()),
+            peer: None,
         })]
     );
 }
@@ -2602,11 +2613,13 @@ fn adopting_a_server_keeps_the_music_and_the_queue() {
             id: "http://attic.local:3000".into(),
             name: "http://attic.local:3000".into(),
             token: Some("attic-token".into()),
+            username: None,
             self_signed: false, peer: None, pairing: None, dj: Default::default() },
         KnownServer {
             id: "http://office.local:3000".into(),
             name: "http://office.local:3000".into(),
             token: Some("office-token".into()),
+            username: None,
             self_signed: true, peer: None, pairing: None, dj: Default::default() },
     ];
     app.push_queue(track("music/a.mp3"));
@@ -2660,6 +2673,7 @@ fn a_row_on_a_closed_tunnel_walks_on_like_a_refused_one() {
         id: "mstream+iroh://faraway".into(),
         name: "mstream+iroh://faraway".into(),
         token: Some("t".into()),
+        username: None,
         self_signed: false, peer: None, pairing: None, dj: Default::default() });
     app.queue.push(at("mstream+iroh://faraway", "music/far.mp3"));
     app.push_queue(track("music/near.mp3"));
@@ -2710,7 +2724,7 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
     // the playing row keeps its place, the position comes back, and
     // nothing plays until asked — then that row, from that second.
     let mut app = connected_app();
-    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: Some("bt".into()), self_signed: false , peer: None, pairing: None, dj: Default::default() }];
+    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: Some("bt".into()), username: None, self_signed: false , peer: None, pairing: None, dj: Default::default() }];
     let mut long = at("http://b", "music/2.mp3");
     long.track.metadata.duration = Some(300.0);
     let snapshot = QueueSnapshot {
@@ -2880,6 +2894,7 @@ fn a_peers_rows_play_through_the_parents_stream_proxy() {
         id: "http://attic:3000".into(),
         name: "http://attic:3000".into(),
         token: Some("at".into()),
+        username: None,
         self_signed: false,
         peer: None, pairing: None, dj: Default::default() }];
     app.queue.push(Queued {
@@ -2901,6 +2916,7 @@ fn a_peer_session_stamps_its_rows_and_keeps_none_of_the_optional_features() {
         id: "mstream+peer://3@http://attic:3000".into(),
         name: "Nas".into(),
         token: None,
+        username: None,
         self_signed: false,
         peer: Some(("http://attic:3000".into(), 3)), pairing: None, dj: Default::default() }];
     let effects = app.adopt_server(
@@ -2989,7 +3005,7 @@ fn a_removed_server_takes_its_rows_and_playback_lands_on_the_next_survivor() {
     // Playing row 0 on the session's server; removing that server plays
     // the survivor, which lives on the other one.
     let mut app = connected_app();
-    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: None, self_signed: false , peer: None, pairing: None, dj: Default::default() }];
+    app.servers = vec![KnownServer { id: "http://b".into(), name: "http://b".into(), token: None, username: None, self_signed: false , peer: None, pairing: None, dj: Default::default() }];
     app.queue.items = vec![at("http://host:3000", "music/1.mp3"), at("http://b", "music/2.mp3")];
     let effects = app.play_index(0);
     app.status = PlayerStatus { playing: true, source: played_url(&effects), ..Default::default() };
@@ -3049,6 +3065,7 @@ fn login_effect_carries_credentials_and_clears_the_password() {
             password: "secret".into(),
             self_signed: false,
             local_token: None,
+            peer: None,
         })]
     );
     assert!(app.connect.password.is_empty(), "password is not kept in memory after use");
@@ -3133,6 +3150,7 @@ fn sending_a_password_over_plain_http_asks_first() {
             password: "secret".into(),
             self_signed: false,
             local_token: None,
+            peer: None,
         })]
     );
 }
@@ -3213,7 +3231,7 @@ fn searching_from_the_query_box_emits_one_search() {
         app.handle_action(Action::Input(c));
     }
     let effects = app.handle_action(Action::Submit);
-    assert_eq!(effects, vec![Effect::Api(ApiCmd::Search("moon".into()))]);
+    assert_eq!(effects, vec![Effect::Api(ApiCmd::Search { query: "moon".into(), generation: app.session_gen() })]);
     assert!(!app.editing_query);
 }
 
@@ -3235,6 +3253,7 @@ fn opening_the_playlists_node_asks_every_time() {
     };
     assert!(asked(&app.handle_action(Action::Activate)));
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlists,
         dest: Tab::Library,
         data: LibraryData::Playlists(vec![crate::api::types::PlaylistSummary {
@@ -3261,6 +3280,7 @@ fn a_pane_knows_when_its_contents_are_still_on_the_wire() {
     assert!(!app.files.loading && !app.search.loading);
 
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Artists,
         dest: Tab::Library,
         data: LibraryData::Artists(Vec::new()),
@@ -3289,12 +3309,14 @@ fn playlist_tracks_open_and_close() {
     assert_eq!(
         effects,
         vec![Effect::Api(ApiCmd::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Playlist("Roadtrip".into()),
             dest: Tab::Library,
         })]
     );
 
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlist("Roadtrip".into()),
         dest: Tab::Library,
         data: LibraryData::Tracks(vec![track("lib/a.mp3")]),
@@ -3323,6 +3345,7 @@ fn a_playlist_answering_after_it_was_left_does_not_open_over_the_top() {
     assert_eq!(app.library_node(), &LibraryNode::Playlists);
 
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlist("Roadtrip".into()),
         dest: Tab::Library,
         data: LibraryData::Tracks(vec![track("lib/a.mp3")]),
@@ -3335,6 +3358,7 @@ fn a_playlist_answering_after_it_was_left_does_not_open_over_the_top() {
     app.handle_action(Action::Activate);
     assert_eq!(app.library_node(), &LibraryNode::Playlist("Dinner".into()));
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlist("Roadtrip".into()),
         dest: Tab::Library,
         data: LibraryData::Tracks(vec![track("lib/a.mp3")]),
@@ -3343,6 +3367,7 @@ fn a_playlist_answering_after_it_was_left_does_not_open_over_the_top() {
     assert!(app.library.loading, "and Dinner is still coming");
 
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         node: LibraryNode::Playlist("Dinner".into()),
         dest: Tab::Library,
         data: LibraryData::Tracks(vec![track("lib/b.mp3")]),
@@ -3379,9 +3404,10 @@ fn drilling_from_artists_to_an_album_of_tracks() {
     let effects = app.handle_action(Action::Activate);
     assert_eq!(
         effects,
-        vec![Effect::Api(ApiCmd::Library { node: LibraryNode::Artists, dest: Tab::Library })]
+        vec![Effect::Api(ApiCmd::Library { generation: app.session_gen(), node: LibraryNode::Artists, dest: Tab::Library })]
     );
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Artists,
         data: LibraryData::Artists(vec!["Signal Chain".into(), "Terminal Test".into()]),
@@ -3393,11 +3419,13 @@ fn drilling_from_artists_to_an_album_of_tracks() {
     assert_eq!(
         effects,
         vec![Effect::Api(ApiCmd::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Artist("Signal Chain".into()),
             dest: Tab::Library,
         })]
     );
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Artist("Signal Chain".into()),
         data: LibraryData::Albums(vec![Album {
@@ -3413,6 +3441,7 @@ fn drilling_from_artists_to_an_album_of_tracks() {
     assert_eq!(
         effects,
         vec![Effect::Api(ApiCmd::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Album {
                 name: "Second Album".into(),
                 artist: Some("Signal Chain".into()),
@@ -3421,6 +3450,7 @@ fn drilling_from_artists_to_an_album_of_tracks() {
         })]
     );
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Album {
             name: "Second Album".into(),
@@ -3441,6 +3471,7 @@ fn back_walks_the_library_stack_to_the_menu() {
     app.handle_action(Action::SelectTab(1));
     app.handle_action(Action::Activate); // → Artists
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Artists,
         data: LibraryData::Artists(vec!["Solo".into()]),
@@ -3468,6 +3499,7 @@ fn a_reply_for_an_abandoned_view_is_discarded() {
     app.handle_action(Action::Back); // …then changed our mind
 
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Artists,
         data: LibraryData::Artists(vec!["Ghost".into()]),
@@ -3483,6 +3515,7 @@ fn genres_show_track_counts_and_lead_to_songs() {
     app.library_stack.restart();
     app.library_stack.enter(LibraryNode::Genres);
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Genres,
         data: LibraryData::Genres(vec![
@@ -3504,6 +3537,7 @@ fn genres_show_track_counts_and_lead_to_songs() {
     assert_eq!(
         effects,
         vec![Effect::Api(ApiCmd::Library {
+            generation: app.session_gen(),
             node: LibraryNode::Genre("Ambient".into()),
             dest: Tab::Library,
         })]
@@ -3518,6 +3552,7 @@ fn albums_without_an_artist_still_resolve() {
     app.library_stack.restart();
     app.library_stack.enter(LibraryNode::Albums);
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Albums,
         data: LibraryData::Albums(vec![Album {
@@ -3543,6 +3578,7 @@ fn recently_added_lists_tracks_directly() {
     app.library_stack.restart();
     app.library_stack.enter(LibraryNode::Recent);
     app.apply_event(Event::Library {
+        generation: app.session_gen(),
         dest: Tab::Library,
         node: LibraryNode::Recent,
         data: LibraryData::Tracks(vec![track("testlib/new.mp3")]),
@@ -4710,6 +4746,7 @@ fn search_replies_that_pass_each_other_cannot_swap_the_results() {
     app.handle_action(Action::Submit);
 
     let stale = app.apply_event(Event::SearchResults {
+        generation: app.session_gen(),
         query: "one".into(),
         results: Box::default(),
     });
@@ -4717,6 +4754,7 @@ fn search_replies_that_pass_each_other_cannot_swap_the_results() {
     assert_eq!(app.search_summary, None, "the overtaken search says nothing");
 
     app.apply_event(Event::SearchResults {
+        generation: app.session_gen(),
         query: "two".into(),
         results: Box::default(),
     });
@@ -4765,6 +4803,7 @@ fn drilling_out_of_search_lights_the_search_tab_spinner() {
     app.handle_action(Action::SelectTab(2));
     app.search_submitted = Some("moon".into());
     app.apply_event(Event::SearchResults {
+        generation: app.session_gen(),
         query: "moon".into(),
         results: Box::new(crate::api::types::SearchResults {
             artists: vec![crate::api::types::SearchGroup {
@@ -5424,10 +5463,12 @@ fn the_art_cache_is_bounded() {
     }
     assert_eq!(app.art.len(), ART_CACHE_CAP);
 
-    // One more starts the cache over rather than growing without bound.
+    // One more lets the oldest cover go rather than growing without
+    // bound — or starting over, which re-asked for a whole wall.
     app.replace_queue(vec![track_with_cover("lib/a.mp3", "again.jpeg")]);
     app.play_index(0);
-    assert_eq!(app.art.len(), 1);
+    assert_eq!(app.art.len(), ART_CACHE_CAP);
+    assert!(!app.art.contains_key("0.jpeg") && app.art.contains_key("again.jpeg"));
 }
 
 // ── Crossfade announcements and handovers (Phase C3) ────────────────────────
@@ -6592,6 +6633,7 @@ fn the_sources_chooser_keeps_one_library_on() {
         id: HOST.into(),
         name: "host".into(),
         token: None,
+        username: None,
         self_signed: false,
         peer: None,
         pairing: None,
@@ -6906,6 +6948,7 @@ fn one_kept_server_does_not_hold_another_servers_plays_behind_it() {
         id: "http://away:4000".into(),
         name: "away".into(),
         token: Some("ta".into()),
+        username: None,
         self_signed: false,
         peer: None,
         pairing: None,
@@ -6988,4 +7031,186 @@ fn a_restored_spot_follows_its_track_through_queue_edits() {
     let _ = app.remove_queue_row(1);
     let effects = app.handle_action(Action::PlayPause);
     assert!(!effects.iter().any(|e| matches!(e, Effect::Audio(AudioCmd::Seek(_)))), "no seek into another track: {effects:?}");
+}
+
+#[test]
+fn a_reply_from_the_server_the_session_left_fills_nothing() {
+    // The review's stale-reply hole: a slow Artists answer from the old
+    // server landed after the switch and filled the new server's Artists,
+    // and playing a hit stamped the new server as its origin. The ask is
+    // stamped with the session generation; a reply must carry it.
+    let mut app = connected_app();
+    app.handle_action(Action::SelectTab(1));
+    app.handle_action(Action::Activate); // into Artists on the old server
+    let old = app.session_gen();
+    app.shed_server_state();
+    assert_ne!(app.session_gen(), old, "a switch moves the generation on");
+    // The new server's own walk wants the same node.
+    app.library_stack.enter(LibraryNode::Artists);
+    app.apply_event(Event::Library {
+        generation: old,
+        dest: Tab::Library,
+        node: LibraryNode::Artists,
+        data: LibraryData::Artists(vec!["Old Server's Band".into()]),
+    });
+    assert!(app.library.entries.is_empty(), "the old server's answer is dropped: {:?}", labels(&app));
+    app.apply_event(Event::Library {
+        generation: app.session_gen(),
+        dest: Tab::Library,
+        node: LibraryNode::Artists,
+        data: LibraryData::Artists(vec!["Signal Chain".into()]),
+    });
+    assert_eq!(labels(&app), vec!["..", "Signal Chain"], "the new server's answer lands");
+}
+
+#[test]
+fn a_search_reply_from_the_server_the_session_left_is_dropped_even_for_the_same_words() {
+    let mut app = connected_app();
+    app.handle_action(Action::StartSearch);
+    for c in "moon".chars() {
+        app.handle_action(Action::Input(c));
+    }
+    app.handle_action(Action::Submit);
+    let old = app.session_gen();
+    app.shed_server_state();
+    assert!(app.search_submitted.is_none(), "a switch wants no search of the old server's");
+    // The same words, typed again on the new server.
+    app.handle_action(Action::StartSearch);
+    for c in "moon".chars() {
+        app.handle_action(Action::Input(c));
+    }
+    app.handle_action(Action::Submit);
+    app.apply_event(Event::SearchResults { generation: old, query: "moon".into(), results: Box::default() });
+    assert!(app.search_hits.is_none(), "the old server's hits are not the new server's");
+    app.apply_event(Event::SearchResults {
+        generation: app.session_gen(),
+        query: "moon".into(),
+        results: Box::default(),
+    });
+    assert!(app.search_hits.is_some());
+}
+
+#[test]
+fn a_re_login_on_a_proxied_peer_signs_in_through_the_parent_and_keeps_the_peer() {
+    // The review's finding: the parent's token expired while a peer was
+    // browsed through it; the sign-in pinged the parent plainly, so the
+    // header named the peer while the browser listed the parent's library
+    // and new rows carried the wrong origin. The login names the peer.
+    let mut app = App::new(None, None, None);
+    let parent = "http://10.0.0.5:3000";
+    app.connected = true;
+    app.session.server = parent.into();
+    app.session.server_id = crate::config::peer_identity(parent, 3);
+    app.session.peer = Some((parent.into(), 3));
+    app.session.token = Some("stale".into());
+
+    app.apply_event(Event::Unauthorized);
+    assert_eq!(app.connect.stage, ConnectStage::Direct);
+    assert_eq!(app.connect.server, parent, "the form aims at the parent, which holds the accounts");
+    app.connect.username = "alice".into();
+    app.connect.password = "pw".into();
+    let effects = app.handle_action(Action::Submit);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiCmd::Login { identity, peer: Some(3), .. })] if identity == parent
+        ),
+        "the sign-in is the parent's and carries the peer: {effects:?}"
+    );
+    // A sign-in at a server that is not the peer's parent carries none.
+    app.session.peer = Some(("http://10.0.0.9:3000".into(), 3));
+    assert_eq!(app.peer_behind(parent), None);
+}
+
+#[test]
+fn an_owed_play_waits_for_the_account_it_was_made_under() {
+    // The review's finding (a shared config directory): one user quits
+    // mid-song, another signs in to the same server, and the first user's
+    // play was posted as the second's listening. The play carries its
+    // account and waits for it.
+    let mut app = stats_app();
+    app.session.username = Some("alice".into());
+    let mut first = item("a.mp3");
+    first.track.metadata.duration = Some(200.0);
+    app.queue.replace(vec![first, item("b.mp3")]);
+    let effects = app.handle_action(Action::PlayPause);
+    let url = played_url(&effects);
+    assert_eq!(app.stats.session.as_ref().and_then(|s| s.account.clone()).as_deref(), Some("alice"));
+    for p in 0..=12 {
+        app.apply_event(status_at(&url, f64::from(p), false));
+    }
+    app.apply_event(ended(&effects));
+    assert_eq!(app.stats.outbox[0].account.as_deref(), Some("alice"), "the play is stamped");
+
+    // Bob signs in before the flush: alice's play is held, not posted as his.
+    app.session.username = Some("bob".into());
+    assert!(reported(&app.tick()).is_none(), "nothing goes out under bob");
+    assert_eq!(app.stats.outbox.len(), 1, "and nothing is dropped");
+    // A play from before the stamp existed (no account) posts as it always did.
+    let mut legacy = app.stats.outbox[0].clone();
+    legacy.play.id = "legacy".into();
+    legacy.account = None;
+    app.stats.outbox.push(legacy);
+    app.stats.flush_wanted = true;
+    let (body, _, ids) = reported(&app.tick()).expect("the unstamped play goes out");
+    assert_eq!(ids, vec!["legacy".to_string()]);
+    assert_eq!(body["plays"].as_array().unwrap().len(), 1);
+    app.stats_reported(ids, crate::tui::worker::ReportOutcome::Settled(vec!["legacy".into()]));
+
+    // Alice is back: her play goes out.
+    app.session.username = Some("alice".into());
+    app.stats.flush_wanted = true;
+    let (_, _, ids) = reported(&app.tick()).expect("alice's play goes out under alice");
+    assert_eq!(ids.len(), 1);
+}
+
+#[test]
+fn a_details_block_answering_after_a_newer_rating_keeps_the_new_rating() {
+    // The review's race: rate a track while its details fetch is still out,
+    // and the older reply's rating won in the sheet and the bar's card while
+    // the queue's copy was right.
+    let mut app = connected_app();
+    app.queue.replace(vec![item("a.mp3")]);
+    let origin = Origin { server: "http://host:3000".into(), peer: None };
+    let asked = app.fetch_track_info(&origin, "a.mp3");
+    assert!(matches!(asked.as_slice(), [Effect::Api(ApiCmd::TrackInfo { .. })]), "{asked:?}");
+    app.rate_track(&origin, "a.mp3", Some(8));
+    let mut block = track("a.mp3");
+    block.metadata.rating = Some(4); // the server's copy from before the write
+    app.consume_track_info("a.mp3".into(), Some(block));
+    assert_eq!(app.track_info.as_ref().and_then(|t| t.metadata.rating), Some(8), "the newer write stands in the block");
+    assert_eq!(app.rating_of("a.mp3"), Some(8));
+
+    // A block asked for after the write is the truth and is taken whole.
+    app.fetch_track_info(&origin, "a.mp3");
+    let mut block = track("a.mp3");
+    block.metadata.rating = Some(2);
+    app.consume_track_info("a.mp3".into(), Some(block));
+    assert_eq!(app.rating_of("a.mp3"), Some(2));
+    assert_eq!(app.rating_known("nowhere.mp3"), None, "no copy, no word");
+}
+
+#[test]
+fn a_full_art_cache_lets_go_of_the_oldest_cover_nothing_on_screen_needs() {
+    // The review's finding: the cache evicted by clearing everything at the
+    // cap, so a wall page over the cap re-asked for its covers every frame.
+    let mut app = connected_app();
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "queued.jpeg")]);
+    app.now_playing = Some(track_with_cover("lib/p.mp3", "playing.jpeg"));
+    app.fetch_art_from("queued.jpeg", None);
+    app.fetch_art_from("playing.jpeg", None);
+    for i in 0..ART_CACHE_CAP - 2 {
+        app.fetch_art_from(&format!("wall{i}.jpeg"), None);
+    }
+    assert_eq!(app.art.len(), ART_CACHE_CAP);
+    app.fetch_art_from("new.jpeg", None);
+    assert_eq!(app.art.len(), ART_CACHE_CAP, "one out, one in");
+    assert!(!app.art.contains_key("wall0.jpeg"), "the oldest unpinned cover went");
+    for kept in ["queued.jpeg", "playing.jpeg", "new.jpeg", "wall1.jpeg"] {
+        assert!(app.art.contains_key(kept), "{kept} stays");
+    }
+    // A slot given back by an unanswered ask is forgotten, not evicted twice.
+    app.art.remove("wall1.jpeg");
+    app.fetch_art_from("newer.jpeg", None);
+    assert!(app.art.contains_key("wall2.jpeg") && app.art.contains_key("newer.jpeg"), "nothing else went for a gap");
 }

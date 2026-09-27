@@ -70,6 +70,12 @@ act:
   added_to: "已添加到 %{name}"
   add_failed_why: "无法添加到播放列表 — %{why}"
 
+# The shared App's playback notes (both shells show them).
+play:
+  unplayable_all: "无法播放这些曲目 — 请检查文件或服务器。"
+  skipping_why: "跳过无法播放的曲目 — %{what}：%{why}"
+  skipping: "跳过无法播放的曲目 — %{what}"
+
 login_problem:
   username: "请输入用户名"
   password: "请输入密码"
@@ -1129,9 +1135,10 @@ gui:
     remember_sub: "下次不再询问，始终以这种方式开始。"
     pick_banner: "选择开场曲 — 在媒体库中任选一首"
     start_keys: "↑↓ 移动 · Enter 选择 · 空格 记住 · Esc 取消"
+    picker_keys: "↑↓ 移动 · 空格 切换 · Enter 完成"
     title: "Auto DJ"
-    state_on: "• 开 · 从 %{server} 挑选"
-    state_off: "• 关"
+    state_on: "开 · 从 %{server} 挑选"
+    state_off: "关"
     status_on: "Auto DJ 已开启"
     status_on_detail: "当队列即将播完时，将从 %{server} 挑选歌曲。"
     status_off: "Auto DJ 已关闭"
@@ -1181,7 +1188,6 @@ gui:
     rating: "最低评分"
     rating_sub: "仅挑选评分达到或高于此值的歌曲。"
     rating_any: "不限"
-    rating_value: "%{stars} ★"
     length: "曲目时长"
     length_sub: "仅选择时长在指定范围内的曲目，跳过间奏和长混音"
     length_any: "不限时长"
@@ -1432,8 +1438,8 @@ gui:
     year: "年份"
     path: "目标位置"
     path_tip: "库中的路径 — 手动修改会保留到下一个来源为止"
-    preview_no_library: "‹未选曲库›/%{path}"
-    preview_contents: "‹种子内容›"
+    preview_no_library: "未选曲库"
+    preview_contents: "种子内容"
     rename_root: "重命名种子根文件夹"
     rename_root_desc: "与目标文件夹名保持一致"
     force_fresh: "强制重新下载"

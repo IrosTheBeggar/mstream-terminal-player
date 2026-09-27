@@ -507,7 +507,7 @@ pub fn run(args: ReplayArgs) -> i32 {
             // answer.
             if !matches!(event, Event::Status(_)) {
                 outstanding = outstanding.saturating_sub(1);
-                println!("   ← {event:?}");
+                println!("   ← {}", redact(&format!("{event:?}")));
             }
             let more = app.apply_event(event);
             pending.extend(more);
@@ -614,8 +614,24 @@ pub fn run(args: ReplayArgs) -> i32 {
 
 fn report(effects: &[Effect]) {
     for effect in effects {
-        println!("   → {effect:?}");
+        println!("   → {}", redact(&format!("{effect:?}")));
     }
+}
+
+/// Secrets never reach the transcript: a token, a password, a pairing code
+/// or a loopback token inside a Debug print is replaced by a marker. The
+/// harness prints every event and effect, and a `Connected` or a `Login`
+/// carries the session's (the review's finding) — a transcript pasted into
+/// a bug report must not carry a working credential with it.
+fn redact(text: &str) -> String {
+    static SECRET: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = SECRET.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?P<key>\b(?:token|password|credential|local_token|code|guest_token|ticket)\b: (?:Some\()?)"[^"]*""#,
+        )
+        .expect("a fixed pattern")
+    });
+    re.replace_all(text, r#"${key}"<redacted>""#).into_owned()
 }
 
 #[cfg(test)]
@@ -670,6 +686,31 @@ mod tests {
         assert!(html.contains("color:#010203;background:#ff0000;"), "{html}");
         assert!(html.contains("a&lt;b"), "a symbol is data, not markup");
         assert!(html.contains("plain"));
+    }
+
+    #[test]
+    fn secrets_are_redacted_from_the_transcript() {
+        let event = Event::Connected {
+            server: "http://h".into(),
+            id: "http://h".into(),
+            username: Some("tester".into()),
+            token: Some("s3cret".into()),
+            ping: Box::default(),
+        };
+        let shown = redact(&format!("{event:?}"));
+        assert!(!shown.contains("s3cret") && shown.contains("token: Some(\"<redacted>\")"), "{shown}");
+        assert!(shown.contains("tester"), "only the secrets go: {shown}");
+        let cmd = crate::tui::worker::ApiCmd::Login {
+            server: "s".into(),
+            identity: "s".into(),
+            username: "u".into(),
+            password: "pw".into(),
+            self_signed: false,
+            local_token: Some("lt".into()),
+            peer: None,
+        };
+        let shown = redact(&format!("{cmd:?}"));
+        assert!(!shown.contains("\"pw\"") && !shown.contains("\"lt\""), "{shown}");
     }
 
     #[test]

@@ -614,6 +614,49 @@ pub fn peer_identity(parent: &str, id: i64) -> String {
     format!("{PEER_ID_PREFIX}{id}@{}", parent.trim_end_matches('/'))
 }
 
+/// A peer identity taken apart: the row id and the parent inside it.
+pub fn peer_identity_parts(identity: &str) -> Option<(i64, &str)> {
+    let (id, parent) = identity.strip_prefix(PEER_ID_PREFIX)?.split_once('@')?;
+    Some((id.parse().ok()?, parent))
+}
+
+/// What `identity` becomes when the saved server `old` is re-addressed as
+/// `new` (contract clause 1: the URL is the identity, so everything that
+/// named it follows): the server itself, or a peer minted under it.
+/// `None` for an identity the change does not touch.
+pub fn renamed_identity(identity: &str, old: &str, new: &str) -> Option<String> {
+    if same_server(identity, old) {
+        return Some(new.to_string());
+    }
+    let (id, parent) = peer_identity_parts(identity)?;
+    same_server(parent, old).then(|| peer_identity(new, id))
+}
+
+/// The saved server `old` was re-addressed as `new` — its entry already
+/// carries the new spelling — and what named it follows (contract clause
+/// 1): the default, the peers reached through it (their parent link and
+/// the identity minted from it), Auto DJ's server. Both of the servers
+/// room's edit paths call this; without it the peers said they had no
+/// parent at the next switch.
+pub fn follow_rename(config: &mut Config, old: &str, new: &str) {
+    if config.default_server.as_deref().is_some_and(|d| same_server(d, old)) {
+        config.default_server = Some(new.to_string());
+    }
+    for entry in config.servers.iter_mut() {
+        if let Some(peer) = entry.peer.as_mut()
+            && same_server(&peer.parent, old)
+        {
+            peer.parent = new.to_string();
+            entry.url = peer_identity(new, peer.id);
+        }
+    }
+    if let Some(server) = config.player.autodj_server.as_mut()
+        && let Some(renamed) = renamed_identity(server, old, new)
+    {
+        *server = renamed;
+    }
+}
+
 /// What to call an entry: a peer's name, a tunnel's short identity, a
 /// standard server's address.
 pub fn display_name(entry: &ServerEntry) -> String {

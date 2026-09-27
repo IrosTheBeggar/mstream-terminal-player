@@ -313,6 +313,7 @@ pub(crate) fn known_servers(
             id: entry.url.clone(),
             name: config::display_name(entry),
             token: config::token_for(credentials, &entry.url),
+            username: entry.username.clone(),
             self_signed: entry.self_signed,
             peer: entry.peer.as_ref().map(|p| (p.parent.clone(), p.id)),
             // What a queued row on this server is dialled with, when the
@@ -839,13 +840,17 @@ fn adopt_log_level(config: &mut config::Config, app: &App) {
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn save_login(app: &App) -> Result<(), String> {
     let mut config = config::load()?;
-    config::touch_server(&mut config, &app.session.server_id, app.session.username.clone());
+    // A peer session's account and token are its parent's: the peer entry
+    // has neither of its own (multi-server clause 26), and a token filed
+    // under the peer's identity is one the parent's next launch never finds.
+    let owner = app.session.peer.as_ref().map_or(app.session.server_id.as_str(), |(parent, _)| parent.as_str());
+    config::touch_server(&mut config, owner, app.session.username.clone());
     config.player.adopt(app.prefs());
     adopt_log_level(&mut config, app);
     config::save(&config)?;
 
     let mut credentials = config::load_credentials()?;
-    config::store_token(&mut credentials, &app.session.server_id, app.session.token.clone());
+    config::store_token(&mut credentials, owner, app.session.token.clone());
     // The pairing code goes in beside the token: both are secrets, and the
     // code is what turns a remembered tunnel identity back into a connection.
     if crate::quickconnect::is_tunnel_id(&app.session.server_id) {
