@@ -6,7 +6,7 @@
 //! advancement, repeat/shuffle — testable without a terminal or a server.
 
 use rust_i18n::t;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 // Key handling lives in `super::keymap` now; the app only meets key events
@@ -604,6 +604,18 @@ pub struct Origin {
     pub server: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer: Option<i64>,
+}
+
+/// Drop the oldest entry of a full cache that nothing pinned needs — or
+/// nothing, when every entry is pinned. A name the map no longer holds (an
+/// unanswered ask gave its slot back) is forgotten on the way.
+fn evict_oldest<T>(map: &mut HashMap<String, T>, order: &mut VecDeque<String>, pinned: &HashSet<String>) {
+    order.retain(|name| map.contains_key(name));
+    if let Some(at) = order.iter().position(|name| !pinned.contains(name))
+        && let Some(name) = order.remove(at)
+    {
+        map.remove(&name);
+    }
 }
 
 /// Why Auto DJ picked a row, for the queue's badge (auto-dj contract,
@@ -1784,6 +1796,8 @@ pub struct App {
     /// waiting" — the two draw the same, and the entry is what stops a
     /// second request either way.
     pub art: HashMap<String, Option<Art>>,
+    /// The cache's insertion order, oldest first: what goes when it fills.
+    art_order: VecDeque<String>,
     /// Track shapes fetched this session, keyed by filepath. `None` records
     /// both "asked, nothing there" and "asked, still waiting" — the bar draws
     /// the same either way, and the entry is what stops a second request.
@@ -1792,6 +1806,7 @@ pub struct App {
     /// belongs to one recording where a cover belongs to a whole album — so
     /// this turns over faster than [`App::art`] does.
     pub waveforms: HashMap<String, Option<Vec<u8>>>,
+    waveform_order: VecDeque<String>,
     /// What the terminal can draw as pixels rather than characters, and the
     /// cover encoded for it. Starts off and is only ever turned on by the
     /// real binary against a real terminal — a test, a replay run and the
@@ -1953,7 +1968,9 @@ impl App {
             stats: stats::Stats::default(),
             now_playing: None,
             art: HashMap::new(),
+            art_order: VecDeque::new(),
             waveforms: HashMap::new(),
+            waveform_order: VecDeque::new(),
             graphics: crate::tui::graphics::Graphics::disabled(),
             audio_available: true,
             tap: None,
@@ -4997,10 +5014,27 @@ impl App {
             return None;
         }
         if self.art.len() >= ART_CACHE_CAP {
-            self.art.clear();
+            // The oldest cover nothing on screen needs goes — never the
+            // playing track's or a queued row's; the wall's page is the
+            // newest and stays by age. Clearing the lot re-asked for
+            // ninety covers a frame (the review's finding).
+            let pinned = self.pinned_art();
+            evict_oldest(&mut self.art, &mut self.art_order, &pinned);
         }
         self.art.insert(file.to_string(), None);
+        self.art_order.push_back(file.to_string());
         Some(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach }))
+    }
+
+    /// The covers on screen whatever else is: the playing track's and the
+    /// queue's rows'.
+    fn pinned_art(&self) -> HashSet<String> {
+        self.queue
+            .items
+            .iter()
+            .filter_map(|item| item.metadata.album_art.clone())
+            .chain(self.now_playing.as_ref().and_then(|t| t.metadata.album_art.clone()))
+            .collect()
     }
 
     /// The session generation (see the field): what a library or search ask
@@ -5080,9 +5114,12 @@ impl App {
             return None;
         }
         if self.waveforms.len() >= ART_CACHE_CAP {
-            self.waveforms.clear();
+            // The same rule as the covers': the queue's shapes stay.
+            let pinned: HashSet<String> = self.queue.items.iter().map(|item| item.filepath.clone()).collect();
+            evict_oldest(&mut self.waveforms, &mut self.waveform_order, &pinned);
         }
         self.waveforms.insert(filepath.to_string(), None);
+        self.waveform_order.push_back(filepath.to_string());
         Some(Effect::Api(ApiCmd::Waveform { filepath: filepath.to_string(), reach }))
     }
 

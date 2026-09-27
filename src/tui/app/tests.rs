@@ -5463,10 +5463,12 @@ fn the_art_cache_is_bounded() {
     }
     assert_eq!(app.art.len(), ART_CACHE_CAP);
 
-    // One more starts the cache over rather than growing without bound.
+    // One more lets the oldest cover go rather than growing without
+    // bound — or starting over, which re-asked for a whole wall.
     app.replace_queue(vec![track_with_cover("lib/a.mp3", "again.jpeg")]);
     app.play_index(0);
-    assert_eq!(app.art.len(), 1);
+    assert_eq!(app.art.len(), ART_CACHE_CAP);
+    assert!(!app.art.contains_key("0.jpeg") && app.art.contains_key("again.jpeg"));
 }
 
 // ── Crossfade announcements and handovers (Phase C3) ────────────────────────
@@ -7186,4 +7188,29 @@ fn a_details_block_answering_after_a_newer_rating_keeps_the_new_rating() {
     app.consume_track_info("a.mp3".into(), Some(block));
     assert_eq!(app.rating_of("a.mp3"), Some(2));
     assert_eq!(app.rating_known("nowhere.mp3"), None, "no copy, no word");
+}
+
+#[test]
+fn a_full_art_cache_lets_go_of_the_oldest_cover_nothing_on_screen_needs() {
+    // The review's finding: the cache evicted by clearing everything at the
+    // cap, so a wall page over the cap re-asked for its covers every frame.
+    let mut app = connected_app();
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "queued.jpeg")]);
+    app.now_playing = Some(track_with_cover("lib/p.mp3", "playing.jpeg"));
+    app.fetch_art_from("queued.jpeg", None);
+    app.fetch_art_from("playing.jpeg", None);
+    for i in 0..ART_CACHE_CAP - 2 {
+        app.fetch_art_from(&format!("wall{i}.jpeg"), None);
+    }
+    assert_eq!(app.art.len(), ART_CACHE_CAP);
+    app.fetch_art_from("new.jpeg", None);
+    assert_eq!(app.art.len(), ART_CACHE_CAP, "one out, one in");
+    assert!(!app.art.contains_key("wall0.jpeg"), "the oldest unpinned cover went");
+    for kept in ["queued.jpeg", "playing.jpeg", "new.jpeg", "wall1.jpeg"] {
+        assert!(app.art.contains_key(kept), "{kept} stays");
+    }
+    // A slot given back by an unanswered ask is forgotten, not evicted twice.
+    app.art.remove("wall1.jpeg");
+    app.fetch_art_from("newer.jpeg", None);
+    assert!(app.art.contains_key("wall2.jpeg") && app.art.contains_key("newer.jpeg"), "nothing else went for a gap");
 }
