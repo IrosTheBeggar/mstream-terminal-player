@@ -19,7 +19,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use rust_i18n::t;
 
 use super::tz::{self, Zone};
@@ -50,6 +50,9 @@ const CHART_ROWS_MAX: u16 = 8;
 /// The rows a chart spends around its columns: the title above, the
 /// baseline and the labels below.
 const CHART_FRAME: u16 = 3;
+/// A tile's card: the frame's two rows around the value, the label and
+/// the detail (stats-screen contract, clause 13).
+const CARD_ROWS: u16 = 5;
 /// The share bar's cells.
 const SHARE_W: usize = 10;
 /// The fewest cells the split's bar beside the hours chart shrinks to
@@ -1132,14 +1135,14 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
         return;
     }
     draw_controls(frame, page, line(y));
-    y += 2;
+    y += 1;
 
     let Some(data) = page.data.as_ref() else { return };
     if data.summary.events == 0 {
-        if y + 1 < body.bottom() {
-            frame.render_widget(Paragraph::new(Span::styled(t!("sta.nothing_title", period = page.period.name.clone()).to_string(), bold())), line(y + 1));
+        if y + 2 < body.bottom() {
+            frame.render_widget(Paragraph::new(Span::styled(t!("sta.nothing_title", period = page.period.name.clone()).to_string(), bold())), line(y + 2));
         }
-        if y + 3 < body.bottom() {
+        if y + 4 < body.bottom() {
             let begins = data
                 .periods
                 .as_ref()
@@ -1150,27 +1153,35 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
                 Some(date) => t!("sta.nothing_hint", date = date).to_string(),
                 None => t!("sta.nothing_hint_plain").to_string(),
             };
-            frame.render_widget(Paragraph::new(Span::styled(hint, dim())), line(y + 3));
+            frame.render_widget(Paragraph::new(Span::styled(hint, dim())), line(y + 4));
         }
         return;
     }
 
-    // The six tiles, two rows of three: value bold, label and detail dim.
+    // The six tiles, two rows of three cards (stats-screen contract,
+    // clause 13): the kit's rounded frame, dim, no fill; inside, the value
+    // bold, the label and the detail dim. The cards fill the column, one
+    // cell between, and the rows stack frame to frame.
     let versus = versus_label(&page.period, &page.options);
     let tiles = tiles(&data.summary, data.previous.as_ref(), versus.as_deref());
-    let tile_w = body.width / 3;
+    let columns = card_columns(body);
     for (i, (value, label, detail)) in tiles.iter().enumerate() {
-        let x = body.x + (i as u16 % 3) * tile_w;
-        let top = y + (i as u16 / 3) * 4;
-        if top + 3 > body.bottom() {
+        let (x, w) = columns[i % 3];
+        let top = y + (i as u16 / 3) * CARD_ROWS;
+        if top + CARD_ROWS > body.bottom() {
             break;
         }
-        let cell = |dy: u16| Rect { x, y: top + dy, width: tile_w.saturating_sub(1), height: 1 };
-        frame.render_widget(Paragraph::new(Span::styled(clip(value, tile_w - 1), bold())), cell(0));
-        frame.render_widget(Paragraph::new(Span::styled(clip(label, tile_w - 1), dim())), cell(1));
-        frame.render_widget(Paragraph::new(Span::styled(clip(detail, tile_w - 1), dim())), cell(2));
+        let card = Rect { x, y: top, width: w, height: CARD_ROWS };
+        let block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(dim());
+        let inner = block.inner(card);
+        frame.render_widget(block, card);
+        let text_w = inner.width.saturating_sub(1);
+        let row = |dy: u16| Rect { x: inner.x + 1, y: inner.y + dy, width: text_w, height: 1 };
+        frame.render_widget(Paragraph::new(Span::styled(clip(value, text_w), bold())), row(0));
+        frame.render_widget(Paragraph::new(Span::styled(clip(label, text_w), dim())), row(1));
+        frame.render_widget(Paragraph::new(Span::styled(clip(detail, text_w), dim())), row(2));
     }
-    y += 8;
+    y += 2 * CARD_ROWS;
 
     // Plays per day (or week, or month): one eighth-block column per
     // bucket, on a scale. The two charts share the rows under the tiles.
@@ -1276,6 +1287,22 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
             frame.render_widget(Paragraph::new(Span::styled(t!("sta.origin_peers_note_2").to_string(), dim())), Rect { x: x + name_w as u16, ..row(5) });
         }
     }
+}
+
+/// The three card columns across `body` as (x, width): one cell between
+/// them, the width's remainder to the first cards, so the row's edges are
+/// the column's own.
+fn card_columns(body: Rect) -> [(u16, u16); 3] {
+    let usable = body.width.saturating_sub(2);
+    let (base, extra) = (usable / 3, usable % 3);
+    let mut out = [(0, 0); 3];
+    let mut x = body.x;
+    for (i, slot) in out.iter_mut().enumerate() {
+        let w = base + u16::from((i as u16) < extra);
+        *slot = (x, w);
+        x += w + 1;
+    }
+    out
 }
 
 /// The rows for each of the two charts, from the rows left under the
@@ -2491,10 +2518,10 @@ mod tests {
         // stats-screen contract, clauses 8–11: whole-number ticks down the
         // left, `0 ┼` at the foot, a baseline with a tick under every
         // label, the labels under their ticks, no gridlines; three rows of
-        // columns on a 30-row terminal, six on 36, eight on 46 and on 70.
+        // columns on a 32-row terminal, five on 36, eight on 46 and on 70.
         let _en = english();
         let mut p = ready();
-        for (height, rows) in [(30u16, 3usize), (36, 6), (46, 8), (70, 8)] {
+        for (height, rows) in [(32u16, 3usize), (36, 5), (46, 8), (70, 8)] {
             let frame = draw_at(&mut p, 100, height);
             let lines: Vec<&str> = frame.lines().collect();
             let title = lines.iter().position(|l| l.contains("PLAYS PER DAY")).unwrap_or_else(|| panic!("no day chart at {height} rows:\n{frame}"));
@@ -2525,11 +2552,14 @@ mod tests {
             assert!(lines[hours + 2 + rows].contains("23"), "the last hour:\n{frame}");
             assert!(!frame.contains('┈') && !frame.contains('╌'), "no gridlines:\n{frame}");
         }
-        // The classic 80×24: the day chart alone, on three rows, and the
-        // hours chart yields, as before.
-        let small = draw_at(&mut p, 80, 24);
+        // Short terminals: at 80×26 the day chart alone, on three rows, and
+        // the hours chart yields; at 80×24 the cards alone (clause 13).
+        let small = draw_at(&mut p, 80, 26);
         assert!(small.contains("PLAYS PER DAY") && small.contains("   0 ┼─┴"), "{small}");
         assert!(!small.contains("WHEN YOU LISTEN"), "{small}");
+        let tiny = draw_at(&mut p, 80, 24);
+        assert_eq!(tiny.matches('╭').count(), 6, "{tiny}");
+        assert!(!tiny.contains("PLAYS PER DAY"), "{tiny}");
     }
 
     fn draw(page: &mut Page) -> String {
@@ -2569,7 +2599,7 @@ mod tests {
 
         let seq = p.seq;
         p.apply(Done::Loaded { seq, result: Ok(loaded(summary(388, 425), Some(periods()))) });
-        let frame = draw(&mut p);
+        let frame = draw_at(&mut p, 100, 32);
         assert!(frame.contains("• This month — 388 plays · 31h 12m · 188 tracks · times in UTC"), "{frame}");
         assert!(frame.contains(" Overview ") && frame.contains(" Top ") && frame.contains(" Recent "), "{frame}");
         assert!(frame.contains("PERIOD  ‹ This month ›   [ ] step · p list"), "{frame}");
@@ -2580,6 +2610,22 @@ mod tests {
         for (value, label, detail) in tiles {
             assert!(frame.contains(value) && frame.contains(label) && frame.contains(detail), "tile {label}:\n{frame}");
         }
+        // The tiles are cards (stats-screen contract, clause 13): six
+        // rounded frames, three across filling the column edge to edge,
+        // the two rows stacked frame to frame, the values a cell in.
+        assert_eq!(frame.matches('╭').count(), 6, "{frame}");
+        let lids: Vec<&str> = frame.lines().filter(|l| l.contains('╭')).collect();
+        let lid = lids[0].trim_end();
+        assert!(lid.starts_with("  ╭") && lid.ends_with('╮') && lid.chars().count() == 98, "the cards fill the column: {lid:?}");
+        assert!(lid.matches('╮').count() == 3 && lid.contains("╮ ╭"), "one cell between the cards: {lid:?}");
+        let values = row(&frame, "│ 388 ");
+        assert!(values.contains("│ 31h 12m ") && values.contains("│ 188 ") && values.trim_end().ends_with('│'), "{values}");
+        assert!(row(&frame, "│ 37 ").contains("│ 6 days ") && row(&frame, "│ 37 ").contains("│ 42 "), "{frame}");
+        let lines: Vec<&str> = frame.lines().collect();
+        let first_lid = lines.iter().position(|l| l.contains('╭')).unwrap();
+        assert!(lines[first_lid - 1].contains("PERIOD"), "the top frame sits under the controls:\n{frame}");
+        assert!(lines[first_lid + 4].contains('╰') && lines[first_lid + 5].contains('╭') && lines[first_lid + 9].contains('╰'), "{frame}");
+        assert!(lines[first_lid + 10].contains("PLAYS PER DAY"), "the chart follows the second row of cards:\n{frame}");
         assert!(row(&frame, "PLAYS PER DAY").contains("most on Tue 8 · 41 plays, 2h 10m"), "{frame}");
         assert!(frame.contains("WHEN YOU LISTEN  most around 21:00, Sundays"), "{frame}");
         assert!(frame.contains("WHERE THE TRACKS LIVE"), "{frame}");
@@ -2588,7 +2634,7 @@ mod tests {
         // contract, clause 12); ten columns wider, the bar is whole.
         assert!(row(&frame, "this server   ▰").contains("▰▰▰▰▰  374 plays · 28h 40m"), "{frame}");
         assert!(row(&frame, "peers’ tracks").contains("▱▱▱▱▱  38 plays · 2h 32m"), "{frame}");
-        let wide = draw_at(&mut p, 110, 30);
+        let wide = draw_at(&mut p, 110, 32);
         assert!(row(&wide, "this server   ▰").contains("▰▰▰▰▰▰▰▰▰▱  374 plays · 28h 40m"), "{wide}");
         assert!(row(&wide, "peers’ tracks").contains("▰▱▱▱▱▱▱▱▱▱  38 plays · 2h 32m"), "{wide}");
         assert!(frame.contains("█"), "the tallest day is a full column:\n{frame}");

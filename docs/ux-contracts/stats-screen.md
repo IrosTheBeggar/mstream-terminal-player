@@ -98,6 +98,16 @@ The page's two column charts — plays per day (or week, or month) and the
     axis's gutter costs that row its cells — and never fewer than four;
     with less room than that the split is not drawn, as before.
 
+### The tiles
+
+13. **The six tiles are cards**: the kit's rounded frame, dim, no fill,
+    one cell of padding; inside, the value bold, the label and the detail
+    dim, as before. Three across, filling the column with one cell between
+    (the width's remainder goes to the first cards), the two rows stacked
+    frame to frame, the top row's frame directly under the period
+    controls. The frames cost the rows under the tiles one row against the
+    bare tiles; the charts yield as clause 10 says.
+
 ## Wording
 
 The page's own strings (`sta.*`). New: the tab is the page's title
@@ -127,3 +137,9 @@ the no-session sentence; `gui.tips.base` names `T`.
   call; the floor fell from four rows to three so that a 30-row terminal
   keeps both charts and a 24-row terminal keeps one, each now a row
   taller with its baseline.
+- **2026-09-27 — Cards (clause 13).** Asked for once the axes were in:
+  borders on the six tiles. Drawn as the kit's rounded cards, each its
+  own frame, rather than as a shared-border grid, which would have cost
+  no row: the grid reads as a table, the cards as the webapp's tiles. The
+  row the frames cost comes out of the charts' share — a 30-row hub
+  terminal keeps the day chart alone, a 24-row one the tiles alone.

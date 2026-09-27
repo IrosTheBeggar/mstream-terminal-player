@@ -544,7 +544,7 @@ the "Player Stats" canvas: the server's `/stats` page (Stats API v2, mStream 6.2
 page on the hub's session and sign-in — any account, since the log is per account, so `run_stats`
 shares the preflight (`ensure_session`) with `admin::run` but is not a room. One state line (the
 period and its totals, "times in your zone" / "in UTC"), three tabs: Overview (the webapp's six
-tiles with the delta against the previous period — a second `/stats/summary` at offset−1 — plays
+tiles as rounded cards with the delta against the previous period — a second `/stats/summary` at offset−1 — plays
 per day/week/month as eighth-block columns from `/stats/timeseries` — on a whole-number scale with a
 ticked baseline, three to eight rows as the screen allows (2026-09-27) — the hourOfDay profile, the
 local/peer split with the ▰▱ bar while peer plays exist), Top (`/stats/top`, entity on `t`, metric on
