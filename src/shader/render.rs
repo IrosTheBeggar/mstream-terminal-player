@@ -198,8 +198,18 @@ impl Gpu {
     /// named and the compiler's reason — which can be a panic inside naga,
     /// caught here so it costs one preset.
     pub fn compile(&self, preset: &Preset) -> Result<Scene, String> {
+        // Every pass's uniforms in one buffer, a block each at an offset the
+        // device will bind at, written in one go each frame; each pass's
+        // group, bound to its block, made once, here.
+        let stride = stride(self.device.limits().min_uniform_buffer_offset_alignment);
+        let uniforms = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("uniforms"),
+            size: (stride * preset.passes.len()) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mut passes = Vec::new();
-        for pass in &preset.passes {
+        for (i, pass) in preset.passes.iter().enumerate() {
             let name = pass.name.as_str();
             let source = glsl::translate(preset, pass).map_err(|e| format!("{name}: {e}"))?;
             let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -210,24 +220,21 @@ impl Gpu {
                 (Ok(_), Some(error)) => return Err(format!("{name}: {error}")),
                 (Ok(pipeline), None) => pipeline,
             };
-            let uniforms = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(name),
-                size: layout::SIZE as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
             let uniform_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some(name),
                 layout: &self.uniform_layout,
                 entries: &[wgpu::BindGroupEntry {
                     binding: layout::UNIFORM_BINDING,
-                    resource: uniforms.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &uniforms,
+                        offset: (stride * i) as u64,
+                        size: wgpu::BufferSize::new(layout::SIZE as u64),
+                    }),
                 }],
             });
             passes.push(Compiled {
                 name: pass.name,
                 pipeline,
-                uniforms,
                 uniform_group,
                 channels: pass.channels,
                 fixed: pass.size,
@@ -236,8 +243,13 @@ impl Gpu {
 
         Ok(Scene {
             history: history(passes.iter().map(|p| (p.name, p.channels))),
+            staged: vec![0; stride * passes.len()],
             passes,
+            uniforms,
+            stride,
             buffers: Default::default(),
+            write: 0,
+            groups: None,
             params: preset.default_params(),
             frame: 0,
             size: (0, 0),
@@ -281,13 +293,32 @@ impl Gpu {
     }
 }
 
+/// A pass's block of uniforms, `layout::SIZE` bytes, rounded up to where the
+/// device lets a binding start.
+fn stride(alignment: u32) -> usize {
+    layout::SIZE.next_multiple_of(alignment.max(1) as usize)
+}
+
 /// One preset, compiled, with its buffers.
 pub struct Scene {
     passes: Vec<Compiled>,
+    /// Every pass's uniforms, a block `stride` bytes after the last.
+    uniforms: wgpu::Buffer,
+    stride: usize,
+    /// This frame's uniforms, laid out as `uniforms` is.
+    staged: Vec<u8>,
     /// Buffers A to D, where the preset has them.
     buffers: [Option<PingPong>; 4],
     /// Per buffer, whether any pass reads it as it was the frame before.
     history: [bool; 4],
+    /// Which of every buffer's two textures this frame writes: they flip
+    /// together, each frame.
+    write: usize,
+    /// Per pass, what its channels read, as a bind group for each value of
+    /// `write` — the only thing that changes between frames. Made with the
+    /// buffers, not each frame (the performance audit's #122); `None` until
+    /// the next [`Scene::resize`] makes them again.
+    groups: Option<Vec<[wgpu::BindGroup; 2]>>,
     params: [f32; MAX_PARAMS],
     frame: i32,
     /// The output size the full-size buffers were made for.
@@ -297,7 +328,7 @@ pub struct Scene {
 struct Compiled {
     name: PassName,
     pipeline: wgpu::RenderPipeline,
-    uniforms: wgpu::Buffer,
+    /// Its block of the scene's uniforms.
     uniform_group: wgpu::BindGroup,
     channels: [Channel; 4],
     fixed: Option<(u32, u32)>,
@@ -305,11 +336,12 @@ struct Compiled {
 
 /// A buffer pass's two textures: one written this frame, the other holding
 /// the last, which is what a pass reading itself sees. A buffer nobody
-/// reads that way has one texture, named twice.
+/// reads that way has one texture, named twice. Which is which is the
+/// scene's `write`: both of a new pair are blank, so a pair made after the
+/// others flips with them as well as it could on its own.
 struct PingPong {
     views: [wgpu::TextureView; 2],
     size: (u32, u32),
-    write: usize,
 }
 
 /// Which buffers some pass reads as they were the frame before: itself,
@@ -347,6 +379,7 @@ impl Scene {
     /// what the window did.
     pub fn resize(&mut self, gpu: &Gpu, size: (u32, u32)) {
         let size = (size.0.max(1), size.1.max(1));
+        let mut remade = false;
         for pass in self.passes.iter().filter(|p| p.name.is_buffer()) {
             let wanted = pass.fixed.unwrap_or(size);
             let current = &mut self.buffers[slot(pass.name)];
@@ -362,9 +395,14 @@ impl Scene {
                 let view = make();
                 [view.clone(), view]
             };
-            *current = Some(PingPong { views, size: wanted, write: 0 });
+            *current = Some(PingPong { views, size: wanted });
+            remade = true;
         }
         self.size = size;
+        if remade || self.groups.is_none() {
+            let groups = self.passes.iter().map(|pass| [0, 1].map(|write| self.group(gpu, pass, write))).collect();
+            self.groups = Some(groups);
+        }
     }
 
     /// Let the full-size buffers go, for a scene that is not being drawn:
@@ -373,7 +411,9 @@ impl Scene {
     /// resize — 05's 1×1 bass baseline comes back where it was.
     pub fn release(&mut self) {
         for pass in self.passes.iter().filter(|p| p.name.is_buffer() && p.fixed.is_none()) {
-            self.buffers[slot(pass.name)] = None;
+            if self.buffers[slot(pass.name)].take().is_some() {
+                self.groups = None;
+            }
         }
     }
 
@@ -396,18 +436,15 @@ impl Scene {
     /// started and `delta` since the last frame; the audio texture is
     /// whatever was last uploaded.
     pub fn draw(&mut self, gpu: &Gpu, target: &wgpu::TextureView, time: f32, delta: f32) {
-        for buffer in self.buffers.iter_mut().flatten() {
-            buffer.write ^= 1;
-        }
+        self.write ^= 1;
         let output = [self.size.0 as f32, self.size.1 as f32];
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        for pass in &self.passes {
-            let (view, size) = match pass.name {
-                PassName::Image => (target, self.size),
-                name => {
-                    let buffer = self.buffers[slot(name)].as_ref().expect("resize made every buffer");
-                    (&buffer.views[buffer.write], buffer.size)
-                }
+        // Every pass's uniforms, and one write for them all: a write stages
+        // its bytes in a buffer of its own, one a frame instead of one a
+        // pass (the performance audit's #122).
+        for (i, pass) in self.passes.iter().enumerate() {
+            let size = match pass.name {
+                PassName::Image => self.size,
+                name => self.buffers[slot(name)].as_ref().expect("resize made every buffer").size,
             };
             let uniforms = Uniforms {
                 resolution: [size.0 as f32, size.1 as f32],
@@ -417,28 +454,17 @@ impl Scene {
                 params: self.params,
                 channel_resolution: output,
             };
-            gpu.queue.write_buffer(&pass.uniforms, 0, &uniforms.to_bytes());
+            self.staged[i * self.stride..][..layout::SIZE].copy_from_slice(&uniforms.to_bytes());
+        }
+        gpu.queue.write_buffer(&self.uniforms, 0, &self.staged);
 
-            let channels: [&wgpu::TextureView; 4] =
-                std::array::from_fn(|i| self.channel(gpu, pass.channels[i], pass.name));
-            let mut entries: Vec<wgpu::BindGroupEntry> = channels
-                .iter()
-                .enumerate()
-                .map(|(i, view)| wgpu::BindGroupEntry {
-                    binding: i as u32,
-                    resource: wgpu::BindingResource::TextureView(view),
-                })
-                .collect();
-            entries.push(wgpu::BindGroupEntry {
-                binding: layout::SAMPLER_BINDING,
-                resource: wgpu::BindingResource::Sampler(&gpu.sampler),
-            });
-            let channel_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(pass.name.as_str()),
-                layout: &gpu.channel_layout,
-                entries: &entries,
-            });
-
+        let groups = self.groups.as_ref().expect("resize made the groups");
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        for (pass, groups) in self.passes.iter().zip(groups) {
+            let view = match pass.name {
+                PassName::Image => target,
+                name => &self.buffers[slot(name)].as_ref().expect("resize made every buffer").views[self.write],
+            };
             let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some(pass.name.as_str()),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -457,11 +483,37 @@ impl Scene {
             });
             render.set_pipeline(&pass.pipeline);
             render.set_bind_group(layout::UNIFORM_GROUP, &pass.uniform_group, &[]);
-            render.set_bind_group(layout::CHANNEL_GROUP, &channel_group, &[]);
+            render.set_bind_group(layout::CHANNEL_GROUP, &groups[self.write], &[]);
             render.draw(0..3, 0..1);
         }
+        // A submission of its own, before the window waits for a surface
+        // to draw on: the GPU shades the preset while the CPU waits.
         gpu.queue.submit([encoder.finish()]);
         self.frame += 1;
+    }
+
+    /// The bind group of what `pass`'s channels read in a frame that writes
+    /// `write` of each buffer's two textures.
+    fn group(&self, gpu: &Gpu, pass: &Compiled, write: usize) -> wgpu::BindGroup {
+        let views: [&wgpu::TextureView; 4] =
+            std::array::from_fn(|i| self.channel(gpu, pass.channels[i], pass.name, write));
+        let mut entries: Vec<wgpu::BindGroupEntry> = views
+            .iter()
+            .enumerate()
+            .map(|(i, view)| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: wgpu::BindingResource::TextureView(view),
+            })
+            .collect();
+        entries.push(wgpu::BindGroupEntry {
+            binding: layout::SAMPLER_BINDING,
+            resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+        });
+        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(pass.name.as_str()),
+            layout: &gpu.channel_layout,
+            entries: &entries,
+        })
     }
 
     /// What a channel reads for the pass `reader`. A buffer that ran earlier
@@ -471,7 +523,7 @@ impl Scene {
     /// buffer still to run over as it was the frame before last — its write
     /// index flips only once the whole frame is drawn. No bundled preset
     /// reads a later buffer, so the two never show the difference.
-    fn channel<'a>(&'a self, gpu: &'a Gpu, channel: Channel, reader: PassName) -> &'a wgpu::TextureView {
+    fn channel<'a>(&'a self, gpu: &'a Gpu, channel: Channel, reader: PassName, write: usize) -> &'a wgpu::TextureView {
         match channel {
             Channel::Unbound => &gpu.black_view,
             Channel::Audio => &gpu.audio_view,
@@ -479,7 +531,7 @@ impl Scene {
                 // Wired to a buffer the file does not have: black, as on
                 // Android.
                 None => &gpu.black_view,
-                Some(ping) => &ping.views[if buffer < reader { ping.write } else { ping.write ^ 1 }],
+                Some(ping) => &ping.views[if buffer < reader { write } else { write ^ 1 }],
             },
         }
     }
@@ -602,6 +654,19 @@ mod tests {
     use super::*;
 
     use crate::shader::library;
+
+    #[test]
+    fn each_pass_s_uniforms_start_where_the_device_can_bind_them() {
+        // WebGL2's floor, which every device here is asked for, is 256.
+        assert_eq!(stride(256), 256);
+        assert_eq!(stride(64), 192);
+        assert_eq!(stride(16), layout::SIZE);
+        assert_eq!(stride(0), layout::SIZE, "no alignment is no padding");
+        for alignment in [1, 4, 32, 64, 128, 256, 512] {
+            let stride = stride(alignment);
+            assert!(stride >= layout::SIZE && stride % alignment as usize == 0, "{alignment}: {stride}");
+        }
+    }
 
     #[test]
     fn the_gpu_asked_for_is_the_users_choice_or_the_cool_one() {
