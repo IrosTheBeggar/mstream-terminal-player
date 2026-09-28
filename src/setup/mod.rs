@@ -192,14 +192,25 @@ impl PartialEq for PathDraft {
 impl Eq for PathDraft {}
 
 impl PathDraft {
-    /// The entries that match the current partial segment, in order.
-    pub fn suggestions(&self) -> Vec<String> {
+    /// The entries that match the current partial segment, in order —
+    /// borrowed, never copied: a listing can run to thousands of folders,
+    /// and the modal shows six. Cloning them all was a string allocation
+    /// per folder on every frame and every cursor key (performance audit
+    /// #115); only an accepted one is copied now.
+    pub fn suggestions(&self) -> impl Iterator<Item = &str> {
         let (_, partial) = split_input(self.text.value());
-        self.entries
-            .iter()
-            .filter(|e| starts_with_fold(e, &partial))
-            .cloned()
-            .collect()
+        self.entries.iter().map(String::as_str).filter(move |e| starts_with_fold(e, &partial))
+    }
+
+    /// How many entries match: the list's length, for the cursor keys, the
+    /// scrollbar and the modal's height.
+    pub fn suggestion_count(&self) -> usize {
+        self.suggestions().count()
+    }
+
+    /// Suggestion `i`, when there is one.
+    pub fn suggestion(&self, i: usize) -> Option<&str> {
+        self.suggestions().nth(i)
     }
 }
 
@@ -990,8 +1001,8 @@ impl Wizard {
     /// a first completion turns "Mus" into a real /home/... path.
     fn accept_suggestion(&mut self, i: usize) {
         if let Modal::PathEntry(draft) = &mut self.modal {
-            let picked = match draft.suggestions().get(i) {
-                Some(entry) => entry.clone(),
+            let picked = match draft.suggestion(i) {
+                Some(entry) => entry.to_string(),
                 None => return,
             };
             let base = if draft.listed_path.is_empty() {
@@ -1621,14 +1632,14 @@ pub(crate) fn starts_with_fold(name: &str, prefix: &str) -> bool {
 }
 
 /// The longest common prefix of the suggestions, case-insensitively, in the
-/// first entry's own casing.
-pub(crate) fn common_prefix(items: &[String]) -> String {
-    let Some(first) = items.first() else { return String::new() };
+/// first entry's own casing. Borrowed names or owned ones alike.
+pub(crate) fn common_prefix<S: AsRef<str>>(items: &[S]) -> String {
+    let Some(first) = items.first().map(AsRef::as_ref) else { return String::new() };
     let mut len = first.chars().count();
     for item in &items[1..] {
         let matched = first
             .chars()
-            .zip(item.chars())
+            .zip(item.as_ref().chars())
             .take_while(|(a, b)| a.to_lowercase().eq(b.to_lowercase()))
             .count();
         len = len.min(matched);
@@ -2014,7 +2025,7 @@ fn event_loop(
 /// that gains nothing, start cycling.
 fn complete_path(wizard: &mut Wizard) {
     let Modal::PathEntry(draft) = &mut wizard.modal else { return };
-    let suggestions = draft.suggestions();
+    let suggestions: Vec<&str> = draft.suggestions().collect();
     if let Some(i) = draft.sel {
         wizard.accept_suggestion(i);
     } else if suggestions.len() == 1 {
@@ -2051,13 +2062,13 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
                     }
                 }
                 KeyCode::Down => {
-                    let n = draft.suggestions().len();
+                    let n = draft.suggestion_count();
                     if n > 0 {
                         draft.sel = Some(draft.sel.map_or(0, |i| (i + 1) % n));
                     }
                 }
                 KeyCode::Up | KeyCode::BackTab => {
-                    let n = draft.suggestions().len();
+                    let n = draft.suggestion_count();
                     if n > 0 {
                         draft.sel = Some(draft.sel.map_or(n - 1, |i| (i + n - 1) % n));
                     }
@@ -3234,8 +3245,8 @@ fn draw_browser(frame: &mut Frame, wizard: &mut Wizard, area: Rect, browse: &Bro
 }
 
 fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &PathDraft) {
-    let suggestions = draft.suggestions();
-    let shown = suggestions.len().min(6) as u16;
+    let count = draft.suggestion_count();
+    let shown = count.min(6) as u16;
     // Anchored as if always full: the title and input hold one spot and
     // the suggestion list grows DOWNWARD beneath them.
     let inner = kit::modal_frame_anchored(frame, area, 62, 7 + shown, 13, th().accent);
@@ -3254,15 +3265,15 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
     );
     let sel_moved = draft.sel != draft.sel_anchor;
     let reveal = if sel_moved { draft.sel } else { None };
-    let (first, visible) = kit::table_view(suggestions.len(), reveal, draft.scroll, 6);
+    let (first, visible) = kit::table_view(count, reveal, draft.scroll, 6);
     if let Modal::PathEntry(d) = &mut wizard.modal {
         d.scroll = first;
         d.sel_anchor = d.sel;
     }
-    let overflow = suggestions.len() > visible;
+    let overflow = count > visible;
     let row_width = if overflow { inner.width.saturating_sub(1) } else { inner.width };
-    for (row, i) in (first..first + visible).enumerate() {
-        let entry = &suggestions[i];
+    for (row, entry) in draft.suggestions().skip(first).take(visible).enumerate() {
+        let i = first + row;
         let selected = draft.sel == Some(i);
         let rect =
             Rect { x: inner.x, y: inner.y + 4 + row as u16, width: row_width, height: 1 };
@@ -3290,7 +3301,7 @@ fn draw_path_entry(frame: &mut Frame, wizard: &mut Wizard, area: Rect, draft: &P
         frame,
         &mut wizard.ui,
         bar,
-        suggestions.len(),
+        count,
         visible,
         first,
         Act::PathScroll(-1),
@@ -3879,13 +3890,30 @@ pub(crate) mod tests {
         assert_eq!(split_input("C:\\Us"), ("C:\\".to_string(), "Us".to_string()));
     }
 
+    /// The list is read where it lies (performance audit #115): its length
+    /// and the rows a frame shows come borrowed, whatever the listing's
+    /// size, and only an accepted suggestion is copied.
+    #[test]
+    fn suggestions_are_counted_and_windowed_where_they_lie() {
+        let entries: Vec<String> = (0..5000).map(|i| format!("Artist {i:04}")).collect();
+        let mut draft = PathDraft { text: "/srv/music/".into(), entries, ..PathDraft::default() };
+        assert_eq!(draft.suggestion_count(), 5000, "an empty partial matches every folder");
+        assert_eq!(draft.suggestions().skip(4998).take(6).collect::<Vec<_>>(), vec!["Artist 4998", "Artist 4999"]);
+        draft.text = "/srv/music/artist 12".into();
+        assert_eq!(draft.suggestion_count(), 100);
+        assert_eq!(draft.suggestion(0), Some("Artist 1200"));
+        assert_eq!(draft.suggestion(99), Some("Artist 1299"));
+        assert_eq!(draft.suggestion(100), None);
+    }
+
     #[test]
     fn suggestions_filter_case_insensitively_and_share_a_prefix() {
         assert!(starts_with_fold("Music", "mus"));
         assert!(!starts_with_fold("Music", "musik"));
         let items = vec!["Music".to_string(), "Musicals".to_string(), "music-old".to_string()];
         assert_eq!(common_prefix(&items), "Music");
-        assert_eq!(common_prefix(&[]), "");
+        assert_eq!(common_prefix(&["Music", "musicals"]), "Music", "borrowed names alike");
+        assert_eq!(common_prefix::<&str>(&[]), "");
     }
 
     #[test]
@@ -4060,7 +4088,7 @@ pub(crate) mod tests {
         wizard.refresh_completion();
         assert!(wizard.queued.is_none(), "no listing for an empty input");
         let Modal::PathEntry(draft) = &wizard.modal else { panic!() };
-        assert!(draft.entries.is_empty() && draft.suggestions().is_empty());
+        assert!(draft.entries.is_empty() && draft.suggestion_count() == 0);
     }
 
     #[test]
