@@ -44,6 +44,8 @@ mod viz_window;
 #[cfg(not(target_arch = "wasm32"))]
 mod gui;
 #[cfg(not(target_arch = "wasm32"))]
+mod instance;
+#[cfg(not(target_arch = "wasm32"))]
 mod kit;
 #[cfg(not(target_arch = "wasm32"))]
 mod setup;
@@ -293,6 +295,13 @@ struct TuiArgs {
     /// contract, clause 57); the player has nothing to do with it yet.
     #[arg(long, hide = true)]
     same_machine: bool,
+
+    /// The launcher's instance lock: an exclusive lock on this file for the
+    /// player's lifetime, so the tray never opens a second desktop player
+    /// beside one that is open (instance.rs). A player started by hand
+    /// passes nothing and is not counted.
+    #[arg(long, hide = true, value_name = "PATH")]
+    instance_lock: Option<std::path::PathBuf>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -319,6 +328,13 @@ struct GuiArgs {
     /// contract, clause 57); the player has nothing to do with it yet.
     #[arg(long, hide = true)]
     same_machine: bool,
+
+    /// The launcher's instance lock: an exclusive lock on this file for the
+    /// player's lifetime, so the tray never opens a second desktop player
+    /// beside one that is open (instance.rs). A player started by hand
+    /// passes nothing and is not counted.
+    #[arg(long, hide = true, value_name = "PATH")]
+    instance_lock: Option<std::path::PathBuf>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -392,6 +408,28 @@ fn listening_seconds(raw: &str) -> Result<f64, String> {
 fn main() {
     let cli = Cli::parse();
 
+    // One desktop player per install, settled before anything else starts:
+    // the launcher's instance lock (instance.rs). A second player finds it
+    // held, says so and leaves — before the log, the spool sweep or the
+    // terminal are touched, so the window it was opened in closes at once.
+    let (lock_path, face) = match &cli.command {
+        Some(Command::Tui(args)) => (args.instance_lock.as_deref(), "tui"),
+        Some(Command::Gui(args)) => (args.instance_lock.as_deref(), "gui"),
+        _ => (None, ""),
+    };
+    let instance = match instance::claim(lock_path, face) {
+        Ok(instance::Claim::Held(held)) => Some(held),
+        Ok(instance::Claim::Unlocked) => None,
+        Ok(instance::Claim::Taken(who)) => {
+            println!("{}", instance::already_open_line(who.as_ref()));
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("warning: instance lock unavailable ({e}) - continuing without it");
+            None
+        }
+    };
+
     // The debug log first, before anything can dial: a subscriber installed
     // after the first connection has already missed the interesting part.
     // The boot line goes to stderr — in the TUI it scrolls away under the
@@ -421,16 +459,22 @@ fn main() {
     engine::http::set_spool_dir(spool_dir);
 
     let serve_args = match (cli.command, cli.port) {
+        // The faces return their exit code so the instance lock's sidecar
+        // is removed on the way out (process::exit runs no destructors).
         (Some(Command::Tui(args)), _) => {
-            std::process::exit(tui::run(args.conn.server, args.conn.token, args.bundled_server));
+            let code = tui::run(args.conn.server, args.conn.token, args.bundled_server);
+            drop(instance);
+            std::process::exit(code);
         }
         (Some(Command::Gui(args)), _) => {
-            std::process::exit(gui::run(
+            let code = gui::run(
                 args.conn.server,
                 args.conn.token,
                 args.torrent,
                 args.bundled_server,
-            ));
+            );
+            drop(instance);
+            std::process::exit(code);
         }
         (Some(Command::Play(args)), _) => std::process::exit(cmd_play::run(args)),
         (Some(Command::Setup(args)), _) => std::process::exit(setup::run(args)),
