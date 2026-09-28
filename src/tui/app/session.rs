@@ -675,6 +675,7 @@ impl App {
                 // come back doubled once a late answer files it again.
                 self.art.clear();
                 self.art_order.clear();
+                self.path_came_up();
                 let libraries = ping.vpaths.len();
                 self.info(format!(
                     "connected to {} ({} librar{})",
@@ -825,6 +826,7 @@ impl App {
                     },
                 );
                 self.tunnel_retry.remove(&id);
+                self.path_came_up();
                 let mut effects = Vec::new();
                 if self.pending_tunnel.as_deref() == Some(id.as_str()) {
                     self.pending_tunnel = None;

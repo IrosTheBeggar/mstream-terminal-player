@@ -650,6 +650,39 @@ fn file_answer<T>(
     }
 }
 
+/// Whether `name`'s last ask went unanswered too recently for a caller
+/// that asks every frame to ask again: the tunnels' rungs, five seconds
+/// doubling to a minute. Without it a failing cover was re-asked every
+/// other frame — a 300x90 wall of them was ~500 requests a second at a
+/// server answering 500 (performance audit #89).
+fn backing_off(retry: &HashMap<String, TunnelRetry>, name: &str) -> bool {
+    retry
+        .get(name)
+        .is_some_and(|r| r.failed_at.elapsed() < tunnel_retry_delay(r.failures.min(TUNNEL_RETRY_LONG_AFTER)))
+}
+
+/// Give back the slot an unanswered ask held, and put the failure on the
+/// ladder. Its place in the order goes with it: the next claim pushes the
+/// name again, and a cover failing every other frame used to leave a name
+/// behind each time — ~90 MB an hour for one wall page, never returned
+/// (performance audit #89).
+fn give_back<T>(
+    map: &mut HashMap<String, T>,
+    order: &mut VecDeque<String>,
+    retry: &mut HashMap<String, TunnelRetry>,
+    name: String,
+) {
+    if map.remove(&name).is_some()
+        && let Some(at) = order.iter().rposition(|held| *held == name)
+    {
+        order.remove(at);
+    }
+    let now = crate::clock::Instant::now();
+    let rung = retry.entry(name).or_insert(TunnelRetry { failed_at: now, failures: 0 });
+    rung.failures += 1;
+    rung.failed_at = now;
+}
+
 /// The covers on screen whatever else is: the playing track's and the
 /// queue's rows'. Free of the App so an answer can be filed while the
 /// cache is borrowed.
@@ -875,7 +908,8 @@ pub(crate) fn ticket_stale(ticket: &crate::api::types::DirectTicket, now: std::t
     }
 }
 
-/// A tunnel's failed dials, for the ladder.
+/// A tunnel's failed dials, for the ladder — and a cover's or a shape's
+/// failed fetches, spaced by the same rungs.
 #[derive(Debug, Clone)]
 pub struct TunnelRetry {
     pub failed_at: crate::clock::Instant,
@@ -1856,6 +1890,12 @@ pub struct App {
     /// this turns over faster than [`App::art`] does.
     pub waveforms: HashMap<String, Option<Vec<u8>>>,
     waveform_order: VecDeque<String>,
+    /// Covers and shapes whose last ask went unanswered, and how often:
+    /// what the tunnels' ladder spaces the next ask by (performance audit
+    /// #89). Beside the caches rather than in them, so the slot a failure
+    /// gave back still reads as a gap to everything that draws.
+    art_retry: HashMap<String, TunnelRetry>,
+    waveform_retry: HashMap<String, TunnelRetry>,
     /// What the terminal can draw as pixels rather than characters, and the
     /// cover encoded for it. Starts off and is only ever turned on by the
     /// real binary against a real terminal — a test, a replay run and the
@@ -2020,6 +2060,8 @@ impl App {
             art_order: VecDeque::new(),
             waveforms: HashMap::new(),
             waveform_order: VecDeque::new(),
+            art_retry: HashMap::new(),
+            waveform_retry: HashMap::new(),
             graphics: crate::tui::graphics::Graphics::disabled(),
             audio_available: true,
             tap: None,
@@ -5034,7 +5076,26 @@ impl App {
     /// grid asks through here so a page of covers rides the same claim
     /// discipline as the playing track's.
     pub(crate) fn fetch_art_file(&mut self, file: &str) -> Option<Effect> {
+        if backing_off(&self.art_retry, file) {
+            return None;
+        }
         self.fetch_art_from(file, None)
+    }
+
+    /// Whether a surface that asks every frame should claim this cover
+    /// now: not cached or claimed, and not waiting out a failure's rung
+    /// (performance audit #89). The wall filters its page through this, so
+    /// a page in backoff costs lookups, not a vector of names per frame.
+    pub(crate) fn wants_art(&self, file: &str) -> bool {
+        !self.art.contains_key(file) && !backing_off(&self.art_retry, file)
+    }
+
+    /// A way to a server just answered — a connect, a tunnel up, a
+    /// retarget — so covers and shapes that failed before are worth
+    /// asking for at once rather than at their next rung.
+    fn path_came_up(&mut self) {
+        self.art_retry.clear();
+        self.waveform_retry.clear();
     }
 
     /// Ask for a queue row's cover, unless the cache holds it or a claim is
@@ -5043,13 +5104,15 @@ impl App {
     /// on a tunnel that is not up is NOT claimed: the ask would have
     /// nowhere to go, and the placeholder a claim leaves would stand in
     /// the picture's way for the rest of the session. The GUI's queue
-    /// panel asks through here for every row it shows.
+    /// panel asks through here for every row it shows, so a cover whose
+    /// last ask failed waits out its rung here (performance audit #89).
     pub(crate) fn fetch_queue_art(&mut self, index: usize) -> Option<Effect> {
         let item = self.queue.items.get(index)?;
-        let file = item.metadata.album_art.clone()?;
-        if self.art.contains_key(&file) {
+        let file = item.metadata.album_art.as_deref()?;
+        if !self.wants_art(file) {
             return None;
         }
+        let file = file.to_string();
         let reach = if self.is_session_origin(&item.origin) {
             None
         } else {
@@ -5198,6 +5261,13 @@ impl App {
             None => return None,
         };
         let item = self.queue.items.get(index)?;
+        // This runs after every event, so a shape whose last ask went
+        // unanswered waits out its rung here — it was re-asked on every
+        // pass of the loop, ten a second, for as long as a server stayed
+        // down (performance audit #89). The track's own start still asks.
+        if self.waveforms.contains_key(&item.filepath) || backing_off(&self.waveform_retry, &item.filepath) {
+            return None;
+        }
         let next = item.filepath.clone();
         let origin = item.origin.clone();
         self.fetch_waveform(&next, &origin)
@@ -5634,12 +5704,15 @@ impl App {
                 // (`file_answer`). An unanswered question gives its slot
                 // back instead — the waveform's rule, learned here the
                 // hard way: a fetch that died with the wifi used to leave
-                // the album coverless for the rest of the session.
+                // the album coverless for the rest of the session. The
+                // failure goes on the ladder, so the surfaces that ask
+                // every frame ask again in seconds, not every frame.
                 if settled {
+                    self.art_retry.remove(&file);
                     let (queue, now_playing) = (&self.queue, self.now_playing.as_ref());
                     file_answer(&mut self.art, &mut self.art_order, file, art, || pinned_art(queue, now_playing));
                 } else {
-                    self.art.remove(&file);
+                    give_back(&mut self.art, &mut self.art_order, &mut self.art_retry, file);
                 }
                 Vec::new()
             }
@@ -5652,12 +5725,13 @@ impl App {
                 // back — otherwise one dropped connection is the last word
                 // on that track for the rest of the session.
                 if settled {
+                    self.waveform_retry.remove(&filepath);
                     let queue = &self.queue;
                     file_answer(&mut self.waveforms, &mut self.waveform_order, filepath, bars, || {
                         pinned_shapes(queue)
                     });
                 } else {
-                    self.waveforms.remove(&filepath);
+                    give_back(&mut self.waveforms, &mut self.waveform_order, &mut self.waveform_retry, filepath);
                 }
                 Vec::new()
             }
@@ -5715,6 +5789,7 @@ impl App {
                     self.session.server = server;
                     self.session.token = token;
                 }
+                self.path_came_up();
                 Vec::new()
             }
             Event::RetargetFailed { identity, why } => {

@@ -7262,3 +7262,93 @@ fn a_shape_that_lands_after_the_cache_let_go_of_its_claim_is_still_evictable() {
     assert_eq!(app.waveforms.len(), ART_CACHE_CAP);
     assert_eq!(app.waveform_order.len(), app.waveforms.len());
 }
+
+/// Pretend `name`'s last failed ask happened `secs` ago.
+fn age_rung(retry: &mut HashMap<String, TunnelRetry>, name: &str, secs: u64) {
+    retry.get_mut(name).expect("a failure on the ladder").failed_at =
+        crate::clock::Instant::now() - std::time::Duration::from_secs(secs);
+}
+
+fn unanswered(file: &str) -> Event {
+    Event::AlbumArt { file: file.into(), art: None, settled: false }
+}
+
+#[test]
+fn a_wall_cover_whose_ask_failed_waits_its_rung_before_it_is_asked_again() {
+    // Performance audit #89: the wall and the queue panel claim whatever
+    // is missing on every frame, so a cover the server kept failing was
+    // asked for every other frame — ~500 requests a second for a 300x90
+    // wall answering 500. The slot is still given back; the next ask waits
+    // out the tunnels' ladder.
+    let mut app = connected_app();
+    assert!(app.fetch_art_file("aa.jpeg").is_some());
+    app.apply_event(unanswered("aa.jpeg"));
+    assert!(!app.art.contains_key("aa.jpeg"), "the slot is given back, as ever");
+    assert!(!app.wants_art("aa.jpeg") && app.fetch_art_file("aa.jpeg").is_none(), "but the next frame does not ask");
+
+    age_rung(&mut app.art_retry, "aa.jpeg", 5);
+    assert!(app.wants_art("aa.jpeg") && app.fetch_art_file("aa.jpeg").is_some(), "five seconds on, it does");
+
+    // A second failure climbs a rung.
+    app.apply_event(unanswered("aa.jpeg"));
+    age_rung(&mut app.art_retry, "aa.jpeg", 6);
+    assert!(app.fetch_art_file("aa.jpeg").is_none(), "ten seconds, this time");
+    age_rung(&mut app.art_retry, "aa.jpeg", 10);
+    assert!(app.fetch_art_file("aa.jpeg").is_some());
+
+    // An answer, even "no art", is the end of the ladder.
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: true });
+    assert!(app.art_retry.is_empty());
+}
+
+#[test]
+fn a_queue_rows_cover_whose_ask_failed_waits_its_rung_too() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
+    assert!(app.fetch_queue_art(0).is_some());
+    app.apply_event(unanswered("aa.jpeg"));
+    assert!(app.fetch_queue_art(0).is_none());
+    age_rung(&mut app.art_retry, "aa.jpeg", 5);
+    assert!(app.fetch_queue_art(0).is_some());
+
+    // A new way to the server is news: what failed is asked for at once.
+    app.apply_event(unanswered("aa.jpeg"));
+    assert!(app.fetch_queue_art(0).is_none());
+    app.apply_event(Event::Retargeted { identity: "elsewhere".into(), server: "http://x/".into(), token: None });
+    assert!(app.fetch_queue_art(0).is_some());
+}
+
+#[test]
+fn failed_asks_leave_no_names_behind_in_the_eviction_order() {
+    // Performance audit #89: each re-claim pushed the name onto the order
+    // again, and the order was only pruned at the cap — which a cache of
+    // failures never reaches. ~90 MB an hour for one failing wall page.
+    let mut app = connected_app();
+    let origin = Origin { server: "http://host:3000".into(), peer: None };
+    for _ in 0..1000 {
+        assert!(app.fetch_art_from("aa.jpeg", None).is_some());
+        app.apply_event(unanswered("aa.jpeg"));
+        assert!(app.fetch_waveform("a.mp3", &origin).is_some());
+        app.apply_event(Event::Waveform { filepath: "a.mp3".into(), bars: None, settled: false });
+    }
+    assert!(app.art_order.is_empty() && app.art.is_empty());
+    assert!(app.waveform_order.is_empty() && app.waveforms.is_empty());
+}
+
+#[test]
+fn the_next_tracks_shape_whose_ask_failed_is_not_asked_after_every_event() {
+    // Performance audit #89: the prefetch runs after every event, so a
+    // failing next-track shape was asked for ten times a second.
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a"), track("b")]);
+    assert!(waveforms_asked(&app.handle_action(Action::PlayPause)).contains(&"b".to_string()));
+
+    let effects = app.apply_event(Event::Waveform { filepath: "b".into(), bars: None, settled: false });
+    assert!(waveforms_asked(&effects).is_empty(), "{effects:?}");
+    let effects = app.apply_event(Event::PlaylistNames { names: None });
+    assert!(waveforms_asked(&effects).is_empty(), "{effects:?}");
+
+    age_rung(&mut app.waveform_retry, "b", 5);
+    let effects = app.apply_event(Event::PlaylistNames { names: None });
+    assert_eq!(waveforms_asked(&effects), vec!["b".to_string()]);
+}
