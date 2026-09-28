@@ -1,25 +1,28 @@
 //! The mini player (docs/ux-contracts/mini-player.md): what the GUI draws
 //! in a terminal smaller than the hundred by twenty-four its screens need —
 //! the playing track's cover, its words the way the bar's card says them,
-//! prev · play · next in the bar's own frames, and a line saying the full
-//! player is a larger window away. The rooms, the queue and the modals wait
-//! for the room they need; the keys the bar names (Space, `p`, `n`, `-`
-//! `+`) keep working, as they always did here.
+//! the bar's seek line on top of prev · play · next in the bar's own
+//! frames, and a line saying the full player is a larger window away. The
+//! rooms, the queue and the modals wait for the room they need; the keys
+//! the bar names (Space, `p`, `n`, `-` `+`) keep working, as they always
+//! did here.
 //!
-//! The parts share the window by what they are worth: the title and the
-//! artist before the cover, the cover before the album, and the file's
-//! spec and the stars only in room the cover cannot use. The cover is
-//! stacked above the rest in a tall or narrow window and beside it in a
-//! short wide one, whichever draws it larger. Below the transport's own
-//! size only the line is left, which is what the GUI drew here before there
-//! was a mini player.
+//! The parts share the window by what they are worth: the title, then the
+//! seek line, then the artist, then a cover at all, then the album, then
+//! the cover's size, and the file's spec and the stars last — so those two
+//! only take room the cover could not use. The row of air over the seek
+//! line and the frames gives way before any of them. The cover is stacked
+//! above the rest in a tall or narrow window and beside it in a short wide
+//! one, whichever draws it larger. Below the transport's own size only the
+//! line is left, which is what the GUI drew here before there was a mini
+//! player.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use unicode_width::UnicodeWidthStr;
 
-use super::bar::{Now, TallKind, clip, cover_slot, facts, play_glyphs, tall_compact};
+use super::bar::{Now, TallKind, clip, cover_slot, facts, play_glyphs, seek_line, tall_compact};
 use super::{Act, Gui, draw_card_cover, playing_cover_ready, put};
 use crate::kit::dim;
 use crate::kit::theme::th;
@@ -31,10 +34,6 @@ const TRANSPORT_W: u16 = 20;
 const TRANSPORT_H: u16 = 3;
 /// The least cover worth drawing: the bar card's, eight cells by four.
 const MIN_COVER: u16 = 4;
-/// The song's lines that come before the cover (the title, the artist),
-/// and the count once the album, which comes after it, joins them.
-const BEFORE_COVER: usize = 2;
-const WITH_COVER: usize = 3;
 /// The air between the parts: a row above and below the transport, two
 /// cells beside the cover, a cell or a row at the window's edges.
 const GAP: u16 = 1;
@@ -51,6 +50,9 @@ pub(super) struct Mini {
     pub cover: Option<Rect>,
     /// Where the song's lines go, when any do.
     pub words: Option<Block>,
+    /// The seek line — its left edge, its row, its width — on top of the
+    /// frames, as the bar's sits on top of its own.
+    pub progress: Option<(u16, u16, u16)>,
     /// The transport's top-left, when its frames fit.
     pub transport: Option<(u16, u16)>,
     /// The line, wrapped: each piece and where it starts.
@@ -132,29 +134,21 @@ fn fit(line: &Words, width: usize) -> Words {
 }
 
 /// The parts laid out in `area`: `widths` are the song's lines' widths, in
-/// order of worth, and `text` the line asking for room.
-pub(super) fn layout(area: Rect, widths: &[u16], text: &str) -> Mini {
-    // Every count of the song's lines, from none to all, each with the best
-    // cover it leaves room for — or nothing, where even no cover fails.
-    let tries: Vec<Option<Mini>> = (0..=widths.len()).map(|k| arrange(area, &widths[..k], text)).collect();
-    let fits = |k: usize| tries[k].is_some();
-    let cover = |k: usize| tries[k].as_ref().and_then(|m| m.cover).map_or(0, |c| c.height);
-
-    let n = widths.len();
-    let first = n.min(BEFORE_COVER);
-    let Some(most) = (0..=first).rev().find(|k| fits(*k)) else {
-        return line_alone(area, text);
-    };
-    let chosen = if most < first || cover(first) == 0 {
-        // No cover beside the title and the artist: as many lines as fit.
-        (most..=n).rev().find(|k| fits(*k)).unwrap_or(most)
-    } else {
-        // A cover: the album only while one still fits, and the rest only
-        // in room the cover cannot use.
-        let base = if n >= WITH_COVER && cover(WITH_COVER) >= MIN_COVER { WITH_COVER } else { first };
-        (base + 1..=n).rev().find(|k| fits(*k) && cover(*k) == cover(base)).unwrap_or(base)
-    };
-    tries[chosen].clone().unwrap_or_else(|| line_alone(area, text))
+/// order of worth, `seek` whether there is a seek line to show — something
+/// playing — and `text` the line asking for room.
+pub(super) fn layout(area: Rect, widths: &[u16], seek: bool, text: &str) -> Mini {
+    // Every count of the song's lines, with the seek line and without, each
+    // with the best cover it leaves room for; the one worth most wins —
+    // worth in this order: the title, the seek line, the artist, a cover at
+    // all, the album, the cover's size, the rest of the lines.
+    let configs = (0..=widths.len()).flat_map(|k| [(k, false), (k, true)]).filter(|(_, p)| seek || !p);
+    configs
+        .filter_map(|(k, p)| arrange(area, &widths[..k], p, text).map(|mini| (k, p, mini)))
+        .max_by_key(|(k, p, mini)| {
+            let cover = mini.cover.map_or(0, |c| c.height);
+            (*k >= 1, *p, *k >= 2, cover > 0, *k >= 3, cover, *k)
+        })
+        .map_or_else(|| line_alone(area, text), |(_, _, mini)| mini)
 }
 
 /// Too small for the frames: the line alone, centred — what the GUI drew
@@ -162,21 +156,23 @@ pub(super) fn layout(area: Rect, widths: &[u16], text: &str) -> Mini {
 fn line_alone(area: Rect, text: &str) -> Mini {
     let lines = wrap(text, area.width.max(1) as usize);
     let top = area.y + area.height.saturating_sub(lines.len() as u16) / 2;
-    Mini { cover: None, words: None, transport: None, lines: centre(lines, area.x, area.width, top) }
+    Mini { cover: None, words: None, progress: None, transport: None, lines: centre(lines, area.x, area.width, top) }
 }
 
-/// The song's first `widths.len()` lines, the transport and the line, and
-/// the largest cover they leave room for, above them or beside them. None
-/// when they do not fit even without a cover.
-fn arrange(area: Rect, widths: &[u16], text: &str) -> Option<Mini> {
+/// The song's first `widths.len()` lines, the seek line if `seek`, the
+/// transport and the line, and the largest cover they leave room for,
+/// above them or beside them. None when they do not fit even without a
+/// cover.
+fn arrange(area: Rect, widths: &[u16], seek: bool, text: &str) -> Option<Mini> {
     let inner_w = area.width.saturating_sub(2 * EDGE);
     let inner_h = area.height.saturating_sub(2 * EDGE);
     let k = widths.len();
+    let seek_h = u16::from(seek);
     // The column's height over `lines` rows of the line, and the air under
     // the song's lines: a row where the window has one to give, none where
     // it is that row short — the words matter more than the air.
     let column = |lines: usize| -> Option<(u16, u16)> {
-        let bare = k as u16 + TRANSPORT_H + GAP + lines as u16;
+        let bare = k as u16 + seek_h + TRANSPORT_H + GAP + lines as u16;
         if k > 0 && bare + GAP <= inner_h {
             Some((bare + GAP, GAP))
         } else {
@@ -215,10 +211,12 @@ fn arrange(area: Rect, widths: &[u16], text: &str) -> Option<Mini> {
             let column_x = left + 2 * cover + SIDE_GAP;
             let top = area.y + area.height.saturating_sub(height) / 2;
             let words = (k > 0).then_some(Block { x: column_x, y: top, width: column, count: k });
-            let transport_y = top + k as u16 + air;
+            let seek_y = top + k as u16 + air;
+            let transport_y = seek_y + seek_h;
             Mini {
                 cover: Some(cover_rect),
                 words,
+                progress: seek.then_some((column_x, seek_y, column)),
                 transport: Some((column_x + (column - TRANSPORT_W) / 2, transport_y)),
                 lines: centre(lines, column_x, column, transport_y + TRANSPORT_H + GAP),
             }
@@ -235,10 +233,12 @@ fn arrange(area: Rect, widths: &[u16], text: &str) -> Option<Mini> {
             });
             let words_y = top + cover_h;
             let words = (k > 0).then_some(Block { x: area.x + EDGE, y: words_y, width: inner_w, count: k });
-            let transport_y = words_y + k as u16 + stacked_air;
+            let seek_y = words_y + k as u16 + stacked_air;
+            let transport_y = seek_y + seek_h;
             Mini {
                 cover: cover_rect,
                 words,
+                progress: seek.then_some((area.x + EDGE, seek_y, inner_w)),
                 transport: Some((area.x + (area.width - TRANSPORT_W) / 2, transport_y)),
                 lines: centre(stacked_lines, area.x + EDGE, inner_w, transport_y + TRANSPORT_H + GAP),
             }
@@ -307,18 +307,25 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// The song's lines for what the GUI plays now, and where everything goes
-/// in `area` — what [`draw`] draws, and what the tests click.
-pub(super) fn plan(gui: &Gui, area: Rect) -> (Vec<Words>, Mini) {
-    let words = words(gui.bar_now().as_ref());
+/// What the GUI plays now, its lines, and where everything goes.
+pub(super) struct Plan {
+    pub now: Option<Now>,
+    pub words: Vec<Words>,
+    pub mini: Mini,
+}
+
+/// The plan for `area` — what [`draw`] draws, and what the tests click.
+pub(super) fn plan(gui: &Gui, area: Rect) -> Plan {
+    let now = gui.bar_now();
+    let words = words(now.as_ref());
     let widths: Vec<u16> = words.iter().map(width_of).collect();
-    let mini = layout(area, &widths, &t!("gui.mini.enlarge"));
-    (words, mini)
+    let mini = layout(area, &widths, now.is_some(), &t!("gui.mini.enlarge"));
+    Plan { now, words, mini }
 }
 
 /// The mini player, in the whole of a window too small for a screen.
 pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
-    let (words, mini) = plan(gui, area);
+    let Plan { now, words, mini } = plan(gui, area);
     if let Some(rect) = mini.cover {
         if playing_cover_ready(&gui.app) {
             // The mosaic where an overlay stood last frame — every cover's
@@ -338,6 +345,11 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
                 x += text.width() as u16;
             }
         }
+    }
+    // The bar's own seek line: a click per cell, the time under the pointer
+    // previewed where the elapsed time stands.
+    if let (Some((x, y, width)), Some(now)) = (mini.progress, now.as_ref()) {
+        seek_line(frame, &mut gui.ui, x, y, width, now);
     }
     if let Some((x, y)) = mini.transport {
         let (prev, play, next) = play_glyphs(gui.bar_paused());
@@ -371,7 +383,9 @@ mod tests {
         let texts =
             mini.lines.iter().map(|(x, y, l)| Rect { x: *x, y: *y, width: l.width() as u16, height: 1 });
         let words = mini.words.map(|b| Rect { x: b.x, y: b.y, width: b.width, height: b.count as u16 });
-        let parts: Vec<Rect> = mini.cover.into_iter().chain(words).chain(transport).chain(texts).collect();
+        let seek = mini.progress.map(|(x, y, width)| Rect { x, y, width, height: 1 });
+        let parts: Vec<Rect> =
+            mini.cover.into_iter().chain(words).chain(seek).chain(transport).chain(texts).collect();
         for (i, a) in parts.iter().enumerate() {
             assert!(
                 area.contains(a.as_position()) && a.right() <= area.right() && a.bottom() <= area.bottom(),
@@ -384,6 +398,10 @@ mod tests {
         if let Some(block) = mini.words {
             assert!(block.count <= widths.len());
         }
+        // The seek line sits on the frames, as the bar's does.
+        if let (Some((_, seek_y, _)), Some((_, frames_y))) = (mini.progress, mini.transport) {
+            assert_eq!(seek_y + 1, frames_y, "the seek line on top of the frames");
+        }
     }
 
     fn shown(mini: &Mini) -> usize {
@@ -391,82 +409,103 @@ mod tests {
     }
 
     #[test]
-    fn a_tall_window_stacks_the_cover_over_the_words_the_transport_and_the_line() {
+    fn a_tall_window_stacks_the_cover_over_the_words_the_seek_line_and_the_frames() {
         // Forty by thirty is taller than wide, a cell being about twice as
         // tall as it is wide.
         let window = area(40, 30);
-        let mini = layout(window, &SONG, LINE);
+        let mini = layout(window, &SONG, true, LINE);
         check(&mini, window, &SONG);
         let cover = mini.cover.expect("room for a cover");
         let block = mini.words.expect("the song's lines");
+        let (seek_x, seek_y, seek_w) = mini.progress.expect("a seek line");
         let (tx, ty) = mini.transport.unwrap();
         assert_eq!(cover.width, 2 * cover.height, "square in cells");
         assert!(block.y >= cover.bottom() + GAP, "the words under the cover");
-        assert!(ty >= block.y + block.count as u16 + GAP, "the transport under the words");
+        assert_eq!(seek_y, block.y + block.count as u16 + GAP, "the seek line under them, a row of air between");
+        assert_eq!((seek_x, seek_w), (block.x, block.width), "as wide as the words' span");
         assert_eq!(tx, (40 - TRANSPORT_W) / 2, "centred");
-        assert!(mini.lines[0].1 >= ty + TRANSPORT_H + GAP, "the line under the transport");
+        assert!(mini.lines[0].1 >= ty + TRANSPORT_H + GAP, "the line under the frames");
         // The title, the artist and the album; the spec and the stars would
         // cost the cover rows.
         assert_eq!(block.count, 3);
-        assert_eq!(cover.height, 28 - (3 + GAP) - TRANSPORT_H - GAP - 2 - GAP);
+        assert_eq!(cover.height, 28 - (3 + GAP) - 1 - TRANSPORT_H - GAP - 2 - GAP);
     }
 
     #[test]
     fn a_short_wide_window_puts_the_cover_beside_them() {
         let window = area(99, 12);
-        let mini = layout(window, &SONG, LINE);
+        let mini = layout(window, &SONG, true, LINE);
         check(&mini, window, &SONG);
         let cover = mini.cover.expect("room for a cover");
         let block = mini.words.unwrap();
         assert_eq!(cover.height, 10, "the window's height, less its edges");
         assert!(block.x >= cover.right() + SIDE_GAP, "the words to the right of the cover");
-        // The column holds all five lines beside a full-height cover by
-        // giving up the row of air over the frames — words before air.
-        assert_eq!(block.count, 5);
-        assert_eq!(mini.transport.unwrap().1, block.y + 5);
+        // Four lines, the seek line and the frames fill the column without
+        // its row of air; the stars are the line that gives way to the seek
+        // line.
+        assert_eq!(block.count, 4);
+        assert_eq!(mini.progress.map(|(_, y, _)| y), Some(block.y + 4));
     }
 
     #[test]
     fn a_roomy_window_says_everything() {
         let window = area(70, 20);
-        let mini = layout(window, &SONG, LINE);
+        let mini = layout(window, &SONG, true, LINE);
         check(&mini, window, &SONG);
         assert_eq!(shown(&mini), 5);
+        assert!(mini.progress.is_some());
         assert_eq!(mini.cover.map(|c| c.height), Some(18));
     }
 
     #[test]
-    fn the_title_and_the_artist_come_before_the_cover_and_the_cover_before_the_album() {
-        // Thirty by sixteen: the title, the artist and an 8×4 cover fit; the
-        // album would leave the cover no room, so it waits.
-        let window = area(30, 16);
-        let mini = layout(window, &SONG, LINE);
+    fn the_parts_give_way_in_order_of_worth() {
+        // Sixty by eight has room for one of the title and the seek line
+        // over the frames: the title — and a cover beside them.
+        let window = area(60, 8);
+        let mini = layout(window, &SONG, true, LINE);
+        check(&mini, window, &SONG);
+        assert_eq!((shown(&mini), mini.progress), (1, None));
+        assert_eq!(mini.transport.unwrap().1, mini.words.unwrap().y + 1, "no air between the title and the frames");
+        assert_eq!(mini.cover.map(|c| c.height), Some(6));
+
+        // A row more: the seek line comes before the artist.
+        let window = area(60, 9);
+        let mini = layout(window, &SONG, true, LINE);
+        check(&mini, window, &SONG);
+        assert_eq!(shown(&mini), 1);
+        assert!(mini.progress.is_some());
+
+        // Thirty by seventeen: the title, the artist, the seek line and an
+        // 8×4 cover fit; the album would leave the cover no room, so it
+        // waits — a cover at all before the album.
+        let window = area(30, 17);
+        let mini = layout(window, &SONG, true, LINE);
         check(&mini, window, &SONG);
         assert_eq!(mini.cover.map(|c| c.height), Some(MIN_COVER));
         assert_eq!(shown(&mini), 2);
 
-        // Too short for a cover at all: the lines that fit, from the top.
-        let window = area(40, 12);
-        let mini = layout(window, &SONG, LINE);
+        // A row less and the cover cannot stand beside the title, the artist
+        // and the seek line, which come first; the rows go to the words.
+        let window = area(30, 16);
+        let mini = layout(window, &SONG, true, LINE);
         check(&mini, window, &SONG);
-        assert!(mini.transport.is_some());
-        assert!(shown(&mini) >= 2, "{mini:?}");
+        assert_eq!(mini.cover, None);
+        assert!(shown(&mini) >= 2 && mini.progress.is_some(), "{mini:?}");
+    }
 
-        // Shorter still, the title keeps its place over the frames by giving
-        // up the row of air under it, and the cover takes the side.
-        let window = area(60, 8);
-        let mini = layout(window, &SONG, LINE);
-        check(&mini, window, &SONG);
-        assert_eq!(shown(&mini), 1);
-        let block = mini.words.unwrap();
-        assert_eq!(mini.transport.unwrap().1, block.y + 1, "no air between the title and the frames");
-        assert_eq!(mini.cover.map(|c| c.height), Some(6));
+    #[test]
+    fn nothing_playing_has_no_seek_line() {
+        let window = area(70, 20);
+        let mini = layout(window, &[17], false, LINE);
+        check(&mini, window, &[17]);
+        assert_eq!(mini.progress, None);
+        assert_eq!(shown(&mini), 1, "the one dim line");
     }
 
     #[test]
     fn a_narrow_window_wraps_the_line_and_a_tiny_one_keeps_only_it() {
         let window = area(26, 20);
-        let mini = layout(window, &SONG, LINE);
+        let mini = layout(window, &SONG, true, LINE);
         check(&mini, window, &SONG);
         assert!(mini.transport.is_some());
         assert!(mini.lines.len() > 1, "wrapped: {:?}", mini.lines);
@@ -474,20 +513,20 @@ mod tests {
 
         // Narrower than the frames: the line is all there is.
         let window = area(18, 10);
-        let mini = layout(window, &SONG, LINE);
+        let mini = layout(window, &SONG, true, LINE);
         check(&mini, window, &SONG);
-        assert_eq!((mini.cover, mini.words, mini.transport), (None, None, None));
+        assert_eq!((mini.cover, mini.words, mini.progress, mini.transport), (None, None, None, None));
         assert_eq!(mini.lines.iter().map(|(_, _, l)| l.as_str()).collect::<Vec<_>>().join(" "), LINE);
 
         // Too short for the frames and the line under them: the same.
-        let mini = layout(area(80, 4), &SONG, LINE);
-        assert_eq!((mini.cover, mini.words, mini.transport), (None, None, None));
+        let mini = layout(area(80, 4), &SONG, true, LINE);
+        assert_eq!((mini.cover, mini.words, mini.progress, mini.transport), (None, None, None, None));
     }
 
     #[test]
     fn no_cover_smaller_than_the_bar_cards() {
         let window = area(24, 8);
-        let mini = layout(window, &[], LINE);
+        let mini = layout(window, &[], false, LINE);
         check(&mini, window, &[]);
         assert!(mini.transport.is_some());
         assert_eq!(mini.cover, None, "a sliver of cover says nothing");

@@ -3788,7 +3788,7 @@ mod tests {
         let lines = rows(&terminal);
         let all = lines.join("\n");
         let area = Rect { x: 0, y: 0, width: 70, height: 20 };
-        let (_, plan) = mini::plan(&gui, area);
+        let plan = mini::plan(&gui, area).mini;
         for (x, y, piece) in plan.lines {
             assert!(lines[y as usize][..].contains(&piece), "the line asks for room, {piece:?} at {x},{y}:\n{all}");
         }
@@ -3797,6 +3797,18 @@ mod tests {
         for (row, word) in ["Cassini IV", "Vela — Cassini", "Cassini · 2019"].iter().enumerate() {
             assert!(lines[block.y as usize + row].contains(word), "{word:?}:\n{all}");
         }
+        // The bar's seek line on top of the frames: the times at its ends, a
+        // seek in every cell — and a click on one moves the playhead there.
+        let (x, y, width) = plan.progress.expect("a seek line");
+        let row = &lines[y as usize];
+        assert!(row.contains("0:47") && row.contains("5:02") && row.contains('━'), "{row:?}");
+        let middle = Position { x: x + width / 2, y };
+        let Some(Act::Seek(fraction)) = gui.ui.hit(middle) else { panic!("no seek under {middle:?}:\n{all}") };
+        assert!(fraction > 0.3 && fraction < 0.7, "{fraction}");
+        gui.act(Act::Seek(1.0));
+        terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+        let row = rows(&terminal)[y as usize].clone();
+        assert!(row.contains("5:02  ") || row.matches("5:02").count() == 2, "the playhead at the end: {row:?}");
         assert!(!all.contains("auto-dj") && !all.contains("Files"), "no bar, no rooms:\n{all}");
         assert!(all.contains('╭'), "the empty cover slot, nothing decoded yet:\n{all}");
 
@@ -3824,7 +3836,7 @@ mod tests {
         gui.app.art.insert("aa.jpeg".into(), Some(crate::tui::art::decode(&bytes.into_inner()).unwrap()));
 
         let area = Rect { x: 0, y: 0, width: 70, height: 20 };
-        let cover = mini::plan(&gui, area).1.cover.expect("room for a cover");
+        let cover = mini::plan(&gui, area).mini.cover.expect("room for a cover");
         let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
         terminal.draw(|frame| render(frame, &mut gui)).unwrap();
         let lines = rows(&terminal);
@@ -3836,7 +3848,7 @@ mod tests {
         terminal.draw(|frame| render(frame, &mut gui)).unwrap();
         let all = rows(&terminal).join("\n");
         assert!(all.contains("auto-dj"), "the bar is back:\n{all}");
-        let first = mini::plan(&gui, area).1.lines.remove(0).2;
+        let first = mini::plan(&gui, area).mini.lines.remove(0).2;
         assert!(!all.contains(&first), "and the line is gone:\n{all}");
     }
     // ── The browser bar ─────────────────────────────────────────────────

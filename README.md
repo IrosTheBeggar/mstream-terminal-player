@@ -373,8 +373,8 @@ Servers running in public mode (no users configured) need no login — just pass
 `mstream-player gui` opens the mouse-first surface the installers launch —
 the same player, drawn for the pointer: everything is clickable and every
 action keeps a key. It wants a terminal at least 100×24 cells; smaller, it
-becomes a mini player — the cover, what is playing, and prev · play · next
-— until there is room again.
+becomes a mini player — the cover, what is playing, a seek line, and prev ·
+play · next — until there is room again.
 
 - **Three screens** on the top bar: **Library** (the nav column and its rooms),
   **Now Playing** (`0`), which is the classic player's full-screen view —
