@@ -226,7 +226,25 @@ pub(super) fn play_glyphs(paused: bool) -> (&'static str, &'static str, &'static
     }
 }
 
-/// The seek line: the gold rule's cells across the playing span, a click
+/// The seek line in the span from `x`, `width` cells wide: the elapsed
+/// time, the gold rule's cells, the total — the bar's across the screen,
+/// the mini player's under the song. Both time slots are as wide as the
+/// total: a track past a hundred minutes reads 100:00, and the cells start
+/// after it rather than under it. The time under the pointer previews in
+/// the elapsed slot.
+pub(super) fn seek_line(frame: &mut Frame, s: &mut Surface<Act>, x: u16, y: u16, width: u16, now: &Now) {
+    let total = fmt_time(now.duration);
+    let slot = total.chars().count().max(4);
+    put(frame, x, y, &format!("{:>slot$}", fmt_time(now.elapsed)), dim());
+    let cells = width.saturating_sub(2 * (slot as u16 + 1)) as usize;
+    let preview = draw_seek_cells(frame, s, x + slot as u16 + 1, y, cells, now);
+    if let Some(time) = preview {
+        put(frame, x, y, &format!("{time:>slot$}"), bright_bold());
+    }
+    put(frame, (x + width).saturating_sub(slot as u16), y, &total, dim());
+}
+
+/// The seek line's cells: the gold rule across the playing span, a click
 /// per cell, the would-land column brightened under the pointer, its time
 /// returned so the caller can preview it in the readout.
 fn draw_seek_cells(
@@ -313,16 +331,9 @@ fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &Ba
                 put(frame, fx, y + 3, &glyphs, Style::default().fg(th().gold));
                 fx += glyphs.chars().count() as u16 + 2;
             }
-            let mut facts: Vec<String> = Vec::new();
-            if let Some(key) = now.key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
-                facts.push(format!("{} {key}", if legacy_conhost() { "key" } else { "♪" }));
-            }
-            if let Some(bpm) = now.bpm.filter(|b| *b > 0) {
-                facts.push(format!("{bpm} BPM"));
-            }
-            if !facts.is_empty() {
+            if let Some(facts) = facts(now) {
                 let room = (area.width - 1).saturating_sub(fx) as usize;
-                put(frame, fx, y + 3, &clip(&facts.join(" · "), room), dim());
+                put(frame, fx, y + 3, &clip(&facts, room), dim());
             }
         }
         None => put(frame, tx, y, &t!("gui.nothing_playing"), sub_style),
@@ -342,21 +353,7 @@ fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &Ba
 fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, v: &BarView) {
     let line = top;
     match v.now {
-        Some(now) => {
-            // Both time slots are as wide as the total: a track past a
-            // hundred minutes reads 100:00, and the cells start after it
-            // rather than under it.
-            let total = fmt_time(now.duration);
-            let slot = total.chars().count().max(4);
-            put(frame, 1, line, &format!("{:>slot$}", fmt_time(now.elapsed)), dim());
-            let cells_x = 2 + slot as u16;
-            let cells = area.width.saturating_sub(2 * (slot as u16 + 2)) as usize;
-            let preview = draw_seek_cells(frame, s, cells_x, line, cells, now);
-            if let Some(time) = preview {
-                put(frame, 1, line, &format!("{time:>slot$}"), bright_bold());
-            }
-            put(frame, area.width - 1 - slot as u16, line, &total, dim());
-        }
+        Some(now) => seek_line(frame, s, 1, line, area.width.saturating_sub(2), now),
         // Idle, the line is exactly the wizard's gold rule.
         None => gold_rule(frame, line, area.width),
     }
@@ -385,6 +382,19 @@ fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, 
     draw_volume(frame, s, 1, top + 4, v.volume);
 
     draw_card(frame, s, area, y, v);
+}
+
+/// The card's last facts after the stars: the key and the tempo, where the
+/// track has them — `♪ 8A · 120 BPM`. The mini player says them the same.
+pub(super) fn facts(now: &Now) -> Option<String> {
+    let mut facts: Vec<String> = Vec::new();
+    if let Some(key) = now.key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+        facts.push(format!("{} {key}", if legacy_conhost() { "key" } else { "♪" }));
+    }
+    if let Some(bpm) = now.bpm.filter(|b| *b > 0) {
+        facts.push(format!("{bpm} BPM"));
+    }
+    (!facts.is_empty()).then(|| facts.join(" · "))
 }
 
 fn card_styles(hover: bool, playing: bool) -> (Style, Style) {

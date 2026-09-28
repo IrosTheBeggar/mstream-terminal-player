@@ -259,7 +259,8 @@ fn run_tui_as<S: Screen>(screen: &mut S, title: &str) -> i32 {
 
     // The room's palette is its interface: not subject to NO_COLOR.
     crate::console::keep_colors();
-    let mut terminal = ratatui::init();
+    // Frames written whole, like the player's (`kit::frames`).
+    let mut terminal = crate::kit::frames::init();
     let mouse_on = execute!(std::io::stdout(), EnableMouseCapture).is_ok();
     if let Some(seq) = claim {
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(seq));
@@ -283,7 +284,7 @@ fn run_tui_as<S: Screen>(screen: &mut S, title: &str) -> i32 {
 }
 
 fn event_loop<S: Screen>(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut crate::kit::frames::PageTerminal,
     screen: &mut S,
     mouse_on: bool,
 ) -> std::io::Result<Outcome> {

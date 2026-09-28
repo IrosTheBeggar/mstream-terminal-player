@@ -29,7 +29,7 @@ use crate::tui::art::Art;
 /// surface paces its own frame's work; two on screen at once (the wall
 /// with the queue open) can spend two budgets, which kitty never reaches
 /// and sixel rations either way.
-const ENCODE_BUDGET: Duration = Duration::from_millis(40);
+pub(super) const ENCODE_BUDGET: Duration = Duration::from_millis(40);
 
 /// One slot's drawing state: its own pixel-protocol cache and its own
 /// mosaic grid, so neither thrashes when a whole page draws in one frame.
@@ -53,9 +53,11 @@ impl Slot {
         self.graphics.encodes()
     }
 
-    /// A resize changes the cell-to-pixel mapping the slot encoded
-    /// against, and kitty forgets its transmitted images with the old
-    /// terminal — the card cover's rule, per slot.
+    /// A resize can change the cell-to-pixel mapping the slot encoded
+    /// against, and can come with a reattach that took kitty's
+    /// transmitted images away with the old terminal — the card cover's
+    /// rule, per slot. Where neither happened, the next draw finds the
+    /// encoded picture still cached (`Graphics::refresh`).
     pub(super) fn on_resize(&mut self) {
         self.graphics.refresh();
         self.key = None;

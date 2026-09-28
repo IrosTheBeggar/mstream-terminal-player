@@ -1733,6 +1733,8 @@ gui:
     back_tip: "Zurück zu den Einstellungen — Esc"
   stats:
     no_session: "keine Sitzung – mit einem Server verbinden, dann erscheint hier sein Hörprotokoll"
+  mini:
+    enlarge: "Für den vollständigen Player das Terminal vergrößern"
   viz:
     failed: "Das Visualizer-Fenster ließ sich nicht öffnen – %{why}"
     prev_tip: "Vorheriges Preset — ←"

@@ -1733,6 +1733,8 @@ gui:
     back_tip: "Volver a Ajustes — Esc"
   stats:
     no_session: "sin sesión — conéctate a un servidor y su registro de escucha aparecerá aquí"
+  mini:
+    enlarge: "Agranda el terminal para ver el reproductor completo"
   viz:
     failed: "no se pudo abrir la ventana del visualizador — %{why}"
     prev_tip: "Preset anterior — ←"

@@ -1733,6 +1733,8 @@ gui:
     back_tip: "Powrót do ustawień — Esc"
   stats:
     no_session: "brak sesji — połącz się z serwerem, a jego dziennik odsłuchów pojawi się tutaj"
+  mini:
+    enlarge: "Powiększ terminal, aby zobaczyć pełny odtwarzacz"
   viz:
     failed: "nie udało się otworzyć okna wizualizacji — %{why}"
     prev_tip: "Poprzedni preset — ←"

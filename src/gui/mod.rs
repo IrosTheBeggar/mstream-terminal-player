@@ -24,6 +24,7 @@ mod actions;
 mod cover;
 mod dj;
 mod library;
+mod mini;
 mod now;
 mod playlists;
 mod queue;
@@ -62,8 +63,8 @@ use crate::tui::{self, worker};
 use bar::{BarView, Now};
 
 /// Below this the layout has nowhere honest to put the bar. The installer's
-/// own window is 100×30; anyone smaller is asked for more room, like the
-/// wizard.
+/// own window is 100×30; anyone smaller gets the mini player — the cover
+/// and the transport, and a line asking for more room (`mini`).
 const MIN_W: u16 = 100;
 const MIN_H: u16 = 24;
 
@@ -1304,8 +1305,10 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             area,
         );
     }
+    // Too small for the screens: the mini player — the cover, the
+    // transport, and a line asking for room (mini-player contract).
     if area.width < MIN_W || area.height < MIN_H {
-        frame.render_widget(Paragraph::new(t!("resize").to_string()).style(dim()), area);
+        mini::draw(frame, gui, area);
         return;
     }
     // The size the hit zones outside a draw reason from — a drawable one.
@@ -2471,7 +2474,7 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn event_loop(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut crate::kit::frames::PageTerminal,
     gui: &mut Gui,
     mouse_on: bool,
     event_rx: &Receiver<Event>,
@@ -2965,7 +2968,9 @@ pub fn run(
     // wizard's ordering, for the wizard's reasons.
     let claim = theme::acquire_ground();
     let ground_guard = GroundGuard;
-    let mut terminal = ratatui::init();
+    // ratatui's init, with each frame written whole and shown at once —
+    // a resize's clear never painted on its own (`kit::frames`).
+    let mut terminal = crate::kit::frames::init();
     // After init, like the player: a terminal that answers the pixel probe
     // strangely makes its mess on the alternate screen, which restore
     // throws away.
@@ -3776,13 +3781,77 @@ mod tests {
     }
 
     #[test]
-    fn a_small_window_asks_for_room_instead_of_breaking() {
+    fn a_small_window_is_the_mini_player_instead_of_breaking() {
+        // The mini-player contract: below the screens' size, the cover, the
+        // transport in the bar's own frames, and a line asking for room.
         let mut gui = test_gui();
         let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
         terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+        let lines = rows(&terminal);
+        let all = lines.join("\n");
+        let area = Rect { x: 0, y: 0, width: 70, height: 20 };
+        let plan = mini::plan(&gui, area).mini;
+        for (x, y, piece) in plan.lines {
+            assert!(lines[y as usize][..].contains(&piece), "the line asks for room, {piece:?} at {x},{y}:\n{all}");
+        }
+        // The song, the card's way: the demo seat's title, artist and album.
+        let block = plan.words.expect("the song's lines");
+        for (row, word) in ["Cassini IV", "Vela — Cassini", "Cassini · 2019"].iter().enumerate() {
+            assert!(lines[block.y as usize + row].contains(word), "{word:?}:\n{all}");
+        }
+        // The bar's seek line on top of the frames: the times at its ends, a
+        // seek in every cell — and a click on one moves the playhead there.
+        let (x, y, width) = plan.progress.expect("a seek line");
+        let row = &lines[y as usize];
+        assert!(row.contains("0:47") && row.contains("5:02") && row.contains('━'), "{row:?}");
+        let middle = Position { x: x + width / 2, y };
+        let Some(Act::Seek(fraction)) = gui.ui.hit(middle) else { panic!("no seek under {middle:?}:\n{all}") };
+        assert!(fraction > 0.3 && fraction < 0.7, "{fraction}");
+        gui.act(Act::Seek(1.0));
+        terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+        let row = rows(&terminal)[y as usize].clone();
+        assert!(row.contains("5:02  ") || row.matches("5:02").count() == 2, "the playhead at the end: {row:?}");
+        assert!(!all.contains("auto-dj") && !all.contains("Files"), "no bar, no rooms:\n{all}");
+        assert!(all.contains('╭'), "the empty cover slot, nothing decoded yet:\n{all}");
+
+        // The three frames, each a click on its verb.
+        let at = |needle: &str| {
+            lines.iter().enumerate().find_map(|(y, line)| {
+                line.char_indices().position(|(i, _)| line[i..].starts_with(needle)).map(|x| (x as u16, y as u16))
+            })
+        };
+        for (needle, act) in [("│ ◂◂ │", Act::Prev), ("┃ ▮▮ ┃", Act::PlayPause), ("│ ▸▸ │", Act::Next)] {
+            let (x, y) = at(needle).unwrap_or_else(|| panic!("no {needle:?}:\n{all}"));
+            assert_eq!(gui.ui.hit(Position { x: x + 2, y }), Some(act), "{needle}");
+        }
+    }
+
+    #[test]
+    fn the_mini_player_wears_the_playing_cover() {
+        let mut gui = test_gui();
+        let mut playing = track("music/a.mp3", "Night Drive", 252.0);
+        playing.metadata.album_art = Some("aa.jpeg".into());
+        gui.app.now_playing = Some(playing);
+        let png = image::RgbImage::from_pixel(64, 64, image::Rgb([200, 40, 40]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        png.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        gui.app.art.insert("aa.jpeg".into(), Some(crate::tui::art::decode(&bytes.into_inner()).unwrap()));
+
+        let area = Rect { x: 0, y: 0, width: 70, height: 20 };
+        let cover = mini::plan(&gui, area).mini.cover.expect("room for a cover");
+        let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+        let lines = rows(&terminal);
+        let row: String = lines[cover.y as usize].chars().skip(cover.x as usize).take(cover.width as usize).collect();
+        assert!(row.chars().all(|c| "█▀▄".contains(c)), "the mosaic holds the cover's cells: {row:?}");
+
+        // Grown back past the screens' size, the full player returns.
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut gui)).unwrap();
         let all = rows(&terminal).join("\n");
-        assert!(all.contains(&t!("resize").to_string()));
-        assert!(!all.contains("auto-dj"), "no bar in a window this small");
+        assert!(all.contains("auto-dj"), "the bar is back:\n{all}");
+        let first = mini::plan(&gui, area).mini.lines.remove(0).2;
+        assert!(!all.contains(&first), "and the line is gone:\n{all}");
     }
     // ── The browser bar ─────────────────────────────────────────────────
 
