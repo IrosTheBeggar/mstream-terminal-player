@@ -346,7 +346,13 @@ pub fn run(opts: ServeOptions) -> Result<(), String> {
             eprintln!("[serve] {}", notice.text);
         }
 
-        let request = server.recv_timeout(Duration::from_millis(250));
+        // Stopped, or a landed pause with nothing in flight: the tick only
+        // has the device watch left to keep, and that polls once a second
+        // anyway. A request still wakes recv the moment it lands
+        // (performance audit #81).
+        let wait =
+            if engine.settled() { crate::engine::DEVICE_POLL } else { Duration::from_millis(250) };
+        let request = server.recv_timeout(wait);
         let request = match request {
             Ok(Some(r)) => r,
             Ok(None) => continue,

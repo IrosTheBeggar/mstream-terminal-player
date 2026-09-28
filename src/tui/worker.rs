@@ -35,10 +35,23 @@ use crate::player::PlayerStatus;
 use crate::tui::app::Tab;
 use crate::tui::art;
 
-/// How often the audio thread ticks the engine and publishes status. Also the
-/// upper bound on command latency, so keep it small enough to feel instant.
+/// How often the audio thread ticks the engine and publishes status while
+/// anything is moving: the end of a track, a blend's steps, the position
+/// the progress bar follows. A command never waits for it — the channel
+/// wakes the thread the moment one arrives.
 #[cfg(not(target_arch = "wasm32"))]
 const TICK: Duration = Duration::from_millis(120);
+
+/// The wait between ticks while the player is settled — stopped, or a
+/// landed pause, with nothing draining or opening. Nothing can change then
+/// without a command, and the tick's one standing job, the device watch,
+/// only polls once a second anyway. It was 120 ms regardless: ~8 wakeups a
+/// second for hours of a paused player, each publishing the same status
+/// (performance audit #81). A status still goes out every wake, so the UI
+/// keeps a once-a-second heartbeat, and every command batch still gets its
+/// own status straight after.
+#[cfg(not(target_arch = "wasm32"))]
+const SETTLED_TICK: Duration = crate::engine::DEVICE_POLL;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioCmd {
@@ -749,7 +762,8 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
     let mut watch = EndWatch::default();
 
     'listening: loop {
-        let batch = match rx.recv_timeout(TICK) {
+        let wait = if player.settled() { SETTLED_TICK } else { TICK };
+        let batch = match rx.recv_timeout(wait) {
             Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => Vec::new(),
             Ok(first) => {
@@ -2389,6 +2403,86 @@ mod tests {
 
         // Later commands still have somewhere to go, and Shutdown lands.
         cmd_tx.send(play("http://x/next.mp3")).expect("the channel is still alive");
+        cmd_tx.send(AudioCmd::Shutdown).unwrap();
+        listener.join().expect("the thread ended on its own terms");
+    }
+
+    /// A player that only counts: ticks, pauses, and whether it calls
+    /// itself settled.
+    #[derive(Clone, Default)]
+    struct Counter {
+        ticks: Arc<std::sync::atomic::AtomicUsize>,
+        pauses: Arc<std::sync::atomic::AtomicUsize>,
+        settled: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl crate::player::PlayerCtl for Counter {
+        fn play(&self, _source: &str, _hint: Option<f64>) -> Result<(), String> {
+            Ok(())
+        }
+        fn pause(&self) {
+            self.pauses.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn resume(&self) {}
+        fn stop(&self) {}
+        fn seek(&self, _position: f64) -> Result<(), String> {
+            Ok(())
+        }
+        fn set_volume(&self, _volume: f32) {}
+        fn set_crossfade(&self, _seconds: f32) {}
+        fn set_gapless(&self, _on: bool) {}
+        fn set_blend_skips(&self, _on: bool) {}
+        fn set_pause_fade(&self, _on: bool) {}
+        fn prepare_next(&self, _source: &str, _duration_hint: Option<f64>) {}
+        fn clear_next(&self) {}
+        fn status(&self) -> crate::player::PlayerStatus {
+            crate::player::PlayerStatus::default()
+        }
+        fn tick(&self) {
+            self.ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn settled(&self) -> bool {
+            self.settled.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn a_settled_player_ticks_once_a_second_and_still_hears_commands_at_once() {
+        use std::sync::atomic::Ordering;
+        let player = Counter::default();
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let theirs = player.clone();
+        let listener = thread::spawn(move || listen_guarded(&theirs, &cmd_rx, &event_tx));
+
+        // Moving: the brisk tick, ~8 a second.
+        std::thread::sleep(Duration::from_millis(1300));
+        let moving = player.ticks.swap(0, Ordering::SeqCst);
+        // Settled (paused, stopped): the device watch's pace — the wait in
+        // flight when it settled still ends on the brisk clock.
+        player.settled.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(200));
+        player.ticks.store(0, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(2300));
+        let settled = player.ticks.swap(0, Ordering::SeqCst);
+        assert!(moving >= 6, "a moving player ticks briskly: {moving} in 1.3s");
+        assert!((1..=3).contains(&settled), "a settled player ticks once a second: {settled} in 2.3s");
+
+        // A command does not wait out the lazy tick: it lands, and its
+        // status goes out, at once.
+        while event_rx.try_recv().is_ok() {}
+        let sent = std::time::Instant::now();
+        cmd_tx.send(AudioCmd::Pause).unwrap();
+        let status = loop {
+            match event_rx.recv_timeout(Duration::from_secs(2)).expect("a status after the command") {
+                Event::Status(status) => break status,
+                _ => continue,
+            }
+        };
+        assert_eq!(status, crate::player::PlayerStatus::default());
+        assert_eq!(player.pauses.load(Ordering::SeqCst), 1, "the pause was applied");
+        assert!(sent.elapsed() < Duration::from_millis(300), "took {:?}", sent.elapsed());
+
         cmd_tx.send(AudioCmd::Shutdown).unwrap();
         listener.join().expect("the thread ended on its own terms");
     }

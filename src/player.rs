@@ -73,6 +73,12 @@ pub trait PlayerCtl {
     /// Drive any background bookkeeping (end-of-track handling). Called on a
     /// timer by the audio thread.
     fn tick(&self);
+    /// Whether nothing can change until a command arrives — stopped, or a
+    /// landed pause, with nothing draining or opening — so the audio thread
+    /// may tick lazily. A backend that cannot say keeps the brisk tick.
+    fn settled(&self) -> bool {
+        false
+    }
     /// Device news since the last call, oldest first. Backends that
     /// cannot lose an output device (the browser's) have none.
     fn take_device_notices(&self) -> Vec<DeviceNotice> {
@@ -144,6 +150,10 @@ impl PlayerCtl for Engine {
 
     fn tick(&self) {
         self.advance_tick();
+    }
+
+    fn settled(&self) -> bool {
+        Engine::settled(self)
     }
 
     fn take_device_notices(&self) -> Vec<DeviceNotice> {

@@ -968,8 +968,10 @@ impl State {
 /// stream opened on. Plugging in headphones (or a Bluetooth speaker
 /// connecting) moves the default without touching the running stream —
 /// the OS leaves it playing on the old endpoint — so the only way to
-/// hear about it is to ask.
-const DEVICE_POLL: Duration = Duration::from_secs(1);
+/// hear about it is to ask. Also how long the drivers wait between ticks
+/// while the engine is [settled](Engine::settled): the watch is then the
+/// only thing the tick has to do, and it keeps its pace.
+pub(crate) const DEVICE_POLL: Duration = Duration::from_secs(1);
 
 /// How long a failed output rebuild rests before the next try: the
 /// outage where nothing will open at all (the lone Bluetooth headset
@@ -1642,6 +1644,16 @@ impl Engine {
     /// Pause and resume ride a short ramp instead of landing mid-wave (C6).
     pub fn set_pause_fade(&self, on: bool) {
         self.state.lock().unwrap().pause_fade = on;
+    }
+
+    /// Whether nothing can change until a command arrives: stopped, or a
+    /// landed pause, with no breath draining, no ramp owed, no open in
+    /// flight. A driver may tick lazily then — once per [`DEVICE_POLL`],
+    /// which is all the device watch asks — where it otherwise ticks every
+    /// ~100 ms to catch the end of a track, a blend's steps and position
+    /// (performance audit #81).
+    pub fn settled(&self) -> bool {
+        self.state.lock().unwrap().at_rest()
     }
 
     pub fn status(&self) -> Status {
