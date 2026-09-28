@@ -24,6 +24,51 @@ pub enum ContextStep {
     Resume,
 }
 
+/// Where the loop's next pass comes from (performance audit #125).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wake {
+    /// The next animation frame: something is waiting to be shown, or the
+    /// picture is moving.
+    Frame,
+    /// A timer this far off: the next poll tick.
+    After(Duration),
+}
+
+/// When to run the next pass, once this one is done.
+///
+/// `urgent` is work already queued — effects to dispatch, a reply or an
+/// audio event to fold in — which the next frame should act on. `animating`
+/// is the visualizer drawing from the audio at the fast poll: frames keep
+/// its 30 a second on the display's beat, where a timer would land them a
+/// frame early or late at random. Anything else waits for the poll tick
+/// the native loop would have woken at, measured from the last draw.
+pub fn next_wake(urgent: bool, animating: bool, since_render: Duration, poll: Duration) -> Wake {
+    if urgent || animating {
+        return Wake::Frame;
+    }
+    match poll.checked_sub(since_render) {
+        Some(left) if !left.is_zero() => Wake::After(left),
+        _ => Wake::Frame,
+    }
+}
+
+/// How much audio the analysers must hold. The tap is fed once a pass
+/// rather than once a frame (performance audit #125), so each copy has to
+/// reach back to where the last one ended, or the ring the visualizer reads
+/// holds two stretches with a seam between. Passes come every 33 ms while
+/// the visualizer draws, and the old 2048-frame window (43 ms at 48 kHz)
+/// was one late frame away from a seam; reaching past a whole slow poll
+/// leaves room for a stalled frame, and for the first pass after a pause.
+const ANALYSER_REACH: Duration = Duration::from_millis(150);
+
+/// The analysers' time-domain window for a context running at `rate`: the
+/// power of two that covers [`ANALYSER_REACH`], within what Web Audio
+/// allows (2048, the old fixed size, up to 32768).
+pub fn analyser_window(rate: f32) -> usize {
+    let frames = (f64::from(rate) * ANALYSER_REACH.as_secs_f64()).ceil() as usize;
+    frames.next_power_of_two().clamp(2048, 32768)
+}
+
 /// The audio context's idle clock (performance audit #123).
 ///
 /// A running AudioContext keeps the browser's audio output open — and on a
@@ -130,6 +175,43 @@ mod tests {
         assert_eq!(idle.step(false, true, t0 + secs(5.1)), ContextStep::Keep);
         assert_eq!(idle.step(false, true, t0 + secs(10.0)), ContextStep::Keep);
         assert_eq!(idle.step(true, true, t0 + secs(10.1)), ContextStep::Keep);
+    }
+
+    fn ms(ms: u64) -> Duration {
+        Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn at_rest_the_loop_sleeps_until_the_next_poll_tick() {
+        // Just drawn: the whole interval.
+        assert_eq!(next_wake(false, false, ms(0), ms(100)), Wake::After(ms(100)));
+        // Woken early by something that did not draw: what is left of it.
+        assert_eq!(next_wake(false, false, ms(30), ms(100)), Wake::After(ms(70)));
+        // A tick that is due or overdue is not a timer of zero.
+        assert_eq!(next_wake(false, false, ms(100), ms(100)), Wake::Frame);
+        assert_eq!(next_wake(false, false, ms(250), ms(100)), Wake::Frame);
+    }
+
+    #[test]
+    fn queued_work_and_a_moving_picture_take_the_next_frame() {
+        assert_eq!(next_wake(true, false, ms(0), ms(100)), Wake::Frame);
+        assert_eq!(next_wake(false, true, ms(5), ms(33)), Wake::Frame);
+    }
+
+    #[test]
+    fn the_analysers_reach_back_past_a_slow_poll() {
+        for rate in [22_050.0, 44_100.0, 48_000.0, 88_200.0, 96_000.0, 192_000.0] {
+            let window = analyser_window(rate);
+            assert!(window.is_power_of_two(), "{rate}");
+            let reach = window as f64 / f64::from(rate);
+            assert!(reach >= 0.15 || window == 32768, "{rate}: {reach}s");
+        }
+        assert_eq!(analyser_window(44_100.0), 8192);
+        assert_eq!(analyser_window(48_000.0), 8192);
+        assert_eq!(analyser_window(96_000.0), 16384);
+        // Web Audio's bounds.
+        assert_eq!(analyser_window(8_000.0), 2048);
+        assert_eq!(analyser_window(384_000.0), 32768);
     }
 
     #[test]

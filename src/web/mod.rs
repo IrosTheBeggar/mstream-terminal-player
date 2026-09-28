@@ -1,10 +1,11 @@
 //! The browser build: the same App and drawing code, rendered by ratzilla.
 //!
 //! The real player's run loop (tui::event_loop) owns the terminal and polls;
-//! a browser owns *us*, so the loop inverts — ratzilla calls the draw closure
-//! once per animation frame and the key handler as events arrive. Each frame
-//! does exactly what one pass of the native loop does: dispatch pending
-//! effects, fold in worker events, draw.
+//! a browser owns *us*, so the loop inverts — the browser calls a pass back
+//! on a timer or an animation frame ([`Alarm`]), and the key handler as
+//! events arrive. Each pass does exactly what one wakeup of the native loop
+//! does: dispatch pending effects, fold in worker events, and draw when the
+//! poll tick or something the user did says so.
 //!
 //! The api worker is real ([`api_worker`]): the same command→endpoint logic
 //! the native thread runs, awaited on the browser's event loop against
@@ -18,11 +19,12 @@ mod audio;
 mod canned;
 mod pace;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::time::Duration;
 
-use ratzilla::{DomBackend, WebRenderer};
+use ratzilla::DomBackend;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
@@ -40,11 +42,15 @@ use audio::WebAudioPlayer;
 /// (tui::SPIN_EVERY); the demo matches it so the two feel the same.
 const SPIN_EVERY_MS: u128 = 90;
 
+/// Asks the shell's loop for a pass on the next frame: what an api reply
+/// or an audio refusal landing in its queue calls.
+pub(crate) type Waker = Rc<dyn Fn()>;
+
 struct Shell {
     app: App,
     audio: WebAudioPlayer,
     api: WebApi,
-    /// Replies from the api worker's futures, drained each frame.
+    /// Replies from the api worker's futures, drained each pass.
     replies: Rc<RefCell<VecDeque<Event>>>,
     pending: Vec<Effect>,
     spun: Instant,
@@ -52,12 +58,97 @@ struct Shell {
     /// next poll tick.
     dirty: bool,
     last_render: Instant,
-    /// What the last real render produced. Browsers call the draw closure at
-    /// display rate, and building the whole TUI sixty times a second is
-    /// wasted work the native player never does — between poll ticks the
-    /// stored buffer is handed back, ratzilla diffs it against itself, and
-    /// nothing touches the DOM.
-    last_buffer: Option<ratatui::buffer::Buffer>,
+}
+
+/// The loop's one alarm (performance audit #125).
+///
+/// ratzilla's `draw_web` ran a pass, and handed ratatui a whole frame to
+/// diff, on every animation frame — 60 or 120 times a second, on a page
+/// with nothing to show. The shell schedules itself instead: the next
+/// animation frame when something is waiting to be seen or the visualizer
+/// is moving, a timer for the next poll tick otherwise — ten wakeups a
+/// second at rest, as natively. At most one wake is ever pending: a frame
+/// supersedes a timer (which is cleared), and a timer never supersedes a
+/// frame.
+///
+/// Frames still go through `window.requestAnimationFrame`, so index.html's
+/// hidden-page stand-in keeps a backgrounded tab's frames coming; its
+/// timers the browser throttles to about one a second, which is plenty.
+#[derive(Clone)]
+struct Alarm(Rc<AlarmState>);
+
+struct AlarmState {
+    /// The pass. Set once, when the loop starts; a wake asked for before
+    /// that is the first pass's to answer.
+    pass: RefCell<Option<Closure<dyn FnMut()>>>,
+    pending: Cell<Pending>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Pending {
+    Nothing,
+    Frame,
+    Timer(i32),
+}
+
+impl Alarm {
+    fn new() -> Self {
+        Alarm(Rc::new(AlarmState { pass: RefCell::new(None), pending: Cell::new(Pending::Nothing) }))
+    }
+
+    fn waker(&self) -> Waker {
+        let alarm = self.clone();
+        Rc::new(move || alarm.frame())
+    }
+
+    fn set(&self, wake: pace::Wake) {
+        match wake {
+            pace::Wake::Frame => self.frame(),
+            pace::Wake::After(delay) => self.after(delay),
+        }
+    }
+
+    /// A pass on the next animation frame.
+    fn frame(&self) {
+        let Some(window) = ratzilla::web_sys::window() else { return };
+        match self.0.pending.get() {
+            Pending::Frame => return,
+            Pending::Timer(id) => window.clear_timeout_with_handle(id),
+            Pending::Nothing => {}
+        }
+        self.0.pending.set(Pending::Nothing);
+        let pass = self.0.pass.borrow();
+        let Some(pass) = pass.as_ref() else { return };
+        if window.request_animation_frame(pass.as_ref().unchecked_ref()).is_ok() {
+            self.0.pending.set(Pending::Frame);
+        }
+    }
+
+    /// A pass after `delay`, unless a frame is already on its way.
+    fn after(&self, delay: Duration) {
+        let Some(window) = ratzilla::web_sys::window() else { return };
+        match self.0.pending.get() {
+            Pending::Frame => return,
+            Pending::Timer(id) => window.clear_timeout_with_handle(id),
+            Pending::Nothing => {}
+        }
+        self.0.pending.set(Pending::Nothing);
+        let pass = self.0.pass.borrow();
+        let Some(pass) = pass.as_ref() else { return };
+        // Rounded up: a timer that fires a fraction early finds the tick not
+        // yet due and costs a second wakeup to reach it.
+        let ms = delay.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+        if let Ok(id) =
+            window.set_timeout_with_callback_and_timeout_and_arguments_0(pass.as_ref().unchecked_ref(), ms)
+        {
+            self.0.pending.set(Pending::Timer(id));
+        }
+    }
+
+    /// The pending wake has fired: the pass is running.
+    fn fired(&self) {
+        self.0.pending.set(Pending::Nothing);
+    }
 }
 
 impl Shell {
@@ -168,21 +259,21 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     app.tap = Some(tap.clone());
     let pending = app.start();
 
+    let alarm = Alarm::new();
     let replies: Rc<RefCell<VecDeque<Event>>> = Rc::new(RefCell::new(VecDeque::new()));
     let shell = Rc::new(RefCell::new(Shell {
         app,
-        audio: WebAudioPlayer::new(tap),
-        api: WebApi::new(replies.clone()),
+        audio: WebAudioPlayer::new(tap, alarm.waker()),
+        api: WebApi::new(replies.clone(), alarm.waker()),
         replies,
         pending,
         spun: Instant::now(),
         dirty: true,
         last_render: Instant::now(),
-        last_buffer: None,
     }));
 
     let backend = DomBackend::new()?;
-    let terminal = ratatui::Terminal::new(backend)?;
+    let mut terminal = ratatui::Terminal::new(backend)?;
 
     // Not ratzilla's on_key_event: that hangs the listener on the grid
     // element the DOM backend created, and the backend replaces that element
@@ -190,6 +281,7 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     // resize and the keyboard is dead. The document outlives every grid, and
     // listening there also ends the focus dance a child listener needed.
     let on_key = shell.clone();
+    let key_alarm = alarm.clone();
     let keydown =
         Closure::<dyn FnMut(_)>::new(move |event: ratzilla::web_sys::KeyboardEvent| {
             let mut shell = on_key.borrow_mut();
@@ -198,10 +290,12 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
                 let effects = shell.app.handle_action(action);
                 shell.pending.extend(effects);
                 shell.dirty = true;
+                key_alarm.frame();
             }
         });
-    ratzilla::web_sys::window()
-        .and_then(|w| w.document())
+    let window = ratzilla::web_sys::window().ok_or("no window to run in")?;
+    window
+        .document()
         .ok_or("no document to listen for keys on")?
         .add_event_listener_with_callback("keydown", keydown.as_ref().unchecked_ref())
         .map_err(|_| "could not attach the keydown listener")?;
@@ -209,20 +303,31 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     // handle for.
     keydown.forget();
 
-    let on_frame = shell;
-    terminal.draw_web(move |frame| {
-        let mut shell = on_frame.borrow_mut();
+    // A resize is drawn on the next frame, not the next poll tick: the
+    // backend rebuilds its grid on the draw after one.
+    let on_resize = shell.clone();
+    let resize_alarm = alarm.clone();
+    let resize = Closure::<dyn FnMut()>::new(move || {
+        on_resize.borrow_mut().dirty = true;
+        resize_alarm.frame();
+    });
+    window
+        .add_event_listener_with_callback("resize", resize.as_ref().unchecked_ref())
+        .map_err(|_| "could not attach the resize listener")?;
+    resize.forget();
+
+    let on_pass = shell;
+    let pass_alarm = alarm.clone();
+    let pass = Closure::<dyn FnMut()>::new(move || {
+        pass_alarm.fired();
+        let mut shell = on_pass.borrow_mut();
         let shell = &mut *shell;
 
         for effect in std::mem::take(&mut shell.pending) {
             shell.dispatch(effect);
         }
-        // Audio status arrives every frame by construction; it waits for the
-        // poll tick like it does natively. Api replies are answers to
-        // something the user asked — those show up straight away.
-        for event in shell.audio.tick() {
-            shell.pending.extend(shell.app.apply_event(event));
-        }
+        // Api replies are answers to something the user asked — those show
+        // up straight away.
         loop {
             // Popped one at a time rather than held borrowed: apply_event can
             // queue effects whose replies want this same queue.
@@ -230,35 +335,53 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
             shell.pending.extend(shell.app.apply_event(event));
             shell.dirty = true;
         }
-        if shell.spun.elapsed().as_millis() >= SPIN_EVERY_MS {
-            shell.app.spinner = shell.app.spinner.wrapping_add(1);
-            shell.spun = Instant::now();
-        }
-        // The plays owed go out from here too (play-reporting clause 8):
-        // the native shells post from their tick, and this frame is the
-        // browser's. Not the whole tick — its reconcile reads the system
-        // clock, which wasm32 has none of.
-        let owed = shell.app.stats_flush_due(Instant::now());
-        shell.pending.extend(owed);
-        // There is no process to quit in a tab; parking the flag turns Quit
-        // into a no-op instead of a frozen screen.
-        shell.app.should_quit = false;
 
-        // The native loop draws once per poll wakeup; matching it here is
-        // both the frame budget and the feel. A resize invalidates the
-        // stored buffer, so a stale size never gets blitted back.
-        let due = shell.dirty
-            || shell.last_render.elapsed() >= crate::tui::poll_interval(&shell.app)
-            || shell.last_buffer.as_ref().is_none_or(|b| b.area != frame.area());
+        // The native loop wakes once a poll, or for input; matching it here
+        // is both the frame budget and the feel. A pass that is neither —
+        // the visualizer's frames between its ticks — only books the next.
+        // Audio status waits for the poll tick like it does natively; news
+        // from the player (a command's fresh status, a refusal) does not.
+        let poll = crate::tui::poll_interval(&shell.app);
+        let due = shell.dirty || shell.audio.has_news() || shell.last_render.elapsed() >= poll;
         if due {
-            ui::render(frame, &mut shell.app);
-            shell.last_buffer = Some(frame.buffer_mut().clone());
+            for event in shell.audio.tick() {
+                shell.pending.extend(shell.app.apply_event(event));
+            }
+            if shell.spun.elapsed().as_millis() >= SPIN_EVERY_MS {
+                shell.app.spinner = shell.app.spinner.wrapping_add(1);
+                shell.spun = Instant::now();
+            }
+            // The plays owed go out from here too (play-reporting clause
+            // 8): the native shells post from their tick, and this pass is
+            // the browser's. Not the whole tick — its reconcile reads the
+            // system clock, which wasm32 has none of.
+            let owed = shell.app.stats_flush_due(Instant::now());
+            shell.pending.extend(owed);
+            // There is no process to quit in a tab; parking the flag turns
+            // Quit into a no-op instead of a frozen screen.
+            shell.app.should_quit = false;
+
+            // Only now, and only here, does ratatui diff a frame: between
+            // draws nothing is handed to it at all.
+            terminal
+                .draw(|frame| ui::render(frame, &mut shell.app))
+                .expect("the backend refused a frame");
             shell.last_render = Instant::now();
             shell.dirty = false;
-        } else if let Some(buffer) = &shell.last_buffer {
-            *frame.buffer_mut() = buffer.clone();
         }
+
+        let urgent = !shell.pending.is_empty()
+            || shell.audio.has_news()
+            || !shell.replies.borrow().is_empty();
+        pass_alarm.set(pace::next_wake(
+            urgent,
+            shell.app.drawing_audio(),
+            shell.last_render.elapsed(),
+            crate::tui::poll_interval(&shell.app),
+        ));
     });
+    *alarm.0.pass.borrow_mut() = Some(pass);
+    alarm.frame();
 
     Ok(())
 }
