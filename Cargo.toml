@@ -31,8 +31,16 @@ unicode-width = "0.2"
 toml = "1.1.4"
 # Shared: on wasm this is the fetch backend (its TLS/socket internals are
 # target-gated inside reqwest itself), which is what makes api::Client's
-# async core one implementation for both builds.
-reqwest = "0.13.4"
+# async core one implementation for both builds. default-features = false
+# is load-bearing: the default TLS is rustls on aws-lc-rs, and the native
+# block below asks for rustls with no provider instead. The rest of the
+# default set is named back in — charset for `.text()`, http2, and
+# system-proxy, which corporate networks route through.
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "charset",
+    "http2",
+    "system-proxy",
+] }
 # The Url type api::urls builds with. On native this is the same crate
 # reqwest re-exports (cargo unifies the 2.x line), so the two spellings are
 # one type where they meet.
@@ -58,6 +66,36 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ratatui = { version = "0.30.2", features = ["crossterm"] }
+# The native TLS: rustls, still checked against what the operating system
+# trusts (rustls-platform-verifier comes with it — the corporate-proxy case
+# the tunnel line below explains), but on ring, the provider iroh already
+# brings, instead of reqwest's default aws-lc-rs. That was a second crypto
+# library, AWS-LC's C and assembly, built on every cold build's critical
+# path and linked beside ring for our three clients alone (performance
+# audit #132). runtime::install_tls_provider puts ring in place before any
+# client is built — without it reqwest panics at the build, loudly.
+#
+# What ring's provider does not do, knowingly given up: verify an ECDSA
+# P-521 certificate (the browsers' root programs take P-256 and P-384
+# only, inspecting proxies typically re-sign with RSA or P-256, and a
+# server trusted as self-signed skips verification anyway — an internal
+# CA on P-521 is the one case that now needs that knob), and offer the
+# X25519MLKEM768 post-quantum key share, which aws-lc-rs offered last,
+# behind X25519, used only if a server asked for it.
+#
+# gzip: the API client offers it and decodes transparently, so the big
+# JSON — a 16k-album list is ~4 MB plain, ~1 MB gzipped; a 5k-row folder
+# with metadata ~2.8 MB, ~0.4 MB — travels compressed wherever mStream's
+# compression toggle or a proxy in front (Caddy, nginx, Cloudflare) will
+# do it; below ~1.6 Mbit/s the plain album list outlasts the 20 s request
+# ceiling (performance audit #98). The browser build's fetch already does
+# this. gzip alone, not brotli too: mStream's brotli mode answers a
+# gzip-only client with gzip, and brotli's extra ~8% (measured on a real
+# mStream's album and folder answers) would be a decoder crate compiled
+# into every triple. The engine's stream clients opt out (engine::http):
+# a decoded body loses the Content-Length seeking needs.
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "gzip"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # Album art at the terminal's own resolution, where the terminal has one:
 # kitty, sixel or iTerm2. Native only, and for two reasons — the wasm build
 # draws through ratzilla's DOM backend, where a sixel escape sequence is
@@ -86,7 +124,9 @@ tiny_http = "0.12"
 # transcode codec=mp3/aac rule from PLAN.md finding #14 stands either way.)
 symphonia = { version = "0.5", features = ["all"] }
 clap = { version = "4", features = ["derive", "env"] }
-stream-download = "0.24.2"
+# Only what engine::http uses: the reqwest source and the temp-file spool.
+# The defaults would ask for reqwest's default TLS again, aws-lc and all.
+stream-download = { version = "0.24.2", default-features = false, features = ["reqwest", "temp-storage"] }
 # "time" is for the open() timeout in engine::http — the runtime already ran
 # with enable_all(), the timer just wasn't compiled in (PLAN.md finding #69).
 tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
@@ -229,6 +269,64 @@ fastrand = { version = "2", features = ["js"] }
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# Debug builds — `cargo run`, `cargo test`, the e2e battery, the pty smoke
+# rigs — optimise the crates that push pixels and samples, and nothing
+# else. At opt-level 0 a 400 px cover's jpeg decode took 35 ms against
+# 2.8 in release, and a 6x3 encode 4 / 13 / 5 ms (kitty / sixel / iTerm2)
+# against 0.28 / 0.56 / 0.22 (PLAN.md, cover_encode_costs); on a shared CI
+# runner a debug sixel encode took ~750 ms, which is what turned main red
+# twice on 2026-09-27 (a192aa8 reworded the wall's pacing test; this takes
+# away the slowness itself). Named crate by crate rather than "*": a
+# blanket override would optimise naga, wgpu, iroh and the TLS stack too,
+# minutes on every cold build of every worktree, for code no frame waits
+# on — these cost seconds. Our own crate stays at 0, for fast rebuilds and
+# a debugger that can see everything (performance audit #133).
+#
+# The covers: jpeg and png decode, the thumbnail and resize, the three
+# protocol encoders — ratatui-image's own loops (kitty's chunking, the
+# resize it drives), icy_sixel quantising through quantette, iTerm2's png
+# deflate and checksums — and kitty's and iTerm2's base64. ratatui-image
+# and the png helpers are not incidental: without them a kitty encode
+# stayed at 0.7 ms and an iTerm2 one at 0.9, against 0.2 with them.
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.simd-adler32]
+opt-level = 3
+[profile.dev.package.ratatui-image]
+opt-level = 3
+[profile.dev.package.icy_sixel]
+opt-level = 3
+[profile.dev.package.quantette]
+opt-level = 3
+[profile.dev.package.base64-simd]
+opt-level = 3
+# The audio: symphonia's core (its sample buffers and DSP) and the codecs
+# mStream actually serves.
+[profile.dev.package.symphonia-core]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 3
+[profile.dev.package.symphonia-codec-aac]
+opt-level = 3
+[profile.dev.package.symphonia-codec-vorbis]
+opt-level = 3
+[profile.dev.package.symphonia-codec-alac]
+opt-level = 3
+[profile.dev.package.symphonia-codec-pcm]
+opt-level = 3
 
 # cargo-deb wraps the already-cross-built binaries in the release workflow
 # (--no-build --no-strip --target <triple>); nothing here compiles anything.

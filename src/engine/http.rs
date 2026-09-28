@@ -154,9 +154,15 @@ fn insecure_client() -> Result<&'static Client, String> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
+            runtime::install_tls_provider();
             Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
                 .pool_max_idle_per_host(0)
+                // Identity only, as below.
+                .no_gzip()
+                .no_brotli()
+                .no_zstd()
+                .no_deflate()
                 .danger_accept_invalid_certs(true)
                 .build()
                 .map_err(|e| format!("failed to build http client: {e}"))
@@ -169,6 +175,7 @@ fn client() -> Result<&'static Client, String> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
+            runtime::install_tls_provider();
             Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
                 // Never reuse a kept-alive connection. A pooled connection
@@ -183,6 +190,16 @@ fn client() -> Result<&'static Client, String> {
                 // alongside the bridge itself). Streams gain nothing from
                 // reuse — an open per track, a connection per open.
                 .pool_max_idle_per_host(0)
+                // Identity only, whatever decoders the tree compiles in: the
+                // API client's gzip is this client's too unless refused, and
+                // a decoded body loses its Content-Length — the length open()
+                // hands back, without which a track seeks only as far as it
+                // has downloaded. tower-http offers the encoding even on a
+                // Range request (performance audit #98).
+                .no_gzip()
+                .no_brotli()
+                .no_zstd()
+                .no_deflate()
                 .build()
                 .map_err(|e| format!("failed to build http client: {e}"))
         })

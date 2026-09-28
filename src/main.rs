@@ -17,6 +17,9 @@ mod input;
 mod logging;
 /// The strings behind t!(), as static data written by build.rs.
 mod locale_table;
+/// Tests over Cargo.toml and Cargo.lock: dependency and profile choices.
+#[cfg(test)]
+mod manifest;
 mod player;
 mod tui;
 
@@ -415,6 +418,9 @@ fn main() {
     if let Some(path) = logging::init(run) {
         eprintln!("logging to {}", path.display());
     }
+
+    // The TLS provider, before anything can dial (see runtime.rs).
+    runtime::install_tls_provider();
 
     // Streaming scratch space (PLAN A1): each playing track spools to a temp
     // file. Decide where those belong before anything can open a stream, and
