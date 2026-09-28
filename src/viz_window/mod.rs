@@ -27,10 +27,11 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
+use crate::cmd_viz;
 use crate::config::VisualizerPrefs;
 use crate::runtime::block_on;
 use crate::shader::library::BUILTIN;
-use crate::shader::render::{Gpu, Offscreen, Scene};
+use crate::shader::render::{self, Gpu, Offscreen, Scene};
 
 pub mod controls;
 mod overlay;
@@ -210,16 +211,18 @@ impl App {
         let surface = instance
             .create_surface(window.clone())
             .map_err(|e| format!("the window has no drawing surface: {e}"))?;
-        let options = wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        };
+        let power_preference = render::power_preference();
+        let options =
+            wgpu::RequestAdapterOptions { power_preference, compatible_surface: Some(&surface), ..Default::default() };
         let adapter = match block_on(instance.request_adapter(&options)) {
             Ok(Ok(adapter)) => adapter,
             Ok(Err(e)) => return Err(format!("no GPU would draw the window: {e}")),
             Err(e) => return Err(e.to_string()),
         };
+        // Which GPU, in the player's log: "why is the fan on" and "why is
+        // 09 slow" start here.
+        let (gpu, asked) = (cmd_viz::describe(&adapter.get_info()), cmd_viz::power(power_preference));
+        eprintln!("viz-window: drawing on {gpu} ({asked})");
         let gpu = Arc::new(Gpu::new(&adapter)?);
         // Every preset compiled ahead on a thread of its own, the one the
         // window opens on first, while the rest of the window is made

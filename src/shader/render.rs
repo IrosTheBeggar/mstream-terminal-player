@@ -35,6 +35,30 @@ fn main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
 }
 ";
 
+/// The GPU to ask for: `WGPU_POWER_PREF` (`low`, `high` or `none`) where it
+/// is set, and otherwise [`POWER`] — a visualizer open for hours beside a
+/// music player is no reason to wake a laptop's discrete GPU (the
+/// performance audit's #121).
+pub fn power_preference() -> wgpu::PowerPreference {
+    preference(wgpu::PowerPreference::from_env())
+}
+
+fn preference(from_env: Option<wgpu::PowerPreference>) -> wgpu::PowerPreference {
+    from_env.unwrap_or(POWER)
+}
+
+/// Without `WGPU_POWER_PREF`: on macOS the integrated GPU. Metal lists a
+/// discrete GPU first, so no preference would still pick it, and on the
+/// dual-GPU Intel MacBook Pros that wakes it and switches the whole display
+/// over to it for as long as the window is open. Elsewhere no preference,
+/// the backend's own order: on Windows that is the adapter driving the main
+/// display, as the system's per-app graphics setting steers it, and Mesa's
+/// device-select (or `DRI_PRIME`) does the same on Linux — where asking for
+/// low power would hand a desktop whose monitor hangs off its graphics card
+/// to the processor's small integrated GPU, and copy every frame across.
+pub const POWER: wgpu::PowerPreference =
+    if cfg!(target_os = "macos") { wgpu::PowerPreference::LowPower } else { wgpu::PowerPreference::None };
+
 pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -578,6 +602,17 @@ mod tests {
     use super::*;
 
     use crate::shader::library;
+
+    #[test]
+    fn the_gpu_asked_for_is_the_users_choice_or_the_cool_one() {
+        use wgpu::PowerPreference as Asked;
+        for asked in [Asked::LowPower, Asked::HighPerformance, Asked::None] {
+            assert_eq!(preference(Some(asked)), asked, "WGPU_POWER_PREF has the last word");
+        }
+        let unset = preference(None);
+        assert_eq!(unset, if cfg!(target_os = "macos") { Asked::LowPower } else { Asked::None });
+        assert_ne!(unset, Asked::HighPerformance, "never the discrete GPU unasked");
+    }
 
     fn wiring(file: &str) -> [bool; 4] {
         let source = library::vendored_source(file).expect("a vendored preset");

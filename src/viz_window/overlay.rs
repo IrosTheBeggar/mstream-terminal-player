@@ -284,7 +284,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let options = wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: crate::shader::render::power_preference(),
             ..Default::default()
         };
         let adapter = block_on(instance.request_adapter(&options)).unwrap().expect("a GPU");
