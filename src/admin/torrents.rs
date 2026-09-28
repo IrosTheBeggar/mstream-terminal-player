@@ -14,7 +14,9 @@
 //!
 //! Every server call runs on a worker thread (the wizard's Job/Done
 //! pattern). The daemon's list is polled every five seconds while the
-//! Torrents tab shows, everything else every thirty.
+//! Torrents tab shows something moving — a download, a check, a queue, or
+//! a list changed since the last look — and with everything else every
+//! thirty once it all rests.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
@@ -46,7 +48,7 @@ use crate::kit::{self, Surface, bold, dim};
 use crate::setup::g;
 use crate::setup::picker::{self, Pick};
 
-/// The daemon's list, while the Torrents tab shows.
+/// The daemon's list, while the Torrents tab shows it moving.
 const POLL_LIST: Duration = Duration::from_secs(5);
 /// Everything else: the status probe, the libraries, the users.
 const POLL_STATE: Duration = Duration::from_secs(30);
@@ -540,6 +542,9 @@ pub(crate) struct Room {
     sel_anchor: Option<usize>,
     last_load: Option<Instant>,
     last_list: Option<Instant>,
+    /// The last list differed from the one before it — a torrent came or
+    /// went, or one's state or progress moved: worth another look soon.
+    list_moved: bool,
     ui: Surface<Act>,
 }
 
@@ -582,6 +587,7 @@ impl Room {
             sel_anchor: None,
             last_load: None,
             last_list: None,
+            list_moved: false,
             ui: Surface::new(),
         }
     }
@@ -663,6 +669,19 @@ impl Room {
             Tab::Access => self.users.len(),
             Tab::Client => 0,
         }
+    }
+
+    /// Whether the list is worth a look every five seconds: something in
+    /// it is moving — downloading, being checked, waiting its turn — or
+    /// the last look found it changed. At rest (seeding, paused, stopped)
+    /// the thirty-second load keeps it fresh: each look is the daemon
+    /// walking its whole list and ~420 bytes a torrent on the wire, and
+    /// nothing on screen can have moved (performance audit #100).
+    fn list_live(&self) -> bool {
+        self.list_moved
+            || self.torrents.iter().any(|t| {
+                matches!(t.status.as_str(), "downloading" | "verifying" | "queued") || t.rate_download > 0.0
+            })
     }
 
     fn selected_torrent(&self) -> Option<&Torrent> {
@@ -1175,6 +1194,11 @@ impl Room {
     }
 
     fn take_list(&mut self, list: TorrentList) {
+        // What a row shows that can move: which torrents, their state and
+        // their progress (a download's rate moves only while it downloads).
+        let same = |a: &Torrent, b: &Torrent| a.info_hash == b.info_hash && a.status == b.status && a.percent == b.percent;
+        self.list_moved = self.torrents.len() != list.torrents.len()
+            || !self.torrents.iter().zip(&list.torrents).all(|(a, b)| same(a, b));
         // A line apart: nothing typed into the filter spans the two.
         self.hay = list.torrents.iter().map(|t| format!("{}\n{}", t.name, t.info_hash).to_lowercase()).collect();
         self.torrents = list.torrents;
@@ -1225,15 +1249,19 @@ impl Screen for Room {
     }
 
     /// The polls, quiet: the list every five seconds while the Torrents
-    /// tab shows, everything else every thirty — only on the tabs page, and
-    /// never on top of a call already queued or running.
+    /// tab shows it moving, everything else — the list with it — every
+    /// thirty; only on the tabs page, and never on top of a call already
+    /// queued or running.
     fn tick(&mut self) {
         if self.phase() != Phase::Tabs || self.in_flight || self.queued.is_some() {
             return;
         }
         if self.last_load.is_none_or(|t| t.elapsed() >= POLL_STATE) {
             self.reload(false);
-        } else if self.tab == Tab::Torrents && self.last_list.is_none_or(|t| t.elapsed() >= POLL_LIST) {
+        } else if self.tab == Tab::Torrents
+            && self.list_live()
+            && self.last_list.is_none_or(|t| t.elapsed() >= POLL_LIST)
+        {
             self.queued = Some(Op::List);
         }
     }
@@ -2014,7 +2042,7 @@ fn state_spans(room: &Room) -> (Vec<Span<'static>>, Option<String>) {
             None,
         );
     }
-    let polls = Some(if room.tab == Tab::Torrents { t!("tor.polls") } else { t!("tor.polls_slow") }.to_string());
+    let polls = Some(if room.tab == Tab::Torrents && room.list_live() { t!("tor.polls") } else { t!("tor.polls_slow") }.to_string());
     match &room.status {
         None => (
             vec![
@@ -3326,7 +3354,8 @@ mod tests {
             result: Ok(RemoveAnswer { ok: true, daemon_remove_ok: false, daemon_remove_error: Some("daemon offline".into()) }),
         });
         assert!(room.note.as_ref().is_some_and(|(n, e)| *e && n.contains("the daemon-side remove failed: daemon offline")));
-        // The polls: the list every five seconds here, everything every thirty.
+        // The polls: with a download running, the list every five seconds
+        // here, everything every thirty.
         room.queued = None;
         room.last_load = Some(Instant::now());
         room.last_list = Some(Instant::now() - Duration::from_secs(6));
@@ -3751,5 +3780,57 @@ mod tests {
                 println!("torrents tab, {n} torrents, filter {filter:?}: {per:.3} ms a frame");
             }
         }
+    }
+
+    #[test]
+    fn a_list_at_rest_waits_for_the_thirty_second_load() {
+        // A five-second look only while something moves — a download, a
+        // check, a queue, or a list changed since the last look; at rest
+        // the thirty-second load keeps it fresh (performance audit #100).
+        let _en = english();
+        let mut room = connected();
+        let mut quiet = list();
+        for t in &mut quiet.torrents {
+            t.status = "seeding".into();
+            t.percent = 1.0;
+            t.rate_download = 0.0;
+        }
+        let look = |room: &mut Room| {
+            room.queued = None;
+            room.last_list = Some(Instant::now() - Duration::from_secs(6));
+            room.tick();
+            room.queued.take()
+        };
+        room.last_load = Some(Instant::now());
+        // The downloads just finished: the list changed, so one more look.
+        room.apply(Done::Listed(Ok(quiet.clone())));
+        assert_eq!(look(&mut room), Some(Op::List));
+        assert!(draw(&mut room).contains("polls every 5 s"));
+        // The same again: nothing moves, nothing to look at until the load.
+        room.apply(Done::Listed(Ok(quiet.clone())));
+        assert_eq!(look(&mut room), None);
+        assert!(draw(&mut room).contains("polls every 30 s"));
+        room.last_load = Some(Instant::now() - Duration::from_secs(31));
+        room.tick();
+        assert_eq!(room.queued.take(), Some(Op::Load), "the load comes as ever, the list with it");
+        room.last_load = Some(Instant::now());
+        // One starts downloading: five seconds again, for as long as it runs.
+        let mut moving = quiet.clone();
+        moving.torrents[2].status = "downloading".into();
+        room.apply(Done::Listed(Ok(moving.clone())));
+        room.apply(Done::Listed(Ok(moving)));
+        assert_eq!(look(&mut room), Some(Op::List));
+        assert!(draw(&mut room).contains("polls every 5 s"));
+        // Queued and checking count as moving too.
+        for status in ["queued", "verifying"] {
+            let mut waiting = quiet.clone();
+            waiting.torrents[0].status = status.into();
+            room.apply(Done::Listed(Ok(waiting.clone())));
+            room.apply(Done::Listed(Ok(waiting)));
+            assert_eq!(look(&mut room), Some(Op::List), "{status}");
+        }
+        // Off the Torrents tab the list is never polled on its own.
+        room.tab = Tab::Libraries;
+        assert_eq!(look(&mut room), None);
     }
 }
