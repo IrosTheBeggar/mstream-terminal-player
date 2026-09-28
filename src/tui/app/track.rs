@@ -49,10 +49,16 @@ impl App {
     /// rows shown or filtered, the playing track, the sheet's block — in one
     /// walk, so a fact learned about one reaches them all (clause 11).
     fn for_each_copy(&mut self, filepath: &str, mut f: impl FnMut(&mut TrackMetadata)) {
+        let mut queued = false;
         for item in &mut self.queue.items {
             if item.filepath == filepath {
                 f(&mut item.track.metadata);
+                queued = true;
             }
+        }
+        if queued {
+            // The saved rows carry the tags too (contract clause 39).
+            self.queue.touch();
         }
         for pane in [&mut self.files, &mut self.library, &mut self.search, &mut self.discover] {
             pane.for_each_track_mut(|track| {

@@ -873,14 +873,77 @@ pub(crate) fn transient_failure(error: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct QueueSnapshot {
     pub version: u32,
+    /// Which write of the rows this is: the ten-second checkpoint's
+    /// [`QueuePlace`] names it, and is only read against it. Absent from a
+    /// file an older player wrote, which then has no place beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<u64>,
     pub index: Option<usize>,
     pub position: f64,
     pub shuffle: bool,
     pub repeat: String,
     pub items: Vec<Queued>,
+    /// [`Queue::retired`]: the Auto DJ rows a restore let go of, by path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired: Vec<String>,
+}
+
+impl QueueSnapshot {
+    /// Take the checkpoint's place when it belongs to these rows — the same
+    /// shape, the same write of them — and keep the rows' own otherwise: a
+    /// place from another write indexes other rows.
+    pub fn adopt(&mut self, place: &QueuePlace) -> bool {
+        if place.version != self.version || self.stamp != Some(place.stamp) {
+            return false;
+        }
+        self.index = place.index;
+        self.position = place.position;
+        true
+    }
+}
+
+/// [`QueueSnapshot`] as it is written, borrowing the rows rather than
+/// cloning every one of them for a write that only reads them (performance
+/// audit #106). The same fields in the same order, so the text is byte for
+/// byte what the owned shape writes and reads back.
+#[derive(Debug, serde::Serialize)]
+pub struct QueueSnapshotRef<'a> {
+    pub version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<u64>,
+    pub index: Option<usize>,
+    pub position: f64,
+    pub shuffle: bool,
+    pub repeat: &'a str,
+    pub items: &'a [Queued],
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    pub retired: &'a [String],
+}
+
+/// Where the saved queue stands — the playing row and the seconds into it —
+/// for the ten-second checkpoint (contract clause 39). The rows have not
+/// changed since they were written, so only this is, beside them, rather
+/// than every row again for the one number that moved (performance audit
+/// #106). `stamp` names the write of the rows it belongs to.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QueuePlace {
+    pub version: u32,
+    pub stamp: u64,
+    pub index: Option<usize>,
+    pub position: f64,
 }
 
 pub const QUEUE_SNAPSHOT_VERSION: u32 = 1;
+
+/// How many played Auto DJ rows a restore brings back ahead of the playing
+/// one (contract clause 40). The DJ only ever appends and a resumed queue
+/// brought every pick back, so a lean-back queue grew ~15 rows an hour,
+/// launch after launch, and every per-row cost with it (performance audit
+/// #106).
+pub const DJ_PLAYED_KEPT: usize = 100;
+/// How many let-go DJ rows [`Queue::retired`] remembers, newest last — the
+/// server's own cap on the ignore list's wire.
+pub const DJ_RETIRED_CAP: usize = 500;
 
 /// A position at or within a second of the track's end restarts the track:
 /// resuming there would seek past the end and stop on play (contract
@@ -906,6 +969,15 @@ pub struct Queue {
     /// can see the end of the queue coming positionally; shuffle has no
     /// position, so its end is this count reaching the queue's length.
     played: usize,
+    /// Moved on by every change to the rows — their number, their order, a
+    /// tag learned in place — so the saver can tell rows it has written
+    /// from rows it has not (performance audit #106).
+    rev: u64,
+    /// The paths of Auto DJ rows a restore let go of (contract clause 40),
+    /// newest last, at most [`DJ_RETIRED_CAP`]: to the DJ's rule that a
+    /// pick already queued is not queued again they are still here.
+    /// Gone with the rows they stood beside when the queue is replaced.
+    pub retired: Vec<String>,
 }
 
 impl Default for Repeat {
@@ -915,13 +987,27 @@ impl Default for Repeat {
 }
 
 impl Queue {
+    /// Note a change to the rows made from outside these methods — a sweep
+    /// that assigned them, a rename or a tag written in place.
+    pub(crate) fn touch(&mut self) {
+        self.rev = self.rev.wrapping_add(1);
+    }
+
+    /// Which edit of the rows this is (see the field).
+    pub(crate) fn rev(&self) -> u64 {
+        self.rev
+    }
+
     pub fn replace(&mut self, tracks: Vec<Queued>) {
+        self.touch();
         self.items = tracks;
+        self.retired.clear();
         self.current = None;
         self.state.select(if self.items.is_empty() { None } else { Some(0) });
     }
 
     pub fn push(&mut self, track: Queued) {
+        self.touch();
         self.items.push(track);
         if self.state.selected().is_none() {
             self.state.select(Some(0));
@@ -935,6 +1021,7 @@ impl Queue {
             Some(current) if current < self.items.len() => current + 1,
             _ => self.items.len(),
         };
+        self.touch();
         self.items.insert(at, track);
         if self.state.selected().is_none() {
             self.state.select(Some(0));
@@ -947,6 +1034,7 @@ impl Queue {
         if from >= self.items.len() || to >= self.items.len() || from == to {
             return;
         }
+        self.touch();
         let item = self.items.remove(from);
         self.items.insert(to, item);
         self.current = self.current.map(|cur| {
@@ -963,7 +1051,9 @@ impl Queue {
     }
 
     pub fn clear(&mut self) {
+        self.touch();
         self.items.clear();
+        self.retired.clear();
         self.current = None;
         self.state.select(None);
     }
@@ -978,6 +1068,7 @@ impl Queue {
         if index >= self.items.len() {
             return false;
         }
+        self.touch();
         self.items.remove(index);
 
         let was_current = match self.current {
@@ -4184,6 +4275,7 @@ impl App {
         // re-announces from wherever playback lands.
         self.announced = None;
         self.queue.items = sweep.keep;
+        self.queue.touch();
         if self.queue.items.is_empty() {
             self.queue.clear();
             self.now_playing = None;
@@ -4214,12 +4306,46 @@ impl App {
     /// What to write down for next time (contract clause 39): every row,
     /// the playing one and the seconds into it — or the spot a restore is
     /// still holding, so a checkpoint before anything plays cannot write
-    /// track 1 / 0:00 over the real place. `None` for an empty queue.
+    /// track 1 / 0:00 over the real place. `None` for an empty queue. Owned,
+    /// for the tests; the saver writes [`App::queue_snapshot_ref`].
+    #[cfg(test)]
     pub fn queue_snapshot(&self) -> Option<QueueSnapshot> {
+        let snapshot = self.queue_snapshot_ref(None)?;
+        Some(QueueSnapshot {
+            version: snapshot.version,
+            stamp: snapshot.stamp,
+            index: snapshot.index,
+            position: snapshot.position,
+            shuffle: snapshot.shuffle,
+            repeat: snapshot.repeat.to_string(),
+            items: snapshot.items.to_vec(),
+            retired: snapshot.retired.to_vec(),
+        })
+    }
+
+    /// [`App::queue_snapshot`] as the saver writes it: borrowed, and
+    /// carrying the write's `stamp` (performance audit #106).
+    pub fn queue_snapshot_ref(&self, stamp: Option<u64>) -> Option<QueueSnapshotRef<'_>> {
         if self.queue.items.is_empty() {
             return None;
         }
-        let (index, position) = match (self.resume_spot, self.queue.current) {
+        let (index, position) = self.queue_spot();
+        Some(QueueSnapshotRef {
+            version: QUEUE_SNAPSHOT_VERSION,
+            stamp,
+            index,
+            position,
+            shuffle: self.queue.shuffle,
+            repeat: self.queue.repeat.label(),
+            items: &self.queue.items,
+            retired: &self.queue.retired,
+        })
+    }
+
+    /// The playing row and the seconds into it, as a snapshot writes them —
+    /// or the spot a restore is still holding (clause 40).
+    pub fn queue_spot(&self) -> (Option<usize>, f64) {
+        match (self.resume_spot, self.queue.current) {
             // The held spot rides the row the queue keeps current — edits
             // before the first play re-index the rows under the spot.
             (Some((_, position)), _) if self.status.is_idle() => (self.queue.current, position),
@@ -4228,22 +4354,15 @@ impl App {
                 (Some(current), position)
             }
             (_, None) => (None, 0.0),
-        };
-        Some(QueueSnapshot {
-            version: QUEUE_SNAPSHOT_VERSION,
-            index,
-            position,
-            shuffle: self.queue.shuffle,
-            repeat: self.queue.repeat.label().to_string(),
-            items: self.queue.items.clone(),
-        })
+        }
     }
 
     /// Bring a saved queue back (contract clause 40): rows whose server is
     /// no longer known are dropped, the playing row keeps its place when it
     /// survives (else the index is clamped), a position at the end restarts
     /// the track, and nothing plays — the spot waits for the first play.
-    /// Returns whether anything came back.
+    /// With the DJ armed, only the last [`DJ_PLAYED_KEPT`] of its played
+    /// rows come back. Returns whether anything came back.
     pub fn restore_queue(&mut self, snapshot: QueueSnapshot) -> bool {
         if snapshot.version != QUEUE_SNAPSHOT_VERSION {
             return false;
@@ -4253,10 +4372,30 @@ impl App {
             origin.server == live.server
                 || self.servers.iter().any(|s| crate::config::same_server(&s.id, &origin.server))
         };
-        let mut kept = Vec::with_capacity(snapshot.items.len());
+        // The DJ appends every pick, so a queue it works grows as it plays
+        // (performance audit #106). Played straight through — no shuffle,
+        // no wrap — the rows before the saved one are behind it for good:
+        // the oldest of the DJ's are let go, their paths kept so it does
+        // not pick them again. What the user queued always comes back.
+        let straight = !snapshot.shuffle && Repeat::from_label(&snapshot.repeat) != Repeat::All;
+        let played = match snapshot.index {
+            Some(at) if straight && self.dj_armed() => snapshot.items[..at.min(snapshot.items.len())]
+                .iter()
+                .filter(|item| item.dj.is_some() && known(&item.origin))
+                .count(),
+            _ => 0,
+        };
+        let mut let_go = played.saturating_sub(DJ_PLAYED_KEPT);
+        let mut retired = snapshot.retired;
+        let mut kept = Vec::with_capacity(snapshot.items.len() - let_go);
         let mut index = None;
         for (i, item) in snapshot.items.into_iter().enumerate() {
             if !known(&item.origin) {
+                continue;
+            }
+            if let_go > 0 && item.dj.is_some() && snapshot.index.is_some_and(|at| i < at) {
+                let_go -= 1;
+                retired.push(item.track.filepath);
                 continue;
             }
             if snapshot.index == Some(i) {
@@ -4268,7 +4407,9 @@ impl App {
             return false;
         }
         let index = index.or_else(|| snapshot.index.map(|i| i.min(kept.len() - 1)));
+        retired.drain(..retired.len().saturating_sub(DJ_RETIRED_CAP));
         self.queue.replace(kept);
+        self.queue.retired = retired;
         self.queue.shuffle = snapshot.shuffle;
         self.queue.repeat = Repeat::from_label(&snapshot.repeat);
         if let Some(index) = index {

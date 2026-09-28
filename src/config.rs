@@ -940,6 +940,30 @@ pub fn save_queue_file(body: &str) -> Result<(), String> {
     write_atomic(&queue_path()?, body, false)
 }
 
+/// Where the saved queue stands between writes of its rows — the playing
+/// row and the seconds into it, naming the rows it belongs to — so the
+/// ten-second checkpoint rewrites a few dozen bytes rather than every row
+/// (performance audit #106). Read only against `queue.json`.
+pub fn queue_place_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("queue-place.json"))
+}
+
+pub fn load_queue_place_file() -> Result<Option<String>, String> {
+    let path = queue_place_path()?;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("could not read {}: {e}", path.display())),
+    }
+}
+
+/// Without the flush `queue.json` gets: this file is rewritten every ten
+/// seconds of playback, and one a power loss emptied is simply not taken —
+/// the rows file's own place stands in, and the rows are never at risk.
+pub fn save_queue_place_file(body: &str) -> Result<(), String> {
+    write_atomic_as(&queue_place_path()?, body, false, false)
+}
+
 /// `stats.json` — the play reporter's outbox and its checkpointed session
 /// (play-reporting contract, clause 9), beside the queue's file and as
 /// disposable: a corrupt file is ignored, never repaired.
@@ -972,12 +996,15 @@ pub fn delete_stats_file() -> Result<(), String> {
 /// Drop the saved queue: a cleared queue must not come back on the next
 /// launch, and neither may one the setting was turned off for.
 pub fn delete_queue_file() -> Result<(), String> {
-    let path = queue_path()?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("could not remove {}: {e}", path.display())),
+    // The place first: without its rows it is never read anyway.
+    for path in [queue_place_path()?, queue_path()?] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("could not remove {}: {e}", path.display())),
+        }
     }
+    Ok(())
 }
 
 pub fn spool_dir() -> Option<PathBuf> {
@@ -1051,6 +1078,13 @@ fn expand_home_from(path: PathBuf, home: Option<PathBuf>) -> PathBuf {
 /// A rename is atomic on both platforms, so a crash mid-write leaves the old
 /// contents rather than a truncated file.
 fn write_atomic(path: &Path, contents: &str, owner_only: bool) -> Result<(), String> {
+    write_atomic_as(path, contents, owner_only, true)
+}
+
+/// [`write_atomic`], with the flush to the drive a choice: `durable: false`
+/// keeps the rename's atomicity against a crash and skips the flush —
+/// for a file whose loss costs nothing (see the queue's place).
+fn write_atomic_as(path: &Path, contents: &str, owner_only: bool, durable: bool) -> Result<(), String> {
     use std::io::Write;
 
     let dir = path
@@ -1067,7 +1101,7 @@ fn write_atomic(path: &Path, contents: &str, owner_only: bool) -> Result<(), Str
         // leave the new name pointing at a file whose bytes never landed —
         // an empty config where the crash-safety was supposed to leave the
         // old one.
-        file.sync_all()
+        if durable { file.sync_all() } else { Ok(()) }
     };
     write(&temp).map_err(|e| format!("could not write {}: {e}", temp.display()))?;
     if owner_only {

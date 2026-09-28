@@ -2729,6 +2729,7 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
     long.track.metadata.duration = Some(300.0);
     let snapshot = QueueSnapshot {
         version: QUEUE_SNAPSHOT_VERSION,
+        stamp: None,
         index: Some(2),
         position: 42.5,
         shuffle: true,
@@ -2739,6 +2740,7 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
             long,
             at("http://gone", "music/lost2.mp3"),
         ],
+        retired: Vec::new(),
     };
     assert!(app.restore_queue(snapshot));
     assert_eq!(app.queue.items.len(), 2, "the two rows whose servers are known");
@@ -2763,19 +2765,23 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
     let mut fresh = connected_app();
     assert!(!fresh.restore_queue(QueueSnapshot {
         version: QUEUE_SNAPSHOT_VERSION + 1,
+        stamp: None,
         index: None,
         position: 0.0,
         shuffle: false,
         repeat: "off".into(),
         items: vec![at("http://host:3000", "music/1.mp3")],
+        retired: Vec::new(),
     }));
     assert!(!fresh.restore_queue(QueueSnapshot {
         version: QUEUE_SNAPSHOT_VERSION,
+        stamp: None,
         index: Some(0),
         position: 0.0,
         shuffle: false,
         repeat: "off".into(),
         items: vec![at("http://gone", "music/1.mp3")],
+        retired: Vec::new(),
     }));
     assert!(fresh.queue.items.is_empty());
 }
@@ -2804,6 +2810,129 @@ fn a_snapshot_round_trips_and_keeps_a_held_spot_until_something_plays() {
 
     // An empty queue has nothing to write.
     assert!(App::new(None, None, None).queue_snapshot().is_none());
+}
+
+#[test]
+fn the_borrowed_snapshot_writes_exactly_what_the_owned_one_does() {
+    // Performance audit #106: the saver serializes the rows where they
+    // stand instead of cloning them first — and must not change a byte.
+    let mut app = connected_app();
+    let mut tagged = track("music/b.flac");
+    tagged.metadata.title = Some("Bé".into());
+    tagged.metadata.genres = vec!["Ambient".into()];
+    tagged.metadata.duration = Some(61.5);
+    app.push_queue(track("music/a.mp3"));
+    app.push_queue(tagged);
+    app.queue.items[1].dj = Some(DjMark { sonic: true });
+    let effects = app.play_index(1);
+    app.status = PlayerStatus { playing: true, position: 17.25, source: played_url(&effects), ..Default::default() };
+    let owned = serde_json::to_string(&app.queue_snapshot().unwrap()).unwrap();
+    let borrowed = serde_json::to_string(&app.queue_snapshot_ref(None).unwrap()).unwrap();
+    assert_eq!(borrowed, owned);
+    // The shape of old: nothing new in a file with no stamp and nothing
+    // let go, so an older player reads it as it always did.
+    assert!(owned.starts_with(r#"{"version":1,"index":1,"position":17.25,"shuffle":false,"repeat":"off","items":[{"#), "{owned}");
+    assert!(!owned.contains("stamp") && !owned.contains("retired"), "{owned}");
+
+    // Stamped and with rows let go, the two still agree, and read back whole.
+    app.queue.retired = vec!["music/old.mp3".into()];
+    let mut owned = app.queue_snapshot().unwrap();
+    owned.stamp = Some(7);
+    let text = serde_json::to_string(&owned).unwrap();
+    assert_eq!(serde_json::to_string(&app.queue_snapshot_ref(Some(7)).unwrap()).unwrap(), text);
+    assert_eq!(serde_json::from_str::<QueueSnapshot>(&text).unwrap(), owned);
+}
+
+#[test]
+fn a_checkpoint_place_is_taken_only_by_the_rows_it_names() {
+    // Performance audit #106: the ten-second checkpoint writes the place
+    // alone; it stands for the rows of the same stamp, never for others.
+    let mut app = connected_app();
+    app.push_queue(track("music/a.mp3"));
+    app.push_queue(track("music/b.mp3"));
+    let mut snapshot = app.queue_snapshot().unwrap();
+    snapshot.stamp = Some(41);
+    let place = QueuePlace { version: QUEUE_SNAPSHOT_VERSION, stamp: 41, index: Some(1), position: 88.0 };
+    let other = QueuePlace { stamp: 40, ..place.clone() };
+    let newer = QueuePlace { version: QUEUE_SNAPSHOT_VERSION + 1, ..place.clone() };
+    let mut unstamped = snapshot.clone();
+    unstamped.stamp = None;
+    assert!(!snapshot.clone().adopt(&other), "another write's place");
+    assert!(!snapshot.clone().adopt(&newer), "another shape's");
+    assert!(!unstamped.adopt(&place), "rows an older player wrote have no place");
+    assert!(snapshot.adopt(&place));
+    assert_eq!((snapshot.index, snapshot.position), (Some(1), 88.0));
+}
+
+/// An Auto DJ pick on the test server.
+fn dj_row(path: &str) -> Queued {
+    Queued { dj: Some(DjMark { sonic: false }), ..item(path) }
+}
+
+#[test]
+fn a_restored_dj_queue_keeps_its_last_hundred_played_picks_and_remembers_the_rest() {
+    // Contract clause 40, performance audit #106: the DJ only appends, so
+    // with it armed a restore brings back the last DJ_PLAYED_KEPT of its
+    // played rows; every row the user queued and every row still to come
+    // stays, and the let-go paths still count as queued to the DJ.
+    let rows = |dj_played: usize| {
+        let mut items: Vec<Queued> = (0..dj_played).map(|i| dj_row(&format!("dj/{i:03}.mp3"))).collect();
+        items.insert(10, item("mine/early.mp3"));
+        items.push(dj_row("dj/playing.mp3"));
+        items.push(dj_row("dj/next.mp3"));
+        items
+    };
+    let snapshot = |dj_played: usize, shuffle: bool, repeat: &str| QueueSnapshot {
+        version: QUEUE_SNAPSHOT_VERSION,
+        stamp: None,
+        index: Some(dj_played + 1),
+        position: 30.0,
+        shuffle,
+        repeat: repeat.into(),
+        items: rows(dj_played),
+        retired: vec!["dj/older.mp3".into()],
+    };
+    let mut app = connected_app();
+    app.dj_server = Some(HOST.into());
+    assert!(app.restore_queue(snapshot(130, false, "off")));
+    let paths: Vec<&str> = app.queue.items.iter().map(|i| i.filepath.as_str()).collect();
+    assert_eq!(paths.len(), 1 + DJ_PLAYED_KEPT + 2, "the user's row, the last hundred picks, the playing and the next");
+    assert_eq!(paths[0], "mine/early.mp3", "what the user queued comes back wherever it stood");
+    assert_eq!(paths[1], "dj/030.mp3", "the thirty oldest picks are let go");
+    assert_eq!(app.queue.current, Some(DJ_PLAYED_KEPT + 1));
+    assert_eq!(app.queue.items[app.queue.current.unwrap()].filepath, "dj/playing.mp3", "the spot rides its row");
+    assert_eq!(app.resume_spot, Some((DJ_PLAYED_KEPT + 1, 30.0)));
+    assert_eq!(app.queue.retired.len(), 31);
+    assert_eq!((app.queue.retired[0].as_str(), app.queue.retired[30].as_str()), ("dj/older.mp3", "dj/029.mp3"));
+    assert_eq!(app.queue_snapshot().unwrap().retired, app.queue.retired, "and they are saved with the queue");
+
+    // A pick the DJ let go is as queued as any row: not queued again.
+    let epoch = app.lane.epoch;
+    app.apply_event(pick(epoch, vec![track("dj/005.mp3"), track("dj/next.mp3")]));
+    assert_eq!(app.queue.items.len(), 1 + DJ_PLAYED_KEPT + 2, "nothing new");
+    app.apply_event(pick(epoch, vec![track("dj/005.mp3"), track("dj/fresh.mp3")]));
+    assert_eq!(app.queue.items.last().unwrap().filepath, "dj/fresh.mp3");
+
+    // Nothing is let go while its rows are still to come or the DJ is off:
+    // shuffled, wrapping, or disarmed.
+    for (shuffle, repeat, armed) in [(true, "off", true), (false, "all", true), (false, "off", false)] {
+        let mut app = connected_app();
+        app.dj_server = armed.then(|| HOST.to_string());
+        assert!(app.restore_queue(snapshot(130, shuffle, repeat)));
+        assert_eq!(app.queue.items.len(), 133, "shuffle {shuffle}, repeat {repeat}, armed {armed}");
+        assert_eq!(app.queue.retired, ["dj/older.mp3"], "what was let go before stays let go");
+    }
+
+    // The memory is bounded, oldest out; a new queue forgets it.
+    let mut app = connected_app();
+    app.dj_server = Some(HOST.into());
+    let mut big = snapshot(DJ_PLAYED_KEPT + DJ_RETIRED_CAP + 5, false, "one");
+    big.retired = Vec::new();
+    assert!(app.restore_queue(big));
+    assert_eq!(app.queue.retired.len(), DJ_RETIRED_CAP);
+    assert_eq!(app.queue.retired[0], "dj/005.mp3", "the oldest five fell out");
+    app.replace_queue(vec![track("x.mp3")]);
+    assert!(app.queue.retired.is_empty());
 }
 
 #[test]

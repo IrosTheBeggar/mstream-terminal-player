@@ -104,7 +104,17 @@ pub(crate) struct Startup {
 #[cfg(not(target_arch = "wasm32"))]
 fn load_queue_snapshot() -> Option<app::QueueSnapshot> {
     let text = config::load_queue_file().ok().flatten()?;
-    serde_json::from_str::<app::QueueSnapshot>(&text).ok()
+    let mut snapshot = serde_json::from_str::<app::QueueSnapshot>(&text).ok()?;
+    // The last checkpoint's place, when it belongs to these rows; one that
+    // is missing, torn or about other rows leaves theirs standing.
+    if let Some(place) = config::load_queue_place_file()
+        .ok()
+        .flatten()
+        .and_then(|text| serde_json::from_str::<app::QueuePlace>(&text).ok())
+    {
+        snapshot.adopt(&place);
+    }
+    Some(snapshot)
 }
 
 /// The play reporter's file as the config left it — `None` for no file,
@@ -118,14 +128,20 @@ fn load_stats_snapshot() -> Option<app::stats::StatsSnapshot> {
 /// Keeps `queue.json` current for the shell (contract clause 39): a write
 /// 800 ms after the queue last changed, a checkpoint every ten seconds
 /// while playing, a flush on the way out — and the file gone once a queue
-/// that existed this session is cleared, or the setting turned off. Keeps
-/// `stats.json` beside it the same way (play-reporting contract, clause
-/// 9): the owed plays and the open session, checkpointed.
+/// that existed this session is cleared, or the setting turned off. The
+/// checkpoint writes only the place, beside rows it has not touched since
+/// (performance audit #106). Keeps `stats.json` beside it the same way
+/// (play-reporting contract, clause 9): the owed plays and the open
+/// session, checkpointed.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct QueueSaver {
     signature: u64,
     dirty_since: Option<std::time::Instant>,
     last_write: std::time::Instant,
+    /// The write of the rows this saver last made, which a checkpoint's
+    /// place names. `None` until it has made one: the file the last launch
+    /// left is not the queue a restore made of it.
+    rows_stamp: Option<u64>,
     stats_signature: u64,
     stats_dirty_since: Option<std::time::Instant>,
     stats_last_write: std::time::Instant,
@@ -147,6 +163,7 @@ impl QueueSaver {
             signature: Self::signature(app),
             dirty_since: None,
             last_write: std::time::Instant::now(),
+            rows_stamp: None,
             stats_signature: Self::stats_signature(app),
             stats_dirty_since: None,
             stats_last_write: std::time::Instant::now(),
@@ -200,7 +217,8 @@ impl QueueSaver {
     }
 
     /// What a change to the queue looks like from outside: the rows, the
-    /// playing one, the modes and a held spot. Cheap enough per tick.
+    /// playing one, the modes and a held spot — and a tag written into a
+    /// row in place, which the rows' revision says. Cheap enough per tick.
     fn signature(app: &App) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -209,6 +227,7 @@ impl QueueSaver {
             item.origin.peer.hash(&mut h);
             item.filepath.hash(&mut h);
         }
+        app.queue.rev().hash(&mut h);
         app.queue.current.hash(&mut h);
         app.queue.shuffle.hash(&mut h);
         app.queue.repeat.label().hash(&mut h);
@@ -233,17 +252,21 @@ impl QueueSaver {
             self.signature = signature;
             self.dirty_since.get_or_insert(now);
         }
-        let due = match self.dirty_since {
-            Some(since) => now.duration_since(since) >= Self::DEBOUNCE,
+        match self.dirty_since {
+            Some(since) => {
+                if now.duration_since(since) >= Self::DEBOUNCE {
+                    self.write(app);
+                }
+            }
             None => {
-                app.status.playing
+                if app.status.playing
                     && !app.status.paused
                     && !app.queue.items.is_empty()
                     && now.duration_since(self.last_write) >= Self::CHECKPOINT
+                {
+                    self.checkpoint(app);
+                }
             }
-        };
-        if due {
-            self.write(app);
         }
     }
 
@@ -256,22 +279,45 @@ impl QueueSaver {
         self.write(app);
     }
 
+    /// The rows and their place, borrowed rather than cloned to be written
+    /// (performance audit #106), under a fresh stamp.
     fn write(&mut self, app: &App) {
         self.dirty_since = None;
         self.last_write = std::time::Instant::now();
-        match app.queue_snapshot() {
+        let stamp = fastrand::u64(..);
+        match app.queue_snapshot_ref(Some(stamp)) {
             Some(snapshot) => {
                 self.had_queue = true;
                 // A read-only config directory costs the next launch its
                 // queue and nothing else; the screen is not the place to say so.
-                if let Ok(body) = serde_json::to_string(&snapshot) {
-                    let _ = config::save_queue_file(&body);
-                }
+                let saved = serde_json::to_string(&snapshot)
+                    .map_err(|e| e.to_string())
+                    .and_then(|body| config::save_queue_file(&body));
+                self.rows_stamp = saved.ok().map(|()| stamp);
             }
             None if self.had_queue => {
+                self.rows_stamp = None;
                 let _ = config::delete_queue_file();
             }
             None => {}
+        }
+    }
+
+    /// The ten-second checkpoint: nothing about the rows changed since they
+    /// were written, only how far into the playing one it is — so only the
+    /// place goes out, a few dozen bytes naming those rows, rather than
+    /// every row again (performance audit #106). Rows not written yet this
+    /// launch are written whole.
+    fn checkpoint(&mut self, app: &App) {
+        let Some(stamp) = self.rows_stamp else {
+            self.write(app);
+            return;
+        };
+        self.last_write = std::time::Instant::now();
+        let (index, position) = app.queue_spot();
+        let place = app::QueuePlace { version: app::QUEUE_SNAPSHOT_VERSION, stamp, index, position };
+        if let Ok(body) = serde_json::to_string(&place) {
+            let _ = config::save_queue_place_file(&body);
         }
     }
 }
@@ -1127,6 +1173,86 @@ mod tests {
         saver.flush(&app);
         let start = startup(None, None, None);
         assert!(start.queue.is_some(), "the default setting is on");
+    }
+
+    #[test]
+    fn the_checkpoint_writes_the_place_and_leaves_the_rows_alone() {
+        // Performance audit #106: while nothing about the rows changes, the
+        // ten-second checkpoint rewrites a few dozen bytes naming them —
+        // and a relaunch still comes back at the checkpointed second.
+        let _scratch = crate::config::testing::Scratch::new("queue-place");
+        let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
+        app.connected = true;
+        for name in ["a", "b", "c"] {
+            app.push_queue(Track { filepath: format!("music/{name}.mp3"), metadata: Default::default() });
+        }
+        app.queue.current = Some(1);
+        app.status = crate::player::PlayerStatus {
+            playing: true,
+            position: 9.0,
+            source: "http://host:3000/media/music/b.mp3?token=tok".into(),
+            ..Default::default()
+        };
+        let mut saver = QueueSaver::new(&app);
+        let ten_seconds_on = |saver: &mut QueueSaver| {
+            saver.last_write -= QueueSaver::CHECKPOINT;
+        };
+
+        // The first checkpoint of a launch writes the rows: the file the
+        // last launch left is not what this one restored.
+        ten_seconds_on(&mut saver);
+        saver.tick(&app);
+        let rows = config::load_queue_file().unwrap().expect("the rows are written");
+        assert!(config::load_queue_place_file().unwrap().is_none());
+
+        // Later checkpoints write the place alone.
+        app.status.position = 31.5;
+        ten_seconds_on(&mut saver);
+        saver.tick(&app);
+        assert_eq!(config::load_queue_file().unwrap().unwrap(), rows, "the rows untouched, byte for byte");
+        let place = config::load_queue_place_file().unwrap().expect("the place is written");
+        assert!(place.len() < 100, "{place}");
+        let back = load_queue_snapshot().unwrap();
+        assert_eq!((back.index, back.position), (Some(1), 31.5), "a relaunch comes back at the checkpoint");
+        assert_eq!(back.items.len(), 3);
+
+        // Paused, nothing is written at all.
+        app.status.paused = true;
+        app.status.position = 40.0;
+        ten_seconds_on(&mut saver);
+        saver.tick(&app);
+        assert_eq!(load_queue_snapshot().unwrap().position, 31.5);
+        app.status.paused = false;
+
+        // An edit writes the rows again under a new stamp, which the old
+        // place no longer names: the rows' own place stands.
+        app.status.position = 50.0;
+        app.queue.move_row(2, 0);
+        saver.tick(&app);
+        saver.dirty_since = saver.dirty_since.map(|since| since - QueueSaver::DEBOUNCE);
+        saver.tick(&app);
+        assert_ne!(config::load_queue_file().unwrap().unwrap(), rows);
+        assert_eq!(config::load_queue_place_file().unwrap().unwrap(), place, "the stale place is still there");
+        let back = load_queue_snapshot().unwrap();
+        assert_eq!((back.index, back.position), (Some(2), 50.0), "and is not taken");
+
+        // A tag learned in place is a change to the rows too.
+        let written = config::load_queue_file().unwrap().unwrap();
+        let origin = app.queue.items[0].origin.clone();
+        assert!(!app.rate_track(&origin, "music/b.mp3", Some(8)).is_empty());
+        saver.tick(&app);
+        assert!(saver.dirty_since.is_some(), "the rating is waiting for the debounce");
+        saver.flush(&app);
+        assert_ne!(config::load_queue_file().unwrap().unwrap(), written);
+
+        // Cleared, both files go.
+        app.queue.clear();
+        app.status = Default::default();
+        ten_seconds_on(&mut saver);
+        saver.checkpoint(&app);
+        saver.flush(&app);
+        assert!(config::load_queue_file().unwrap().is_none());
+        assert!(config::load_queue_place_file().unwrap().is_none(), "the place goes with its rows");
     }
 
     #[test]

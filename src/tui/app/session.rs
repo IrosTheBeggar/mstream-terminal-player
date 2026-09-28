@@ -294,6 +294,7 @@ impl App {
         for item in &mut self.queue.items {
             rename(&mut item.origin.server);
         }
+        self.queue.touch();
         for owed in &mut self.stats.outbox {
             rename(&mut owed.origin.server);
         }
