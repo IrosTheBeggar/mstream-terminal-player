@@ -1353,6 +1353,7 @@ fn clip_lead(text: &str, max: usize) -> String {
 pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     gui.ui.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
+    gui.stats.drawn = false; // and the Stats screen's says it drew
     let area = frame.area();
     if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
         frame.render_widget(
@@ -3627,6 +3628,42 @@ mod tests {
         assert!(all.contains("no session"), "{all}");
         super::handle_key(&mut lone, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(lone.screen, Screen::Library);
+    }
+
+    #[test]
+    fn a_stats_page_under_the_mini_player_is_not_on_screen() {
+        // The mini player stands in for every screen and draws no page: a
+        // page chosen under it has no frame to be out of date, so its
+        // surface's clocks do not redraw the mini player every pass
+        // (performance audit #102 follow-up), and the pointer below the
+        // bar is the mini player's transport, not the undrawn page's.
+        use crate::admin::Screen as _;
+        let mut gui = browsing_gui();
+        gui.app.session.server = "http://host.invalid:3000".into();
+        gui.app.session.server_id = "http://host.invalid:3000".into();
+        gui.act(Act::Screen(Screen::Stats));
+        assert!(gui.stats.page.is_some());
+        let mut small = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        small.draw(|frame| render(frame, &mut gui)).unwrap();
+        assert!(gui.stats.page.as_mut().unwrap().ui().stale(), "never drawn: its own surface says so");
+        assert!(!moving(&mut gui), "but it is not on screen");
+        let click = event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(!stats::pointer(&mut gui, click), "the mini player's to take");
+
+        // Full size: the page draws, and its clocks and pointer are the
+        // frame's again.
+        draw(&mut gui);
+        assert!(!moving(&mut gui), "drawn, and nothing on a clock");
+        gui.stats.page.as_mut().unwrap().ui().overlay(Rect::new(2, 2, 10, 4));
+        assert!(moving(&mut gui), "an overlay came: the page owes a frame");
+        assert!(stats::pointer(&mut gui, click), "the page's");
+        small.draw(|frame| render(frame, &mut gui)).unwrap();
+        assert!(!moving(&mut gui), "not under the mini player");
     }
 
     #[test]
