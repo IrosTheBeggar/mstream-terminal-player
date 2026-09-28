@@ -1733,6 +1733,8 @@ gui:
     back_tip: "Voltar às definições — Esc"
   stats:
     no_session: "sem sessão — conecte-se a um servidor e seu registro de audição aparecerá aqui"
+  mini:
+    enlarge: "Aumente o terminal para ver o player completo"
   viz:
     failed: "a janela do visualizador não pôde abrir — %{why}"
   tips:

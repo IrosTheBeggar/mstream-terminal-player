@@ -2158,6 +2158,16 @@ a LATER secondary screen (party view), Columns retired.
   bar to the page's own surface; `T` from anywhere, Esc back. A new
   terminal window for the page was weighed and refused (the contract's
   log says why).
+- **The mini player ✅ 2026-09-27** (docs/ux-contracts/mini-player.md) —
+  below the 100×24 the screens need, the GUI no longer draws one dim line:
+  it draws the playing track's cover (pixels or mosaic, the card's two
+  paths), prev · play · next in the bar's own frames, and a line asking for
+  room. The cover is stacked over the frames in a tall or narrow window and
+  beside them in a short wide one, whichever draws it larger, never under
+  the card's 8×4; below the frames' 22 columns the line stands alone, as
+  before. Growing back returns the screen untouched. `src/gui/mini.rs`,
+  ten locales, layout and render tests, and a pty run resized through five
+  shapes with the play frame clicked.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with

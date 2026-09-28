@@ -1733,6 +1733,8 @@ gui:
     back_tip: "返回设置 — Esc"
   stats:
     no_session: "没有会话 — 连接服务器后，收听记录会显示在这里"
+  mini:
+    enlarge: "放大终端即可使用完整播放器"
   viz:
     failed: "无法打开可视化窗口 — %{why}"
   tips:

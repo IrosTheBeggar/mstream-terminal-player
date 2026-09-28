@@ -1733,6 +1733,8 @@ gui:
     back_tip: "Back to Settings — Esc"
   stats:
     no_session: "no session — connect to a server and its listening log opens here"
+  mini:
+    enlarge: "Enlarge the terminal for the full player"
   viz:
     failed: "the visualizer window could not open — %{why}"
   tips:
