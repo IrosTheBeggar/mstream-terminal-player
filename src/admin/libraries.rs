@@ -837,12 +837,37 @@ fn render(frame: &mut Frame, room: &mut Room) {
         room.ui.pointer = live_pointer;
         room.ui.clear_registries();
     }
-    match room.modal.clone() {
+    // The folder browser and the path modal each hold a server listing —
+    // thousands of names at a music root — so they are drawn from where
+    // they live, not from a copy made every frame (performance audit #110).
+    match &mut room.modal {
         Modal::None => {}
-        Modal::Browser(browse) => draw_browser(frame, room, area, &browse),
-        Modal::PathEntry(draft) => draw_path_entry(frame, room, area, &draft),
-        Modal::Name(draft) => draw_name(frame, room, area, &draft),
-        Modal::Remove(i) => draw_remove(frame, room, area, i),
+        Modal::Browser(_) => {
+            // Lent to its draw, which never touches the modal, and put back.
+            let modal = std::mem::replace(&mut room.modal, Modal::None);
+            if let Modal::Browser(browse) = &modal {
+                draw_browser(frame, room, area, browse);
+            }
+            room.modal = modal;
+        }
+        Modal::PathEntry(draft) => {
+            // The draft stays in place — its draw keeps the list's scroll
+            // there — and lends the frame only its listing.
+            let entries = std::mem::take(&mut draft.entries);
+            let lent = PathDraft { entries, ..draft.clone() };
+            draw_path_entry(frame, room, area, &lent);
+            if let Modal::PathEntry(draft) = &mut room.modal {
+                draft.entries = lent.entries;
+            }
+        }
+        Modal::Name(draft) => {
+            let draft = draft.clone();
+            draw_name(frame, room, area, &draft);
+        }
+        Modal::Remove(i) => {
+            let i = *i;
+            draw_remove(frame, room, area, i);
+        }
     }
 
     // The tooltip draws last — over everything, once the dwell matures.
@@ -1584,5 +1609,72 @@ mod tests {
         assert!(frame.contains("stay on disk"), "{frame}");
         assert!(frame.contains("◂ Keep it") && frame.contains("Remove  "), "{frame}");
         assert!(frame.contains("y remove · Esc keep"), "{frame}");
+    }
+
+    #[test]
+    fn the_path_modal_draws_from_its_own_draft_and_keeps_its_listing() {
+        // The draft is drawn where it lives, lending the frame its listing
+        // instead of being copied with it every frame (performance audit
+        // #110): the listing is back after a draw, and the scroll the draw
+        // keeps lands in the draft.
+        let _en = english();
+        let mut room = room(false);
+        handle_key(&mut room, key(KeyCode::Char('t')));
+        type_text(&mut room, "/srv/");
+        room.queued = None;
+        room.apply(Done::Completed {
+            dir: "/srv/".into(),
+            listing: Ok(DirListing {
+                path: "/srv".into(),
+                directories: (0..40).map(|i| DirEntry { name: format!("d{i:02}") }).collect(),
+                files: Vec::new(),
+            }),
+        });
+        for _ in 0..12 {
+            handle_key(&mut room, key(KeyCode::Down));
+        }
+        let frame = draw(&mut room);
+        assert!(frame.contains("▸ d11"), "{frame}");
+        let Modal::PathEntry(draft) = &room.modal else { panic!("the path modal") };
+        assert_eq!(draft.entries.len(), 40, "the listing is back after the frame");
+        assert_eq!((draft.sel, draft.sel_anchor), (Some(11), Some(11)), "the draw kept its anchor");
+        assert!((6..=11).contains(&draft.scroll), "scrolled to the cursor: {}", draft.scroll);
+        let scroll = draft.scroll;
+        draw(&mut room);
+        let Modal::PathEntry(draft) = &room.modal else { panic!("the path modal") };
+        assert_eq!(draft.scroll, scroll, "a still cursor keeps its scroll");
+    }
+
+    /// `cargo test --release path_modal_frame_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check; run --release with --nocapture"]
+    fn path_modal_frame_cost() {
+        let _en = english();
+        let folders: Vec<String> = (0..5_000).map(|i| format!("Folder {i:04}")).collect();
+        let mut room = room(false);
+        handle_key(&mut room, key(KeyCode::Char('t')));
+        type_text(&mut room, "/big/");
+        room.queued = None;
+        room.apply(Done::Completed {
+            dir: "/big/".into(),
+            listing: Ok(DirListing {
+                path: "/big".into(),
+                directories: folders.iter().map(|name| DirEntry { name: name.clone() }).collect(),
+                files: Vec::new(),
+            }),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        for which in ["path modal", "folder browser"] {
+            if which == "folder browser" {
+                room.modal = Modal::Browser(Browse { path: "/big".into(), dirs: folders.clone(), sel: 0 });
+            }
+            let frames = 200;
+            let started = std::time::Instant::now();
+            for _ in 0..frames {
+                terminal.draw(|frame| render(frame, &mut room)).unwrap();
+            }
+            let per = started.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+            println!("libraries {which}, 5,000 folders: {per:.3} ms a frame");
+        }
     }
 }

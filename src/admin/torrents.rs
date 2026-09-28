@@ -502,6 +502,10 @@ pub(crate) struct Room {
     /// When the status last answered, for "reachable N ago".
     status_at: Option<Instant>,
     pub torrents: Vec<Torrent>,
+    /// Each torrent's name and hash, lowercased once as the list lands,
+    /// for the filter that runs over them every frame (performance audit
+    /// #110) — the GUI's torrent picker keeps its names the same way.
+    hay: Vec<String>,
     pub list_error: Option<String>,
     list_loaded: bool,
     pub access: BTreeMap<String, AccessRow>,
@@ -552,6 +556,7 @@ impl Room {
             status: None,
             status_at: None,
             torrents: Vec::new(),
+            hay: Vec::new(),
             list_error: None,
             list_loaded: false,
             access: BTreeMap::new(),
@@ -642,8 +647,9 @@ impl Room {
         let q = self.filter.value().trim().to_lowercase();
         self.torrents
             .iter()
+            .zip(&self.hay)
             .enumerate()
-            .filter(|(_, t)| q.is_empty() || t.name.to_lowercase().contains(&q) || t.info_hash.to_lowercase().contains(&q))
+            .filter(|(_, (_, hay))| q.is_empty() || hay.contains(&q))
             .map(|(i, _)| i)
             .collect()
     }
@@ -981,6 +987,7 @@ impl Room {
                 if self.phase() != Phase::Tabs {
                     self.status = None;
                     self.torrents.clear();
+                    self.hay.clear();
                     self.list_error = None;
                     self.list_loaded = false;
                     self.sel = None;
@@ -1168,6 +1175,8 @@ impl Room {
     }
 
     fn take_list(&mut self, list: TorrentList) {
+        // A line apart: nothing typed into the filter spans the two.
+        self.hay = list.torrents.iter().map(|t| format!("{}\n{}", t.name, t.info_hash).to_lowercase()).collect();
         self.torrents = list.torrents;
         self.list_error = list.error.filter(|e| !e.trim().is_empty());
         self.list_loaded = true;
@@ -2448,7 +2457,10 @@ fn draw_torrents(frame: &mut Frame, room: &mut Room, body: Rect) {
         return;
     }
     let rows_rect = Rect { x: table.x, y: rows_y, width: table.width, height: table.bottom().saturating_sub(rows_y) };
-    let torrents = room.torrents.clone();
+    // The list is lent to the rows and put back, not copied for them every
+    // frame — it is the daemon's whole list, and a row needs the room only
+    // for its tooltip (performance audit #110).
+    let torrents = std::mem::take(&mut room.torrents);
     table_rows(frame, room, rows_rect, filtered.len(), |frame, room, i, rect, selected, hovered| {
         let t = &torrents[filtered[i]];
         let cell = |x: u16, w: u16| Rect { x, y: rect.y, width: w, height: 1 };
@@ -2486,10 +2498,12 @@ fn draw_torrents(frame: &mut Frame, room: &mut Room, body: Rect) {
         };
         frame.render_widget(Paragraph::new(Span::styled(clip(&by, by_w), cell_style(selected, hovered, own))), cell(by_x, by_w));
     });
-    // The cursor row's hash, error and origin ride the note line.
+    room.torrents = torrents;
+    // The cursor row's hash, error and origin ride the note line — found
+    // through this frame's filter, not a second run of it.
     if room.note.is_none()
         && room.busy.is_none()
-        && let Some(t) = room.selected_torrent()
+        && let Some(t) = room.sel.and_then(|s| filtered.get(s)).and_then(|&i| room.torrents.get(i))
     {
         let mut spans = vec![Span::styled(short_id(&t.info_hash), dim())];
         if !t.error_message.trim().is_empty() {
@@ -2741,9 +2755,12 @@ fn draw_access(frame: &mut Frame, room: &mut Room, body: Rect) {
         return;
     }
     let rows_rect = Rect { x: table.x, y: rows_y, width: table.width, height: table.bottom().saturating_sub(rows_y) };
-    let users: Vec<(String, AdminUser)> = room.users.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    table_rows(frame, room, rows_rect, users.len(), |frame, room, i, rect, selected, hovered| {
-        let (name, u) = &users[i];
+    // Lent to the rows and put back, not copied every frame (performance
+    // audit #110): a row needs the room only for its click.
+    let users = std::mem::take(&mut room.users);
+    let rows: Vec<(&String, &AdminUser)> = users.iter().collect();
+    table_rows(frame, room, rows_rect, rows.len(), |frame, room, i, rect, selected, hovered| {
+        let (name, u) = rows[i];
         let cell = |x: u16, w: u16| Rect { x, y: rect.y, width: w, height: 1 };
         // With every user allowed, the ticks are information, not a lever: dim.
         let own = if whitelist { Style::default() } else { dim() };
@@ -2757,6 +2774,7 @@ fn draw_access(frame: &mut Frame, room: &mut Room, body: Rect) {
         frame.render_widget(Paragraph::new(Span::styled(glyph, cell_style(selected, hovered, glyph_style))), glyph_rect);
         room.ui.click(glyph_rect, Act::UserToggle(name.clone()));
     });
+    room.users = users;
     if room.note.is_none()
         && room.busy.is_none()
         && let Some(name) = room.selected_user()
@@ -3671,5 +3689,67 @@ mod tests {
         let loaded = load(&Client::new(&server.url).expect("client")).expect("a load");
         assert_eq!((server.peak(), server.paths().len()), (2, 2));
         assert!(loaded.list.is_none() && loaded.warning.is_none());
+    }
+
+    #[test]
+    fn a_frame_lends_the_list_to_its_rows_and_hands_it_back() {
+        // The rows draw from the list itself, taken for the frame and put
+        // back rather than copied (performance audit #110): after a draw
+        // the room holds every torrent, and the cursor's note is found
+        // through the frame's own filter, whatever the case typed.
+        let _en = english();
+        let mut room = connected();
+        press(&mut room, KeyCode::Char('/'));
+        type_text(&mut room, "RAINBOWS");
+        press(&mut room, KeyCode::Enter);
+        press(&mut room, KeyCode::Down);
+        let frame = draw(&mut room);
+        assert!(frame.contains("1 of 4 match") && frame.contains("Radiohead - In Rainbows"), "{frame}");
+        assert!(frame.contains("e5f6e5f6e5f6… · Tracker gave HTTP response code 403"), "the cursor's note:\n{frame}");
+        assert_eq!(room.torrents.len(), 4, "the list is back after the frame");
+        // A hash matches too, in either case.
+        press(&mut room, KeyCode::Char('/'));
+        for _ in 0.."RAINBOWS".len() {
+            press(&mut room, KeyCode::Backspace);
+        }
+        type_text(&mut room, "C3D4");
+        assert_eq!(room.filtered().len(), 1);
+        assert!(draw(&mut room).contains("linux-6.9.iso"));
+        assert_eq!(room.torrents.len(), 4);
+        // The Access tab lends the users the same way.
+        press(&mut room, KeyCode::Enter);
+        room.tab = Tab::Access;
+        let frame = draw(&mut room);
+        assert!(frame.contains("iros") && frame.contains("dj-tom"), "{frame}");
+        assert_eq!(room.users.len(), 4, "the accounts are back after the frame");
+    }
+
+    /// `cargo test --release torrents_tab_frame_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check; run --release with --nocapture"]
+    fn torrents_tab_frame_cost() {
+        let _en = english();
+        for n in [1_000, 5_000] {
+            for filter in ["", "flac"] {
+                let mut room = connected();
+                let mut many = list();
+                many.torrents = (0..n)
+                    .map(|i| torrent(&format!("{i:04x}"), &format!("Some.Torrent.Name.{i:04}.FLAC-GROUP"), "seeding", 1.0, 0.0, 400_000_000, Some("iros")))
+                    .collect();
+                room.apply(Done::Listed(Ok(many)));
+                if !filter.is_empty() {
+                    room.filter = Input::new(filter.into());
+                    room.sel = Some(0);
+                }
+                let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+                let frames = 200;
+                let started = Instant::now();
+                for _ in 0..frames {
+                    terminal.draw(|frame| render(frame, &mut room)).unwrap();
+                }
+                let per = started.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+                println!("torrents tab, {n} torrents, filter {filter:?}: {per:.3} ms a frame");
+            }
+        }
     }
 }

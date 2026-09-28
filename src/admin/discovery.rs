@@ -439,16 +439,24 @@ impl Room {
     /// The catalog rows the table shows: the filter's matches, in the
     /// server's order (seeders, then online, then size).
     pub(crate) fn rows(&self) -> Vec<&CatalogPeer> {
+        self.row_indices().into_iter().map(|i| &self.catalog.peers[i]).collect()
+    }
+
+    /// [`Room::rows`] as places in the catalog — what the table draws
+    /// from, beside the room it registers its clicks on.
+    fn row_indices(&self) -> Vec<usize> {
         let q = if self.filter_on { self.filter.value().trim().to_lowercase() } else { String::new() };
         self.catalog
             .peers
             .iter()
-            .filter(|p| {
+            .enumerate()
+            .filter(|(_, p)| {
                 q.is_empty()
                     || p.payload.name.to_lowercase().contains(&q)
                     || p.payload.description.to_lowercase().contains(&q)
                     || p.from.to_lowercase().contains(&q)
             })
+            .map(|(i, _)| i)
             .collect()
     }
 
@@ -1370,11 +1378,15 @@ fn render(frame: &mut Frame, room: &mut Room) {
 
     draw_header(frame, area, &t!("p2p.title"), &host_of(&room.client));
     let column = Rect { x: 2, y: 2, width: area.width.saturating_sub(4), height: area.height.saturating_sub(5) };
-    match room.status.clone() {
+    // Lent to the draw and put back, not copied every frame (performance
+    // audit #110): nothing the page draws reads it off the room.
+    let status = room.status.take();
+    match &status {
         None => {}
-        Some(s) if !s.enabled => draw_off(frame, room, column, &s),
-        Some(s) => draw_on(frame, room, column, &s),
+        Some(s) if !s.enabled => draw_off(frame, room, column, s),
+        Some(s) => draw_on(frame, room, column, s),
     }
+    room.status = status;
     draw_bottom(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room));
 
     if modal_open {
@@ -1927,7 +1939,9 @@ fn draw_servers(frame: &mut Frame, room: &mut Room, table: Rect, s: &DiscoverySt
     frame.render_widget(Paragraph::new(Span::styled("─".repeat(table.width as usize), dim())), line(y));
     y += 1;
 
-    let rows: Vec<CatalogPeer> = room.rows().into_iter().cloned().collect();
+    // Places in the catalog, not copies of its peers: each row on screen
+    // is read where it lives (performance audit #110).
+    let rows = room.row_indices();
     if rows.is_empty() {
         let text = if room.filter_on && !room.catalog.peers.is_empty() { t!("p2p.empty_filter") } else { t!("p2p.empty_servers") };
         frame.render_widget(Paragraph::new(Span::styled(text.to_string(), dim())), line(y));
@@ -1944,7 +1958,8 @@ fn draw_servers(frame: &mut Frame, room: &mut Room, table: Rect, s: &DiscoverySt
     }
     let rows_y = y;
     let now = unix_now();
-    for (i, peer) in rows.iter().enumerate().skip(first).take(visible) {
+    for (i, &at) in rows.iter().enumerate().skip(first).take(visible) {
+        let peer = &room.catalog.peers[at];
         let selected = room.sel == Some(i);
         let rect = line(y);
         let hovered = !selected && room.ui.pointer.is_some_and(|p| rect.contains(p));
@@ -2007,7 +2022,7 @@ fn draw_servers(frame: &mut Frame, room: &mut Room, table: Rect, s: &DiscoverySt
     // else is on it.
     if room.note.is_none()
         && room.busy.is_none()
-        && let Some(peer) = room.selected_peer()
+        && let Some(peer) = room.sel.and_then(|s| rows.get(s)).map(|&at| &room.catalog.peers[at])
         && !peer.payload.description.trim().is_empty()
     {
         let text = format!("{} · {}", display_name(peer), printable(&peer.payload.description, DESCRIPTION_MAX));
@@ -3027,5 +3042,28 @@ mod tests {
         assert!(loaded.catalog.is_some() && loaded.activity.is_some() && loaded.requests.is_none());
         let server = super::super::waves::serve(&[1, 4], answer(500));
         assert!(run(&server.url).is_err());
+    }
+
+    #[test]
+    fn a_frame_reads_the_catalog_where_it_lives_and_keeps_the_status() {
+        // The table draws each row from the catalog by its place, and the
+        // page from the status lent for the frame — no copies made every
+        // frame (performance audit #110). The filter matches whatever the
+        // case, and the cursor's note is the filtered row's.
+        let _en = english();
+        let mut room = on();
+        handle_key(&mut room, key(KeyCode::Char('/')));
+        type_text(&mut room, "JAZZ");
+        handle_key(&mut room, key(KeyCode::Enter));
+        assert_eq!(room.rows().len(), 1);
+        handle_key(&mut room, key(KeyCode::Down));
+        let frame = draw(&mut room);
+        assert!(frame.contains("jazz-corner"), "{frame}");
+        assert!(room.status.is_some(), "the status is back after the frame");
+        let peer = room.selected_peer().expect("the cursor's peer");
+        assert_eq!(display_name(peer), "jazz-corner");
+        if !peer.payload.description.trim().is_empty() {
+            assert!(frame.contains(&format!("jazz-corner · {}", printable(&peer.payload.description, DESCRIPTION_MAX))), "{frame}");
+        }
     }
 }

@@ -1172,12 +1172,16 @@ fn render(frame: &mut Frame, room: &mut Room) {
         room.ui.pointer = live_pointer;
         room.ui.clear_registries();
     }
-    match room.modal.clone() {
+    // Lent to its draw and put back, not copied every frame: the folder
+    // browser holds a server listing, the history up to fifty runs
+    // (performance audit #110). No modal's draw touches the modal.
+    let modal = std::mem::replace(&mut room.modal, Modal::None);
+    match &modal {
         Modal::None => {}
-        Modal::Form(f) => draw_form(frame, room, area, &f),
-        Modal::Browser { browse, .. } => draw_browser(frame, room, area, &browse),
-        Modal::History { dest, runs, loaded, sel } => draw_history(frame, room, area, &dest, &runs, loaded, sel),
-        Modal::Remove(id) => {
+        Modal::Form(f) => draw_form(frame, room, area, f),
+        Modal::Browser { browse, .. } => draw_browser(frame, room, area, browse),
+        Modal::History { dest, runs, loaded, sel } => draw_history(frame, room, area, dest, runs, *loaded, *sel),
+        &Modal::Remove(id) => {
             let (lib, path) = room
                 .dest(id)
                 .map(|d| (printable(&d.library_name, 64), d.dest_path.clone()))
@@ -1193,6 +1197,7 @@ fn render(frame: &mut Frame, room: &mut Room) {
             );
         }
     }
+    room.modal = modal;
     if let Some((target, text)) = room.ui.ripe_tooltip() {
         kit::draw_tooltip(frame, area, target, text);
     }
@@ -2490,5 +2495,24 @@ mod tests {
             _ => (500, "{}".into()),
         });
         assert!(matches!(run(&server.url), Err(ApiError::NotFound(_))));
+    }
+
+    #[test]
+    fn a_modal_is_lent_to_its_draw_and_handed_back() {
+        // Drawn from the modal itself, not a copy made every frame
+        // (performance audit #110): after the frame it is as it was.
+        let _en = english();
+        let mut room = idle();
+        press(&mut room, KeyCode::Char('a'));
+        ctrl(&mut room, 'b');
+        room.queued = None;
+        room.apply(Done::Browsed(Ok(DirListing {
+            path: "/Volumes".into(),
+            directories: (0..300).map(|i| crate::api::types::DirEntry { name: format!("Drive {i}") }).collect(),
+            files: Vec::new(),
+        })));
+        let before = format!("{:?}", room.modal);
+        assert!(draw(&mut room).contains("▸ Drive 0"));
+        assert_eq!(format!("{:?}", room.modal), before);
     }
 }

@@ -1047,14 +1047,16 @@ fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect) {
     if rows_rect.height == 0 {
         return;
     }
-    let names = room.names();
-    let users = room.users.clone();
+    // The accounts are lent to the rows and put back, not copied for them
+    // every frame: a row needs the room only for its clicks (performance
+    // audit #110).
+    let users = std::mem::take(&mut room.users);
+    let rows: Vec<(&String, &AdminUser)> = users.iter().collect();
     // A checkbox cell's glyph — a bar on the selected row, its own colour
     // otherwise — sitting one cell in from the column's left edge.
     let glyph_x = |x: u16, w: u16| x + (w.saturating_sub(3)) / 2;
-    table_rows(frame, room, rows_rect, names.len(), |frame, room, i, rect, selected, hovered| {
-        let name = &names[i];
-        let Some(u) = users.get(name) else { return };
+    table_rows(frame, room, rows_rect, rows.len(), |frame, room, i, rect, selected, hovered| {
+        let (name, u) = rows[i];
         let cell = |x: u16, w: u16| Rect { x, y: rect.y, width: w, height: 1 };
         let base = cell_style(selected, hovered, Style::default());
         frame.render_widget(
@@ -1080,6 +1082,7 @@ fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect) {
         frame.render_widget(Paragraph::new(Span::styled("[X]", x_style)), x_rect);
         room.ui.click(x_rect, Act::Remove(name.clone()));
     });
+    room.users = users;
 }
 
 fn table_rows(
@@ -1751,5 +1754,19 @@ mod tests {
         };
         assert_eq!(server.peak(), 2);
         assert_eq!((users.len(), libraries.len()), (1, 0));
+    }
+
+    #[test]
+    fn a_frame_lends_the_accounts_to_the_table_and_hands_them_back() {
+        // Taken for the rows and put back rather than copied every frame
+        // (performance audit #110): the table and the cursor's note still
+        // read them.
+        let _en = english();
+        let mut r = loaded();
+        let before = r.users.clone();
+        handle_key(&mut r, key(KeyCode::Down));
+        let frame = draw(&mut r);
+        assert!(row(&frame, "anna").contains("[✓]") && frame.contains("guest"), "{frame}");
+        assert_eq!(r.users, before, "the accounts are back after the frame");
     }
 }
