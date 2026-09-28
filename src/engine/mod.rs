@@ -235,22 +235,40 @@ const START_TIMEOUT: Duration = Duration::from_millis(1500);
 const SUPERSEDE_POLL: Duration = Duration::from_millis(20);
 
 /// How many opens given up for a newer command may still be running
-/// (dropping the receiver does not stop an open mid-request) before the
-/// next one waits for one of them to finish. Skimming a remote queue would
-/// otherwise start an open per keypress, every one pulling its probe over
-/// the link the wanted one needs (performance audit #79) — where the old
-/// blocking wait, with collapse, never ran more than two in a row.
+/// (giving one up does not stop it mid-request) before the next one waits
+/// for one of them to finish. Skimming a remote queue would otherwise start
+/// an open per keypress, every one pulling its probe over the link the
+/// wanted one needs (performance audit #79) — where the old blocking wait,
+/// with collapse, never ran more than two in a row.
 const MAX_ABANDONED: usize = 2;
 
-/// The receiving end of an open running on its own thread.
-type Opener = mpsc::Receiver<Result<Prepared, String>>;
+/// An open running on its own thread: the channel its answer comes down,
+/// and the thread.
+struct Opener {
+    rx: mpsc::Receiver<Result<Prepared, String>>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Opener {
+    /// Walk away from the open. The receiver goes now, so the answer drops
+    /// into a closed channel on the open's own thread the moment it
+    /// arrives — the reader, its download and its spool file with it — as
+    /// a deadline's abandonment always has. A receiver kept to count the
+    /// open by kept that answer too: a live reader downloading a track
+    /// nobody wanted, whole, beside the one that was, until something next
+    /// looked at the list (review of audit #79). The thread is handed back
+    /// for the counting — see [`MAX_ABANDONED`].
+    fn give_up(self) -> std::thread::JoinHandle<()> {
+        self.thread
+    }
+}
 
 /// Why a direct open produced no source.
 enum OpenError {
     /// It failed, and why — for the logs and the queue's failure path.
     Failed(String),
-    /// A newer command made it moot before it finished — with the open's
-    /// receiver when one was running, for the engine to account for.
+    /// A newer command made it moot before it finished — with the opener
+    /// when one was running, for the engine to give up and count.
     Superseded(Option<Opener>),
 }
 
@@ -293,12 +311,12 @@ fn open_entry_unless(
                 let _ = tx.send(result);
             }
         });
-    if spawned.is_err() {
+    let Ok(thread) = spawned else {
         // A box that cannot spawn a thread still deserves its music; the
         // unbounded open is the behaviour this path always had.
         return open_entry(entry).map_err(OpenError::Failed);
-    }
-    await_open(rx, superseded)
+    };
+    await_open(Opener { rx, thread }, superseded)
 }
 
 /// Wait for an opener's answer: at most [`START_TIMEOUT`], and only for as
@@ -307,14 +325,18 @@ fn open_entry_unless(
 /// open, seconds over a tunnel, twenty against a stall — and then find the
 /// unwanted track installed and sounding for a moment before it could act
 /// (performance audit #79). Now the thread asks `superseded` every
-/// [`SUPERSEDE_POLL`] and walks away on a yes, handing `rx` back; dropping
-/// it is the same abandonment the deadline uses. The open-then-swap order
-/// is untouched: nothing has happened to the playing sink yet.
-fn await_open(rx: Opener, superseded: &mut dyn FnMut() -> bool) -> Result<Prepared, OpenError> {
+/// [`SUPERSEDE_POLL`] and walks away on a yes, handing the opener back to
+/// be given up ([`Opener::give_up`]) — the same abandonment the deadline
+/// uses. The open-then-swap order is untouched: nothing has happened to
+/// the playing sink yet.
+fn await_open(
+    opener: Opener,
+    superseded: &mut dyn FnMut() -> bool,
+) -> Result<Prepared, OpenError> {
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
-        match rx.recv_timeout(left.min(SUPERSEDE_POLL)) {
+        match opener.rx.recv_timeout(left.min(SUPERSEDE_POLL)) {
             Ok(result) => return result.map_err(OpenError::Failed),
             // The open thread panicked and the catch dropped the sender.
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -328,7 +350,7 @@ fn await_open(rx: Opener, superseded: &mut dyn FnMut() -> bool) -> Result<Prepar
                     )));
                 }
                 if superseded() {
-                    return Err(OpenError::Superseded(Some(rx)));
+                    return Err(OpenError::Superseded(Some(opener)));
                 }
             }
         }
@@ -500,10 +522,10 @@ enum NextTrack {
     /// Nothing decided — the resting state, and all of it when crossfade
     /// is off.
     Idle,
-    /// A thread is opening the pick; its answer arrives on `rx`. Dropping
-    /// the receiver is the cancellation: the opener's send fails, the
-    /// decoder drops, and its spool file deletes itself.
-    Opening { index: Option<usize>, rx: mpsc::Receiver<Result<Prepared, String>> },
+    /// A thread is opening the pick; its answer arrives on `opener`.
+    /// Dropping the receiver is the cancellation: the opener's send fails,
+    /// the decoder drops, and its spool file deletes itself.
+    Opening { index: Option<usize>, opener: Opener },
     /// Opened, decoded, spooling — waiting for the fade window to arrive.
     Ready { prepared: Prepared, index: Option<usize> },
     /// The open failed, and when. Remembered so the tick does not walk
@@ -594,7 +616,7 @@ fn spawn_prepare(entry: QueueEntry, index: Option<usize>) -> NextTrack {
             }
         });
     match spawned {
-        Ok(_) => NextTrack::Opening { index, rx },
+        Ok(thread) => NextTrack::Opening { index, opener: Opener { rx, thread } },
         // A box that cannot spawn a thread still has the ordinary advance
         // path; a blend is not worth an error.
         Err(_) => NextTrack::Failed { at: Instant::now() },
@@ -975,13 +997,13 @@ impl State {
             NextTrack::Ready { prepared, .. } if prepared.path == source => {
                 Some(Ahead::Ready(prepared))
             }
-            NextTrack::Opening { index, rx }
+            NextTrack::Opening { index, opener }
                 if match index {
                     None => self.pending_next.as_ref().is_some_and(|e| e.path == source),
                     Some(at) => self.q.queue.get(at).is_some_and(|e| e.path == source),
                 } =>
             {
-                Some(Ahead::Opening(rx))
+                Some(Ahead::Opening(opener))
             }
             other => {
                 self.next = other;
@@ -1192,11 +1214,12 @@ pub struct Engine {
     /// audio worker, serve's loop). Bounded by [`Engine::push_notice`];
     /// drained by [`Engine::take_device_notices`].
     notices: Mutex<Vec<DeviceNotice>>,
-    /// Opens given up for a newer command, still running on their threads,
-    /// and when each was given up — see [`MAX_ABANDONED`]. Pruned as they
-    /// finish (their answer is dropped here, spool file and all) or once
-    /// they are older than [`START_TIMEOUT`], the most any open is waited.
-    abandoned: Mutex<Vec<(Instant, Opener)>>,
+    /// The threads of opens given up for a newer command, and when each
+    /// was given up — see [`MAX_ABANDONED`]. Only the threads: the answers
+    /// were let go with their receivers ([`Opener::give_up`]), and drop on
+    /// those threads as they finish. Pruned once finished, or once older
+    /// than [`START_TIMEOUT`], the most any open is waited.
+    abandoned: Mutex<Vec<(Instant, std::thread::JoinHandle<()>)>>,
     /// Calls blocked on the device callback right now: a seek's try_seek,
     /// made with the state lock released (audit #48). The stream is never
     /// suspended under one — its answer would never come. Both drivers
@@ -1280,9 +1303,8 @@ impl Engine {
         loop {
             {
                 let mut gone = self.abandoned.lock().unwrap();
-                gone.retain(|(since, rx)| {
-                    since.elapsed() < START_TIMEOUT
-                        && matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty))
+                gone.retain(|(since, thread)| {
+                    since.elapsed() < START_TIMEOUT && !thread.is_finished()
                 });
                 if gone.len() < MAX_ABANDONED {
                     return Ok(());
@@ -1635,9 +1657,9 @@ impl Engine {
                 etrace!("play takes over the prepared {redacted}");
                 Ok(prepared)
             }
-            Some(Ahead::Opening(rx)) => {
+            Some(Ahead::Opening(opener)) => {
                 etrace!("play takes over the open of {redacted}");
-                await_open(rx, superseded)
+                await_open(opener, superseded)
             }
             None => {
                 let entry = s.q.queue[0].clone();
@@ -1660,8 +1682,8 @@ impl Engine {
             Err(OpenError::Failed(e)) => Err(EngineError::Unplayable(e)),
             Err(OpenError::Superseded(opener)) => {
                 etrace!("play {redacted} given up: a newer command came");
-                if let Some(rx) = opener {
-                    self.abandoned.lock().unwrap().push((Instant::now(), rx));
+                if let Some(opener) = opener {
+                    self.abandoned.lock().unwrap().push((Instant::now(), opener.give_up()));
                 }
                 Err(EngineError::Superseded)
             }
@@ -2287,7 +2309,7 @@ impl Engine {
 
         // Collect the opener's answer if one has arrived.
         s.next = match std::mem::replace(&mut s.next, NextTrack::Idle) {
-            NextTrack::Opening { index, rx } => match rx.try_recv() {
+            NextTrack::Opening { index, opener } => match opener.rx.try_recv() {
                 Ok(Ok(prepared)) => {
                     etrace!("prepared {} ({:.1}s)",
                         http::redact_source(&prepared.path), prepared.duration);
@@ -2304,7 +2326,7 @@ impl Engine {
                     etrace!("open FAILED: opener panicked");
                     NextTrack::Failed { at: Instant::now() }
                 }
-                Err(mpsc::TryRecvError::Empty) => NextTrack::Opening { index, rx },
+                Err(mpsc::TryRecvError::Empty) => NextTrack::Opening { index, opener },
             },
             other => other,
         };
@@ -2650,6 +2672,84 @@ mod tests {
         let outcome = open_entry_unless(&entry, &mut || false);
         assert!(matches!(outcome, Err(OpenError::Failed(ref e)) if e.contains("stalled while opening")));
         assert!(started.elapsed() >= START_TIMEOUT, "the full deadline, not less");
+    }
+
+    /// A WAV that answers after `delay`, sends enough at once for an open
+    /// to finish, then trickles the rest for longer than any test runs —
+    /// and reports when the client hangs up.
+    fn trickling_wav_server(delay: Duration) -> (String, mpsc::Receiver<Instant>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (hung_up, hang_ups) = mpsc::channel();
+        // Twenty seconds of WAV: eighteen seconds of trickle, well past
+        // the end of any test.
+        let body = Arc::new(wav_bytes(20));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let (body, hung_up) = (body.clone(), hung_up.clone());
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut request = [0u8; 2048];
+                    let _ = stream.read(&mut request);
+                    std::thread::sleep(delay);
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(&body[..600_000]);
+                    for chunk in body[600_000..].chunks(8_192) {
+                        if stream.write_all(chunk).is_err() {
+                            let _ = hung_up.send(Instant::now());
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}/trickling.wav"), hang_ups)
+    }
+
+    #[test]
+    fn a_given_up_open_takes_its_download_with_it_when_it_finishes() {
+        // An open given up mid-request runs on, and what it opens must not
+        // outlive it. The engine used to keep the receiver to count the
+        // open by, which kept the answer too: a live reader downloading the
+        // whole unwanted track beside the wanted one until something next
+        // pruned the list (review of audit #79). Given up, the answer drops
+        // on the open's own thread the moment it arrives.
+        let (url, hang_ups) = trickling_wav_server(Duration::from_millis(100));
+        let entry = QueueEntry { path: url, duration_hint: None };
+
+        // Waited for, the same open succeeds: a real track, not a failure
+        // whose connection would close on its own. Dropped here, which is
+        // the hang-up the server reports first.
+        assert!(open_entry_bounded(&entry).is_ok(), "the track opens");
+        hang_ups.recv_timeout(Duration::from_secs(3)).expect("a dropped track hangs up");
+
+        let asked = Instant::now();
+        let outcome =
+            open_entry_unless(&entry, &mut || asked.elapsed() > Duration::from_millis(20));
+        let Err(OpenError::Superseded(Some(opener))) = outcome else {
+            panic!("given up while its request was out");
+        };
+        let thread = opener.give_up();
+        let until = Instant::now() + Duration::from_secs(5);
+        while !thread.is_finished() {
+            assert!(Instant::now() < until, "the open never finished");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let finished = Instant::now();
+        // Finished, and its download went with it: the server hears the
+        // hang-up, not a request for the rest of the track.
+        let hung_up = hang_ups
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the download ran on after its open was given up");
+        let after = hung_up.saturating_duration_since(finished);
+        assert!(after < Duration::from_secs(1), "hung up {after:?} after the open finished");
     }
 
     #[test]
@@ -3281,9 +3381,12 @@ mod tests {
         engine.set_volume(0.0);
         let mut running = Vec::new();
         for _ in 0..MAX_ABANDONED {
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = mpsc::channel::<()>();
             running.push(tx);
-            engine.abandoned.lock().unwrap().push((Instant::now(), rx));
+            let thread = std::thread::spawn(move || {
+                let _ = rx.recv();
+            });
+            engine.abandoned.lock().unwrap().push((Instant::now(), thread));
         }
 
         // Full: the open waits, and is given up in its turn, never started.
@@ -5030,7 +5133,8 @@ mod tests {
         s.next = NextTrack::Failed { at: Instant::now() };
         assert!(s.at_rest());
         let (_tx, rx) = mpsc::channel();
-        s.next = NextTrack::Opening { index: None, rx };
+        let opener = Opener { rx, thread: std::thread::spawn(|| {}) };
+        s.next = NextTrack::Opening { index: None, opener };
         assert!(!s.at_rest(), "an open in flight is not at rest");
         s.next = NextTrack::Idle;
         // An orphaned remnant is the tick's to skip.
