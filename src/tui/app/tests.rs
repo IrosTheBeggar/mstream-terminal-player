@@ -8067,6 +8067,43 @@ fn decoded_cover(side: u32) -> crate::tui::art::Art {
 }
 
 #[test]
+fn a_connect_mid_track_asks_for_the_playing_cover_at_full_size_again() {
+    // A connect empties the cache — a switch and back, a re-login, a Quick
+    // Connect add — and only a track's start asked for the original: the
+    // queue panel re-asking first left Now Playing's big box, the card and
+    // the mini player on the small copy for the rest of the track (the
+    // integration check of performance audit #92).
+    let mut app = connected_app();
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg"), track_with_cover("lib/b.mp3", "bb.jpeg")]);
+    app.play_index(0);
+    let full = decoded_cover(640);
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(full.clone()), settled: true, small: false });
+    let effects = app.apply_event(Event::Connected {
+        server: "http://host:3000".into(),
+        id: "http://host:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::default(),
+    });
+    let original = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None, small: false });
+    assert!(effects.contains(&original), "{effects:?}");
+    assert_eq!(covers_asked(&app.claim_queue_art(0..2)), vec!["bb.jpeg".to_string()], "the panel asks only the rest");
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(full.clone()), settled: true, small: false });
+    assert_eq!(now_art(&app).map(|art| art.source()), Some(full.source()));
+
+    // Nothing playing, nothing asked.
+    let mut idle = connected_app();
+    let effects = idle.apply_event(Event::Connected {
+        server: "http://host:3000".into(),
+        id: "http://host:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::default(),
+    });
+    assert!(covers_asked(&effects).is_empty(), "{effects:?}");
+}
+
+#[test]
 fn a_small_copy_that_lands_after_the_original_was_asked_for_is_not_the_answer() {
     let mut app = connected_app();
     let small = crate::tui::art::Art::from_rgb(1, 1, vec![1, 1, 1]).unwrap();
