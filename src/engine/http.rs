@@ -169,47 +169,85 @@ fn trusted(url: &Url) -> bool {
     })
 }
 
-/// The verified client's twin for trusted hosts, kept apart so a
-/// self-signed server never loosens anyone else's TLS. Same pool rule —
-/// see the comment below for why streams never reuse a connection.
-fn insecure_client() -> Result<&'static Client, String> {
-    static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                .pool_max_idle_per_host(0)
-                .danger_accept_invalid_certs(true)
-                .build()
-                .map_err(|e| format!("failed to build http client: {e}"))
-        })
-        .as_ref()
-        .map_err(|e| e.clone())
+// ── Connection reuse ────────────────────────────────────────────────────────
+//
+// A stream to this machine never reuses a kept-alive connection. That is
+// the Quick Connect bridge, which the tunnel always hands out as a literal
+// 127.0.0.1: a pooled connection assumes the far end is still there, and
+// through the bridge that assumption failed silently — the tunnel held the
+// client-side TCP open after the server's side was gone, the pool offered
+// the corpse to the next open, and the request sat waiting for headers
+// until OPEN_TIMEOUT, which read as "crossfade didn't happen" whenever a
+// prepare fired within the pool's idle window of the previous download
+// finishing (the listening-session trace, fixed alongside the bridge
+// itself). A loopback connect costs microseconds; nothing to win there.
+//
+// Anywhere else a fresh connection is a TCP and a TLS handshake, two round
+// trips before the request even leaves — on every play, skip, seek and
+// back-fill (performance audit #78). Those streams pool, and behind an h2
+// proxy (Caddy, nginx, Cloudflare) a burst of them rides one warm
+// connection. Two bounds keep a pooled connection honest:
+//
+//   * POOL_IDLE, under Node's five-second keep-alive: mStream's own server
+//     closes an idle socket at five seconds, and a request sent into that
+//     close fails outright. Four seconds retires ours first. hyper dates an
+//     h2 connection from its last checkout, so a request more than four
+//     seconds after the previous one dials fresh even while a download
+//     still runs on the old connection: reuse is for bursts — skimming,
+//     seek after seek, a range and its back-fill — and never worse than a
+//     connection per request.
+//   * H2_PING: an h2 connection that went dark is found out by a PING
+//     within four seconds of its last byte, before stream-download's
+//     five-second watchdog reconnects, so the reconnect never lands on it.
+const POOL_IDLE: Duration = Duration::from_secs(4);
+const H2_PING: Duration = Duration::from_secs(2);
+
+/// The client for one stream URL. Four, built once each: verified, or
+/// trusting a self-signed server (kept apart so that one never loosens
+/// anyone else's TLS); pooled, or not for a loopback address.
+fn client_for(url: &Url) -> Result<Client, String> {
+    static CLIENTS: [OnceLock<Result<Client, String>>; 4] = [const { OnceLock::new() }; 4];
+    let (trust, pooled) = (trusted(url), !is_loopback(url));
+    CLIENTS[usize::from(trust) * 2 + usize::from(pooled)]
+        .get_or_init(|| build_client(trust, pooled))
+        .clone()
 }
 
-fn client() -> Result<&'static Client, String> {
-    static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            Client::builder()
-                .connect_timeout(CONNECT_TIMEOUT)
-                // Never reuse a kept-alive connection. A pooled connection
-                // assumes the far end is still there, and through the Quick
-                // Connect bridge that assumption failed silently: the tunnel
-                // held the client-side TCP open after the server's side was
-                // gone, the pool offered the corpse to the next open, and
-                // the request sat waiting for headers until OPEN_TIMEOUT —
-                // which read as "crossfade didn't happen" whenever a prepare
-                // fired within the pool's idle window of the previous
-                // download finishing (the listening-session trace, fixed
-                // alongside the bridge itself). Streams gain nothing from
-                // reuse — an open per track, a connection per open.
-                .pool_max_idle_per_host(0)
-                .build()
-                .map_err(|e| format!("failed to build http client: {e}"))
-        })
-        .as_ref()
-        .map_err(|e| e.clone())
+/// A literal loopback address: the Quick Connect bridge. `localhost` by
+/// name is somebody's own server, and pools like any other.
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    }
+}
+
+fn build_client(trust: bool, pooled: bool) -> Result<Client, String> {
+    let mut builder = Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        // Streams seek by byte offset, and a compressed response has none
+        // to seek by: its Content-Length (if it sends one) counts the
+        // compressed bytes. Off by name, so a decompression feature turned
+        // on for the API client's JSON never reaches a stream.
+        .no_gzip()
+        .no_brotli()
+        .no_zstd()
+        .no_deflate();
+    builder = if pooled {
+        builder
+            .pool_max_idle_per_host(2)
+            .pool_idle_timeout(POOL_IDLE)
+            .http2_keep_alive_interval(H2_PING)
+            .http2_keep_alive_timeout(H2_PING)
+            .http2_keep_alive_while_idle(true)
+    } else {
+        builder.pool_max_idle_per_host(0)
+    };
+    if trust {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    builder.build().map_err(|e| format!("failed to build http client: {e}"))
 }
 
 /// Open a URL as a seekable reader. Returns the reader plus the reported
@@ -218,8 +256,7 @@ fn client() -> Result<&'static Client, String> {
 /// mStream's `/transcode` does on a cache miss).
 pub(crate) fn open(url_str: &str) -> Result<(HttpReader, Option<u64>), String> {
     let url: Url = url_str.parse().map_err(|e| format!("invalid URL: {e}"))?;
-    let client =
-        if trusted(&url) { insecure_client()?.clone() } else { client()?.clone() };
+    let client = client_for(&url)?;
     runtime::block_on(async move {
         let open = async {
             let stream = HttpStream::new(client, url)
@@ -380,6 +417,8 @@ pub(crate) mod tests {
         // bridge presented when the server behind it had hung up. A pooled
         // client offers that connection to its next request and waits out
         // its whole timeout; a pool-free client opens fresh and succeeds.
+        // The bridge is always a literal loopback address, which is what
+        // keeps these streams pool-free when every other host pools.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let conns = Arc::new(AtomicUsize::new(0));
@@ -412,6 +451,80 @@ pub(crate) mod tests {
             second.err()
         );
         assert_eq!(conns.load(Ordering::SeqCst), 2, "each open dials fresh");
+    }
+
+    /// A keep-alive server: answers every request on a connection with the
+    /// same four-byte body, counts connections, and keeps each request's
+    /// head for the test to read.
+    fn keep_alive_server() -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        use std::io::{Read, Write};
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Mutex};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let conns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let heads = Arc::new(Mutex::new(Vec::new()));
+        let (counter, seen) = (conns.clone(), heads.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let seen = seen.clone();
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut head = [0u8; 2048];
+                    while let Ok(n @ 1..) = stream.read(&mut head) {
+                        seen.lock().unwrap().push(String::from_utf8_lossy(&head[..n]).into_owned());
+                        let answer = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nRIFF";
+                        if stream.write_all(answer).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, conns, heads)
+    }
+
+    #[test]
+    fn streams_from_another_host_reuse_a_connection_the_last_one_finished() {
+        use std::io::Read;
+        use std::sync::atomic::Ordering;
+        // The same server by name: `localhost` is somebody's own mStream,
+        // not the Quick Connect bridge (always a literal 127.0.0.1), so its
+        // streams pool — two TLS handshakes' worth of round trips saved on
+        // every skip behind a proxy (performance audit #78).
+        let (addr, conns, _) = keep_alive_server();
+        let url = format!("http://localhost:{}/one.wav", addr.port());
+        for _ in 0..3 {
+            let (mut reader, _) = open(&url).unwrap();
+            let mut body = Vec::new();
+            reader.read_to_end(&mut body).unwrap();
+            assert_eq!(body, b"RIFF");
+            // A beat for the finished connection to go back to the pool.
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(conns.load(Ordering::SeqCst), 1, "three opens, one connection");
+    }
+
+    #[test]
+    fn streams_never_ask_for_a_compressed_body() {
+        use std::io::Read;
+        // A compressed body has no byte offsets to seek by. The API client
+        // may decompress its JSON; the stream clients must not even offer.
+        let (addr, _, heads) = keep_alive_server();
+        for host in ["127.0.0.1", "localhost"] {
+            let (mut reader, _) = open(&format!("http://{host}:{}/a.mp3", addr.port())).unwrap();
+            reader.read_to_end(&mut Vec::new()).unwrap();
+        }
+        let heads = heads.lock().unwrap();
+        assert_eq!(heads.len(), 2);
+        for head in heads.iter() {
+            assert!(!head.to_ascii_lowercase().contains("accept-encoding"), "{head}");
+        }
     }
 
     /// Every byte of the test file is a function of its offset, so a read
