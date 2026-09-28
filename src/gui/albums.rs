@@ -555,24 +555,26 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     put(frame, label_x, content.y, &label, dim());
 
     // The covers this page still owes the cache: claimed through the
-    // App's own fetch. Only the missing ones allocate anything — after
-    // the first frame of a page this whole scan is hashmap lookups.
-    let missing: Vec<String> = {
+    // App's own fetch, the whole page in one batch (performance audit
+    // #101). The page goes on record first, and only when it moved — a
+    // page standing still costs a comparison, not a vector of names —
+    // because what is on screen is what the cache must not evict
+    // (performance audit #91).
+    let moved: Option<Vec<String>> = {
         let Some(albums) = wall_albums(gui) else { return };
-        visible
-            .iter()
-            .filter_map(|&at| albums.get(at))
-            .filter_map(|album| album.album_art_file.as_deref())
-            .filter(|file| !gui.app.art.contains_key(*file))
-            .map(str::to_string)
-            .collect()
+        // `visible` is already this page's slice of the wall's view.
+        let page = || {
+            visible
+                .iter()
+                .filter_map(|&at| albums.get(at))
+                .filter_map(|album| album.album_art_file.as_deref())
+        };
+        (!gui.app.wall_on_view_is(page())).then(|| page().map(str::to_string).collect())
     };
-    let mut fetches = Vec::new();
-    for file in missing {
-        if let Some(effect) = gui.app.fetch_art_file(&file) {
-            fetches.push(effect);
-        }
+    if let Some(page) = moved {
+        gui.app.set_wall_on_view(page);
     }
+    let fetches = gui.app.claim_wall_art();
     gui.pend(fetches);
 
     // The slots, one per cell, forked from the probed answer so each has

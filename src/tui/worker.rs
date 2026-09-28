@@ -222,8 +222,17 @@ pub enum ApiCmd {
     /// Fetch and decode one cover, named by the art file a track's metadata
     /// carries. The app caches the answer under that name. `reach` names
     /// the row's own server when it is not the session's (contract clause
-    /// 30); `None` asks the session.
-    AlbumArt { file: String, reach: Option<crate::tui::app::Reach> },
+    /// 30); `None` asks the session. `small`: a cover for a small surface —
+    /// a wall cell, a queue row — rather than the playing track's. Those
+    /// come a page at a time, so they wait their turn in their server's
+    /// art lane (performance audit #88); the playing cover never does. And
+    /// they ask for the server's 256 px copy, where the playing cover's
+    /// big box may want the original's pixels (performance audit #92).
+    AlbumArt { file: String, reach: Option<crate::tui::app::Reach>, small: bool },
+    /// The App let go of its claim on this cover before an answer came: a
+    /// lane still holding the ask drops it unasked (performance audit #88).
+    /// One already on the wire lands as any late answer does.
+    ArtWithdraw { file: String },
     /// Fetch a track's shape for the progress bar. Keyed by filepath rather
     /// than by an art file: a waveform belongs to one recording, not to an
     /// album. `reach` as for [`ApiCmd::AlbumArt`].
@@ -282,6 +291,7 @@ impl ApiCmd {
             | ApiCmd::RenamePlaylist { .. }
             | ApiCmd::DeletePlaylist { .. }
             | ApiCmd::Search { .. }
+            | ApiCmd::ArtWithdraw { .. }
             | ApiCmd::Shutdown => None,
         }
     }
@@ -574,8 +584,9 @@ pub enum Event {
     /// `settled` saying which kind of `None` it is: the server's word that
     /// there is no art (remembered), or a failure to ask (forgotten, so
     /// the next track off that album asks again). Art is a nicety: nothing
-    /// about it is ever worth a message the user has to read.
-    AlbumArt { file: String, art: Option<art::Art>, settled: bool },
+    /// about it is ever worth a message the user has to read. `small`
+    /// echoes the ask's: which copy of the cover this is.
+    AlbumArt { file: String, art: Option<art::Art>, settled: bool, small: bool },
     /// A track's shape, or `None` for every flavour of "there isn't one".
     /// Like art, never worth a message: the bar it decorates draws perfectly
     /// well without it.
@@ -1037,29 +1048,28 @@ fn lock(table: &TunnelTable) -> std::sync::MutexGuard<'_, Tunnels> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
-    let mut client: Option<Arc<Client>> = None;
+    let session: Session = Arc::default();
     // The dial threads and the sampler hold the table too; the sampler only
     // weakly, so it ends with this thread.
     let tunnels: Arc<TunnelTable> = Arc::new(std::sync::Mutex::new(Tunnels::default()));
     spawn_tunnel_sampler(Arc::downgrade(&tunnels), events.clone());
+    let lanes: Lanes = Arc::default();
     while let Ok(cmd) = rx.recv() {
-        // Connection commands change who `client` *is*, so they stay
-        // serialized here — reaching a different server mid-dial is a
-        // contradiction, not a feature. Everything else is a read against
-        // the current client and answers on its own thread (audit #63):
-        // one stalled search used to block every pane behind a 20-second
-        // timeout. A tunnel dial takes up to a minute cold, so it runs on
-        // its own thread as well and reports back through the events.
+        // Connection commands change who the session's client *is*, so they
+        // stay serialized — reaching a different server mid-dial is a
+        // contradiction, not a feature — and a read that rides the session
+        // runs on the client the change before it left. But they run on a
+        // thread of their own, and only the reads that depend on them wait
+        // behind them: a row's cover from another server, a play report
+        // or a tunnel dial no longer sits out a ping that hangs for twenty
+        // seconds (performance audit #84). Every read answers on its own
+        // thread (audit #63) — except the small covers, which a page
+        // claims by the hundred and so wait their turn in their server's
+        // art lane (performance audit #88). A tunnel dial takes up to a
+        // minute cold, so it runs on its own thread as well and reports
+        // back through the events.
         let result = match cmd {
             ApiCmd::Shutdown => break,
-
-            ApiCmd::Connect { server, identity, token, self_signed, peer, local_token } => {
-                connect(&mut client, &server, &identity, token, self_signed, peer, local_token)
-            }
-
-            ApiCmd::Login { server, identity, username, password, self_signed, local_token, peer } => {
-                login(&mut client, &server, &identity, &username, &password, self_signed, local_token, peer)
-            }
 
             ApiCmd::TunnelOpen { id, credential } => {
                 tracing::info!("tunnel {}: dialling", tunnel_log_name(&id));
@@ -1071,12 +1081,30 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 Some(close_tunnel(&tunnels, id))
             }
             ApiCmd::TunnelCredential { id, credential } => swap_credential(&tunnels, id, &credential),
-            ApiCmd::Retarget { identity, server, token, self_signed, peer, local_token } => {
-                Some(retarget(&mut client, &server, &identity, token, self_signed, peer, local_token))
+            ApiCmd::ArtWithdraw { file } => {
+                // The session first, then the lanes: the order the change
+                // thread holds them in as it hands a held cover on, so the
+                // ask is found held or queued, never between the two.
+                let mut slot = lock_session(&session);
+                slot.held.retain(|cmd| !matches!(cmd, ApiCmd::AlbumArt { file: asked, .. } if *asked == file));
+                lock_lanes(&lanes).withdraw(&file);
+                None
             }
 
-            read => {
-                spawn_read(client.clone(), events.clone(), read);
+            cmd => {
+                let mut slot = lock_session(&session);
+                if rides_session(&cmd) && slot.changing {
+                    slot.held.push_back(cmd);
+                } else if is_connection_change(&cmd) {
+                    slot.changing = true;
+                    slot.held.push_back(cmd);
+                    drop(slot);
+                    spawn_changes(&session, &lanes, events);
+                } else {
+                    let client = slot.client.clone();
+                    drop(slot);
+                    dispatch_read(client, &lanes, events, cmd);
+                }
                 None
             }
         };
@@ -1162,6 +1190,143 @@ pub(crate) fn playlist_verb_event(verb: PlaylistVerb<'_>, result: Result<(), Api
     }
 }
 
+/// The session's client, and what waits on a change to it. A connection
+/// change runs on its own thread with `changing` up; the session-bound
+/// commands that arrive meanwhile — reads and further changes alike — are
+/// `held`, in order, and the change thread works through them: each read
+/// on the client the change before it left, each change in its turn.
+/// Everything that does not ride the session goes straight on (performance
+/// audit #84).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct SessionSlot {
+    client: Option<Arc<Client>>,
+    changing: bool,
+    held: std::collections::VecDeque<ApiCmd>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type Session = Arc<std::sync::Mutex<SessionSlot>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type Lanes = Arc<std::sync::Mutex<ArtLanes>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lock_session(session: &Session) -> std::sync::MutexGuard<'_, SessionSlot> {
+    session.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lock_lanes(lanes: &Lanes) -> std::sync::MutexGuard<'_, ArtLanes> {
+    lanes.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The commands that change who the session's client is.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_connection_change(cmd: &ApiCmd) -> bool {
+    matches!(cmd, ApiCmd::Connect { .. } | ApiCmd::Login { .. } | ApiCmd::Retarget { .. })
+}
+
+/// Whether a command waits on a connection change in flight: the changes
+/// themselves, and every read the session's client answers. A read aimed
+/// at a row's own server, the parent's direct-access ask and the failure
+/// walk's probe build their own clients, and the tunnel commands touch
+/// none (those four are handled before this is asked).
+#[cfg(not(target_arch = "wasm32"))]
+fn rides_session(cmd: &ApiCmd) -> bool {
+    is_connection_change(cmd) || (cmd.reach().is_none() && !matches!(cmd, ApiCmd::DirectAccess { .. } | ApiCmd::Probe { .. }))
+}
+
+/// A read on its way: a small cover to its server's lane, anything else to
+/// a thread of its own.
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_read(client: Option<Arc<Client>>, lanes: &Lanes, events: &Sender<Event>, cmd: ApiCmd) {
+    if matches!(cmd, ApiCmd::AlbumArt { small: true, .. }) {
+        lock_lanes(lanes).ask(client, events, cmd);
+    } else {
+        spawn_read(client, events.clone(), cmd);
+    }
+}
+
+/// Work through what is held — the connection change at its front, then
+/// whatever came in behind it — on a thread of its own. Each change's event
+/// goes out before any read issued after it is even asked, so its answers
+/// land on the session the change made: the order the serial loop gave
+/// for free.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_changes(session: &Session, lanes: &Lanes, events: &Sender<Event>) {
+    let (runner, runner_lanes, runner_events) = (session.clone(), lanes.clone(), events.clone());
+    let spawned = thread::Builder::new()
+        .name("mstream-api-connect".into())
+        .spawn(move || work_through(&runner, &runner_lanes, &runner_events));
+    // No thread to be had: the loop does the work itself, as it always
+    // used to.
+    if spawned.is_err() {
+        work_through(session, lanes, events);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn work_through(session: &Session, lanes: &Lanes, events: &Sender<Event>) {
+    loop {
+        let mut slot = lock_session(session);
+        let Some(cmd) = slot.held.pop_front() else {
+            slot.changing = false;
+            return;
+        };
+        let mut client = slot.client.clone();
+        if !is_connection_change(&cmd) {
+            // Handed on before the session is let go, so a withdrawal
+            // meanwhile finds the cover in one place or the other.
+            dispatch_read(client, lanes, events, cmd);
+            continue;
+        }
+        drop(slot);
+        let retarget = matches!(cmd, ApiCmd::Retarget { .. });
+        let before = client.clone();
+        let event = run_change(&mut client, cmd);
+        let mut slot = lock_session(session);
+        if replaced(before.as_ref(), client.as_ref()) {
+            lock_lanes(lanes).session_moved(client.clone(), retarget, events);
+        }
+        slot.client = client;
+        drop(slot);
+        if let Some(event) = event
+            && events.send(event).is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// Whether a change left the session on another client than the one it
+/// had: a failed change keeps the very one.
+#[cfg(not(target_arch = "wasm32"))]
+fn replaced(before: Option<&Arc<Client>>, after: Option<&Arc<Client>>) -> bool {
+    match (before, after) {
+        (Some(was), Some(now)) => !Arc::ptr_eq(was, now),
+        (was, now) => was.is_none() && now.is_some(),
+    }
+}
+
+/// One connection change, against the client in hand: replaced only when
+/// the new server answered, as ever.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_change(client: &mut Option<Arc<Client>>, cmd: ApiCmd) -> Option<Event> {
+    match cmd {
+        ApiCmd::Connect { server, identity, token, self_signed, peer, local_token } => {
+            connect(client, &server, &identity, token, self_signed, peer, local_token)
+        }
+        ApiCmd::Login { server, identity, username, password, self_signed, local_token, peer } => {
+            login(client, &server, &identity, &username, &password, self_signed, local_token, peer)
+        }
+        ApiCmd::Retarget { identity, server, token, self_signed, peer, local_token } => {
+            Some(retarget(client, &server, &identity, token, self_signed, peer, local_token))
+        }
+        _ => None,
+    }
+}
+
 /// The client for a read aimed at a row's own server. `None` when the base
 /// will not parse — the read then falls back to the session, whose answer
 /// the App's stale-reply guards judge as they would any other.
@@ -1202,6 +1367,157 @@ fn spawn_read(client: Option<Arc<Client>>, events: Sender<Event>, cmd: ApiCmd) {
             let _ = events.send(event);
         })
         .ok();
+}
+
+/// How many small covers one server is asked for at once. The wall claims
+/// every cover of a page in one frame — 150-odd at 300x90 — and a thread
+/// per read put the whole page in flight together: a thread and a
+/// connection per cover, all sharing the link, so each landed only near
+/// the end of the batch and a slow Quick Connect relay ran the lot into
+/// the 20-second deadline, with the playing track's stream starved beside
+/// them (performance audit #88). Six is a browser's figure per host.
+#[cfg(not(target_arch = "wasm32"))]
+const ART_LANE_WIDTH: usize = 6;
+/// Servers a lane is kept for; an idle one goes when the shelf is full.
+#[cfg(not(target_arch = "wasm32"))]
+const ART_LANE_SHELF: usize = 16;
+
+/// One server's small covers: the asks waiting their turn, and how many of
+/// the lane's threads are out. Per server, not one for all: a dead peer
+/// holding every slot would starve the session's covers behind it — #63's
+/// head-of-line block, back inside the lane.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct ArtLane {
+    /// Oldest first, served from the back: the page on screen was claimed
+    /// last, so it is drawn first, and a page flipped past waits behind it
+    /// rather than in front.
+    waiting: Vec<(Option<Arc<Client>>, ApiCmd)>,
+    running: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ArtLane {
+    /// Queue an ask; true when a runner should start for it.
+    fn push(&mut self, client: Option<Arc<Client>>, cmd: ApiCmd) -> bool {
+        self.waiting.push((client, cmd));
+        let start = self.running < ART_LANE_WIDTH;
+        if start {
+            self.running += 1;
+        }
+        start
+    }
+
+    /// The newest waiting ask — or, with none left, the runner asking is
+    /// done and goes.
+    fn next(&mut self) -> Option<(Option<Arc<Client>>, ApiCmd)> {
+        let job = self.waiting.pop();
+        if job.is_none() {
+            self.running -= 1;
+        }
+        job
+    }
+
+    /// Drop the waiting asks for `file`.
+    fn withdraw(&mut self, file: &str) {
+        self.waiting.retain(|(_, cmd)| !matches!(cmd, ApiCmd::AlbumArt { file: asked, .. } if asked == file));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type Lane = Arc<std::sync::Mutex<ArtLane>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lock_lane(lane: &Lane) -> std::sync::MutexGuard<'_, ArtLane> {
+    lane.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The lanes, one per reach the covers are asked of (`None`: the session,
+/// a fresh lane each time its client is replaced).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct ArtLanes {
+    shelf: Vec<(Option<crate::tui::app::Reach>, Lane)>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ArtLanes {
+    /// Queue a small cover in its server's lane, and start a runner when
+    /// the lane has one to spare.
+    fn ask(&mut self, client: Option<Arc<Client>>, events: &Sender<Event>, cmd: ApiCmd) {
+        let reach = cmd.reach().cloned();
+        let lane = match self.shelf.iter().find(|(known, _)| *known == reach) {
+            Some((_, lane)) => lane.clone(),
+            None => {
+                if self.shelf.len() >= ART_LANE_SHELF
+                    && let Some(at) = self.shelf.iter().position(|(_, lane)| {
+                        let lane = lock_lane(lane);
+                        lane.waiting.is_empty() && lane.running == 0
+                    })
+                {
+                    self.shelf.remove(at);
+                }
+                let lane = Lane::default();
+                self.shelf.push((reach, lane.clone()));
+                lane
+            }
+        };
+        let start = lock_lane(&lane).push(client, cmd);
+        if start {
+            spawn_art_runner(lane, events.clone());
+        }
+    }
+
+    /// The session's client was replaced. Its covers start a lane of their
+    /// own: kept, the lane made the new session's covers wait on the old
+    /// one's asks still on the wire — six runners held twenty seconds an
+    /// ask by a server that hangs, a page taking minutes — and each waiting
+    /// ask kept the client it was queued with, so the server the user had
+    /// left went on being asked. The old lane's runners finish what they
+    /// carry and go. What it had waiting: a retarget is the same server by
+    /// another path, whose claims the App keeps, so those asks move across
+    /// onto the new client; a connect or a sign-in may be another server,
+    /// and the App lets every claim go when its Connected lands, so they
+    /// are dropped (the review of performance audit #88).
+    fn session_moved(&mut self, client: Option<Arc<Client>>, same_server: bool, events: &Sender<Event>) {
+        let Some(at) = self.shelf.iter().position(|(reach, _)| reach.is_none()) else { return };
+        let (_, old) = self.shelf.remove(at);
+        let waiting = std::mem::take(&mut lock_lane(&old).waiting);
+        if same_server {
+            for (_, cmd) in waiting {
+                self.ask(client.clone(), events, cmd);
+            }
+        }
+    }
+
+    /// The App no longer wants this cover: an ask still waiting in any
+    /// lane goes unasked. Nothing answers for it — the claim it would have
+    /// filled is already gone.
+    fn withdraw(&self, file: &str) {
+        for (_, lane) in &self.shelf {
+            lock_lane(lane).withdraw(file);
+        }
+    }
+}
+
+/// One of a lane's threads: answers the newest waiting ask until none is
+/// left, then goes.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_art_runner(lane: Lane, events: Sender<Event>) {
+    let runner = lane.clone();
+    let spawned = thread::Builder::new().name("mstream-api-art".into()).spawn(move || {
+        loop {
+            let Some((client, cmd)) = lock_lane(&runner).next() else { return };
+            if events.send(answer(client.as_deref(), cmd)).is_err() {
+                lock_lane(&runner).running -= 1;
+                return;
+            }
+        }
+    });
+    // No thread to be had: the ask waits for the next one the lane starts.
+    if spawned.is_err() {
+        lock_lane(&lane).running -= 1;
+    }
 }
 
 /// One read, answered. Failures map onto events here: only 401 means the
@@ -1311,7 +1627,7 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::Search { query, generation } => {
             c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r), generation })
         }
-        ApiCmd::AlbumArt { file, .. } => {
+        ApiCmd::AlbumArt { file, small, .. } => {
             // The waveform's rule, because this cache burned without it: a
             // 404 and bytes that won't decode are the server's own word
             // that there is no art — settled, remembered, never asked
@@ -1320,10 +1636,10 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
             // album coverless for the rest of the session. Decoded here so
             // the render loop only ever meets covers already at terminal
             // scale.
-            let answer = c.album_art(&file);
+            let answer = c.album_art(&file, small);
             let settled = matches!(&answer, Ok(_) | Err(ApiError::NotFound(_)));
             let art = answer.ok().and_then(|bytes| art::decode(&bytes));
-            Ok(Event::AlbumArt { file, art, settled })
+            Ok(Event::AlbumArt { file, art, settled, small })
         }
         ApiCmd::Waveform { filepath, .. } => {
             // Same rule as art: a shape nobody could draw is not news. The
@@ -1345,6 +1661,7 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         | ApiCmd::DirectAccess { .. }
         | ApiCmd::Retarget { .. }
         | ApiCmd::Probe { .. }
+        | ApiCmd::ArtWithdraw { .. }
         | ApiCmd::Shutdown => return Event::Error("connection change routed as a read".into()),
     };
     match answered {
@@ -3019,5 +3336,392 @@ mod tests {
         // …and a four-stop journey that came back whole is not "the same
         // track" just because two of its rows are the seeds.
         assert!(journey_note(&stops(4), 4).is_none());
+    }
+
+    fn small_cover(file: &str) -> ApiCmd {
+        ApiCmd::AlbumArt { file: file.to_string(), reach: None, small: true }
+    }
+
+    fn asked_file(job: Option<(Option<Arc<Client>>, ApiCmd)>) -> Option<String> {
+        match job {
+            Some((_, ApiCmd::AlbumArt { file, .. })) => Some(file),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn an_art_lane_runs_six_at_a_time_newest_first_and_drops_what_was_withdrawn() {
+        // Performance audit #88: a page of covers was a thread and a
+        // connection per cover, all at once. The lane starts a runner for
+        // each of its first six asks and queues the rest; runners take the
+        // newest first, and a withdrawn ask is never taken.
+        let mut lane = ArtLane::default();
+        let started: Vec<bool> = (0..10).map(|i| lane.push(None, small_cover(&format!("c{i}.jpeg")))).collect();
+        assert_eq!(started, [true, true, true, true, true, true, false, false, false, false]);
+        assert_eq!(asked_file(lane.next()).as_deref(), Some("c9.jpeg"), "the page on screen was claimed last");
+        lane.withdraw("c8.jpeg");
+        assert_eq!(asked_file(lane.next()).as_deref(), Some("c7.jpeg"), "the withdrawn ask is skipped");
+        for _ in 0..7 {
+            assert!(lane.next().is_some());
+        }
+        assert_eq!(lane.running, 6);
+        assert!(lane.next().is_none(), "nothing left: the runner that asked goes");
+        assert_eq!(lane.running, 5);
+        assert!(lane.push(None, small_cover("late.jpeg")), "and a new ask may start one again");
+    }
+
+    #[test]
+    fn a_page_of_small_covers_never_has_more_than_six_in_flight_to_one_server() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let open = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        {
+            let (open, peak) = (open.clone(), peak.clone());
+            thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { break };
+                    let (open, peak) = (open.clone(), peak.clone());
+                    thread::spawn(move || {
+                        let now = open.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        let mut buf = [0u8; 2048];
+                        let _ = stream.read(&mut buf);
+                        thread::sleep(Duration::from_millis(40));
+                        open.fetch_sub(1, Ordering::SeqCst);
+                        let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    });
+                }
+            });
+        }
+        let client = Arc::new(Client::new_with(&format!("http://127.0.0.1:{port}"), false).unwrap());
+        let (tx, rx) = mpsc::channel();
+        let mut lanes = ArtLanes::default();
+        for i in 0..30 {
+            lanes.ask(Some(client.clone()), &tx, small_cover(&format!("c{i}.jpeg")));
+        }
+        let mut answered = 0;
+        while answered < 30 {
+            match rx.recv_timeout(Duration::from_secs(10)).expect("every ask answers") {
+                Event::AlbumArt { settled: true, art: None, .. } => answered += 1,
+                other => panic!("a 404 is the server's own no: {other:?}"),
+            }
+        }
+        assert!(peak.load(Ordering::SeqCst) <= ART_LANE_WIDTH, "peak {}", peak.load(Ordering::SeqCst));
+        assert!(peak.load(Ordering::SeqCst) > 1, "and it does run them side by side");
+    }
+
+    /// A one-route-at-a-time HTTP server for the worker's own tests: each
+    /// request gets `answer(path)` — how long to hold it, the status line
+    /// and the body — on its own thread. Returns the base URL.
+    fn test_server(answer: impl Fn(&str) -> (Duration, &'static str, &'static str) + Send + Sync + 'static) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let answer = Arc::new(answer);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let answer = answer.clone();
+                thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&request).to_string();
+                    let path = text.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let (hold, status, body) = answer(&path);
+                    thread::sleep(hold);
+                    let reply = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes());
+                });
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn a_connect_that_hangs_holds_back_only_the_reads_that_ride_the_session() {
+        // Performance audit #84: a connection change ran on the dispatch
+        // loop, so a ping that hung held every later command behind it —
+        // another server's covers, play reports, tunnel dials. It runs on
+        // its own thread now; what does not ride the session goes straight
+        // on, and what does still lands on the session the change made.
+        const PING: &str = r#"{"vpaths":["lib"],"transcode":false,"noFileModify":true,"noUpload":true}"#;
+        let slow = test_server(|path| match path {
+            "/api/v1/ping" => (Duration::from_millis(1500), "200 OK", PING),
+            p if p.starts_with("/api/v1/file-explorer") => {
+                (Duration::ZERO, "200 OK", r#"{"path":"lib/","directories":[],"files":[]}"#)
+            }
+            _ => (Duration::ZERO, "404 Not Found", "{}"),
+        });
+        let other = test_server(|_| (Duration::ZERO, "404 Not Found", "{}"));
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let worker = thread::spawn(move || api_loop(&rx, &events_tx));
+
+        let started = std::time::Instant::now();
+        tx.send(ApiCmd::Connect {
+            server: slow.clone(),
+            identity: slow.clone(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        })
+        .unwrap();
+        tx.send(ApiCmd::Browse("lib".into())).unwrap();
+        let reach = crate::tui::app::Reach {
+            base: other,
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        };
+        tx.send(ApiCmd::AlbumArt { file: "far.jpg".into(), reach: Some(reach), small: true }).unwrap();
+
+        let mut order = Vec::new();
+        while order.len() < 3 {
+            let event = events.recv_timeout(Duration::from_secs(10)).expect("three answers");
+            let name = match event {
+                Event::AlbumArt { .. } => "cover",
+                Event::Connected { .. } => "connected",
+                Event::Listing(_) => "listing",
+                Event::TunnelStatus { .. } | Event::TunnelPath { .. } => continue,
+                other => panic!("unexpected {other:?}"),
+            };
+            order.push((name, started.elapsed()));
+        }
+        tx.send(ApiCmd::Shutdown).unwrap();
+        worker.join().unwrap();
+
+        let names: Vec<&str> = order.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["cover", "connected", "listing"], "{order:?}");
+        assert!(order[0].1 < Duration::from_millis(1000), "the other server's cover did not wait: {order:?}");
+        assert!(order[1].1 >= Duration::from_millis(1400), "the ping really hung: {order:?}");
+    }
+
+    #[test]
+    fn connection_changes_keep_their_order_and_a_read_between_two_rides_the_first() {
+        // The property the serial loop gave (worker.rs's api_loop): changes
+        // one at a time, in order, and each session read on the client the
+        // change before it left (performance audit #84).
+        const PING: &str = r#"{"vpaths":["lib"],"transcode":false,"noFileModify":true,"noUpload":true}"#;
+        let first = test_server(|path| match path {
+            "/api/v1/ping" => (Duration::from_millis(600), "200 OK", PING),
+            _ => (Duration::ZERO, "200 OK", r#"{"path":"one/","directories":[],"files":[]}"#),
+        });
+        let second = test_server(|path| match path {
+            "/api/v1/ping" => (Duration::ZERO, "200 OK", PING),
+            _ => (Duration::ZERO, "200 OK", r#"{"path":"two/","directories":[],"files":[]}"#),
+        });
+        let connect = |server: &str| ApiCmd::Connect {
+            server: server.to_string(),
+            identity: server.to_string(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        };
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let worker = thread::spawn(move || api_loop(&rx, &events_tx));
+        for cmd in [connect(&first), ApiCmd::Browse("lib".into()), connect(&second), ApiCmd::Browse("lib".into())] {
+            tx.send(cmd).unwrap();
+        }
+        let mut seen = Vec::new();
+        while seen.len() < 4 {
+            match events.recv_timeout(Duration::from_secs(10)).expect("four answers") {
+                Event::Connected { server, .. } => seen.push(format!("connected {}", server == first)),
+                Event::Listing(listing) => seen.push(format!("listing {}", listing.path)),
+                Event::TunnelStatus { .. } | Event::TunnelPath { .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        tx.send(ApiCmd::Shutdown).unwrap();
+        worker.join().unwrap();
+        // Reads answer on their own threads, so the first listing may pass
+        // the second connect's answer — as it always could. What holds: the
+        // changes land in order, the read between them asked the first
+        // server, and the read after the second asked the second, after it.
+        let at = |what: &str| seen.iter().position(|s| s == what).unwrap_or_else(|| panic!("{what}: {seen:?}"));
+        assert!(at("connected true") < at("connected false"), "{seen:?}");
+        assert!(at("connected true") < at("listing one/"), "{seen:?}");
+        assert!(at("connected false") < at("listing two/"), "{seen:?}");
+    }
+
+    #[test]
+    fn a_held_cover_is_never_between_the_session_and_its_lane() {
+        // The review's race (performance audit #84): the change thread took
+        // a held cover off the session, let the session go, and only then
+        // queued it in a lane, so a withdrawal handled in between found it
+        // in neither and it was fetched anyway. The session stays held
+        // until the lane has it — the order a withdrawal takes them in.
+        let session: Session = Arc::default();
+        {
+            let mut slot = lock_session(&session);
+            slot.changing = true;
+            slot.held.push_back(small_cover("held.jpeg"));
+        }
+        let lanes: Lanes = Arc::default();
+        let (events, _answers) = mpsc::channel();
+        let busy = lock_lanes(&lanes);
+        let worker = {
+            let (session, lanes) = (session.clone(), lanes.clone());
+            thread::spawn(move || work_through(&session, &lanes, &events))
+        };
+        let until = std::time::Instant::now() + Duration::from_millis(300);
+        while std::time::Instant::now() < until {
+            if let Ok(slot) = session.try_lock() {
+                assert!(!slot.held.is_empty(), "the cover left the session before a lane had it");
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        drop(busy);
+        worker.join().unwrap();
+        assert!(lock_session(&session).held.is_empty());
+        assert_eq!(lock_lanes(&lanes).shelf.len(), 1, "and the lane has it");
+    }
+
+    const LANE_PING: &str = r#"{"vpaths":["lib"],"transcode":false,"noFileModify":true,"noUpload":true}"#;
+
+    fn connect_to(server: &str) -> ApiCmd {
+        ApiCmd::Connect {
+            server: server.to_string(),
+            identity: server.to_string(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        }
+    }
+
+    /// A server whose covers each hang `hold` before a 404, counting the
+    /// asks it was sent; its ping answers at once.
+    fn hanging_art(hold: Duration) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = asked.clone();
+        let base = test_server(move |path| match path {
+            "/api/v1/ping" => (Duration::ZERO, "200 OK", LANE_PING),
+            p if p.starts_with("/album-art/") => {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (hold, "404 Not Found", "{}")
+            }
+            _ => (Duration::ZERO, "404 Not Found", "{}"),
+        });
+        (base, asked)
+    }
+
+    /// The next event that is not the tunnel sampler's.
+    fn next_answer(events: &Receiver<Event>, within: Duration) -> Event {
+        loop {
+            match events.recv_timeout(within).expect("an answer") {
+                Event::TunnelStatus { .. } | Event::TunnelPath { .. } => {}
+                event => return event,
+            }
+        }
+    }
+
+    /// Twenty covers on the session's lane, six of them on the wire.
+    fn twenty_covers_on(tx: &Sender<ApiCmd>, asked: &std::sync::atomic::AtomicUsize) {
+        for i in 0..20 {
+            tx.send(small_cover(&format!("old{i}.jpeg"))).unwrap();
+        }
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while asked.load(std::sync::atomic::Ordering::SeqCst) < ART_LANE_WIDTH && std::time::Instant::now() < until {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), ART_LANE_WIDTH);
+    }
+
+    #[test]
+    fn a_new_session_gets_a_lane_of_its_own_and_asks_the_old_server_nothing_more() {
+        // The review of performance audit #88: the session's lane outlived
+        // the session. After a switch away from a server whose art hangs,
+        // the leftovers kept all six runners for twenty seconds an ask, each
+        // still aimed at the server the user had left, and the new server's
+        // covers waited behind them.
+        let (old, asked_old) = hanging_art(Duration::from_millis(1500));
+        let new = test_server(|path| match path {
+            "/api/v1/ping" => (Duration::ZERO, "200 OK", LANE_PING),
+            _ => (Duration::ZERO, "404 Not Found", "{}"),
+        });
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let worker = thread::spawn(move || api_loop(&rx, &events_tx));
+        tx.send(connect_to(&old)).unwrap();
+        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Connected { .. }));
+        twenty_covers_on(&tx, &asked_old);
+
+        tx.send(connect_to(&new)).unwrap();
+        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Connected { .. }));
+        let asked = std::time::Instant::now();
+        tx.send(small_cover("new.jpeg")).unwrap();
+        match next_answer(&events, Duration::from_secs(5)) {
+            Event::AlbumArt { file, .. } => assert_eq!(file, "new.jpeg", "the new server's cover first"),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(asked.elapsed() < Duration::from_millis(1000), "it did not wait: {:?}", asked.elapsed());
+
+        // The six on the wire land; the fourteen that waited are never sent.
+        for _ in 0..ART_LANE_WIDTH {
+            assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::AlbumArt { .. }));
+        }
+        assert!(events.recv_timeout(Duration::from_millis(300)).is_err(), "nothing more is answered");
+        assert_eq!(asked_old.load(std::sync::atomic::Ordering::SeqCst), ART_LANE_WIDTH);
+        tx.send(ApiCmd::Shutdown).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_retarget_moves_the_waiting_covers_onto_the_new_path() {
+        // The same server by another way: its claims stand in the App, so
+        // what waited on the old path is asked on the new one, at once,
+        // rather than behind the old path's six on the wire.
+        let (old, asked_old) = hanging_art(Duration::from_millis(1500));
+        let new = test_server(|path| match path {
+            "/api/" => (Duration::ZERO, "200 OK", "{}"),
+            _ => (Duration::ZERO, "404 Not Found", "{}"),
+        });
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let worker = thread::spawn(move || api_loop(&rx, &events_tx));
+        tx.send(connect_to(&old)).unwrap();
+        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Connected { .. }));
+        twenty_covers_on(&tx, &asked_old);
+
+        let moved = std::time::Instant::now();
+        tx.send(ApiCmd::Retarget {
+            identity: old.clone(),
+            server: new,
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        })
+        .unwrap();
+        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Retargeted { .. }));
+        for _ in 0..20 - ART_LANE_WIDTH {
+            match next_answer(&events, Duration::from_secs(5)) {
+                Event::AlbumArt { settled: true, .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(moved.elapsed() < Duration::from_millis(1000), "the new path answered them: {:?}", moved.elapsed());
+        for _ in 0..ART_LANE_WIDTH {
+            assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::AlbumArt { .. }));
+        }
+        assert_eq!(asked_old.load(std::sync::atomic::Ordering::SeqCst), ART_LANE_WIDTH);
+        tx.send(ApiCmd::Shutdown).unwrap();
+        worker.join().unwrap();
     }
 }

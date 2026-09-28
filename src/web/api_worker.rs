@@ -260,7 +260,11 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
         }
 
         // One server, the page's own: a row's reach is that server anyway.
-        ApiCmd::AlbumArt { file, .. } => {
+        // Every cover the App asks of the browser build is `small` — it
+        // keeps no source bytes, and the 256 px copy decodes on the page's
+        // one thread in a millisecond where an original took tens
+        // (performance audit #92).
+        ApiCmd::AlbumArt { file, small, .. } => {
             // The waveform's rule, exactly as the native worker applies
             // it: a 404 or undecodable bytes settle as "no art"; a
             // transport failure — or no session yet — is not an answer
@@ -269,15 +273,19 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             // raise.
             let client = session.borrow().as_ref().map(|s| s.client.clone());
             let (art, settled) = match client {
-                Some(c) => match c.album_art_async(&file).await {
+                Some(c) => match c.album_art_async(&file, small).await {
                     Ok(bytes) => (art::decode(&bytes), true),
                     Err(ApiError::NotFound(_)) => (None, true),
                     Err(_) => (None, false),
                 },
                 None => (None, false),
             };
-            Some(Event::AlbumArt { file, art, settled })
+            Some(Event::AlbumArt { file, art, settled, small })
         }
+
+        // No art lanes here: the browser already asks a host six at a
+        // time, so there is nothing queued to withdraw.
+        ApiCmd::ArtWithdraw { .. } => None,
 
         ApiCmd::Waveform { filepath, .. } => {
             // Art's rule, for the same reason: a shape nobody could draw is

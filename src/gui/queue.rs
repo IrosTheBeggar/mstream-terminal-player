@@ -155,13 +155,10 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     gui.queue_view.scroll = first;
 
     // The covers these rows still owe the cache, claimed through the App's
-    // own fetch — hashmap lookups after the first frame.
-    let mut fetches = Vec::new();
-    for index in first..first + visible {
-        if let Some(effect) = gui.app.fetch_queue_art(index) {
-            fetches.push(effect);
-        }
-    }
+    // own fetch in one batch — hashmap lookups after the first frame. The
+    // rows go on record with it: what the panel shows is what the cache
+    // must not evict (performance audit #91).
+    let fetches = gui.app.claim_queue_art(first..first + visible);
     gui.pend(fetches);
 
 
@@ -425,7 +422,7 @@ mod tests {
         gui.pending
             .iter()
             .filter_map(|e| match e {
-                Effect::Api(ApiCmd::AlbumArt { file, reach }) => {
+                Effect::Api(ApiCmd::AlbumArt { file, reach, .. }) => {
                     Some((file.clone(), reach.as_ref().map(|r| r.base.clone())))
                 }
                 _ => None,
@@ -508,7 +505,7 @@ mod tests {
             "the other server's row asks its own server: {asks:?}"
         );
         let reach = gui.pending.iter().find_map(|e| match e {
-            Effect::Api(ApiCmd::AlbumArt { file, reach }) if file == "bb.jpeg" => reach.clone(),
+            Effect::Api(ApiCmd::AlbumArt { file, reach, .. }) if file == "bb.jpeg" => reach.clone(),
             _ => None,
         });
         assert_eq!(reach.unwrap().token.as_deref(), Some("tok"), "with its token");
