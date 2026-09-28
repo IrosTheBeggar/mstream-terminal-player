@@ -1049,8 +1049,14 @@ impl Queue {
             return;
         }
         self.touch();
-        let item = self.items.remove(from);
-        self.items.insert(to, item);
+        // Rotate the rows between the two ends by one: a remove and an insert
+        // each shifted the whole tail behind them, ~2.4 MB of rows per drag
+        // step near the top of a 3,000-row queue (performance audit #114).
+        if from < to {
+            self.items[from..=to].rotate_left(1);
+        } else {
+            self.items[to..=from].rotate_right(1);
+        }
         self.current = self.current.map(|cur| {
             if cur == from {
                 to

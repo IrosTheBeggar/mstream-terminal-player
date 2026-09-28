@@ -3121,6 +3121,28 @@ fn add_next_lands_after_the_playing_row_and_play_now_starts_it() {
 }
 
 #[test]
+fn a_move_lands_every_row_where_taking_it_out_and_putting_it_back_would() {
+    // Performance audit #114: a move rotates the rows between its two ends
+    // instead of shifting the whole tail twice. Every pair of ends, both
+    // ways, against the remove-and-insert it replaces — rows and current.
+    let names: Vec<String> = (0..12).map(|i| format!("r{i}")).collect();
+    for from in 0..12 {
+        for to in 0..12 {
+            for current in [None, Some(0), Some(from), Some(to), Some(5), Some(11)] {
+                let mut queue = Queue { items: names.iter().map(|n| item(n)).collect(), current, ..Default::default() };
+                let mut expected: Vec<&str> = names.iter().map(String::as_str).collect();
+                let moved = expected.remove(from);
+                expected.insert(to, moved);
+                let playing = current.map(|c| names[c].as_str());
+                queue.move_row(from, to);
+                assert_eq!(queue.items.iter().map(|i| i.filepath.as_str()).collect::<Vec<_>>(), expected, "{from} -> {to}");
+                assert_eq!(queue.current.map(|c| queue.items[c].filepath.as_str()), playing, "{from} -> {to}: current stays on its track");
+            }
+        }
+    }
+}
+
+#[test]
 fn moving_a_queued_row_keeps_current_on_its_track() {
     // The pure rule: current follows the track it was on.
     let mut queue = Queue { items: vec![item("a"), item("b"), item("c"), item("d")], current: Some(1), ..Default::default() };
