@@ -294,6 +294,7 @@ impl App {
         for item in &mut self.queue.items {
             rename(&mut item.origin.server);
         }
+        self.queue.touch();
         for owed in &mut self.stats.outbox {
             rename(&mut owed.origin.server);
         }
@@ -370,10 +371,13 @@ impl App {
         self.search.set(Vec::new());
         self.files.set(Vec::new());
         self.files.loading = true;
-        // The album wall was the old server's too.
+        // The album wall was the old server's too, and so were the
+        // Artists and Genres lists.
         self.albums = None;
         self.artist_albums = None;
         self.albums_rev = self.albums_rev.wrapping_add(1);
+        self.artists = None;
+        self.genre_list = None;
         self.library.set(Vec::new());
         self.library_stack = super::nav::Drill::new(crate::tui::worker::LibraryNode::Root);
     }
@@ -649,6 +653,15 @@ impl App {
                 }
                 if token.is_some() {
                     self.session.token = token;
+                }
+                if username.is_some() && username != self.session.username {
+                    // Another account on the same server can see other
+                    // libraries: the Artists and Genres lists kept for the
+                    // rooms were the last one's (performance audit #99). The
+                    // album wall keeps its own lifecycle — dropped while it
+                    // stands, it would wait on an ask nothing sent.
+                    self.artists = None;
+                    self.genre_list = None;
                 }
                 if username.is_some() {
                     self.session.username = username;

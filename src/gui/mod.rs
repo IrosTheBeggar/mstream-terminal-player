@@ -815,6 +815,9 @@ impl Gui {
             }
             Act::VizWindow => vizwin::toggle(self),
             Act::Nav(i) => {
+                // The room already up, chosen again: the Library rooms ask
+                // the server afresh (below).
+                let again = i == self.active && self.screen == Screen::Library;
                 // A nav row is the Library's: it brings that screen back.
                 self.screen = Screen::Library;
                 self.app.fullscreen = false;
@@ -864,10 +867,17 @@ impl Gui {
                 // The shell's own note was about the room being left.
                 self.note = None;
                 // The Library rooms open their root list fresh on every
-                // visit (library-rooms contract, entry point 1).
+                // visit (library-rooms contract, entry point 1) — Artists
+                // and Genres from the session's copy once they have one, a
+                // whole list's round trip saved per return (performance
+                // audit #99). Choosing the room already up asks again: the
+                // lists change only with a rescan, and that is how to see it.
                 if let Some(root) = library::root_of(i)
                     && self.app.connected
                 {
+                    if again {
+                        self.app.forget_root_list(&root);
+                    }
                     library::open(self, root);
                 }
                 if i != SETTINGS_NAV {

@@ -223,6 +223,49 @@ fn a_filter_narrows_the_list_without_losing_the_way_out() {
 }
 
 #[test]
+fn a_growing_filter_narrows_what_is_shown_and_ends_where_a_fresh_one_would() {
+    // Performance audit #111: a key that only adds to the needle narrows
+    // the rows on screen in place rather than rescanning (and re-cloning)
+    // the whole list — and every step must show exactly what typing the
+    // same text into an unfiltered list shows, in the same order.
+    let names: Vec<String> = (0..400).map(|i| format!("{} Band {i}", ["Amber", "AMBIENT", "Bass", "Ämber"][i % 4])).collect();
+    let dirs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let shown = |app: &App| labels(app).into_iter().map(str::to_string).collect::<Vec<_>>();
+    let fresh = |text: &str| {
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &dirs, &["amber solo.mp3"]))));
+        app.pane_mut().apply_filter(text.to_string());
+        shown(&app)
+    };
+    let mut app = connected_app();
+    app.apply_event(Event::Listing(Box::new(listing("/lib/", &dirs, &["amber solo.mp3"]))));
+    type_filter(&mut app, "");
+    for (typed, key) in [("a", 'a'), ("am", 'm'), ("amb", 'b'), ("amb ", ' '), ("amb b", 'b'), ("amb b1", '1')] {
+        let rows = app.pane().entries.as_ptr();
+        app.handle_action(Action::Input(key));
+        assert_eq!(shown(&app), fresh(typed), "after {typed:?}");
+        if typed.len() > 1 {
+            assert_eq!(app.pane().entries.as_ptr(), rows, "{typed:?} narrowed the rows where they stand");
+        }
+    }
+    assert_eq!(labels(&app)[0], "..", "the way out survives every step");
+    assert_eq!(app.pane().counts().1, 401, "and nothing was lost behind the filter");
+
+    // Widening — a Backspace, or an edit that is not a longer needle —
+    // starts again from the whole list.
+    app.handle_action(Action::Backspace);
+    assert_eq!(shown(&app), fresh("amb b"));
+    for _ in 0..3 {
+        app.handle_action(Action::Backspace);
+    }
+    assert_eq!(shown(&app), fresh("am"));
+    app.pane_mut().apply_filter("bass".into());
+    assert_eq!(shown(&app), fresh("bass"));
+    app.pane_mut().apply_filter(String::new());
+    assert_eq!(labels(&app).len(), 402);
+}
+
+#[test]
 fn a_filter_survives_being_typed_but_not_a_new_listing() {
     let mut app = connected_app();
     app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Alpha", "Beta"], &[]))));
@@ -289,6 +332,37 @@ fn the_column_behind_a_filtered_pick_holds_the_whole_folder() {
     app.handle_action(Action::Back);
     assert_eq!(labels(&app), vec!["..", "Alpha", "Beta", "Betamax"]);
     assert!(app.pane().filter.is_empty(), "and no filter came back with it");
+}
+
+#[test]
+fn a_drill_moves_the_listing_into_its_column_rather_than_copying_it() {
+    // Performance audit #112: every drill replaces the pane straight after
+    // pushing its column, so the column takes the rows themselves — the
+    // shown list, or the whole one behind a filter — not a copy of them.
+    let mut app = connected_app();
+    app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Alpha", "Beta", "Betamax"], &[]))));
+    let rows = app.files.entries.as_ptr();
+    app.files.state.select(Some(2)); // Beta
+    app.handle_action(Action::Activate);
+    assert_eq!(app.files.trail[0].entries.as_ptr(), rows, "the rows moved into the column");
+    assert_eq!(app.files.trail[0].chosen, 2);
+    assert!(app.files.entries.is_empty() && app.files.loading, "the pane waits for its reply");
+
+    app.apply_event(Event::Listing(Box::new(listing("/lib/Beta/", &["One", "Two", "Twelve"], &[]))));
+    type_filter(&mut app, "twe");
+    app.handle_action(Action::Submit);
+    let whole = app.files.unfiltered.as_ref().unwrap().as_ptr();
+    app.handle_action(Action::Activate);
+    assert_eq!(app.files.trail[1].entries.as_ptr(), whole, "the whole folder, not the filtered view");
+    assert_eq!(app.files.trail[1].entries[app.files.trail[1].chosen].label(), "Twelve");
+    assert!(app.files.filter.is_empty() && app.files.unfiltered.is_none());
+
+    // Back walks out through both, with nothing hidden.
+    app.apply_event(Event::Listing(Box::new(listing("/lib/Beta/Twelve/", &[], &["x.mp3"]))));
+    app.handle_action(Action::Back);
+    assert_eq!(labels(&app), vec!["..", "One", "Two", "Twelve"]);
+    app.handle_action(Action::Back);
+    assert_eq!(labels(&app), vec!["..", "Alpha", "Beta", "Betamax"]);
 }
 
 #[test]
@@ -2108,6 +2182,100 @@ fn a_tunnel_parent_is_kept_for_the_access_call_and_let_go_once_the_peer_is_direc
     assert!(app.tunnel_targets().contains(parent));
 }
 
+#[test]
+fn the_targets_ask_each_origin_once_in_the_order_the_queue_names_them() {
+    // Performance audit #108: a queue comes in long runs from one origin,
+    // and the targets walk each origin once — same sets, same first-seen
+    // order (reconcile_direct asks in it), however many rows repeat them.
+    let mut app = connected_app();
+    let parent = "mstream+iroh://faraway";
+    app.servers.push(faraway());
+    app.direct_offered.insert(parent.into());
+    let peer = |id: i64, path: &str| Queued { dj: None, origin: Origin { server: parent.into(), peer: Some(id) }, track: track(path) };
+    let mut rows = Vec::new();
+    for run in 0..6 {
+        for i in 0..500 {
+            let path = format!("music/{run}/{i}.mp3");
+            rows.push(match run % 3 {
+                0 => peer(9, &path),
+                1 => at(FARAWAY, &path),
+                _ => peer(7, &path),
+            });
+        }
+    }
+    rows.push(item("music/here.mp3"));
+    app.queue.replace(rows);
+    let peers: Vec<(String, i64)> = app.peer_targets().into_iter().map(|(_, parent, id)| (parent, id)).collect();
+    assert_eq!(peers, [(parent.to_string(), 9), (parent.to_string(), 7)], "each peer once, first seen first");
+    assert_eq!(app.queue_origins().len(), 4);
+    let wanted = app.tunnel_targets();
+    assert!(wanted.contains(parent) && wanted.contains(FARAWAY));
+    assert_eq!(wanted.len(), 1, "the tunnel server is the peers' parent: one tunnel, {wanted:?}");
+
+    // One access ask per peer, however many rows are its, in that order.
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    let asks = direct_asks(&app.tick_at(crate::clock::Instant::now()));
+    assert_eq!(asks, [(9, false), (7, false)]);
+}
+
+#[test]
+fn every_change_to_the_queues_rows_moves_its_revision() {
+    // Performance audit #108: the saver watches the revision instead of
+    // hashing every row, so every writer of the rows must move it — and a
+    // step that changes nothing need not.
+    let mut app = connected_app();
+    let mut last = app.queue.rev();
+    let mut moved = |app: &App, what: &str| {
+        assert_ne!(app.queue.rev(), last, "{what} moves the revision");
+        last = app.queue.rev();
+    };
+    app.replace_queue(vec![track("a.mp3"), track("b.mp3"), track("c.mp3")]);
+    moved(&app, "replace");
+    app.push_queue(track("d.mp3"));
+    moved(&app, "push");
+    app.queue.insert_next(item("e.mp3"));
+    moved(&app, "insert next");
+    app.queue.move_row(0, 2);
+    moved(&app, "a move");
+    app.queue.remove(1);
+    moved(&app, "a removal");
+    app.servers.push(KnownServer { id: "http://b".into(), name: "b".into(), token: None, username: None, self_signed: false, peer: None, pairing: None, dj: Default::default() });
+    app.queue.push(at("http://b", "b/x.mp3"));
+    moved(&app, "push");
+    app.drop_server_items("http://b");
+    moved(&app, "a server's rows swept");
+    app.rename_server("http://host:3000", "http://host:3001");
+    moved(&app, "a rename");
+    let origin = app.queue.items[0].origin.clone();
+    let path = app.queue.items[0].filepath.clone();
+    app.rate_track(&origin, &path, Some(6));
+    moved(&app, "a rating written into the row");
+    let mut block = track(&path);
+    block.metadata.title = Some("Learned".into());
+    app.consume_track_info(path.clone(), Some(block));
+    moved(&app, "a tag the row lacked, filled in from the details block");
+
+    // The review of #106: a block that only confirms what the row already
+    // says — a sheet opened on a tagged track — is no change to the rows,
+    // and neither is the rating the row already wears.
+    let still = app.queue.rev();
+    let mut block = track(&path);
+    block.metadata.title = Some("Other".into());
+    block.metadata.rating = Some(6);
+    app.consume_track_info(path.clone(), Some(block));
+    app.rate_track(&origin, &path, Some(6));
+    assert_eq!(app.queue.items[0].track.metadata.title.as_deref(), Some("Learned"), "a fill, not an overwrite");
+    assert_eq!(app.queue.rev(), still, "a details block with nothing new moves nothing");
+    app.queue.clear();
+    moved(&app, "a clear");
+
+    let still = app.queue.rev();
+    app.queue.move_row(0, 0);
+    app.queue.remove(5);
+    app.rate_track(&origin, "not/queued.mp3", Some(2));
+    assert_eq!(app.queue.rev(), still, "nothing changed, nothing moved");
+}
+
 // ── Tunnels follow the queue (contract clause 38) ───────────────────────
 
 fn tunnel_up(local_url: &str) -> TunnelState {
@@ -2729,6 +2897,7 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
     long.track.metadata.duration = Some(300.0);
     let snapshot = QueueSnapshot {
         version: QUEUE_SNAPSHOT_VERSION,
+        stamp: None,
         index: Some(2),
         position: 42.5,
         shuffle: true,
@@ -2739,6 +2908,7 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
             long,
             at("http://gone", "music/lost2.mp3"),
         ],
+        retired: Vec::new(),
     };
     assert!(app.restore_queue(snapshot));
     assert_eq!(app.queue.items.len(), 2, "the two rows whose servers are known");
@@ -2763,19 +2933,23 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
     let mut fresh = connected_app();
     assert!(!fresh.restore_queue(QueueSnapshot {
         version: QUEUE_SNAPSHOT_VERSION + 1,
+        stamp: None,
         index: None,
         position: 0.0,
         shuffle: false,
         repeat: "off".into(),
         items: vec![at("http://host:3000", "music/1.mp3")],
+        retired: Vec::new(),
     }));
     assert!(!fresh.restore_queue(QueueSnapshot {
         version: QUEUE_SNAPSHOT_VERSION,
+        stamp: None,
         index: Some(0),
         position: 0.0,
         shuffle: false,
         repeat: "off".into(),
         items: vec![at("http://gone", "music/1.mp3")],
+        retired: Vec::new(),
     }));
     assert!(fresh.queue.items.is_empty());
 }
@@ -2804,6 +2978,151 @@ fn a_snapshot_round_trips_and_keeps_a_held_spot_until_something_plays() {
 
     // An empty queue has nothing to write.
     assert!(App::new(None, None, None).queue_snapshot().is_none());
+}
+
+#[test]
+fn the_borrowed_snapshot_writes_exactly_what_the_owned_one_does() {
+    // Performance audit #106: the saver serializes the rows where they
+    // stand instead of cloning them first — and must not change a byte.
+    let mut app = connected_app();
+    let mut tagged = track("music/b.flac");
+    tagged.metadata.title = Some("Bé".into());
+    tagged.metadata.genres = vec!["Ambient".into()];
+    tagged.metadata.duration = Some(61.5);
+    app.push_queue(track("music/a.mp3"));
+    app.push_queue(tagged);
+    app.queue.items[1].dj = Some(DjMark { sonic: true });
+    let effects = app.play_index(1);
+    app.status = PlayerStatus { playing: true, position: 17.25, source: played_url(&effects), ..Default::default() };
+    let owned = serde_json::to_string(&app.queue_snapshot().unwrap()).unwrap();
+    let borrowed = serde_json::to_string(&app.queue_snapshot_ref(None).unwrap()).unwrap();
+    assert_eq!(borrowed, owned);
+    // The shape of old: nothing new in a file with no stamp and nothing
+    // let go, so an older player reads it as it always did.
+    assert!(owned.starts_with(r#"{"version":1,"index":1,"position":17.25,"shuffle":false,"repeat":"off","items":[{"#), "{owned}");
+    assert!(!owned.contains("stamp") && !owned.contains("retired"), "{owned}");
+
+    // Stamped and with rows let go, the two still agree, and read back whole.
+    app.queue.retired = vec!["music/old.mp3".into()];
+    let mut owned = app.queue_snapshot().unwrap();
+    owned.stamp = Some(7);
+    let text = serde_json::to_string(&owned).unwrap();
+    assert_eq!(serde_json::to_string(&app.queue_snapshot_ref(Some(7)).unwrap()).unwrap(), text);
+    assert_eq!(serde_json::from_str::<QueueSnapshot>(&text).unwrap(), owned);
+}
+
+#[test]
+fn a_checkpoint_place_is_taken_only_by_the_rows_it_names() {
+    // Performance audit #106: the ten-second checkpoint writes the place
+    // alone; it stands for the rows of the same stamp, never for others.
+    let mut app = connected_app();
+    app.push_queue(track("music/a.mp3"));
+    app.push_queue(track("music/b.mp3"));
+    let mut snapshot = app.queue_snapshot().unwrap();
+    snapshot.stamp = Some(41);
+    let place = QueuePlace { version: QUEUE_SNAPSHOT_VERSION, stamp: 41, index: Some(1), position: 88.0 };
+    let other = QueuePlace { stamp: 40, ..place.clone() };
+    let newer = QueuePlace { version: QUEUE_SNAPSHOT_VERSION + 1, ..place.clone() };
+    let mut unstamped = snapshot.clone();
+    unstamped.stamp = None;
+    assert!(!snapshot.clone().adopt(&other), "another write's place");
+    assert!(!snapshot.clone().adopt(&newer), "another shape's");
+    assert!(!unstamped.adopt(&place), "rows an older player wrote have no place");
+    assert!(snapshot.adopt(&place));
+    assert_eq!((snapshot.index, snapshot.position), (Some(1), 88.0));
+}
+
+/// An Auto DJ pick on the test server.
+fn dj_row(path: &str) -> Queued {
+    Queued { dj: Some(DjMark { sonic: false }), ..item(path) }
+}
+
+#[test]
+fn a_restored_dj_queue_keeps_its_last_hundred_played_picks_and_remembers_the_rest() {
+    // Contract clause 40, performance audit #106: the DJ only appends, so
+    // with it armed a restore brings back the last DJ_PLAYED_KEPT of its
+    // played rows; every row the user queued and every row still to come
+    // stays, and the let-go paths still count as queued to the DJ.
+    let rows = |dj_played: usize| {
+        let mut items: Vec<Queued> = (0..dj_played).map(|i| dj_row(&format!("dj/{i:03}.mp3"))).collect();
+        items.insert(10, item("mine/early.mp3"));
+        items.push(dj_row("dj/playing.mp3"));
+        items.push(dj_row("dj/next.mp3"));
+        items
+    };
+    let snapshot = |dj_played: usize, shuffle: bool, repeat: &str| QueueSnapshot {
+        version: QUEUE_SNAPSHOT_VERSION,
+        stamp: None,
+        index: Some(dj_played + 1),
+        position: 30.0,
+        shuffle,
+        repeat: repeat.into(),
+        items: rows(dj_played),
+        retired: vec!["dj/older.mp3".into()],
+    };
+    let mut app = connected_app();
+    app.dj_server = Some(HOST.into());
+    assert!(app.restore_queue(snapshot(130, false, "off")));
+    let paths: Vec<&str> = app.queue.items.iter().map(|i| i.filepath.as_str()).collect();
+    assert_eq!(paths.len(), 1 + DJ_PLAYED_KEPT + 2, "the user's row, the last hundred picks, the playing and the next");
+    assert_eq!(paths[0], "mine/early.mp3", "what the user queued comes back wherever it stood");
+    assert_eq!(paths[1], "dj/030.mp3", "the thirty oldest picks are let go");
+    assert_eq!(app.queue.current, Some(DJ_PLAYED_KEPT + 1));
+    assert_eq!(app.queue.items[app.queue.current.unwrap()].filepath, "dj/playing.mp3", "the spot rides its row");
+    assert_eq!(app.resume_spot, Some((DJ_PLAYED_KEPT + 1, 30.0)));
+    assert_eq!(app.queue.retired.len(), 31);
+    assert_eq!((app.queue.retired[0].as_str(), app.queue.retired[30].as_str()), ("dj/older.mp3", "dj/029.mp3"));
+    assert_eq!(app.queue_snapshot().unwrap().retired, app.queue.retired, "and they are saved with the queue");
+
+    // A pick the DJ let go is as queued as any row: not queued again.
+    let epoch = app.lane.epoch;
+    app.apply_event(pick(epoch, vec![track("dj/005.mp3"), track("dj/next.mp3")]));
+    assert_eq!(app.queue.items.len(), 1 + DJ_PLAYED_KEPT + 2, "nothing new");
+    app.apply_event(pick(epoch, vec![track("dj/005.mp3"), track("dj/fresh.mp3")]));
+    assert_eq!(app.queue.items.last().unwrap().filepath, "dj/fresh.mp3");
+
+    // Nothing is let go while its rows are still to come or the DJ is off:
+    // shuffled, wrapping, or disarmed.
+    for (shuffle, repeat, armed) in [(true, "off", true), (false, "all", true), (false, "off", false)] {
+        let mut app = connected_app();
+        app.dj_server = armed.then(|| HOST.to_string());
+        assert!(app.restore_queue(snapshot(130, shuffle, repeat)));
+        assert_eq!(app.queue.items.len(), 133, "shuffle {shuffle}, repeat {repeat}, armed {armed}");
+        assert_eq!(app.queue.retired, ["dj/older.mp3"], "what was let go before stays let go");
+    }
+
+    // The memory is bounded, oldest out; a new queue forgets it.
+    let mut app = connected_app();
+    app.dj_server = Some(HOST.into());
+    let mut big = snapshot(DJ_PLAYED_KEPT + DJ_RETIRED_CAP + 5, false, "one");
+    big.retired = Vec::new();
+    assert!(app.restore_queue(big));
+    assert_eq!(app.queue.retired.len(), DJ_RETIRED_CAP);
+    assert_eq!(app.queue.retired[0], "dj/005.mp3", "the oldest five fell out");
+    app.replace_queue(vec![track("x.mp3")]);
+    assert!(app.queue.retired.is_empty());
+
+    // The saved row's server is gone: the spot is the row after it,
+    // counted among the rows kept. The saved index clamped would skip
+    // ahead by the thirty let go (the review's note) — here, to the last.
+    let mut app = connected_app();
+    app.dj_server = Some(HOST.into());
+    let mut gone = snapshot(130, false, "off");
+    gone.items[131] = Queued { dj: Some(DjMark { sonic: false }), ..at("http://gone", "dj/playing.mp3") };
+    gone.items.extend([dj_row("dj/next2.mp3"), dj_row("dj/next3.mp3")]);
+    assert!(app.restore_queue(gone));
+    assert_eq!(app.queue.items.len(), 1 + DJ_PLAYED_KEPT + 3, "the gone row dropped, the thirty let go");
+    let spot = app.queue.current.expect("a spot");
+    assert_eq!(app.queue.items[spot].filepath, "dj/next.mp3", "the row after the one that is gone");
+    assert_eq!(app.resume_spot, Some((spot, 30.0)));
+    assert_eq!(app.resume_track.as_deref(), Some("dj/next.mp3"));
+
+    // And a saved index past the rows lands on the last (clause 40).
+    let mut app = connected_app();
+    let mut past = snapshot(130, false, "off");
+    past.index = Some(999);
+    assert!(app.restore_queue(past));
+    assert_eq!(app.queue.current, Some(132), "clamped to the last row");
 }
 
 #[test]
@@ -2837,6 +3156,28 @@ fn add_next_lands_after_the_playing_row_and_play_now_starts_it() {
     let paths: Vec<&str> = app.queue.items.iter().map(|i| i.filepath.as_str()).collect();
     assert_eq!(paths, ["music/a.mp3", "music/c.mp3", "music/b.mp3", "music/z.mp3"]);
     assert_eq!(app.queue.current, Some(1));
+}
+
+#[test]
+fn a_move_lands_every_row_where_taking_it_out_and_putting_it_back_would() {
+    // Performance audit #114: a move rotates the rows between its two ends
+    // instead of shifting the whole tail twice. Every pair of ends, both
+    // ways, against the remove-and-insert it replaces — rows and current.
+    let names: Vec<String> = (0..12).map(|i| format!("r{i}")).collect();
+    for from in 0..12 {
+        for to in 0..12 {
+            for current in [None, Some(0), Some(from), Some(to), Some(5), Some(11)] {
+                let mut queue = Queue { items: names.iter().map(|n| item(n)).collect(), current, ..Default::default() };
+                let mut expected: Vec<&str> = names.iter().map(String::as_str).collect();
+                let moved = expected.remove(from);
+                expected.insert(to, moved);
+                let playing = current.map(|c| names[c].as_str());
+                queue.move_row(from, to);
+                assert_eq!(queue.items.iter().map(|i| i.filepath.as_str()).collect::<Vec<_>>(), expected, "{from} -> {to}");
+                assert_eq!(queue.current.map(|c| queue.items[c].filepath.as_str()), playing, "{from} -> {to}: current stays on its track");
+            }
+        }
+    }
 }
 
 #[test]
@@ -4381,6 +4722,75 @@ fn a_playlist_change_reasks_an_open_playlists_view() {
     app.open_library_node(LibraryNode::Albums, true);
     let effects = app.apply_event(Event::PlaylistDeleted);
     assert!(effects.is_empty(), "no refresh for a view not on screen: {effects:?}");
+}
+
+#[test]
+fn the_artists_and_genres_lists_are_kept_for_the_session_and_seat_a_return() {
+    // Performance audit #99: the two root lists change only with a
+    // rescan; once answered, opening the room again seats the session's
+    // copy — a fresh drill, no request — and a new server forgets them.
+    use crate::api::types::Genre;
+    let asks = |effects: &[Effect], node: LibraryNode| {
+        effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Library { node: n, .. }) if *n == node))
+    };
+    let mut app = connected_app();
+    let effects = app.open_library_node(LibraryNode::Artists, true);
+    assert!(asks(&effects, LibraryNode::Artists), "the first opening asks");
+    let generation = app.session_gen();
+    app.apply_event(Event::Library {
+        node: LibraryNode::Artists,
+        dest: Tab::Library,
+        data: LibraryData::Artists(vec!["Air".into(), "Bonobo".into()]),
+        generation,
+    });
+    app.library.state.select(Some(2));
+    app.handle_action(Action::Activate); // down into Bonobo
+    assert!(matches!(app.library_stack.here(), LibraryNode::Artist(_)));
+
+    let effects = app.open_library_node(LibraryNode::Artists, true);
+    assert!(effects.is_empty(), "a return asks nothing: {effects:?}");
+    assert!(matches!(app.library_stack.here(), LibraryNode::Artists), "at the root again");
+    assert!(app.library.trail.is_empty() && !app.library.loading);
+    assert_eq!(app.library.entries.iter().map(Entry::label).collect::<Vec<_>>(), ["..", "Air", "Bonobo"]);
+
+    let effects = app.open_library_node(LibraryNode::Genres, true);
+    assert!(asks(&effects, LibraryNode::Genres));
+    app.apply_event(Event::Library {
+        node: LibraryNode::Genres,
+        dest: Tab::Library,
+        data: LibraryData::Genres(vec![Genre { name: "Dub".into(), track_count: Some(3) }]),
+        generation,
+    });
+    assert!(app.open_library_node(LibraryNode::Genres, true).is_empty());
+    assert!(asks(&app.open_library_node(LibraryNode::Recent, true), LibraryNode::Recent), "recent means now");
+
+    // Forgotten on request (the GUI's second choice of the room), and with
+    // the server.
+    app.forget_root_list(&LibraryNode::Genres);
+    assert!(asks(&app.open_library_node(LibraryNode::Genres, true), LibraryNode::Genres));
+    app.shed_server_state();
+    assert!(app.artists.is_none() && app.genre_list.is_none());
+    assert!(asks(&app.open_library_node(LibraryNode::Artists, true), LibraryNode::Artists));
+
+    // And with the account (the review's note): a reconnect as the same
+    // user, or one that names none, keeps them; another user on the same
+    // server may see other libraries, and forgets them.
+    let connected = |username: Option<&str>| Event::Connected {
+        server: "http://host:3000".into(),
+        id: "http://host:3000".into(),
+        username: username.map(str::to_string),
+        token: None,
+        ping: Box::default(),
+    };
+    app.apply_event(connected(Some("alice")));
+    app.artists = Some(vec!["Air".into()]);
+    app.genre_list = Some(Vec::new());
+    app.apply_event(connected(Some("alice")));
+    app.apply_event(connected(None));
+    assert!(app.artists.is_some() && app.genre_list.is_some(), "the same account keeps its lists");
+    app.apply_event(connected(Some("bob")));
+    assert!(app.artists.is_none() && app.genre_list.is_none(), "another account's are not its own");
+    assert!(asks(&app.open_library_node(LibraryNode::Artists, true), LibraryNode::Artists));
 }
 
 #[test]

@@ -258,12 +258,16 @@ parent changes a peer's label only.
 39. **Persistence.** The queue is saved — items (title, album, artist,
     genre, duration, origin, path, art), index, position, shuffle, repeat —
     debounced on every edit and track change, checkpointed every 10 s
-    while playing, and flushed when the app backgrounds. An emptied queue
+    while playing (the checkpoint writes the place alone — the row and the
+    second, naming the rows it belongs to — beside rows unchanged since
+    their write, and the rows whole when they are no longer on the drive
+    as written), and flushed when the app backgrounds. An emptied queue
     deletes the snapshot, but only after a queue existed this session (a
     restore that whiffed must not destroy what it failed to read). The
     setting **Resume queue on launch** ("Save the play queue and your
     place, and restore them when you reopen the app.") defaults on;
-    turning it off blocks restore and deletes the snapshot.
+    turning it off blocks restore and deletes the snapshot, and turning
+    it back on saves the queue again, playing or not.
 40. **Restore** runs after the server list has loaded. Items whose server
     is no longer configured are dropped; every surviving item gets a
     freshly built URL (the saved token and cache-buster are stale); the
@@ -271,7 +275,11 @@ parent changes a peer's label only.
     restarts it. The queue opens **paused at the spot — never auto-plays**.
     A restore whose load failed parks the intended spot so a later save
     cannot overwrite it with track 1 / 0:00. A snapshot from another
-    schema version is ignored, not migrated.
+    schema version is ignored, not migrated. With Auto DJ armed and the
+    queue played straight through (no shuffle, repeat not All), only the
+    last 100 of the DJ's rows before the spot come back; the rows the user
+    queued always do, and the paths of the ones let go (the newest 500)
+    still count as queued to the DJ, so it does not pick them again.
 
 ### The bundled server *(addition — no record)*
 
@@ -623,3 +631,15 @@ additions to drawn idioms. Revisit if discussion disagrees.
   parent. The Manage-servers list and the header dropdown scroll: a
   window of rows follows the cursor under the keys and the wheel
   otherwise.
+- **2026-09-28 — The queue file's cost** (performance audit #106, clauses
+  39 and 40). The ten-second checkpoint rewrote every row, flushed to the
+  drive, to move one number: it now writes `queue-place.json` (the row and
+  the second, without the flush) beside a `queue.json` it leaves alone,
+  and a restore takes that place only when it names the write of the rows
+  beside it; rows that are gone from the drive or replaced there (the
+  setting turned off and on, another copy of the player) are written whole
+  instead, as the old checkpoint always did. And the record's DJ appends
+  every pick forever, which a resumed queue brought back launch after
+  launch; here a restore with the DJ armed keeps its last 100 played rows
+  and remembers the rest by path, so the no-repeat rule holds without the
+  rows.

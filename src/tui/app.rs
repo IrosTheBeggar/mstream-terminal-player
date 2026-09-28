@@ -512,11 +512,24 @@ impl Pane {
     /// Narrow to the rows whose name contains `filter`, ignoring case. An
     /// empty filter puts everything back.
     pub fn apply_filter(&mut self, filter: String) {
+        let needle = filter.trim().to_lowercase();
+        let shown = self.filter.trim().to_lowercase();
+        // A key that only adds to the needle can only take rows away: a name
+        // holding the new needle holds the old one inside it, so the rows on
+        // screen are the only candidates, and they narrow where they stand.
+        // Rescanning the whole list cloned every match again on every key —
+        // ~2 ms a key at 5,000 tracks, ~10 at 30,000 (performance audit
+        // #111). A widening edit still starts from the whole list.
+        if self.unfiltered.is_some() && !shown.is_empty() && needle.contains(shown.as_str()) {
+            self.entries.retain(|entry| entry.matches(&needle));
+            self.filter = filter;
+            self.rest_cursor();
+            return;
+        }
         let all = self
             .unfiltered
             .take()
             .unwrap_or_else(|| std::mem::take(&mut self.entries));
-        let needle = filter.trim().to_lowercase();
         self.filter = filter;
         if needle.is_empty() {
             self.entries = all;
@@ -884,14 +897,77 @@ pub(crate) fn transient_failure(error: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct QueueSnapshot {
     pub version: u32,
+    /// Which write of the rows this is: the ten-second checkpoint's
+    /// [`QueuePlace`] names it, and is only read against it. Absent from a
+    /// file an older player wrote, which then has no place beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<u64>,
     pub index: Option<usize>,
     pub position: f64,
     pub shuffle: bool,
     pub repeat: String,
     pub items: Vec<Queued>,
+    /// [`Queue::retired`]: the Auto DJ rows a restore let go of, by path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired: Vec<String>,
+}
+
+impl QueueSnapshot {
+    /// Take the checkpoint's place when it belongs to these rows — the same
+    /// shape, the same write of them — and keep the rows' own otherwise: a
+    /// place from another write indexes other rows.
+    pub fn adopt(&mut self, place: &QueuePlace) -> bool {
+        if place.version != self.version || self.stamp != Some(place.stamp) {
+            return false;
+        }
+        self.index = place.index;
+        self.position = place.position;
+        true
+    }
+}
+
+/// [`QueueSnapshot`] as it is written, borrowing the rows rather than
+/// cloning every one of them for a write that only reads them (performance
+/// audit #106). The same fields in the same order, so the text is byte for
+/// byte what the owned shape writes and reads back.
+#[derive(Debug, serde::Serialize)]
+pub struct QueueSnapshotRef<'a> {
+    pub version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<u64>,
+    pub index: Option<usize>,
+    pub position: f64,
+    pub shuffle: bool,
+    pub repeat: &'a str,
+    pub items: &'a [Queued],
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    pub retired: &'a [String],
+}
+
+/// Where the saved queue stands — the playing row and the seconds into it —
+/// for the ten-second checkpoint (contract clause 39). The rows have not
+/// changed since they were written, so only this is, beside them, rather
+/// than every row again for the one number that moved (performance audit
+/// #106). `stamp` names the write of the rows it belongs to.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QueuePlace {
+    pub version: u32,
+    pub stamp: u64,
+    pub index: Option<usize>,
+    pub position: f64,
 }
 
 pub const QUEUE_SNAPSHOT_VERSION: u32 = 1;
+
+/// How many played Auto DJ rows a restore brings back ahead of the playing
+/// one (contract clause 40). The DJ only ever appends and a resumed queue
+/// brought every pick back, so a lean-back queue grew ~15 rows an hour,
+/// launch after launch, and every per-row cost with it (performance audit
+/// #106).
+pub const DJ_PLAYED_KEPT: usize = 100;
+/// How many let-go DJ rows [`Queue::retired`] remembers, newest last — the
+/// server's own cap on the ignore list's wire.
+pub const DJ_RETIRED_CAP: usize = 500;
 
 /// A position at or within a second of the track's end restarts the track:
 /// resuming there would seek past the end and stop on play (contract
@@ -917,6 +993,16 @@ pub struct Queue {
     /// can see the end of the queue coming positionally; shuffle has no
     /// position, so its end is this count reaching the queue's length.
     played: usize,
+    /// Moved on by every change to the rows — their number, their order, a
+    /// tag learned in place — so the saver can tell rows it has written
+    /// from rows it has not without reading them all again (performance
+    /// audit #106, #108).
+    rev: u64,
+    /// The paths of Auto DJ rows a restore let go of (contract clause 40),
+    /// newest last, at most [`DJ_RETIRED_CAP`]: to the DJ's rule that a
+    /// pick already queued is not queued again they are still here.
+    /// Gone with the rows they stood beside when the queue is replaced.
+    pub retired: Vec<String>,
 }
 
 impl Default for Repeat {
@@ -926,13 +1012,27 @@ impl Default for Repeat {
 }
 
 impl Queue {
+    /// Note a change to the rows made from outside these methods — a sweep
+    /// that assigned them, a rename or a tag written in place.
+    pub(crate) fn touch(&mut self) {
+        self.rev = self.rev.wrapping_add(1);
+    }
+
+    /// Which edit of the rows this is (see the field).
+    pub(crate) fn rev(&self) -> u64 {
+        self.rev
+    }
+
     pub fn replace(&mut self, tracks: Vec<Queued>) {
+        self.touch();
         self.items = tracks;
+        self.retired.clear();
         self.current = None;
         self.state.select(if self.items.is_empty() { None } else { Some(0) });
     }
 
     pub fn push(&mut self, track: Queued) {
+        self.touch();
         self.items.push(track);
         if self.state.selected().is_none() {
             self.state.select(Some(0));
@@ -946,6 +1046,7 @@ impl Queue {
             Some(current) if current < self.items.len() => current + 1,
             _ => self.items.len(),
         };
+        self.touch();
         self.items.insert(at, track);
         if self.state.selected().is_none() {
             self.state.select(Some(0));
@@ -958,8 +1059,15 @@ impl Queue {
         if from >= self.items.len() || to >= self.items.len() || from == to {
             return;
         }
-        let item = self.items.remove(from);
-        self.items.insert(to, item);
+        self.touch();
+        // Rotate the rows between the two ends by one: a remove and an insert
+        // each shifted the whole tail behind them, ~2.4 MB of rows per drag
+        // step near the top of a 3,000-row queue (performance audit #114).
+        if from < to {
+            self.items[from..=to].rotate_left(1);
+        } else {
+            self.items[to..=from].rotate_right(1);
+        }
         self.current = self.current.map(|cur| {
             if cur == from {
                 to
@@ -974,7 +1082,9 @@ impl Queue {
     }
 
     pub fn clear(&mut self) {
+        self.touch();
         self.items.clear();
+        self.retired.clear();
         self.current = None;
         self.state.select(None);
     }
@@ -989,6 +1099,7 @@ impl Queue {
         if index >= self.items.len() {
             return false;
         }
+        self.touch();
         self.items.remove(index);
 
         let was_current = match self.current {
@@ -1625,6 +1736,13 @@ pub struct App {
     /// audit #103). A counter rather than the Vec's address: a freed list's
     /// address comes back for the next one of the same length.
     pub albums_rev: u64,
+    /// The Artists and Genres root lists, kept whole the way `albums` is:
+    /// they change only with a rescan, and a return to the GUI's room
+    /// seats its list from here instead of asking for all of it again
+    /// (library-rooms contract, entry point 1; performance audit #99).
+    /// Cleared with the session.
+    pub artists: Option<Vec<String>>,
+    pub genre_list: Option<Vec<crate::api::types::Genre>>,
     /// The full block the sheet or Song info asked for last (track-actions
     /// contract, clause 8), by the track's path.
     pub track_info: Option<Track>,
@@ -1921,6 +2039,8 @@ impl App {
             albums: None,
             artist_albums: None,
             albums_rev: 0,
+            artists: None,
+            genre_list: None,
             track_info: None,
             playlist_names: PlaylistNames::Unasked,
             rating_writes: Vec::new(),
@@ -3018,25 +3138,31 @@ impl App {
     /// Remember the listing on screen as a column, on the way into the next
     /// one. Called before the request goes out, so the context is there while
     /// the reply is still coming.
+    ///
+    /// Every caller replaces the pane straight after, so the rows move into
+    /// the column rather than being copied for a pane about to drop them — a
+    /// deep copy of every row on every drill, 2-5 ms at 20,000 (performance
+    /// audit #112). The pane stands empty, unfiltered, until that `set`.
     fn push_trail(&mut self) -> bool {
         let pane = self.pane_mut();
         if pane.entries.is_empty() {
             return false;
         }
         let chosen = pane.state.selected().unwrap_or(0);
+        let shown = std::mem::take(&mut pane.entries);
         // The column behind keeps the whole listing, not the narrowed view of
         // it. A filter is a way of finding one row, and once it has been found
         // the rest of the folder is the context worth having — which also
         // means coming back out is a list with nothing hidden and no filter
         // left over to explain.
-        let entries = pane.entries.clone();
-        let (entries, chosen) = match &pane.unfiltered {
+        let (entries, chosen) = match pane.unfiltered.take() {
             Some(all) => {
-                let row = all.iter().position(|entry| entry == &entries[chosen]);
-                (all.clone(), row.unwrap_or(0))
+                let row = shown.get(chosen).and_then(|picked| all.iter().position(|entry| entry == picked));
+                (all, row.unwrap_or(0))
             }
-            None => (entries, chosen),
+            None => (shown, chosen),
         };
+        pane.filter.clear();
         pane.trail.push(Trail { entries, chosen });
         true
     }
@@ -4004,12 +4130,34 @@ impl App {
         if let Some((parent, id)) = &self.session.peer {
             add(parent, *id);
         }
-        for item in &self.queue.items {
-            if let Some(id) = item.origin.peer {
-                add(&item.origin.server, id);
+        for (server, peer) in self.queue_origins() {
+            if let Some(id) = peer {
+                add(server, id);
             }
         }
         out
+    }
+
+    /// The queue's origins, each once, in the order the rows first name
+    /// them. A queue comes in long runs from one server, and everything a
+    /// row's origin asks of a pass — its tunnel, its peer's ticket — is
+    /// the same for every row of the run: asked per row, that was a string
+    /// cloned or formatted per queued track on every loop pass
+    /// (performance audit #108).
+    fn queue_origins(&self) -> Vec<(&str, Option<i64>)> {
+        let mut origins: Vec<(&str, Option<i64>)> = Vec::new();
+        let mut last: Option<&Origin> = None;
+        for item in &self.queue.items {
+            if last == Some(&item.origin) {
+                continue;
+            }
+            last = Some(&item.origin);
+            let origin = (item.origin.server.as_str(), item.origin.peer);
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+        origins
     }
 
     /// Whether a peer's own tunnel is worth dialling: its parent offers
@@ -4202,6 +4350,7 @@ impl App {
         // re-announces from wherever playback lands.
         self.announced = None;
         self.queue.items = sweep.keep;
+        self.queue.touch();
         if self.queue.items.is_empty() {
             self.queue.clear();
             self.now_playing = None;
@@ -4232,12 +4381,46 @@ impl App {
     /// What to write down for next time (contract clause 39): every row,
     /// the playing one and the seconds into it — or the spot a restore is
     /// still holding, so a checkpoint before anything plays cannot write
-    /// track 1 / 0:00 over the real place. `None` for an empty queue.
+    /// track 1 / 0:00 over the real place. `None` for an empty queue. Owned,
+    /// for the tests; the saver writes [`App::queue_snapshot_ref`].
+    #[cfg(test)]
     pub fn queue_snapshot(&self) -> Option<QueueSnapshot> {
+        let snapshot = self.queue_snapshot_ref(None)?;
+        Some(QueueSnapshot {
+            version: snapshot.version,
+            stamp: snapshot.stamp,
+            index: snapshot.index,
+            position: snapshot.position,
+            shuffle: snapshot.shuffle,
+            repeat: snapshot.repeat.to_string(),
+            items: snapshot.items.to_vec(),
+            retired: snapshot.retired.to_vec(),
+        })
+    }
+
+    /// [`App::queue_snapshot`] as the saver writes it: borrowed, and
+    /// carrying the write's `stamp` (performance audit #106).
+    pub fn queue_snapshot_ref(&self, stamp: Option<u64>) -> Option<QueueSnapshotRef<'_>> {
         if self.queue.items.is_empty() {
             return None;
         }
-        let (index, position) = match (self.resume_spot, self.queue.current) {
+        let (index, position) = self.queue_spot();
+        Some(QueueSnapshotRef {
+            version: QUEUE_SNAPSHOT_VERSION,
+            stamp,
+            index,
+            position,
+            shuffle: self.queue.shuffle,
+            repeat: self.queue.repeat.label(),
+            items: &self.queue.items,
+            retired: &self.queue.retired,
+        })
+    }
+
+    /// The playing row and the seconds into it, as a snapshot writes them —
+    /// or the spot a restore is still holding (clause 40).
+    pub fn queue_spot(&self) -> (Option<usize>, f64) {
+        match (self.resume_spot, self.queue.current) {
             // The held spot rides the row the queue keeps current — edits
             // before the first play re-index the rows under the spot.
             (Some((_, position)), _) if self.status.is_idle() => (self.queue.current, position),
@@ -4246,22 +4429,15 @@ impl App {
                 (Some(current), position)
             }
             (_, None) => (None, 0.0),
-        };
-        Some(QueueSnapshot {
-            version: QUEUE_SNAPSHOT_VERSION,
-            index,
-            position,
-            shuffle: self.queue.shuffle,
-            repeat: self.queue.repeat.label().to_string(),
-            items: self.queue.items.clone(),
-        })
+        }
     }
 
     /// Bring a saved queue back (contract clause 40): rows whose server is
     /// no longer known are dropped, the playing row keeps its place when it
     /// survives (else the index is clamped), a position at the end restarts
     /// the track, and nothing plays — the spot waits for the first play.
-    /// Returns whether anything came back.
+    /// With the DJ armed, only the last [`DJ_PLAYED_KEPT`] of its played
+    /// rows come back. Returns whether anything came back.
     pub fn restore_queue(&mut self, snapshot: QueueSnapshot) -> bool {
         if snapshot.version != QUEUE_SNAPSHOT_VERSION {
             return false;
@@ -4271,22 +4447,48 @@ impl App {
             origin.server == live.server
                 || self.servers.iter().any(|s| crate::config::same_server(&s.id, &origin.server))
         };
-        let mut kept = Vec::with_capacity(snapshot.items.len());
+        // The DJ appends every pick, so a queue it works grows as it plays
+        // (performance audit #106). Played straight through — no shuffle,
+        // no wrap — the rows before the saved one are behind it for good:
+        // the oldest of the DJ's are let go, their paths kept so it does
+        // not pick them again. What the user queued always comes back.
+        let straight = !snapshot.shuffle && Repeat::from_label(&snapshot.repeat) != Repeat::All;
+        let played = match snapshot.index {
+            Some(at) if straight && self.dj_armed() => snapshot.items[..at.min(snapshot.items.len())]
+                .iter()
+                .filter(|item| item.dj.is_some() && known(&item.origin))
+                .count(),
+            _ => 0,
+        };
+        let mut let_go = played.saturating_sub(DJ_PLAYED_KEPT);
+        let mut retired = snapshot.retired;
+        let mut kept = Vec::with_capacity(snapshot.items.len() - let_go);
         let mut index = None;
         for (i, item) in snapshot.items.into_iter().enumerate() {
+            // The saved row's place among the rows kept: its own, or when
+            // its server is gone, the row after it — counted past the rows
+            // dropped or let go before it, not from the saved index.
+            if snapshot.index == Some(i) {
+                index = Some(kept.len());
+            }
             if !known(&item.origin) {
                 continue;
             }
-            if snapshot.index == Some(i) {
-                index = Some(kept.len());
+            if let_go > 0 && item.dj.is_some() && snapshot.index.is_some_and(|at| i < at) {
+                let_go -= 1;
+                retired.push(item.track.filepath);
+                continue;
             }
             kept.push(item);
         }
         if kept.is_empty() {
             return false;
         }
-        let index = index.or_else(|| snapshot.index.map(|i| i.min(kept.len() - 1)));
+        // An index past the rows (clause 40's clamp) lands on the last.
+        let index = snapshot.index.map(|_| index.unwrap_or(kept.len()).min(kept.len() - 1));
+        retired.drain(..retired.len().saturating_sub(DJ_RETIRED_CAP));
         self.queue.replace(kept);
+        self.queue.retired = retired;
         self.queue.shuffle = snapshot.shuffle;
         self.queue.repeat = Repeat::from_label(&snapshot.repeat);
         if let Some(index) = index {
@@ -4532,6 +4734,10 @@ impl App {
     /// the peer refused — spaced by the record's gaps — and never again
     /// once the parent declined (contract clause 27).
     pub(crate) fn reconcile_direct(&mut self, now: crate::clock::Instant) -> Vec<Effect> {
+        // No parent offers it: nothing to ask, whoever is referenced.
+        if self.direct_offered.is_empty() {
+            return Vec::new();
+        }
         let now_wall = std::time::SystemTime::now();
         let mut asks = Vec::new();
         for (pid, parent, id) in self.peer_targets() {
@@ -4617,12 +4823,12 @@ impl App {
                 }
             }
         }
-        for item in &self.queue.items {
-            match item.origin.peer {
-                Some(id) => self.want_for_peer(&mut wanted, &item.origin.server, id),
+        for (server, peer) in self.queue_origins() {
+            match peer {
+                Some(id) => self.want_for_peer(&mut wanted, server, id),
                 None => {
-                    if crate::quickconnect::is_tunnel_id(&item.origin.server) {
-                        wanted.insert(item.origin.server.clone());
+                    if crate::quickconnect::is_tunnel_id(server) {
+                        wanted.insert(server.to_string());
                     }
                 }
             }
@@ -5089,8 +5295,34 @@ impl App {
             self.push_trail();
         }
         self.library_stack.enter(node.clone());
+        // A root list the session holds is seated from it: a fresh drill,
+        // no request (performance audit #99).
+        if fresh && let Some(data) = self.root_list(&node) {
+            self.library.set(entries::entries_from_library(data));
+            return Vec::new();
+        }
         self.library.set(Vec::new());
         vec![self.ask_library(node, Tab::Library)]
+    }
+
+    /// The session's copy of a room's root list, when it has one — Artists
+    /// and Genres; Recent and the play lists mean now and always ask.
+    fn root_list(&self, node: &LibraryNode) -> Option<LibraryData> {
+        match node {
+            LibraryNode::Artists => self.artists.clone().map(LibraryData::Artists),
+            LibraryNode::Genres => self.genre_list.clone().map(LibraryData::Genres),
+            _ => None,
+        }
+    }
+
+    /// Let a room's root list go, so the next opening asks the server: the
+    /// GUI's click on the room already up — the way to see a rescan.
+    pub(crate) fn forget_root_list(&mut self, node: &LibraryNode) {
+        match node {
+            LibraryNode::Artists => self.artists = None,
+            LibraryNode::Genres => self.genre_list = None,
+            _ => {}
+        }
     }
 
     /// Whether the Library pane's drill stands on the Albums wall, or on an
@@ -5512,6 +5744,16 @@ impl App {
                 {
                     self.artist_albums = Some((artist.clone(), albums.clone()));
                     self.albums_rev = self.albums_rev.wrapping_add(1);
+                }
+                // The Artists and Genres rooms' copies — see the fields.
+                match (&node, dest, &data) {
+                    (LibraryNode::Artists, Tab::Library, LibraryData::Artists(names)) => {
+                        self.artists = Some(names.clone());
+                    }
+                    (LibraryNode::Genres, Tab::Library, LibraryData::Genres(genres)) => {
+                        self.genre_list = Some(genres.clone());
+                    }
+                    _ => {}
                 }
                 self.pane_for_mut(dest).set(entries_from_library(data));
                 self.message = None;
