@@ -4447,6 +4447,12 @@ impl App {
         let mut kept = Vec::with_capacity(snapshot.items.len() - let_go);
         let mut index = None;
         for (i, item) in snapshot.items.into_iter().enumerate() {
+            // The saved row's place among the rows kept: its own, or when
+            // its server is gone, the row after it — counted past the rows
+            // dropped or let go before it, not from the saved index.
+            if snapshot.index == Some(i) {
+                index = Some(kept.len());
+            }
             if !known(&item.origin) {
                 continue;
             }
@@ -4455,15 +4461,13 @@ impl App {
                 retired.push(item.track.filepath);
                 continue;
             }
-            if snapshot.index == Some(i) {
-                index = Some(kept.len());
-            }
             kept.push(item);
         }
         if kept.is_empty() {
             return false;
         }
-        let index = index.or_else(|| snapshot.index.map(|i| i.min(kept.len() - 1)));
+        // An index past the rows (clause 40's clamp) lands on the last.
+        let index = snapshot.index.map(|_| index.unwrap_or(kept.len()).min(kept.len() - 1));
         retired.drain(..retired.len().saturating_sub(DJ_RETIRED_CAP));
         self.queue.replace(kept);
         self.queue.retired = retired;

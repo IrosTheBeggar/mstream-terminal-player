@@ -3101,6 +3101,28 @@ fn a_restored_dj_queue_keeps_its_last_hundred_played_picks_and_remembers_the_res
     assert_eq!(app.queue.retired[0], "dj/005.mp3", "the oldest five fell out");
     app.replace_queue(vec![track("x.mp3")]);
     assert!(app.queue.retired.is_empty());
+
+    // The saved row's server is gone: the spot is the row after it,
+    // counted among the rows kept. The saved index clamped would skip
+    // ahead by the thirty let go (the review's note) — here, to the last.
+    let mut app = connected_app();
+    app.dj_server = Some(HOST.into());
+    let mut gone = snapshot(130, false, "off");
+    gone.items[131] = Queued { dj: Some(DjMark { sonic: false }), ..at("http://gone", "dj/playing.mp3") };
+    gone.items.extend([dj_row("dj/next2.mp3"), dj_row("dj/next3.mp3")]);
+    assert!(app.restore_queue(gone));
+    assert_eq!(app.queue.items.len(), 1 + DJ_PLAYED_KEPT + 3, "the gone row dropped, the thirty let go");
+    let spot = app.queue.current.expect("a spot");
+    assert_eq!(app.queue.items[spot].filepath, "dj/next.mp3", "the row after the one that is gone");
+    assert_eq!(app.resume_spot, Some((spot, 30.0)));
+    assert_eq!(app.resume_track.as_deref(), Some("dj/next.mp3"));
+
+    // And a saved index past the rows lands on the last (clause 40).
+    let mut app = connected_app();
+    let mut past = snapshot(130, false, "off");
+    past.index = Some(999);
+    assert!(app.restore_queue(past));
+    assert_eq!(app.queue.current, Some(132), "clamped to the last row");
 }
 
 #[test]
