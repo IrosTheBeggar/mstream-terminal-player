@@ -19,6 +19,10 @@
 //! so there are no retained JS closures; the one future is `play()`'s
 //! promise, watched for the autoplay-policy refusal so the UI can say
 //! "press a key" instead of playing silence.
+//!
+//! The context is only awake while something sounds: `tick()` suspends it a
+//! few seconds into a pause, a stop or the end of the queue, and play wakes
+//! it (see [`ContextIdle`] for why the browser will not do this itself).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -30,6 +34,7 @@ use web_sys::{
     AnalyserNode, AudioContext, AudioContextState, ChannelSplitterNode, HtmlAudioElement,
 };
 
+use super::pace::{ContextIdle, ContextStep};
 use crate::clock::Instant;
 use crate::engine::tap::AudioTap;
 use crate::player::PlayerStatus;
@@ -46,6 +51,8 @@ pub struct WebAudioPlayer {
     /// Whether building the graph was already tried — one element supports
     /// exactly one `createMediaElementSource`, ever, so no retries.
     graph_built: bool,
+    /// When the context goes to sleep and wakes (performance audit #123).
+    idle: ContextIdle,
 
     /// What the player has been told, as opposed to what the element reports:
     /// the element flickers `paused` while `play()` settles, and the UI
@@ -79,6 +86,7 @@ impl WebAudioPlayer {
             element: None,
             graph: None,
             graph_built: false,
+            idle: ContextIdle::default(),
             source: String::new(),
             playing: false,
             paused: false,
@@ -102,6 +110,9 @@ impl WebAudioPlayer {
             }
             AudioCmd::Resume => {
                 self.paused = false;
+                // A pause longer than a few seconds suspended the context;
+                // a keypress is what brings it back, the same as Play.
+                self.resume_context();
                 if let Some(el) = &self.element {
                     self.watch_play(el);
                 }
@@ -154,6 +165,8 @@ impl WebAudioPlayer {
 
         let mut events: Vec<Event> =
             self.async_events.borrow_mut().drain(..).collect();
+
+        self.pace_context(now);
 
         if let Some(el) = &self.element {
             if self.playing {
@@ -231,12 +244,38 @@ impl WebAudioPlayer {
         el.set_src(&url);
         el.load();
         // The context starts suspended until the page has user activation;
-        // every Play arrives on a keypress, which is exactly that. Resuming
-        // is idempotent, so just always ask.
+        // every Play arrives on a keypress, which is exactly that — or on
+        // a track ending, which the idle grace outlasts, so the context is
+        // still awake. Resuming is idempotent, so just always ask.
+        self.resume_context();
+        self.watch_play(&el);
+    }
+
+    fn resume_context(&mut self) {
         if let Some(graph) = &self.graph {
             let _ = graph.ctx.resume();
         }
-        self.watch_play(&el);
+        self.idle.resumed();
+    }
+
+    /// Put the context to sleep once nothing has sounded for a while, and
+    /// wake it if the element starts from outside the app (performance
+    /// audit #123). Judged by the element, not the commanded state: a media
+    /// key can play or pause it behind the app's back, and a failed stream
+    /// sits "not paused" with nothing coming.
+    fn pace_context(&mut self, now: Instant) {
+        let (Some(el), Some(graph)) = (&self.element, &self.graph) else { return };
+        let sounding = !el.paused() && !el.ended() && el.error().is_none();
+        let running = graph.ctx.state() == AudioContextState::Running;
+        match self.idle.step(sounding, running, now) {
+            ContextStep::Keep => {}
+            ContextStep::Suspend => {
+                let _ = graph.ctx.suspend();
+            }
+            ContextStep::Resume => {
+                let _ = graph.ctx.resume();
+            }
+        }
     }
 
     /// Call `play()` and watch the promise: the browser's autoplay policy

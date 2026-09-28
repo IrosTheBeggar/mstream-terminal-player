@@ -16,6 +16,7 @@
 mod api_worker;
 mod audio;
 mod canned;
+mod pace;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;

@@ -57,6 +57,11 @@ mod admin;
 /// drawing code and the worker message types compile unchanged there.
 #[cfg(target_arch = "wasm32")]
 mod web;
+/// The browser shell's timing rules (src/web/pace.rs), which are pure:
+/// compiled here too so their tests run where `cargo test` does.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "web/pace.rs"]
+mod web_pace;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod discovery;
