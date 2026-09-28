@@ -10,22 +10,42 @@ set env(HOME) $::env(WIZHOME)
 proc drain {secs} { expect -timeout $secs timeout {} }
 spawn {*}$argv
 exec stty rows 56 columns 100 < $spawn_out(slave,name)
-expect { "Add a music folder" {} timeout { puts "SYNC-FAIL"; exit 2 } }
+expect {
+    "Add a music folder" {}
+    eof { puts "DIED-EARLY"; exit 8 }
+    timeout { puts "SYNC-FAIL"; exit 2 }
+}
 send "t"
 drain 1
 send "$::env(WIZMUSIC)\r"
 drain 1
 send "c"
-expect { "All optional" {} timeout { puts "NO-EXTRAS"; exec kill -9 [exp_pid]; expect eof; exit 4 } }
+expect {
+    "All optional" {}
+    eof { puts "DIED-BEFORE-EXTRAS"; exit 8 }
+    timeout { puts "NO-EXTRAS"; exec kill -9 [exp_pid]; expect eof; exit 4 }
+}
 drain 1
 send "c"
-expect { "Admin User" {} timeout { puts "NO-LOGIN"; exec kill -9 [exp_pid]; expect eof; exit 5 } }
+expect {
+    "Admin User" {}
+    eof { puts "DIED-BEFORE-LOGIN"; exit 8 }
+    timeout { puts "NO-LOGIN"; exec kill -9 [exp_pid]; expect eof; exit 5 }
+}
 drain 1
 send "\x13"
-expect { "Public" {} timeout { puts "NO-MODAL"; exec kill -9 [exp_pid]; expect eof; exit 6 } }
+expect {
+    "Public" {}
+    eof { puts "DIED-BEFORE-MODAL"; exit 8 }
+    timeout { puts "NO-MODAL"; exec kill -9 [exp_pid]; expect eof; exit 6 }
+}
 drain 1
 send "\r"
-expect { "running!" {} timeout { puts "NO-DONE"; exec kill -9 [exp_pid]; expect eof; exit 7 } }
+expect {
+    "running!" {}
+    eof { puts "DIED-BEFORE-DONE"; exit 8 }
+    timeout { puts "NO-DONE"; exec kill -9 [exp_pid]; expect eof; exit 7 }
+}
 drain 4
 send "\x03"
 expect eof

@@ -14,14 +14,22 @@ set env(XDG_CONFIG_HOME) $::env(WIZHOME)/.config
 proc drain {secs} { expect -timeout $secs timeout {} }
 spawn {*}$argv
 exec stty rows 40 columns 100 < $spawn_out(slave,name)
-expect { "USERNAME" {} timeout { puts "NO-SIGNIN"; exit 2 } }
+expect {
+  "USERNAME" {}
+  eof { puts "DIED-EARLY"; exit 6 }
+  timeout { puts "NO-SIGNIN"; exec kill -9 [exp_pid]; expect eof; exit 2 }
+}
 drain 1
 send "alice"
 drain 1
 send "\t"
 drain 1
 send "hunter2\r"
-expect { "Libraries" {} timeout { puts "NO-ROOM"; exec kill -9 [exp_pid]; expect eof; exit 3 } }
+expect {
+  "Libraries" {}
+  eof { puts "DIED-AFTER-SIGNIN"; exit 6 }
+  timeout { puts "NO-ROOM"; exec kill -9 [exp_pid]; expect eof; exit 3 }
+}
 drain 2
 send "\x03"
 expect eof

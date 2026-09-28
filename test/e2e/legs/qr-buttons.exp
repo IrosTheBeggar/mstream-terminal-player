@@ -10,14 +10,25 @@ set env(HOME) $::env(WIZHOME)
 proc drain {secs} { expect -timeout $secs timeout {} }
 spawn {*}$argv
 exec stty rows 40 columns 100 < $spawn_out(slave,name)
-expect { "running!" {} eof { puts "DIED-EARLY"; exit 6 } timeout { puts "NO-PAGE"; exec kill -9 [exp_pid]; expect eof; exit 2 } }
+expect {
+    "running!" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { puts "NO-PAGE"; exec kill -9 [exp_pid]; expect eof; exit 2 }
+}
 drain 2
 send "\x1b\[A"
 drain 1
 send "\r"
-expect { "/admin" {} timeout { puts "NO-ADMIN-NOTE"; exec kill -9 [exp_pid]; expect eof; exit 3 } }
+expect {
+    "/admin" {}
+    eof { puts "DIED-BEFORE-ADMIN-NOTE"; exit 6 }
+    timeout { puts "NO-ADMIN-NOTE"; exec kill -9 [exp_pid]; expect eof; exit 3 }
+}
 drain 1
 send "\x1b"
-expect { eof {} timeout { exec kill -9 [exp_pid]; expect eof; exit 4 } }
+expect {
+    eof {}
+    timeout { puts "NO-EXIT"; exec kill -9 [exp_pid]; expect eof; exit 4 }
+}
 catch wait result
 exit [lindex $result 3]
