@@ -1,11 +1,12 @@
 //! The real api worker for the browser: the native api thread's job, done
 //! with futures instead of a thread.
 //!
-//! Commands arrive from the frame loop, each spawns onto the browser's event
-//! loop (`spawn_local`), and whatever event the reply maps to is queued for
-//! the next frame to fold in. The command→endpoint logic itself is the same
-//! code the native thread runs — worker::load_library and friends — awaited
-//! directly instead of parked on the tokio runtime.
+//! Commands arrive from the shell's loop, each spawns onto the browser's
+//! event loop (`spawn_local`), and whatever event the reply maps to is
+//! queued, with a wake for the loop to fold it in on the next frame. The
+//! command→endpoint logic itself is the same code the native thread runs —
+//! worker::load_library and friends — awaited directly instead of parked on
+//! the tokio runtime.
 //!
 //! What this worker does NOT speak: Quick Connect (the tunnel is iroh and
 //! native), and mDNS discovery (no multicast in a browser) — the shell keeps
@@ -17,6 +18,7 @@ use std::rc::Rc;
 
 use wasm_bindgen_futures::spawn_local;
 
+use super::Waker;
 use crate::api::types::Capabilities;
 use crate::api::{ApiError, Client};
 use crate::tui::art;
@@ -32,11 +34,14 @@ struct Session {
 pub struct WebApi {
     session: Rc<RefCell<Option<Session>>>,
     queue: Rc<RefCell<VecDeque<Event>>>,
+    /// A reply is an answer to something the user asked: it wakes the loop
+    /// rather than waiting out the poll.
+    wake: Waker,
 }
 
 impl WebApi {
-    pub fn new(queue: Rc<RefCell<VecDeque<Event>>>) -> Self {
-        WebApi { session: Rc::new(RefCell::new(None)), queue }
+    pub fn new(queue: Rc<RefCell<VecDeque<Event>>>, wake: Waker) -> Self {
+        WebApi { session: Rc::new(RefCell::new(None)), queue, wake }
     }
 
     pub fn dispatch(&self, cmd: ApiCmd) {
@@ -45,10 +50,12 @@ impl WebApi {
         }
         let session = self.session.clone();
         let queue = self.queue.clone();
+        let wake = self.wake.clone();
         spawn_local(async move {
             let event = handle(&session, cmd).await;
             if let Some(event) = event {
                 queue.borrow_mut().push_back(event);
+                wake();
             }
         });
     }

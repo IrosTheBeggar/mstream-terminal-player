@@ -37,13 +37,25 @@ fn main() {
 // the key flattening and order are exactly what `i18n!("locales")` produced;
 // a BTreeMap iterates keys in byte order, which the backend's binary search
 // relies on.
+//
+// The browser build carries English alone (performance audit #126). Its
+// shell never sets a locale, and everything that does — the wizard's
+// language picker, the admin rooms, the viz window — is native-only, so t!()
+// there always lands on the fallback; the other nine were ~570 KB of strings
+// in every download.
 fn write_locale_table() {
+    // main.rs's `i18n!(.., fallback = "en", ..)`.
+    const FALLBACK: &str = "en";
     let dir = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
     let locales = rust_i18n_support::load_locales(&format!("{dir}/locales"), |_| false);
     assert!(!locales.is_empty(), "no locales found under {dir}/locales");
+    let browser = std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32");
     let mut out = String::with_capacity(1 << 20);
     out.push_str("pub static LOCALES: &[(&str, &[(&str, &str)])] = &[\n");
     for (locale, keys) in &locales {
+        if browser && locale != FALLBACK {
+            continue;
+        }
         out.push_str(&format!("    ({locale:?}, &[\n"));
         for (key, value) in keys {
             out.push_str(&format!("        ({key:?}, {value:?}),\n"));
