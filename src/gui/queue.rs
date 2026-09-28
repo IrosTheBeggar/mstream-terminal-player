@@ -422,7 +422,7 @@ mod tests {
         gui.pending
             .iter()
             .filter_map(|e| match e {
-                Effect::Api(ApiCmd::AlbumArt { file, reach }) => {
+                Effect::Api(ApiCmd::AlbumArt { file, reach, .. }) => {
                     Some((file.clone(), reach.as_ref().map(|r| r.base.clone())))
                 }
                 _ => None,
@@ -505,7 +505,7 @@ mod tests {
             "the other server's row asks its own server: {asks:?}"
         );
         let reach = gui.pending.iter().find_map(|e| match e {
-            Effect::Api(ApiCmd::AlbumArt { file, reach }) if file == "bb.jpeg" => reach.clone(),
+            Effect::Api(ApiCmd::AlbumArt { file, reach, .. }) if file == "bb.jpeg" => reach.clone(),
             _ => None,
         });
         assert_eq!(reach.unwrap().token.as_deref(), Some("tok"), "with its token");

@@ -641,17 +641,23 @@ fn file_answer<'p, T>(
     name: String,
     value: T,
     pinned: impl FnOnce() -> HashSet<&'p str>,
-) {
+) -> Vec<(String, T)> {
+    let mut evicted = Vec::new();
     if let Some(slot) = map.get_mut(&name) {
         *slot = value;
-        return;
+        return evicted;
     }
     map.insert(name.clone(), value);
     order.push_back(name);
     if map.len() > ART_CACHE_CAP {
         let pinned = pinned();
-        while map.len() > ART_CACHE_CAP && evict_oldest(map, order, &pinned).is_some() {}
+        while map.len() > ART_CACHE_CAP
+            && let Some(gone) = evict_oldest(map, order, &pinned)
+        {
+            evicted.push(gone);
+        }
     }
+    evicted
 }
 
 /// Whether `name`'s last ask went unanswered too recently for a caller
@@ -733,12 +739,25 @@ struct Claims<'v> {
     now_playing: Option<&'v Track>,
     view: &'v ArtOnView,
     pinned: Option<HashSet<&'v str>>,
-    effects: Vec<Effect>,
+    /// Claims the cache let go of before an answer came, told to the
+    /// worker so a lane still holding the ask drops it (performance audit
+    /// #88).
+    withdrawn: Vec<Effect>,
+    asks: Vec<Effect>,
 }
 
 impl<'v> Claims<'v> {
     fn new(queue: &'v Queue, now_playing: Option<&'v Track>, view: &'v ArtOnView) -> Self {
-        Claims { queue, now_playing, view, pinned: None, effects: Vec::new() }
+        Claims { queue, now_playing, view, pinned: None, withdrawn: Vec::new(), asks: Vec::new() }
+    }
+
+    /// The batch as effects: the withdrawals first, then the asks — last
+    /// claimed first, because a lane serves its newest ask first and the
+    /// page reads from its top-left cell (performance audit #88).
+    fn into_effects(self) -> Vec<Effect> {
+        let mut effects = self.withdrawn;
+        effects.extend(self.asks.into_iter().rev());
+        effects
     }
 
     /// Claim `file` unless the cache holds it or a claim is out: the
@@ -752,18 +771,30 @@ impl<'v> Claims<'v> {
         order: &mut VecDeque<String>,
         file: &str,
         reach: Option<Reach>,
+        small: bool,
     ) {
         if art.contains_key(file) {
             return;
         }
         if art.len() >= ART_CACHE_CAP {
             let pinned = self.pinned.get_or_insert_with(|| pinned_art(self.queue, self.now_playing, self.view));
-            while art.len() >= ART_CACHE_CAP && evict_oldest(art, order, pinned).is_some() {}
+            while art.len() >= ART_CACHE_CAP
+                && let Some((name, value)) = evict_oldest(art, order, pinned)
+            {
+                self.withdrawn.extend(withdrawal(name, value));
+            }
         }
         art.insert(file.to_string(), None);
         order.push_back(file.to_string());
-        self.effects.push(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach }));
+        self.asks.push(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach, small }));
     }
+}
+
+/// What an evicted cover owes the worker: nothing for a decoded one, a
+/// withdrawal for an empty slot — a claim still waiting its turn, most
+/// likely, whose ask a lane can drop unasked (performance audit #88).
+fn withdrawal(name: String, value: Option<Art>) -> Option<Effect> {
+    value.is_none().then_some(Effect::Api(ApiCmd::ArtWithdraw { file: name }))
 }
 
 /// Why Auto DJ picked a row, for the queue's badge (auto-dj contract,
@@ -5108,12 +5139,14 @@ impl App {
     /// Ask for the cover of what just started, unless the cache already
     /// holds it — or already holds the placeholder a previous ask left, so
     /// skipping n-n-n through one album costs one request, not five.
-    fn fetch_art(&mut self) -> Option<Effect> {
-        let file = self.now_playing.as_ref()?.metadata.album_art.clone()?;
+    fn fetch_art(&mut self) -> Vec<Effect> {
+        let Some(file) = self.now_playing.as_ref().and_then(|t| t.metadata.album_art.clone()) else {
+            return Vec::new();
+        };
         // A row whose own server cannot be reached shows no cover rather
         // than the session server's file of the same name.
-        let reach = self.playing_row_reach().ok()?;
-        self.fetch_art_from(&file, reach)
+        let Ok(reach) = self.playing_row_reach() else { return Vec::new() };
+        self.fetch_art_from(&file, reach, false)
     }
 
     /// The playing row's own server when it is not the session's (contract
@@ -5149,7 +5182,7 @@ impl App {
         if backing_off(&self.art_retry, file) {
             return None;
         }
-        self.fetch_art_from(file, None)
+        self.fetch_art_from(file, None, true).pop()
     }
 
     /// Whether a surface that asks every frame should claim this cover
@@ -5176,10 +5209,10 @@ impl App {
         let mut claims = Claims::new(queue, now_playing.as_ref(), art_on_view);
         for file in &art_on_view.wall {
             if !art.contains_key(file) && !backing_off(art_retry, file) {
-                claims.claim(art, art_order, file, None);
+                claims.claim(art, art_order, file, None, true);
             }
         }
-        claims.effects
+        claims.into_effects()
     }
 
     /// The queue panel drew these rows: they go on record, and what their
@@ -5224,10 +5257,10 @@ impl App {
         let mut claims = Claims::new(queue, now_playing.as_ref(), art_on_view);
         for (index, reach) in asks {
             if let Some(file) = queue.items[index].metadata.album_art.as_deref() {
-                claims.claim(art, art_order, file, reach);
+                claims.claim(art, art_order, file, reach, true);
             }
         }
-        claims.effects
+        claims.into_effects()
     }
 
     /// One queue row's cover, the way the panel claims it — for the tests.
@@ -5236,11 +5269,14 @@ impl App {
         self.claim_rows(index..index + 1).pop()
     }
 
-    fn fetch_art_from(&mut self, file: &str, reach: Option<Reach>) -> Option<Effect> {
+    /// Claim one cover — `small` for a wall cell or a queue row, not for
+    /// the playing track's (see [`ApiCmd::AlbumArt`]) — with whatever the
+    /// claim let go of withdrawn first.
+    fn fetch_art_from(&mut self, file: &str, reach: Option<Reach>, small: bool) -> Vec<Effect> {
         let App { art, art_order, queue, now_playing, art_on_view, .. } = self;
         let mut claims = Claims::new(queue, now_playing.as_ref(), art_on_view);
-        claims.claim(art, art_order, file, reach);
-        claims.effects.pop()
+        claims.claim(art, art_order, file, reach, small);
+        claims.into_effects()
     }
 
     /// Whether the wall's page on record is this one — the check each
@@ -5837,13 +5873,14 @@ impl App {
                 if settled {
                     self.art_retry.remove(&file);
                     let (queue, now_playing, view) = (&self.queue, self.now_playing.as_ref(), &self.art_on_view);
-                    file_answer(&mut self.art, &mut self.art_order, file, art, || {
+                    let evicted = file_answer(&mut self.art, &mut self.art_order, file, art, || {
                         pinned_art(queue, now_playing, view)
                     });
+                    evicted.into_iter().filter_map(|(name, value)| withdrawal(name, value)).collect()
                 } else {
                     give_back(&mut self.art, &mut self.art_order, &mut self.art_retry, file);
+                    Vec::new()
                 }
-                Vec::new()
             }
             // Same rule, and here it is the whole point: a shape asked for
             // ahead of the track lands while something else is still

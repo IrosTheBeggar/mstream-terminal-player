@@ -2365,7 +2365,7 @@ fn a_playing_row_from_another_server_asks_that_server_for_its_cover_and_shape() 
     assert!(
         effects.iter().any(|e| matches!(
             e,
-            Effect::Api(ApiCmd::AlbumArt { file, reach: Some(Reach { base, local_token, .. }) })
+            Effect::Api(ApiCmd::AlbumArt { file, reach: Some(Reach { base, local_token, .. }), .. })
                 if file == "far.jpg" && base == "http://127.0.0.1:4242" && local_token.as_deref() == Some("lt")
         )),
         "the cover comes from the row's server: {effects:?}"
@@ -2383,7 +2383,7 @@ fn a_playing_row_from_another_server_asks_that_server_for_its_cover_and_shape() 
     assert!(
         effects.iter().any(|e| matches!(
             e,
-            Effect::Api(ApiCmd::AlbumArt { file, reach: None }) if file == "near.jpg"
+            Effect::Api(ApiCmd::AlbumArt { file, reach: None, .. }) if file == "near.jpg"
         )),
         "{effects:?}"
     );
@@ -5392,7 +5392,7 @@ fn starting_a_track_asks_for_its_cover_once() {
     ]);
 
     let effects = app.play_index(0);
-    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None });
+    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None, small: false });
     assert!(effects.contains(&asked), "got {effects:?}");
 
     // The next track shares the cover and the first ask is still out; the
@@ -5438,7 +5438,7 @@ fn a_cover_nobody_answered_for_is_asked_for_again() {
     // waveform's rule, applied here.
     let mut app = connected_app();
     app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
-    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None });
+    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None, small: false });
     assert!(app.play_index(0).contains(&asked));
 
     // The fetch dies with the network: nothing was learned, so nothing is
@@ -7198,13 +7198,13 @@ fn a_full_art_cache_lets_go_of_the_oldest_cover_nothing_on_screen_needs() {
     app.replace_queue(vec![track_with_cover("lib/a.mp3", "queued.jpeg")]);
     app.queue_on_view(0..1);
     app.now_playing = Some(track_with_cover("lib/p.mp3", "playing.jpeg"));
-    app.fetch_art_from("queued.jpeg", None);
-    app.fetch_art_from("playing.jpeg", None);
+    app.fetch_art_from("queued.jpeg", None, true);
+    app.fetch_art_from("playing.jpeg", None, true);
     for i in 0..ART_CACHE_CAP - 2 {
-        app.fetch_art_from(&format!("wall{i}.jpeg"), None);
+        app.fetch_art_from(&format!("wall{i}.jpeg"), None, true);
     }
     assert_eq!(app.art.len(), ART_CACHE_CAP);
-    app.fetch_art_from("new.jpeg", None);
+    app.fetch_art_from("new.jpeg", None, true);
     assert_eq!(app.art.len(), ART_CACHE_CAP, "one out, one in");
     assert!(!app.art.contains_key("wall0.jpeg"), "the oldest unpinned cover went");
     for kept in ["queued.jpeg", "playing.jpeg", "new.jpeg", "wall1.jpeg"] {
@@ -7212,7 +7212,7 @@ fn a_full_art_cache_lets_go_of_the_oldest_cover_nothing_on_screen_needs() {
     }
     // A slot given back by an unanswered ask is forgotten, not evicted twice.
     app.art.remove("wall1.jpeg");
-    app.fetch_art_from("newer.jpeg", None);
+    app.fetch_art_from("newer.jpeg", None, true);
     assert!(app.art.contains_key("wall2.jpeg") && app.art.contains_key("newer.jpeg"), "nothing else went for a gap");
 }
 
@@ -7225,7 +7225,7 @@ fn a_cover_that_lands_after_the_cache_let_go_of_its_claim_is_still_evictable() {
     let mut app = connected_app();
     app.replace_queue(vec![track_with_cover("lib/a.mp3", "queued.jpeg")]);
     app.queue_on_view(0..1);
-    app.fetch_art_from("queued.jpeg", None);
+    app.fetch_art_from("queued.jpeg", None, true);
     for i in 0..ART_CACHE_CAP {
         app.fetch_art_file(&format!("old{i}.jpeg"));
     }
@@ -7328,7 +7328,7 @@ fn failed_asks_leave_no_names_behind_in_the_eviction_order() {
     let mut app = connected_app();
     let origin = Origin { server: "http://host:3000".into(), peer: None };
     for _ in 0..1000 {
-        assert!(app.fetch_art_from("aa.jpeg", None).is_some());
+        assert!(!app.fetch_art_from("aa.jpeg", None, true).is_empty());
         app.apply_event(unanswered("aa.jpeg"));
         assert!(app.fetch_waveform("a.mp3", &origin).is_some());
         app.apply_event(Event::Waveform { filepath: "a.mp3".into(), bars: None, settled: false });
@@ -7442,7 +7442,7 @@ fn a_wall_page_is_claimed_in_one_batch_that_evicts_as_single_claims_did() {
     let page: Vec<String> = (0..150).map(|i| format!("page{i}.jpeg")).collect();
     app.set_wall_on_view(page.clone());
     let claims = app.claim_wall_art();
-    assert_eq!(claims.len(), 150);
+    assert_eq!(covers_asked(&claims).len(), 150);
     assert_eq!(app.art.len(), ART_CACHE_CAP, "one out for each one in");
     assert!(page.iter().all(|file| app.art.contains_key(file)));
     assert!((20..40).all(|n| app.art.contains_key(&format!("q{n}.jpeg"))), "the panel's rows on record stay");
@@ -7451,4 +7451,61 @@ fn a_wall_page_is_claimed_in_one_batch_that_evicts_as_single_claims_did() {
     assert!(app.art.contains_key("old130.jpeg"));
     assert_eq!(app.art_order.len(), app.art.len());
     assert!(app.claim_wall_art().is_empty(), "the next frame owes nothing");
+}
+
+/// Every cover ask in these effects, by file, in dispatch order.
+fn covers_asked(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Api(ApiCmd::AlbumArt { file, .. }) => Some(file.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every withdrawal in these effects, by file.
+fn covers_withdrawn(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Api(ApiCmd::ArtWithdraw { file }) => Some(file.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_page_of_covers_is_asked_small_top_cell_last_and_what_it_evicted_unasked_is_withdrawn() {
+    // Performance audit #88: a page's covers queue in their server's art
+    // lane, served newest first — so the batch goes out last cell first,
+    // and the top-left cover is the first answered. A claim the page
+    // evicted before its answer came is withdrawn, so a lane still holding
+    // it drops it instead of spending the link on a page flipped past.
+    let mut app = connected_app();
+    for i in 0..ART_CACHE_CAP {
+        app.fetch_art_file(&format!("old{i}.jpeg"));
+    }
+    let answered = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+    for i in 0..10 {
+        app.apply_event(Event::AlbumArt { file: format!("old{i}.jpeg"), art: Some(answered.clone()), settled: true });
+    }
+    let page: Vec<String> = (0..20).map(|i| format!("page{i}.jpeg")).collect();
+    app.set_wall_on_view(page.clone());
+    let effects = app.claim_wall_art();
+
+    let asked = covers_asked(&effects);
+    assert_eq!(asked.first().map(String::as_str), Some("page19.jpeg"));
+    assert_eq!(asked.last().map(String::as_str), Some("page0.jpeg"), "served last in, first out: the top cell first");
+    assert!(effects.iter().all(|e| !matches!(e, Effect::Api(ApiCmd::AlbumArt { small: false, .. }))), "all small");
+
+    let withdrawn = covers_withdrawn(&effects);
+    assert_eq!(withdrawn, (10..20).map(|i| format!("old{i}.jpeg")).collect::<Vec<_>>(), "only the unanswered go back");
+    let first_ask = effects.iter().position(|e| matches!(e, Effect::Api(ApiCmd::AlbumArt { .. }))).unwrap();
+    assert!(effects[..first_ask].iter().all(|e| matches!(e, Effect::Api(ApiCmd::ArtWithdraw { .. }))), "withdrawn before anything is asked");
+
+    // The playing track's cover never queues behind a page.
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "playing.jpeg")]);
+    let effects = app.play_index(0);
+    assert!(effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::AlbumArt { small: false, file, .. }) if file == "playing.jpeg")));
 }

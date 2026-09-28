@@ -279,6 +279,10 @@ async fn handle(session: &Rc<RefCell<Option<Session>>>, cmd: ApiCmd) -> Option<E
             Some(Event::AlbumArt { file, art, settled })
         }
 
+        // No art lanes here: the browser already asks a host six at a
+        // time, so there is nothing queued to withdraw.
+        ApiCmd::ArtWithdraw { .. } => None,
+
         ApiCmd::Waveform { filepath, .. } => {
             // Art's rule, for the same reason: a shape nobody could draw is
             // not worth the "not connected" toast `with_session` would raise.
