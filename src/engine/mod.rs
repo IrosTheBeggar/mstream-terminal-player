@@ -22,7 +22,7 @@ use trace::etrace;
 use std::fmt;
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -949,6 +949,19 @@ impl State {
         self.pending_next = None;
         self.cancel_overlap();
     }
+
+    /// Whether nothing here can change until a command arrives: stopped, or
+    /// paused with the pause landed and a track still in the sink — and no
+    /// breath draining, no orphaned remnant to skip, no open in flight.
+    /// Every other state has something the tick will do on its own.
+    fn at_rest(&self) -> bool {
+        let still = self.stopped || (self.sink.is_paused() && !self.sink.empty());
+        still
+            && self.pausing.is_none()
+            && self.outgoing.is_empty()
+            && !self.orphaned_tail
+            && !matches!(self.next, NextTrack::Opening { .. })
+    }
 }
 
 /// How often the system default output is compared with the one the
@@ -964,9 +977,32 @@ const DEVICE_POLL: Duration = Duration::from_secs(1);
 /// device answers.
 const REBUILD_RETRY: Duration = Duration::from_secs(2);
 
+/// How long a stopped engine — or one that has never played anything —
+/// keeps the device stream running before it lets it sleep (performance
+/// audit #75). Long enough that a stop's breath, and whatever a stop left
+/// in the mixer, have long since played out; short next to what a running
+/// stream costs: the machine it keeps from idle-sleeping.
+#[cfg(not(test))]
+const IDLE_STOPPED: Duration = Duration::from_secs(5);
+/// How long a landed pause keeps it running. Longer than a stop: resuming
+/// from a sleeping stream restarts the device, which takes a few ms on a
+/// wired output but can clip the first few hundred on a Bluetooth link,
+/// and a short pause should come back exactly as it always has.
+#[cfg(not(test))]
+const IDLE_PAUSED: Duration = Duration::from_secs(30);
+/// Tests watch the stream go to sleep; nobody wants half a minute of it.
+#[cfg(test)]
+const IDLE_STOPPED: Duration = Duration::from_millis(400);
+#[cfg(test)]
+const IDLE_PAUSED: Duration = Duration::from_millis(800);
+
 /// The output device under watch, and the watch's own bookkeeping.
 struct OutputWatch {
     out: output::Output,
+    /// When something last needed the device callback: a command about to
+    /// lean on a Player, or a tick that found the engine anything but at
+    /// rest. The idle clock that suspends the stream runs from here.
+    active_at: Instant,
     /// When the default-device identity was last polled.
     polled: Instant,
     /// When a rebuild last failed outright, so the retries pace
@@ -995,6 +1031,30 @@ pub struct Engine {
     /// audio worker, serve's loop). Bounded by [`Engine::push_notice`];
     /// drained by [`Engine::take_device_notices`].
     notices: Mutex<Vec<DeviceNotice>>,
+    /// Calls blocked on the device callback right now: a seek's try_seek,
+    /// made with the state lock released (audit #48). The stream is never
+    /// suspended under one — its answer would never come. Both drivers
+    /// tick on the thread that runs their commands, so a wait and a tick
+    /// never overlap there; the count is what keeps that true for any
+    /// driver that ticks from elsewhere.
+    callback_waits: AtomicUsize,
+}
+
+/// One call waiting on the device callback, counted for as long as it
+/// waits — see [`Engine::callback_waits`].
+struct CallbackWait<'a>(&'a AtomicUsize);
+
+impl<'a> CallbackWait<'a> {
+    fn new(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::AcqRel);
+        CallbackWait(count)
+    }
+}
+
+impl Drop for CallbackWait<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl Engine {
@@ -1035,12 +1095,70 @@ impl Engine {
             state,
             output: Mutex::new(OutputWatch {
                 out: device,
+                active_at: Instant::now(),
                 polled: Instant::now(),
                 failed_at: None,
                 outage_told: false,
             }),
             notices: Mutex::new(Vec::new()),
+            callback_waits: AtomicUsize::new(0),
         })
+    }
+
+    /// Wake the device stream for a call about to lean on a Player, and
+    /// restart the idle clock (performance audit #75). rodio performs
+    /// seeks, stops and skips inside the device callback, and a new sink
+    /// only sounds once the callback pulls it: against a suspended stream
+    /// a seek would wait forever and a play would start silent. Takes only
+    /// the output lock, so it may run under the state lock or before it.
+    fn wake(&self) {
+        let mut w = self.output.lock().unwrap();
+        w.active_at = Instant::now();
+        w.out.wake();
+    }
+
+    /// [`Engine::wake`], then [`Engine::ensure_output`]: the entry every
+    /// mutator about to lean on the sink makes. The wake goes first so a
+    /// stream that will not restart — its device gone while it slept — is
+    /// rebuilt before the caller touches it.
+    fn wake_output(&self) {
+        self.wake();
+        self.ensure_output();
+    }
+
+    /// The tick's half of the device's sleep (performance audit #75). Once
+    /// the engine has been at rest long enough, the stream is suspended:
+    /// the callback stops, and the operating system stops keeping the audio
+    /// hardware — and on macOS the machine — awake for a player nobody is
+    /// listening to. Whenever the engine is not at rest the stream is
+    /// awake; the mutators wake it themselves, and this is the net under
+    /// any path that starts sound without asking. Nothing is lost by the
+    /// sleep: the rodio chain freezes where it stands, position and
+    /// decoder included.
+    fn rest_output(&self, s: &State) {
+        let mut w = self.output.lock().unwrap();
+        if !s.at_rest() {
+            w.active_at = Instant::now();
+            if !w.out.is_awake() {
+                etrace!("output woken by the tick");
+                w.out.wake();
+            }
+            return;
+        }
+        let after = if s.stopped { IDLE_STOPPED } else { IDLE_PAUSED };
+        if !w.out.is_awake()
+            || w.active_at.elapsed() < after
+            || self.callback_waits.load(Ordering::Acquire) > 0
+        {
+            return;
+        }
+        if w.out.suspend() {
+            etrace!(
+                "output suspended ({} for {:.1}s)",
+                if s.stopped { "stopped" } else { "paused" },
+                after.as_secs_f64()
+            );
+        }
     }
 
     /// Keep the output stream on the device the system says it should be
@@ -1048,8 +1166,9 @@ impl Engine {
     /// the device died under us — and a poll of the system default — a
     /// new device became the default while the old stream plays on
     /// unaware. Either way the cure is the same rebuild. Called from the
-    /// tick and from every mutator about to lean on the sink; the healthy
-    /// path costs an atomic load, plus one identity poll a second.
+    /// tick and, through [`Engine::wake_output`], from every mutator about
+    /// to lean on the sink; the healthy path costs an atomic load, plus one
+    /// identity poll a second.
     fn ensure_output(&self) {
         let why = {
             let mut w = self.output.lock().unwrap();
@@ -1132,6 +1251,9 @@ impl Engine {
         let was_outage = {
             let mut w = self.output.lock().unwrap();
             let old = std::mem::replace(&mut w.out, fresh);
+            // The fresh stream opens running; the idle clock starts over
+            // with it, so a paused resume still gets its full grace.
+            w.active_at = Instant::now();
             w.polled = Instant::now();
             w.failed_at = None;
             let was = w.outage_told;
@@ -1198,6 +1320,7 @@ impl Engine {
         // state lock must not wait with it (the lesson of audit #48).
         if let Some((sink, fade)) = restore {
             if position > Duration::from_millis(250) {
+                let _waiting = CallbackWait::new(&self.callback_waits);
                 let sought = sink.try_seek(position);
                 etrace!(
                     "rebuild seek to {:.2}: {}",
@@ -1262,7 +1385,7 @@ impl Engine {
         // Before the state lock, here and in every mutator below: the
         // rebuild takes that lock itself, and this Mutex does not forgive
         // a second lock from the same thread.
-        self.ensure_output();
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         // Boundary first, staging second — every mutator's discipline now:
         // promotion writes the index and queue, and must never overwrite
@@ -1358,6 +1481,10 @@ impl Engine {
     }
 
     pub fn resume(&self) {
+        // A pause long enough put the device to sleep; the resume is what
+        // wakes it (audit #75), and a stream that will not restart is
+        // rebuilt — paused, where it stood — before the resume lands.
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         // A soft pause still mid-ramp: the resume overtakes it — cancel the
         // landing and ramp straight back up from wherever the fade stands.
@@ -1378,16 +1505,24 @@ impl Engine {
     }
 
     pub fn stop(&self) {
+        // Awake so the stop can finish: the breath, and the stopped
+        // sink's source leaving the mixer, both happen in the callback.
+        // No rebuild for a dead device — there is nothing left to keep.
+        self.wake();
         self.state.lock().unwrap().stop_softly();
     }
 
     pub fn seek(&self, position: f64) -> Result<(), EngineError> {
         let mut target = seek_target(position)?;
+        // Counted from before the wake to the end of the wait: the tick
+        // never suspends the stream under a seek (audit #75).
+        let _waiting = CallbackWait::new(&self.callback_waits);
         // A seek against a dead device would never return: try_seek waits
-        // on a feedback the dead callback can never send. Rebuild first —
+        // on a feedback the dead callback can never send — and a sleeping
+        // one is the same wait, so the stream wakes first. Rebuild first —
         // and when no device would open at all, refuse rather than wedge
         // this thread until one comes back.
-        self.ensure_output();
+        self.wake_output();
         if self.output.lock().unwrap().out.is_dead() {
             return Err(EngineError::NoDevice("no output device".to_string()));
         }
@@ -1535,7 +1670,7 @@ impl Engine {
     }
 
     pub fn next_manual(&self) -> Result<(), EngineError> {
-        self.ensure_output();
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         match pick_next(&s.q, true) {
@@ -1556,9 +1691,10 @@ impl Engine {
     }
 
     pub fn previous_manual(&self) -> Result<(), EngineError> {
-        // The restart branch below seeks, and a seek against a dead
-        // device never returns — same reasoning as Engine::seek.
-        self.ensure_output();
+        // The restart branch below seeks, and a seek against a dead or a
+        // sleeping device never returns — same reasoning as Engine::seek.
+        let _waiting = CallbackWait::new(&self.callback_waits);
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         if s.q.index == 0 {
@@ -1630,7 +1766,7 @@ impl Engine {
     /// (finding #68). Hints still reach the player that has them, through
     /// [`Engine::play_source`].
     pub fn queue_add(&self, file: String) {
-        self.ensure_output();
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         let was_empty = s.q.queue.is_empty();
@@ -1648,7 +1784,7 @@ impl Engine {
     }
 
     pub fn queue_add_many(&self, files: Vec<String>) {
-        self.ensure_output();
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         let was_empty = s.q.queue.is_empty();
@@ -1661,7 +1797,7 @@ impl Engine {
     }
 
     pub fn queue_play_index(&self, index: usize) -> Result<(), EngineError> {
-        self.ensure_output();
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         if index >= s.q.queue.len() {
@@ -1676,7 +1812,7 @@ impl Engine {
     }
 
     pub fn queue_remove(&self, index: usize) -> Result<(), EngineError> {
-        self.ensure_output();
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         if index >= s.q.queue.len() {
@@ -1730,6 +1866,8 @@ impl Engine {
     }
 
     pub fn queue_clear(&self) {
+        // Awake for the stop's sake, as in Engine::stop.
+        self.wake();
         let mut s = self.state.lock().unwrap();
         s.stop_softly();
         s.q.queue.clear();
@@ -1766,6 +1904,9 @@ impl Engine {
         Self::land_pause(&mut s);
         s.retire_outgoing();
         self.crossfade_step(&mut s);
+        // Asleep once at rest for long enough, awake otherwise — ahead of
+        // the advance below, which is never at rest (audit #75).
+        self.rest_output(&s);
         if !(s.sink.empty() && !s.stopped && !s.q.queue.is_empty()) {
             return;
         }
@@ -2018,6 +2159,12 @@ impl Engine {
                 s.pending_next = None;
             }
         }
+    }
+
+    /// Whether the device stream is running, or asleep (audit #75).
+    #[cfg(test)]
+    fn output_awake(&self) -> bool {
+        self.output.lock().unwrap().out.is_awake()
     }
 
     /// Whether a blend is running — the outgoing half still draining.
@@ -4215,5 +4362,221 @@ mod tests {
             later.position
         );
         engine.stop();
+    }
+
+    /// A State with no device behind it: the sink is a rodio Player that
+    /// nothing pulls, which is all the bookkeeping predicates need.
+    fn bare_state() -> State {
+        State {
+            sink: Arc::new(Player::new().0),
+            fade: fade::FadeHandle::new(1.0),
+            tap_live: Arc::new(AtomicBool::new(true)),
+            tap: None,
+            current_file: String::new(),
+            duration: 0.0,
+            stopped: true,
+            volume: 1.0,
+            advance_failures: 0,
+            crossfade: 0.0,
+            gapless: false,
+            appended: None,
+            blend_skips: false,
+            pause_fade: false,
+            pausing: None,
+            orphaned_tail: false,
+            gate_noted: None,
+            pending_next: None,
+            next: NextTrack::Idle,
+            outgoing: Vec::new(),
+            q: QueueState { queue: Vec::new(), index: 0, shuffle: false, loop_mode: LoopMode::None },
+        }
+    }
+
+    /// A sink with a track in it, as far as the bookkeeping can tell.
+    fn loaded_sink() -> Arc<Player> {
+        let sink = Player::new().0;
+        sink.append(rodio::source::Zero::new(
+            std::num::NonZero::new(2).unwrap(),
+            std::num::NonZero::new(44_100).unwrap(),
+        ));
+        Arc::new(sink)
+    }
+
+    #[test]
+    fn at_rest_is_stopped_or_a_landed_pause_with_nothing_in_flight() {
+        // Never played, and stopped: nothing will happen without a command.
+        let mut s = bare_state();
+        assert!(s.at_rest(), "a fresh engine is at rest");
+
+        // Playing is never at rest.
+        s.sink = loaded_sink();
+        s.stopped = false;
+        assert!(!s.at_rest(), "a sounding track is not at rest");
+
+        // A landed pause with the track still in the sink is.
+        s.sink.pause();
+        assert!(s.at_rest(), "a landed pause is at rest");
+        // A soft pause still ramping down is not: the tick owes it a landing.
+        s.pausing = Some(Instant::now());
+        assert!(!s.at_rest(), "a pause still ramping is not at rest");
+        s.pausing = None;
+        // A prepared next waiting out the pause changes nothing; an open in
+        // flight is the tick's to collect.
+        s.next = NextTrack::Failed { at: Instant::now() };
+        assert!(s.at_rest());
+        let (_tx, rx) = mpsc::channel();
+        s.next = NextTrack::Opening { index: None, rx };
+        assert!(!s.at_rest(), "an open in flight is not at rest");
+        s.next = NextTrack::Idle;
+        // An orphaned remnant is the tick's to skip.
+        s.orphaned_tail = true;
+        assert!(!s.at_rest());
+        s.orphaned_tail = false;
+
+        // A pause over an empty sink is a track that ran out under the
+        // pause key: the advance is still owed, so it is not rest.
+        s.sink = Arc::new(Player::new().0);
+        s.sink.pause();
+        assert!(!s.at_rest(), "an ended track under a pause still advances");
+
+        // Stopped with a breath still draining is not rest either: the
+        // callback has to play the breath out.
+        let mut s = bare_state();
+        s.outgoing.push(Outgoing {
+            sink: loaded_sink(),
+            fade: fade::FadeHandle::new(1.0),
+            fade_dur: STOP_FADE,
+            deadline: Instant::now() + STOP_FADE,
+        });
+        assert!(!s.at_rest(), "a draining breath is not at rest");
+    }
+
+    /// Run `f` on its own thread and give it `limit`: a call that waits on
+    /// a callback that never comes must fail the test, not hang it.
+    fn within<T: Send + 'static>(
+        limit: Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(limit).expect("the call never returned — waiting on a sleeping device?")
+    }
+
+    /// Tick for `span`, the way a driver would.
+    fn tick_for(engine: &Engine, span: Duration) {
+        let until = Instant::now() + span;
+        while Instant::now() < until {
+            engine.advance_tick();
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    }
+
+    /// `cargo test the_device_sleeps -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn the_device_sleeps_when_nothing_needs_it_and_wakes_for_what_does() {
+        // The stream used to run for the whole process — stopped, paused,
+        // never played — holding the machine awake (audit #75). Now it
+        // sleeps after a quiet spell, and everything that needs the
+        // callback wakes it first: a seek would otherwise wait forever.
+        let first = std::env::temp_dir().join("mstream-idle-a.wav");
+        let second = std::env::temp_dir().join("mstream-idle-b.wav");
+        std::fs::write(&first, wav_bytes(30)).unwrap();
+        std::fs::write(&second, wav_bytes(30)).unwrap();
+        let engine = Arc::new(Engine::new().unwrap());
+        engine.set_volume(0.0);
+
+        // Never played: awake at the open (it proves the device), asleep
+        // once the stopped threshold passes.
+        engine.advance_tick();
+        assert!(engine.output_awake(), "the open starts the stream");
+        tick_for(&engine, IDLE_STOPPED + Duration::from_millis(300));
+        assert!(!engine.output_awake(), "a never-played engine lets the device sleep");
+
+        // A play wakes it, and the track sounds: the position advances.
+        engine.queue_add_many(vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ]);
+        assert!(engine.output_awake(), "a play wakes the device before it starts");
+        tick_for(&engine, Duration::from_millis(900));
+        let played = engine.status();
+        assert!(played.playing && played.position > 0.4, "the play sounded: {:.2}", played.position);
+
+        // Playing never sleeps, however long it runs.
+        tick_for(&engine, IDLE_PAUSED + Duration::from_millis(300));
+        assert!(engine.output_awake(), "a playing engine keeps the device");
+
+        // A landed pause sleeps after the (longer) paused threshold.
+        engine.pause();
+        tick_for(&engine, IDLE_STOPPED + Duration::from_millis(100));
+        assert!(engine.output_awake(), "a pause gets longer grace than a stop");
+        tick_for(&engine, IDLE_PAUSED);
+        assert!(!engine.output_awake(), "a landed pause lets the device sleep");
+        let held = engine.status();
+        assert!(held.paused);
+
+        // A seek against the sleeping stream wakes it and lands.
+        let seeker = engine.clone();
+        within(Duration::from_secs(5), move || seeker.seek(12.0)).expect("the seek landed");
+        let sought = engine.status();
+        assert!(sought.paused, "a seek keeps the pause");
+        assert!((sought.position - 12.0).abs() < 0.5, "landed at {:.2}", sought.position);
+
+        // Asleep again, then a resume wakes it and the track runs on.
+        tick_for(&engine, IDLE_PAUSED + Duration::from_millis(300));
+        assert!(!engine.output_awake());
+        engine.resume();
+        assert!(engine.output_awake(), "a resume wakes the device");
+        tick_for(&engine, Duration::from_millis(900));
+        let resumed = engine.status();
+        assert!(resumed.playing && resumed.position > sought.position + 0.4,
+            "resumed from {:.2} to {:.2}", sought.position, resumed.position);
+
+        // Next against a sleeping device: the second track starts and runs.
+        engine.pause();
+        tick_for(&engine, IDLE_PAUSED + Duration::from_millis(300));
+        assert!(!engine.output_awake());
+        let skipper = engine.clone();
+        within(Duration::from_secs(5), move || skipper.next_manual()).expect("next started");
+        tick_for(&engine, Duration::from_millis(900));
+        let next = engine.status();
+        assert_eq!(next.queue_index, 1);
+        assert!(next.playing && next.position > 0.4, "next sounded: {:.2}", next.position);
+
+        // A stop, and the stopped threshold.
+        engine.stop();
+        tick_for(&engine, IDLE_STOPPED + Duration::from_millis(400));
+        assert!(!engine.output_awake(), "a stopped engine lets the device sleep");
+        // Previous restarts by seeking — against a sleeping device too.
+        let restarter = engine.clone();
+        within(Duration::from_secs(5), move || restarter.previous_manual()).expect("previous");
+        engine.stop();
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
+
+    /// `cargo test a_seek_waiting -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_seek_waiting_on_the_callback_holds_the_device_awake() {
+        // A seek waits on the callback with the state lock released (audit
+        // #48); a tick from another thread must not put the device to sleep
+        // under it, or the answer never comes.
+        let tiny = std::env::temp_dir().join("mstream-idle-wait.wav");
+        std::fs::write(&tiny, wav_bytes(30)).unwrap();
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.play_source(tiny.to_string_lossy().into_owned(), None).unwrap();
+        engine.pause();
+        let waiting = CallbackWait::new(&engine.callback_waits);
+        tick_for(&engine, IDLE_PAUSED + Duration::from_millis(300));
+        assert!(engine.output_awake(), "a waiting seek holds the device awake");
+        drop(waiting);
+        tick_for(&engine, IDLE_PAUSED + Duration::from_millis(300));
+        assert!(!engine.output_awake(), "and lets it go when the wait ends");
+        let _ = std::fs::remove_file(&tiny);
     }
 }
