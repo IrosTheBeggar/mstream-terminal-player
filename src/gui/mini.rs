@@ -331,7 +331,7 @@ pub(super) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
             // The mosaic where an overlay stood last frame — every cover's
             // rule, though nothing here draws over it.
             let mosaic = gui.ui.covered_last_frame(rect);
-            draw_card_cover(frame, rect, &mut gui.app, mosaic);
+            draw_card_cover(frame, rect, &gui.app, &mut gui.mini_cover, mosaic);
         } else {
             cover_slot(frame, rect.x, rect.y, rect.width, rect.height);
         }
