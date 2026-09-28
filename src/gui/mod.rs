@@ -46,7 +46,6 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::Paragraph;
 use rust_i18n::t;
 
 use crate::config::{self, Config};
@@ -556,6 +555,10 @@ pub(crate) struct Gui {
     library: library::LibraryUi,
     /// Track actions: the sheet, its picker and info, a grip drag.
     actions: actions::ActionsUi,
+    /// The bar card's cover and the mini player's, a slot each — see
+    /// [`draw_card_cover`].
+    card: Option<cover::Slot>,
+    mini_cover: Option<cover::Slot>,
     /// The queue's highlighted row last drawn, so a new one is revealed.
     last_qsel: Option<usize>,
     /// The last frame left paced work unfinished (covers still waiting to
@@ -608,6 +611,8 @@ impl Gui {
             dj: dj::DjUi::new(),
             library: library::LibraryUi::new(),
             actions: actions::ActionsUi::new(),
+            card: None,
+            mini_cover: None,
             last_qsel: None,
             hot: false,
         }
@@ -1454,11 +1459,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     }
 
     // The bar, under the Library alone: the Now Playing view carries its
-    // own scrubber and transport. While the pairing QR is up, the card
-    // cover stands down: the graphics encode cache holds ONE image, and two
-    // per frame thrash it.
+    // own scrubber and transport.
     if gui.screen == Screen::Library {
-        let has_art = playing_cover_ready(&gui.app) && gui.servers.qr.is_none();
+        let has_art = playing_cover_ready(&gui.app);
         let now = gui.bar_now();
         let view = BarView {
             now: now.as_ref(),
@@ -1477,7 +1480,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             // The mosaic where an overlay stood last frame — the rule every
             // other cover follows, since a picture's cells are skipped.
             let mosaic = gui.ui.covered_last_frame(cover);
-            draw_card_cover(frame, cover, &mut gui.app, mosaic);
+            draw_card_cover(frame, cover, &gui.app, &mut gui.card, mosaic);
         }
     }
 
@@ -1512,10 +1515,21 @@ fn playing_cover_ready(app: &App) -> bool {
 /// terminal can (kitty · sixel · iTerm2), the ▀-mosaic everywhere else —
 /// the same two paths the TUI's facts column walks. The kit's rule holds:
 /// pixels are for album art only, never chrome.
-fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App, mosaic: bool) {
-    // Field by field, the way the TUI spells it: the art cache's borrow
-    // must be visibly disjoint from the graphics and cover-pane fields
-    // taken mutably below.
+///
+/// Through a slot of its own — the bar's, or the mini player's — not
+/// `app.graphics`, which the Now Playing cover draws through at its own
+/// size: sharing its one encoded picture, every switch between the two
+/// screens decoded and encoded the cover again (60-180 ms on sixel, a
+/// megabyte or two re-sent on kitty) for a picture drawn a moment ago
+/// (performance audit #97). Forked on first draw, which is after the
+/// probe: a fork taken with the Gui would be of the disabled answer.
+fn draw_card_cover(
+    frame: &mut Frame,
+    rect: Rect,
+    app: &App,
+    slot: &mut Option<cover::Slot>,
+    mosaic: bool,
+) {
     let cover = app
         .now_playing
         .as_ref()
@@ -1525,13 +1539,12 @@ fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App, mosaic: bool) {
     let Some(cover) = cover else {
         return;
     };
-    if !mosaic && app.graphics.draw(frame, rect, cover) {
-        return;
-    }
-    let mut canvas = crate::tui::canvas::Canvas::new(rect);
-    if !canvas.is_empty() {
-        app.cover_pane.draw(&mut canvas, cover);
-        frame.render_widget(Paragraph::new(canvas.into_lines()), rect);
+    let slot = slot.get_or_insert_with(|| cover::Slot::new(app.graphics.fork()));
+    if mosaic {
+        slot.draw_mosaic(frame, rect, cover);
+    } else {
+        // One cover: a frame's whole budget, never starved.
+        slot.draw_paced(frame, rect, cover, &cover::Pace::frame());
     }
 }
 
@@ -2501,6 +2514,10 @@ fn event_loop(
             refresh_book(gui);
         }
         terminal.draw(|frame| render(frame, gui))?;
+        // The kitty pictures this frame stopped drawing — a queue row's
+        // slot let go, a wall slot past the page — leave the terminal's
+        // store now that the frame covering their cells is out.
+        crate::tui::graphics::release_dropped();
 
         while let Ok(ev) = event_rx.try_recv() {
             // The servers layer looks first: session answers that would
@@ -2650,6 +2667,9 @@ fn event_loop(
                 // and every queue row's alike.
                 TermEvent::Resize(..) => {
                     gui.app.graphics.refresh();
+                    for slot in [&mut gui.card, &mut gui.mini_cover].into_iter().flatten() {
+                        slot.on_resize();
+                    }
                     gui.albums.on_resize();
                     gui.queue.on_resize();
                     gui.actions.on_resize();
@@ -2993,6 +3013,8 @@ pub fn run(
         &event_tx,
     );
 
+    // Still on the alternate screen, where kitty keeps the pictures.
+    crate::tui::graphics::release_all();
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(POINTER_RESET));
@@ -3855,6 +3877,44 @@ mod tests {
         let first = mini::plan(&gui, area).mini.lines.remove(0).2;
         assert!(!all.contains(&first), "and the line is gone:\n{all}");
     }
+
+    #[test]
+    fn the_card_now_playing_and_the_mini_player_keep_a_cover_each() {
+        // One encoded picture shared by the card and Now Playing meant every
+        // switch between the two screens decoded and encoded the cover
+        // again (performance audit #97); the mini player made three.
+        use ratatui_image::picker::ProtocolType;
+        let mut gui = test_gui();
+        gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
+        let mut playing = track("music/a.mp3", "Night Drive", 252.0);
+        playing.metadata.album_art = Some("aa.jpeg".into());
+        gui.app.now_playing = Some(playing);
+        // Larger than the thumbnail, so Now Playing's box decodes the source.
+        let cover = image::RgbImage::from_fn(400, 400, |x, y| image::Rgb([x as u8, y as u8, 90]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        cover.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        gui.app.art.insert("aa.jpeg".into(), Some(crate::tui::art::decode(&bytes.into_inner()).unwrap()));
+
+        let mut full = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut small = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        for _ in 0..3 {
+            full.draw(|frame| render(frame, &mut gui)).unwrap();
+            gui.act(Act::Screen(Screen::NowPlaying));
+            full.draw(|frame| render(frame, &mut gui)).unwrap();
+            gui.act(Act::Screen(Screen::Library));
+            small.draw(|frame| render(frame, &mut gui)).unwrap();
+        }
+        let encodes = |slot: &Option<cover::Slot>| slot.as_ref().map(cover::Slot::encodes);
+        assert_eq!(gui.app.graphics.encodes(), 1, "Now Playing's cover, once");
+        assert_eq!(encodes(&gui.card), Some(1), "the card's, once");
+        assert_eq!(encodes(&gui.mini_cover), Some(1), "the mini player's, once");
+        let placed = |terminal: &Terminal<TestBackend>| {
+            let cells = &terminal.backend().buffer().content;
+            cells.iter().any(|cell| cell.symbol().contains('\u{10EEEE}'))
+        };
+        assert!(placed(&full) && placed(&small), "and each drew as pixels");
+    }
+
     // ── The browser bar ─────────────────────────────────────────────────
 
     #[test]

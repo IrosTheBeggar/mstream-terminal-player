@@ -111,6 +111,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # arrives regardless — icy_sixel quantises through quantette, which brings
 # it — so the trim's win is the codec and C-library weight, not rayon.
 ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
+# zlib for kitty covers sent over ssh (tui::graphics, `deflate_kitty`).
+# Already in the tree as png's deflate backend, with these features; named
+# here for one call each way.
+miniz_oxide = "0.8"
 # sys-locale answers "what language is this machine?" for the wizard.
 # Native-only — the wasm build has no wizard (rust-i18n itself is a plain
 # dependency: the shared App's notes go through t!() on every target).
