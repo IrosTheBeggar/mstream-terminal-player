@@ -30,16 +30,17 @@ use winit::window::{Fullscreen, Window, WindowId};
 use crate::config::VisualizerPrefs;
 use crate::runtime::block_on;
 use crate::shader::library::BUILTIN;
-use crate::shader::preset::Preset;
 use crate::shader::render::{Gpu, Offscreen, Scene};
 
 pub mod controls;
 mod overlay;
 pub mod pipe;
+mod prefetch;
 
 use controls::{Command, Controls, Entry, Tuning, View};
 use overlay::Overlay;
 use pipe::{Message, Report};
+use prefetch::{Compiled, Prefetch};
 
 const TITLE: &str = "mStream Visualizer";
 /// The window as it opens: the presets' 16:9, at a size that sits beside a
@@ -132,6 +133,9 @@ struct App {
     /// Every built-in preset, as the controls offer them.
     entries: Vec<Entry>,
     scenes: Vec<Option<Scene>>,
+    /// The presets being compiled ahead; `None` where each is compiled on
+    /// first sight instead.
+    prefetch: Option<Prefetch>,
     tuning: Tuning,
     controls: Controls,
     audio: Vec<u8>,
@@ -146,7 +150,8 @@ struct App {
 struct Gfx {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
-    gpu: Gpu,
+    /// Shared with the thread that compiles presets ahead.
+    gpu: Arc<Gpu>,
     /// The preset draws here at logical size; the blit scales it up.
     target: Offscreen,
     blit: Blit,
@@ -171,6 +176,7 @@ impl App {
             preset,
             entries,
             scenes: (0..count).map(|_| None).collect(),
+            prefetch: None,
             tuning,
             controls: Controls::default(),
             audio: vec![0; pipe::AUDIO_LEN],
@@ -207,7 +213,15 @@ impl App {
             Ok(Err(e)) => return Err(format!("no GPU would draw the window: {e}")),
             Err(e) => return Err(e.to_string()),
         };
-        let gpu = Gpu::new(&adapter)?;
+        let gpu = Arc::new(Gpu::new(&adapter)?);
+        // Every preset compiled ahead on a thread of its own, the one the
+        // window opens on first, while the rest of the window is made
+        // (performance audit #87). Not on GL: there the driver's compile
+        // holds the one context the frames are drawn with, so a compile
+        // stalls them wherever it runs.
+        if adapter.get_info().backend != wgpu::Backend::Gl {
+            self.prefetch = Prefetch::start(gpu.clone(), prefetch::order(self.preset, self.entries.len()));
+        }
 
         // The preset's colours are already what it wants on screen (see
         // `render::FORMAT`): a plain format shows them as they are, and an
@@ -285,8 +299,10 @@ impl App {
     /// Preset `i`, compiled for this GPU on first sight with its knobs as
     /// the panel has them; its buffers come with its first frame. One the
     /// GPU refuses is marked, and never offered or tried again (contract
-    /// clauses 7, 11).
+    /// clauses 7, 11). The worker's, when it has it — waited for, if it is
+    /// still compiling it — and otherwise compiled here.
     fn load(&mut self, i: usize) -> bool {
+        self.adopt();
         if self.scenes[i].is_some() {
             return true;
         }
@@ -294,20 +310,32 @@ impl App {
         if self.entries[i].refused {
             return false;
         }
-        let builtin = &BUILTIN[i];
-        let loaded = Preset::parse(builtin.source)
-            .map_err(|e| e.to_string())
-            .and_then(|preset| gfx.gpu.compile(&preset));
-        match loaded {
+        let compiled = match self.prefetch.as_mut().and_then(|prefetch| prefetch.take(i)) {
+            Some(compiled) => compiled,
+            None => prefetch::compile(&gfx.gpu, i),
+        };
+        self.keep(i, compiled);
+        self.scenes[i].is_some()
+    }
+
+    /// What the worker has finished since the last look.
+    fn adopt(&mut self) {
+        let Some(prefetch) = self.prefetch.as_mut() else { return };
+        for (i, compiled) in prefetch.done() {
+            self.keep(i, compiled);
+        }
+    }
+
+    /// A preset compiled: the scene kept, or the preset marked refused.
+    fn keep(&mut self, i: usize, compiled: Compiled) {
+        match compiled {
             Ok(mut scene) => {
                 scene.set_params(&self.tuning.knobs[i]);
                 self.scenes[i] = Some(scene);
-                true
             }
             Err(e) => {
-                eprintln!("viz-window: {} does not draw on this GPU: {e}", builtin.file);
+                eprintln!("viz-window: {} does not draw on this GPU: {e}", BUILTIN[i].file);
                 self.entries[i].refused = true;
-                false
             }
         }
     }
@@ -438,6 +466,8 @@ impl App {
         if !self.showing() {
             return;
         }
+        // A refusal found ahead shows in the dropdown from this frame on.
+        self.adopt();
         // The controls first, so what they ask for is what this frame shows.
         self.run_controls(&window);
         if !self.ensure_scene(event_loop) {
