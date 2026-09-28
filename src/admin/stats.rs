@@ -1596,6 +1596,7 @@ fn recent_row(page: &Page, item: &HistoryItem, now: i64) -> RecentRow {
     let t = iso_unix(&item.started_at);
     let (title, artist, _, _) = track_words(item.track.as_ref());
     let legacy = item.source.as_deref() == Some("legacy");
+    let (client, client_short) = client_words(item);
     RecentRow {
         time: t.map(|t| time_label(t, page.offset_at(t))).unwrap_or_default(),
         day: t.map(|t| day_label(t, now, page.offset_at(t), page.offset_at(now))).unwrap_or_default(),
@@ -1605,8 +1606,8 @@ fn recent_row(page: &Page, item: &HistoryItem, now: i64) -> RecentRow {
         completed: item.outcome == "completed" && !legacy,
         listened: listened_words(item),
         counted: item.counted,
-        client: client_words(item).0,
-        client_short: client_words(item).1,
+        client,
+        client_short,
     }
 }
 
@@ -1646,10 +1647,12 @@ fn draw_recent(frame: &mut Frame, page: &mut Page, body: Rect) {
     if rows_rect.height == 0 {
         return;
     }
+    // Only the rows on screen are put in words: the log grows fifty plays
+    // at a time as the cursor walks it, and a row is some forty strings
+    // (performance audit #104).
     let now = unix_now();
-    let rows: Vec<RecentRow> = page.history.iter().map(|item| recent_row(page, item, now)).collect();
-    table_rows(frame, page, rows_rect, rows.len(), |frame, _page, i, rect, selected, hovered| {
-        let r = &rows[i];
+    table_rows(frame, page, rows_rect, page.history.len(), |frame, page, i, rect, selected, hovered| {
+        let r = &recent_row(page, &page.history[i], now);
         let cell = |x: u16, w: u16| Rect { x, y: rect.y, width: w, height: 1 };
         let base = cell_style(selected, hovered, Style::default());
         let dimmed = cell_style(selected, hovered, dim());
@@ -2306,24 +2309,25 @@ fn client_words(item: &HistoryItem) -> (String, String) {
     }
 }
 
-/// Names from a locale list: `Jan · Feb · …`.
-fn names(key: &str) -> Vec<String> {
-    t!(key).split(" · ").map(str::to_string).collect()
+/// The `i`th name of a locale list: `Jan · Feb · …` — the one name, not
+/// the list split into twelve for it.
+fn nth_name(key: &str, i: usize) -> String {
+    t!(key).split(" · ").nth(i).map(str::to_string).unwrap_or_default()
 }
 
 /// A month's name from one of the locale's three lists: `sta.months_short`
 /// for axes and day labels, `sta.months_long` for a date (declined where
 /// the language declines), `sta.months_title` for a month named on its own.
 fn month_name(m: u32, list: &str) -> String {
-    names(list).get((m as usize).saturating_sub(1)).cloned().unwrap_or_default()
+    nth_name(list, (m as usize).saturating_sub(1))
 }
 
 fn weekday_short(w: u32) -> String {
-    names("sta.weekdays_short").get(w as usize).cloned().unwrap_or_default()
+    nth_name("sta.weekdays_short", w as usize)
 }
 
 fn weekday_plural(w: u32) -> String {
-    names("sta.weekdays_plural").get(w as usize).cloned().unwrap_or_default()
+    nth_name("sta.weekdays_plural", w as usize)
 }
 
 /// The local wall clock of an instant: `(days since the epoch, year,
@@ -3221,5 +3225,77 @@ mod tests {
             panic!("a load");
         };
         assert!(loaded.periods.is_none() && loaded.previous.is_none());
+    }
+
+    /// A log of `n` plays, seven hours apart, each its own artist and title.
+    fn deep_log(n: usize) -> Vec<HistoryItem> {
+        (0..n)
+            .map(|k| {
+                let started = today0() - 3600 * 7 * k as i64;
+                let mut item = play(&format!("q{k}"), started, "completed", 200_000, Some(200_000), true, Some("mstream-webapp/6.27.0"), None);
+                item.track = Some(track(&format!("Artist {k}"), &format!("Title {k}"), "Album", 2020));
+                item
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_deep_log_puts_the_rows_on_screen_in_their_own_words() {
+        // A row is put in words as it is drawn, not the whole log every
+        // frame (performance audit #104): whatever depth the cursor has
+        // walked to, each row on screen is its own play, in order.
+        let _en = english();
+        let mut p = ready();
+        press(&mut p, KeyCode::Left);
+        assert_eq!(p.tab, Tab::Recent);
+        p.history = deep_log(2_000);
+        p.next = None;
+        p.act(Act::Select(1_500));
+        let frame = draw_at(&mut p, 120, 40);
+        let at = row(&frame, "Artist 1500 - Title 1500");
+        let started = today0() - 3600 * 7 * 1500;
+        assert!(at.contains(&time_label(started, 0)) && at.contains(&day_label(started, unix_now(), 0, 0)), "{at}");
+        // The table's rows (the note line under them names the cursor's
+        // play too, between dots).
+        let shown: Vec<usize> = frame
+            .lines()
+            .filter(|l| !l.contains(" · "))
+            .filter_map(|l| l.split("Artist ").nth(1)?.split(' ').next()?.parse().ok())
+            .collect();
+        assert!(shown.len() > 20 && shown.contains(&1_500), "{frame}");
+        assert!(shown.windows(2).all(|w| w[1] == w[0] + 1), "rows in log order: {shown:?}");
+        assert!(!frame.contains("Artist 0 - "), "the log's top is scrolled away:\n{frame}");
+    }
+
+    #[test]
+    fn a_name_is_picked_from_its_list_without_the_rest() {
+        let _en = english();
+        assert_eq!(month_name(1, "sta.months_short"), "Jan");
+        assert_eq!(month_name(12, "sta.months_long"), "December");
+        assert_eq!(month_name(0, "sta.months_short"), "Jan", "a zero month is the first, as it was");
+        assert_eq!(month_name(13, "sta.months_short"), "");
+        assert_eq!((weekday_short(0), weekday_plural(6)), ("Sun".to_string(), "Saturdays".to_string()));
+        assert_eq!(weekday_short(7), "");
+    }
+
+    /// `cargo test --release recent_tab_frame_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check; run --release with --nocapture"]
+    fn recent_tab_frame_cost() {
+        let _en = english();
+        for n in [50, 2_000, 5_000] {
+            let mut p = ready();
+            press(&mut p, KeyCode::Left);
+            p.history = deep_log(n);
+            p.sel = Some(0);
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            let frames = 200;
+            let started = std::time::Instant::now();
+            for _ in 0..frames {
+                terminal.draw(|frame| render(frame, &mut p)).unwrap();
+            }
+            let per = started.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+            println!("recent tab, {n} plays: {per:.3} ms a frame");
+        }
     }
 }
