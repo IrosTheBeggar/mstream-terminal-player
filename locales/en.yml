@@ -1147,10 +1147,8 @@ sta:
   tab_overview: "Overview"
   tab_top: "Top"
   tab_recent: "Recent"
-  note_overview: "the period's totals"
   note_top: "by plays, or by time on m"
   note_recent: "the log, newest first"
-  facts: " — %{plays} · %{time} · %{tracks} · %{zone}"
   zone_local: "times in your zone"
   zone_utc: "times in UTC"
   empty_state: "• no plays yet"
@@ -1158,14 +1156,12 @@ sta:
   empty_1: "The web player reports each track when it ends, and the mobile app sends its history when it"
   empty_2: "is online. Older apps that still scrobble at 30 seconds count too."
   empty_prov: "Plays this account reports through this server · %{zone}"
-  nothing_state: " — no plays started in this period"
   nothing_title: "Nothing in %{period}"
   nothing_hint: "Your log begins on %{date} — [ ] walks the periods, p lists them."
   nothing_hint_plain: "[ ] walks the periods, p lists them."
   noapi_state: "• no Stats API"
   noapi_detail: " — this server does not have it yet; it arrived in mStream 6.27"
   ctl_period: "PERIOD"
-  ctl_step: "[ ] step · p list"
   ctl_origin: "ORIGIN"
   origin_all: "all"
   origin_local: "this server"
@@ -1325,7 +1321,6 @@ sta:
 gui:
   top:
     library: "Library"
-    now: "Now Playing"
     viz: "Visualizer"
     viz_tip: "Open the visualizer in its own window — V"
   nav:
@@ -1733,6 +1728,8 @@ gui:
     back_tip: "Back to Settings — Esc"
   stats:
     no_session: "no session — connect to a server and its listening log opens here"
+  mini:
+    enlarge: "Enlarge the terminal for the full player"
   viz:
     failed: "the visualizer window could not open — %{why}"
     prev_tip: "Previous preset — ←"

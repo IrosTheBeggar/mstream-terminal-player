@@ -1147,10 +1147,8 @@ sta:
   tab_overview: "概要"
   tab_top: "トップ"
   tab_recent: "最近"
-  note_overview: "この期間の合計"
   note_top: "再生数順、m で時間順"
   note_recent: "履歴、新しい順"
-  facts: " — %{plays} · %{time} · %{tracks} · %{zone}"
   zone_local: "時刻はあなたのタイムゾーン"
   zone_utc: "時刻は UTC"
   empty_state: "• まだ再生がありません"
@@ -1158,14 +1156,12 @@ sta:
   empty_1: "ウェブプレイヤーは各トラックの終了時に報告し、モバイルアプリはオンラインになったときに"
   empty_2: "履歴を送ります。30秒で scrobble する古いアプリも数えます。"
   empty_prov: "このアカウントがこのサーバー経由で報告した再生 · %{zone}"
-  nothing_state: " — この期間に始まった再生はありません"
   nothing_title: "%{period}には何もありません"
   nothing_hint: "履歴は %{date} から — [ ] で期間を移動、p で一覧。"
   nothing_hint_plain: "[ ] で期間を移動、p で一覧。"
   noapi_state: "• 統計 API なし"
   noapi_detail: " — このサーバーにはまだありません。mStream 6.27 で追加されました"
   ctl_period: "期間"
-  ctl_step: "[ ] 移動 · p 一覧"
   ctl_origin: "出所"
   origin_all: "すべて"
   origin_local: "このサーバー"
@@ -1325,7 +1321,6 @@ sta:
 gui:
   top:
     library: "ライブラリ"
-    now: "再生中"
     viz: "ビジュアライザー"
     viz_tip: "ビジュアライザーを別ウィンドウで開く — V"
   nav:
@@ -1733,6 +1728,8 @@ gui:
     back_tip: "設定に戻る — Esc"
   stats:
     no_session: "セッションがありません — サーバーに接続すると視聴ログがここに表示されます"
+  mini:
+    enlarge: "ターミナルを広げると、フルプレーヤーが表示されます"
   viz:
     failed: "ビジュアライザーのウィンドウを開けませんでした — %{why}"
     prev_tip: "前のプリセット — ←"

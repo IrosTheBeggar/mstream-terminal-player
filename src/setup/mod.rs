@@ -1754,7 +1754,8 @@ fn run_tui(mut wizard: Wizard) -> i32 {
 
     // The wizard's palette is its interface: not subject to NO_COLOR.
     crate::console::keep_colors();
-    let mut terminal = ratatui::init();
+    // Frames written whole, like the player's (`kit::frames`).
+    let mut terminal = crate::kit::frames::init();
     // A wizard whose buttons cannot be clicked is half a wizard; like the
     // player, a terminal that refuses mouse reports still works by keys.
     let mouse_on = execute!(std::io::stdout(), EnableMouseCapture).is_ok();
@@ -1784,7 +1785,7 @@ fn run_tui(mut wizard: Wizard) -> i32 {
 }
 
 fn event_loop(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut crate::kit::frames::PageTerminal,
     wizard: &mut Wizard,
     mouse_on: bool,
     to_worker: &Sender<(Arc<Client>, Job)>,

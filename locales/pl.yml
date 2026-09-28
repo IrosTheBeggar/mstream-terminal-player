@@ -1147,10 +1147,8 @@ sta:
   tab_overview: "Przegląd"
   tab_top: "Top"
   tab_recent: "Ostatnie"
-  note_overview: "sumy okresu"
   note_top: "wg odtworzeń, albo wg czasu na m"
   note_recent: "dziennik, najnowsze na górze"
-  facts: " — %{plays} · %{time} · %{tracks} · %{zone}"
   zone_local: "czas w twojej strefie"
   zone_utc: "czas w UTC"
   empty_state: "• jeszcze brak odtworzeń"
@@ -1158,14 +1156,12 @@ sta:
   empty_1: "Odtwarzacz webowy zgłasza każdy utwór po jego końcu, a aplikacja mobilna wysyła historię, gdy"
   empty_2: "jest online. Starsze aplikacje, które wciąż scrobblują po 30 sekundach, też się liczą."
   empty_prov: "Odtworzenia, które to konto zgłasza przez ten serwer · %{zone}"
-  nothing_state: " — w tym okresie nic nie zaczęto"
   nothing_title: "Nic w okresie %{period}"
   nothing_hint: "Twój dziennik zaczyna się %{date} — [ ] przechodzi po okresach, p je wypisuje."
   nothing_hint_plain: "[ ] przechodzi po okresach, p je wypisuje."
   noapi_state: "• brak API statystyk"
   noapi_detail: " — ten serwer jeszcze go nie ma; pojawiło się w mStream 6.27"
   ctl_period: "OKRES"
-  ctl_step: "[ ] zmień · p lista"
   ctl_origin: "ŹRÓDŁO"
   origin_all: "wszystko"
   origin_local: "ten serwer"
@@ -1325,7 +1321,6 @@ sta:
 gui:
   top:
     library: "Biblioteka"
-    now: "Teraz gra"
     viz: "Wizualizacja"
     viz_tip: "Otwórz wizualizację w osobnym oknie — V"
   nav:
@@ -1733,6 +1728,8 @@ gui:
     back_tip: "Powrót do ustawień — Esc"
   stats:
     no_session: "brak sesji — połącz się z serwerem, a jego dziennik odsłuchów pojawi się tutaj"
+  mini:
+    enlarge: "Powiększ terminal, aby zobaczyć pełny odtwarzacz"
   viz:
     failed: "nie udało się otworzyć okna wizualizacji — %{why}"
     prev_tip: "Poprzedni preset — ←"

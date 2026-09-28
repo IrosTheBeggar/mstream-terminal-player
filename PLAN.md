@@ -542,17 +542,21 @@ line plus the webapp's two warnings; after the first user the room signs in as t
 **Stats page ✅ 2026-09-14** — `mstream-player stats` (`src/admin/stats.rs`, `src/admin/tz.rs`), per
 the "Player Stats" canvas: the server's `/stats` page (Stats API v2, mStream 6.27) as a standalone
 page on the hub's session and sign-in — any account, since the log is per account, so `run_stats`
-shares the preflight (`ensure_session`) with `admin::run` but is not a room. One state line (the
-period and its totals, "times in your zone" / "in UTC"), three tabs: Overview (the webapp's six
-tiles with the delta against the previous period — a second `/stats/summary` at offset−1 — plays
-per day/week/month as eighth-block columns from `/stats/timeseries`, the hourOfDay profile, the
+shares the preflight (`ensure_session`) with `admin::run` but is not a room. Three tabs (the state
+line that carried the period's totals went 2026-09-27 as redundant with the tiles; "times in UTC" ends
+the Recent tab's note when the zone is unknown): Overview (the webapp's six
+tiles as rounded cards with the delta against the previous period — a second `/stats/summary` at offset−1 — plays
+per day/week/month as eighth-block columns from `/stats/timeseries` — on a whole-number scale with a
+ticked baseline, three to eight rows as the screen allows (2026-09-27) — the hourOfDay profile, the
 local/peer split with the ▰▱ bar while peer plays exist), Top (`/stats/top`, entity on `t`, metric on
 `m`, the share bar following the metric, `via <peer>` from peerName), Recent (`/stats/history`
 paged by the cursor as the selection nears the end; outcome, listened and client words as the
 webapp's stats-view.js spells them; `x` → gold gate → `DELETE /stats/plays/:id`, then a quiet
 reload). Periods from `/stats/periods` in the webapp's `periodOptions` order, stepped on `[` `]`,
-listed on `p`; the default period with no data falls to the first with data, as the webapp does.
-Every read carries a `seq`; a stale answer is dropped. Time zone without a crate: `tz.rs` reads the
+dropped as a list under the `This month ▾` control on `p` or a click (2026-09-27; before, a centred
+picker); the default period with no data falls to the first with data, as the webapp does. A change
+keeps the page drawn as it stands until the new numbers land (the page tracks the period its numbers
+belong to), so nothing blinks. Every read carries a `seq`; a stale answer is dropped. Time zone without a crate: `tz.rs` reads the
 TZif file `/etc/localtime` points at (or `TZ` names) — transitions, then the POSIX footer rule — for
 the IANA name the server wants and the offsets the local clock needs; no file → UTC. Empty log,
 empty period, and a pre-6.27 server (404) are their own states. Not built from the canvas: the
@@ -2021,7 +2025,9 @@ a LATER secondary screen (party view), Columns retired.
   auto-dj then padded three columns in from the edge.
 - **The top bar and a first Now Playing screen ✅ 2026-09-22** — the
   wordmark gives way to two tabs, Library and Now Playing (`Screen`,
-  `Act::Screen`, `0`/Esc between them; a nav digit is the Library's). Now
+  `Act::Screen`, `0`/Esc between them; a nav digit is the Library's; the
+  Now Playing tab was hidden 2026-09-27 — `0` alone opens the screen, the
+  bar's tabs are Library and Stats). Now
   Playing (`src/gui/now.rs`) is the slot the contract's tabs will fill: the
   playing track's cover as large as the stage allows through the cover
   slot machinery, its title, byline, spec and facts beneath; the queue
@@ -2158,6 +2164,34 @@ a LATER secondary screen (party view), Columns retired.
   bar to the page's own surface; `T` from anywhere, Esc back. A new
   terminal window for the page was weighed and refused (the contract's
   log says why).
+- **The mini player ✅ 2026-09-27** (docs/ux-contracts/mini-player.md) —
+  below the 100×24 the screens need, the GUI no longer draws one dim line:
+  it draws the playing track's cover (pixels or mosaic, the card's two
+  paths), the song's words the card's way (title, artist, album · year,
+  spec, stars · key · tempo), the bar's own seek line on top of prev · play
+  · next in the bar's frames, and a line asking for room. The parts rank
+  title, seek line, artist, a cover at all, album, the cover's size, then
+  the rest, and the layout keeps the best-ranked arrangement that fits. The cover is stacked over the frames in a tall or narrow window and
+  beside them in a short wide one, whichever draws it larger, never under
+  the card's 8×4; below the frames' 22 columns the line stands alone, as
+  before. Growing back returns the screen untouched. `src/gui/mini.rs`,
+  ten locales, layout and render tests, and a pty run resized through five
+  shapes with the play frame clicked.
+- **Resizing at the terminal's pace ✅ 2026-09-27** — every page's frames
+  (the GUI, the TUI, the wizard, the admin rooms) are encoded into memory
+  and written in one go once the frame is done, fenced in DEC mode 2026
+  so a terminal that knows the mode shows the frame whole: the clear a
+  resize opens with is never painted on its own, and a frame that changes
+  nothing writes nothing (`src/kit/frames.rs`). In kitty itself, with no
+  multiplexer between, a resize no longer sends every cover again: kitty
+  keeps a transmitted picture through a resize and the clear after it
+  (graphics.c spares virtual placements), so the cache stays
+  (`Graphics::refresh`). Measured on a pty, the Albums wall in truecolor,
+  from the resize to the last byte: the mosaic 1.7–2.8 ms → 0.8–1.2 ms;
+  kitty 15–18 ms and ~870 KB → 2–3.5 ms and 17–30 KB; iTerm2 and sixel
+  as before, 5–16 ms (their pictures live in the cells, and a clear takes
+  them). After a walk through six sizes the screen matched a fresh start
+  cell for cell on every protocol.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with

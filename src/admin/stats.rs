@@ -1,15 +1,17 @@
 //! The stats page: `mstream-player stats` — the server's /stats page (the
 //! Stats API v2, mStream 6.27) as one page in the hub's chrome, for any
 //! signed-in account: stats are per account, so it lives beside the admin
-//! rooms, not under them. One state line carries the period and its
-//! totals; three tabs on ←→ — Overview (the webapp's six tiles, plays per
-//! day, when you listen, where the tracks live), Top (tracks, artists,
-//! albums or genres ranked by plays or by time) and Recent (the log, newest
-//! first, paged as the cursor nears its end; `x` forgets a play behind a
-//! gate). The period steps on `[` `]` and lists on `p`; the origin (all ·
-//! this server · peers) cycles on `o` while the log holds peer plays.
-//! Everything loads on entry and on a change — no poll, like the webapp.
-//! Nothing here plays music: it is a report.
+//! rooms, not under them. Three tabs on ←→ — Overview (the webapp's six
+//! tiles, plays per day, when you listen, where the tracks live), Top
+//! (tracks, artists, albums or genres ranked by plays or by time) and
+//! Recent (the log, newest first, paged as the cursor nears its end; `x`
+//! forgets a play behind a gate). The period is a dropdown — `This month ▾`
+//! on the Overview's controls row, leading the other tabs' notes — whose
+//! list drops on `p` or a click; `[` `]` step it. The origin (all · this
+//! server · peers) cycles on `o` while the log holds peer plays. Everything
+//! loads on entry and on a change — no poll, like the webapp — and a change
+//! keeps the page as it stands until the new numbers land, so nothing
+//! blinks. Nothing here plays music: it is a report.
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -19,7 +21,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use rust_i18n::t;
 
 use super::tz::{self, Zone};
@@ -43,10 +45,21 @@ const HISTORY_PAGE: u32 = 50;
 const PAGE_AHEAD: usize = 10;
 const TAB_GAP: u16 = 2;
 const TEXT_MAX: usize = 120;
-/// Both charts are four rows of eighth-block columns.
-const CHART_ROWS: u16 = 4;
+/// Both charts are eighth-block columns: three rows on a short terminal,
+/// up to eight as the screen grows (stats-screen contract, clause 10).
+const CHART_ROWS_MIN: u16 = 3;
+const CHART_ROWS_MAX: u16 = 8;
+/// The rows a chart spends around its columns: the title above, the
+/// baseline and the labels below.
+const CHART_FRAME: u16 = 3;
+/// A tile's card: the frame's two rows around the value, the label and
+/// the detail (stats-screen contract, clause 13).
+const CARD_ROWS: u16 = 5;
 /// The share bar's cells.
 const SHARE_W: usize = 10;
+/// The fewest cells the split's bar beside the hours chart shrinks to
+/// before the split gives way (stats-screen contract, clause 12).
+const SHARE_MIN: usize = 4;
 
 // ── The page's vocabulary ─────────────────────────────────────────────────
 
@@ -74,13 +87,14 @@ impl Tab {
         .to_string()
     }
 
-    fn note(self) -> String {
+    /// The pane's one-line note at the tab row's right; the Overview has
+    /// none — its tiles say what it shows.
+    fn note(self) -> Option<String> {
         match self {
-            Tab::Overview => t!("sta.note_overview"),
-            Tab::Top => t!("sta.note_top"),
-            Tab::Recent => t!("sta.note_recent"),
+            Tab::Overview => None,
+            Tab::Top => Some(t!("sta.note_top").to_string()),
+            Tab::Recent => Some(t!("sta.note_recent").to_string()),
         }
-        .to_string()
     }
 }
 
@@ -230,7 +244,7 @@ impl Period {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Modal {
     None,
-    /// `p`: the period list, with its cursor.
+    /// The period list, dropped under the control, with its cursor.
     Period(usize),
     /// `x`: the forget gate, on a row of the log.
     Forget(usize),
@@ -244,9 +258,12 @@ pub(crate) enum Act {
     TableScroll(i8),
     TableScrollTo(usize),
     PeriodStep(i8),
+    /// The control: the list drops, or closes if it is open.
     PeriodList,
+    /// The cursor onto a row of the list (the keys' way through it).
     PeriodRow(usize),
-    PeriodChoose,
+    /// A row of the list picked: the period, and the list closes.
+    PeriodPick(usize),
     PeriodClose,
     Origin(usize),
     Entity(usize),
@@ -353,7 +370,12 @@ pub(crate) struct Page {
     zone: Option<Zone>,
     tz: String,
     pub tab: Tab,
+    /// The period chosen — what the control names.
     pub period: Period,
+    /// The period the numbers on the page belong to: `period` once its
+    /// read lands, the one before while that read is in flight — the
+    /// tiles compare, and an empty period is named, by this one.
+    pub shown: Period,
     /// The periods with data, the webapp's select — from `/stats/periods`.
     pub options: Vec<Period>,
     pub origin: Origin,
@@ -381,6 +403,9 @@ pub(crate) struct Page {
     /// contract): no header row and no tips row of its own, the host's top
     /// bar and footer carry those, and the ground is the host's.
     hosted: bool,
+    /// Where the period's name was drawn this frame: the list drops from
+    /// under it.
+    period_at: Option<Rect>,
 }
 
 /// The page, loading: what `mstream-player stats` opens.
@@ -403,6 +428,7 @@ impl Page {
             tz,
             tab: Tab::Overview,
             period: Period::this_month(),
+            shown: Period::this_month(),
             options: Vec::new(),
             origin: Origin::All,
             entity: Entity::Tracks,
@@ -423,6 +449,7 @@ impl Page {
             sel_anchor: None,
             ui: Surface::new(),
             hosted: false,
+            period_at: None,
         }
     }
 
@@ -459,6 +486,12 @@ impl Page {
         self.busy = Some(busy.into());
     }
 
+    /// The periods to pick from: the server's list, or This month and All
+    /// time before it has answered.
+    fn choices(&self) -> Vec<Period> {
+        if self.options.is_empty() { vec![Period::this_month(), Period::all_time()] } else { self.options.clone() }
+    }
+
     /// Ask for everything again, for the period and origin as they stand.
     /// The page as the GUI's Stats screen hosts it.
     pub(crate) fn hosted(mut self) -> Self {
@@ -489,13 +522,13 @@ impl Page {
         }
     }
 
-    /// A new period or origin: the old numbers go before the new arrive,
-    /// so the state line never names one period over another's totals.
+    /// A new period or origin: the page keeps the numbers it has, under
+    /// the new name, until the new ones land — the note row says they are
+    /// on their way — so nothing blinks (stats-screen contract, clause 16).
+    /// The cursor lets go and the log's cursor is dropped: the rows are
+    /// about to change, and the old log must not be paged for the new range.
     fn change_range(&mut self) {
-        self.data = None;
-        self.history.clear();
         self.next = None;
-        self.top.clear();
         self.sel = None;
         self.tscroll = 0;
         self.note = None;
@@ -575,26 +608,29 @@ impl Page {
             }
             Act::TableScrollTo(row) => self.tscroll = row,
             Act::PeriodStep(d) => {
-                let options = if self.options.is_empty() { vec![Period::this_month(), Period::all_time()] } else { self.options.clone() };
+                let options = self.choices();
                 let i = options.iter().position(|o| o.is(&self.period.period, self.period.offset)).unwrap_or(0);
                 let j = if d < 0 { i.saturating_sub(1) } else { (i + 1).min(options.len() - 1) };
                 self.set_period(options[j].clone());
             }
             Act::PeriodList => {
-                let i = self.options.iter().position(|o| o.is(&self.period.period, self.period.offset)).unwrap_or(0);
-                self.modal = Modal::Period(i);
-            }
-            Act::PeriodRow(i) => {
-                if let Modal::Period(cursor) = &mut self.modal {
-                    *cursor = i.min(self.options.len().saturating_sub(1));
+                if matches!(self.modal, Modal::Period(_)) {
+                    self.modal = Modal::None;
+                } else {
+                    let i = self.choices().iter().position(|o| o.is(&self.period.period, self.period.offset)).unwrap_or(0);
+                    self.modal = Modal::Period(i);
                 }
             }
-            Act::PeriodChoose => {
-                if let Modal::Period(i) = self.modal.clone() {
-                    self.modal = Modal::None;
-                    if let Some(chosen) = self.options.get(i).cloned() {
-                        self.set_period(chosen);
-                    }
+            Act::PeriodRow(i) => {
+                let n = self.choices().len();
+                if let Modal::Period(cursor) = &mut self.modal {
+                    *cursor = i.min(n.saturating_sub(1));
+                }
+            }
+            Act::PeriodPick(i) => {
+                self.modal = Modal::None;
+                if let Some(chosen) = self.choices().get(i).cloned() {
+                    self.set_period(chosen);
                 }
             }
             Act::PeriodClose => self.modal = Modal::None,
@@ -667,6 +703,9 @@ impl Page {
                     Ok(loaded) => {
                         self.no_api = false;
                         self.note = None;
+                        // The seq matched: this answer is for the period and
+                        // origin as they stand.
+                        self.shown = self.period.clone();
                         self.options = loaded
                             .periods
                             .as_ref()
@@ -783,10 +822,8 @@ impl Screen for Page {
                 self.tscroll = if up { self.tscroll.saturating_sub(1) } else { self.tscroll.saturating_add(1) };
             }
             Modal::Period(cursor) => {
-                let n = self.options.len();
-                if n > 0 {
-                    *cursor = if up { cursor.saturating_sub(1) } else { (*cursor + 1).min(n - 1) };
-                }
+                let n = if self.options.is_empty() { 2 } else { self.options.len() };
+                *cursor = if up { cursor.saturating_sub(1) } else { (*cursor + 1).min(n - 1) };
             }
             Modal::Forget(_) => {}
         }
@@ -799,10 +836,10 @@ fn handle_key(page: &mut Page, key: KeyEvent) -> Option<Outcome> {
     let code = key.code;
     match page.modal.clone() {
         Modal::Period(cursor) => {
-            let n = page.options.len();
+            let n = page.choices().len();
             return match code {
-                KeyCode::Esc => page.act(Act::PeriodClose),
-                KeyCode::Enter => page.act(Act::PeriodChoose),
+                KeyCode::Esc | KeyCode::Char('p') => page.act(Act::PeriodClose),
+                KeyCode::Enter => page.act(Act::PeriodPick(cursor)),
                 KeyCode::Up | KeyCode::BackTab => page.act(Act::PeriodRow(cursor.saturating_sub(1))),
                 KeyCode::Down | KeyCode::Tab => page.act(Act::PeriodRow((cursor + 1).min(n.saturating_sub(1)))),
                 _ => None,
@@ -884,11 +921,14 @@ fn draw_page(frame: &mut Frame, page: &mut Page, area: Rect) {
     if modal_open {
         page.ui.pointer = None;
     }
+    page.period_at = None;
 
-    // The bottom edge is the note and the tips; the page keeps the row
-    // above them, which the rooms leave blank — a chart's axis lands there.
-    // Hosted, the header row and the tips row are the host's: one blank
-    // row under its bar, the note on the area's last row.
+    // The tabs are the body's first row — no state line: the tiles carry
+    // the period's totals (stats-screen contract, clause 15). The bottom
+    // edge is the note and the tips; the page keeps the row above them,
+    // which the rooms leave blank — a chart's axis lands there. Hosted,
+    // the header row and the tips row are the host's: one blank row under
+    // its bar, the note on the area's last row.
     let (top, bottom) = if page.hosted { (1, 1) } else { (2, 2) };
     let column = Rect {
         x: area.x + 2,
@@ -962,12 +1002,10 @@ pub(crate) fn footer_hint(page: &Page) -> String {
     parts.join(" · ")
 }
 
-/// The state line, the tabs, the tab's body.
+/// The tabs, the tab's note, the tab's body — or, on a server without
+/// the API, its one gold sentence where the body would be.
 fn draw_body(frame: &mut Frame, page: &mut Page, column: Rect) {
-    let line = |y: u16| Rect { x: column.x, y, width: column.width, height: 1 };
-    draw_state(frame, page, line(column.y));
-
-    let tabs_y = column.y + 2;
+    let tabs_y = column.y;
     let mut x = column.x;
     for tab in Tab::ALL {
         let label = format!(" {} ", tab.name());
@@ -984,13 +1022,14 @@ fn draw_body(frame: &mut Frame, page: &mut Page, column: Rect) {
         page.ui.click(rect, Act::Tab(tab));
         x = rect.right() + TAB_GAP;
     }
-    let note = page.tab.note();
-    if x as usize + 2 + note.chars().count() <= column.right() as usize {
-        frame.render_widget(Paragraph::new(Span::styled(note, dim())).alignment(Alignment::Right), line(tabs_y));
-    }
+    draw_tab_note(frame, page, Rect { x: x + 2, y: tabs_y, width: column.right().saturating_sub(x + 2), height: 1 });
 
     let body = Rect { x: column.x, y: tabs_y + 2, width: column.width, height: column.bottom().saturating_sub(tabs_y + 2) };
     if body.height == 0 {
+        return;
+    }
+    if page.no_api {
+        gold_line(frame, Rect { height: 1, ..body }, &t!("sta.noapi_state"), &t!("sta.noapi_detail"));
         return;
     }
     match page.tab {
@@ -1000,68 +1039,80 @@ fn draw_body(frame: &mut Frame, page: &mut Page, column: Rect) {
     }
 }
 
-/// `• This month — 388 plays · 31h 12m · 188 tracks · times in your zone`,
-/// or the gold sentence for a log with nothing in it, a period with
-/// nothing in it, or a server without the API.
-fn draw_state(frame: &mut Frame, page: &Page, at: Rect) {
-    let gold = Style::default().fg(th().gold);
-    let gold_bold = gold.add_modifier(Modifier::BOLD);
-    let spans = if page.no_api {
-        vec![
-            Span::styled(t!("sta.noapi_state").to_string(), gold_bold),
-            Span::styled(t!("sta.noapi_detail").to_string(), gold),
-        ]
-    } else if let Some(s) = page.summary() {
-        if page.no_plays_ever() {
-            vec![
-                Span::styled(t!("sta.empty_state").to_string(), gold_bold),
-                Span::styled(t!("sta.empty_state_detail").to_string(), gold),
-            ]
-        } else if s.events == 0 {
-            vec![
-                Span::styled(format!("• {}", page.period.name), bold()),
-                Span::styled(t!("sta.nothing_state").to_string(), dim()),
-            ]
-        } else {
-            let zone = if page.zone.is_some() { t!("sta.zone_local") } else { t!("sta.zone_utc") };
-            let facts = t!(
-                "sta.facts",
-                plays = plays_words(s.plays),
-                time = fmt_duration(s.listened_ms),
-                tracks = tracks_words(s.unique_tracks),
-                zone = zone
-            );
-            vec![Span::styled(format!("• {}", page.period.name), bold()), Span::raw(facts.to_string())]
-        }
-    } else {
+/// The tab row's right edge: the pane's note, and on the tabs with no
+/// period control of their own the period's name before it, as the
+/// control — `This month ▾ · the log, newest first` — so every tab names
+/// the range it shows and can change it (stats-screen contract, clause
+/// 14). The log's note ends in "times in UTC" on a machine without a
+/// zone. Parts drop from the right when the row is short of room.
+fn draw_tab_note(frame: &mut Frame, page: &mut Page, at: Rect) {
+    let control = page.tab != Tab::Overview && page.data.is_some() && !page.no_api && !page.no_plays_ever();
+    let name = control.then(|| format!("{}{}", page.period.name, g(" ▾", " v")));
+    let mut parts: Vec<String> = name.iter().cloned().collect();
+    parts.extend(page.tab.note());
+    if page.tab == Tab::Recent && page.zone.is_none() {
+        parts.push(t!("sta.zone_utc").to_string());
+    }
+    while !parts.is_empty() && parts.join(" · ").chars().count() > at.width as usize {
+        parts.pop();
+    }
+    if parts.is_empty() {
         return;
-    };
+    }
+    let text = parts.join(" · ");
+    let mut x = at.right().saturating_sub(text.chars().count() as u16);
+    if name.is_some() {
+        x = period_control(frame, page, x, at.y);
+        parts.remove(0);
+        if parts.is_empty() {
+            return;
+        }
+        let rest = format!(" · {}", parts.join(" · "));
+        frame.render_widget(Paragraph::new(Span::styled(rest, dim())), Rect { x, y: at.y, width: at.right().saturating_sub(x), height: 1 });
+    } else {
+        frame.render_widget(Paragraph::new(Span::styled(text, dim())), Rect { x, y: at.y, width: at.right().saturating_sub(x), height: 1 });
+    }
+}
+
+/// One gold sentence — `• head` bold, the tail after it — for a state the
+/// page has nothing else to show: no Stats API, no plays yet.
+fn gold_line(frame: &mut Frame, at: Rect, head: &str, tail: &str) {
+    let gold = Style::default().fg(th().gold);
+    let spans = vec![Span::styled(head.to_string(), gold.add_modifier(Modifier::BOLD)), Span::styled(tail.to_string(), gold)];
     frame.render_widget(Paragraph::new(Line::from(spans)), at);
 }
 
-/// `PERIOD  ‹ This month ›   [ ] step · p list        ORIGIN (•) all ( ) this server ( ) peers`
+/// The period control, `This month ▾`: the name bold, the chevron dim,
+/// both bright under the pointer; a click drops the list under it, or
+/// closes it. Returns the x past it.
+fn period_control(frame: &mut Frame, page: &mut Page, x: u16, y: u16) -> u16 {
+    let name = page.period.name.clone();
+    let chevron = g(" ▾", " v");
+    let rect = Rect { x, y, width: (name.chars().count() + chevron.chars().count()) as u16, height: 1 };
+    let hover = page.ui.hovers(rect);
+    let (name_style, chevron_style) = if hover {
+        let bright = Style::default().fg(th().bright).add_modifier(Modifier::BOLD);
+        (bright, bright)
+    } else {
+        (bold(), dim())
+    };
+    frame.render_widget(Paragraph::new(Line::from(vec![Span::styled(name, name_style), Span::styled(chevron, chevron_style)])), rect);
+    page.ui.click(rect, Act::PeriodList);
+    page.period_at = Some(rect);
+    rect.right()
+}
+
+/// `PERIOD  This month ▾        ORIGIN (•) all ( ) this server ( ) peers`
+/// — the period a dropdown (stats-screen contract, clause 14), the origin
+/// a radio row while the log holds peer plays.
 fn draw_controls(frame: &mut Frame, page: &mut Page, at: Rect) {
-    let mut x = at.x;
     let put = |frame: &mut Frame, x: u16, text: &str, style: Style| -> u16 {
         let w = text.chars().count() as u16;
         frame.render_widget(Paragraph::new(Span::styled(text.to_string(), style)), Rect { x, y: at.y, width: w, height: 1 });
         x + w
     };
-    x = put(frame, x, &t!("sta.ctl_period"), dim()) + 2;
-    let prev = Rect { x, y: at.y, width: 2, height: 1 };
-    let prev_hover = page.ui.pointer.is_some_and(|p| prev.contains(p));
-    x = put(frame, x, g("‹ ", "< "), if prev_hover { Style::default().fg(th().bright) } else { dim() });
-    page.ui.click(prev, Act::PeriodStep(-1));
-    x = put(frame, x, &page.period.name, bold());
-    let next = Rect { x, y: at.y, width: 2, height: 1 };
-    let next_hover = page.ui.pointer.is_some_and(|p| next.contains(p));
-    x = put(frame, x, g(" ›", " >"), if next_hover { Style::default().fg(th().bright) } else { dim() });
-    page.ui.click(next, Act::PeriodStep(1));
-    let step = t!("sta.ctl_step").to_string();
-    let step_rect = Rect { x: x + 3, y: at.y, width: step.chars().count() as u16, height: 1 };
-    let step_hover = page.ui.pointer.is_some_and(|p| step_rect.contains(p));
-    x = put(frame, x + 3, &step, if step_hover { Style::default().fg(th().bright) } else { dim() });
-    page.ui.click(step_rect, Act::PeriodList);
+    let x = put(frame, at.x, &t!("sta.ctl_period"), dim()) + 2;
+    let x = period_control(frame, page, x, at.y);
 
     if page.peer_plays() {
         let label = t!("sta.ctl_origin").to_string();
@@ -1111,27 +1162,30 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
         return;
     }
     if page.no_plays_ever() {
-        // The webapp's empty state, in its words.
+        // The webapp's empty state, in its words, under the gold sentence.
+        gold_line(frame, line(y), &t!("sta.empty_state"), &t!("sta.empty_state_detail"));
         for (i, key) in ["sta.empty_1", "sta.empty_2"].iter().enumerate() {
-            if y + 1 + (i as u16) < body.bottom() {
-                frame.render_widget(Paragraph::new(t!(*key).to_string()), line(y + 1 + i as u16));
+            if y + 2 + (i as u16) < body.bottom() {
+                frame.render_widget(Paragraph::new(t!(*key).to_string()), line(y + 2 + i as u16));
             }
         }
-        if y + 4 < body.bottom() {
+        if y + 5 < body.bottom() {
             let zone = if page.zone.is_some() { t!("sta.zone_local") } else { t!("sta.zone_utc") };
-            frame.render_widget(Paragraph::new(Span::styled(t!("sta.empty_prov", zone = zone).to_string(), dim())), line(y + 4));
+            frame.render_widget(Paragraph::new(Span::styled(t!("sta.empty_prov", zone = zone).to_string(), dim())), line(y + 5));
         }
         return;
     }
     draw_controls(frame, page, line(y));
-    y += 2;
+    y += 1;
 
+    // Everything under the controls is the SHOWN period's: a change keeps
+    // it until the new numbers land (clause 16).
     let Some(data) = page.data.as_ref() else { return };
     if data.summary.events == 0 {
-        if y + 1 < body.bottom() {
-            frame.render_widget(Paragraph::new(Span::styled(t!("sta.nothing_title", period = page.period.name.clone()).to_string(), bold())), line(y + 1));
+        if y + 2 < body.bottom() {
+            frame.render_widget(Paragraph::new(Span::styled(t!("sta.nothing_title", period = page.shown.name.clone()).to_string(), bold())), line(y + 2));
         }
-        if y + 3 < body.bottom() {
+        if y + 4 < body.bottom() {
             let begins = data
                 .periods
                 .as_ref()
@@ -1142,33 +1196,43 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
                 Some(date) => t!("sta.nothing_hint", date = date).to_string(),
                 None => t!("sta.nothing_hint_plain").to_string(),
             };
-            frame.render_widget(Paragraph::new(Span::styled(hint, dim())), line(y + 3));
+            frame.render_widget(Paragraph::new(Span::styled(hint, dim())), line(y + 4));
         }
         return;
     }
 
-    // The six tiles, two rows of three: value bold, label and detail dim.
-    let versus = versus_label(&page.period, &page.options);
+    // The six tiles, two rows of three cards (stats-screen contract,
+    // clause 13): the kit's rounded frame, dim, no fill; inside, the value
+    // bold, the label and the detail dim. The cards fill the column, one
+    // cell between, and the rows stack frame to frame.
+    let versus = versus_label(&page.shown, &page.options);
     let tiles = tiles(&data.summary, data.previous.as_ref(), versus.as_deref());
-    let tile_w = body.width / 3;
+    let columns = card_columns(body);
     for (i, (value, label, detail)) in tiles.iter().enumerate() {
-        let x = body.x + (i as u16 % 3) * tile_w;
-        let top = y + (i as u16 / 3) * 4;
-        if top + 3 > body.bottom() {
+        let (x, w) = columns[i % 3];
+        let top = y + (i as u16 / 3) * CARD_ROWS;
+        if top + CARD_ROWS > body.bottom() {
             break;
         }
-        let cell = |dy: u16| Rect { x, y: top + dy, width: tile_w.saturating_sub(1), height: 1 };
-        frame.render_widget(Paragraph::new(Span::styled(clip(value, tile_w - 1), bold())), cell(0));
-        frame.render_widget(Paragraph::new(Span::styled(clip(label, tile_w - 1), dim())), cell(1));
-        frame.render_widget(Paragraph::new(Span::styled(clip(detail, tile_w - 1), dim())), cell(2));
+        let card = Rect { x, y: top, width: w, height: CARD_ROWS };
+        let block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded).border_style(dim());
+        let inner = block.inner(card);
+        frame.render_widget(block, card);
+        let text_w = inner.width.saturating_sub(1);
+        let row = |dy: u16| Rect { x: inner.x + 1, y: inner.y + dy, width: text_w, height: 1 };
+        frame.render_widget(Paragraph::new(Span::styled(clip(value, text_w), bold())), row(0));
+        frame.render_widget(Paragraph::new(Span::styled(clip(label, text_w), dim())), row(1));
+        frame.render_widget(Paragraph::new(Span::styled(clip(detail, text_w), dim())), row(2));
     }
-    y += 8;
+    y += 2 * CARD_ROWS;
 
-    // Plays per day (or week, or month): one eighth-block column per bucket.
-    if y + CHART_ROWS + 2 > body.bottom() {
+    // Plays per day (or week, or month): one eighth-block column per
+    // bucket, on a scale. The two charts share the rows under the tiles.
+    let rows = chart_rows(body.bottom().saturating_sub(y));
+    if y + rows + CHART_FRAME > body.bottom() {
         return;
     }
-    let from = match (page.period.period.as_str(), data.periods.as_ref().and_then(|p| p.earliest.as_deref())) {
+    let from = match (page.shown.period.as_str(), data.periods.as_ref().and_then(|p| p.earliest.as_deref())) {
         // All time starts at the retention floor, years before the first
         // play; the chart starts where the log does.
         ("all", Some(earliest)) => earliest.to_string(),
@@ -1176,8 +1240,20 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
     };
     let (keys, values, bucket) = calendar_series(&data.series, &from, &data.summary.period.to, |t| page.offset_at(t));
     let width = body.width as usize;
-    let fold = values.len().div_ceil(width.max(1)).max(1);
-    let values: Vec<u64> = values.chunks(fold).map(|c| c.iter().sum()).collect();
+    // Buckets fold into pairs (or more) when the row is too narrow for a
+    // column each. The axis takes a gutter sized by the tallest folded
+    // column — which folding raises — so fold, size, and fold again while
+    // the gutter grows.
+    let mut gutter_w = gutter(values.iter().copied().max().unwrap_or(0), rows) as usize;
+    let (values, fold) = loop {
+        let fold = values.len().div_ceil(width.saturating_sub(gutter_w).max(1)).max(1);
+        let folded: Vec<u64> = values.chunks(fold).map(|c| c.iter().sum()).collect();
+        let wide = gutter(folded.iter().copied().max().unwrap_or(0), rows) as usize;
+        if wide <= gutter_w {
+            break (folded, fold);
+        }
+        gutter_w = wide;
+    };
     let title = match (bucket, fold) {
         ("day", 1) => t!("sta.chart_days").to_string(),
         ("day", n) => t!("sta.chart_days_folded", n = n).to_string(),
@@ -1189,25 +1265,32 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
     if title.chars().count() + 2 + days_note.chars().count() <= width {
         frame.render_widget(Paragraph::new(Span::styled(days_note, dim())).alignment(Alignment::Right), line(y));
     }
-    let cell_w = ((width / values.len().max(1)) as u16).clamp(1, 3);
-    columns(frame, Rect { x: body.x, y: y + 1, width: body.width, height: CHART_ROWS }, &values, cell_w);
+    let cell_w = ((width.saturating_sub(gutter_w) / values.len().max(1)) as u16).clamp(1, 3);
     let labels: Vec<(usize, String)> = match bucket {
         "day" => day_axis(&keys, fold),
         "week" => week_axis(&keys, fold),
         _ => month_axis(&keys, fold),
     };
-    axis(frame, line(y + 1 + CHART_ROWS), &labels, cell_w);
-    y += CHART_ROWS + 2;
+    chart(frame, Rect { x: body.x, y: y + 1, width: body.width, height: rows + 2 }, &values, cell_w, &labels);
+    y += rows + CHART_FRAME;
 
     // When you listen — the 24-hour profile — and, beside it, where the
     // tracks live, while the log holds peer plays.
-    if y + CHART_ROWS + 2 > body.bottom() {
+    if y + rows + CHART_FRAME > body.bottom() {
         return;
     }
     let hours = hour_series(&data.hours);
-    let hours_w: u16 = 48;
+    let hours_w: u16 = gutter(hours.iter().copied().max().unwrap_or(0), rows) + 48;
+    // Beside it, where the tracks live, while the log holds peer plays and
+    // the row has room for the split's words on a bar of at least
+    // SHARE_MIN cells.
+    let o = &data.summary.origins;
+    let name_w = [t!("sta.origin_local_row"), t!("sta.origin_peers_row")].iter().map(|s| s.chars().count()).max().unwrap_or(0) + 1;
+    let words = |plays: u64, ms: u64| t!("sta.plays_time", plays = plays_words(plays), time = fmt_duration(ms)).to_string();
+    let (local_words, peer_words) = (words(o.local.plays, o.local.listened_ms), words(o.peers.plays, o.peers.listened_ms));
+    let widest = local_words.chars().count().max(peer_words.chars().count());
     let right_w = body.width.saturating_sub(hours_w + 3);
-    let left_w = if page.peer_plays() && right_w >= 40 { hours_w } else { body.width };
+    let left_w = if page.peer_plays() && right_w as usize >= name_w + SHARE_MIN + 2 + widest { hours_w } else { body.width };
     let title = t!("sta.chart_hours").to_string();
     frame.render_widget(Paragraph::new(Span::styled(title.clone(), dim())), line(y));
     if let Some(note) = hours_note(&data.summary)
@@ -1218,31 +1301,30 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
             Rect { x: body.x + title.chars().count() as u16 + 2, y, width: left_w - title.chars().count() as u16 - 2, height: 1 },
         );
     }
-    columns(frame, Rect { x: body.x, y: y + 1, width: hours_w.min(body.width), height: CHART_ROWS }, &hours, 2);
     let hour_labels: Vec<(usize, String)> = [0, 6, 12, 18, 23].iter().map(|h| (*h, h.to_string())).collect();
-    axis(frame, Rect { x: body.x, y: y + 1 + CHART_ROWS, width: hours_w.min(body.width), height: 1 }, &hour_labels, 2);
+    chart(frame, Rect { x: body.x, y: y + 1, width: hours_w.min(body.width), height: rows + 2 }, &hours, 2, &hour_labels);
 
     if left_w < body.width {
         let x = body.x + left_w + 3;
         let w = body.right().saturating_sub(x);
         let row = |dy: u16| Rect { x, y: y + dy, width: w, height: 1 };
         frame.render_widget(Paragraph::new(Span::styled(t!("sta.origins_title").to_string(), dim())), row(0));
-        let o = &data.summary.origins;
+        // The bar: ten cells, fewer when the row is short of them.
+        let bar_w = (w as usize).saturating_sub(name_w + 2 + widest).min(SHARE_W);
         let total = (o.local.plays + o.peers.plays).max(1);
-        let local_share = ((o.local.plays * SHARE_W as u64 + total / 2) / total) as usize;
-        let name_w = [t!("sta.origin_local_row"), t!("sta.origin_peers_row")].iter().map(|s| s.chars().count()).max().unwrap_or(0) + 1;
-        let split = |frame: &mut Frame, at: Rect, name: String, filled: usize, plays: u64, ms: u64| {
+        let local_share = ((o.local.plays * bar_w as u64 + total / 2) / total) as usize;
+        let split = |frame: &mut Frame, at: Rect, name: String, filled: usize, words: &str| {
             let spans = vec![
                 Span::raw(format!("{name:<name_w$}")),
                 Span::styled(g("▰", "■").repeat(filled), Style::default().fg(th().accent)),
-                Span::styled(g("▱", "·").repeat(SHARE_W - filled), dim()),
-                Span::raw(format!("  {}", t!("sta.plays_time", plays = plays_words(plays), time = fmt_duration(ms)))),
+                Span::styled(g("▱", "·").repeat(bar_w - filled), dim()),
+                Span::raw(format!("  {words}")),
             ];
             frame.render_widget(Paragraph::new(Line::from(spans)), at);
         };
-        split(frame, row(1), t!("sta.origin_local_row").to_string(), local_share, o.local.plays, o.local.listened_ms);
+        split(frame, row(1), t!("sta.origin_local_row").to_string(), local_share, &local_words);
         frame.render_widget(Paragraph::new(Span::styled(t!("sta.origin_local_note").to_string(), dim())), Rect { x: x + name_w as u16, ..row(2) });
-        split(frame, row(3), t!("sta.origin_peers_row").to_string(), SHARE_W - local_share, o.peers.plays, o.peers.listened_ms);
+        split(frame, row(3), t!("sta.origin_peers_row").to_string(), bar_w - local_share, &peer_words);
         frame.render_widget(Paragraph::new(Span::styled(t!("sta.origin_peers_note_1").to_string(), dim())), Rect { x: x + name_w as u16, ..row(4) });
         if y + 5 < body.bottom() {
             frame.render_widget(Paragraph::new(Span::styled(t!("sta.origin_peers_note_2").to_string(), dim())), Rect { x: x + name_w as u16, ..row(5) });
@@ -1250,40 +1332,117 @@ fn draw_overview(frame: &mut Frame, page: &mut Page, body: Rect) {
     }
 }
 
-/// A column chart in eighth blocks: `values` left to right, each `cell_w`
-/// cells wide (the last cell a gap when there is room), `at.height` rows
-/// tall, scaled to the tallest.
-fn columns(frame: &mut Frame, at: Rect, values: &[u64], cell_w: u16) {
-    let rows = at.height as usize;
-    let vmax = values.iter().copied().max().unwrap_or(0).max(1);
-    let glyphs = crate::tui::ui::glyphs();
+/// The three card columns across `body` as (x, width): one cell between
+/// them, the width's remainder to the first cards, so the row's edges are
+/// the column's own.
+fn card_columns(body: Rect) -> [(u16, u16); 3] {
+    let usable = body.width.saturating_sub(2);
+    let (base, extra) = (usable / 3, usable % 3);
+    let mut out = [(0, 0); 3];
+    let mut x = body.x;
+    for (i, slot) in out.iter_mut().enumerate() {
+        let w = base + u16::from((i as u16) < extra);
+        *slot = (x, w);
+        x += w + 1;
+    }
+    out
+}
+
+/// The rows for each of the two charts, from the rows left under the
+/// tiles: an equal share, three at the least — a short terminal still
+/// gets a chart — and eight at the most (stats-screen contract, clause
+/// 10).
+fn chart_rows(avail: u16) -> u16 {
+    (avail.saturating_sub(2 * CHART_FRAME) / 2).clamp(CHART_ROWS_MIN, CHART_ROWS_MAX)
+}
+
+/// The scale a chart of `rows` rows draws `vmax` on (stats-screen
+/// contract, clause 8): the axis's top, and for each row from the top
+/// down the value at its upper edge when that is a whole number — those
+/// rows get a tick and a label. Once the tallest column reaches the rows'
+/// count every row is the same whole number of plays and every row is
+/// labelled; below that the tallest column takes the whole height and the
+/// whole numbers fall where they fall.
+fn scale(vmax: u64, rows: u16) -> (u64, Vec<Option<u64>>) {
+    let rows = u64::from(rows.max(1));
+    let top = if vmax >= rows { vmax.div_ceil(rows) * rows } else { vmax.max(1) };
+    let ticks = (0..rows)
+        .map(|r| {
+            let edge = top * (rows - r);
+            (edge % rows == 0).then_some(edge / rows)
+        })
+        .collect();
+    (top, ticks)
+}
+
+/// The cells a chart's axis takes before its first column: the widest
+/// tick label, a space, the axis, a space.
+fn gutter(vmax: u64, rows: u16) -> u16 {
+    fmt_count(scale(vmax, rows).0).chars().count() as u16 + 3
+}
+
+/// A column chart with its furniture (stats-screen contract, clauses 8
+/// and 9): `values` left to right in eighth-block columns `cell_w` cells
+/// wide (the last cell a gap when there is room) on all of `at`'s rows
+/// but the last two, scaled to [`scale`]'s top; down the left the ticks
+/// and their labels, `0` at the foot; under the columns the baseline, a
+/// tick under every column that carries one of `labels`; the labels on
+/// the last row, each under its tick, none overlapping the last.
+fn chart(frame: &mut Frame, at: Rect, values: &[u64], cell_w: u16, labels: &[(usize, String)]) {
+    let rows = at.height.saturating_sub(2);
+    if rows == 0 {
+        return;
+    }
+    let vmax = values.iter().copied().max().unwrap_or(0);
+    let (top, ticks) = scale(vmax, rows);
+    let label_w = fmt_count(top).chars().count();
+    let plot_x = at.x + label_w as u16 + 3;
+    let plot_w = at.right().saturating_sub(plot_x);
+    let cell_w = cell_w.max(1);
     let bar_w = if cell_w > 1 { cell_w as usize - 1 } else { 1 };
-    let per_row = (at.width / cell_w.max(1)) as usize;
-    for row in 0..rows {
-        let mut spans = Vec::with_capacity(values.len());
-        for v in values.iter().take(per_row) {
-            let eighths = ((*v as f64 / vmax as f64) * (rows * 8) as f64).round() as i64;
-            let level = (eighths - ((rows - 1 - row) * 8) as i64).clamp(0, 8) as usize;
-            spans.push(Span::styled(glyphs.eighths[level].repeat(bar_w), Style::default().fg(th().accent)));
+    let n = values.len().min((plot_w / cell_w) as usize);
+    let glyphs = crate::tui::ui::glyphs();
+    let ink = Style::default().fg(th().accent);
+    for (row, tick) in ticks.iter().enumerate() {
+        let (label, axis) = match tick {
+            Some(v) => (fmt_count(*v), "┤"),
+            None => (String::new(), "│"),
+        };
+        let mut spans = vec![Span::styled(format!("{label:>label_w$} {axis} "), dim())];
+        for v in &values[..n] {
+            let eighths = ((*v as f64 / top as f64) * (rows as usize * 8) as f64).round() as i64;
+            let level = (eighths - ((rows as usize - 1 - row) * 8) as i64).clamp(0, 8) as usize;
+            spans.push(Span::styled(glyphs.eighths[level].repeat(bar_w), ink));
             if cell_w > 1 {
                 spans.push(Span::raw(" "));
             }
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), Rect { x: at.x, y: at.y + row as u16, width: at.width, height: 1 });
     }
-}
-
-/// The labels under a chart, at their columns, none overlapping the last.
-fn axis(frame: &mut Frame, at: Rect, labels: &[(usize, String)], cell_w: u16) {
-    let mut end = at.x;
+    // The labels with room, left to right; then the baseline, a tick under
+    // each of them.
+    let mut placed: Vec<(u16, &str)> = Vec::new();
+    let mut end = plot_x;
     for (i, text) in labels {
-        let x = at.x + *i as u16 * cell_w;
+        if *i >= n {
+            continue;
+        }
+        let x = plot_x + *i as u16 * cell_w;
         let w = text.chars().count() as u16;
         if x < end || x + w > at.right() {
             continue;
         }
-        frame.render_widget(Paragraph::new(Span::styled(text.clone(), dim())), Rect { x, y: at.y, width: w, height: 1 });
+        placed.push((x, text.as_str()));
         end = x + w + 1;
+    }
+    let base_y = at.y + rows;
+    let mut base = format!("{:>label_w$} ┼─", fmt_count(0));
+    for px in 0..(n as u16 * cell_w).min(plot_w) {
+        base.push(if placed.iter().any(|(x, _)| *x == plot_x + px) { '┴' } else { '─' });
+    }
+    frame.render_widget(Paragraph::new(Span::styled(base, dim())), Rect { x: at.x, y: base_y, width: at.width, height: 1 });
+    for (x, text) in placed {
+        frame.render_widget(Paragraph::new(Span::styled(text.to_string(), dim())), Rect { x, y: base_y + 1, width: text.chars().count() as u16, height: 1 });
     }
 }
 
@@ -1548,9 +1707,14 @@ fn row_words(page: &Page, i: usize) -> Option<String> {
 
 // ── Modals ────────────────────────────────────────────────────────────────
 
-/// `p`: the period list — every period the log has data in, then All time.
+/// The period list, dropped under the control (stats-screen contract,
+/// clause 14): every period the log has data in, then All time, the
+/// current one wearing the `•`, the cursor on the slab; the first play's
+/// date closes the list. A click on a row picks it; a click anywhere else
+/// closes the list, as Esc does. Without a control drawn this frame the
+/// list hangs from the tab row's left.
 fn draw_period_list(frame: &mut Frame, page: &mut Page, area: Rect, cursor: usize) {
-    let options = if page.options.is_empty() { vec![Period::this_month(), Period::all_time()] } else { page.options.clone() };
+    let options = page.choices();
     let foot = page
         .data
         .as_ref()
@@ -1558,20 +1722,36 @@ fn draw_period_list(frame: &mut Frame, page: &mut Page, area: Rect, cursor: usiz
         .and_then(|p| p.earliest.as_deref())
         .and_then(iso_unix)
         .map(|t| t!("sta.period_foot", date = date_long(t, page.offset_at(t))).to_string());
-    let rows_max = area.height.saturating_sub(8).max(3) as usize;
-    let visible = options.len().min(rows_max);
-    let height = 5 + visible as u16 + foot.is_some() as u16;
-    let inner = kit::modal_frame(frame, area, 46, height, th().accent);
-    frame.render_widget(
-        Paragraph::new(Span::styled(t!("sta.period_title").to_string(), Style::default().fg(th().accent).add_modifier(Modifier::BOLD))),
-        Rect { x: inner.x + 1, y: inner.y, width: inner.width.saturating_sub(2), height: 1 },
-    );
-    kit::modal_close_plain(frame, &mut page.ui, inner, Act::PeriodClose);
+    // Anywhere outside the rows closes the list; the rows, registered
+    // after this, win the pointer.
+    page.ui.click(area, Act::PeriodClose);
+
+    let anchor = page.period_at.unwrap_or(Rect { x: area.x + 2, y: area.y + if page.hosted { 1 } else { 2 }, width: 0, height: 1 });
+    let widest = options
+        .iter()
+        .map(|o| o.name.chars().count() + o.detail.as_ref().map_or(0, |d| d.chars().count() + 2))
+        .chain(foot.iter().map(|f| f.chars().count()))
+        .max()
+        .unwrap_or(10);
+    // The frame, the marker's cell and a cell of padding each side.
+    let width = ((widest + 6) as u16).clamp(24, 46).min(area.width.saturating_sub(4));
+    let y = anchor.bottom();
+    let room = area.bottom().saturating_sub(1).saturating_sub(y);
+    let visible = options.len().min(room.saturating_sub(2 + u16::from(foot.is_some())).max(1) as usize);
+    let rect = Rect {
+        x: anchor.x.min(area.right().saturating_sub(width + 2)),
+        y,
+        width,
+        height: visible as u16 + 2 + u16::from(foot.is_some()),
+    };
+    page.ui.overlay(rect);
+    let inner = kit::frame_at(frame, rect, th().accent);
+
     let (first, visible) = kit::table_view(options.len(), Some(cursor), cursor.saturating_sub(visible.saturating_sub(1)), visible);
     for (row, i) in (first..first + visible).enumerate() {
-        let rect = Rect { x: inner.x + 1, y: inner.y + 2 + row as u16, width: inner.width.saturating_sub(2), height: 1 };
+        let rect = Rect { x: inner.x, y: inner.y + row as u16, width: inner.width, height: 1 };
         let on = i == cursor;
-        let hover = !on && page.ui.pointer.is_some_and(|p| rect.contains(p));
+        let hover = !on && page.ui.hovers(rect);
         let base = if on {
             Style::default().fg(th().on_accent).bg(th().accent)
         } else if hover {
@@ -1583,17 +1763,21 @@ fn draw_period_list(frame: &mut Frame, page: &mut Page, area: Rect, cursor: usiz
             frame.render_widget(Paragraph::new(Span::styled(" ".repeat(rect.width as usize), base)), rect);
         }
         let option = &options[i];
-        let mut spans = vec![Span::styled(format!(" {}", option.name), if on || hover { base.add_modifier(Modifier::BOLD) } else { base })];
+        let mark = if option.is(&page.period.period, page.period.offset) { g("•", "*") } else { " " };
+        let mut spans = vec![
+            Span::styled(format!(" {mark} "), if on { base } else { Style::default().fg(th().accent) }),
+            Span::styled(option.name.clone(), if on || hover { base.add_modifier(Modifier::BOLD) } else { base }),
+        ];
         if let Some(detail) = &option.detail {
             spans.push(Span::styled(format!("  {detail}"), if on { base } else { dim() }));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), rect);
-        page.ui.click(rect, Act::PeriodRow(i));
+        page.ui.click(rect, Act::PeriodPick(i));
     }
     if let Some(foot) = foot {
         frame.render_widget(
             Paragraph::new(Span::styled(foot, dim())),
-            Rect { x: inner.x + 2, y: inner.y + 3 + visible as u16, width: inner.width.saturating_sub(3), height: 1 },
+            Rect { x: inner.x + 3, y: inner.y + visible as u16, width: inner.width.saturating_sub(3), height: 1 },
         );
     }
 }
@@ -2364,14 +2548,96 @@ mod tests {
         let buffer = terminal.backend().buffer().clone();
         let row = |y: u16| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>();
         assert!(row(0).trim().is_empty() && row(1).trim().is_empty(), "no header, and the row under the host's bar stays blank");
-        assert!(row(2).contains("388 plays"), "the state line is the body's first row: {}", row(2));
+        assert!(row(2).contains(" Overview ") && row(2).contains(" Top "), "the tabs are the body's first row: {}", row(2));
+        assert!(row(2).trim_end().ends_with("This month ▾ · by plays, or by time on m"), "the Top tab names the period at the row's right: {}", row(2));
         assert!(row(28).contains(" · "), "the cursor row's words take the area's last row: {}", row(28));
         assert!(row(29).trim().is_empty(), "no tips row of its own: {}", row(29));
         assert!(!footer_hint(&p).is_empty(), "the host asks for the hint instead");
     }
 
+    #[test]
+    fn a_chart_reads_on_a_whole_number_scale_and_grows_with_the_screen() {
+        // stats-screen contract, clause 8: once the tallest column reaches
+        // the rows' count every row is the same whole number of plays…
+        assert_eq!(scale(4, 4), (4, vec![Some(4), Some(3), Some(2), Some(1)]));
+        assert_eq!(scale(37, 4), (40, vec![Some(40), Some(30), Some(20), Some(10)]));
+        assert_eq!(scale(5, 4), (8, vec![Some(8), Some(6), Some(4), Some(2)]));
+        assert_eq!(scale(41, 8).0, 48);
+        // …below it the tallest column takes the whole height and only the
+        // whole numbers are labelled.
+        assert_eq!(scale(2, 4), (2, vec![Some(2), None, Some(1), None]));
+        assert_eq!(scale(3, 4), (3, vec![Some(3), None, None, None]));
+        assert_eq!(scale(0, 4), (1, vec![Some(1), None, None, None]));
+        // The gutter: the widest label, a space, the axis, a space.
+        assert_eq!(gutter(4, 4), 4);
+        assert_eq!(gutter(37, 4), 5);
+        assert_eq!(gutter(9_999, 4), 9, "10,000 with its comma");
+        // Clause 10: the rows under the tiles, shared by two charts, three
+        // to eight.
+        assert_eq!(chart_rows(6), 3);
+        assert_eq!(chart_rows(12), 3);
+        assert_eq!(chart_rows(14), 4);
+        assert_eq!(chart_rows(18), 6);
+        assert_eq!(chart_rows(22), 8);
+        assert_eq!(chart_rows(90), 8);
+    }
+
+    #[test]
+    fn the_charts_wear_their_axes_and_take_the_rows_the_screen_has() {
+        // stats-screen contract, clauses 8–11: whole-number ticks down the
+        // left, `0 ┼` at the foot, a baseline with a tick under every
+        // label, the labels under their ticks, no gridlines; three rows of
+        // columns on a 30-row terminal, five on 34, eight on 46 and on 70.
+        let _en = english();
+        let mut p = ready();
+        for (height, rows) in [(30u16, 3usize), (34, 5), (46, 8), (70, 8)] {
+            let frame = draw_at(&mut p, 100, height);
+            let lines: Vec<&str> = frame.lines().collect();
+            let title = lines.iter().position(|l| l.contains("PLAYS PER DAY")).unwrap_or_else(|| panic!("no day chart at {height} rows:\n{frame}"));
+            let base = lines.iter().position(|l| l.contains(" ┼─")).unwrap_or_else(|| panic!("no baseline at {height} rows:\n{frame}"));
+            assert_eq!(base - title - 1, rows, "rows of columns at {height} rows:\n{frame}");
+            let (top, ticks) = scale(41, rows as u16);
+            assert!(lines[title + 1].starts_with(&format!("  {top} ┤ ")), "the top row carries the scale's top:\n{frame}");
+            for (r, tick) in ticks.iter().enumerate() {
+                let want = match tick {
+                    Some(v) => format!("{v} ┤ "),
+                    None => "   │ ".to_string(),
+                };
+                assert!(lines[title + 1 + r].contains(&want), "row {r} at {height} rows:\n{frame}");
+            }
+            assert!(lines[base].starts_with("   0 ┼─┴"), "0 at the foot, the first day's tick right after:\n{frame}");
+            // Every tick has a label starting under it, and no label starts
+            // anywhere else.
+            let ticks_at: Vec<usize> = lines[base].chars().enumerate().filter(|(_, c)| *c == '┴').map(|(x, _)| x).collect();
+            let under: Vec<char> = lines[base + 1].chars().collect();
+            let starts: Vec<usize> = (0..under.len()).filter(|&i| under[i].is_ascii_digit() && (i == 0 || under[i - 1] == ' ')).collect();
+            assert!(ticks_at.len() >= 6, "{frame}");
+            assert_eq!(starts, ticks_at, "labels under their ticks at {height} rows:\n{frame}");
+            assert!(lines[base + 1].trim().starts_with('1') && lines[base + 1].trim().ends_with("30"), "the first and last day:\n{frame}");
+            // The hours chart: the same furniture, the same rows.
+            let hours = lines.iter().position(|l| l.contains("WHEN YOU LISTEN")).unwrap_or_else(|| panic!("no hours chart at {height} rows:\n{frame}"));
+            assert!(lines[hours + 1].starts_with(&format!("  {} ┤ ", scale(47, rows as u16).0)), "{frame}");
+            assert!(lines[hours + 1 + rows].starts_with("   0 ┼─┴") && lines[hours + 2 + rows].trim_start().starts_with("0 "), "{frame}");
+            assert!(lines[hours + 2 + rows].contains("23"), "the last hour:\n{frame}");
+            assert!(!frame.contains('┈') && !frame.contains('╌'), "no gridlines:\n{frame}");
+        }
+        // Short terminals, down to the page's 24-row floor: the cards and
+        // the day chart on three rows, and the hours chart yields — the
+        // state line's two rows went to the body (clause 15).
+        for height in [26u16, 24] {
+            let small = draw_at(&mut p, 80, height);
+            assert_eq!(small.matches('╭').count(), 6, "{small}");
+            assert!(small.contains("PLAYS PER DAY") && small.contains("   0 ┼─┴"), "{small}");
+            assert!(!small.contains("WHEN YOU LISTEN"), "{small}");
+        }
+    }
+
     fn draw(page: &mut Page) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        draw_at(page, 100, 30)
+    }
+
+    fn draw_at(page: &mut Page, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, page)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let mut out = String::new();
@@ -2389,7 +2655,7 @@ mod tests {
     }
 
     #[test]
-    fn boots_loading_then_draws_the_overview_with_its_tiles_charts_and_state_line() {
+    fn boots_loading_then_draws_the_overview_with_its_tiles_and_charts() {
         let _en = english();
         let mut p = start(Client::new("http://home.mstream.example:3000").expect("client"), Some("anna".into()));
         assert!(matches!(p.queued, Some(Op::Load { .. })), "the first load is queued");
@@ -2399,14 +2665,18 @@ mod tests {
         p.busy = None;
         let frame = draw(&mut p);
         assert!(frame.contains("Stats") && frame.contains("home.mstream.example · anna"), "{frame}");
-        assert!(!frame.contains("• This month"), "no state line before the load lands:\n{frame}");
+        assert!(frame.contains(" Overview ") && !frame.contains("PERIOD"), "the tabs, and nothing else, before the load lands:\n{frame}");
 
         let seq = p.seq;
         p.apply(Done::Loaded { seq, result: Ok(loaded(summary(388, 425), Some(periods()))) });
-        let frame = draw(&mut p);
-        assert!(frame.contains("• This month — 388 plays · 31h 12m · 188 tracks · times in UTC"), "{frame}");
-        assert!(frame.contains(" Overview ") && frame.contains(" Top ") && frame.contains(" Recent "), "{frame}");
-        assert!(frame.contains("PERIOD  ‹ This month ›   [ ] step · p list"), "{frame}");
+        let frame = draw_at(&mut p, 100, 32);
+        // No state line (stats-screen contract, clause 15): the tabs are the
+        // body's first row, the Overview's tab row ends with its tabs, and
+        // the period is a dropdown control (clause 14).
+        assert!(!frame.contains("388 plays ·") && !frame.contains("the period's totals"), "{frame}");
+        let rows: Vec<&str> = frame.lines().collect();
+        assert!(rows[1].trim().is_empty() && rows[2].contains(" Overview ") && rows[2].contains(" Top ") && rows[2].trim_end().ends_with("Recent"), "{}", rows[2]);
+        assert!(frame.contains("PERIOD  This month ▾") && !frame.contains('‹') && !frame.contains("p list"), "{frame}");
         assert!(frame.contains("ORIGIN  (•) all   ( ) this server   ( ) peers"), "the log holds peer plays:\n{frame}");
         // The six tiles and their details, against August by its own name.
         let tiles = [("388", "plays", "+12% vs August 2026"), ("31h 12m", "listening time", "+1h 12m vs August 2026"), ("188", "tracks", "14% of the library"),
@@ -2414,11 +2684,33 @@ mod tests {
         for (value, label, detail) in tiles {
             assert!(frame.contains(value) && frame.contains(label) && frame.contains(detail), "tile {label}:\n{frame}");
         }
+        // The tiles are cards (stats-screen contract, clause 13): six
+        // rounded frames, three across filling the column edge to edge,
+        // the two rows stacked frame to frame, the values a cell in.
+        assert_eq!(frame.matches('╭').count(), 6, "{frame}");
+        let lids: Vec<&str> = frame.lines().filter(|l| l.contains('╭')).collect();
+        let lid = lids[0].trim_end();
+        assert!(lid.starts_with("  ╭") && lid.ends_with('╮') && lid.chars().count() == 98, "the cards fill the column: {lid:?}");
+        assert!(lid.matches('╮').count() == 3 && lid.contains("╮ ╭"), "one cell between the cards: {lid:?}");
+        let values = row(&frame, "│ 388 ");
+        assert!(values.contains("│ 31h 12m ") && values.contains("│ 188 ") && values.trim_end().ends_with('│'), "{values}");
+        assert!(row(&frame, "│ 37 ").contains("│ 6 days ") && row(&frame, "│ 37 ").contains("│ 42 "), "{frame}");
+        let lines: Vec<&str> = frame.lines().collect();
+        let first_lid = lines.iter().position(|l| l.contains('╭')).unwrap();
+        assert!(lines[first_lid - 1].contains("PERIOD"), "the top frame sits under the controls:\n{frame}");
+        assert!(lines[first_lid + 4].contains('╰') && lines[first_lid + 5].contains('╭') && lines[first_lid + 9].contains('╰'), "{frame}");
+        assert!(lines[first_lid + 10].contains("PLAYS PER DAY"), "the chart follows the second row of cards:\n{frame}");
         assert!(row(&frame, "PLAYS PER DAY").contains("most on Tue 8 · 41 plays, 2h 10m"), "{frame}");
         assert!(frame.contains("WHEN YOU LISTEN  most around 21:00, Sundays"), "{frame}");
         assert!(frame.contains("WHERE THE TRACKS LIVE"), "{frame}");
-        assert!(row(&frame, "this server   ▰").contains("▰▰▰▰▰▰▰▰▰▱  374 plays · 28h 40m"), "{frame}");
-        assert!(row(&frame, "peers’ tracks").contains("▰▱▱▱▱▱▱▱▱▱  38 plays · 2h 32m"), "{frame}");
+        // At 100 columns the split beside the hours chart is short of its
+        // ten cells and keeps its words on a shorter bar (stats-screen
+        // contract, clause 12); ten columns wider, the bar is whole.
+        assert!(row(&frame, "this server   ▰").contains("▰▰▰▰▰  374 plays · 28h 40m"), "{frame}");
+        assert!(row(&frame, "peers’ tracks").contains("▱▱▱▱▱  38 plays · 2h 32m"), "{frame}");
+        let wide = draw_at(&mut p, 110, 32);
+        assert!(row(&wide, "this server   ▰").contains("▰▰▰▰▰▰▰▰▰▱  374 plays · 28h 40m"), "{wide}");
+        assert!(row(&wide, "peers’ tracks").contains("▰▱▱▱▱▱▱▱▱▱  38 plays · 2h 32m"), "{wide}");
         assert!(frame.contains("█"), "the tallest day is a full column:\n{frame}");
         assert!(frame.contains("←→ tab · [ ] period · p pick a period · o origin · q quit"), "{frame}");
         // Every period the fixture names, in the webapp's order, then All time.
@@ -2429,30 +2721,52 @@ mod tests {
     }
 
     #[test]
-    fn the_period_steps_on_brackets_lists_on_p_and_a_new_choice_reloads() {
+    fn the_period_steps_on_brackets_and_a_change_keeps_the_page_until_the_new_numbers_land() {
         let _en = english();
         let mut p = ready();
         let seq = p.seq;
         press(&mut p, KeyCode::Char('['));
         assert_eq!(p.period.name, "Last week");
-        assert!(p.data.is_none(), "the old numbers go before the new arrive");
         assert!(matches!(&p.queued, Some(Op::Load { seq: s, period, .. }) if *s > seq && period.period == "week" && period.offset == -1), "{:?}", p.queued);
         assert_eq!(p.busy.as_deref(), Some("loading your listening…"));
+        // stats-screen contract, clause 16: the page keeps this month's
+        // numbers under the new name while the read is out — nothing
+        // blinks — and the tiles still compare against the SHOWN period's
+        // predecessor; only the log's paging cursor and the row cursor go.
+        assert!(p.data.is_some() && !p.history.is_empty() && !p.top.is_empty(), "the old numbers stand");
+        assert!(p.next.is_none() && p.sel.is_none());
+        assert_eq!(p.shown.name, "This month");
         let frame = draw(&mut p);
+        assert!(frame.contains("PERIOD  Last week ▾"), "{frame}");
+        assert!(row(&frame, "│ 388 ").contains("│ 31h 12m "), "the tiles keep their numbers:\n{frame}");
+        assert!(frame.contains("+12% vs August 2026"), "{frame}");
         assert!(frame.contains("loading your listening…"), "{frame}");
 
-        // An answer to the older question is dropped.
+        // An answer to the older question is dropped; the live one lands.
         p.apply(Done::Loaded { seq, result: Ok(loaded(summary(1, 1), Some(periods()))) });
-        assert!(p.data.is_none());
+        assert_eq!(p.shown.name, "This month");
+        assert!(row(&draw(&mut p), "│ 388 ").contains("│ 31h 12m "));
         let live = p.seq;
         p.apply(Done::Loaded { seq: live, result: Ok(loaded(summary(120, 130), Some(periods()))) });
-        assert!(draw(&mut p).contains("• Last week — 120 plays"));
+        assert_eq!(p.shown.name, "Last week");
+        let frame = draw(&mut p);
+        assert!(frame.contains("│ 120 ") && frame.contains("vs last week"), "{frame}");
+        assert!(!frame.contains("loading your listening…"), "{frame}");
 
+        // p drops the list under the control (clause 14): the current
+        // period wears the •, the cursor starts on it, the first play's
+        // date closes the list; no title bar, no [X]. Esc keeps, Enter
+        // picks, p again closes.
         press(&mut p, KeyCode::Char('p'));
         assert_eq!(p.modal, Modal::Period(1));
         let frame = draw(&mut p);
-        assert!(frame.contains("Period") && frame.contains("[X]"), "{frame}");
-        assert!(frame.contains("Last week  Week of 2026-08-31"), "{frame}");
+        let lines: Vec<&str> = frame.lines().collect();
+        let ctl = lines.iter().position(|l| l.contains("PERIOD  Last week ▾")).unwrap();
+        let name_x = lines[ctl].find("Last week").unwrap();
+        assert_eq!(lines[ctl + 1].chars().nth(name_x), Some('╭'), "the list hangs from the name:\n{frame}");
+        assert!(lines[ctl + 2].contains("   This week  Week of 2026-09-07"), "{frame}");
+        assert!(lines[ctl + 3].contains(" • Last week  Week of 2026-08-31"), "{frame}");
+        assert!(!frame.contains("[X]"), "{frame}");
         assert!(frame.contains("first play 3 March 2026"), "{frame}");
         assert!(frame.contains("↑↓ pick · Enter choose · Esc keep Last week"), "{frame}");
         press(&mut p, KeyCode::Down);
@@ -2464,14 +2778,69 @@ mod tests {
         press(&mut p, KeyCode::Down);
         press(&mut p, KeyCode::Down);
         press(&mut p, KeyCode::Enter);
+        assert_eq!(p.modal, Modal::None);
         assert_eq!(p.period.name, "Last month");
         assert!(matches!(&p.queued, Some(Op::Load { period, .. }) if period.is("month", -1)));
+        press(&mut p, KeyCode::Char('p'));
+        assert!(matches!(p.modal, Modal::Period(_)));
+        press(&mut p, KeyCode::Char('p'));
+        assert_eq!(p.modal, Modal::None);
         // The last option is All time; stepping past it stays there.
         for _ in 0..20 {
             press(&mut p, KeyCode::Char(']'));
         }
         assert_eq!(p.period.name, "All time");
         assert!(matches!(&p.queued, Some(Op::Load { period, .. }) if period.period == "all"));
+    }
+
+    #[test]
+    fn the_period_control_and_its_list_answer_the_pointer_on_every_tab() {
+        // stats-screen contract, clause 14: a click on the name drops the
+        // list; a row picks; anywhere else closes. On the Top and Recent
+        // tabs the name leads the tab row's note and is the same control.
+        let _en = english();
+        let mut p = ready();
+        let frame = draw(&mut p);
+        let lines: Vec<&str> = frame.lines().collect();
+        let ctl_y = lines.iter().position(|l| l.contains("PERIOD  This month ▾")).unwrap() as u16;
+        let name_x = lines[ctl_y as usize].find("This month").unwrap() as u16;
+        assert_eq!(p.ui.hit(Position { x: name_x + 3, y: ctl_y }), Some(Act::PeriodList));
+        p.act(Act::PeriodList);
+        assert_eq!(p.modal, Modal::Period(2));
+        let frame = draw(&mut p);
+        let lines: Vec<&str> = frame.lines().collect();
+        assert_eq!(lines[ctl_y as usize + 1].chars().nth(name_x as usize), Some('╭'), "the list hangs from the name:\n{frame}");
+        let row_y = lines.iter().position(|l| l.contains("Last month  August 2026")).unwrap() as u16;
+        assert_eq!(p.ui.hit(Position { x: name_x + 5, y: row_y }), Some(Act::PeriodPick(3)));
+        assert_eq!(p.ui.hit(Position { x: 90, y: row_y }), Some(Act::PeriodClose), "beside the list the page only closes it");
+        p.act(Act::PeriodPick(3));
+        assert_eq!(p.modal, Modal::None);
+        assert_eq!(p.period.name, "Last month");
+        assert!(matches!(&p.queued, Some(Op::Load { period, .. }) if period.is("month", -1)));
+
+        // The Top tab: the name leads the note at the tab row's right, the
+        // list drops from it and keeps inside the column.
+        p.queued = None;
+        p.busy = None;
+        press(&mut p, KeyCode::Right);
+        let frame = draw(&mut p);
+        let tabs = row(&frame, " Overview ");
+        assert!(tabs.trim_end().ends_with("Last month ▾ · by plays, or by time on m"), "{tabs}");
+        let x = tabs.find("Last month ▾").unwrap() as u16;
+        assert_eq!(p.ui.hit(Position { x: x + 2, y: 2 }), Some(Act::PeriodList));
+        p.act(Act::PeriodList);
+        let frame = draw(&mut p);
+        let lines: Vec<&str> = frame.lines().collect();
+        let lid = lines[3].trim_end();
+        assert!(lid.contains('╭') && lid.ends_with('╮'), "the list drops under the tab row:\n{frame}");
+        assert!(lid.find('╭').unwrap() <= x as usize && lid.chars().count() <= 98, "{frame}");
+        assert!(frame.contains(" • Last month  August 2026"), "{frame}");
+        p.act(Act::PeriodClose);
+
+        // The Recent tab, on a machine without a zone, says so after its note.
+        press(&mut p, KeyCode::Right);
+        let frame = draw(&mut p);
+        assert!(row(&frame, " Overview ").trim_end().ends_with("Last month ▾ · the log, newest first · times in UTC"), "{frame}");
     }
 
     #[test]
@@ -2674,10 +3043,9 @@ mod tests {
         p.period = Period { period: "month".into(), offset: -1, name: "Last month".into(), detail: Some("August 2026".into()) };
         p.apply(Done::Loaded { seq: live, result: Ok(loaded(nothing, Some(periods()))) });
         let frame = draw(&mut p);
-        assert!(frame.contains("• Last month — no plays started in this period"), "{frame}");
         assert!(frame.contains("Nothing in Last month"), "{frame}");
         assert!(frame.contains("Your log begins on 3 March 2026 — [ ] walks the periods, p lists them."), "{frame}");
-        assert!(frame.contains("PERIOD  ‹ Last month ›"), "{frame}");
+        assert!(frame.contains("PERIOD  Last month ▾"), "{frame}");
 
         // The default period with nothing in it, on a log that has data
         // elsewhere: the webapp's move, the first period with data.

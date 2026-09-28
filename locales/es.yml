@@ -1147,10 +1147,8 @@ sta:
   tab_overview: "Resumen"
   tab_top: "Top"
   tab_recent: "Recientes"
-  note_overview: "los totales del periodo"
   note_top: "por reproducciones, o por tiempo con m"
   note_recent: "el registro, lo más nuevo primero"
-  facts: " — %{plays} · %{time} · %{tracks} · %{zone}"
   zone_local: "horas en tu zona"
   zone_utc: "horas en UTC"
   empty_state: "• aún sin reproducciones"
@@ -1158,14 +1156,12 @@ sta:
   empty_1: "El reproductor web informa de cada pista al terminar, y la app móvil envía su historial cuando"
   empty_2: "está en línea. Las apps antiguas que aún hacen scrobble a los 30 segundos también cuentan."
   empty_prov: "Reproducciones que esta cuenta informa a través de este servidor · %{zone}"
-  nothing_state: " — no empezó ninguna reproducción en este periodo"
   nothing_title: "Nada en %{period}"
   nothing_hint: "Tu registro empieza el %{date} — [ ] recorre los periodos, p los lista."
   nothing_hint_plain: "[ ] recorre los periodos, p los lista."
   noapi_state: "• sin API de estadísticas"
   noapi_detail: " — este servidor aún no la tiene; llegó con mStream 6.27"
   ctl_period: "PERIODO"
-  ctl_step: "[ ] cambiar · p lista"
   ctl_origin: "ORIGEN"
   origin_all: "todo"
   origin_local: "este servidor"
@@ -1325,7 +1321,6 @@ sta:
 gui:
   top:
     library: "Biblioteca"
-    now: "Reproduciendo"
     viz: "Visualizador"
     viz_tip: "Abrir el visualizador en su propia ventana — V"
   nav:
@@ -1733,6 +1728,8 @@ gui:
     back_tip: "Volver a Ajustes — Esc"
   stats:
     no_session: "sin sesión — conéctate a un servidor y su registro de escucha aparecerá aquí"
+  mini:
+    enlarge: "Agranda el terminal para ver el reproductor completo"
   viz:
     failed: "no se pudo abrir la ventana del visualizador — %{why}"
     prev_tip: "Preset anterior — ←"

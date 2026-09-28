@@ -20,8 +20,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 #[cfg(not(target_arch = "wasm32"))]
-use ratatui::DefaultTerminal;
-#[cfg(not(target_arch = "wasm32"))]
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEventKind,
     MouseButton, MouseEventKind,
@@ -519,7 +517,9 @@ pub fn run(server: Option<String>, token: Option<String>, bundled: Option<String
 
     // The player's palette is its interface: not subject to NO_COLOR.
     crate::console::keep_colors();
-    let mut terminal = ratatui::init();
+    // ratatui's init, with each frame written whole and shown at once —
+    // a resize's clear never painted on its own (`kit::frames`).
+    let mut terminal = crate::kit::frames::init();
     // After init and before anything is drawn — not because the query
     // needs raw mode (the crate flips termios itself; graphics-probe calls
     // it cooked and works), but because the alternate screen is already up,
@@ -630,7 +630,7 @@ pub(crate) fn remember(app: &App) {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn event_loop(
-    terminal: &mut DefaultTerminal,
+    terminal: &mut crate::kit::frames::PageTerminal,
     app: &mut App,
     events: &Receiver<Event>,
     audio_tx: &Sender<AudioCmd>,

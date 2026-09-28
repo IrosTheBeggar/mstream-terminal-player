@@ -1147,10 +1147,8 @@ sta:
   tab_overview: "Übersicht"
   tab_top: "Top"
   tab_recent: "Zuletzt"
-  note_overview: "die Summen des Zeitraums"
   note_top: "nach Wiedergaben, oder mit m nach Zeit"
   note_recent: "das Protokoll, neueste zuerst"
-  facts: " — %{plays} · %{time} · %{tracks} · %{zone}"
   zone_local: "Zeiten in deiner Zone"
   zone_utc: "Zeiten in UTC"
   empty_state: "• noch keine Wiedergaben"
@@ -1158,14 +1156,12 @@ sta:
   empty_1: "Der Web-Player meldet jeden Titel, wenn er endet, und die Mobile-App schickt ihren Verlauf, sobald"
   empty_2: "sie online ist. Ältere Apps, die noch nach 30 Sekunden scrobbeln, zählen auch."
   empty_prov: "Wiedergaben, die dieses Konto über diesen Server meldet · %{zone}"
-  nothing_state: " — in diesem Zeitraum wurde nichts gestartet"
   nothing_title: "Nichts in %{period}"
   nothing_hint: "Dein Protokoll beginnt am %{date} — [ ] geht die Zeiträume durch, p listet sie."
   nothing_hint_plain: "[ ] geht die Zeiträume durch, p listet sie."
   noapi_state: "• keine Stats-API"
   noapi_detail: " — dieser Server hat sie noch nicht; sie kam mit mStream 6.27"
   ctl_period: "ZEITRAUM"
-  ctl_step: "[ ] weiter · p Liste"
   ctl_origin: "HERKUNFT"
   origin_all: "alle"
   origin_local: "dieser Server"
@@ -1325,7 +1321,6 @@ sta:
 gui:
   top:
     library: "Bibliothek"
-    now: "Jetzt läuft"
     viz: "Visualizer"
     viz_tip: "Visualizer in eigenem Fenster öffnen — V"
   nav:
@@ -1733,6 +1728,8 @@ gui:
     back_tip: "Zurück zu den Einstellungen — Esc"
   stats:
     no_session: "keine Sitzung – mit einem Server verbinden, dann erscheint hier sein Hörprotokoll"
+  mini:
+    enlarge: "Für den vollständigen Player das Terminal vergrößern"
   viz:
     failed: "Das Visualizer-Fenster ließ sich nicht öffnen – %{why}"
     prev_tip: "Vorheriges Preset — ←"

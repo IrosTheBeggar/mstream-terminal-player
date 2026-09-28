@@ -1025,6 +1025,7 @@ mod feasibility {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::gui::cover::ENCODE_BUDGET;
     use crate::tui::art::Art;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1127,24 +1128,40 @@ mod feasibility {
             // Frames run until every slot has upgraded to pixels. Each one
             // is bounded by the budget plus at most ONE encode that began
             // inside it — that overshoot is the price of not asking the
-            // encoder how long it will take before starting it.
+            // encoder how long it will take before starting it. So what is
+            // checked is when each encode began, not how long a frame took:
+            // a debug-build sixel encode is ~50 ms on the dev Mac and ~750
+            // ms on a shared CI runner with the suite running beside it, so
+            // no fixed ceiling on the frame fits both (a 700 ms one failed
+            // there, 2026-09-27 twice, while a whole page encoded at once
+            // here stays under it).
             let mut frames = 0;
             let mut worst = Duration::ZERO;
             while slots.iter().any(|slot| slot.key.is_none()) {
                 frames += 1;
                 assert!(frames <= 30, "{protocol:?}: covers never all upgraded");
                 let start = Instant::now();
+                let mut late = Vec::new();
                 terminal
                     .draw(|frame| {
                         let pace = Pace::frame();
+                        // No earlier than the pace's own start, so an
+                        // encode the pace allowed began before this clock
+                        // reached the budget too.
+                        let opened = Instant::now();
                         for ((slot, art), rect) in
                             slots.iter_mut().zip(&arts).zip(grid_rects())
                         {
+                            let (encodes, at) = (slot.encodes(), opened.elapsed());
                             slot.draw_paced(frame, rect, art, &pace);
+                            if slot.encodes() > encodes && at >= ENCODE_BUDGET {
+                                late.push(at);
+                            }
                         }
                     })
                     .unwrap();
                 worst = worst.max(start.elapsed());
+                assert!(late.is_empty(), "{protocol:?}: frame {frames} began encodes at {late:?}");
             }
 
             let start = Instant::now();
@@ -1160,9 +1177,6 @@ mod feasibility {
             eprintln!(
                 "{protocol:?} grid: {frames} frames to upgrade, worst {worst:?}, cached {cached:?}"
             );
-            // The budget plus one debug-build sixel encode, with headroom
-            // for shared hardware: the old single-frame cost was 2 s.
-            assert!(worst.as_millis() < 700, "{protocol:?}: a frame took {worst:?}");
             assert!(cached < worst, "{protocol:?}: the per-slot caches saved nothing");
         }
     }

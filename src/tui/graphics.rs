@@ -61,6 +61,11 @@ mod native {
         /// 10x20 must not drift toward whatever terminal happens to be
         /// running the suite.
         adaptive: bool,
+        /// Whether a kitty transmission outlives a resize here — see
+        /// [`images_outlive_resize`]. When it does, a resize keeps the
+        /// cached picture, and a wall of covers is not sent again for
+        /// every cell a window edge is dragged across.
+        images_outlive_resize: bool,
         /// When the window-size ioctl was last consulted. One cover per
         /// frame was this module's design point; the GUI's album wall
         /// draws fifteen, and re-asking for every one of them was
@@ -175,6 +180,9 @@ mod native {
                     return Graphics {
                         picker: Some(picker),
                         adaptive: true,
+                        images_outlive_resize: images_outlive_resize(protocol, |var| {
+                            std::env::var(var).ok()
+                        }),
                         ..Graphics::disabled()
                     };
                 }
@@ -223,7 +231,15 @@ mod native {
                 picker.set_protocol_type(ProtocolType::Iterm2);
             }
 
-            let graphics = Graphics { picker, adaptive: true, ..Graphics::disabled() };
+            let outlive = picker.as_ref().is_some_and(|p| {
+                images_outlive_resize(p.protocol_type(), |var| std::env::var(var).ok())
+            });
+            let graphics = Graphics {
+                picker,
+                adaptive: true,
+                images_outlive_resize: outlive,
+                ..Graphics::disabled()
+            };
             // One line in the flight recorder: which way this terminal
             // answered is the first fact every cover-looks-wrong report
             // needs, and it is unknowable after the fact.
@@ -263,6 +279,7 @@ mod native {
             Graphics {
                 picker: self.picker.clone(),
                 adaptive: self.adaptive,
+                images_outlive_resize: self.images_outlive_resize,
                 ..Graphics::disabled()
             }
         }
@@ -275,6 +292,7 @@ mod native {
                 cached: None,
                 refused: None,
                 adaptive: false,
+                images_outlive_resize: false,
                 font_checked: std::time::Instant::now(),
                 #[cfg(test)]
                 decodes: std::cell::Cell::new(0),
@@ -309,33 +327,21 @@ mod native {
             }
         }
 
-        /// Draw `art` centred in `area`, reporting whether it managed to.
-        /// `false` is the caller's cue to draw the mosaic instead, and is
-        /// returned for every reason there might be: no picker, no source
-        /// bytes, bytes that won't decode, an area too small to hold a
-        /// picture, or an encoder that refused.
-        ///
-        /// What gets re-encoded, and when, is the whole performance story.
-        /// Encoding a cover costs about 10 ms on kitty and about 165 ms on
-        /// sixel, and it happens here, at render time, on the thread the
-        /// keyboard is waiting on. So the cache turns on the *fitted size*
-        /// rather than on the area: a square cover in a wide panel is
-        /// bounded by the panel's height, and every column added or removed
-        /// leaves the picture exactly the same size. Keyed on the area, a
-        /// slow drag of a terminal edge would re-encode on every cell
-        /// crossed; keyed on the size, most of those cost the arithmetic
-        /// below and nothing else.
-        /// The terminal behind this session was replaced — a tmux reattach
-        /// puts a fresh kitty instance behind the same tty, and the image
-        /// store the cached transmission lives in went with the old one.
-        /// Kitty is the one protocol that transmits pixels once and then
-        /// draws by reference; sixel and iTerm2 carry their pixels in the
-        /// cells and survive a full repaint on their own. Called on every
-        /// terminal resize, which a reattach almost always delivers; a
-        /// same-size reattach stays blank only until the next resize or
-        /// track change.
+        /// The terminal may have been replaced — a tmux reattach puts a
+        /// fresh kitty instance behind the same tty, and the image store
+        /// the cached transmission lives in went with the old one. Kitty is
+        /// the one protocol that transmits pixels once and then draws by
+        /// reference; sixel and iTerm2 carry their pixels in the cells and
+        /// survive a full repaint on their own. Called on every terminal
+        /// resize, which a reattach almost always delivers; a same-size
+        /// reattach stays blank only until the next resize or track change.
+        /// Where no reattach can happen — kitty itself, no multiplexer — the
+        /// transmission stays: sending a wall of covers again on every
+        /// resize was most of what a resize cost there.
         pub fn refresh(&mut self) {
-            if self.picker.as_ref().is_some_and(|p| p.protocol_type() == ProtocolType::Kitty) {
+            let kitty =
+                self.picker.as_ref().is_some_and(|p| p.protocol_type() == ProtocolType::Kitty);
+            if kitty && !self.images_outlive_resize {
                 self.cached = None;
             }
             // A resize is what the half-second font check exists to catch:
@@ -394,6 +400,22 @@ mod native {
             );
         }
 
+        /// Draw `art` centred in `area`, reporting whether it managed to.
+        /// `false` is the caller's cue to draw the mosaic instead, and is
+        /// returned for every reason there might be: no picker, no source
+        /// bytes, bytes that won't decode, an area too small to hold a
+        /// picture, or an encoder that refused.
+        ///
+        /// What gets re-encoded, and when, is the whole performance story.
+        /// Encoding a cover costs about 10 ms on kitty and about 165 ms on
+        /// sixel, and it happens here, at render time, on the thread the
+        /// keyboard is waiting on. So the cache turns on the *fitted size*
+        /// rather than on the area: a square cover in a wide panel is
+        /// bounded by the panel's height, and every column added or removed
+        /// leaves the picture exactly the same size. Keyed on the area, a
+        /// slow drag of a terminal edge would re-encode on every cell
+        /// crossed; keyed on the size, most of those cost the arithmetic
+        /// below and nothing else.
         ///
         /// Nor does the cache turn on the area's place: an encoded cover
         /// draws anywhere for free — kitty by reference to what it
@@ -555,14 +577,43 @@ mod native {
         env("TERM_PROGRAM").is_some_and(|v| v == "Apple_Terminal")
     }
 
+    /// Whether a multiplexer — tmux, zellij, or screen — sits between us
+    /// and the terminal: the queries were answered by it, the outer
+    /// terminal's variables may be stale, and a reattach can put another
+    /// terminal behind the same tty.
+    fn multiplexed(env: &impl Fn(&str) -> Option<String>) -> bool {
+        ["TMUX", "ZELLIJ", "STY"].iter().any(|var| env(var).is_some())
+    }
+
+    /// Whether a kitty transmission outlives a terminal resize. In kitty
+    /// itself it does: a resize and the full-screen clear ratatui sends
+    /// with one pass over the virtual placements the unicode-placeholder
+    /// form draws with, and an image is freed only once its last placement
+    /// goes (kitty's graphics.c, `clear_filter_func` and `grman_resize`).
+    /// Under a multiplexer a reattach can swap the terminal out, and other
+    /// terminals that speak the protocol clear by rules of their own — both
+    /// keep having the picture sent again.
+    ///
+    /// kitty sets TERM itself, and ssh carries it. KITTY_WINDOW_ID alone is
+    /// weaker: a terminal started from a kitty shell inherits it, so it
+    /// counts only while nothing claims TERM_PROGRAM, which such a
+    /// terminal sets to its own name. Guessed wrong, this way costs a
+    /// resize what it cost before; the other way, blank covers.
+    fn images_outlive_resize(
+        protocol: ProtocolType,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> bool {
+        let kitty = env("TERM").is_some_and(|t| t == "xterm-kitty")
+            || (env("KITTY_WINDOW_ID").is_some() && env("TERM_PROGRAM").is_none());
+        protocol == ProtocolType::Kitty && kitty && !multiplexed(&env)
+    }
+
     fn demote_for_iterm2(
         protocol: ProtocolType,
         env: impl Fn(&str) -> Option<String>,
     ) -> bool {
         matches!(protocol, ProtocolType::Kitty | ProtocolType::Sixel)
-            && env("TMUX").is_none()
-            && env("ZELLIJ").is_none()
-            && env("STY").is_none()
+            && !multiplexed(&env)
             && ["TERM_PROGRAM", "LC_TERMINAL"]
                 .iter()
                 .any(|var| env(var).is_some_and(|v| v.contains("iTerm")))
@@ -804,6 +855,69 @@ mod native {
             let line = Graphics::disabled().diagnostics();
             assert!(line.contains("no pixel protocol"), "{line}");
             assert!(!line.contains("cell"), "{line}");
+        }
+
+        #[test]
+        fn only_kitty_itself_keeps_its_pictures_through_a_resize() {
+            let kitty = |var: &str| match var {
+                "KITTY_WINDOW_ID" => Some("1".to_string()),
+                _ => None,
+            };
+            assert!(images_outlive_resize(ProtocolType::Kitty, kitty));
+            let by_term = |var: &str| match var {
+                "TERM" => Some("xterm-kitty".to_string()),
+                _ => None,
+            };
+            assert!(
+                images_outlive_resize(ProtocolType::Kitty, by_term),
+                "over ssh, TERM is what says so"
+            );
+            // A reattach can put another terminal behind the tty.
+            for mux in ["TMUX", "ZELLIJ", "STY"] {
+                let inside = |var: &str| match var {
+                    "KITTY_WINDOW_ID" => Some("1".to_string()),
+                    v if v == mux => Some("1".to_string()),
+                    _ => None,
+                };
+                assert!(!images_outlive_resize(ProtocolType::Kitty, inside), "{mux}");
+            }
+            // Another terminal speaking kitty's protocol clears by its own
+            // rules; sixel and iTerm2 carry their pixels in the cells.
+            let ghostty = |var: &str| match var {
+                "TERM" => Some("xterm-ghostty".to_string()),
+                "TERM_PROGRAM" => Some("ghostty".to_string()),
+                _ => None,
+            };
+            assert!(!images_outlive_resize(ProtocolType::Kitty, ghostty));
+            // One started from a kitty shell inherits KITTY_WINDOW_ID.
+            let nested = |var: &str| match var {
+                "KITTY_WINDOW_ID" => Some("1".to_string()),
+                "TERM" => Some("wezterm".to_string()),
+                "TERM_PROGRAM" => Some("WezTerm".to_string()),
+                _ => None,
+            };
+            assert!(!images_outlive_resize(ProtocolType::Kitty, nested));
+            assert!(!images_outlive_resize(ProtocolType::Sixel, kitty));
+            assert!(!images_outlive_resize(ProtocolType::Iterm2, kitty));
+        }
+
+        #[test]
+        fn a_resize_sends_kittys_picture_again_only_where_a_reattach_could_lose_it() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            let art = a_cover(64);
+            for (outlive, encodes) in [(true, 1), (false, 2)] {
+                let mut graphics = Graphics {
+                    images_outlive_resize: outlive,
+                    ..Graphics::forced(ProtocolType::Kitty)
+                };
+                let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+                terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), &art))).unwrap();
+                graphics.refresh();
+                terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), &art))).unwrap();
+                assert_eq!(graphics.encodes(), encodes, "outlives a resize: {outlive}");
+            }
         }
 
         #[test]

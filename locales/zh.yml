@@ -1147,10 +1147,8 @@ sta:
   tab_overview: "概览"
   tab_top: "排行"
   tab_recent: "最近"
-  note_overview: "本时段的总计"
   note_top: "按播放次数，或按 m 切换为时长"
   note_recent: "记录，最新在前"
-  facts: " — %{plays} · %{time} · %{tracks} · %{zone}"
   zone_local: "时间为你的时区"
   zone_utc: "时间为 UTC"
   empty_state: "• 还没有播放"
@@ -1158,14 +1156,12 @@ sta:
   empty_1: "网页播放器在每首曲目结束时上报，移动应用在联网时发送其历史。"
   empty_2: "仍在 30 秒时 scrobble 的旧应用也算在内。"
   empty_prov: "此账户通过此服务器上报的播放 · %{zone}"
-  nothing_state: " — 本时段没有开始的播放"
   nothing_title: "%{period}没有内容"
   nothing_hint: "你的记录始于 %{date} — [ ] 切换时段，p 列出时段。"
   nothing_hint_plain: "[ ] 切换时段，p 列出时段。"
   noapi_state: "• 无统计 API"
   noapi_detail: " — 此服务器还没有它；它随 mStream 6.27 到来"
   ctl_period: "时段"
-  ctl_step: "[ ] 切换 · p 列表"
   ctl_origin: "来源"
   origin_all: "全部"
   origin_local: "本服务器"
@@ -1325,7 +1321,6 @@ sta:
 gui:
   top:
     library: "音乐库"
-    now: "正在播放"
     viz: "可视化"
     viz_tip: "在独立窗口中打开可视化 — V"
   nav:
@@ -1733,6 +1728,8 @@ gui:
     back_tip: "返回设置 — Esc"
   stats:
     no_session: "没有会话 — 连接服务器后，收听记录会显示在这里"
+  mini:
+    enlarge: "放大终端即可使用完整播放器"
   viz:
     failed: "无法打开可视化窗口 — %{why}"
     prev_tip: "上一个预设 — ←"

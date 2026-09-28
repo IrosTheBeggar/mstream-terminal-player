@@ -24,6 +24,7 @@ mod actions;
 mod cover;
 mod dj;
 mod library;
+mod mini;
 mod now;
 mod playlists;
 mod queue;
@@ -62,8 +63,8 @@ use crate::tui::{self, worker};
 use bar::{BarView, Now};
 
 /// Below this the layout has nowhere honest to put the bar. The installer's
-/// own window is 100×30; anyone smaller is asked for more room, like the
-/// wizard.
+/// own window is 100×30; anyone smaller gets the mini player — the cover
+/// and the transport, and a line asking for more room (`mini`).
 const MIN_W: u16 = 100;
 const MIN_H: u16 = 24;
 
@@ -101,7 +102,8 @@ pub(crate) enum Act {
     Chip(usize),
     /// The query card: start (or resume) editing the search text.
     EditQuery,
-    /// A top-bar tab: the Library, or Now Playing.
+    /// A screen: the Library or Stats from their top-bar tabs, Now Playing
+    /// from `0` — it has no tab.
     Screen(Screen),
     /// The top bar's Visualizer item: open the window, or bring it to the
     /// front (docs/ux-contracts/visualizer-window.md).
@@ -330,9 +332,10 @@ impl List {
     }
 }
 
-/// The top bar's two screens: the Library — the nav column and its rooms —
-/// and Now Playing, the playing track large. The queue panel and the bar
-/// stand under both.
+/// The screens: the Library — the nav column and its rooms, with the queue
+/// panel and the bar under it — and Now Playing, the TUI's view of the
+/// playing track, which opens on `0` and has no top-bar tab of its own
+/// (hidden 2026-09-27; the Library tab is the way back).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Screen {
     Library,
@@ -1135,15 +1138,13 @@ fn demo_now() -> Now {
 /// One run of text at a cell, clipped at the frame's edge — written into
 /// the buffer directly: the hub's primitive runs a few hundred times a
 /// frame, and a `Paragraph` per call was a handful of allocations each.
-/// The top bar's tabs at the left: the kit's tab slab for the screen that
-/// is up, dim text for the other, bright under the pointer.
+/// The top bar's tabs at the left — Library, Stats: the kit's tab slab for
+/// the screen that is up, dim text for the other, bright under the
+/// pointer. Now Playing has no tab (it opens on `0`), so while it is up no
+/// tab wears the slab.
 fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
     let mut x = 1;
-    let tabs = [
-        (Screen::Library, t!("gui.top.library")),
-        (Screen::NowPlaying, t!("gui.top.now")),
-        (Screen::Stats, t!("sta.title")),
-    ];
+    let tabs = [(Screen::Library, t!("gui.top.library")), (Screen::Stats, t!("sta.title"))];
     for (screen, label) in tabs {
         let text = format!(" {label} ");
         let rect = Rect { x, y: 0, width: text.chars().count() as u16, height: 1 };
@@ -1304,8 +1305,10 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             area,
         );
     }
+    // Too small for the screens: the mini player — the cover, the
+    // transport, and a line asking for room (mini-player contract).
     if area.width < MIN_W || area.height < MIN_H {
-        frame.render_widget(Paragraph::new(t!("resize").to_string()).style(dim()), area);
+        mini::draw(frame, gui, area);
         return;
     }
     // The size the hit zones outside a draw reason from — a drawable one.
@@ -2471,7 +2474,7 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn event_loop(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut crate::kit::frames::PageTerminal,
     gui: &mut Gui,
     mouse_on: bool,
     event_rx: &Receiver<Event>,
@@ -2965,7 +2968,9 @@ pub fn run(
     // wizard's ordering, for the wizard's reasons.
     let claim = theme::acquire_ground();
     let ground_guard = GroundGuard;
-    let mut terminal = ratatui::init();
+    // ratatui's init, with each frame written whole and shown at once —
+    // a resize's clear never painted on its own (`kit::frames`).
+    let mut terminal = crate::kit::frames::init();
     // After init, like the player: a terminal that answers the pixel probe
     // strangely makes its mess on the alternate screen, which restore
     // throws away.
@@ -3433,7 +3438,7 @@ mod tests {
         let all = rows.join("\n");
         assert!(!all.contains("Albums") && !all.contains("auto-dj"), "the nav and the bar stand down:\n{all}");
         assert!(rows[1].trim().is_empty(), "a blank row under the bar, where the page's own header would be");
-        assert!(rows[4].contains(" Overview ") && rows[4].contains(" Recent "), "the page's tab strip:\n{all}");
+        assert!(rows[2].contains(" Overview ") && rows[2].contains(" Recent "), "the page's tab strip is the page's first row:\n{all}");
         assert!(rows[29].contains("Esc library"), "the footer carries the way back after the page's hint: {}", rows[29]);
         let buf = draw_buffer(&mut gui);
         let sx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Stats ")).unwrap() as u16;
@@ -3467,26 +3472,28 @@ mod tests {
     }
 
     #[test]
-    fn the_top_bar_switches_between_the_library_and_now_playing() {
+    fn the_top_bar_has_the_library_and_stats_tabs_and_0_opens_now_playing() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut gui = browsing_gui();
         let rows = draw(&mut gui);
         assert!(!rows[0].contains("mStream"), "no wordmark: {:?}", rows[0]);
+        assert!(!rows[0].contains("Now Playing"), "no Now Playing tab — 0 opens the screen: {:?}", rows[0]);
         let lx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Library ")).unwrap() as u16;
-        let nx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Now Playing ")).unwrap() as u16;
+        let sx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Stats ")).unwrap() as u16;
         let buf = draw_buffer(&mut gui);
         assert_eq!(buf[(lx, 0)].bg, th().accent, "the Library tab wears the slab");
-        assert_ne!(buf[(nx, 0)].bg, th().accent, "the other tab does not");
+        assert_ne!(buf[(sx, 0)].bg, th().accent, "the other tab does not");
         assert!(rows.iter().any(|r| r.contains("Albums")), "the nav column is up");
-        assert_eq!(gui.ui.hit(Position { x: nx + 1, y: 0 }), Some(Act::Screen(Screen::NowPlaying)));
-        let sx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Stats ")).unwrap() as u16;
-        assert_eq!(gui.ui.hit(Position { x: sx + 1, y: 0 }), Some(Act::Screen(Screen::Stats)), "the third tab");
+        assert_eq!(gui.ui.hit(Position { x: sx + 1, y: 0 }), Some(Act::Screen(Screen::Stats)), "the second tab");
 
-        // Now Playing: the nav, the room, the queue panel and the bar go;
-        // the TUI's view stands under the top bar (now-playing contract,
-        // clauses 1–2) with the App's full-screen flag up.
+        // Now Playing, on 0: the nav, the room, the queue panel and the bar
+        // go; the TUI's view stands under the top bar (now-playing contract,
+        // clauses 1–2) with the App's full-screen flag up, and no tab wears
+        // the slab.
         gui.act(Act::Screen(Screen::NowPlaying));
         assert!(gui.app.fullscreen, "the App's full-screen flag follows the screen");
+        let buf = draw_buffer(&mut gui);
+        assert!(buf[(lx, 0)].bg != th().accent && buf[(sx, 0)].bg != th().accent, "no tab is lit on Now Playing");
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(!all.contains("Albums"), "the nav column is gone:\n{all}");
@@ -3776,13 +3783,77 @@ mod tests {
     }
 
     #[test]
-    fn a_small_window_asks_for_room_instead_of_breaking() {
+    fn a_small_window_is_the_mini_player_instead_of_breaking() {
+        // The mini-player contract: below the screens' size, the cover, the
+        // transport in the bar's own frames, and a line asking for room.
         let mut gui = test_gui();
         let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
         terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+        let lines = rows(&terminal);
+        let all = lines.join("\n");
+        let area = Rect { x: 0, y: 0, width: 70, height: 20 };
+        let plan = mini::plan(&gui, area).mini;
+        for (x, y, piece) in plan.lines {
+            assert!(lines[y as usize][..].contains(&piece), "the line asks for room, {piece:?} at {x},{y}:\n{all}");
+        }
+        // The song, the card's way: the demo seat's title, artist and album.
+        let block = plan.words.expect("the song's lines");
+        for (row, word) in ["Cassini IV", "Vela — Cassini", "Cassini · 2019"].iter().enumerate() {
+            assert!(lines[block.y as usize + row].contains(word), "{word:?}:\n{all}");
+        }
+        // The bar's seek line on top of the frames: the times at its ends, a
+        // seek in every cell — and a click on one moves the playhead there.
+        let (x, y, width) = plan.progress.expect("a seek line");
+        let row = &lines[y as usize];
+        assert!(row.contains("0:47") && row.contains("5:02") && row.contains('━'), "{row:?}");
+        let middle = Position { x: x + width / 2, y };
+        let Some(Act::Seek(fraction)) = gui.ui.hit(middle) else { panic!("no seek under {middle:?}:\n{all}") };
+        assert!(fraction > 0.3 && fraction < 0.7, "{fraction}");
+        gui.act(Act::Seek(1.0));
+        terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+        let row = rows(&terminal)[y as usize].clone();
+        assert!(row.contains("5:02  ") || row.matches("5:02").count() == 2, "the playhead at the end: {row:?}");
+        assert!(!all.contains("auto-dj") && !all.contains("Files"), "no bar, no rooms:\n{all}");
+        assert!(all.contains('╭'), "the empty cover slot, nothing decoded yet:\n{all}");
+
+        // The three frames, each a click on its verb.
+        let at = |needle: &str| {
+            lines.iter().enumerate().find_map(|(y, line)| {
+                line.char_indices().position(|(i, _)| line[i..].starts_with(needle)).map(|x| (x as u16, y as u16))
+            })
+        };
+        for (needle, act) in [("│ ◂◂ │", Act::Prev), ("┃ ▮▮ ┃", Act::PlayPause), ("│ ▸▸ │", Act::Next)] {
+            let (x, y) = at(needle).unwrap_or_else(|| panic!("no {needle:?}:\n{all}"));
+            assert_eq!(gui.ui.hit(Position { x: x + 2, y }), Some(act), "{needle}");
+        }
+    }
+
+    #[test]
+    fn the_mini_player_wears_the_playing_cover() {
+        let mut gui = test_gui();
+        let mut playing = track("music/a.mp3", "Night Drive", 252.0);
+        playing.metadata.album_art = Some("aa.jpeg".into());
+        gui.app.now_playing = Some(playing);
+        let png = image::RgbImage::from_pixel(64, 64, image::Rgb([200, 40, 40]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        png.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        gui.app.art.insert("aa.jpeg".into(), Some(crate::tui::art::decode(&bytes.into_inner()).unwrap()));
+
+        let area = Rect { x: 0, y: 0, width: 70, height: 20 };
+        let cover = mini::plan(&gui, area).mini.cover.expect("room for a cover");
+        let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+        let lines = rows(&terminal);
+        let row: String = lines[cover.y as usize].chars().skip(cover.x as usize).take(cover.width as usize).collect();
+        assert!(row.chars().all(|c| "█▀▄".contains(c)), "the mosaic holds the cover's cells: {row:?}");
+
+        // Grown back past the screens' size, the full player returns.
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut gui)).unwrap();
         let all = rows(&terminal).join("\n");
-        assert!(all.contains(&t!("resize").to_string()));
-        assert!(!all.contains("auto-dj"), "no bar in a window this small");
+        assert!(all.contains("auto-dj"), "the bar is back:\n{all}");
+        let first = mini::plan(&gui, area).mini.lines.remove(0).2;
+        assert!(!all.contains(&first), "and the line is gone:\n{all}");
     }
     // ── The browser bar ─────────────────────────────────────────────────
 
