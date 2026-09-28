@@ -32,10 +32,6 @@ use rodio::{Decoder, Player, Source};
 use serde::Serialize;
 
 use crate::player::DeviceNotice;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 // ── Loop mode ───────────────────────────────────────────────────────────────
 
@@ -326,7 +322,15 @@ fn open_entry(entry: &QueueEntry) -> Result<Prepared, String> {
             crate::stderrln!("[engine] decode failed for {}: {}", path, e);
             e.to_string()
         })?;
-        let duration = entry.duration_hint.unwrap_or_else(|| probe_duration(&path));
+        // The decoder that just probed the file knows its length, as for a
+        // stream. A second open and probe used to supply it (performance
+        // audit #80): serve's queue carries no hint, so every local track
+        // paid it, re-reading any embedded cover, and for a LAME MP3 it
+        // counted the encoder delay and padding the decoder trims away.
+        let duration = entry
+            .duration_hint
+            .or_else(|| decoder.total_duration().map(|d| d.as_secs_f64()))
+            .unwrap_or(0.0);
         (Opened::Local(decoder), duration)
     };
     Ok(Prepared { opened, path, duration })
@@ -2057,7 +2061,7 @@ impl Engine {
     }
 }
 
-// ── Duration detection via symphonia (local files only) ────────────────────
+// ── Seek positions ──────────────────────────────────────────────────────────
 
 /// Turn a wire position into a Duration, or refuse it. Finite and
 /// non-negative have been checked since finding #11; magnitude was the
@@ -2070,46 +2074,6 @@ fn seek_target(position: f64) -> Result<Duration, EngineError> {
     }
     Duration::try_from_secs_f64(position)
         .map_err(|_| EngineError::Seek("position out of range".to_string()))
-}
-
-fn probe_duration(path: &str) -> f64 {
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return 0.0,
-    };
-
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let probed = match symphonia::default::get_probe().format(
-        &hint,
-        mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
-    ) {
-        Ok(p) => p,
-        Err(_) => return 0.0,
-    };
-
-    if let Some(track) = probed.format.default_track() {
-        if let Some(n_frames) = track.codec_params.n_frames {
-            if let Some(sr) = track.codec_params.sample_rate {
-                if sr > 0 {
-                    return n_frames as f64 / sr as f64;
-                }
-            }
-        }
-        if let Some(tb) = track.codec_params.time_base {
-            if let Some(n_frames) = track.codec_params.n_frames {
-                let d = tb.calc_time(n_frames);
-                return d.seconds as f64 + d.frac;
-            }
-        }
-    }
-    0.0
 }
 
 // ── Tests (pure queue logic; no audio device required) ─────────────────────
@@ -2177,6 +2141,38 @@ mod tests {
             mp3.extend(frame(i % 25 != 0));
         }
         mp3
+    }
+
+    #[test]
+    fn a_local_file_takes_its_length_from_the_decoder_that_opened_it() {
+        // One open and one probe per local track (performance audit #80).
+        // The length is the decoder's, as for a stream, and for a LAME file
+        // that is the length it plays: the encoder's delay and padding
+        // trimmed, where the old second probe (gapless off) counted them.
+        let mut mp3 = silent_mp3(b"Info", 100);
+        // The LAME extension after the frame count: encoder, then the delay
+        // (576, plus the decoder's 529) and padding (1000, less 529) in 24
+        // bits, then the tag's CRC-16 over everything before it.
+        mp3[48..57].copy_from_slice(b"LAME3.100");
+        mp3[69..72].copy_from_slice(&[0x24, 0x03, 0xE8]);
+        let crc = mp3[..82].iter().fold(0u16, |crc, &byte| {
+            (0..8).fold(crc ^ u16::from(byte), |c, _| if c & 1 == 1 { c >> 1 ^ 0xA001 } else { c >> 1 })
+        });
+        mp3[82..84].copy_from_slice(&crc.to_be_bytes());
+        let path = std::env::temp_dir()
+            .join(format!("mstream-local-length-{}.mp3", std::process::id()));
+        std::fs::write(&path, &mp3).unwrap();
+        let played = (100.0 * 1152.0 - (576.0 + 529.0) - (1000.0 - 529.0)) / 44_100.0;
+
+        let mut entry = QueueEntry::new(path.to_string_lossy().into_owned());
+        let opened = open_entry(&entry).map(|prepared| prepared.duration);
+        entry.duration_hint = Some(99.0);
+        let hinted = open_entry(&entry).map(|prepared| prepared.duration);
+        let _ = std::fs::remove_file(&path);
+
+        let length = opened.unwrap();
+        assert!((length - played).abs() < 1e-6, "{length} against {played}");
+        assert_eq!(hinted.unwrap(), 99.0, "a hint still wins");
     }
 
     #[test]
