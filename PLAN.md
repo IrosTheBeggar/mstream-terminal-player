@@ -2171,6 +2171,21 @@ a LATER secondary screen (party view), Columns retired.
   before. Growing back returns the screen untouched. `src/gui/mini.rs`,
   ten locales, layout and render tests, and a pty run resized through five
   shapes with the play frame clicked.
+- **Resizing at the terminal's pace ✅ 2026-09-27** — every page's frames
+  (the GUI, the TUI, the wizard, the admin rooms) are encoded into memory
+  and written in one go once the frame is done, fenced in DEC mode 2026
+  so a terminal that knows the mode shows the frame whole: the clear a
+  resize opens with is never painted on its own, and a frame that changes
+  nothing writes nothing (`src/kit/frames.rs`). In kitty itself, with no
+  multiplexer between, a resize no longer sends every cover again: kitty
+  keeps a transmitted picture through a resize and the clear after it
+  (graphics.c spares virtual placements), so the cache stays
+  (`Graphics::refresh`). Measured on a pty, the Albums wall in truecolor,
+  from the resize to the last byte: the mosaic 1.7–2.8 ms → 0.8–1.2 ms;
+  kitty 15–18 ms and ~870 KB → 2–3.5 ms and 17–30 KB; iTerm2 and sixel
+  as before, 5–16 ms (their pictures live in the cells, and a clear takes
+  them). After a walk through six sizes the screen matched a fresh start
+  cell for cell on every protocol.
 - Next slices, in rough order: the shared view's Lyrics tab (the TUI's
   placeholder today), Discover's room and its "Play a path to…" entry (revisits the
   sonic contract's §5 search-skip; Find similar re-enters the sheet with

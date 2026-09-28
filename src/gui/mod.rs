@@ -2474,7 +2474,7 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn event_loop(
-    terminal: &mut ratatui::DefaultTerminal,
+    terminal: &mut crate::kit::frames::PageTerminal,
     gui: &mut Gui,
     mouse_on: bool,
     event_rx: &Receiver<Event>,
@@ -2968,7 +2968,9 @@ pub fn run(
     // wizard's ordering, for the wizard's reasons.
     let claim = theme::acquire_ground();
     let ground_guard = GroundGuard;
-    let mut terminal = ratatui::init();
+    // ratatui's init, with each frame written whole and shown at once —
+    // a resize's clear never painted on its own (`kit::frames`).
+    let mut terminal = crate::kit::frames::init();
     // After init, like the player: a terminal that answers the pixel probe
     // strangely makes its mess on the alternate screen, which restore
     // throws away.

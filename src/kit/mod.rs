@@ -15,7 +15,11 @@
 //! Colors come from [`theme`] — the kit's FIXED palette (a truecolor →
 //! 256 → named-ANSI ladder plus the OSC 11 ground lease). The player's
 //! adaptive `ui::Theme` is deliberately not part of the kit.
+//!
+//! Frames reach the terminal through [`frames`]: whole, in one write, and
+//! shown at once. Every full-screen page starts with its `init`.
 
+pub mod frames;
 pub mod theme;
 
 use std::time::{Duration, Instant};
