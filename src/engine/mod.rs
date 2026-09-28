@@ -755,6 +755,10 @@ struct State {
     /// session it exists to hold (PR #5 review). Edge-triggered, the same
     /// gate says its piece once and then keeps quiet.
     gate_noted: Option<&'static str>,
+    /// When the sounding track's end was due by the wall clock, noted the
+    /// first time a driver asked for its pace inside the track's last
+    /// moments — see [`State::until_end_paced`].
+    end_due: Option<Instant>,
     /// What the TUI said should play after the current track. The TUI keeps
     /// its own queue and feeds this engine one source at a time, so unlike
     /// serve mode the engine cannot pick a next; it has to be told. Consulted
@@ -1108,6 +1112,28 @@ impl State {
         }
         Some(self.duration - self.sink.get_pos().as_secs_f64())
     }
+
+    /// [`State::until_end`] for a driver's pace ([`next_tick`]): None once
+    /// the end is more than [`END_GRACE`] overdue by the wall clock. The
+    /// due time is noted at the first look inside the last `base` of the
+    /// track, and forgotten when the track leaves that window. END_GRACE on
+    /// the position covers a track that runs long; this covers one whose
+    /// position stopped short of the end — a callback parked on a stalled
+    /// download, a device lost in an outage with nothing to reopen — which
+    /// would otherwise hold the driver at END_POLL for as long as it stays
+    /// stopped (review of audit #76).
+    fn until_end_paced(&mut self, base: Duration, now: Instant) -> Option<f64> {
+        let left = self.until_end();
+        let Some(near) = left.filter(|&left| left < base.as_secs_f64()) else {
+            self.end_due = None;
+            return left;
+        };
+        let due = *self.end_due.get_or_insert(now + Duration::from_secs_f64(near.max(0.0)));
+        if now.saturating_duration_since(due).as_secs_f64() > END_GRACE {
+            return None;
+        }
+        Some(near)
+    }
 }
 
 /// How far ahead of a track's computed end a driver aims its next tick,
@@ -1270,6 +1296,7 @@ impl Engine {
             pausing: None,
             orphaned_tail: false,
             gate_noted: None,
+            end_due: None,
             pending_next: None,
             next: NextTrack::Idle,
             outgoing: Vec::new(),
@@ -1950,8 +1977,9 @@ impl Engine {
     /// the next tick — see [`next_tick`]: a second while settled, and near
     /// a track's end just long enough to catch it running out.
     pub fn tick_wait(&self, base: Duration) -> Duration {
-        let s = self.state.lock().unwrap();
-        next_tick(s.at_rest(), s.until_end(), base)
+        let mut s = self.state.lock().unwrap();
+        let left = s.until_end_paced(base, Instant::now());
+        next_tick(s.at_rest(), left, base)
     }
 
     pub fn status(&self) -> Status {
@@ -5093,6 +5121,7 @@ mod tests {
             pausing: None,
             orphaned_tail: false,
             gate_noted: None,
+            end_due: None,
             pending_next: None,
             next: NextTrack::Idle,
             outgoing: Vec::new(),
@@ -5201,6 +5230,43 @@ mod tests {
         assert_eq!(s.until_end(), None, "paused");
         s.sink = Arc::new(Player::new().0);
         assert_eq!(s.until_end(), None, "ran out: the tick's advance is due at once");
+    }
+
+    #[test]
+    fn an_end_that_stops_short_is_watched_closely_for_a_second_and_no_longer() {
+        // A position frozen a few ms short of the end — a callback parked
+        // on a stalled download — never runs past it, so the grace on the
+        // position never ends the close watch: serve ticked every 5 ms for
+        // as long as the freeze lasted (review of audit #76). The wall
+        // clock ends it a second after the end was due.
+        let base = Duration::from_millis(250);
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut s = bare_state();
+        s.sink = loaded_sink();
+        s.stopped = false;
+        // Far from the end: nothing noted.
+        s.duration = 30.0;
+        assert_eq!(s.until_end_paced(base, at(0)), Some(30.0));
+        assert!(s.end_due.is_none());
+        // 20 ms short, and nothing pulls this sink: the position stays put.
+        s.duration = 0.02;
+        assert_eq!(s.until_end_paced(base, at(0)), Some(0.02));
+        assert_eq!(next_tick(false, Some(0.02), base), END_POLL);
+        assert_eq!(s.until_end_paced(base, at(1000)), Some(0.02), "inside the grace");
+        assert_eq!(s.until_end_paced(base, at(1030)), None, "a second overdue");
+        assert_eq!(next_tick(false, None, base), base, "back to the driver's own pace");
+        assert_eq!(s.until_end_paced(base, at(9000)), None, "and it stays there");
+        // Leaving the window — the next track, a seek back — starts over.
+        s.duration = 30.0;
+        assert_eq!(s.until_end_paced(base, at(9100)), Some(30.0));
+        s.duration = 0.02;
+        assert_eq!(s.until_end_paced(base, at(9200)), Some(0.02), "a fresh end, watched");
+        // So does a pause: the wall clock does not run toward an end
+        // while nothing sounds.
+        s.sink.pause();
+        assert_eq!(s.until_end_paced(base, at(9300)), None);
+        assert!(s.end_due.is_none());
     }
 
     /// Run `f` on its own thread and give it `limit`: a call that waits on
