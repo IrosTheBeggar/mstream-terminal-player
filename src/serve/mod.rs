@@ -139,6 +139,9 @@ fn engine_error(e: EngineError, fallback: &str) -> Resp {
         EngineError::EndOfQueue => error_response("Already at end of queue"),
         EngineError::Seek(_) => error_response(&e.to_string()),
         EngineError::Unplayable(_) => error_response(fallback),
+        // Serve's routes never ask to be superseded; kept total for the
+        // match's sake, under the route's own play-failure message.
+        EngineError::Superseded => error_response(fallback),
     }
 }
 

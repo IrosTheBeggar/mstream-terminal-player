@@ -51,6 +51,19 @@ impl PlayerStatus {
 
 pub trait PlayerCtl {
     fn play(&self, source: &str, duration_hint: Option<f64>) -> Result<(), String>;
+    /// [`PlayerCtl::play`], giving the open up as soon as `superseded`
+    /// answers true — a newer play or a stop has arrived, and this track is
+    /// no longer wanted. Giving up is not a failure: Ok, with playback as it
+    /// was. A backend whose opens cannot be abandoned just plays.
+    fn play_unless(
+        &self,
+        source: &str,
+        duration_hint: Option<f64>,
+        superseded: &mut dyn FnMut() -> bool,
+    ) -> Result<(), String> {
+        let _ = superseded;
+        self.play(source, duration_hint)
+    }
     fn pause(&self);
     fn resume(&self);
     fn stop(&self);
@@ -90,6 +103,18 @@ pub trait PlayerCtl {
 impl PlayerCtl for Engine {
     fn play(&self, source: &str, duration_hint: Option<f64>) -> Result<(), String> {
         self.play_source(source.to_string(), duration_hint).map_err(|e| e.to_string())
+    }
+
+    fn play_unless(
+        &self,
+        source: &str,
+        duration_hint: Option<f64>,
+        superseded: &mut dyn FnMut() -> bool,
+    ) -> Result<(), String> {
+        match self.play_source_unless(source.to_string(), duration_hint, superseded) {
+            Ok(()) | Err(crate::engine::EngineError::Superseded) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     fn pause(&self) {

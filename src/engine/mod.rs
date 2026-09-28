@@ -86,6 +86,10 @@ pub enum EngineError {
     OutOfBounds,
     EndOfQueue,
     Seek(String),
+    /// A play given up because a newer command made it moot while its
+    /// source was still opening. Not a failure: playback stands as it was,
+    /// and the newer command says what happens next.
+    Superseded,
 }
 
 impl fmt::Display for EngineError {
@@ -96,6 +100,7 @@ impl fmt::Display for EngineError {
             EngineError::OutOfBounds => write!(f, "Index out of bounds"),
             EngineError::EndOfQueue => write!(f, "Already at end of queue"),
             EngineError::Seek(e) => write!(f, "Seek failed: {}", e),
+            EngineError::Superseded => write!(f, "Superseded by a newer command"),
         }
     }
 }
@@ -224,16 +229,54 @@ const START_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(test)]
 const START_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// How often a direct open waiting on its thread asks whether it is still
+/// wanted (performance audit #79). Short enough that a stop or a newer play
+/// feels immediate; the question is a few channel reads.
+const SUPERSEDE_POLL: Duration = Duration::from_millis(20);
+
+/// How many opens given up for a newer command may still be running
+/// (dropping the receiver does not stop an open mid-request) before the
+/// next one waits for one of them to finish. Skimming a remote queue would
+/// otherwise start an open per keypress, every one pulling its probe over
+/// the link the wanted one needs (performance audit #79) — where the old
+/// blocking wait, with collapse, never ran more than two in a row.
+const MAX_ABANDONED: usize = 2;
+
+/// The receiving end of an open running on its own thread.
+type Opener = mpsc::Receiver<Result<Prepared, String>>;
+
+/// Why a direct open produced no source.
+enum OpenError {
+    /// It failed, and why — for the logs and the queue's failure path.
+    Failed(String),
+    /// A newer command made it moot before it finished — with the open's
+    /// receiver when one was running, for the engine to account for.
+    Superseded(Option<Opener>),
+}
+
 /// [`open_entry`] with a deadline, for the path that blocks the audio
 /// thread. Same thread-and-channel shape as [`spawn_prepare`], and the
 /// same abandonment contract: a result that arrives after the deadline
 /// drops into a closed channel, taking the reader and its spool file
 /// with it.
 fn open_entry_bounded(entry: &QueueEntry) -> Result<Prepared, String> {
+    open_entry_unless(entry, &mut || false).map_err(|e| match e {
+        OpenError::Failed(reason) => reason,
+        // Never asked, so never given up; for the match's sake.
+        OpenError::Superseded(_) => EngineError::Superseded.to_string(),
+    })
+}
+
+/// [`open_entry_bounded`], giving up as soon as `superseded` says the
+/// source is no longer wanted — see [`await_open`].
+fn open_entry_unless(
+    entry: &QueueEntry,
+    superseded: &mut dyn FnMut() -> bool,
+) -> Result<Prepared, OpenError> {
     if !http::is_http_url(&entry.path) {
         // Local files open or fail in microseconds; a thread per open
         // would be pure ceremony.
-        return open_entry(entry);
+        return open_entry(entry).map_err(OpenError::Failed);
     }
     let (tx, rx) = mpsc::channel();
     let moved = entry.clone();
@@ -253,17 +296,41 @@ fn open_entry_bounded(entry: &QueueEntry) -> Result<Prepared, String> {
     if spawned.is_err() {
         // A box that cannot spawn a thread still deserves its music; the
         // unbounded open is the behaviour this path always had.
-        return open_entry(entry);
+        return open_entry(entry).map_err(OpenError::Failed);
     }
-    match rx.recv_timeout(START_TIMEOUT) {
-        Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
-            "the stream stalled while opening — gave up after {}s",
-            START_TIMEOUT.as_secs()
-        )),
-        // The open thread panicked and the catch dropped the sender.
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err("the decoder gave up on the stream".into())
+    await_open(rx, superseded)
+}
+
+/// Wait for an opener's answer: at most [`START_TIMEOUT`], and only for as
+/// long as the source is wanted. The wait parks the audio thread, so a
+/// stop or a newer play used to queue behind it — the rest of a doomed
+/// open, seconds over a tunnel, twenty against a stall — and then find the
+/// unwanted track installed and sounding for a moment before it could act
+/// (performance audit #79). Now the thread asks `superseded` every
+/// [`SUPERSEDE_POLL`] and walks away on a yes, handing `rx` back; dropping
+/// it is the same abandonment the deadline uses. The open-then-swap order
+/// is untouched: nothing has happened to the playing sink yet.
+fn await_open(rx: Opener, superseded: &mut dyn FnMut() -> bool) -> Result<Prepared, OpenError> {
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left.min(SUPERSEDE_POLL)) {
+            Ok(result) => return result.map_err(OpenError::Failed),
+            // The open thread panicked and the catch dropped the sender.
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(OpenError::Failed("the decoder gave up on the stream".into()));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if Instant::now() >= deadline {
+                    return Err(OpenError::Failed(format!(
+                        "the stream stalled while opening — gave up after {}s",
+                        START_TIMEOUT.as_secs()
+                    )));
+                }
+                if superseded() {
+                    return Err(OpenError::Superseded(Some(rx)));
+                }
+            }
         }
     }
 }
@@ -558,6 +625,12 @@ fn attach(
         (Opened::Http(d), None) => sink.append(fade::Faded::new(d, fade.clone())),
     }
     (fade, live)
+}
+
+/// A next track taken over by a play — see [`State::take_ahead`].
+enum Ahead {
+    Ready(Prepared),
+    Opening(Opener),
 }
 
 /// A sink on its way out of a blend: still connected to the mixer, ramping
@@ -891,6 +964,32 @@ impl State {
         }
     }
 
+    /// The next track, taken out of the slot, when it is `source` and has
+    /// already been opened or is opening: a manual pick of what was
+    /// announced (or committed) to follow, inside its prepare window. The
+    /// play takes it over rather than throwing it away and fetching the
+    /// same track again with the audio thread waiting (performance audit
+    /// #79). Anything else stays where it was.
+    fn take_ahead(&mut self, source: &str) -> Option<Ahead> {
+        match std::mem::replace(&mut self.next, NextTrack::Idle) {
+            NextTrack::Ready { prepared, .. } if prepared.path == source => {
+                Some(Ahead::Ready(prepared))
+            }
+            NextTrack::Opening { index, rx }
+                if match index {
+                    None => self.pending_next.as_ref().is_some_and(|e| e.path == source),
+                    Some(at) => self.q.queue.get(at).is_some_and(|e| e.path == source),
+                } =>
+            {
+                Some(Ahead::Opening(rx))
+            }
+            other => {
+                self.next = other;
+                None
+            }
+        }
+    }
+
     /// Forget whatever was decided or prepared about the next track. Any
     /// queue mutation calls this: the committed pick was made against a
     /// queue that no longer exists, and over-forgetting only costs a
@@ -1093,6 +1192,11 @@ pub struct Engine {
     /// audio worker, serve's loop). Bounded by [`Engine::push_notice`];
     /// drained by [`Engine::take_device_notices`].
     notices: Mutex<Vec<DeviceNotice>>,
+    /// Opens given up for a newer command, still running on their threads,
+    /// and when each was given up — see [`MAX_ABANDONED`]. Pruned as they
+    /// finish (their answer is dropped here, spool file and all) or once
+    /// they are older than [`START_TIMEOUT`], the most any open is waited.
+    abandoned: Mutex<Vec<(Instant, Opener)>>,
     /// Calls blocked on the device callback right now: a seek's try_seek,
     /// made with the state lock released (audit #48). The stream is never
     /// suspended under one — its answer would never come. Both drivers
@@ -1164,8 +1268,31 @@ impl Engine {
                 outage_told: false,
             }),
             notices: Mutex::new(Vec::new()),
+            abandoned: Mutex::new(Vec::new()),
             callback_waits: AtomicUsize::new(0),
         })
+    }
+
+    /// Before a direct open starts: wait, for as long as the play is still
+    /// wanted, until fewer than [`MAX_ABANDONED`] given-up opens are still
+    /// running.
+    fn make_room(&self, superseded: &mut dyn FnMut() -> bool) -> Result<(), OpenError> {
+        loop {
+            {
+                let mut gone = self.abandoned.lock().unwrap();
+                gone.retain(|(since, rx)| {
+                    since.elapsed() < START_TIMEOUT
+                        && matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty))
+                });
+                if gone.len() < MAX_ABANDONED {
+                    return Ok(());
+                }
+            }
+            std::thread::sleep(SUPERSEDE_POLL);
+            if superseded() {
+                return Err(OpenError::Superseded(None));
+            }
+        }
     }
 
     /// Wake the device stream for a call about to lean on a Player, and
@@ -1444,6 +1571,21 @@ impl Engine {
 
     /// Clear the queue, add one source (path or URL), play it.
     pub fn play_source(&self, source: String, duration_hint: Option<f64>) -> Result<(), EngineError> {
+        self.play_source_unless(source, duration_hint, &mut || false)
+    }
+
+    /// [`Engine::play_source`] for a driver that can tell when the play has
+    /// been overtaken — the TUI's audio thread, whose channel may hold a
+    /// newer play or a stop by the time a slow open finishes. `superseded`
+    /// is asked while the open waits (see [`await_open`]); on a yes the
+    /// open is abandoned and the answer is [`EngineError::Superseded`], the
+    /// playing sink untouched, exactly as a failed open leaves it.
+    pub fn play_source_unless(
+        &self,
+        source: String,
+        duration_hint: Option<f64>,
+        superseded: &mut dyn FnMut() -> bool,
+    ) -> Result<(), EngineError> {
         etrace!("play {} hint={:?}", http::redact_source(&source), duration_hint);
         // Before the state lock, here and in every mutator below: the
         // rebuild takes that lock itself, and this Mutex does not forgive
@@ -1454,6 +1596,10 @@ impl Engine {
         // promotion writes the index and queue, and must never overwrite
         // what this caller is about to decide (fix-round review).
         s.promote_if_crossed();
+        // Before the announcement goes: a pick of the very track it
+        // announced keeps the open already made for it.
+        let ahead = s.take_ahead(&source);
+        let redacted = http::redact_source(&source);
         s.q.queue.clear();
         s.q.queue.push(QueueEntry { path: source, duration_hint });
         s.q.index = 0;
@@ -1466,7 +1612,45 @@ impl Engine {
         // the failed-jump review finding, caught by its verifier).
         s.pending_next = None;
         s.invalidate_next();
-        s.start_current(self.output.lock().unwrap().mixer())
+        // Opened and decoded BEFORE the running sink is touched, with the
+        // lock held — start_current's order — so a bad source, or one given
+        // up on, leaves current playback as it was.
+        let opened = match ahead {
+            Some(Ahead::Ready(prepared)) => {
+                etrace!("play takes over the prepared {redacted}");
+                Ok(prepared)
+            }
+            Some(Ahead::Opening(rx)) => {
+                etrace!("play takes over the open of {redacted}");
+                await_open(rx, superseded)
+            }
+            None => {
+                let entry = s.q.queue[0].clone();
+                // Only a network open is ever left running; a local one is
+                // over in microseconds.
+                let room =
+                    if http::is_http_url(&entry.path) { self.make_room(superseded) } else { Ok(()) };
+                room.and_then(|()| open_entry_unless(&entry, superseded))
+            }
+        };
+        match opened {
+            Ok(mut prepared) => {
+                // The play's own hint, like a fresh open would take it.
+                if let Some(hint) = duration_hint {
+                    prepared.duration = hint;
+                }
+                s.install(self.output.lock().unwrap().mixer(), prepared);
+                Ok(())
+            }
+            Err(OpenError::Failed(e)) => Err(EngineError::Unplayable(e)),
+            Err(OpenError::Superseded(opener)) => {
+                etrace!("play {redacted} given up: a newer command came");
+                if let Some(rx) = opener {
+                    self.abandoned.lock().unwrap().push((Instant::now(), rx));
+                }
+                Err(EngineError::Superseded)
+            }
+        }
     }
 
     /// Announce what should play after the current track, so a blend can
@@ -2399,6 +2583,54 @@ mod tests {
         assert!(waited < Duration::from_secs(10), "took {waited:?}");
     }
 
+    /// A server that sends headers and a few bytes, then nothing, forever:
+    /// an open that can only end by a deadline or by being given up.
+    fn stalled_url() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut request = [0u8; 1024];
+                    let _ = stream.read(&mut request);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 1000000\r\n\
+                          content-type: audio/mpeg\r\n\r\nID3\x04\x00\x00\x00\x00\x00\x00",
+                    );
+                    let _ = stream.flush();
+                    std::thread::sleep(Duration::from_secs(60));
+                });
+            }
+        });
+        format!("http://{addr}/stalled.mp3")
+    }
+
+    #[test]
+    fn an_open_nobody_wants_any_more_is_given_up_at_once() {
+        // The same stall the deadline exists for, but a newer command
+        // arrives 200 ms in: the wait ends then, not at START_TIMEOUT
+        // (audit #79) — and without anyone calling it a failure.
+        let entry = QueueEntry { path: stalled_url(), duration_hint: None };
+        let started = Instant::now();
+        let mut asked = 0;
+        let outcome = open_entry_unless(&entry, &mut || {
+            asked += 1;
+            started.elapsed() > Duration::from_millis(200)
+        });
+        let waited = started.elapsed();
+        assert!(matches!(outcome, Err(OpenError::Superseded(Some(_)))), "given up, not failed");
+        assert!(waited < START_TIMEOUT / 2, "took {waited:?}");
+        assert!(asked >= 5, "asked every poll while it waited ({asked} times)");
+
+        // Nobody superseding: the deadline still ends it, as before.
+        let started = Instant::now();
+        let outcome = open_entry_unless(&entry, &mut || false);
+        assert!(matches!(outcome, Err(OpenError::Failed(ref e)) if e.contains("stalled while opening")));
+        assert!(started.elapsed() >= START_TIMEOUT, "the full deadline, not less");
+    }
+
     #[test]
     fn a_seek_too_large_for_a_duration_is_refused_not_a_panic() {
         assert_eq!(seek_target(12.5).unwrap(), Duration::from_secs_f64(12.5));
@@ -2893,6 +3125,107 @@ mod tests {
         assert!(later.playing && later.position > 0.3, "the prepared track sounds: {:.2}", later.position);
         engine.stop();
         let _ = std::fs::remove_file(&local);
+    }
+
+    /// A manual pick of the announced next inside its prepare window —
+    /// `n` in a track's last seconds with gapless on, the default — used
+    /// to throw the prepared decoder away and fetch the track again with
+    /// the audio thread waiting (audit #79). The play takes it over.
+    ///
+    /// `cargo test a_manual_pick_of -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_manual_pick_of_the_announced_next_takes_over_its_open() {
+        let local = std::env::temp_dir().join("mstream-takeover-a.wav");
+        std::fs::write(&local, wav_bytes(20)).unwrap();
+        let (url, hits) = counting_wav_server(4);
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_gapless(true);
+        // A hint of 5 s puts the whole track inside PREPARE_LEAD: the
+        // announcement is opened at the first tick.
+        engine.play_source(local.to_string_lossy().into_owned(), Some(5.0)).unwrap();
+        engine.prepare_next(url.clone(), Some(4.0));
+        let started = std::time::Instant::now();
+        while !matches!(engine.state.lock().unwrap().next, NextTrack::Ready { .. }) {
+            engine.advance_tick();
+            assert!(started.elapsed() < Duration::from_secs(5), "the announcement never opened");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        engine.play_source(url.clone(), Some(4.0)).unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "the play fetched the track again");
+        std::thread::sleep(Duration::from_millis(600));
+        let status = engine.status();
+        assert_eq!(status.file, url);
+        assert!(status.playing && status.position > 0.3, "the taken-over track plays");
+        engine.stop();
+        let _ = std::fs::remove_file(&local);
+    }
+
+    /// A play given up for a newer command leaves playback as it was — the
+    /// open-then-swap order, the same as a failed open.
+    ///
+    /// `cargo test a_play_given_up -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_play_given_up_leaves_the_old_track_playing() {
+        let local = std::env::temp_dir().join("mstream-given-up-a.wav");
+        std::fs::write(&local, wav_bytes(30)).unwrap();
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.play_source(local.to_string_lossy().into_owned(), None).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let before = engine.status();
+
+        let asked = std::time::Instant::now();
+        let outcome = engine.play_source_unless(stalled_url(), None, &mut || {
+            asked.elapsed() > Duration::from_millis(300)
+        });
+        assert!(matches!(outcome, Err(EngineError::Superseded)), "{outcome:?}");
+        assert!(asked.elapsed() < Duration::from_secs(1), "gave up in {:?}", asked.elapsed());
+        std::thread::sleep(Duration::from_millis(400));
+        let after = engine.status();
+        assert_eq!(after.file, before.file, "the old track is still the one playing");
+        assert!(after.playing && after.position > before.position + 0.5);
+        engine.stop();
+        let _ = std::fs::remove_file(&local);
+    }
+
+    /// Opens given up for newer commands keep running until their request
+    /// ends, so skimming could stack them one per keypress; past
+    /// MAX_ABANDONED the next open waits for one to finish — for as long
+    /// as it is itself still wanted (audit #79).
+    ///
+    /// `cargo test given_up_opens -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn given_up_opens_still_running_hold_the_next_one_back() {
+        let (url, hits) = counting_wav_server(3);
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        let mut running = Vec::new();
+        for _ in 0..MAX_ABANDONED {
+            let (tx, rx) = mpsc::channel();
+            running.push(tx);
+            engine.abandoned.lock().unwrap().push((Instant::now(), rx));
+        }
+
+        // Full: the open waits, and is given up in its turn, never started.
+        let asked = Instant::now();
+        let outcome =
+            engine.play_source_unless(url.clone(), None, &mut || asked.elapsed() > Duration::from_millis(300));
+        assert!(matches!(outcome, Err(EngineError::Superseded)), "{outcome:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "no open may start while the room is full");
+
+        // One of them ends: there is room, and the play goes ahead.
+        drop(running.pop());
+        engine.play_source(url.clone(), None).unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.status().file, url);
+        engine.stop();
     }
 
     /// Under shuffle the prepare rolls the dice for the next row; the
