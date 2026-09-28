@@ -1022,10 +1022,12 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
             }
             ApiCmd::TunnelCredential { id, credential } => swap_credential(&tunnels, id, &credential),
             ApiCmd::ArtWithdraw { file } => {
+                // The session first, then the lanes: the order the change
+                // thread holds them in as it hands a held cover on, so the
+                // ask is found held or queued, never between the two.
+                let mut slot = lock_session(&session);
+                slot.held.retain(|cmd| !matches!(cmd, ApiCmd::AlbumArt { file: asked, .. } if *asked == file));
                 lock_lanes(&lanes).withdraw(&file);
-                lock_session(&session)
-                    .held
-                    .retain(|cmd| !matches!(cmd, ApiCmd::AlbumArt { file: asked, .. } if *asked == file));
                 None
             }
 
@@ -1213,11 +1215,13 @@ fn work_through(session: &Session, lanes: &Lanes, events: &Sender<Event>) {
             return;
         };
         let mut client = slot.client.clone();
-        drop(slot);
         if !is_connection_change(&cmd) {
+            // Handed on before the session is let go, so a withdrawal
+            // meanwhile finds the cover in one place or the other.
             dispatch_read(client, lanes, events, cmd);
             continue;
         }
+        drop(slot);
         let event = run_change(&mut client, cmd);
         lock_session(session).client = client;
         if let Some(event) = event
@@ -3252,5 +3256,38 @@ mod tests {
         assert!(at("connected true") < at("connected false"), "{seen:?}");
         assert!(at("connected true") < at("listing one/"), "{seen:?}");
         assert!(at("connected false") < at("listing two/"), "{seen:?}");
+    }
+
+    #[test]
+    fn a_held_cover_is_never_between_the_session_and_its_lane() {
+        // The review's race (performance audit #84): the change thread took
+        // a held cover off the session, let the session go, and only then
+        // queued it in a lane, so a withdrawal handled in between found it
+        // in neither and it was fetched anyway. The session stays held
+        // until the lane has it — the order a withdrawal takes them in.
+        let session: Session = Arc::default();
+        {
+            let mut slot = lock_session(&session);
+            slot.changing = true;
+            slot.held.push_back(small_cover("held.jpeg"));
+        }
+        let lanes: Lanes = Arc::default();
+        let (events, _answers) = mpsc::channel();
+        let busy = lock_lanes(&lanes);
+        let worker = {
+            let (session, lanes) = (session.clone(), lanes.clone());
+            thread::spawn(move || work_through(&session, &lanes, &events))
+        };
+        let until = std::time::Instant::now() + Duration::from_millis(300);
+        while std::time::Instant::now() < until {
+            if let Ok(slot) = session.try_lock() {
+                assert!(!slot.held.is_empty(), "the cover left the session before a lane had it");
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        drop(busy);
+        worker.join().unwrap();
+        assert!(lock_session(&session).held.is_empty());
+        assert_eq!(lock_lanes(&lanes).shelf.len(), 1, "and the lane has it");
     }
 }
