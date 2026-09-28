@@ -18,7 +18,7 @@
 
 use std::io::Write;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -140,6 +140,7 @@ struct App {
     started: Instant,
     last_frame: Instant,
     exit_code: i32,
+    stats: Option<Stats>,
 }
 
 struct Gfx {
@@ -178,6 +179,7 @@ impl App {
             started: Instant::now(),
             last_frame: Instant::now(),
             exit_code: 0,
+            stats: Stats::from_env(),
         }
     }
 
@@ -321,6 +323,7 @@ impl App {
     /// compile with, and the choice is simply where it will open.
     fn pick(&mut self, i: usize) {
         let i = i.min(self.entries.len() - 1);
+        self.asked();
         if self.gfx.is_none() {
             self.preset = i;
         } else if self.load(i) {
@@ -332,6 +335,7 @@ impl App {
     /// wrapping (contract clause 7). Where no other draws, the picture
     /// stays.
     fn step(&mut self, by: isize) {
+        self.asked();
         let count = self.entries.len() as isize;
         let mut i = self.preset as isize;
         for _ in 1..count {
@@ -357,6 +361,13 @@ impl App {
         self.exit_code = 1;
         event_loop.exit();
         false
+    }
+
+    /// A preset asked for, for [`Stats`].
+    fn asked(&mut self) {
+        if let Some(stats) = &mut self.stats {
+            stats.asked = Some(Instant::now());
+        }
     }
 
     fn toggle_fullscreen(&self) {
@@ -437,6 +448,13 @@ impl App {
         gfx.gpu.queue.submit(first.into_iter().chain([encoder.finish()]));
         gfx.overlay.release();
         gfx.gpu.queue.present(frame);
+        if let Some(stats) = &mut self.stats {
+            stats.frames += 1;
+            if let Some(asked) = stats.asked.take() {
+                let file = self.entries[self.preset].file;
+                eprintln!("viz-window: stats: {file} on screen {:.1} ms after it was asked", ms(asked.elapsed()));
+            }
+        }
     }
 }
 
@@ -466,6 +484,9 @@ impl ApplicationHandler<Message> for App {
                 }
             }
             Message::Quit => close(event_loop, "the player's pipe closed"),
+        }
+        if let Some(stats) = &mut self.stats {
+            stats.tick();
         }
     }
 
@@ -522,6 +543,9 @@ impl ApplicationHandler<Message> for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                if let Some(stats) = &mut self.stats {
+                    stats.redraws += 1;
+                }
                 self.draw(event_loop);
                 // Paced by the display: Fifo's acquire waits for the next
                 // vertical blank, so this is one frame per refresh, not a
@@ -532,7 +556,50 @@ impl ApplicationHandler<Message> for App {
             }
             _ => {}
         }
+        if let Some(stats) = &mut self.stats {
+            stats.tick();
+        }
     }
+}
+
+/// `MSTREAM_VIZ_STATS`, set to anything: a diagnostic, off unless asked
+/// for. Once a second the window says on stderr — which the player keeps
+/// in its log — how many frames it presented and how many redraws it was
+/// asked for, and after a preset is asked for, how long it took to reach
+/// the screen. Counted where the window already is; nothing is measured
+/// that would not happen anyway.
+struct Stats {
+    since: Instant,
+    redraws: u32,
+    frames: u32,
+    /// When the preset now on its way was asked for.
+    asked: Option<Instant>,
+}
+
+impl Stats {
+    fn from_env() -> Option<Stats> {
+        let on = std::env::var_os("MSTREAM_VIZ_STATS").is_some_and(|v| !v.is_empty());
+        on.then(|| Stats { since: Instant::now(), redraws: 0, frames: 0, asked: None })
+    }
+
+    /// The last second, said once it has passed. Called from every event,
+    /// the parent's thirty a second among them, so a window drawing nothing
+    /// still says so.
+    fn tick(&mut self) {
+        let elapsed = self.since.elapsed();
+        if elapsed < Duration::from_secs(1) {
+            return;
+        }
+        let rate = |n: u32| f64::from(n) / elapsed.as_secs_f64();
+        eprintln!("viz-window: stats: {:.1} frames/s, {:.1} redraws/s", rate(self.frames), rate(self.redraws));
+        self.since = Instant::now();
+        self.redraws = 0;
+        self.frames = 0;
+    }
+}
+
+fn ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 /// The window's size in points — what the preset shades at.
