@@ -13,6 +13,7 @@
 
 pub(crate) mod fade;
 pub(crate) mod http;
+mod mpeg;
 pub(crate) mod output;
 pub(crate) mod tap;
 pub(crate) mod trace;
@@ -276,21 +277,32 @@ fn open_entry(entry: &QueueEntry) -> Result<Prepared, String> {
     // PlaybackFailed. Serve and the CLI keep the lines (audit #43).
     let (opened, duration) = if http::is_http_url(&path) {
         let redacted = http::redact_source(&path);
-        let (reader, content_length) = http::open(&path).map_err(|e| {
+        let (mut reader, content_length) = http::open(&path).map_err(|e| {
             crate::stderrln!("[engine] open failed for {}: {}", redacted, e);
             e
         })?;
-        if content_length.is_none() {
+        let mut builder = Decoder::builder().with_seekable(true);
+        if let Some(len) = content_length {
+            // A constant-bitrate MP3 seeks by byte offset: one Range request
+            // where the frame walk would read every byte up to the target as
+            // the download delivered it (performance audit #72; the why is
+            // in engine::mpeg). Only with a length, which the offset is
+            // computed from: symphonia refuses a coarse seek without one.
+            let cbr = mpeg::is_cbr_mp3(&mut reader).map_err(|e| {
+                crate::stderrln!("[engine] open failed for {}: {}", redacted, e);
+                e.to_string()
+            })?;
+            if cbr {
+                etrace!("{redacted}: constant bitrate, so seeks go by byte offset");
+            }
+            builder = builder.with_byte_len(len).with_coarse_seek(cbr);
+        } else {
             crate::stderrln!(
                 "[engine] {}: no content length — seek limited to downloaded data",
                 redacted
             );
         }
-        let mut builder = Decoder::builder().with_data(reader).with_seekable(true);
-        if let Some(len) = content_length {
-            builder = builder.with_byte_len(len);
-        }
-        let decoder = builder.build().map_err(|e| {
+        let decoder = builder.with_data(reader).build().map_err(|e| {
             crate::stderrln!("[engine] decode failed for {}: {}", redacted, e);
             e.to_string()
         })?;
@@ -2145,6 +2157,61 @@ mod tests {
         assert!(err.contains("stalled while opening"), "{err}");
         // Bounded is the claim, not sharp: a busy CI box wakes late.
         assert!(waited < Duration::from_secs(10), "took {waited:?}");
+    }
+
+    /// An MP3 that decodes: an Info or Xing frame carrying the frame count,
+    /// then `frames` frames of 128 kbps 44.1 kHz silence (zeroed side
+    /// information decodes to nothing at all).
+    fn silent_mp3(tag: &[u8; 4], frames: u32) -> Vec<u8> {
+        let frame = |padded: bool| {
+            let mut bytes = vec![0u8; 417 + usize::from(padded)];
+            bytes[..4].copy_from_slice(&[0xFF, 0xFB, 0x90 | u8::from(padded) << 1, 0x40]);
+            bytes
+        };
+        let mut mp3 = frame(false);
+        mp3[36..40].copy_from_slice(tag);
+        mp3[43] = 1; // flags: the frame count follows
+        mp3[44..48].copy_from_slice(&frames.to_be_bytes());
+        for i in 0..frames {
+            // 128 kbps at 44.1 kHz is 417.96 bytes a frame: pad 24 in 25.
+            mp3.extend(frame(i % 25 != 0));
+        }
+        mp3
+    }
+
+    #[test]
+    fn a_cbr_mp3_over_http_seeks_by_byte_offset_not_by_reading_up_to_the_target() {
+        // The first 300 KB arrive at once and the rest of the file is held
+        // back, as on a slow link a few seconds into a track. Symphonia's
+        // accurate seek walks every frame from here to the target, reading
+        // each as the download delivers it: the seek waited for the whole
+        // gap (37.8s for a 90% seek at 2 Mbit/s in the audit's
+        // measurement). A constant-bitrate stream seeks by byte offset
+        // instead, one Range request just short of the target (performance
+        // audit #72).
+        use http::tests::{HELD_BACK, range_server};
+        let mp3 = silent_mp3(b"Info", 2000);
+        let len = mp3.len() as u64;
+        let (url, log) = range_server(mp3, |start| {
+            if start == 0 { (300_000, HELD_BACK) } else { (usize::MAX, Duration::ZERO) }
+        });
+        let entry = QueueEntry { path: url, duration_hint: None };
+        let Opened::Http(mut decoder) = open_entry(&entry).unwrap().opened else {
+            panic!("an http source opens as one")
+        };
+        let total = decoder.total_duration().expect("the Info frame's count");
+        assert!((total.as_secs_f64() - 2000.0 * 1152.0 / 44_100.0).abs() < 0.01, "{total:?}");
+
+        let started = Instant::now();
+        decoder.try_seek(total.mul_f64(0.9)).unwrap();
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(1500), "the seek waited {took:?}");
+        assert!(decoder.next().is_some(), "and decodes on from there");
+        let asked = log.lock().unwrap().clone();
+        assert!(
+            asked.iter().any(|&(start, _)| start > len * 85 / 100 && start <= len * 90 / 100),
+            "one Range request just short of the target: {asked:?}"
+        );
     }
 
     #[test]

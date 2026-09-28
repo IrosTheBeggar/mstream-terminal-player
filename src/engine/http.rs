@@ -288,7 +288,7 @@ pub(crate) fn redact_source(source: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -425,8 +425,9 @@ mod tests {
     /// `pace(start)` says how many bytes go out at once and how long the
     /// rest is then held back. Every request's `(start, end)` lands in the
     /// log (end exclusive); an inverted range is logged and refused with a
-    /// 416, the way mStream's own server refuses one.
-    fn range_server(
+    /// 416, the way mStream's own server refuses one. The engine's own
+    /// tests serve through it too.
+    pub(crate) fn range_server(
         body: Vec<u8>,
         pace: impl Fn(u64) -> (usize, Duration) + Send + Sync + 'static,
     ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<(u64, u64)>>>) {
@@ -508,7 +509,7 @@ mod tests {
     // inside stream-download's five-second reconnect watchdog, so a reader
     // parked behind them takes three seconds and a reader woken when its
     // own bytes land takes milliseconds.
-    const HELD_BACK: Duration = Duration::from_secs(3);
+    pub(crate) const HELD_BACK: Duration = Duration::from_secs(3);
 
     #[test]
     fn a_seek_into_the_last_stretch_does_not_wait_for_the_rest_of_the_file() {
