@@ -4,6 +4,7 @@
 //! Async work runs on the shared runtime in `crate::runtime`.
 
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Once, OnceLock};
 use std::time::Duration;
@@ -126,6 +127,27 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 const OPEN_TIMEOUT: Duration = Duration::from_millis(400);
 
+// ── Head start ──────────────────────────────────────────────────────────────
+//
+// stream-download holds every read back until its prefetch has spooled:
+// after the open, and again after each seek past what has downloaded. Its
+// default of 256 KiB put a fixed wait in front of every play, skip and
+// out-of-range seek (a second at 2 Mbit/s before the decoder saw a byte)
+// for a probe that needs a few KB of it: 17-38 KB for the demo library's
+// MP3s (the ID3 tag and a frame), under 1 KB for FLAC or WAV, read in
+// blocks that grow to 32 KiB (performance audit #74). 64 KiB covers those
+// reads with room over. It shortens the head start, not the buffer: past
+// it the spool keeps growing at link rate minus bitrate, as it always did.
+// And not smaller still: once playing, the decoder is pulled on the audio
+// device's callback, and a head start shorter than one of its reads would
+// leave that callback waiting on the network from the first bar.
+const PREFETCH: u64 = 64 * 1024;
+
+/// Spool writes reach the file in batches this size rather than the
+/// default 4 KiB: the same bytes in a sixteenth of the write calls and task
+/// yields. Readers are woken per network chunk either way.
+const WRITE_BATCH: NonZeroUsize = NonZeroUsize::new(64 * 1024).unwrap();
+
 /// Hosts allowed to present a certificate the OS won't vouch for — written
 /// when a session whose saved entry opted in connects (`tui::dispatch`
 /// sees the flag ride past on the Connect/Login command), read per open.
@@ -208,10 +230,11 @@ pub(crate) fn open(url_str: &str) -> Result<(HttpReader, Option<u64>), String> {
                 // the UI toast (pre-merge review).
                 .map_err(|e| redact_queries(&format!("request failed: {e}")))?;
             let content_length = stream.content_length();
-            let reader =
-                StreamDownload::from_stream(stream, spool_provider(), Settings::default())
-                    .await
-                    .map_err(|e| redact_queries(&format!("stream init failed: {e}")))?;
+            let settings =
+                Settings::default().prefetch_bytes(PREFETCH).batch_write_size(WRITE_BATCH);
+            let reader = StreamDownload::from_stream(stream, spool_provider(), settings)
+                .await
+                .map_err(|e| redact_queries(&format!("stream init failed: {e}")))?;
             Ok((reader, content_length))
         };
         // Timing out abandons the future, which aborts the request in
@@ -618,6 +641,31 @@ mod tests {
             assert!(got == body[2_000_000..2_010_000], "round {round}");
             assert!(took < Duration::from_millis(1500), "round {round}: waited {took:?}");
         }
+    }
+
+    #[test]
+    fn an_open_and_a_seek_wait_for_a_short_head_start_not_a_quarter_meg() {
+        // stream-download holds reads back until its prefetch has spooled;
+        // at its default 256 KiB that was a second at 2 Mbit/s on every
+        // open and every out-of-range seek (performance audit #74). Each
+        // response here sends 80 KB and then holds the rest back: enough
+        // for our head start, well short of the default's.
+        let body = patterned(2_000_000);
+        let (url, _) = range_server(body.clone(), |_| (80_000, HELD_BACK));
+        let (mut reader, _) = open(&url).unwrap();
+
+        // The probe reads straight off the open, no seek first (a seek
+        // would cut the prefetch short).
+        let started = std::time::Instant::now();
+        let mut got = vec![0u8; 1000];
+        std::io::Read::read_exact(&mut reader, &mut got).unwrap();
+        let took = started.elapsed();
+        assert!(got == body[..1000]);
+        assert!(took < Duration::from_millis(1500), "the probe's first read waited {took:?}");
+
+        let (took, got) = seek_and_read(&mut reader, 1_000_000, 1000).unwrap();
+        assert!(got == body[1_000_000..1_001_000]);
+        assert!(took < Duration::from_millis(1500), "the seek waited {took:?}");
     }
 
     #[test]
