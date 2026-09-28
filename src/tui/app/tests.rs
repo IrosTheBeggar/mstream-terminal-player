@@ -7214,3 +7214,51 @@ fn a_full_art_cache_lets_go_of_the_oldest_cover_nothing_on_screen_needs() {
     app.fetch_art_from("newer.jpeg", None);
     assert!(app.art.contains_key("wall2.jpeg") && app.art.contains_key("newer.jpeg"), "nothing else went for a gap");
 }
+
+#[test]
+fn a_cover_that_lands_after_the_cache_let_go_of_its_claim_is_still_evictable() {
+    // Performance audit #90: a wall page flipped past before its covers
+    // landed was filed back outside the eviction order — kept for the
+    // session, past the cap, with its source bytes. Dropped instead, it
+    // would be asked for again every frame while it is still on screen.
+    let mut app = connected_app();
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "queued.jpeg")]);
+    app.fetch_art_from("queued.jpeg", None);
+    for i in 0..ART_CACHE_CAP {
+        app.fetch_art_file(&format!("old{i}.jpeg"));
+    }
+    for i in 0..ART_CACHE_CAP {
+        app.fetch_art_file(&format!("new{i}.jpeg"));
+    }
+    assert!(!app.art.contains_key("old0.jpeg"), "the first page's claims went while still out");
+
+    let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+    for i in 0..ART_CACHE_CAP {
+        app.apply_event(Event::AlbumArt { file: format!("old{i}.jpeg"), art: Some(art.clone()), settled: true });
+    }
+    assert_eq!(app.art.len(), ART_CACHE_CAP, "the answers are kept, and the cap holds");
+    assert_eq!(app.art_order.len(), app.art.len(), "every entry is one eviction can reach");
+    assert!(app.art.contains_key("old255.jpeg") && app.art.contains_key("queued.jpeg"));
+
+    // Reachable means it goes: a fresh page lets every one of them go.
+    for i in 0..ART_CACHE_CAP {
+        app.fetch_art_file(&format!("next{i}.jpeg"));
+    }
+    assert!(app.art.keys().all(|k| k.starts_with("next") || k == "queued.jpeg"), "nothing outlived the cap");
+    assert_eq!(app.art.len(), ART_CACHE_CAP);
+}
+
+#[test]
+fn a_shape_that_lands_after_the_cache_let_go_of_its_claim_is_still_evictable() {
+    // The waveforms' copy of the covers' rule (performance audit #90).
+    let mut app = connected_app();
+    let origin = Origin { server: "http://host:3000".into(), peer: None };
+    for i in 0..2 * ART_CACHE_CAP {
+        app.fetch_waveform(&format!("t{i}.mp3"), &origin);
+    }
+    for i in 0..ART_CACHE_CAP {
+        app.apply_event(Event::Waveform { filepath: format!("t{i}.mp3"), bars: Some(vec![1]), settled: true });
+    }
+    assert_eq!(app.waveforms.len(), ART_CACHE_CAP);
+    assert_eq!(app.waveform_order.len(), app.waveforms.len());
+}

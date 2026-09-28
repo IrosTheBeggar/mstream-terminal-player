@@ -608,14 +608,63 @@ pub struct Origin {
 
 /// Drop the oldest entry of a full cache that nothing pinned needs — or
 /// nothing, when every entry is pinned. A name the map no longer holds (an
-/// unanswered ask gave its slot back) is forgotten on the way.
-fn evict_oldest<T>(map: &mut HashMap<String, T>, order: &mut VecDeque<String>, pinned: &HashSet<String>) {
+/// unanswered ask gave its slot back) is forgotten on the way. Hands back
+/// what went, so a caller shedding several knows when to stop.
+fn evict_oldest<T>(
+    map: &mut HashMap<String, T>,
+    order: &mut VecDeque<String>,
+    pinned: &HashSet<String>,
+) -> Option<(String, T)> {
     order.retain(|name| map.contains_key(name));
-    if let Some(at) = order.iter().position(|name| !pinned.contains(name))
-        && let Some(name) = order.remove(at)
-    {
-        map.remove(&name);
+    let at = order.iter().position(|name| !pinned.contains(name))?;
+    let name = order.remove(at)?;
+    let value = map.remove(&name)?;
+    Some((name, value))
+}
+
+/// File a settled answer. A claim still standing is filled in place. One
+/// the cache let go of while its question was out — the wall turned past
+/// its page before the covers landed — goes back in as the newest entry,
+/// and the cache sheds its oldest to stay at the cap. The answer is paid
+/// for and never stale, but filed outside the order nothing could evict it
+/// again: a fast flip through a slow server's wall left hundreds of covers
+/// past the cap for the rest of the session (performance audit #90).
+/// Dropping it instead would re-ask, every frame, for a cover still on
+/// screen.
+fn file_answer<T>(
+    map: &mut HashMap<String, T>,
+    order: &mut VecDeque<String>,
+    name: String,
+    value: T,
+    pinned: impl FnOnce() -> HashSet<String>,
+) {
+    if let Some(slot) = map.get_mut(&name) {
+        *slot = value;
+        return;
     }
+    map.insert(name.clone(), value);
+    order.push_back(name);
+    if map.len() > ART_CACHE_CAP {
+        let pinned = pinned();
+        while map.len() > ART_CACHE_CAP && evict_oldest(map, order, &pinned).is_some() {}
+    }
+}
+
+/// The covers on screen whatever else is: the playing track's and the
+/// queue's rows'. Free of the App so an answer can be filed while the
+/// cache is borrowed.
+fn pinned_art(queue: &Queue, now_playing: Option<&Track>) -> HashSet<String> {
+    queue
+        .items
+        .iter()
+        .filter_map(|item| item.metadata.album_art.clone())
+        .chain(now_playing.and_then(|t| t.metadata.album_art.clone()))
+        .collect()
+}
+
+/// The shapes eviction must leave alone: the queue's.
+fn pinned_shapes(queue: &Queue) -> HashSet<String> {
+    queue.items.iter().map(|item| item.filepath.clone()).collect()
 }
 
 /// Why Auto DJ picked a row, for the queue's badge (auto-dj contract,
@@ -5019,7 +5068,9 @@ impl App {
             // newest and stays by age. Clearing the lot re-asked for
             // ninety covers a frame (the review's finding).
             let pinned = self.pinned_art();
-            evict_oldest(&mut self.art, &mut self.art_order, &pinned);
+            while self.art.len() >= ART_CACHE_CAP
+                && evict_oldest(&mut self.art, &mut self.art_order, &pinned).is_some()
+            {}
         }
         self.art.insert(file.to_string(), None);
         self.art_order.push_back(file.to_string());
@@ -5029,12 +5080,7 @@ impl App {
     /// The covers on screen whatever else is: the playing track's and the
     /// queue's rows'.
     fn pinned_art(&self) -> HashSet<String> {
-        self.queue
-            .items
-            .iter()
-            .filter_map(|item| item.metadata.album_art.clone())
-            .chain(self.now_playing.as_ref().and_then(|t| t.metadata.album_art.clone()))
-            .collect()
+        pinned_art(&self.queue, self.now_playing.as_ref())
     }
 
     /// The session generation (see the field): what a library or search ask
@@ -5115,8 +5161,10 @@ impl App {
         }
         if self.waveforms.len() >= ART_CACHE_CAP {
             // The same rule as the covers': the queue's shapes stay.
-            let pinned: HashSet<String> = self.queue.items.iter().map(|item| item.filepath.clone()).collect();
-            evict_oldest(&mut self.waveforms, &mut self.waveform_order, &pinned);
+            let pinned = pinned_shapes(&self.queue);
+            while self.waveforms.len() >= ART_CACHE_CAP
+                && evict_oldest(&mut self.waveforms, &mut self.waveform_order, &pinned).is_some()
+            {}
         }
         self.waveforms.insert(filepath.to_string(), None);
         self.waveform_order.push_back(filepath.to_string());
@@ -5581,12 +5629,15 @@ impl App {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just
                 // means the next track off that album finds its cover
-                // already here. An unanswered question gives its slot back
-                // instead — the waveform's rule, learned here the hard
-                // way: a fetch that died with the wifi used to leave the
-                // album coverless for the rest of the session.
+                // already here — and one whose claim the cache let go of
+                // meanwhile is filed where eviction can still reach it
+                // (`file_answer`). An unanswered question gives its slot
+                // back instead — the waveform's rule, learned here the
+                // hard way: a fetch that died with the wifi used to leave
+                // the album coverless for the rest of the session.
                 if settled {
-                    self.art.insert(file, art);
+                    let (queue, now_playing) = (&self.queue, self.now_playing.as_ref());
+                    file_answer(&mut self.art, &mut self.art_order, file, art, || pinned_art(queue, now_playing));
                 } else {
                     self.art.remove(&file);
                 }
@@ -5601,7 +5652,10 @@ impl App {
                 // back — otherwise one dropped connection is the last word
                 // on that track for the rest of the session.
                 if settled {
-                    self.waveforms.insert(filepath, bars);
+                    let queue = &self.queue;
+                    file_answer(&mut self.waveforms, &mut self.waveform_order, filepath, bars, || {
+                        pinned_shapes(queue)
+                    });
                 } else {
                     self.waveforms.remove(&filepath);
                 }

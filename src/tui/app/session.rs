@@ -670,8 +670,11 @@ impl App {
                 }
                 self.libraries = ping.vpaths.clone();
                 // Cover filenames only mean anything to the server that
-                // minted them; a reconnect may be a different server.
+                // minted them; a reconnect may be a different server. The
+                // order goes with the map: a name left behind in it would
+                // come back doubled once a late answer files it again.
                 self.art.clear();
+                self.art_order.clear();
                 let libraries = ping.vpaths.len();
                 self.info(format!(
                     "connected to {} ({} librar{})",
