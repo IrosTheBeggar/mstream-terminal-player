@@ -641,10 +641,14 @@ fn event_loop(
     let mut title = String::new();
     let mut spun = Instant::now();
     let mut saver = QueueSaver::new(app);
+    let mut expecting = crate::kit::pace::Expecting::default();
     loop {
         // A save changes what the book knows — a peer just reconciled, a
         // token just signed in for — and the queue's rows resolve against it.
         let saving = pending.iter().any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. }));
+        if pending.iter().any(awaits_answer) {
+            expecting.arm();
+        }
         dispatch(app, &mut pending, audio_tx, api_tx, event_tx);
         if saving && let Ok(fresh) = config::load() {
             let credentials = config::load_credentials().unwrap_or_default();
@@ -668,7 +672,7 @@ fn event_loop(
 
         terminal.draw(|frame| ui::render(frame, app))?;
 
-        if event::poll(poll_interval(app))? {
+        if event::poll(expecting.wait(poll_interval(app)))? {
             // Everything already queued is handled before the next draw.
             // Mouse capture arms any-motion tracking, so a sweep of the
             // pointer is one event per cell crossed — serviced one frame
@@ -860,6 +864,23 @@ pub(crate) fn save_login(app: &App) -> Result<(), String> {
     config::save_credentials(&credentials)
 }
 
+/// Whether an effect asks a worker something the screen waits to hear back
+/// on: a read of the server, a transport change the next status confirms,
+/// a look for servers nearby. While one is out the loop waits briskly, so
+/// the answer is drawn within milliseconds of landing rather than at the
+/// end of a poll it cannot cut short (`kit::pace`, performance audit #82).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn awaits_answer(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Api(_)
+            | Effect::Discover
+            | Effect::Audio(
+                AudioCmd::Play { .. } | AudioCmd::Pause | AudioCmd::Resume | AudioCmd::Stop | AudioCmd::Seek(_)
+            )
+    )
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn dispatch(
     app: &App,
@@ -976,6 +997,21 @@ mod tests {
 
         let _ = std::panic::take_hook();
         std::panic::set_hook(original);
+    }
+
+    /// The requests that keep the loop brisk (performance audit #82): the
+    /// server's answers and a transport change's first status — never a
+    /// volume nudge or a save, which nobody waits on.
+    #[test]
+    fn a_request_the_screen_waits_on_keeps_the_loop_brisk() {
+        let play = Effect::Audio(AudioCmd::Play { url: "http://x/a.mp3".into(), duration_hint: None });
+        assert!(awaits_answer(&play));
+        assert!(awaits_answer(&Effect::Audio(AudioCmd::Seek(12.0))));
+        assert!(awaits_answer(&Effect::Api(ApiCmd::Shutdown)));
+        assert!(awaits_answer(&Effect::Discover));
+        assert!(!awaits_answer(&Effect::Audio(AudioCmd::SetVolume(0.5))));
+        assert!(!awaits_answer(&Effect::SaveSession));
+        assert!(!awaits_answer(&Effect::Trust("http://x".into())));
     }
 
     #[test]

@@ -11,9 +11,10 @@
 //! brighten under the pointer, and a FIXED palette (see [`theme`]) so the
 //! screens look the same in every terminal that can carry it.
 //! Mouse-first — every control is clickable — and every action has
-//! a key. All decisions live in [`Wizard`]; the loop below only draws,
-//! reads input, and runs one queued server call per pass (queued so the
-//! "working…" frame is on screen while the call blocks).
+//! a key. All decisions live in [`Wizard`]; the loop below only folds in
+//! the worker's answers, draws, hands the worker one queued server call
+//! per pass (after the draw, so the "working…" frame is on screen while
+//! the call runs), and reads input.
 
 pub mod picker;
 
@@ -43,6 +44,7 @@ use rust_i18n::t;
 use crate::kit::{
     self, GroundGuard, POINTER_RESET, Surface, accent, bold, dim, set_pointer_shape, theme,
 };
+use crate::kit::pace::Expecting;
 use crate::kit::theme::th;
 
 /// How long to wait for input before redrawing anyway.
@@ -343,8 +345,8 @@ fn server_port(server: &str) -> Option<u16> {
     }
 }
 
-/// A server call queued from input handling and run right after the next
-/// draw, so its "working…" note is actually visible while it blocks.
+/// A server call queued from input handling and handed to the worker right
+/// after the next draw, so its "working…" note is on screen while it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Op {
     Ping,
@@ -1792,10 +1794,15 @@ fn event_loop(
     from_worker: &Receiver<Done>,
 ) -> std::io::Result<Outcome> {
     let mut hand = false;
+    // Two clocks behind the brisk wait (`kit::pace`): the single-flight op
+    // the worker is running, and the validations that go out beside it.
+    let mut flight = Expecting::default();
+    let mut checks = Expecting::default();
     loop {
-        terminal.draw(|frame| render(frame, wizard))?;
-
-        // Fold in whatever the worker finished, then hand it the next op.
+        // Fold in whatever the worker finished before the frame is drawn:
+        // folded in after, an answer missed the frame it could have been
+        // on and waited out a whole poll for the next (performance audit
+        // #82).
         loop {
             match from_worker.try_recv() {
                 Ok(done) => wizard.apply(done),
@@ -1807,7 +1814,16 @@ fn event_loop(
                 }
             }
         }
+        flight.track(wizard.in_flight);
+
+        terminal.draw(|frame| render(frame, wizard))?;
+
+        // Then hand it the next op.
+        if !wizard.pending_validate.is_empty() {
+            checks.arm();
+        }
         wizard.dispatch_queued(to_worker);
+        flight.track(wizard.in_flight);
 
         // The hand cursor follows whether the pointer is over anything
         // clickable in the frame just drawn.
@@ -1837,7 +1853,7 @@ fn event_loop(
             continue;
         }
 
-        if !event::poll(POLL)? {
+        if !event::poll(checks.wait(flight.wait(POLL)))? {
             continue;
         }
         // Drain everything queued before the next draw: mouse capture arms

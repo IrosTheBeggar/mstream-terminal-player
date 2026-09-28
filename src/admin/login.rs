@@ -188,7 +188,7 @@ impl Screen for SignIn {
         &mut self.ui
     }
 
-    fn pump(&mut self) {
+    fn absorb(&mut self) {
         let answer = match &self.in_flight {
             Some(rx) => match rx.try_recv() {
                 Ok(done) => Some(done),
@@ -202,7 +202,14 @@ impl Screen for SignIn {
         if let Some(done) = answer {
             self.apply(done);
         }
+    }
+
+    fn pump(&mut self) {
         self.dispatch_queued();
+    }
+
+    fn awaiting(&self) -> bool {
+        self.in_flight.is_some()
     }
 
     /// Signed in: the loop ends and the hub reads the session.

@@ -606,7 +606,7 @@ impl Screen for Room {
         &mut self.ui
     }
 
-    fn pump(&mut self) {
+    fn absorb(&mut self) {
         loop {
             match self.from_worker.try_recv() {
                 Ok(done) => self.apply(done),
@@ -617,7 +617,14 @@ impl Screen for Room {
                 }
             }
         }
+    }
+
+    fn pump(&mut self) {
         self.dispatch_queued();
+    }
+
+    fn awaiting(&self) -> bool {
+        self.in_flight
     }
 
     fn render(&mut self, frame: &mut Frame) {
@@ -1338,6 +1345,38 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    /// The hub's order (performance audit #82): an answer is folded in
+    /// before the draw, and the op a key queued meanwhile goes to the
+    /// worker only in the pump after it — the frame between shows its
+    /// busy note.
+    #[test]
+    fn absorb_folds_in_the_answer_and_leaves_the_next_call_to_the_pump() {
+        let _en = english();
+        let mut room = room(false);
+        let (answer, answers) = std::sync::mpsc::channel();
+        let (asks, asked) = std::sync::mpsc::channel();
+        room.from_worker = answers;
+        room.to_worker = asks;
+
+        handle_key(&mut room, key(KeyCode::Char('b')));
+        Screen::pump(&mut room);
+        assert!(room.awaiting(), "the browse is out with the worker");
+        assert!(asked.try_recv().is_ok());
+
+        let music = Lib { name: "music".into(), root: "/srv/music".into(), follow_symlinks: false };
+        answer.send(Done::Loaded(Ok(vec![music.clone()]))).unwrap();
+        room.queue(Op::Load, "reloading");
+        Screen::absorb(&mut room);
+        assert_eq!(room.libs, vec![music], "the answer is in before the frame is drawn");
+        assert!(!room.awaiting());
+        assert_eq!(room.queued, Some(Op::Load), "absorbing never hands the worker the next call");
+        assert!(asked.try_recv().is_err());
+
+        Screen::pump(&mut room);
+        assert!(room.awaiting());
+        assert!(matches!(asked.try_recv(), Ok((_, Op::Load))), "the pump does");
     }
 
     #[test]

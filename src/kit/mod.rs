@@ -17,9 +17,11 @@
 //! adaptive `ui::Theme` is deliberately not part of the kit.
 //!
 //! Frames reach the terminal through [`frames`]: whole, in one write, and
-//! shown at once. Every full-screen page starts with its `init`.
+//! shown at once. Every full-screen page starts with its `init`, and waits
+//! between frames at the pace [`pace`] sets.
 
 pub mod frames;
+pub mod pace;
 pub mod theme;
 
 use std::time::{Duration, Instant};

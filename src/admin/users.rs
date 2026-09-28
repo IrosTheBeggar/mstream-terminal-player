@@ -710,7 +710,7 @@ impl Screen for Room {
         &mut self.ui
     }
 
-    fn pump(&mut self) {
+    fn absorb(&mut self) {
         loop {
             match self.from_worker.try_recv() {
                 Ok(done) => self.apply(done),
@@ -721,7 +721,14 @@ impl Screen for Room {
                 }
             }
         }
+    }
+
+    fn pump(&mut self) {
         self.dispatch_queued();
+    }
+
+    fn awaiting(&self) -> bool {
+        self.in_flight
     }
 
     /// The quiet reload — never under a modal (its draft would go stale),

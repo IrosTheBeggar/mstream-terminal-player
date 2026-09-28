@@ -232,6 +232,13 @@ impl ServersUi {
         self.form.is_some() || self.confirm.is_some() || self.qr.is_some()
     }
 
+    /// Whether a thread of this layer's is out — a form's submit, a version
+    /// probe — so the loop waits briskly for its answer (`kit::pace`).
+    pub(crate) fn busy(&self) -> bool {
+        self.form.as_ref().is_some_and(|form| form.submitting)
+            || self.versions.values().any(|probe| matches!(probe, Probe::Pending))
+    }
+
     fn version_label(&self, key: &str) -> String {
         match self.versions.get(key) {
             Some(Probe::Pending) => "…".to_string(),

@@ -4,8 +4,8 @@
 //! already holds. Its client is built from the App's reach, so a Quick
 //! Connect tunnel or a peer's parent serves it as it serves the queue. The
 //! page keeps its own surface; the screen hands it the keys and the pointer
-//! below the bar, pumps its worker each frame, and puts its hint on the
-//! GUI's footer.
+//! below the bar, folds in and pumps its worker each frame, and puts its
+//! hint on the GUI's footer.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -164,9 +164,23 @@ pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
     true
 }
 
-/// The page's own per-frame duties, after the draw: its worker's answers,
-/// a held control, the tooltip clock — and whether the pointer is over one
-/// of its clickables, for the hand.
+/// The page's worker's answers, before the draw — the hub's order, so an
+/// answer is on screen the frame it lands (performance audit #82).
+pub(crate) fn absorb(gui: &mut Gui) {
+    if let Some(page) = gui.stats.page.as_mut() {
+        Hosted::absorb(page);
+    }
+}
+
+/// Whether the page has a call out with its worker — the GUI's loop waits
+/// briskly for the answer while it does (`kit::pace`).
+pub(crate) fn awaiting(gui: &Gui) -> bool {
+    gui.stats.page.as_ref().is_some_and(Hosted::awaiting)
+}
+
+/// The page's own per-frame duties, after the draw: its worker's next
+/// call, a held control, the tooltip clock — and whether the pointer is
+/// over one of its clickables, for the hand.
 pub(crate) fn frame(gui: &mut Gui) -> bool {
     let on_screen = gui.screen == Screen::Stats;
     let Some(page) = gui.stats.page.as_mut() else { return false };

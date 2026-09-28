@@ -53,6 +53,7 @@ use crate::config::{self, Config};
 use crate::kit::{
     GroundGuard, ListView, POINTER_RESET, Surface, dim, input_display_blink, scroll_list, set_pointer_shape,
 };
+use crate::kit::pace::Expecting;
 use crate::kit::theme::{self, legacy_conhost, th};
 use crate::tui::app::{
     Action, App, Effect, Entry, MessageKind, SEARCH_CLASSES, SearchClass, SearchNode, Tab,
@@ -2484,24 +2485,16 @@ fn event_loop(
 ) -> std::io::Result<()> {
     let mut hand = false;
     let mut saver = tui::QueueSaver::new(&gui.app);
+    // Two clocks behind the brisk wait (`kit::pace`): the workers' requests
+    // the App sends, and the side threads' calls — a sign-in, a torrent
+    // check, the Stats page's load — which say themselves when they are out.
+    let mut asked = Expecting::default();
+    let mut side = Expecting::default();
     loop {
-        // A SaveSession about to be dispatched writes the config behind
-        // this copy's back — a Quick Connect add mints a whole new entry
-        // there. Reload after, so the dropdown and the room list it.
-        let saving = gui
-            .pending
-            .iter()
-            .any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. } | Effect::SaveDjLibrary { .. }));
-        tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
-        saver.tick(&gui.app);
-        let ticked = gui.app.tick();
-        gui.pend(ticked);
-        if saving && let Ok(fresh) = config::load() {
-            gui.config = fresh;
-            refresh_book(gui);
-        }
-        terminal.draw(|frame| render(frame, gui))?;
-
+        // Whatever the workers sent is folded in before anything is drawn —
+        // the TUI's order. Drawn first, an answer that landed during the
+        // wait missed this frame and sat out a whole second poll for the
+        // next, and so did the requests it led to (performance audit #82).
         while let Ok(ev) = event_rx.try_recv() {
             // The servers layer looks first: session answers that would
             // land on the TUI's connect screen open the GUI's form instead.
@@ -2527,6 +2520,27 @@ fn event_loop(
         }
         servers::poll(gui);
         torrent::poll(gui);
+        stats::absorb(gui);
+
+        // A SaveSession about to be dispatched writes the config behind
+        // this copy's back — a Quick Connect add mints a whole new entry
+        // there. Reload after, so the dropdown and the room list it.
+        let saving = gui
+            .pending
+            .iter()
+            .any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. } | Effect::SaveDjLibrary { .. }));
+        if gui.pending.iter().any(tui::awaits_answer) {
+            asked.arm();
+        }
+        tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
+        saver.tick(&gui.app);
+        let ticked = gui.app.tick();
+        gui.pend(ticked);
+        if saving && let Ok(fresh) = config::load() {
+            gui.config = fresh;
+            refresh_book(gui);
+        }
+        terminal.draw(|frame| render(frame, gui))?;
 
         // The Stats screen's page pumps its worker and its controls here too.
         let stats_over = stats::frame(gui);
@@ -2555,7 +2569,8 @@ fn event_loop(
         } else {
             gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
         };
-        if !event::poll(wait)? {
+        side.track(gui.servers.busy() || gui.torrent.busy.is_some() || stats::awaiting(gui));
+        if !event::poll(side.wait(asked.wait(wait)))? {
             continue;
         }
         // Drain everything queued before the next draw (the wizard's

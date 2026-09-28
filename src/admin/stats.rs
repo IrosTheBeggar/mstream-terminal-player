@@ -790,7 +790,7 @@ impl Screen for Page {
         &mut self.ui
     }
 
-    fn pump(&mut self) {
+    fn absorb(&mut self) {
         loop {
             match self.from_worker.try_recv() {
                 Ok(done) => self.apply(done),
@@ -801,7 +801,14 @@ impl Screen for Page {
                 }
             }
         }
+    }
+
+    fn pump(&mut self) {
         self.dispatch_queued();
+    }
+
+    fn awaiting(&self) -> bool {
+        self.in_flight
     }
 
     fn render(&mut self, frame: &mut Frame) {

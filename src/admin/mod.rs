@@ -10,7 +10,8 @@
 //! shares (the header, the note and tips lines on the bottom edge) and
 //! the gate sentences for the errors B4 warns a terminal client will hit.
 //! Rooms keep their own state, worker and drawing; the loop only asks a
-//! room to pump its worker, tick its timers, draw, and answer input.
+//! room to fold in and pump its worker, tick its timers, draw, and answer
+//! input.
 
 mod backups;
 mod torrents;
@@ -39,6 +40,7 @@ use ratatui::widgets::{Block, Paragraph};
 use rust_i18n::t;
 
 use crate::api::{ApiError, Client};
+use crate::kit::pace::Expecting;
 use crate::kit::theme::th;
 use crate::kit::{
     GroundGuard, POINTER_RESET, Surface, accent, bold, dim, set_pointer_shape, theme,
@@ -206,7 +208,8 @@ pub(crate) enum Outcome {
 
 /// What the terminal session asks of a room. A room keeps its own worker
 /// channels, state and drawing; the loop calls these in a fixed order —
-/// tick, draw, pump, then input — so a busy note queued by a key is on
+/// absorb, tick, draw, pump, then input — so a worker's answer is on
+/// screen the frame it is folded in, and a busy note queued by a key is on
 /// screen the frame before its call blocks the worker.
 pub(crate) trait Screen {
     type Act: Clone;
@@ -215,17 +218,28 @@ pub(crate) trait Screen {
     /// drags, hold-repeat and tooltip dwell through it.
     fn ui(&mut self) -> &mut Surface<Self::Act>;
 
-    /// Fold in whatever the worker finished, then hand it the next queued
-    /// op. Called once per frame, right after the draw.
+    /// Fold in whatever the worker finished. Called once per frame, right
+    /// before the draw: folded in after it, an answer missed the frame it
+    /// could have been on and waited out a whole poll for the next
+    /// (performance audit #82).
+    fn absorb(&mut self);
+
+    /// Hand the worker the next queued op. Called once per frame, right
+    /// after the draw.
     fn pump(&mut self);
+
+    /// Whether a call is out with the worker: the loop waits briskly for
+    /// its answer while one is (`kit::pace`).
+    fn awaiting(&self) -> bool;
 
     /// Once per loop turn, before the draw: a room's own timers (a poll
     /// cadence, say). Nothing by default.
     fn tick(&mut self) {}
 
-    /// Asked right after the pump: a screen whose job is done (the sign-in
-    /// page, once the server answered) ends the loop from here — the rooms
-    /// only ever end on a key or a click, and never override it.
+    /// Asked right after the answers are folded in: a screen whose job is
+    /// done (the sign-in page, once the server answered) ends the loop
+    /// from here — the rooms only ever end on a key or a click, and never
+    /// override it.
     fn finished(&self) -> Option<Outcome> {
         None
     }
@@ -289,13 +303,17 @@ fn event_loop<S: Screen>(
     mouse_on: bool,
 ) -> std::io::Result<Outcome> {
     let mut hand = false;
+    let mut expecting = Expecting::default();
     loop {
-        screen.tick();
-        terminal.draw(|frame| screen.render(frame))?;
-        screen.pump();
+        screen.absorb();
         if let Some(outcome) = screen.finished() {
             return Ok(outcome);
         }
+        expecting.track(screen.awaiting());
+        screen.tick();
+        terminal.draw(|frame| screen.render(frame))?;
+        screen.pump();
+        expecting.track(screen.awaiting());
 
         let over = screen.ui().hovering_clickable();
         if over != hand {
@@ -308,7 +326,7 @@ fn event_loop<S: Screen>(
         }
         screen.ui().dwell_tick();
 
-        if !event::poll(POLL)? {
+        if !event::poll(expecting.wait(POLL))? {
             continue;
         }
         // Drain everything queued before the next draw: a sweep of the
