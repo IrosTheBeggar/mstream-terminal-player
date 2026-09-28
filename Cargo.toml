@@ -398,10 +398,12 @@ rust-i18n-support = "=3.1.5"
 # waiting on it (a 1s nudge back stalled 14s at 8 Mbit/s, a seek into the
 # last 154 KB 29s), the loader then refilled the file's lowest gap instead of
 # the one ahead of the reader, a read that ran off the end of an island never
-# asked for what came next, a seek past an island asked the server for an
-# inverted range (a 416 and a dead track), and a chunk landing above a reader
-# that had sought back into a gap woke it onto bytes never written. Neither
-# 0.24.3, 0.24.4 nor upstream main (checked 2026-09-28) changes those files.
+# asked for what came next (the patch's ask keeps only the latest: queued
+# behind a stale one, it was dropped), a seek past an island asked the server
+# for an inverted range (a 416 and a dead track), and a chunk landing above a
+# reader that had sought back into a gap woke it onto bytes never written.
+# Neither 0.24.3, 0.24.4 nor upstream main (checked 2026-09-28) changes those
+# files.
 # Drop this entry and vendor/stream-download once a release does: the range
 # tests in src/engine/http.rs say whether it did.
 [patch.crates-io]

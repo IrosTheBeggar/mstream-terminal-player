@@ -8,7 +8,7 @@ use std::time::Instant;
 use parking_lot::{Condvar, Mutex, RwLock};
 use rangemap::RangeSet;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 use tracing::{debug, error};
 
 #[derive(Debug, Clone)]
@@ -20,7 +20,7 @@ pub(crate) struct SourceHandle {
     pub(super) content_length: Option<u64>,
     pub(super) seek_tx: mpsc::Sender<u64>,
     // mstream-player patch: see `want`.
-    pub(super) want_tx: mpsc::Sender<u64>,
+    pub(super) want_tx: watch::Sender<u64>,
     pub(super) notify_read: NotifyRead,
 }
 
@@ -53,9 +53,15 @@ impl SourceHandle {
     // where the reader's bytes run out. A seek re-targets the download; a read never did, so
     // a reader that played (or sought within the spool) past the end of an island waited
     // there until the download happened by, after everything else. The download decides
-    // whether it is already on its way; a message still pending means one is in hand.
+    // whether it is already on its way.
+    //
+    // Only the latest want counts, so it replaces one the download has not looked at yet. On
+    // a one-slot queue it was dropped instead, and the one ahead of it was stale by then: the
+    // write that woke its reader had landed while it waited. The download found those bytes
+    // already there and did nothing, and the reader, off the end of another island, parked
+    // until the back-fill came round (performance audit #73 follow-up).
     pub(crate) fn want(&self, position: u64) {
-        let _ = self.want_tx.try_send(position);
+        self.want_tx.send_replace(position);
     }
 
     pub(crate) fn notify_read(&self) {
