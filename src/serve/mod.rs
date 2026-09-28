@@ -41,8 +41,10 @@ pub struct ServeOptions {
     /// stance: unreachable from `--port N`.
     pub gapless: bool,
     /// With neither of those, open the next track ahead of its boundary
-    /// anyway, so the plain cut never waits on the open (performance audit
-    /// #77). Same legacy stance: a prefetch is asked for, never assumed.
+    /// anyway, so the plain cut normally does not wait on the open; one
+    /// still running at the boundary leaves the cut to open the track
+    /// itself, as without (performance audit #77). Same legacy stance: a
+    /// prefetch is asked for, never assumed.
     pub prefetch: bool,
 }
 

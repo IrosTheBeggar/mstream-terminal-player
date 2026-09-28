@@ -363,7 +363,9 @@ struct ServeArgs {
     gapless: bool,
 
     /// With no crossfade or gapless set, still open the next track ahead of
-    /// time, so the plain cut between tracks never waits on the open.
+    /// time, so the plain cut between tracks normally does not wait on the
+    /// open. If that open is still running at the boundary, the cut opens
+    /// the track itself, as without the flag.
     #[arg(long)]
     prefetch: bool,
 }
