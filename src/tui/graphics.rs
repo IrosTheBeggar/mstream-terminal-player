@@ -73,6 +73,12 @@ mod native {
         /// cached picture, and a wall of covers is not sent again for
         /// every cell a window edge is dragged across.
         images_outlive_resize: bool,
+        /// Whether kitty's pixels go deflated — see [`deflate_kitty`].
+        deflate: bool,
+        /// Whether escapes this instance builds itself go through tmux's
+        /// passthrough: the picker's own answer, read once for it
+        /// ([`wrapped_for_tmux`]) rather than on every encode.
+        tmux: bool,
         /// When the window-size ioctl was last consulted. One cover per
         /// frame was this module's design point; the GUI's album wall
         /// draws fifteen, and re-asking for every one of them was
@@ -192,11 +198,13 @@ mod native {
                     picker.set_protocol_type(protocol);
                     tracing::info!("terminal graphics: forced {forced:?}, cell {font:?}");
                     return Graphics {
+                        tmux: wrapped_for_tmux(&picker),
                         picker: Some(picker),
                         adaptive: true,
                         images_outlive_resize: images_outlive_resize(protocol, |var| {
                             std::env::var(var).ok()
                         }),
+                        deflate: deflate_kitty(|var| std::env::var(var).ok()),
                         ..Graphics::disabled()
                     };
                 }
@@ -249,9 +257,11 @@ mod native {
                 images_outlive_resize(p.protocol_type(), |var| std::env::var(var).ok())
             });
             let graphics = Graphics {
+                tmux: picker.as_ref().is_some_and(wrapped_for_tmux),
                 picker,
                 adaptive: true,
                 images_outlive_resize: outlive,
+                deflate: deflate_kitty(|var| std::env::var(var).ok()),
                 ..Graphics::disabled()
             };
             // One line in the flight recorder: which way this terminal
@@ -294,6 +304,8 @@ mod native {
                 picker: self.picker.clone(),
                 adaptive: self.adaptive,
                 images_outlive_resize: self.images_outlive_resize,
+                deflate: self.deflate,
+                tmux: self.tmux,
                 ..Graphics::disabled()
             }
         }
@@ -307,6 +319,8 @@ mod native {
                 refused: None,
                 adaptive: false,
                 images_outlive_resize: false,
+                deflate: false,
+                tmux: false,
                 font_checked: std::time::Instant::now(),
                 kitty_id: KittyId::default(),
                 #[cfg(test)]
@@ -404,6 +418,7 @@ mod native {
             #[allow(deprecated)]
             let mut rebuilt = Picker::from_fontsize(fresh);
             rebuilt.set_protocol_type(protocol);
+            self.tmux = wrapped_for_tmux(&rebuilt);
             self.picker = Some(rebuilt);
             // Everything remembered was measured against the old cells.
             self.cached = None;
@@ -535,9 +550,9 @@ mod native {
                 // to be sent under this instance's own id (`KittyId`).
                 let built = match picker.protocol_type() {
                     ProtocolType::Kitty => {
-                        let tmux = wrapped_for_tmux(picker);
+                        let (tmux, deflate) = (self.tmux, self.deflate);
                         let id = self.kitty_id.get(tmux);
-                        kitty_picture(picker, source, fitted, &resize, id, tmux)
+                        kitty_picture(picker, source, fitted, &resize, (id, tmux, deflate))
                             .map(|(protocol, transmit)| (protocol, Some(transmit)))
                     }
                     _ => picker.new_protocol(source, fitted, resize).ok().map(|p| (p, None)),
@@ -593,7 +608,8 @@ mod native {
             #[allow(deprecated)]
             let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(10, 20));
             picker.set_protocol_type(protocol);
-            Graphics { picker: Some(picker), ..Graphics::disabled() }
+            let tmux = wrapped_for_tmux(&picker);
+            Graphics { picker: Some(picker), tmux, ..Graphics::disabled() }
         }
     }
 
@@ -743,15 +759,14 @@ mod native {
         source: image::DynamicImage,
         fitted: Size,
         resize: &Resize,
-        id: u32,
-        tmux: bool,
+        (id, tmux, deflate): (u32, bool, bool),
     ) -> Option<(Protocol, String)> {
         let font = picker.font_size();
         let cells = resize.size_for(&source, font, fitted);
         // No background: the picker's is transparent unless set, and
         // nothing here sets it.
         let pixels = resize.resize(&source, font, cells, None);
-        let transmit = kitty_transmit(&pixels, id, tmux);
+        let transmit = kitty_transmit(&pixels, id, tmux, deflate);
         let stand_in = image::DynamicImage::new_rgb8(1, 1);
         let placeholders = Protocol::Kitty(Kitty::new(stand_in, cells, id, tmux).ok()?);
         let scratch = Rect::new(0, 0, 1, 1);
@@ -764,22 +779,41 @@ mod native {
     /// first carrying the image's keys and a virtual placement (U=1) for
     /// the placeholders to draw — upstream's `transmit_virtual`, framed the
     /// same way for tmux, and ours to drop once sent.
-    fn kitty_transmit(img: &image::DynamicImage, id: u32, tmux: bool) -> String {
+    ///
+    /// Upstream always sends RGBA, uncompressed: 5.3 bytes on the wire a
+    /// pixel, a quarter of them an alpha byte that is constant for a cover
+    /// (performance audit #93). An opaque picture goes as RGB (f=24) here —
+    /// the pixels being sent decide, not the source's format: a fit that
+    /// leaves slack is padded onto transparent, and f=24 would paint that
+    /// strip black. And with `deflate` the pixels go through zlib (o=z).
+    fn kitty_transmit(img: &image::DynamicImage, id: u32, tmux: bool, deflate: bool) -> String {
         use base64::Engine;
         use std::fmt::Write as _;
 
         let (w, h) = (img.width(), img.height());
-        let rgba = img.to_rgba8();
+        let (format, pixels) = if opaque(img) {
+            (24, img.to_rgb8().into_raw())
+        } else {
+            (32, img.to_rgba8().into_raw())
+        };
+        // Level 1, zlib's fastest: over a slow link the bytes are the
+        // cost, and past its first level deflate buys a few per cent more
+        // for several times the time.
+        let (payload, compression) = if deflate {
+            (miniz_oxide::deflate::compress_to_vec_zlib(&pixels, 1), "o=z,")
+        } else {
+            (pixels, "")
+        };
         let (start, escape, end) = Parser::tmux_start_escape_end(tmux);
         const CHUNK: usize = 4096 / 4 * 3;
-        let chunks = rgba.as_raw().len().div_ceil(CHUNK);
+        let chunks = payload.len().div_ceil(CHUNK);
         let per_chunk = start.len() + 2 * escape.len() + 12 + 4096 + end.len();
         let mut data = String::with_capacity(chunks * per_chunk + 48);
-        for (i, chunk) in rgba.as_raw().chunks(CHUNK).enumerate() {
+        for (i, chunk) in payload.chunks(CHUNK).enumerate() {
             data.push_str(start);
             let _ = write!(data, "{escape}_Gq=2,");
             if i == 0 {
-                let _ = write!(data, "i={id},a=T,U=1,f=32,t=d,s={w},v={h},");
+                let _ = write!(data, "i={id},a=T,U=1,f={format},{compression}t=d,s={w},v={h},");
             }
             let _ = write!(data, "m={};", u8::from(i + 1 < chunks));
             base64::engine::general_purpose::STANDARD.encode_string(chunk, &mut data);
@@ -787,6 +821,36 @@ mod native {
             data.push_str(end);
         }
         data
+    }
+
+    /// Whether every pixel of `img` is opaque: no alpha channel, or one at
+    /// full everywhere. RGBA8 is the one alpha layout a resize here makes
+    /// (the padding); any other is taken at its word.
+    fn opaque(img: &image::DynamicImage) -> bool {
+        match img {
+            image::DynamicImage::ImageRgba8(rgba) => {
+                rgba.pixels().all(|pixel| pixel.0[3] == u8::MAX)
+            }
+            other => !other.color().has_alpha(),
+        }
+    }
+
+    /// Whether kitty's pixels go deflated (`o=z`). Over ssh a wall page is
+    /// megabytes down a link counted in Mbit/s — seconds of frozen screen
+    /// at 20 — and zlib's fastest level sends 40-60% of them; locally the
+    /// pty moves that page in tens of milliseconds, less than deflating it
+    /// would take out of the frame's encode budget (~0.5 ms a wall cover,
+    /// ~12 ms a 640 px one — the audit's measurements, #93). And only to
+    /// kitty and Ghostty, which inflate: the capability query asks about
+    /// f=24, never o=z, and with q=2 a terminal that could not inflate
+    /// would show nothing and say nothing. Both name themselves in TERM,
+    /// which ssh carries; under tmux TERM is tmux's own, and the pixels go
+    /// plain.
+    fn deflate_kitty(env: impl Fn(&str) -> Option<String>) -> bool {
+        let remote = env("SSH_CONNECTION").is_some() || env("SSH_TTY").is_some();
+        let inflates =
+            env("TERM").is_some_and(|term| term == "xterm-kitty" || term == "xterm-ghostty");
+        remote && inflates
     }
 
     /// Whether a queried protocol should give way to iTerm2's own.
@@ -1242,6 +1306,111 @@ mod native {
             );
         }
 
+        /// A kitty transmission as the terminal reads it: the first chunk's
+        /// keys, and the chunks' base64 joined and — for `o=z` — inflated.
+        fn received(transmit: &str) -> (String, Vec<u8>) {
+            use base64::Engine;
+            let (mut keys, mut payload) = (String::new(), Vec::new());
+            for command in transmit.split("\x1b_G").skip(1) {
+                let command = command.split("\x1b\\").next().unwrap();
+                let (control, data) = command.split_once(';').unwrap();
+                assert!(data.len() <= 4096, "a chunk past the protocol's ceiling");
+                if keys.is_empty() {
+                    keys = control.to_string();
+                }
+                payload.extend(base64::engine::general_purpose::STANDARD.decode(data).unwrap());
+            }
+            if keys.contains("o=z") {
+                payload = miniz_oxide::inflate::decompress_to_vec_zlib(&payload).unwrap();
+            }
+            (keys, payload)
+        }
+
+        /// Received pixels as RGBA, whichever format they came in.
+        fn rgba(keys: &str, pixels: Vec<u8>) -> Vec<u8> {
+            if !keys.contains("f=24") {
+                return pixels;
+            }
+            pixels.chunks(3).flat_map(|p| [p[0], p[1], p[2], u8::MAX]).collect()
+        }
+
+        #[test]
+        fn opaque_pixels_go_as_rgb_and_only_the_fits_padding_keeps_its_alpha() {
+            // The alpha byte was a constant quarter of every opaque cover
+            // on the wire (performance audit #93).
+            let rgb = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(30, 20, |x, y| {
+                image::Rgb([x as u8, y as u8, 7])
+            }));
+            let (keys, pixels) = received(&kitty_transmit(&rgb, 9, false, false));
+            assert!(keys.contains("f=24,t=d,s=30,v=20,") && !keys.contains("o=z"), "{keys}");
+            assert_eq!(pixels, rgb.to_rgb8().into_raw());
+            // RGBA that is opaque everywhere is RGB on the wire too.
+            let solid = image::DynamicImage::ImageRgba8(rgb.to_rgba8());
+            let (keys, pixels) = received(&kitty_transmit(&solid, 9, false, false));
+            assert!(keys.contains("f=24"), "{keys}");
+            assert_eq!(pixels, rgb.to_rgb8().into_raw());
+            // The fit's padding is transparent, and stays so: f=24 would
+            // paint the strip black over the ground.
+            let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
+            let font = ratatui_image::FontSize::new(13, 27);
+            let padded = resize.resize(&rgb, font, Size::new(12, 6), None);
+            assert!(padded.to_rgba8().pixels().any(|pixel| pixel.0[3] == 0), "the test's premise");
+            let (keys, pixels) = received(&kitty_transmit(&padded, 9, false, false));
+            assert!(keys.contains("f=32"), "{keys}");
+            assert_eq!(pixels, padded.to_rgba8().into_raw());
+        }
+
+        #[test]
+        fn deflated_pixels_inflate_to_exactly_what_was_drawn_in_fewer_bytes() {
+            // Something photographic enough to compress like a cover does.
+            let cover = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(192, 192, |x, y| {
+                let v = ((x * x + y * 3) / 7) as u8;
+                image::Rgb([v, v.wrapping_add((y / 3) as u8), 255 - v])
+            }));
+            let plain = kitty_transmit(&cover, 5, false, false);
+            let deflated = kitty_transmit(&cover, 5, false, true);
+            let (keys, pixels) = received(&deflated);
+            assert!(keys.starts_with("q=2,i=5,a=T,U=1,f=24,o=z,t=d,s=192,v=192,"), "{keys}");
+            assert_eq!(pixels, cover.to_rgb8().into_raw());
+            assert!(deflated.len() < plain.len() * 3 / 4, "{} vs {}", deflated.len(), plain.len());
+            // Through tmux, every chunk is wrapped the way the rest are.
+            let wrapped = kitty_transmit(&cover, 5, true, true);
+            let chunks = wrapped.matches("\x1bPtmux;\x1b\x1b_Gq=2,").count();
+            assert_eq!(chunks, deflated.matches("\x1b_Gq=2,").count());
+            assert_eq!(wrapped.matches("\x1b\x1b\\\x1b\\").count(), chunks);
+        }
+
+        #[test]
+        fn pixels_go_deflated_only_over_ssh_to_a_terminal_known_to_inflate() {
+            type Env = &'static [(&'static str, &'static str)];
+            fn env(pairs: Env) -> impl Fn(&str) -> Option<String> {
+                move |var| pairs.iter().find(|(name, _)| *name == var).map(|(_, v)| v.to_string())
+            }
+            const SSH: (&str, &str) = ("SSH_CONNECTION", "10.0.0.2 50000 10.0.0.1 22");
+            const TTY: (&str, &str) = ("SSH_TTY", "/dev/ttys003");
+            assert!(deflate_kitty(env(&[SSH, ("TERM", "xterm-kitty")])));
+            assert!(deflate_kitty(env(&[TTY, ("TERM", "xterm-ghostty")])));
+            // Locally the pty moves a page faster than zlib compresses it.
+            assert!(!deflate_kitty(env(&[("TERM", "xterm-kitty"), ("KITTY_WINDOW_ID", "1")])));
+            // Nobody known to inflate: under tmux TERM is tmux's own.
+            assert!(!deflate_kitty(env(&[TTY, ("TERM", "tmux-256color")])));
+            assert!(!deflate_kitty(env(&[TTY, ("TERM", "xterm-256color")])));
+
+            // The answer rides with the Graphics, forks included.
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+            let art = a_cover(64);
+            let remote = Graphics { deflate: true, ..Graphics::forced(ProtocolType::Kitty) };
+            let local = Graphics::forced(ProtocolType::Kitty);
+            for (mut graphics, deflated) in [(remote.fork(), true), (local, false)] {
+                let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+                terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), &art))).unwrap();
+                let sent: String =
+                    terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect();
+                assert_eq!(sent.contains(",o=z,"), deflated, "deflated: {deflated}");
+            }
+        }
+
         #[test]
         fn the_kitty_picture_is_the_one_the_picker_would_have_built() {
             use ratatui::Terminal;
@@ -1255,36 +1424,46 @@ mod native {
                 terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
             }
 
-            // Same cells, same pixels, byte for byte: only the id differs.
-            // A square cover in a square-ish box, a banner, and a box the
-            // fit leaves transparent padding in (a 13x27 cell).
+            // Same cells, same pixels: only the id and the wire format
+            // differ. A square cover that fits its box exactly, a banner,
+            // and a cover the fit leaves transparent padding beside.
             let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
-            let cases = [((10, 20), 128, (12, 6)), ((10, 20), 400, (30, 9)), ((13, 27), 128, (12, 6))];
-            for (font, side, fitted) in cases {
+            let cases = [
+                ((10, 20), (128, 128), (12, 6)),
+                ((10, 20), (400, 201), (30, 9)),
+                ((13, 27), (128, 65), (12, 6)),
+            ];
+            let mut formats = Vec::new();
+            for (font, (side, tall), fitted) in cases {
                 #[allow(deprecated)]
                 let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(font.0, font.1));
                 picker.set_protocol_type(ProtocolType::Kitty);
-                let pixels = image::RgbImage::from_fn(side, side / 2 + 1, |x, y| {
+                let pixels = image::RgbImage::from_fn(side, tall, |x, y| {
                     image::Rgb([(x * 7) as u8, (y * 13) as u8, (x ^ y) as u8])
                 });
                 let source = image::DynamicImage::ImageRgb8(pixels);
                 let fitted = Size::new(fitted.0, fitted.1);
                 let (ours, transmit) =
-                    kitty_picture(&picker, source.clone(), fitted, &resize, 42, false).unwrap();
+                    kitty_picture(&picker, source.clone(), fitted, &resize, (42, false, false))
+                        .unwrap();
                 let theirs = picker.new_protocol(source.clone(), fitted, resize.clone()).unwrap();
                 assert_eq!(ours.size(), theirs.size(), "{font:?} {side}");
 
                 // The picker's picture sends its transmission ahead of the
-                // first row's placeholders; ours is the same, id aside.
+                // first row's placeholders; ours is the same picture, pixel
+                // for pixel, whichever format carries it.
                 let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
                 let first = frame_of(&mut terminal, &theirs);
-                let sent = first.split("\x1b[s").next().unwrap();
-                let id = sent.split("i=").nth(1).unwrap().split(',').next().unwrap();
-                assert_eq!(
-                    transmit.replacen("i=42,", "i=,", 1),
-                    sent.replacen(&format!("i={id},"), "i=,", 1),
-                    "{font:?} {side}"
-                );
+                let (their_keys, their_pixels) = received(first.split("\x1b[s").next().unwrap());
+                let (our_keys, our_pixels) = received(&transmit);
+                assert_eq!(rgba(&our_keys, our_pixels), their_pixels, "{font:?} {side}");
+                let size = |keys: &str| keys.split(",t=d,").nth(1).unwrap().to_string();
+                assert_eq!(size(&our_keys), size(&their_keys), "{font:?} {side}");
+                // RGB where every pixel is opaque, RGBA where the fit padded.
+                let padded = their_pixels.chunks(4).any(|pixel| pixel[3] != u8::MAX);
+                assert_eq!(our_keys.contains("f=32"), padded, "{font:?} {side}: {our_keys}");
+                assert_eq!(our_keys.contains("f=24"), !padded, "{font:?} {side}: {our_keys}");
+                formats.push(padded);
 
                 // And the placeholders ours draws every frame are the ones
                 // upstream's own draws once its transmission is spent.
@@ -1292,13 +1471,13 @@ mod native {
                 let pixels = resize.resize(&source, picker.font_size(), cells, None);
                 let upstream = Protocol::Kitty(Kitty::new(pixels, cells, 42, false).unwrap());
                 let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
-                let with_pixels = frame_of(&mut terminal, &upstream);
-                assert!(with_pixels.starts_with(&transmit), "{font:?} {side}: the same bytes");
+                frame_of(&mut terminal, &upstream);
                 let mut again = Terminal::new(TestBackend::new(40, 12)).unwrap();
                 let mut spent = Terminal::new(TestBackend::new(40, 12)).unwrap();
                 assert_eq!(frame_of(&mut spent, &ours), frame_of(&mut again, &upstream));
                 assert!(!frame_of(&mut spent, &ours).contains("a=T"), "the stand-in sends nothing");
             }
+            assert!(formats.contains(&true) && formats.contains(&false), "{formats:?}");
         }
 
         #[test]
@@ -1513,6 +1692,24 @@ mod native {
                 eprintln!(
                     "{protocol:?}: {encode:?} to encode a 6x3 cover from the thumbnail ({} decodes), {again:?} to draw it again",
                     graphics.decodes.get()
+                );
+            }
+
+            // What deflating a kitty transmission adds, and saves, at a
+            // wall cover's size and at a large Now Playing cover's.
+            let source = image::load_from_memory(&jpeg).unwrap();
+            for side in [120, 192, 400] {
+                let pixels = source.resize_exact(side, side, image::imageops::FilterType::Triangle);
+                let start = std::time::Instant::now();
+                let plain = kitty_transmit(&pixels, 1, false, false);
+                let fast = start.elapsed();
+                let start = std::time::Instant::now();
+                let deflated = kitty_transmit(&pixels, 1, false, true);
+                let slow = start.elapsed();
+                eprintln!(
+                    "kitty {side}px: {} bytes in {fast:?}, deflated {} bytes in {slow:?}",
+                    plain.len(),
+                    deflated.len()
                 );
             }
         }
