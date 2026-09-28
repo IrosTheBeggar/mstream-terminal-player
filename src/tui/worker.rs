@@ -988,33 +988,28 @@ fn lock(table: &TunnelTable) -> std::sync::MutexGuard<'_, Tunnels> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
-    let mut client: Option<Arc<Client>> = None;
+    let session: Session = Arc::default();
     // The dial threads and the sampler hold the table too; the sampler only
     // weakly, so it ends with this thread.
     let tunnels: Arc<TunnelTable> = Arc::new(std::sync::Mutex::new(Tunnels::default()));
     spawn_tunnel_sampler(Arc::downgrade(&tunnels), events.clone());
-    let mut lanes = ArtLanes::default();
+    let lanes: Lanes = Arc::default();
     while let Ok(cmd) = rx.recv() {
-        // Connection commands change who `client` *is*, so they stay
-        // serialized here — reaching a different server mid-dial is a
-        // contradiction, not a feature. Everything else is a read against
-        // the current client and answers on its own thread (audit #63):
-        // one stalled search used to block every pane behind a 20-second
-        // timeout — except the small covers, which a page claims by the
-        // hundred and so wait their turn in their server's art lane
-        // (performance audit #88). A tunnel dial takes up to a minute
-        // cold, so it runs on its own thread as well and reports back
-        // through the events.
+        // Connection commands change who the session's client *is*, so they
+        // stay serialized — reaching a different server mid-dial is a
+        // contradiction, not a feature — and a read that rides the session
+        // runs on the client the change before it left. But they run on a
+        // thread of their own, and only the reads that depend on them wait
+        // behind them: a row's cover from another server, a play report
+        // or a tunnel dial no longer sits out a ping that hangs for twenty
+        // seconds (performance audit #84). Every read answers on its own
+        // thread (audit #63) — except the small covers, which a page
+        // claims by the hundred and so wait their turn in their server's
+        // art lane (performance audit #88). A tunnel dial takes up to a
+        // minute cold, so it runs on its own thread as well and reports
+        // back through the events.
         let result = match cmd {
             ApiCmd::Shutdown => break,
-
-            ApiCmd::Connect { server, identity, token, self_signed, peer, local_token } => {
-                connect(&mut client, &server, &identity, token, self_signed, peer, local_token)
-            }
-
-            ApiCmd::Login { server, identity, username, password, self_signed, local_token, peer } => {
-                login(&mut client, &server, &identity, &username, &password, self_signed, local_token, peer)
-            }
 
             ApiCmd::TunnelOpen { id, credential } => {
                 tracing::info!("tunnel {}: dialling", tunnel_log_name(&id));
@@ -1026,24 +1021,28 @@ fn api_loop(rx: &Receiver<ApiCmd>, events: &Sender<Event>) {
                 Some(close_tunnel(&tunnels, id))
             }
             ApiCmd::TunnelCredential { id, credential } => swap_credential(&tunnels, id, &credential),
-            ApiCmd::Retarget { identity, server, token, self_signed, peer, local_token } => {
-                Some(retarget(&mut client, &server, &identity, token, self_signed, peer, local_token))
-            }
-
-            // A page of covers is a queue, not a fan-out (audit #88); the
-            // playing track's cover and every other read keep their own
-            // thread.
-            cover @ ApiCmd::AlbumArt { small: true, .. } => {
-                lanes.ask(client.clone(), events, cover);
-                None
-            }
             ApiCmd::ArtWithdraw { file } => {
-                lanes.withdraw(&file);
+                lock_lanes(&lanes).withdraw(&file);
+                lock_session(&session)
+                    .held
+                    .retain(|cmd| !matches!(cmd, ApiCmd::AlbumArt { file: asked, .. } if *asked == file));
                 None
             }
 
-            read => {
-                spawn_read(client.clone(), events.clone(), read);
+            cmd => {
+                let mut slot = lock_session(&session);
+                if rides_session(&cmd) && slot.changing {
+                    slot.held.push_back(cmd);
+                } else if is_connection_change(&cmd) {
+                    slot.changing = true;
+                    slot.held.push_back(cmd);
+                    drop(slot);
+                    spawn_changes(&session, &lanes, events);
+                } else {
+                    let client = slot.client.clone();
+                    drop(slot);
+                    dispatch_read(client, &lanes, events, cmd);
+                }
                 None
             }
         };
@@ -1126,6 +1125,124 @@ pub(crate) fn playlist_verb_event(verb: PlaylistVerb<'_>, result: Result<(), Api
         (PlaylistVerb::Create(name), Err(e)) => Ok(Event::Error(format!("couldn't create {name}: {e}"))),
         (PlaylistVerb::Rename(from), Err(e)) => Ok(Event::Error(format!("couldn't rename {from}: {e}"))),
         (PlaylistVerb::Delete(name), Err(e)) => Ok(Event::Error(format!("couldn't delete {name}: {e}"))),
+    }
+}
+
+/// The session's client, and what waits on a change to it. A connection
+/// change runs on its own thread with `changing` up; the session-bound
+/// commands that arrive meanwhile — reads and further changes alike — are
+/// `held`, in order, and the change thread works through them: each read
+/// on the client the change before it left, each change in its turn.
+/// Everything that does not ride the session goes straight on (performance
+/// audit #84).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct SessionSlot {
+    client: Option<Arc<Client>>,
+    changing: bool,
+    held: std::collections::VecDeque<ApiCmd>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type Session = Arc<std::sync::Mutex<SessionSlot>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type Lanes = Arc<std::sync::Mutex<ArtLanes>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lock_session(session: &Session) -> std::sync::MutexGuard<'_, SessionSlot> {
+    session.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn lock_lanes(lanes: &Lanes) -> std::sync::MutexGuard<'_, ArtLanes> {
+    lanes.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The commands that change who the session's client is.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_connection_change(cmd: &ApiCmd) -> bool {
+    matches!(cmd, ApiCmd::Connect { .. } | ApiCmd::Login { .. } | ApiCmd::Retarget { .. })
+}
+
+/// Whether a command waits on a connection change in flight: the changes
+/// themselves, and every read the session's client answers. A read aimed
+/// at a row's own server, the parent's direct-access ask and the failure
+/// walk's probe build their own clients, and the tunnel commands touch
+/// none (those four are handled before this is asked).
+#[cfg(not(target_arch = "wasm32"))]
+fn rides_session(cmd: &ApiCmd) -> bool {
+    is_connection_change(cmd) || (cmd.reach().is_none() && !matches!(cmd, ApiCmd::DirectAccess { .. } | ApiCmd::Probe { .. }))
+}
+
+/// A read on its way: a small cover to its server's lane, anything else to
+/// a thread of its own.
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_read(client: Option<Arc<Client>>, lanes: &Lanes, events: &Sender<Event>, cmd: ApiCmd) {
+    if matches!(cmd, ApiCmd::AlbumArt { small: true, .. }) {
+        lock_lanes(lanes).ask(client, events, cmd);
+    } else {
+        spawn_read(client, events.clone(), cmd);
+    }
+}
+
+/// Work through what is held — the connection change at its front, then
+/// whatever came in behind it — on a thread of its own. Each change's event
+/// goes out before any read issued after it is even asked, so its answers
+/// land on the session the change made: the order the serial loop gave
+/// for free.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_changes(session: &Session, lanes: &Lanes, events: &Sender<Event>) {
+    let (runner, runner_lanes, runner_events) = (session.clone(), lanes.clone(), events.clone());
+    let spawned = thread::Builder::new()
+        .name("mstream-api-connect".into())
+        .spawn(move || work_through(&runner, &runner_lanes, &runner_events));
+    // No thread to be had: the loop does the work itself, as it always
+    // used to.
+    if spawned.is_err() {
+        work_through(session, lanes, events);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn work_through(session: &Session, lanes: &Lanes, events: &Sender<Event>) {
+    loop {
+        let mut slot = lock_session(session);
+        let Some(cmd) = slot.held.pop_front() else {
+            slot.changing = false;
+            return;
+        };
+        let mut client = slot.client.clone();
+        drop(slot);
+        if !is_connection_change(&cmd) {
+            dispatch_read(client, lanes, events, cmd);
+            continue;
+        }
+        let event = run_change(&mut client, cmd);
+        lock_session(session).client = client;
+        if let Some(event) = event
+            && events.send(event).is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// One connection change, against the client in hand: replaced only when
+/// the new server answered, as ever.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_change(client: &mut Option<Arc<Client>>, cmd: ApiCmd) -> Option<Event> {
+    match cmd {
+        ApiCmd::Connect { server, identity, token, self_signed, peer, local_token } => {
+            connect(client, &server, &identity, token, self_signed, peer, local_token)
+        }
+        ApiCmd::Login { server, identity, username, password, self_signed, local_token, peer } => {
+            login(client, &server, &identity, &username, &password, self_signed, local_token, peer)
+        }
+        ApiCmd::Retarget { identity, server, token, self_signed, peer, local_token } => {
+            Some(retarget(client, &server, &identity, token, self_signed, peer, local_token))
+        }
+        _ => None,
     }
 }
 
@@ -2989,5 +3106,151 @@ mod tests {
         }
         assert!(peak.load(Ordering::SeqCst) <= ART_LANE_WIDTH, "peak {}", peak.load(Ordering::SeqCst));
         assert!(peak.load(Ordering::SeqCst) > 1, "and it does run them side by side");
+    }
+
+    /// A one-route-at-a-time HTTP server for the worker's own tests: each
+    /// request gets `answer(path)` — how long to hold it, the status line
+    /// and the body — on its own thread. Returns the base URL.
+    fn test_server(answer: impl Fn(&str) -> (Duration, &'static str, &'static str) + Send + Sync + 'static) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let answer = Arc::new(answer);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let answer = answer.clone();
+                thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let text = String::from_utf8_lossy(&request).to_string();
+                    let path = text.split_whitespace().nth(1).unwrap_or("/").to_string();
+                    let (hold, status, body) = answer(&path);
+                    thread::sleep(hold);
+                    let reply = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes());
+                });
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn a_connect_that_hangs_holds_back_only_the_reads_that_ride_the_session() {
+        // Performance audit #84: a connection change ran on the dispatch
+        // loop, so a ping that hung held every later command behind it —
+        // another server's covers, play reports, tunnel dials. It runs on
+        // its own thread now; what does not ride the session goes straight
+        // on, and what does still lands on the session the change made.
+        const PING: &str = r#"{"vpaths":["lib"],"transcode":false,"noFileModify":true,"noUpload":true}"#;
+        let slow = test_server(|path| match path {
+            "/api/v1/ping" => (Duration::from_millis(1500), "200 OK", PING),
+            p if p.starts_with("/api/v1/file-explorer") => {
+                (Duration::ZERO, "200 OK", r#"{"path":"lib/","directories":[],"files":[]}"#)
+            }
+            _ => (Duration::ZERO, "404 Not Found", "{}"),
+        });
+        let other = test_server(|_| (Duration::ZERO, "404 Not Found", "{}"));
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let worker = thread::spawn(move || api_loop(&rx, &events_tx));
+
+        let started = std::time::Instant::now();
+        tx.send(ApiCmd::Connect {
+            server: slow.clone(),
+            identity: slow.clone(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        })
+        .unwrap();
+        tx.send(ApiCmd::Browse("lib".into())).unwrap();
+        let reach = crate::tui::app::Reach {
+            base: other,
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        };
+        tx.send(ApiCmd::AlbumArt { file: "far.jpg".into(), reach: Some(reach), small: true }).unwrap();
+
+        let mut order = Vec::new();
+        while order.len() < 3 {
+            let event = events.recv_timeout(Duration::from_secs(10)).expect("three answers");
+            let name = match event {
+                Event::AlbumArt { .. } => "cover",
+                Event::Connected { .. } => "connected",
+                Event::Listing(_) => "listing",
+                Event::TunnelStatus { .. } | Event::TunnelPath { .. } => continue,
+                other => panic!("unexpected {other:?}"),
+            };
+            order.push((name, started.elapsed()));
+        }
+        tx.send(ApiCmd::Shutdown).unwrap();
+        worker.join().unwrap();
+
+        let names: Vec<&str> = order.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["cover", "connected", "listing"], "{order:?}");
+        assert!(order[0].1 < Duration::from_millis(1000), "the other server's cover did not wait: {order:?}");
+        assert!(order[1].1 >= Duration::from_millis(1400), "the ping really hung: {order:?}");
+    }
+
+    #[test]
+    fn connection_changes_keep_their_order_and_a_read_between_two_rides_the_first() {
+        // The property the serial loop gave (worker.rs's api_loop): changes
+        // one at a time, in order, and each session read on the client the
+        // change before it left (performance audit #84).
+        const PING: &str = r#"{"vpaths":["lib"],"transcode":false,"noFileModify":true,"noUpload":true}"#;
+        let first = test_server(|path| match path {
+            "/api/v1/ping" => (Duration::from_millis(600), "200 OK", PING),
+            _ => (Duration::ZERO, "200 OK", r#"{"path":"one/","directories":[],"files":[]}"#),
+        });
+        let second = test_server(|path| match path {
+            "/api/v1/ping" => (Duration::ZERO, "200 OK", PING),
+            _ => (Duration::ZERO, "200 OK", r#"{"path":"two/","directories":[],"files":[]}"#),
+        });
+        let connect = |server: &str| ApiCmd::Connect {
+            server: server.to_string(),
+            identity: server.to_string(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        };
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let worker = thread::spawn(move || api_loop(&rx, &events_tx));
+        for cmd in [connect(&first), ApiCmd::Browse("lib".into()), connect(&second), ApiCmd::Browse("lib".into())] {
+            tx.send(cmd).unwrap();
+        }
+        let mut seen = Vec::new();
+        while seen.len() < 4 {
+            match events.recv_timeout(Duration::from_secs(10)).expect("four answers") {
+                Event::Connected { server, .. } => seen.push(format!("connected {}", server == first)),
+                Event::Listing(listing) => seen.push(format!("listing {}", listing.path)),
+                Event::TunnelStatus { .. } | Event::TunnelPath { .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        tx.send(ApiCmd::Shutdown).unwrap();
+        worker.join().unwrap();
+        // Reads answer on their own threads, so the first listing may pass
+        // the second connect's answer — as it always could. What holds: the
+        // changes land in order, the read between them asked the first
+        // server, and the read after the second asked the second, after it.
+        let at = |what: &str| seen.iter().position(|s| s == what).unwrap_or_else(|| panic!("{what}: {seen:?}"));
+        assert!(at("connected true") < at("connected false"), "{seen:?}");
+        assert!(at("connected true") < at("listing one/"), "{seen:?}");
+        assert!(at("connected false") < at("listing two/"), "{seen:?}");
     }
 }
