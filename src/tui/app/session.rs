@@ -371,9 +371,12 @@ impl App {
         self.search.set(Vec::new());
         self.files.set(Vec::new());
         self.files.loading = true;
-        // The album wall was the old server's too.
+        // The album wall was the old server's too, and so were the
+        // Artists and Genres lists.
         self.albums = None;
         self.artist_albums = None;
+        self.artists = None;
+        self.genre_list = None;
         self.library.set(Vec::new());
         self.library_stack = super::nav::Drill::new(crate::tui::worker::LibraryNode::Root);
     }

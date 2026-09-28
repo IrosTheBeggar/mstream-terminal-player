@@ -4687,6 +4687,55 @@ fn a_playlist_change_reasks_an_open_playlists_view() {
 }
 
 #[test]
+fn the_artists_and_genres_lists_are_kept_for_the_session_and_seat_a_return() {
+    // Performance audit #99: the two root lists change only with a
+    // rescan; once answered, opening the room again seats the session's
+    // copy — a fresh drill, no request — and a new server forgets them.
+    use crate::api::types::Genre;
+    let asks = |effects: &[Effect], node: LibraryNode| {
+        effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Library { node: n, .. }) if *n == node))
+    };
+    let mut app = connected_app();
+    let effects = app.open_library_node(LibraryNode::Artists, true);
+    assert!(asks(&effects, LibraryNode::Artists), "the first opening asks");
+    let generation = app.session_gen();
+    app.apply_event(Event::Library {
+        node: LibraryNode::Artists,
+        dest: Tab::Library,
+        data: LibraryData::Artists(vec!["Air".into(), "Bonobo".into()]),
+        generation,
+    });
+    app.library.state.select(Some(2));
+    app.handle_action(Action::Activate); // down into Bonobo
+    assert!(matches!(app.library_stack.here(), LibraryNode::Artist(_)));
+
+    let effects = app.open_library_node(LibraryNode::Artists, true);
+    assert!(effects.is_empty(), "a return asks nothing: {effects:?}");
+    assert!(matches!(app.library_stack.here(), LibraryNode::Artists), "at the root again");
+    assert!(app.library.trail.is_empty() && !app.library.loading);
+    assert_eq!(app.library.entries.iter().map(Entry::label).collect::<Vec<_>>(), ["..", "Air", "Bonobo"]);
+
+    let effects = app.open_library_node(LibraryNode::Genres, true);
+    assert!(asks(&effects, LibraryNode::Genres));
+    app.apply_event(Event::Library {
+        node: LibraryNode::Genres,
+        dest: Tab::Library,
+        data: LibraryData::Genres(vec![Genre { name: "Dub".into(), track_count: Some(3) }]),
+        generation,
+    });
+    assert!(app.open_library_node(LibraryNode::Genres, true).is_empty());
+    assert!(asks(&app.open_library_node(LibraryNode::Recent, true), LibraryNode::Recent), "recent means now");
+
+    // Forgotten on request (the GUI's second choice of the room), and with
+    // the server.
+    app.forget_root_list(&LibraryNode::Genres);
+    assert!(asks(&app.open_library_node(LibraryNode::Genres, true), LibraryNode::Genres));
+    app.shed_server_state();
+    assert!(app.artists.is_none() && app.genre_list.is_none());
+    assert!(asks(&app.open_library_node(LibraryNode::Artists, true), LibraryNode::Artists));
+}
+
+#[test]
 fn a_random_pick_lands_on_the_side_that_asked() {
     let mut app = connected_app();
     app.apply_event(Event::SonicRandom {

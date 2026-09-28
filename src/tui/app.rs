@@ -1719,6 +1719,13 @@ pub struct App {
     /// clause 7): the pane holds them as text rows, the wall wants the
     /// covers and years.
     pub artist_albums: Option<(String, Vec<crate::api::types::Album>)>,
+    /// The Artists and Genres root lists, kept whole the way `albums` is:
+    /// they change only with a rescan, and a return to the GUI's room
+    /// seats its list from here instead of asking for all of it again
+    /// (library-rooms contract, entry point 1; performance audit #99).
+    /// Cleared with the session.
+    pub artists: Option<Vec<String>>,
+    pub genre_list: Option<Vec<crate::api::types::Genre>>,
     /// The full block the sheet or Song info asked for last (track-actions
     /// contract, clause 8), by the track's path.
     pub track_info: Option<Track>,
@@ -2014,6 +2021,8 @@ impl App {
             library_stack: Drill::new(LibraryNode::Root),
             albums: None,
             artist_albums: None,
+            artists: None,
+            genre_list: None,
             track_info: None,
             playlist_names: PlaylistNames::Unasked,
             rating_writes: Vec::new(),
@@ -5264,8 +5273,34 @@ impl App {
             self.push_trail();
         }
         self.library_stack.enter(node.clone());
+        // A root list the session holds is seated from it: a fresh drill,
+        // no request (performance audit #99).
+        if fresh && let Some(data) = self.root_list(&node) {
+            self.library.set(entries::entries_from_library(data));
+            return Vec::new();
+        }
         self.library.set(Vec::new());
         vec![self.ask_library(node, Tab::Library)]
+    }
+
+    /// The session's copy of a room's root list, when it has one — Artists
+    /// and Genres; Recent and the play lists mean now and always ask.
+    fn root_list(&self, node: &LibraryNode) -> Option<LibraryData> {
+        match node {
+            LibraryNode::Artists => self.artists.clone().map(LibraryData::Artists),
+            LibraryNode::Genres => self.genre_list.clone().map(LibraryData::Genres),
+            _ => None,
+        }
+    }
+
+    /// Let a room's root list go, so the next opening asks the server: the
+    /// GUI's click on the room already up — the way to see a rescan.
+    pub(crate) fn forget_root_list(&mut self, node: &LibraryNode) {
+        match node {
+            LibraryNode::Artists => self.artists = None,
+            LibraryNode::Genres => self.genre_list = None,
+            _ => {}
+        }
     }
 
     /// Whether the Library pane's drill stands on the Albums wall, or on an
@@ -5685,6 +5720,16 @@ impl App {
                     (&node, dest, &data)
                 {
                     self.artist_albums = Some((artist.clone(), albums.clone()));
+                }
+                // The Artists and Genres rooms' copies — see the fields.
+                match (&node, dest, &data) {
+                    (LibraryNode::Artists, Tab::Library, LibraryData::Artists(names)) => {
+                        self.artists = Some(names.clone());
+                    }
+                    (LibraryNode::Genres, Tab::Library, LibraryData::Genres(genres)) => {
+                        self.genre_list = Some(genres.clone());
+                    }
+                    _ => {}
                 }
                 self.pane_for_mut(dest).set(entries_from_library(data));
                 self.message = None;

@@ -416,12 +416,25 @@ mod tests {
         assert!(!rows.iter().any(|r| r.contains("  ..")), "no .. at a root: {all}");
         assert_eq!(gui.app.library.state.selected(), Some(1), "the cursor rests on the first name");
 
+        // Down into an artist, then away: a return opens the root list
+        // again — from the session's copy, with no second ask for all of it
+        // (performance audit #99).
+        gui.act(Act::PaneRow(List::Library, 1, RowVerb::Open));
+        assert!(asked(&gui, &LibraryNode::Artist("Bassnectar".into())));
         gui.act(Act::Nav(GENRES_NAV));
         assert!(asked(&gui, &LibraryNode::Genres));
         gui.act(Act::Nav(RECENT_NAV));
         assert!(asked(&gui, &LibraryNode::Recent), "Recent asks on every visit");
+        gui.pending.clear();
         gui.act(Act::Nav(ARTISTS_NAV));
-        assert!(asked(&gui, &LibraryNode::Artists), "a room restarts at its root");
+        assert!(matches!(gui.app.library_stack.here(), LibraryNode::Artists), "a room restarts at its root");
+        assert!(!asked(&gui, &LibraryNode::Artists), "seated from the session's copy");
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("Bassnectar") && all.contains("Portishead") && all.contains("2 items"), "{all}");
+        // The room chosen again while it is up asks afresh: the way to see
+        // a rescan.
+        gui.act(Act::Nav(ARTISTS_NAV));
+        assert!(asked(&gui, &LibraryNode::Artists), "a second choice reloads");
     }
 
     #[test]
