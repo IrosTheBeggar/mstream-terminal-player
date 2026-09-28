@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use ratatui::Terminal;
 use ratatui::backend::{Backend, ClearType, WindowSize};
-use ratatui::buffer::{Buffer, Cell as BufferCell};
+use ratatui::buffer::Cell as BufferCell;
 use ratatui::layout::{Position, Size};
 use ratzilla::backend::webgl2::WebGl2BackendOptions;
 use ratzilla::{DomBackend, FontAtlasConfig, WebGl2Backend};
@@ -77,9 +77,6 @@ struct Shell {
 
 /// What the loop needs of a backend beyond ratatui's trait.
 trait Surface: Backend + 'static {
-    /// Last touches to a frame before it goes out.
-    fn finish(_buffer: &mut Buffer) {}
-
     /// About to repaint everything: take the window's size first.
     fn follow_resize(&mut self) {}
 }
@@ -101,10 +98,6 @@ struct Canvas {
 }
 
 impl Surface for Canvas {
-    fn finish(buffer: &mut Buffer) {
-        colours::settle(buffer);
-    }
-
     /// The canvas learns its new size inside `flush`, after a frame at the
     /// old size has been diffed and drawn; asked first, the draw that
     /// follows is already the right size.
@@ -540,7 +533,9 @@ fn run_loop<B: Surface>(mut terminal: Terminal<B>, shell: Rc<RefCell<Shell>>, al
             terminal
                 .draw(|frame| {
                     ui::render(frame, &mut shell.app);
-                    B::finish(frame.buffer_mut());
+                    // In the page's colours, whichever surface paints them:
+                    // the DOM fallback looks as the canvas does.
+                    colours::settle(frame.buffer_mut());
                 })
                 .expect("the backend refused a frame");
             shell.last_render = Instant::now();
