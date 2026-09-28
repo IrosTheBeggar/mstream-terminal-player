@@ -21,6 +21,7 @@ Usage: fake_mstream.py PORT
 """
 import json
 import os
+import socketserver
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -158,4 +159,16 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+class Server(HTTPServer):
+    """HTTPServer without its reverse lookup. The stock server_bind asks
+    socket.getfqdn() for the host's name between bind and listen; on
+    GitHub's macOS runners that lookup stalls ~35 s, and the battery
+    starts seven fakes a run (performance audit #131). The name is only
+    for CGI's SERVER_NAME, which nothing here reads."""
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+Server(("127.0.0.1", PORT), Handler).serve_forever()
