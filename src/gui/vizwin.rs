@@ -338,6 +338,7 @@ fn save(gui: &mut Gui) {
     if gui.vizwin.unsaved.take().is_none() || !gui.config_ok {
         return;
     }
+    gui.flush_prefs();
     let mut config = match config::load() {
         Ok(config) => config,
         Err(e) => {

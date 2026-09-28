@@ -415,6 +415,7 @@ pub(crate) fn update_config(gui: &mut Gui, mutate: impl FnOnce(&mut Config)) -> 
     if !gui.config_ok {
         return false;
     }
+    gui.flush_prefs();
     let mut config = match config::load() {
         Ok(config) => config,
         Err(e) => {
@@ -602,6 +603,7 @@ pub(crate) fn switch_to(gui: &mut Gui, index: usize) {
 
     // The outgoing session's place is worth keeping before it is replaced.
     if gui.app.connected {
+        gui.flush_prefs();
         crate::tui::remember(&gui.app);
         if let Ok(fresh) = config::load() {
             gui.config = fresh;

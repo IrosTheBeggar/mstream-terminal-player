@@ -563,7 +563,17 @@ pub(crate) struct Gui {
     /// upgrade to pixels): the event loop shortens its idle wait so the
     /// next frame comes promptly instead of a poll tick later.
     hot: bool,
+    /// When a setting last changed, while the change is not yet on disk:
+    /// the file is written once the changes rest (see [`PREFS_REST`]).
+    prefs_unsaved: Option<Instant>,
 }
+
+/// How long settings rest before they are written: a held ← on the blend
+/// or an Auto DJ bar steps at the key repeat, each step used to be a load,
+/// a serialize and a full flush of the drive, and now the file is written
+/// once, after (performance audit #86). Short, so a crash or a closed
+/// window costs a third of a second of choices at most.
+const PREFS_REST: Duration = Duration::from_millis(300);
 
 impl Gui {
     fn new(config: Config, config_ok: bool, mut app: App) -> Self {
@@ -611,6 +621,7 @@ impl Gui {
             actions: actions::ActionsUi::new(),
             last_qsel: None,
             hot: false,
+            prefs_unsaved: None,
         }
     }
 
@@ -663,7 +674,10 @@ impl Gui {
     /// Loads fresh before writing: other flows save behind this copy's back
     /// (a connect's SaveSession touches the server list, the servers room
     /// edits it), and writing the boot-time copy wholesale would undo them.
+    /// What it writes of the player's comes from the App as it stands, so a
+    /// change still waiting to be written (see [`Gui::save_soon`]) goes too.
     fn save_now(&mut self) {
+        self.prefs_unsaved = None;
         if !self.config_ok {
             return;
         }
@@ -684,6 +698,31 @@ impl Gui {
         }
     }
 
+    /// A player setting changed: written once the changes rest
+    /// ([`PREFS_REST`]), so a held key's every step is not a write of its
+    /// own. Only the player's settings wait — they live in the App, which
+    /// no reload of the config replaces; the GUI's own section is written
+    /// at once ([`Gui::set_key_hints`]).
+    fn save_soon(&mut self) {
+        self.prefs_unsaved = Some(Instant::now());
+    }
+
+    /// Once a pass: the settings written once they have rested.
+    fn save_rested(&mut self) {
+        if self.prefs_unsaved.is_some_and(|since| since.elapsed() >= PREFS_REST) {
+            self.save_now();
+        }
+    }
+
+    /// Before the config is read back from disk (a reload, another flow's
+    /// load-and-save): settings still waiting are written first, so the
+    /// file the reload reads is the file the screen shows.
+    fn flush_prefs(&mut self) {
+        if self.prefs_unsaved.is_some() {
+            self.save_now();
+        }
+    }
+
     /// The blend walks whole seconds and snaps toward the pressed direction
     /// (the TUI's rule: a hand-written 4.5 steps to 5 and 4, never 5.5).
     fn adjust_blend(&mut self, delta: i32) {
@@ -692,7 +731,7 @@ impl Gui {
         self.app.crossfade = snapped.clamp(0.0, 30.0);
         let set = AudioCmd::SetCrossfade(self.app.crossfade);
         self.pend(vec![Effect::Audio(set)]);
-        self.save_now();
+        self.save_soon();
     }
 
     fn adjust_row(&mut self, row: usize, delta: i32) {
@@ -710,23 +749,23 @@ impl Gui {
                 self.app.gapless = !self.app.gapless;
                 let cmd = AudioCmd::SetGapless(self.app.gapless);
                 self.pend(vec![Effect::Audio(cmd)]);
-                self.save_now();
+                self.save_soon();
             }
             ROW_BLEND_SKIPS => {
                 self.app.blend_skips = !self.app.blend_skips;
                 let cmd = AudioCmd::SetBlendSkips(self.app.blend_skips);
                 self.pend(vec![Effect::Audio(cmd)]);
-                self.save_now();
+                self.save_soon();
             }
             ROW_PAUSE_FADE => {
                 self.app.pause_fade = !self.app.pause_fade;
                 let cmd = AudioCmd::SetPauseFade(self.app.pause_fade);
                 self.pend(vec![Effect::Audio(cmd)]);
-                self.save_now();
+                self.save_soon();
             }
             ROW_RESUME => {
                 self.app.resume_queue = !self.app.resume_queue;
-                self.save_now();
+                self.save_soon();
             }
             ROW_HINTS => self.set_key_hints(!self.config.gui.key_hints),
             _ => {}
@@ -2549,6 +2588,9 @@ fn event_loop(
         let ticked = gui.app.tick();
         dirty |= !ticked.is_empty();
         gui.pend(ticked);
+        if saving {
+            gui.flush_prefs();
+        }
         if saving && let Ok(fresh) = config::load() {
             gui.config = fresh;
             refresh_book(gui);
@@ -2565,6 +2607,8 @@ fn event_loop(
         dirty |= page.stepped;
         // The visualizer window's host: the child's exit, the next texture.
         dirty |= vizwin::tick(gui);
+        // Settings changed a moment ago, now resting: written.
+        gui.save_rested();
         let over = gui.ui.hovering_clickable() || page.over;
         if over != hand {
             hand = over;
@@ -3076,6 +3120,42 @@ mod tests {
         let mut gui = Gui::new(Config::default(), false, App::new(None, None, None));
         gui.demo = Some(demo_now());
         gui
+    }
+
+    /// A held key's steps are written once they rest, not once a step; a
+    /// reload, another flow's write, and Start/Stop write what is waiting
+    /// first (performance audit #86).
+    #[test]
+    fn settings_are_written_once_they_rest_and_before_anything_rereads_them() {
+        let scratch = crate::config::testing::Scratch::new("gui-prefs-rest");
+        let mut gui = Gui::new(Config::default(), true, App::new(None, None, None));
+        config::save(&gui.config).unwrap();
+        let file = scratch.dir.join("config.toml");
+        let on_disk = || config::load().unwrap().player.crossfade_seconds;
+        let before = std::fs::read_to_string(&file).unwrap();
+
+        for _ in 0..5 {
+            gui.adjust_blend(1);
+        }
+        assert_eq!(gui.app.crossfade, 5.0, "each step lands at once");
+        gui.save_rested();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "still moving: nothing written");
+        gui.prefs_unsaved = gui.prefs_unsaved.map(|since| since - PREFS_REST);
+        gui.save_rested();
+        assert_eq!(on_disk(), 5.0, "rested: written, once");
+        assert!(gui.prefs_unsaved.is_none());
+
+        // Another flow's load-and-save writes the waiting change first.
+        gui.adjust_blend(1);
+        servers::update_config(&mut gui, |_| {});
+        assert_eq!(on_disk(), 6.0);
+        assert_eq!(gui.config.player.crossfade_seconds, 6.0, "the GUI's copy is the file's");
+
+        // The GUI's own section is written at once.
+        gui.set_key_hints(false);
+        assert!(!config::load().unwrap().gui.key_hints);
+        assert!(gui.prefs_unsaved.is_none());
+        let _ = &scratch;
     }
 
     fn track(filepath: &str, title: &str, duration: f64) -> Track {
