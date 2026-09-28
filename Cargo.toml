@@ -143,6 +143,27 @@ wgpu = { version = "30", default-features = false, features = [
 # `x11-dl` open their libraries at run time — and CI's NEEDED guard holds
 # the build to that.
 winit = "0.30"
+# The window's controls (src/viz_window/controls.rs): the preset arrows,
+# the preset dropdown and the tuning panel, drawn by egui over the preset on
+# the same wgpu device and fed the same winit events. 0.36 is the line on
+# wgpu 30 and winit 0.30.13; it wants rustc 1.95. default-features = false
+# on all three is load-bearing: egui-wgpu's defaults turn wgpu's defaults
+# back on (the browser backends the line above leaves out), and
+# egui-winit's bring a clipboard (arboard, smithay-clipboard) and a browser
+# launcher the window never uses; egui's own `default_fonts` would embed four
+# faces where the controls draw with two (below). A CJK face is borrowed
+# from the system at run time, for Japanese and Chinese.
+egui = { version = "0.36", default-features = false }
+egui-wgpu = { version = "0.36", default-features = false }
+egui-winit = { version = "0.36", default-features = false }
+# egui's two text faces, Ubuntu Light and Hack, named directly so its two
+# emoji faces — 0.7 MB the controls never draw — stay out of the binary.
+# Versioned with egui.
+epaint_default_fonts = "0.36"
+# Already in the tree as egui's font reader, and named here for one call:
+# a borrowed system face is checked the way egui will read it, because
+# egui panics on a face it cannot parse. Versioned with egui's (epaint).
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
 
 # The setup wizard's native folder picker. Split by backend on purpose
 # (the picker spike, mStream-side, 2026-08-21): rfd's Linux portal backend
