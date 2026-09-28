@@ -530,8 +530,9 @@ mod native {
                         return false;
                     }
                     // Decoded here rather than kept decoded: the cache holds
-                    // sixty-four covers, and at this size the pixels are an
-                    // order of magnitude more memory than the bytes.
+                    // two hundred and fifty-six covers, and at this size the
+                    // pixels are an order of magnitude more memory than the
+                    // bytes.
                     #[cfg(test)]
                     self.decodes.set(self.decodes.get() + 1);
                     let Ok(source) = image::load_from_memory(art.source()) else {
