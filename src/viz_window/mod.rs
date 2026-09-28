@@ -253,11 +253,15 @@ impl App {
     fn resize(&mut self) {
         let (Some(window), Some(gfx)) = (&self.window, self.gfx.as_mut()) else { return };
         let size = window.inner_size();
+        // Zero is Windows' minimize, which sends no Occluded: the window is
+        // hidden until it has a size again, and nothing is drawn or asked
+        // for meanwhile (contract clause 6).
         if size.width == 0 || size.height == 0 {
             gfx.config.width = 0;
             gfx.config.height = 0;
             return;
         }
+        let was_hidden = gfx.config.width == 0 || gfx.config.height == 0;
         if (gfx.config.width, gfx.config.height) != (size.width, size.height) {
             gfx.config.width = size.width;
             gfx.config.height = size.height;
@@ -270,6 +274,11 @@ impl App {
             for scene in self.scenes.iter_mut().flatten() {
                 scene.resize(&gfx.gpu, logical);
             }
+        }
+        // Restored: the frames start again on their own, not when the
+        // pointer next moves (performance audit #117).
+        if was_hidden {
+            window.request_redraw();
         }
     }
 
@@ -408,17 +417,25 @@ impl App {
         }
     }
 
+    /// On screen to draw into: not occluded, and a surface with a size.
+    fn showing(&self) -> bool {
+        self.gfx.as_ref().is_some_and(|gfx| showing(self.occluded, (gfx.config.width, gfx.config.height)))
+    }
+
     fn draw(&mut self, event_loop: &ActiveEventLoop) {
         let Some(window) = self.window.clone() else { return };
+        // A window with no surface to show draws nothing — the controls'
+        // pass included, which would otherwise run for a picture nobody
+        // sees (performance audit #117).
+        if !self.showing() {
+            return;
+        }
         // The controls first, so what they ask for is what this frame shows.
         self.run_controls(&window);
         if !self.ensure_scene(event_loop) {
             return;
         }
         let Some(gfx) = self.gfx.as_mut() else { return };
-        if gfx.config.width == 0 || gfx.config.height == 0 {
-            return;
-        }
         let now = Instant::now();
         let time = now.duration_since(self.started).as_secs_f32();
         let delta = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
@@ -447,6 +464,9 @@ impl App {
         let first = gfx.overlay.paint(&gfx.gpu, &mut encoder, &view, size);
         gfx.gpu.queue.submit(first.into_iter().chain([encoder.finish()]));
         gfx.overlay.release();
+        // On Wayland this has the compositor's frame callback pace the next
+        // redraw; everywhere else it does nothing.
+        window.pre_present_notify();
         gfx.gpu.queue.present(frame);
         if let Some(stats) = &mut self.stats {
             stats.frames += 1;
@@ -549,8 +569,13 @@ impl ApplicationHandler<Message> for App {
                 self.draw(event_loop);
                 // Paced by the display: Fifo's acquire waits for the next
                 // vertical blank, so this is one frame per refresh, not a
-                // spin.
-                if !self.occluded && let Some(window) = &self.window {
+                // spin. Only a frame that reached the acquire waited for
+                // one, though: a window hidden asks for nothing more until
+                // it shows again. Windows sends no Occluded, and a 0×0
+                // window there would otherwise ask again at once, every
+                // time — a core spent on a minimized window (performance
+                // audit #117).
+                if self.showing() && let Some(window) = &self.window {
                     window.request_redraw();
                 }
             }
@@ -600,6 +625,12 @@ impl Stats {
 
 fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
+}
+
+/// Whether a window can show a frame: not occluded, and a surface with a
+/// size — Windows minimizes to 0×0 and says nothing else.
+fn showing(occluded: bool, (width, height): (u32, u32)) -> bool {
+    !occluded && width != 0 && height != 0
 }
 
 /// The window's size in points — what the preset shades at.
@@ -741,5 +772,20 @@ impl Blit {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, group, &[]);
         pass.draw(0..3, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_window_hidden_either_way_asks_for_no_frames() {
+        assert!(showing(false, (1920, 1080)), "on screen");
+        assert!(!showing(true, (1920, 1080)), "behind another window: macOS and X11 say Occluded");
+        // Windows minimizes to a 0×0 client area and never says Occluded:
+        // a 0×0 surface is hidden, or each frame asks for the next at once.
+        assert!(!showing(false, (0, 0)), "minimized on Windows");
+        assert!(!showing(false, (0, 1080)) && !showing(false, (1920, 0)), "no area is nothing to show");
     }
 }
