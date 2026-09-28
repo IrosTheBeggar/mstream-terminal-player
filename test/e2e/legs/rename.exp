@@ -7,7 +7,11 @@ set env(HOME) $::env(WIZHOME)
 proc drain {secs} { expect -timeout $secs timeout {} }
 spawn {*}$argv
 exec stty rows 40 columns 100 < $spawn_out(slave,name)
-expect { "Add a music folder" {} timeout { puts "SYNC-FAIL"; exit 2 } }
+expect {
+    "Add a music folder" {}
+    eof { puts "DIED-EARLY"; exit 6 }
+    timeout { puts "SYNC-FAIL"; exit 2 }
+}
 send "t"
 drain 1
 send "$::env(WIZMUSIC)\r"

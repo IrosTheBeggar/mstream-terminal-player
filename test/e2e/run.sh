@@ -15,6 +15,18 @@ cd "$(dirname "$0")/../.."
 E2E=test/e2e
 BIN="${BIN:-target/debug/mstream-player}"
 
+# README law 3, checked before anything runs: a braced pattern list is a
+# list only as `expect`'s sole argument with a newline after the brace.
+# On one line, or after -timeout/-i, it is ONE glob that never matches —
+# the gate waits out its timeout and cannot fail. Nineteen did, for 390 s
+# a run (performance audit #129). Comments are skipped; -brace is fine.
+one_line='^[^#]*(^|[^[:alnum:]_])expect[[:space:]]+\{[[:space:]]*[^[:space:]]'
+after_flag='^[^#]*(^|[^[:alnum:]_])expect([[:space:]]+-(timeout|i)[[:space:]]+[^[:space:]]+)+[[:space:]]+\{'
+if grep -nE -e "$one_line" -e "$after_flag" "$E2E"/legs/*.exp; then
+  echo "FAIL a braced expect above is one glob, not a pattern list: put \`expect {\` alone on its line (README law 3)"
+  exit 1
+fi
+
 command -v expect >/dev/null || { echo "SKIP: expect(1) not installed"; exit 0; }
 command -v python3 >/dev/null || { echo "SKIP: python3 not installed"; exit 0; }
 
