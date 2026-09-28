@@ -267,13 +267,13 @@ impl App {
             gfx.config.height = size.height;
             gfx.surface.configure(&gfx.gpu.device, &gfx.config);
         }
+        // Only the target: a scene takes the new size when it next draws,
+        // so a drag remakes one preset's buffers, not every one ever shown
+        // (performance audit #120).
         let logical = logical_size(window);
         if gfx.target.size != logical {
             gfx.target = Offscreen::for_display(&gfx.gpu, logical);
             gfx.blit.bind(&gfx.gpu, &gfx.target.view);
-            for scene in self.scenes.iter_mut().flatten() {
-                scene.resize(&gfx.gpu, logical);
-            }
         }
         // Restored: the frames start again on their own, not when the
         // pointer next moves (performance audit #117).
@@ -283,8 +283,9 @@ impl App {
     }
 
     /// Preset `i`, compiled for this GPU on first sight with its knobs as
-    /// the panel has them. One the GPU refuses is marked, and never offered
-    /// or tried again (contract clauses 7, 11).
+    /// the panel has them; its buffers come with its first frame. One the
+    /// GPU refuses is marked, and never offered or tried again (contract
+    /// clauses 7, 11).
     fn load(&mut self, i: usize) -> bool {
         if self.scenes[i].is_some() {
             return true;
@@ -296,7 +297,7 @@ impl App {
         let builtin = &BUILTIN[i];
         let loaded = Preset::parse(builtin.source)
             .map_err(|e| e.to_string())
-            .and_then(|preset| gfx.gpu.load(&preset, gfx.target.size));
+            .and_then(|preset| gfx.gpu.compile(&preset));
         match loaded {
             Ok(mut scene) => {
                 scene.set_params(&self.tuning.knobs[i]);
@@ -315,6 +316,13 @@ impl App {
     /// and the player hears which it is (contract clause 13).
     fn front(&mut self, i: usize) {
         let changed = i != self.preset;
+        // The one going keeps its pipelines, for coming back to, but not
+        // its full-size buffers: a feedback preset left behind would
+        // otherwise hold a window's worth of textures each for the rest of
+        // the session (performance audit #120).
+        if changed && let Some(going) = self.scenes[self.preset].as_mut() {
+            going.release();
+        }
         self.preset = i;
         if let Some(window) = &self.window {
             self.retitle(window);
@@ -445,6 +453,9 @@ impl App {
             self.audio_fresh = false;
         }
         let scene = self.scenes[self.preset].as_mut().expect("ensured above");
+        // Nothing unless the window changed size since this scene last drew,
+        // or it has just come to the front.
+        scene.resize(&gfx.gpu, gfx.target.size);
         scene.draw(&gfx.gpu, &gfx.target.view, time, delta);
 
         let frame = match gfx.surface.get_current_texture() {

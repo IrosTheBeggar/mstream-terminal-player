@@ -4,7 +4,8 @@
 //! layout the translation's bindings promise (`glsl::layout`), the one
 //! sampler, the audio texture, and a black texture for a channel wired to
 //! nothing. A [`Scene`] is one preset compiled on it — a pipeline per pass,
-//! a ping-pong pair per buffer — and draws a frame into any RGBA8 view.
+//! a ping-pong pair per buffer that is read a frame late — and draws a
+//! frame into any RGBA8 view.
 //!
 //! Offscreen for now: `viz-probe` draws every preset into a texture and
 //! reads it back. The window (Phase 11.1) hands the same [`Scene::draw`]
@@ -159,10 +160,20 @@ impl Gpu {
     }
 
     /// Compile every pass of `preset` for this device, with its buffers
-    /// sized for an output of `size`. A pass that will not compile fails the
-    /// whole preset, with the pass named and the compiler's reason — which
-    /// can be a panic inside naga, caught here so it costs one preset.
+    /// sized for an output of `size`: [`Gpu::compile`], then
+    /// [`Scene::resize`].
     pub fn load(&self, preset: &Preset, size: (u32, u32)) -> Result<Scene, String> {
+        let mut scene = self.compile(preset)?;
+        scene.resize(self, size);
+        Ok(scene)
+    }
+
+    /// Compile every pass of `preset` for this device, and nothing more: the
+    /// scene has no buffers until [`Scene::resize`] gives it an output size.
+    /// A pass that will not compile fails the whole preset, with the pass
+    /// named and the compiler's reason — which can be a panic inside naga,
+    /// caught here so it costs one preset.
+    pub fn compile(&self, preset: &Preset) -> Result<Scene, String> {
         let mut passes = Vec::new();
         for pass in &preset.passes {
             let name = pass.name.as_str();
@@ -199,15 +210,14 @@ impl Gpu {
             });
         }
 
-        let mut scene = Scene {
+        Ok(Scene {
+            history: history(passes.iter().map(|p| (p.name, p.channels))),
             passes,
             buffers: Default::default(),
             params: preset.default_params(),
             frame: 0,
             size: (0, 0),
-        };
-        scene.resize(self, size);
-        Ok(scene)
+        })
     }
 
     fn pipeline(&self, name: &str, source: String) -> wgpu::RenderPipeline {
@@ -252,6 +262,8 @@ pub struct Scene {
     passes: Vec<Compiled>,
     /// Buffers A to D, where the preset has them.
     buffers: [Option<PingPong>; 4],
+    /// Per buffer, whether any pass reads it as it was the frame before.
+    history: [bool; 4],
     params: [f32; MAX_PARAMS],
     frame: i32,
     /// The output size the full-size buffers were made for.
@@ -268,11 +280,31 @@ struct Compiled {
 }
 
 /// A buffer pass's two textures: one written this frame, the other holding
-/// the last, which is what a pass reading itself sees.
+/// the last, which is what a pass reading itself sees. A buffer nobody
+/// reads that way has one texture, named twice.
 struct PingPong {
     views: [wgpu::TextureView; 2],
     size: (u32, u32),
     write: usize,
+}
+
+/// Which buffers some pass reads as they were the frame before: itself,
+/// or one still to run — [`Scene::channel`]'s rule. Only those need a
+/// second texture to keep last frame's pixels in; a buffer read only by the
+/// passes after it is read as it was just drawn, and one texture does (the
+/// performance audit's #120: 05's buffer A, 09's A and B).
+fn history(passes: impl IntoIterator<Item = (PassName, [Channel; 4])>) -> [bool; 4] {
+    let mut kept = [false; 4];
+    for (reader, channels) in passes {
+        for channel in channels {
+            if let Channel::Buffer(buffer) = channel
+                && buffer >= reader
+            {
+                kept[slot(buffer)] = true;
+            }
+        }
+    }
+    kept
 }
 
 fn slot(pass: PassName) -> usize {
@@ -298,12 +330,27 @@ impl Scene {
                 continue;
             }
             let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
-            let views = std::array::from_fn(|_| {
-                texture(&gpu.device, pass.name.as_str(), wanted, FORMAT, usage).create_view(&Default::default())
-            });
+            let make =
+                || texture(&gpu.device, pass.name.as_str(), wanted, FORMAT, usage).create_view(&Default::default());
+            let views = if self.history[slot(pass.name)] {
+                [make(), make()]
+            } else {
+                let view = make();
+                [view.clone(), view]
+            };
             *current = Some(PingPong { views, size: wanted, write: 0 });
         }
         self.size = size;
+    }
+
+    /// Let the full-size buffers go, for a scene that is not being drawn:
+    /// the next [`Scene::resize`] makes them again, blank, as a new size
+    /// does. A fixed size buffer keeps its contents, as it does through a
+    /// resize — 05's 1×1 bass baseline comes back where it was.
+    pub fn release(&mut self) {
+        for pass in self.passes.iter().filter(|p| p.name.is_buffer() && p.fixed.is_none()) {
+            self.buffers[slot(pass.name)] = None;
+        }
     }
 
     pub fn passes(&self) -> usize {
@@ -523,5 +570,41 @@ impl Offscreen {
     /// Wait for everything submitted so far — for timing a frame.
     pub fn finish(gpu: &Gpu) -> Result<(), String> {
         gpu.device.poll(wgpu::PollType::wait_indefinitely()).map(drop).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::shader::library;
+
+    fn wiring(file: &str) -> [bool; 4] {
+        let source = library::vendored_source(file).expect("a vendored preset");
+        let preset = Preset::parse(&source).unwrap_or_else(|e| panic!("{file}: {e}"));
+        history(preset.passes.iter().map(|p| (p.name, p.channels)))
+    }
+
+    #[test]
+    fn only_a_buffer_read_a_frame_late_keeps_a_second_texture() {
+        // 05: B reads A just drawn, and itself; C reads itself; the image
+        // reads B and C just drawn. A is never read as it was.
+        assert_eq!(wiring("05-hex-marching.glsl"), [false, true, true, false]);
+        // 09: the image reads A and B, both just drawn.
+        assert_eq!(wiring("09-mountainbytes.glsl"), [false; 4]);
+        // 04: A reads itself.
+        assert_eq!(wiring("04-cyber-fuji.glsl"), [true, false, false, false]);
+        // One pass reading a buffer still to run sees last frame's.
+        use PassName::{BufferA, BufferB, Image};
+        let early = [
+            (BufferA, [Channel::Buffer(BufferB), Channel::Unbound, Channel::Unbound, Channel::Unbound]),
+            (BufferB, [Channel::Audio, Channel::Unbound, Channel::Unbound, Channel::Unbound]),
+            (Image, [Channel::Buffer(BufferA), Channel::Buffer(BufferB), Channel::Unbound, Channel::Unbound]),
+        ];
+        assert_eq!(history(early), [false, true, false, false]);
+        // Single-pass presets have no buffers at all.
+        for single in ["01-spectrum-bars.glsl", "07-neonwave-sunrise.glsl"] {
+            assert_eq!(wiring(single), [false; 4], "{single}");
+        }
     }
 }
