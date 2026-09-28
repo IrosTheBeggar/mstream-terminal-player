@@ -6,7 +6,12 @@
     <title>mstream-player · web demo</title>
     <!-- rustc emits bulk-memory ops by default now; trunk's wasm-opt
          validates with them off unless told, and fails the release build.
-         (data-wasm-opt-params needs trunk >= 0.21.) -->
+         (data-wasm-opt-params needs trunk >= 0.21.)
+         Built for speed rather than size, measured (performance audit
+         #126): opt-level "z" takes 12% off the gzipped bundle but makes a
+         visualizer frame ~65% slower, and fat LTO or wasm-opt -Oz save
+         about 1.5%. The size win that costs nothing is build.rs giving the
+         browser the English table alone. -->
     <link
       data-trunk
       rel="rust"

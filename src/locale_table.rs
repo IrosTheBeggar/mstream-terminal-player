@@ -17,6 +17,9 @@
 //! locale, its fallback chain and `available_locales!` are all unchanged:
 //! they live in the macro's generated code, which still owns the lookup
 //! and only asks this backend for a string.
+//!
+//! The browser build's table holds English alone (build.rs says why), so
+//! there every t!() is an English answer, as it always was.
 
 include!(concat!(env!("OUT_DIR"), "/locale_table.rs"));
 
