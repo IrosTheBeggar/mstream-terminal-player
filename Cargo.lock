@@ -3413,6 +3413,7 @@ dependencies = [
  "rfd",
  "rodio",
  "rust-i18n",
+ "rust-i18n-support",
  "serde",
  "serde_json",
  "serde_yaml",

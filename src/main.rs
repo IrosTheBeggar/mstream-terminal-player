@@ -15,6 +15,8 @@ mod input;
 /// level type and switches are shared, because the Settings tab that
 /// drives them is drawing code the browser build keeps.
 mod logging;
+/// The strings behind t!(), as static data written by build.rs.
+mod locale_table;
 mod player;
 mod tui;
 
@@ -192,8 +194,12 @@ mod quickconnect {
 
 // The locale table, embedded at compile time from locales/*.yml: the
 // wizard's, the GUI's, and the shared App's own notes — every target.
-// Crate root because t!() resolves crate::_rust_i18n_translate.
-rust_i18n::i18n!("locales", fallback = "en");
+// Crate root because t!() resolves crate::_rust_i18n_translate. The strings
+// themselves come from build.rs as one static (locale_table.rs): the macro
+// is pointed at a folder that does not exist, so it generates only the
+// t!() machinery and none of the 17k statements that used to dominate the
+// release build.
+rust_i18n::i18n!("locales-come-from-build-rs", fallback = "en", backend = crate::locale_table::Table);
 
 #[cfg(not(target_arch = "wasm32"))]
 use clap::{Args, Parser, Subcommand};

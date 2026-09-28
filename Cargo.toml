@@ -269,6 +269,9 @@ iroh-tickets = "1"
 [dev-dependencies]
 # The locale-completeness test parses locales/*.yml directly.
 serde_yaml = "0.9"
+# The locale table's test compares it with what the i18n! macro would have
+# loaded. Versioned with the build-dependency above.
+rust-i18n-support = "=3.1.5"
 # The visualizer presets' compile matrix (src/shader/matrix.rs): every pass
 # through naga's GLSL frontend, its validator, and all four backends wgpu
 # drives — Metal, HLSL, SPIR-V, desktop GLSL — with no GPU, so CI runs it
@@ -279,3 +282,7 @@ naga = { version = "30", features = ["glsl-in", "wgsl-in", "msl-out", "hlsl-out"
 [build-dependencies]
 # Windows icon + VersionInfo embedding (build.rs; no-op for other targets).
 winresource = "0.1"
+# build.rs reads locales/*.yml with the i18n! macro's own loader and writes
+# the table as a static (src/locale_table.rs). Already in the tree as the
+# macro's dependency; pinned to rust-i18n's version, so bump them together.
+rust-i18n-support = "=3.1.5"
