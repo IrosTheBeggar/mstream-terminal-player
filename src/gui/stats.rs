@@ -25,6 +25,11 @@ use crate::tui::app::Origin;
 pub(crate) struct StatsUi {
     pub page: Option<Page>,
     why: Option<String>,
+    /// Whether the last frame drew the screen. The mini player stands in
+    /// for every screen and draws none of this one, so a page chosen
+    /// under it is not on screen: its clocks, its hover and its clicks
+    /// are not the frame's (see [`on_screen`]).
+    pub drawn: bool,
 }
 
 /// Open the screen: the page on the session's server — a peer session's
@@ -75,6 +80,7 @@ pub(crate) fn reopen(gui: &mut Gui) {
 /// `view` is the Now Playing screen's rect, which keeps the top bar's row
 /// for the TUI view's own title; the page wants the rows under the bar.
 pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, view: Rect) {
+    gui.stats.drawn = true;
     let view = Rect { y: view.y + 1, height: view.height.saturating_sub(1), ..view };
     match gui.stats.page.as_mut() {
         Some(page) => page::render_hosted(frame, page, view),
@@ -126,7 +132,7 @@ pub(crate) fn tips(gui: &Gui) -> String {
 /// loop, step for step (contract clause 5). True when the event was the
 /// screen's to take, whether or not a page was up to take it.
 pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
-    if gui.screen != Screen::Stats || mouse.row == 0 || gui.modal_open() {
+    if !on_screen(gui) || mouse.row == 0 || gui.modal_open() {
         return false;
     }
     let at = Position { x: mouse.column, y: mouse.row };
@@ -171,11 +177,20 @@ pub(crate) fn absorb(gui: &mut Gui) -> bool {
     gui.stats.page.as_mut().is_some_and(Hosted::absorb)
 }
 
+/// Whether the screen is chosen AND the last frame drew it — not so under
+/// the mini player, which keeps the page, and its worker, for the window
+/// to grow back to.
+fn on_screen(gui: &Gui) -> bool {
+    gui.screen == Screen::Stats && gui.stats.drawn
+}
+
 /// Whether the page's last frame is out of date on its clocks alone (the
 /// kit's [`crate::kit::Surface::stale`]) — only while it is on screen.
+/// A page the mini player stands in for drew no frame to be out of date:
+/// its surface said stale for as long as it went undrawn, and the loop
+/// redrew the mini player every pass (performance audit #102 follow-up).
 pub(crate) fn stale(gui: &mut Gui) -> bool {
-    let on_screen = gui.screen == Screen::Stats;
-    on_screen && gui.stats.page.as_mut().is_some_and(|page| page.ui().stale())
+    on_screen(gui) && gui.stats.page.as_mut().is_some_and(|page| page.ui().stale())
 }
 
 /// Whether the page has a call out with its worker — the GUI's loop waits
@@ -196,7 +211,7 @@ pub(crate) struct Duties {
 /// The page's own per-frame duties, after the draw: its worker's next
 /// call, a held control, the tooltip clock.
 pub(crate) fn frame(gui: &mut Gui) -> Duties {
-    let on_screen = gui.screen == Screen::Stats;
+    let shown = on_screen(gui);
     let Some(page) = gui.stats.page.as_mut() else { return Duties::default() };
     Hosted::pump(page);
     let mut stepped = false;
@@ -205,5 +220,5 @@ pub(crate) fn frame(gui: &mut Gui) -> Duties {
         stepped = true;
     }
     page.ui().dwell_tick();
-    Duties { over: on_screen && page.ui().hovering_clickable(), stepped }
+    Duties { over: shown && page.ui().hovering_clickable(), stepped }
 }

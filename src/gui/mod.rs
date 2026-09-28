@@ -1360,6 +1360,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
 fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     gui.ui.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
+    gui.stats.drawn = false; // and the Stats screen's says it drew
     let area = frame.area();
     if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
         frame.render_widget(
@@ -2654,20 +2655,7 @@ fn event_loop(
         }
         gui.ui.dwell_tick();
 
-        // While covers are still upgrading to pixels, the next frame is
-        // wanted promptly — idling out the full poll would stretch a page
-        // turn's ~50 ms of encode work across a second of ticks. A blinking
-        // caret wants its next frame ON the flip, not a poll tick after it.
-        let wait = if gui.hot {
-            Duration::from_millis(10)
-        } else if gui.app.drawing_audio() || vizwin::wants_frames(gui) {
-            // The visualizer tab, moving: the TUI's thirty frames a second —
-            // and the visualizer window's feed, at the same pace, while it
-            // has anything to say (silence, once settled, is said once).
-            Duration::from_millis(33)
-        } else {
-            gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
-        };
+        let wait = next_wait(gui);
         side.track(gui.servers.busy() || gui.torrent.busy.is_some() || stats::awaiting(gui));
         if !event::poll(side.wait(asked.wait(wait)))? {
             continue;
@@ -2775,6 +2763,34 @@ fn event_loop(
                 _ => {}
             }
         }
+    }
+}
+
+/// How long the pass waits for input before the next one.
+fn next_wait(gui: &Gui) -> Duration {
+    // Effects this pass made after its dispatch go out at the top of the
+    // next: the covers the wall's page and the queue panel's rows claimed
+    // as the frame drew, a held control's step. They waited out the whole
+    // wait for it, so a page turn's cover asks left up to a poll after its
+    // frame (performance audit #82 follow-up). A cover is claimed once and
+    // a refused claim sends nothing, so the pass after finds nothing
+    // pending and waits as it would have.
+    if !gui.pending.is_empty() {
+        return Duration::ZERO;
+    }
+    // While covers are still upgrading to pixels, the next frame is
+    // wanted promptly — idling out the full poll would stretch a page
+    // turn's ~50 ms of encode work across a second of ticks. A blinking
+    // caret wants its next frame ON the flip, not a poll tick after it.
+    if gui.hot {
+        Duration::from_millis(10)
+    } else if gui.app.drawing_audio() || vizwin::wants_frames(gui) {
+        // The visualizer tab, moving: the TUI's thirty frames a second —
+        // and the visualizer window's feed, at the same pace, while it
+        // has anything to say (silence, once settled, is said once).
+        Duration::from_millis(33)
+    } else {
+        gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
     }
 }
 
@@ -3634,6 +3650,42 @@ mod tests {
         assert!(all.contains("no session"), "{all}");
         super::handle_key(&mut lone, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(lone.screen, Screen::Library);
+    }
+
+    #[test]
+    fn a_stats_page_under_the_mini_player_is_not_on_screen() {
+        // The mini player stands in for every screen and draws no page: a
+        // page chosen under it has no frame to be out of date, so its
+        // surface's clocks do not redraw the mini player every pass
+        // (performance audit #102 follow-up), and the pointer below the
+        // bar is the mini player's transport, not the undrawn page's.
+        use crate::admin::Screen as _;
+        let mut gui = browsing_gui();
+        gui.app.session.server = "http://host.invalid:3000".into();
+        gui.app.session.server_id = "http://host.invalid:3000".into();
+        gui.act(Act::Screen(Screen::Stats));
+        assert!(gui.stats.page.is_some());
+        let mut small = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        small.draw(|frame| render(frame, &mut gui)).unwrap();
+        assert!(gui.stats.page.as_mut().unwrap().ui().stale(), "never drawn: its own surface says so");
+        assert!(!moving(&mut gui), "but it is not on screen");
+        let click = event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(!stats::pointer(&mut gui, click), "the mini player's to take");
+
+        // Full size: the page draws, and its clocks and pointer are the
+        // frame's again.
+        draw(&mut gui);
+        assert!(!moving(&mut gui), "drawn, and nothing on a clock");
+        gui.stats.page.as_mut().unwrap().ui().overlay(Rect::new(2, 2, 10, 4));
+        assert!(moving(&mut gui), "an overlay came: the page owes a frame");
+        assert!(stats::pointer(&mut gui, click), "the page's");
+        small.draw(|frame| render(frame, &mut gui)).unwrap();
+        assert!(!moving(&mut gui), "not under the mini player");
     }
 
     #[test]

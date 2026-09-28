@@ -523,6 +523,10 @@ mod tests {
         draw(&mut gui);
         assert!(art_asks(&gui).is_empty(), "nothing to ask while the tunnel is closed");
         assert!(!gui.app.art.contains_key("cc.jpeg"), "and no placeholder stands in the way");
+        assert!(
+            super::super::next_wait(&gui) > std::time::Duration::ZERO,
+            "a refused claim sends nothing: the loop waits, it does not spin"
+        );
 
         gui.app.tunnels.insert(
             id,

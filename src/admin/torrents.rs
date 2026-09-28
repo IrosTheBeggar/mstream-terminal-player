@@ -43,6 +43,7 @@ use crate::api::types::{
     Torrent, TorrentClientConfig, TorrentList, TorrentParams, TorrentStatus, VpathAccess,
 };
 use crate::api::{ApiError, Client, TorrentCreds};
+use crate::kit::pace::BRISK_FOR;
 use crate::kit::theme::th;
 use crate::kit::{self, Surface, bold, dim};
 use crate::setup::g;
@@ -531,6 +532,9 @@ pub(crate) struct Room {
     listed_rx: Receiver<(String, Vec<String>)>,
     /// [`SEED_LIST_WAIT`], held here so a test can take a listing's slow road.
     seed_wait: Duration,
+    /// When the last Tab asked — a listing still out is waited for
+    /// briskly from then (see [`Room::listing_awaited`]).
+    seed_asked_at: Option<Instant>,
     /// The client page shown on purpose (`c` on the Client tab) while a
     /// client is configured.
     pub choosing: bool,
@@ -550,6 +554,9 @@ pub(crate) struct Room {
     busy: Option<String>,
     queued: Option<Op>,
     in_flight: bool,
+    /// The worker thread is gone: its channel is not read again, and its
+    /// note stands.
+    worker_gone: bool,
     tscroll: usize,
     sel_anchor: Option<usize>,
     last_load: Option<Instant>,
@@ -587,6 +594,7 @@ impl Room {
             listed_tx,
             listed_rx,
             seed_wait: SEED_LIST_WAIT,
+            seed_asked_at: None,
             choosing: false,
             client_pick: 0,
             group: 0,
@@ -600,6 +608,7 @@ impl Room {
             busy: None,
             queued: None,
             in_flight: false,
+            worker_gone: false,
             tscroll: 0,
             sel_anchor: None,
             last_load: None,
@@ -936,6 +945,7 @@ impl Room {
         let Modal::SeedPath { path, error, asked, .. } = &mut self.modal else { return };
         *error = None;
         *asked = Some(path.value().to_string());
+        self.seed_asked_at = Some(Instant::now());
         let (_, _, dir) = seed_dir(path.value());
         if self.seed_listing.insert(dir.clone()) {
             let tx = self.listed_tx.clone();
@@ -951,6 +961,16 @@ impl Room {
                 Err(_) => break,
             }
         }
+    }
+
+    /// Whether a listing a Tab left out is still worth a brisk wait: its
+    /// completion repaints, and one slower than [`SEED_LIST_WAIT`] waited
+    /// out a whole poll to show (performance audit #85 follow-up). For
+    /// [`BRISK_FOR`] after the Tab and no longer — a dead mount's listing
+    /// may never come, and counted for good it would hold the loop's
+    /// clock through every worker call after it.
+    fn listing_awaited(&self) -> bool {
+        !self.seed_listing.is_empty() && self.seed_asked_at.is_some_and(|at| at.elapsed() < BRISK_FOR)
     }
 
     /// A folder's listing, back: it completes the input its Tab was
@@ -1297,16 +1317,29 @@ impl Screen for Room {
 
     fn absorb(&mut self) -> bool {
         let mut folded = false;
-        loop {
+        while !self.worker_gone {
             match self.from_worker.try_recv() {
                 Ok(done) => self.apply(done),
                 Err(TryRecvError::Empty) => break,
+                // Nothing is out with a worker that is gone.
                 Err(TryRecvError::Disconnected) => {
-                    self.note = Some((t!("note.worker_gone").to_string(), true));
-                    return true;
+                    self.worker_gone = true;
+                    self.in_flight = false;
                 }
             }
             folded = true;
+        }
+        // Its note stands for good — one a tab switch cleared is back the
+        // next pass — but is set only when it is not up: returning from
+        // here with it every pass redrew the room every pass and skipped
+        // the listings below, which have threads of their own (performance
+        // audit #85 follow-up).
+        if self.worker_gone {
+            let gone = t!("note.worker_gone");
+            if !self.note.as_ref().is_some_and(|(note, _)| *note == gone) {
+                self.note = Some((gone.to_string(), true));
+                folded = true;
+            }
         }
         // The seed path's folder listings, read off the draw thread
         // (performance audit #85): a completion that lands repaints.
@@ -1321,8 +1354,9 @@ impl Screen for Room {
         self.dispatch_queued();
     }
 
+    /// A call out with the worker, or a seed-path listing still out.
     fn awaiting(&self) -> bool {
-        self.in_flight
+        self.in_flight || self.listing_awaited()
     }
 
     /// The polls, quiet: the list every five seconds while the Torrents
@@ -4005,5 +4039,45 @@ mod tests {
         room.take_listing(format!("{}/", dir.display()), vec!["boc.torrent".into()]);
         assert!(matches!(room.modal, Modal::None));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_listing_still_out_is_waited_for_and_lands_after_the_worker_is_gone() {
+        // Its completion repaints, so a listing slower than the Tab's own
+        // wait keeps the loop brisk as a worker's call does — for
+        // BRISK_FOR after its Tab, not for as long as a dead mount holds
+        // it (performance audit #85 follow-up).
+        let _en = english();
+        let mut room = connected();
+        assert!(!room.awaiting());
+        room.open_seed_path();
+        type_text(&mut room, "/nowhere/b");
+        room.seed_wait = Duration::ZERO;
+        // The folder is being listed already: the Tab asks nothing new, and
+        // its listing stays out until the test sends it.
+        room.seed_listing.insert("/nowhere/".into());
+        press(&mut room, KeyCode::Tab);
+        assert!(room.awaiting(), "a listing is out: waited for briskly");
+        room.seed_asked_at = room.seed_asked_at.and_then(|at| at.checked_sub(BRISK_FOR));
+        assert!(!room.awaiting(), "past BRISK_FOR a listing that never comes holds nothing");
+        press(&mut room, KeyCode::Tab);
+        assert!(room.awaiting(), "the next Tab waits again");
+
+        // The worker dies with a call out: said once, the room stops
+        // redrawing for it, and the listing still lands.
+        let (_, dead) = std::sync::mpsc::channel();
+        room.from_worker = dead;
+        room.in_flight = true;
+        assert!(room.absorb(), "the worker's end is news");
+        assert!(room.note.as_ref().is_some_and(|(note, err)| *err && note.contains("worker thread is gone")));
+        assert!(!room.absorb(), "once: nothing to redraw for on the passes after");
+        room.note = None; // a tab switch's
+        assert!(room.absorb() && room.note.as_ref().is_some_and(|(_, err)| *err), "the note stands");
+        assert!(!room.absorb());
+        room.listed_tx.send(("/nowhere/".into(), vec!["albums/".into(), "boc.torrent".into()])).unwrap();
+        assert!(room.absorb(), "a listing after the worker's end still lands");
+        let Modal::SeedPath { path, asked, .. } = &room.modal else { panic!("the path modal") };
+        assert!(path.value() == "/nowhere/boc.torrent" && asked.is_none(), "{}", path.value());
+        assert!(!room.awaiting(), "nothing is out: not the listing, not the dead worker's call");
     }
 }
