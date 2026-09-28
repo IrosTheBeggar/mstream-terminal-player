@@ -1624,7 +1624,7 @@ fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
             .and_then(|file| app.art.get(file))
             .and_then(|art| art.as_ref());
         app.viz.draw(&mut canvas, &app.heard, sounding, cover);
-        frame.render_widget(Paragraph::new(canvas.into_lines()), picture);
+        frame.render_widget(&canvas, picture);
     }
 }
 
@@ -1764,7 +1764,7 @@ fn render_facts_cover(frame: &mut Frame, area: Rect, app: &mut App, mosaic: bool
     let mut canvas = crate::tui::canvas::Canvas::new(area);
     if !canvas.is_empty() {
         app.cover_pane.draw(&mut canvas, cover);
-        frame.render_widget(Paragraph::new(canvas.into_lines()), area);
+        frame.render_widget(&canvas, area);
     }
     Some(area)
 }

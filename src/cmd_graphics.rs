@@ -178,5 +178,5 @@ fn render_mosaic(frame: &mut ratatui::Frame, area: Rect, card: &Art) {
             canvas.set(x as i32, y as i32, art::cover_sample(card, w, h, x, y));
         }
     }
-    frame.render_widget(Paragraph::new(canvas.into_lines()), area);
+    frame.render_widget(&canvas, area);
 }

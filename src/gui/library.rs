@@ -77,20 +77,19 @@ fn at_root(gui: &Gui) -> bool {
     )
 }
 
-/// The rows the list draws, with their pane indices: everything but the
-/// `..` row at a root (it would climb into the TUI's mode menu). Borrows
-/// the App alone, so the shell's own state stays writable beside it.
-fn rows_of(app: &App, skip_parent: bool) -> Vec<(usize, &Entry)> {
-    app.library
-        .entries
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| !(skip_parent && matches!(e, Entry::Parent)))
-        .collect()
-}
-
-fn rows(gui: &Gui) -> Vec<(usize, &Entry)> {
-    rows_of(&gui.app, at_root(gui))
+/// The rows the list draws: everything but the `..` row at a root (it
+/// would climb into the TUI's mode menu), and how many rows that passed
+/// over — a drawn row's pane index is its position plus that. Borrows the
+/// App alone, so the shell's own state stays writable beside it.
+///
+/// A slice past the first row rather than a filtered copy: `..` only ever
+/// leads a listing (every listing is built with it first, and a filter
+/// keeps the order), and the copy was a 20,000-artist Vec every frame to
+/// drop one row (performance audit #109).
+fn rows_of(app: &App, skip_parent: bool) -> (usize, &[Entry]) {
+    let entries = &app.library.entries;
+    let skip = usize::from(skip_parent && matches!(entries.first(), Some(Entry::Parent)));
+    (skip, &entries[skip..])
 }
 
 /// A root list's cursor never rests on the hidden `..`.
@@ -177,7 +176,7 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     }
     let root = at_root(gui);
     let alpha = alphabetical(gui);
-    let rows = rows_of(&gui.app, root);
+    let (skip, rows) = rows_of(&gui.app, root);
     if rows.is_empty() {
         // An empty answer, or a filter that matched nothing (the bar
         // contract's rule: the way back is one key).
@@ -189,7 +188,7 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
     // The strip on an alphabetical list of 25 or more (clauses 10–12).
     if alpha && rows.len() >= STRIP_MIN_ROWS {
         // The narrowed list's letters (clause 11), by drawn position.
-        let (present, first_of) = letter_index(rows.iter().map(|(_, entry)| entry.label()));
+        let (present, first_of) = letter_index(rows.iter().map(Entry::label));
         let strip = Rect { x: content.x, y: content.y + 2, width: content.width, height: 1 };
         letter_strip(frame, &mut gui.ui, strip, &present, move |bucket| Act::LibJump(first_of[bucket]));
     }
@@ -201,13 +200,15 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         height: content.height.saturating_sub(3),
     };
     let selected = gui.app.library.state.selected();
-    let sel_pos = selected.and_then(|s| rows.iter().position(|(i, _)| *i == s));
+    // Off the drawn rows when it rests on the hidden `..`.
+    let sel_pos = selected.and_then(|s| s.checked_sub(skip)).filter(|&pos| pos < rows.len());
     let (first, visible) = gui.library.view.window(rows.len(), sel_pos, list.height as usize);
     // Lit only while the keyboard holds it (the kit's list-cursor law).
     let lit = gui.library.view.shown(selected);
 
     let len = rows.len();
-    let shown: Vec<(usize, &Entry)> = rows.into_iter().skip(first).take(visible).collect();
+    let shown: Vec<(usize, &Entry)> =
+        rows.iter().enumerate().skip(first).take(visible).map(|(pos, entry)| (skip + pos, entry)).collect();
     let playing = gui.app.now_playing.as_ref().map(|t| t.filepath.as_str());
     super::draw_pane_rows(
         frame,
@@ -238,7 +239,8 @@ fn draw_list(frame: &mut Frame, gui: &mut Gui, content: Rect) {
 /// to the top and takes the cursor — unlit, the strip being a pointer tool
 /// (clause 13, the kit's list-cursor law); ↓ picks it up there.
 fn jump_list(gui: &mut Gui, pos: usize) {
-    let target = rows(gui).get(pos).map(|(i, _)| *i);
+    let (skip, rows) = rows_of(&gui.app, at_root(gui));
+    let target = (pos < rows.len()).then_some(skip + pos);
     if let Some(index) = target {
         gui.library.view.scroll = pos;
         gui.library.view.stow();
@@ -574,6 +576,68 @@ mod tests {
             gui.pending,
             gui.app.library_stack.here()
         );
+    }
+
+    #[test]
+    fn the_rows_past_a_hidden_way_out_keep_their_pane_indices() {
+        // A root's `..` is sliced off the front rather than filtered out of
+        // a copy (performance audit #109): every drawn row still answers
+        // with its own pane index, filtered or not.
+        let mut gui = artists_gui(&["Air", "Bassnectar", "Cocteau Twins"]);
+        let rows = draw(&mut gui);
+        assert_eq!(hit_text(&gui, &rows, "Air"), Some(Act::PaneRow(List::Library, 1, RowVerb::Open)));
+        assert_eq!(hit_text(&gui, &rows, "Cocteau Twins"), Some(Act::PaneRow(List::Library, 3, RowVerb::Open)));
+        // A cursor resting on the hidden row is off the drawn ones.
+        gui.app.library.state.select(Some(0));
+        let all = draw(&mut gui).join("\n");
+        assert!(all.contains("Air") && all.contains("3 items"), "{all}");
+
+        key(&mut gui, KeyCode::Char('f'));
+        for c in "twins".chars() {
+            key(&mut gui, KeyCode::Char(c));
+        }
+        let rows = draw(&mut gui);
+        assert!(rows.join("\n").contains("1 of 3"), "{}", rows.join("\n"));
+        assert_eq!(
+            hit_text(&gui, &rows, "Cocteau Twins"),
+            Some(Act::PaneRow(List::Library, 1, RowVerb::Open)),
+            "the one match, behind the kept `..`"
+        );
+
+        // Below a root the way out is a row like any other, first.
+        key(&mut gui, KeyCode::Esc);
+        gui.act(Act::Nav(GENRES_NAV));
+        gui.pending.clear();
+        land(&mut gui, LibraryNode::Genres, LibraryData::Genres(vec![Genre { name: "Ambient".into(), track_count: Some(1) }]));
+        gui.act(Act::PaneRow(List::Library, 1, RowVerb::Open));
+        land(&mut gui, LibraryNode::Genre("Ambient".into()), LibraryData::Tracks(vec![track("t/a.mp3", 61.0)]));
+        let rows = draw(&mut gui);
+        assert_eq!(hit_text(&gui, &rows, ".."), Some(Act::PaneRow(List::Library, 0, RowVerb::Open)));
+        assert_eq!(hit_text(&gui, &rows, "a.mp3"), Some(Act::PaneRow(List::Library, 1, RowVerb::Open)));
+        assert!(rows.join("\n").contains("1 items") || rows.join("\n").contains("1 item"), "{}", rows.join("\n"));
+    }
+
+    /// Not a check, a measurement (performance audit #109): a frame of the
+    /// Artists room at 20,000 names, bare and filtered —
+    /// `cargo test --release twenty_thousand_artists -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check; run --release with --nocapture"]
+    fn render_twenty_thousand_artists_and_time_it() {
+        let names: Vec<String> =
+            (0..20_000).map(|i| format!("{}rtist {i:05}", (b'A' + (i % 26) as u8) as char)).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut gui = artists_gui(&refs);
+        let mut terminal = Terminal::new(TestBackend::new(160, 48)).unwrap();
+        for filter in ["", "rtist 1"] {
+            gui.app.library.apply_filter(filter.into());
+            let frames = 2_000;
+            let started = std::time::Instant::now();
+            for _ in 0..frames {
+                terminal.draw(|frame| render(frame, &mut gui)).unwrap();
+            }
+            let per_frame = started.elapsed() / frames;
+            println!(">>> {per_frame:?} per frame at 20,000 artists, filter {filter:?}");
+        }
     }
 
     #[test]

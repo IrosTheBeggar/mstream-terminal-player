@@ -373,6 +373,7 @@ impl App {
         // The album wall was the old server's too.
         self.albums = None;
         self.artist_albums = None;
+        self.albums_rev = self.albums_rev.wrapping_add(1);
         self.library.set(Vec::new());
         self.library_stack = super::nav::Drill::new(crate::tui::worker::LibraryNode::Root);
     }

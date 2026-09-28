@@ -481,6 +481,12 @@ pub struct Pane {
 
 impl Pane {
     pub fn set(&mut self, entries: Vec<Entry>) {
+        // `..` leads a listing or is not in it: `counts` and the GUI's
+        // list rooms count on it rather than walking every row.
+        debug_assert!(
+            !entries.iter().skip(1).any(|entry| matches!(entry, Entry::Parent)),
+            "`..` below the first row"
+        );
         // A filter describes the list it was typed against. This is a
         // different list, so it goes.
         self.filter.clear();
@@ -527,8 +533,6 @@ impl Pane {
         }
     }
 
-    /// How many rows are on screen, and how many there would be with no
-    /// filter. `..` counts as neither: it is the way out, not a result.
     /// Visit every track row this pane holds — the shown ones and the ones
     /// a filter is hiding — so a patch reaches them all.
     pub(crate) fn for_each_track_mut(&mut self, mut f: impl FnMut(&mut Track)) {
@@ -539,8 +543,15 @@ impl Pane {
         }
     }
 
+    /// How many rows are on screen, and how many there would be with no
+    /// filter. `..` counts as neither: it is the way out, not a result.
+    ///
+    /// Asked every frame by the browse bar and the list rooms, so it does
+    /// not walk the rows: `..` only ever leads a listing (see [`Pane::set`];
+    /// a filter keeps the order), so it is the first row or it is absent
+    /// (performance audit #109).
     pub fn counts(&self) -> (usize, usize) {
-        let real = |list: &[Entry]| list.iter().filter(|e| !matches!(e, Entry::Parent)).count();
+        let real = |list: &[Entry]| list.len() - usize::from(matches!(list.first(), Some(Entry::Parent)));
         let shown = real(&self.entries);
         (shown, self.unfiltered.as_ref().map_or(shown, |all| real(all)))
     }
@@ -1608,6 +1619,12 @@ pub struct App {
     /// clause 7): the pane holds them as text rows, the wall wants the
     /// covers and years.
     pub artist_albums: Option<(String, Vec<crate::api::types::Album>)>,
+    /// Moves every time `albums` or `artist_albums` is replaced, so what is
+    /// derived from them — the GUI wall's filtered view — can tell a new
+    /// list from the one it was built on without walking either (performance
+    /// audit #103). A counter rather than the Vec's address: a freed list's
+    /// address comes back for the next one of the same length.
+    pub albums_rev: u64,
     /// The full block the sheet or Song info asked for last (track-actions
     /// contract, clause 8), by the track's path.
     pub track_info: Option<Track>,
@@ -1903,6 +1920,7 @@ impl App {
             library_stack: Drill::new(LibraryNode::Root),
             albums: None,
             artist_albums: None,
+            albums_rev: 0,
             track_info: None,
             playlist_names: PlaylistNames::Unasked,
             rating_writes: Vec::new(),
@@ -5487,11 +5505,13 @@ impl App {
                     (&node, dest, &data)
                 {
                     self.albums = Some(albums.clone());
+                    self.albums_rev = self.albums_rev.wrapping_add(1);
                 }
                 if let (LibraryNode::Artist(artist), Tab::Library, LibraryData::Albums(albums)) =
                     (&node, dest, &data)
                 {
                     self.artist_albums = Some((artist.clone(), albums.clone()));
+                    self.albums_rev = self.albums_rev.wrapping_add(1);
                 }
                 self.pane_for_mut(dest).set(entries_from_library(data));
                 self.message = None;
