@@ -165,11 +165,17 @@ pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
 }
 
 /// The page's worker's answers, before the draw — the hub's order, so an
-/// answer is on screen the frame it lands (performance audit #82).
-pub(crate) fn absorb(gui: &mut Gui) {
-    if let Some(page) = gui.stats.page.as_mut() {
-        Hosted::absorb(page);
-    }
+/// answer is on screen the frame it lands (performance audit #82). True
+/// when anything came: a frame to draw.
+pub(crate) fn absorb(gui: &mut Gui) -> bool {
+    gui.stats.page.as_mut().is_some_and(Hosted::absorb)
+}
+
+/// Whether the page's last frame is out of date on its clocks alone (the
+/// kit's [`crate::kit::Surface::stale`]) — only while it is on screen.
+pub(crate) fn stale(gui: &mut Gui) -> bool {
+    let on_screen = gui.screen == Screen::Stats;
+    on_screen && gui.stats.page.as_mut().is_some_and(|page| page.ui().stale())
 }
 
 /// Whether the page has a call out with its worker — the GUI's loop waits
@@ -178,16 +184,26 @@ pub(crate) fn awaiting(gui: &Gui) -> bool {
     gui.stats.page.as_ref().is_some_and(Hosted::awaiting)
 }
 
+/// What the page's per-frame duties found.
+#[derive(Default)]
+pub(crate) struct Duties {
+    /// The pointer is over one of the page's clickables: the hand.
+    pub over: bool,
+    /// A held control stepped: a frame to draw.
+    pub stepped: bool,
+}
+
 /// The page's own per-frame duties, after the draw: its worker's next
-/// call, a held control, the tooltip clock — and whether the pointer is
-/// over one of its clickables, for the hand.
-pub(crate) fn frame(gui: &mut Gui) -> bool {
+/// call, a held control, the tooltip clock.
+pub(crate) fn frame(gui: &mut Gui) -> Duties {
     let on_screen = gui.screen == Screen::Stats;
-    let Some(page) = gui.stats.page.as_mut() else { return false };
+    let Some(page) = gui.stats.page.as_mut() else { return Duties::default() };
     Hosted::pump(page);
+    let mut stepped = false;
     if let Some(act) = page.ui().hold_action() {
         <Page as Hosted>::act(page, act);
+        stepped = true;
     }
     page.ui().dwell_tick();
-    on_screen && page.ui().hovering_clickable()
+    Duties { over: on_screen && page.ui().hovering_clickable(), stepped }
 }

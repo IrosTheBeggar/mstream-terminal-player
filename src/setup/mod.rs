@@ -44,10 +44,11 @@ use rust_i18n::t;
 use crate::kit::{
     self, GroundGuard, POINTER_RESET, Surface, accent, bold, dim, set_pointer_shape, theme,
 };
-use crate::kit::pace::Expecting;
+use crate::kit::pace::{Expecting, REDRAW_ANYWAY};
 use crate::kit::theme::th;
 
-/// How long to wait for input before redrawing anyway.
+/// How long to wait for input before the next pass anyway: the resolution
+/// of the progress poll's clock, the held arrow's and the tooltip's.
 const POLL: Duration = Duration::from_millis(100);
 /// How often the Done screen re-asks for scan progress.
 const PROGRESS_EVERY: Duration = Duration::from_millis(1500);
@@ -1798,6 +1799,12 @@ fn event_loop(
     // the worker is running, and the validations that go out beside it.
     let mut flight = Expecting::default();
     let mut checks = Expecting::default();
+    // Whether anything happened since the last frame — input, an answer, a
+    // held arrow's step — and when it was drawn. Nothing on the wizard's
+    // screens moves on its own but a ripening tooltip, so a pass with
+    // nothing new skips the draw (performance audit #102).
+    let mut dirty = true;
+    let mut drawn = Instant::now();
     loop {
         // Fold in whatever the worker finished before the frame is drawn:
         // folded in after, an answer missed the frame it could have been
@@ -1810,13 +1817,19 @@ fn event_loop(
                 Err(TryRecvError::Disconnected) => {
                     wizard.note =
                         Some((t!("note.worker_gone").to_string(), true));
+                    dirty = true;
                     break;
                 }
             }
+            dirty = true;
         }
         flight.track(wizard.in_flight);
 
-        terminal.draw(|frame| render(frame, wizard))?;
+        if dirty || wizard.ui.stale() || drawn.elapsed() >= REDRAW_ANYWAY {
+            terminal.draw(|frame| render(frame, wizard))?;
+            drawn = Instant::now();
+            dirty = false;
+        }
 
         // Then hand it the next op.
         if !wizard.pending_validate.is_empty() {
@@ -1836,6 +1849,7 @@ fn event_loop(
         // A held scrollbar arrow keeps stepping until the button lifts.
         if let Some(act) = wizard.ui.hold_action() {
             wizard.act(act);
+            dirty = true;
         }
 
         // Tooltip dwell. Tips can't leak through modals — render drops
@@ -1856,6 +1870,7 @@ fn event_loop(
         if !event::poll(checks.wait(flight.wait(POLL)))? {
             continue;
         }
+        dirty = true;
         // Drain everything queued before the next draw: mouse capture arms
         // any-motion tracking, so a sweep of the pointer is one event per
         // cell crossed — pointer updates are cheap, but each must not cost

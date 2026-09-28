@@ -884,13 +884,16 @@ pub(crate) fn submit_form(gui: &mut Gui) {
 
 // ── Background replies ──────────────────────────────────────────────────────
 
-/// Drain what the threads sent since the last pass.
-pub(crate) fn poll(gui: &mut Gui) {
+/// Drain what the threads sent since the last pass; true when anything
+/// came — a frame to draw.
+pub(crate) fn poll(gui: &mut Gui) -> bool {
+    let mut folded = false;
     loop {
         let reply = match gui.servers.rx.try_recv() {
             Ok(reply) => reply,
-            Err(_) => return,
+            Err(_) => return folded,
         };
+        folded = true;
         match reply {
             Reply::Version { key, version } => {
                 let state = version.map_or(Probe::Unreachable, Probe::Version);

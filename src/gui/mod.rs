@@ -36,7 +36,7 @@ mod torrent_meta;
 mod vizwin;
 
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{
@@ -53,7 +53,7 @@ use crate::config::{self, Config};
 use crate::kit::{
     GroundGuard, ListView, POINTER_RESET, Surface, dim, input_display_blink, scroll_list, set_pointer_shape,
 };
-use crate::kit::pace::Expecting;
+use crate::kit::pace::{Expecting, REDRAW_ANYWAY};
 use crate::kit::theme::{self, legacy_conhost, th};
 use crate::tui::app::{
     Action, App, Effect, Entry, MessageKind, SEARCH_CLASSES, SearchClass, SearchNode, Tab,
@@ -2490,6 +2490,13 @@ fn event_loop(
     // check, the Stats page's load — which say themselves when they are out.
     let mut asked = Expecting::default();
     let mut side = Expecting::default();
+    // Whether anything happened since the last frame that it does not show
+    // yet — input, an answer, a timer of the App's — and when it was drawn.
+    // A pass with nothing new skips the draw (performance audit #102): a
+    // paused GUI redrew the same frame ten times a second, thirty with the
+    // visualizer window open, each a full render and a diff of every cell.
+    let mut dirty = true;
+    let mut drawn = Instant::now();
     loop {
         // Whatever the workers sent is folded in before anything is drawn —
         // the TUI's order. Drawn first, an answer that landed during the
@@ -2506,7 +2513,12 @@ fn event_loop(
             let sonic_random = matches!(ev, Event::SonicRandom { .. });
             let connected = matches!(ev, Event::Connected { .. });
             let was_results = gui.app.sonic.view == crate::tui::app::SonicView::Results;
+            // A status that says what the last one said changes nothing on
+            // screen: paused or stopped, the audio thread repeats itself
+            // every tick.
+            let repeat = matches!(&ev, Event::Status(status) if *status == gui.app.status);
             let effects = gui.app.apply_event(ev);
+            dirty |= !repeat || !effects.is_empty();
             gui.pend(effects);
             if sonic_random {
                 sonic::random_landed(gui, was_results);
@@ -2518,9 +2530,9 @@ fn event_loop(
                 stats::reopen(gui);
             }
         }
-        servers::poll(gui);
-        torrent::poll(gui);
-        stats::absorb(gui);
+        dirty |= servers::poll(gui);
+        dirty |= torrent::poll(gui);
+        dirty |= stats::absorb(gui);
 
         // A SaveSession about to be dispatched writes the config behind
         // this copy's back — a Quick Connect add mints a whole new entry
@@ -2535,24 +2547,32 @@ fn event_loop(
         tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
         saver.tick(&gui.app);
         let ticked = gui.app.tick();
+        dirty |= !ticked.is_empty();
         gui.pend(ticked);
         if saving && let Ok(fresh) = config::load() {
             gui.config = fresh;
             refresh_book(gui);
+            dirty = true;
         }
-        terminal.draw(|frame| render(frame, gui))?;
+        if dirty || moving(gui) || drawn.elapsed() >= REDRAW_ANYWAY {
+            terminal.draw(|frame| render(frame, gui))?;
+            drawn = Instant::now();
+            dirty = false;
+        }
 
         // The Stats screen's page pumps its worker and its controls here too.
-        let stats_over = stats::frame(gui);
+        let page = stats::frame(gui);
+        dirty |= page.stepped;
         // The visualizer window's host: the child's exit, the next texture.
-        vizwin::tick(gui);
-        let over = gui.ui.hovering_clickable() || stats_over;
+        dirty |= vizwin::tick(gui);
+        let over = gui.ui.hovering_clickable() || page.over;
         if over != hand {
             hand = over;
             set_pointer_shape(hand, mouse_on);
         }
         if let Some(act) = gui.ui.hold_action() {
             gui.act(act);
+            dirty = true;
         }
         gui.ui.dwell_tick();
 
@@ -2573,6 +2593,7 @@ fn event_loop(
         if !event::poll(side.wait(asked.wait(wait)))? {
             continue;
         }
+        dirty = true;
         // Drain everything queued before the next draw (the wizard's
         // collapse-moves lesson: pointer sweeps are one event per cell).
         let mut inputs = vec![event::read()?];
@@ -2673,6 +2694,15 @@ fn event_loop(
             }
         }
     }
+}
+
+/// Whether the screen moves on its own, with nothing happening: covers
+/// still upgrading to pixels, the visualizer tab settling, a caret due to
+/// blink, a tooltip ripening, the frame after an overlay came or went.
+/// Every pass draws while it does, as every pass did before frames could
+/// be skipped.
+fn moving(gui: &mut Gui) -> bool {
+    gui.hot || gui.app.drawing_audio() || gui.ui.stale() || stats::stale(gui)
 }
 
 impl Gui {

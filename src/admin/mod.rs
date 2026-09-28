@@ -23,7 +23,7 @@ pub(crate) mod stats;
 mod tz;
 mod users;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Subcommand};
 use ratatui::Frame;
@@ -40,13 +40,14 @@ use ratatui::widgets::{Block, Paragraph};
 use rust_i18n::t;
 
 use crate::api::{ApiError, Client};
-use crate::kit::pace::Expecting;
+use crate::kit::pace::{Expecting, REDRAW_ANYWAY};
 use crate::kit::theme::th;
 use crate::kit::{
     GroundGuard, POINTER_RESET, Surface, accent, bold, dim, set_pointer_shape, theme,
 };
 
-/// How long to wait for input before redrawing anyway.
+/// How long to wait for input before the next pass anyway: the resolution
+/// of the rooms' timers, the held arrow's and the tooltip's.
 const POLL: Duration = Duration::from_millis(100);
 
 #[derive(Args)]
@@ -218,11 +219,11 @@ pub(crate) trait Screen {
     /// drags, hold-repeat and tooltip dwell through it.
     fn ui(&mut self) -> &mut Surface<Self::Act>;
 
-    /// Fold in whatever the worker finished. Called once per frame, right
-    /// before the draw: folded in after it, an answer missed the frame it
-    /// could have been on and waited out a whole poll for the next
-    /// (performance audit #82).
-    fn absorb(&mut self);
+    /// Fold in whatever the worker finished, and say whether anything came
+    /// — a frame to draw. Called once per frame, right before the draw:
+    /// folded in after it, an answer missed the frame it could have been on
+    /// and waited out a whole poll for the next (performance audit #82).
+    fn absorb(&mut self) -> bool;
 
     /// Hand the worker the next queued op. Called once per frame, right
     /// after the draw.
@@ -304,14 +305,24 @@ fn event_loop<S: Screen>(
 ) -> std::io::Result<Outcome> {
     let mut hand = false;
     let mut expecting = Expecting::default();
+    // Whether anything happened since the last frame — input, an answer, a
+    // held arrow's step — and when it was drawn. Nothing in a room moves on
+    // its own but the caret, a ripening tooltip and the ages (minutes), so
+    // a pass with nothing new skips the draw (performance audit #102).
+    let mut dirty = true;
+    let mut drawn = Instant::now();
     loop {
-        screen.absorb();
+        dirty |= screen.absorb();
         if let Some(outcome) = screen.finished() {
             return Ok(outcome);
         }
         expecting.track(screen.awaiting());
         screen.tick();
-        terminal.draw(|frame| screen.render(frame))?;
+        if dirty || screen.ui().stale() || drawn.elapsed() >= REDRAW_ANYWAY {
+            terminal.draw(|frame| screen.render(frame))?;
+            drawn = Instant::now();
+            dirty = false;
+        }
         screen.pump();
         expecting.track(screen.awaiting());
 
@@ -323,12 +334,14 @@ fn event_loop<S: Screen>(
         let held = screen.ui().hold_action();
         if let Some(act) = held {
             screen.act(act);
+            dirty = true;
         }
         screen.ui().dwell_tick();
 
         if !event::poll(expecting.wait(POLL))? {
             continue;
         }
+        dirty = true;
         // Drain everything queued before the next draw: a sweep of the
         // pointer is one event per cell crossed.
         let mut inputs = vec![event::read()?];

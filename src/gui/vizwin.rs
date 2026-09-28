@@ -209,13 +209,14 @@ fn failed(gui: &mut Gui, why: String) {
 
 /// Once a frame: the window's reports, the child's exit if it exited, the
 /// choices saved once they rest, and the next texture down the pipe when
-/// the last is a batch old (contract clause 2).
-pub(crate) fn tick(gui: &mut Gui) {
-    take_reports(gui, false);
+/// the last is a batch old (contract clause 2). True when a report came or
+/// the window went — the top bar's word, a frame to draw.
+pub(crate) fn tick(gui: &mut Gui) -> bool {
+    let reported = take_reports(gui, false);
     if gui.vizwin.unsaved.is_some_and(|since| since.elapsed() >= SAVE_AFTER) {
         save(gui);
     }
-    let Some(child) = gui.vizwin.child.as_mut() else { return };
+    let Some(child) = gui.vizwin.child.as_mut() else { return reported };
     match child.try_wait() {
         Ok(None) => {}
         Ok(Some(status)) => {
@@ -226,25 +227,26 @@ pub(crate) fn tick(gui: &mut Gui) {
                 let why = gui.vizwin.last_words.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 failed(gui, why.unwrap_or_else(|| status.to_string()));
             }
-            return;
+            return true;
         }
         Err(_) => {
             gui.vizwin.child = None;
             gui.vizwin.to_writer = None;
             gone(gui);
-            return;
+            return true;
         }
     }
     if gui.vizwin.last_feed.elapsed() >= FEED {
         feed(gui);
     }
+    reported
 }
 
-/// Every report the window has sent so far. With `to_the_end`, the reader
-/// is waited for until it reaches the end of the pipe — the window is gone,
-/// and a pick made on its way out is still kept.
-fn take_reports(gui: &mut Gui, to_the_end: bool) {
-    let Some(rx) = gui.vizwin.from_window.as_ref() else { return };
+/// Every report the window has sent so far; true when there were any. With
+/// `to_the_end`, the reader is waited for until it reaches the end of the
+/// pipe — the window is gone, and a pick made on its way out is still kept.
+fn take_reports(gui: &mut Gui, to_the_end: bool) -> bool {
+    let Some(rx) = gui.vizwin.from_window.as_ref() else { return false };
     let mut reports = Vec::new();
     loop {
         let next = if to_the_end { rx.recv_timeout(GRACE).ok() } else { rx.try_recv().ok() };
@@ -253,9 +255,11 @@ fn take_reports(gui: &mut Gui, to_the_end: bool) {
             None => break,
         }
     }
+    let any = !reports.is_empty();
     for report in reports {
         observe(gui, report);
     }
+    any
 }
 
 /// The window closed: its last words heard, its choices saved now rather

@@ -188,7 +188,7 @@ impl Screen for SignIn {
         &mut self.ui
     }
 
-    fn absorb(&mut self) {
+    fn absorb(&mut self) -> bool {
         let answer = match &self.in_flight {
             Some(rx) => match rx.try_recv() {
                 Ok(done) => Some(done),
@@ -199,9 +199,11 @@ impl Screen for SignIn {
             },
             None => None,
         };
+        let folded = answer.is_some();
         if let Some(done) = answer {
             self.apply(done);
         }
+        folded
     }
 
     fn pump(&mut self) {

@@ -29,6 +29,14 @@ pub const BRISK_FIRST: Duration = Duration::from_millis(1);
 /// frame at most between the answer landing and the loop drawing it.
 pub const BRISK: Duration = Duration::from_millis(8);
 
+/// The longest a loop goes without drawing, changed or not (performance
+/// audit #102). A loop draws when something happened — input, an answer, a
+/// timer it keeps — or something on screen moves on its own, and skips the
+/// frame otherwise; whatever changes a frame without telling it (a
+/// terminal resized without a word, an age that ticked over) is a second
+/// out of date at most.
+pub const REDRAW_ANYWAY: Duration = Duration::from_secs(1);
+
 /// How long a request keeps the loop brisk. Past it, an answer the network
 /// is holding up — a tunnel dial, a native folder dialog left open, a slow
 /// scan — costs a poll's delay again rather than a hundred wakeups a

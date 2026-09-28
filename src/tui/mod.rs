@@ -1,8 +1,8 @@
 //! The interactive terminal player: terminal setup and the event loop.
 //!
 //! The loop does three things per pass — dispatch pending effects to the
-//! workers, draw, then fold in whatever input or worker events arrived. All
-//! the decisions live in [`app`].
+//! workers, draw if anything changed, then fold in whatever input or worker
+//! events arrived. All the decisions live in [`app`].
 
 pub mod app;
 pub mod art;
@@ -36,8 +36,9 @@ use app::Effect;
 #[cfg(not(target_arch = "wasm32"))]
 use worker::{ApiCmd, AudioCmd, Event};
 
-/// How long to wait for a key before redrawing anyway. Also sets how quickly
-/// the progress bar advances on screen.
+/// How long to wait for a key before the next pass anyway: the resolution of
+/// every timer the loop keeps, and the longest a new status — the progress
+/// bar's next step — waits to reach the screen.
 const POLL: Duration = Duration::from_millis(100);
 
 /// The same, while something is being drawn from the audio itself. Ten frames
@@ -50,10 +51,13 @@ const POLL_DRAWING_AUDIO: Duration = Duration::from_millis(33);
 #[cfg(not(target_arch = "wasm32"))]
 const SPIN_EVERY: Duration = Duration::from_millis(90);
 
-/// How long to wait before drawing again. Shared with the replay harness,
-/// which has to draw on the same schedule or it measures the app under one it
-/// never runs at: anything that moves on a timer sees a different number of
-/// frames there than here, and reports a different answer because of it.
+/// How long to wait before drawing again, while anything on screen moves.
+/// Shared with the replay harness, which has to draw on the same schedule or
+/// it measures the app under one it never runs at: anything that moves on a
+/// timer sees a different number of frames there than here, and reports a
+/// different answer because of it. (The loop skips a frame only when nothing
+/// moved, so the frames the harness draws that the loop would not are the
+/// same frame again.)
 pub(crate) fn poll_interval(app: &App) -> Duration {
     if app.drawing_audio() { POLL_DRAWING_AUDIO } else { POLL }
 }
@@ -642,6 +646,13 @@ fn event_loop(
     let mut spun = Instant::now();
     let mut saver = QueueSaver::new(app);
     let mut expecting = crate::kit::pace::Expecting::default();
+    // Whether anything happened since the last frame that it does not show
+    // yet — input, an answer, a timer of the App's — and when it was drawn.
+    // A pass with nothing new skips the draw (performance audit #102): a
+    // paused player's screen is the same frame ten times a second, each a
+    // full render and a diff of every cell for no byte of output.
+    let mut dirty = true;
+    let mut drawn = Instant::now();
     loop {
         // A save changes what the book knows — a peer just reconciled, a
         // token just signed in for — and the queue's rows resolve against it.
@@ -653,13 +664,18 @@ fn event_loop(
         if saving && let Ok(fresh) = config::load() {
             let credentials = config::load_credentials().unwrap_or_default();
             app.servers = known_servers(&fresh, &credentials);
+            dirty = true;
         }
         saver.tick(app);
-        pending.extend(app.tick());
+        let ticked = app.tick();
+        dirty |= !ticked.is_empty();
+        pending.extend(ticked);
 
         if spun.elapsed() >= SPIN_EVERY {
             app.spinner = app.spinner.wrapping_add(1);
             spun = Instant::now();
+            // A turn is only news to a frame that shows the spinner.
+            dirty |= app.spinner_shown.get();
         }
 
         // The player spends most of its life behind another window, where the
@@ -670,9 +686,14 @@ fn event_loop(
             title = wanted;
         }
 
-        terminal.draw(|frame| ui::render(frame, app))?;
+        if dirty || moving(app) || drawn.elapsed() >= crate::kit::pace::REDRAW_ANYWAY {
+            terminal.draw(|frame| ui::render(frame, app))?;
+            drawn = Instant::now();
+            dirty = false;
+        }
 
         if event::poll(expecting.wait(poll_interval(app)))? {
+            dirty = true;
             // Everything already queued is handled before the next draw.
             // Mouse capture arms any-motion tracking, so a sweep of the
             // pointer is one event per cell crossed — serviced one frame
@@ -711,7 +732,13 @@ fn event_loop(
         }
 
         while let Ok(event) = events.try_recv() {
-            pending.extend(app.apply_event(event));
+            // A status that says what the last one said changes nothing on
+            // screen: paused or stopped, the audio thread repeats itself
+            // every tick.
+            let repeat = matches!(&event, Event::Status(status) if *status == app.status);
+            let effects = app.apply_event(event);
+            dirty |= !repeat || !effects.is_empty();
+            pending.extend(effects);
         }
 
         if app.should_quit {
@@ -720,6 +747,15 @@ fn event_loop(
             return Ok(());
         }
     }
+}
+
+/// Whether the screen moves on its own, with nothing happening: the
+/// visualizer still settling, the log following its file. Every pass draws
+/// while it does, as every pass did before frames could be skipped — both
+/// advance inside the drawing.
+#[cfg(not(target_arch = "wasm32"))]
+fn moving(app: &App) -> bool {
+    app.drawing_audio() || app.log_view.as_ref().is_some_and(|view| view.follow)
 }
 
 /// Runs of pointer moves collapse to where the pointer ended up. The places
