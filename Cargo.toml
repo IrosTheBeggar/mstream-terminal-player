@@ -60,9 +60,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 ratatui = { version = "0.30.2", features = ["crossterm"] }
 # Album art at the terminal's own resolution, where the terminal has one:
 # kitty, sixel or iTerm2. Native only, and for two reasons — the wasm build
-# draws through ratzilla's DOM backend, where a sixel escape sequence is
-# just bytes in a <div>, and the crate's rustix dependency is gated
-# `cfg(not(windows))`, which wasm32-unknown-unknown satisfies.
+# draws through ratzilla (a WebGL canvas, or its DOM grid), where a sixel
+# escape sequence is just a run of glyphs, and the crate's rustix
+# dependency is gated `cfg(not(windows))`, which wasm32-unknown-unknown
+# satisfies.
 #
 # default-features = false is load-bearing, not tidiness. The defaults are
 # ["image-defaults", "crossterm", "chafa-dyn"]: chafa-dyn probes pkg-config

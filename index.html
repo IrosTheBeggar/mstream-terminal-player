@@ -89,8 +89,17 @@
         user-select: none;
         -webkit-user-select: none;
       }
+      canvas {
+        /* The terminal is drawn on a WebGL canvas (src/web/mod.rs), sized
+           here rather than by the renderer so a resize reaches it; block,
+           or the inline baseline gap grows a scrollbar. */
+        display: block;
+        width: 100vw;
+        height: 100vh;
+      }
       pre {
-        /* The terminal's rows are <pre> elements. The browser default gives
+        /* Where WebGL2 is missing, the terminal falls back to the DOM grid,
+           whose rows are <pre> elements. The browser default gives
            each a 1em vertical margin and its own idea of a monospace font —
            the margins alone once pushed the bottom three rows 559px past
            the fold. Zero margin, and the same font the cell probe measures,

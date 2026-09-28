@@ -57,11 +57,15 @@ mod admin;
 /// drawing code and the worker message types compile unchanged there.
 #[cfg(target_arch = "wasm32")]
 mod web;
-/// The browser shell's timing rules (src/web/pace.rs), which are pure:
-/// compiled here too so their tests run where `cargo test` does.
+/// The browser shell's timing rules and its canvas colours (src/web/pace.rs,
+/// src/web/colours.rs), which are pure: compiled here too so their tests
+/// run where `cargo test` does.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "web/pace.rs"]
 mod web_pace;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "web/colours.rs"]
+mod web_colours;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod discovery;

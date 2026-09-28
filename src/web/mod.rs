@@ -17,6 +17,7 @@
 mod api_worker;
 mod audio;
 mod canned;
+mod colours;
 mod pace;
 
 use std::cell::{Cell, RefCell};
@@ -24,7 +25,12 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::Duration;
 
-use ratzilla::DomBackend;
+use ratatui::Terminal;
+use ratatui::backend::{Backend, ClearType, WindowSize};
+use ratatui::buffer::{Buffer, Cell as BufferCell};
+use ratatui::layout::{Position, Size};
+use ratzilla::backend::webgl2::WebGl2BackendOptions;
+use ratzilla::{DomBackend, FontAtlasConfig, WebGl2Backend};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
@@ -42,6 +48,12 @@ use audio::WebAudioPlayer;
 /// (tui::SPIN_EVERY); the demo matches it so the two feel the same.
 const SPIN_EVERY_MS: u128 = 90;
 
+/// index.html's font stack and size, for the WebGL renderer's glyph atlas:
+/// the canvas draws the same face the DOM grid would have (beamterm adds
+/// the generic `monospace` after these, as the page's CSS does).
+const FONTS: [&str; 4] = ["Cascadia Mono", "JetBrains Mono", "Consolas", "DejaVu Sans Mono"];
+const FONT_PX: f32 = 16.0;
+
 /// Asks the shell's loop for a pass on the next frame: what an api reply
 /// or an audio refusal landing in its queue calls.
 pub(crate) type Waker = Rc<dyn Fn()>;
@@ -57,7 +69,102 @@ struct Shell {
     /// Something the user did is waiting to be seen — draw now, not at the
     /// next poll tick.
     dirty: bool,
+    /// Everything goes out again on the next draw: the window changed
+    /// size, or the canvas lost its pixels with its context.
+    repaint: bool,
     last_render: Instant,
+}
+
+/// What the loop needs of a backend beyond ratatui's trait.
+trait Surface: Backend + 'static {
+    /// Last touches to a frame before it goes out.
+    fn finish(_buffer: &mut Buffer) {}
+
+    /// About to repaint everything: take the window's size first.
+    fn follow_resize(&mut self) {}
+}
+
+/// The DOM grid follows a resize by itself: its own listener has it
+/// rebuild the whole grid on the next draw.
+impl Surface for DomBackend {}
+
+/// The WebGL renderer, presenting only frames that changed.
+///
+/// Its `flush` redraws and presents the whole canvas every time, where the
+/// DOM grid did nothing for a draw that changed nothing — and at rest nearly
+/// every draw is one: the poll tick redraws a screen that has not moved. So
+/// a flush goes through only after a draw with cells in it, or a clear
+/// (which is how a resize and a restored context repaint).
+struct Canvas {
+    gl: WebGl2Backend,
+    changed: bool,
+}
+
+impl Surface for Canvas {
+    fn finish(buffer: &mut Buffer) {
+        colours::settle(buffer);
+    }
+
+    /// The canvas learns its new size inside `flush`, after a frame at the
+    /// old size has been diffed and drawn; asked first, the draw that
+    /// follows is already the right size.
+    fn follow_resize(&mut self) {
+        let _ = self.gl.resize_canvas();
+    }
+}
+
+impl Backend for Canvas {
+    type Error = std::io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a BufferCell)>,
+    {
+        let mut content = content.peekable();
+        self.changed |= content.peek().is_some();
+        self.gl.draw(content)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if std::mem::take(&mut self.changed) { self.gl.flush() } else { Ok(()) }
+    }
+
+    fn clear(&mut self) -> std::io::Result<()> {
+        self.changed = true;
+        self.gl.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> std::io::Result<()> {
+        self.changed = true;
+        self.gl.clear_region(clear_type)
+    }
+
+    // The player never shows a cursor; one that did would be a change.
+    fn show_cursor(&mut self) -> std::io::Result<()> {
+        self.changed = true;
+        self.gl.show_cursor()
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> std::io::Result<()> {
+        self.changed = true;
+        self.gl.set_cursor_position(position)
+    }
+
+    fn hide_cursor(&mut self) -> std::io::Result<()> {
+        self.gl.hide_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> std::io::Result<Position> {
+        self.gl.get_cursor_position()
+    }
+
+    fn size(&self) -> std::io::Result<Size> {
+        self.gl.size()
+    }
+
+    fn window_size(&mut self) -> std::io::Result<WindowSize> {
+        self.gl.window_size()
+    }
 }
 
 /// The loop's one alarm (performance audit #125).
@@ -269,17 +376,16 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
         pending,
         spun: Instant::now(),
         dirty: true,
+        repaint: false,
         last_render: Instant::now(),
     }));
 
-    let backend = DomBackend::new()?;
-    let mut terminal = ratatui::Terminal::new(backend)?;
-
-    // Not ratzilla's on_key_event: that hangs the listener on the grid
-    // element the DOM backend created, and the backend replaces that element
-    // wholesale on every resize without moving the listener — one window
-    // resize and the keyboard is dead. The document outlives every grid, and
-    // listening there also ends the focus dance a child listener needed.
+    // Not ratzilla's on_key_event: that hangs the listener on the element
+    // the backend draws into — a canvas that would need focus, or the DOM
+    // grid, which the backend replaces wholesale on every resize without
+    // moving the listener (one window resize and the keyboard is dead). The
+    // document outlives every grid, and listening there also ends the focus
+    // dance a child listener needed.
     let on_key = shell.clone();
     let key_alarm = alarm.clone();
     let keydown =
@@ -303,19 +409,78 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     // handle for.
     keydown.forget();
 
-    // A resize is drawn on the next frame, not the next poll tick: the
-    // backend rebuilds its grid on the draw after one.
+    // A resize is drawn on the next frame, not the next poll tick.
     let on_resize = shell.clone();
     let resize_alarm = alarm.clone();
     let resize = Closure::<dyn FnMut()>::new(move || {
-        on_resize.borrow_mut().dirty = true;
+        let mut shell = on_resize.borrow_mut();
+        shell.dirty = true;
+        shell.repaint = true;
         resize_alarm.frame();
     });
     window
         .add_event_listener_with_callback("resize", resize.as_ref().unchecked_ref())
         .map_err(|_| "could not attach the resize listener")?;
+    // The canvas takes the same way back from a lost GPU context: beamterm
+    // rebuilds its resources in the next flush, and a repaint is a flush
+    // with every cell in it. Captured, since the event does not bubble.
+    window
+        .add_event_listener_with_callback_and_bool(
+            "webglcontextrestored",
+            resize.as_ref().unchecked_ref(),
+            true,
+        )
+        .map_err(|_| "could not attach the context listener")?;
     resize.forget();
 
+    // WebGL2 where the browser has it (performance audit #124): the DOM
+    // grid rewrites an element's markup and inline style for every changed
+    // cell and makes the browser restyle and lay out every row it touched —
+    // 4-7 ms a frame at 1920×1080 with the visualizer up, thirty times a
+    // second — and throws away and rebuilds all ten thousand of its
+    // elements on every resize event. The canvas takes a changed cell as a
+    // few bytes of a GPU buffer and a resize as a new viewport. The DOM grid
+    // stays as the fallback.
+    match webgl_terminal() {
+        Ok(terminal) => run_loop(terminal, shell, alarm),
+        Err(why) => {
+            ratzilla::web_sys::console::warn_1(
+                &format!("mstream-player: no WebGL2 ({why}); drawing with the DOM grid").into(),
+            );
+            // A failed context still left its canvas behind, full-window
+            // and in front of the grid that is about to be built.
+            if let Some(document) = window.document() {
+                while let Ok(Some(canvas)) = document.query_selector("canvas") {
+                    canvas.remove();
+                }
+            }
+            run_loop(Terminal::new(DomBackend::new()?)?, shell, alarm);
+        }
+    }
+    Ok(())
+}
+
+/// The WebGL2 renderer, glyphs rasterized on first use from the page's own
+/// font, so anything the UI draws — braille, block elements, box drawing,
+/// CJK — has a glyph (the static atlas beamterm ships knows a fixed set).
+/// The canvas is sized by index.html's CSS, not by the renderer, so it
+/// follows the window.
+///
+/// It costs the download about a megabyte: beamterm's builder falls back to
+/// its embedded static atlas (1 MB, barely compressible) in a branch no
+/// optimisation removes — fat LTO keeps it too — so the atlas ships though
+/// this build never loads it.
+fn webgl_terminal() -> Result<Terminal<Canvas>, Box<dyn std::error::Error>> {
+    let options = WebGl2BackendOptions::new()
+        .font_atlas_config(FontAtlasConfig::dynamic(&FONTS, FONT_PX))
+        .canvas_padding_color(colours::PAGE)
+        .disable_auto_css_resize();
+    let gl = WebGl2Backend::new_with_options(options)?;
+    Ok(Terminal::new(Canvas { gl, changed: true })?)
+}
+
+/// Hand the loop its terminal and start it.
+fn run_loop<B: Surface>(mut terminal: Terminal<B>, shell: Rc<RefCell<Shell>>, alarm: Alarm) {
     let on_pass = shell;
     let pass_alarm = alarm.clone();
     let pass = Closure::<dyn FnMut()>::new(move || {
@@ -361,10 +526,22 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
             // Quit into a no-op instead of a frozen screen.
             shell.app.should_quit = false;
 
+            // A resize repaints everything: the backend is told first, and
+            // ratatui forgets what it last drew, so every cell goes out
+            // again. The DOM grid needs that even when the size in cells did
+            // not change — it rebuilt itself blank, and a diff against the
+            // old frame would leave it that way.
+            if std::mem::take(&mut shell.repaint) {
+                terminal.backend_mut().follow_resize();
+                terminal.clear().expect("the backend refused to clear");
+            }
             // Only now, and only here, does ratatui diff a frame: between
             // draws nothing is handed to it at all.
             terminal
-                .draw(|frame| ui::render(frame, &mut shell.app))
+                .draw(|frame| {
+                    ui::render(frame, &mut shell.app);
+                    B::finish(frame.buffer_mut());
+                })
                 .expect("the backend refused a frame");
             shell.last_render = Instant::now();
             shell.dirty = false;
@@ -382,8 +559,6 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
     });
     *alarm.0.pass.borrow_mut() = Some(pass);
     alarm.frame();
-
-    Ok(())
 }
 
 /// Browser key events, translated to the crate's input types. `None` is a key
