@@ -48,6 +48,12 @@ pub(crate) struct VizWindow {
     pub(crate) prefs: VisualizerPrefs,
     /// When the choices last changed, while they are not yet saved.
     unsaved: Option<Instant>,
+    /// Nothing plays, and the quiet texture — silence, settled — is down
+    /// the pipe: the window keeps it, and nothing more is built or sent
+    /// until something plays (performance audit #119). Once settled, every
+    /// texture after it was the same bytes, thirty times a second, and the
+    /// GUI's loop woke at the feed's pace for them.
+    settled: bool,
     /// Tests never spawn a process: the window is a flag there.
     #[cfg(test)]
     pub(crate) dry_open: bool,
@@ -68,6 +74,7 @@ impl VizWindow {
             last_words: Arc::new(Mutex::new(None)),
             prefs: VisualizerPrefs::default(),
             unsaved: None,
+            settled: false,
             #[cfg(test)]
             dry_open: false,
             #[cfg(test)]
@@ -85,17 +92,39 @@ impl VizWindow {
         self.dry_open
     }
 
-    fn send(&self, message: Message) {
-        if let Some(tx) = &self.to_writer {
+    /// Whether the message went into the pipe's queue.
+    fn send(&self, message: Message) -> bool {
+        match &self.to_writer {
             // Full means the window is behind: this one is dropped, the
             // next one says the same thing a frame later.
-            let _ = tx.try_send(message.encode());
+            Some(tx) => tx.try_send(message.encode()).is_ok(),
+            None => false,
         }
     }
 }
 
 pub(crate) fn is_open(gui: &Gui) -> bool {
     gui.vizwin.is_open()
+}
+
+/// Whether the window wants the loop at the feed's pace: open, and
+/// something plays or the silence has not settled yet. Settled and quiet,
+/// the loop goes back to its own (performance audit #119).
+pub(crate) fn wants_frames(gui: &Gui) -> bool {
+    gui.vizwin.is_open() && (sounding(gui) || !gui.vizwin.settled)
+}
+
+/// Something is playing, and not paused: the tap has samples to show.
+fn sounding(gui: &Gui) -> bool {
+    gui.app.status.playing && !gui.app.status.paused
+}
+
+/// The texture silence settles to, whatever the curve: every bin under
+/// the lowest floor the panel allows (the smoothing's -140 dB floor against
+/// its -120), and the waveform row at its midline, (0.5 + 0.5 · 0) · 255.
+fn quiet(bytes: &[u8]) -> bool {
+    let (spectrum, wave) = bytes.split_at(crate::shader::audio::WIDTH);
+    spectrum.iter().all(|&b| b == 0) && wave.iter().all(|&b| b == 127)
 }
 
 /// The top bar's item and `V` (contract entries 1–2): open the window, or
@@ -127,6 +156,7 @@ fn remember(gui: &mut Gui) {
 #[cfg(test)]
 fn open(gui: &mut Gui) {
     gui.vizwin.dry_open = true;
+    gui.vizwin.settled = false;
 }
 
 /// Spawn the child, and the three threads that serve it: the writer that
@@ -201,6 +231,8 @@ fn open(gui: &mut Gui) {
     gui.vizwin.to_writer = Some(tx);
     gui.vizwin.from_window = Some(report_rx);
     gui.vizwin.last_feed = Instant::now();
+    // A new window starts from a blank texture, not the quiet one.
+    gui.vizwin.settled = false;
 }
 
 fn failed(gui: &mut Gui, why: String) {
@@ -322,12 +354,21 @@ fn save(gui: &mut Gui) {
 }
 
 /// The texture for what is playing — silence when nothing is, or it is
-/// paused, so the presets settle rather than freeze on the last sound.
+/// paused, so the presets settle rather than freeze on the last sound —
+/// until the silence has settled and gone down the pipe; after that the
+/// window keeps it, and nothing is built or sent until something plays.
+/// Settled is judged against the quiet texture itself, never against the
+/// last one sent: two smoothing steps can round to the same bytes long
+/// before the bins reach the floor, and stopping there would freeze a
+/// picture that is not quiet.
 fn feed(gui: &mut Gui) {
     let now = Instant::now();
     let elapsed = now.duration_since(gui.vizwin.last_feed).as_secs_f32().min(0.5);
     gui.vizwin.last_feed = now;
-    let playing = gui.app.status.playing && !gui.app.status.paused;
+    let playing = sounding(gui);
+    if !playing && gui.vizwin.settled {
+        return;
+    }
     let vizwin = &mut gui.vizwin;
     vizwin.mono.clear();
     if playing
@@ -337,7 +378,10 @@ fn feed(gui: &mut Gui) {
         vizwin.frame.mono_into(&mut vizwin.mono);
     }
     let bytes = vizwin.texture.update(&vizwin.mono, elapsed).to_vec();
-    vizwin.send(Message::Audio(bytes));
+    let settles = !playing && quiet(&bytes);
+    // Settled only once the quiet texture is actually queued: one dropped
+    // on a full pipe is built and sent again next time.
+    vizwin.settled = vizwin.send(Message::Audio(bytes)) && settles;
 }
 
 /// The player is quitting: the pipe's end is the window's cue to quit; one
@@ -402,6 +446,76 @@ mod tests {
         observe(&mut gui, Report::Curve(tuned));
         let prefs = &gui.vizwin.prefs;
         assert_eq!((prefs.min_db, prefs.max_db, prefs.smoothing), (Some(-90.0), Some(-30.0), Some(0.5)));
+    }
+
+    /// One feed a batch after the last: the texture falls away at its
+    /// pace, as the loop's feeding would have it.
+    fn feed_later(gui: &mut Gui) {
+        gui.vizwin.last_feed = Instant::now() - FEED;
+        feed(gui);
+    }
+
+    /// Paused, the window is fed silence until it has settled and then
+    /// nothing more, and the loop leaves the feed's pace; a play starts
+    /// both again (performance audit #119).
+    #[test]
+    fn settled_silence_is_sent_once_and_the_loop_leaves_the_feed_pace() {
+        let mut gui = gui();
+        toggle(&mut gui);
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        gui.vizwin.to_writer = Some(tx);
+        let tone: Vec<f32> = (0..1024).map(|i| 0.5 * (i as f32 * 0.4).sin()).collect();
+        gui.vizwin.texture.update(&tone, 1.0);
+        assert!(wants_frames(&gui), "a window just opened on sound");
+
+        let mut sent = Vec::new();
+        for _ in 0..50 {
+            feed_later(&mut gui);
+            sent.extend(rx.try_iter());
+            if gui.vizwin.settled {
+                break;
+            }
+        }
+        assert!(gui.vizwin.settled, "silence settles");
+        assert!(sent.len() > 1, "it fell away over several textures, not one");
+        let last = sent.last().unwrap();
+        assert!(quiet(&last[1..]), "the last one sent is the quiet texture");
+        assert!(!sent[0][1..].iter().take(512).all(|&b| b == 0), "the first was not");
+        assert!(!wants_frames(&gui), "settled: the loop goes back to its own pace");
+
+        feed_later(&mut gui);
+        assert!(rx.try_recv().is_err(), "nothing more is sent while nothing plays");
+
+        gui.app.status.playing = true;
+        assert!(wants_frames(&gui), "a play wants the feed again");
+        feed_later(&mut gui);
+        assert!(rx.try_recv().is_ok());
+        assert!(!gui.vizwin.settled);
+    }
+
+    /// The quiet texture dropped on a full pipe is not taken as sent.
+    #[test]
+    fn silence_dropped_on_a_full_pipe_is_sent_again() {
+        let mut gui = gui();
+        toggle(&mut gui);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        gui.vizwin.to_writer = Some(tx);
+        feed_later(&mut gui);
+        assert!(gui.vizwin.settled, "a fresh texture is already quiet");
+        rx.try_recv().unwrap();
+
+        // Open again on a window that is behind: its queue is full.
+        toggle(&mut gui);
+        gui.vizwin.dry_open = false;
+        toggle(&mut gui);
+        gui.vizwin.send(Message::Raise);
+        feed_later(&mut gui);
+        assert!(!gui.vizwin.settled, "dropped, so not settled");
+        assert!(wants_frames(&gui));
+        rx.try_recv().unwrap();
+        feed_later(&mut gui);
+        assert!(gui.vizwin.settled);
+        assert!(quiet(&rx.try_recv().unwrap()[1..]));
     }
 
     #[test]

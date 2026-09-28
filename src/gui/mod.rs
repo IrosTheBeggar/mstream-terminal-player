@@ -2582,9 +2582,10 @@ fn event_loop(
         // caret wants its next frame ON the flip, not a poll tick after it.
         let wait = if gui.hot {
             Duration::from_millis(10)
-        } else if gui.app.drawing_audio() || vizwin::is_open(gui) {
+        } else if gui.app.drawing_audio() || vizwin::wants_frames(gui) {
             // The visualizer tab, moving: the TUI's thirty frames a second —
-            // and the visualizer window's feed, at the same pace.
+            // and the visualizer window's feed, at the same pace, while it
+            // has anything to say (silence, once settled, is said once).
             Duration::from_millis(33)
         } else {
             gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
