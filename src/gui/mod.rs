@@ -46,7 +46,6 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::Paragraph;
 use rust_i18n::t;
 
 use crate::config::{self, Config};
@@ -1531,7 +1530,7 @@ fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App, mosaic: bool) {
     let mut canvas = crate::tui::canvas::Canvas::new(rect);
     if !canvas.is_empty() {
         app.cover_pane.draw(&mut canvas, cover);
-        frame.render_widget(Paragraph::new(canvas.into_lines()), rect);
+        frame.render_widget(&canvas, rect);
     }
 }
 

@@ -9,10 +9,16 @@
 //! Cells are about twice as tall as they are wide, so half-height pixels come
 //! out roughly square, which is why the trace of a waveform looks like a
 //! waveform rather than something squashed.
+//!
+//! A canvas is a widget: `frame.render_widget(&canvas, area)` writes each
+//! cell's glyph and colours straight into the frame's buffer.
 
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
+#[cfg(test)]
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Widget;
 
 pub const UPPER: &str = "\u{2580}";
 pub const LOWER: &str = "\u{2584}";
@@ -79,10 +85,13 @@ impl Canvas {
         }
     }
 
-    /// Fold the pixels back into character rows.
+    /// Fold the pixels back into character rows — the picture as text, for
+    /// the tests that read it by span.
     ///
-    /// Runs of identical cells share a span. At thirty frames a second over a
-    /// hundred columns the difference is thousands of allocations either way.
+    /// Runs of identical cells share a span. This used to be how every
+    /// picture reached the screen, through a Paragraph; the cells go
+    /// straight into the buffer now, by the `Widget` impl below.
+    #[cfg(test)]
     pub fn into_lines(self) -> Vec<Line<'static>> {
         let mut lines = Vec::with_capacity(self.height as usize / 2);
         for row in 0..self.height / 2 {
@@ -109,6 +118,31 @@ impl Canvas {
 
     fn at(&self, x: u16, y: u16) -> Option<Color> {
         self.pixels[y as usize * self.width as usize + x as usize]
+    }
+}
+
+/// Every cell written straight into the buffer: its glyph, then its colours
+/// patched over what is there — so an empty cell keeps the ground's colours
+/// under its blank and an upper-only one keeps the ground's background under
+/// its lower half, as the Paragraph this replaces did.
+///
+/// The Paragraph cost a String per run of identical cells, and then took
+/// every cell apart again — grapheme segmentation, four width lookups — to
+/// put the same glyph back. A cover picture has almost no runs, so that was
+/// one allocation a cell: ~90 ns a cell against ~10 written directly, ~5% of
+/// a core for a 300×90 visualizer in Cover mode, and every mosaic cover on
+/// every frame (performance audit #105).
+impl Widget for &Canvas {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        // Clipped to the buffer, as the Paragraph clipped: a rect running
+        // past the frame loses what hangs over, where indexing would panic.
+        let area = area.intersection(buf.area);
+        for row in 0..area.height.min(self.height / 2) {
+            for x in 0..area.width.min(self.width) {
+                let (glyph, style) = cell(self.at(x, row * 2), self.at(x, row * 2 + 1));
+                buf[(area.x + x, area.y + row)].set_symbol(glyph).set_style(style);
+            }
+        }
     }
 }
 
@@ -184,6 +218,131 @@ mod tests {
         canvas.set(0, -1, Color::Red);
         canvas.set(0, 2, Color::Red);
         assert_eq!(text(&canvas.into_lines()), vec!["   "], "nothing smeared to the far side");
+    }
+
+    /// A picture with every kind of cell in it, runs and lone cells both.
+    fn every_kind_of_cell(width: u16, rows: u16) -> Canvas {
+        let mut canvas = canvas(width, rows);
+        let colours = [Color::Red, Color::Rgb(10, 200, 30), Color::Indexed(33)];
+        let mut seed = 7u32;
+        for y in 0..i32::from(rows) * 2 {
+            for x in 0..i32::from(width) {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                // A quarter of the pixels stay empty.
+                if let Some(colour) = colours.get((seed >> 16) as usize % 4) {
+                    canvas.set(x, y, *colour);
+                }
+            }
+        }
+        canvas
+    }
+
+    /// A frame with a ground laid down and old text on it: what a picture
+    /// is drawn over.
+    fn grounded(area: Rect) -> Buffer {
+        let mut buf = Buffer::empty(area);
+        buf.set_style(area, Style::new().fg(Color::Gray).bg(Color::Rgb(26, 26, 26)));
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                buf[(x, y)].set_symbol("x");
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn written_straight_in_the_picture_is_the_one_the_paragraph_drew() {
+        use ratatui::widgets::Paragraph;
+        // Performance audit #105: the widget replaces Paragraph over
+        // `into_lines`, cell for cell — glyphs, colours, and the ground
+        // showing through wherever a half is empty.
+        let frame = Rect::new(0, 0, 20, 8);
+        let area = Rect::new(3, 2, 13, 5);
+        let mut direct = grounded(frame);
+        (&every_kind_of_cell(13, 5)).render(area, &mut direct);
+        let mut paragraph = grounded(frame);
+        Paragraph::new(every_kind_of_cell(13, 5).into_lines()).render(area, &mut paragraph);
+        assert_eq!(direct, paragraph);
+        assert_eq!(direct[(0, 0)].symbol(), "x", "nothing outside the rect is touched");
+    }
+
+    #[test]
+    fn a_picture_running_past_the_frame_is_clipped_as_the_paragraph_clipped_it() {
+        use ratatui::widgets::Paragraph;
+        // Past the right edge and the bottom: indexing the buffer there
+        // would panic, where the Paragraph dropped the overhang.
+        let frame = Rect::new(0, 0, 10, 4);
+        for area in [Rect::new(6, 1, 9, 6), Rect::new(0, 0, 30, 20), Rect::new(12, 5, 4, 4)] {
+            let mut direct = grounded(frame);
+            (&every_kind_of_cell(area.width, area.height)).render(area, &mut direct);
+            let mut paragraph = grounded(frame);
+            Paragraph::new(every_kind_of_cell(area.width, area.height).into_lines())
+                .render(area, &mut paragraph);
+            assert_eq!(direct, paragraph, "{area:?}");
+        }
+    }
+
+    /// Not a check, a measurement (performance audit #105): a 250x80 panel
+    /// — a 300x90 terminal's visualizer — written into a frame both ways,
+    /// as a photo (every cell its own colours: the Cover mode, a mosaic
+    /// cover) and as bars (long runs: the spectrum), each frame building
+    /// its picture fresh as the visualizer does —
+    /// `cargo test --release a_panel_both_ways -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check; run --release with --nocapture"]
+    fn time_a_panel_both_ways() {
+        use ratatui::widgets::Paragraph;
+        use std::time::Instant;
+        let (width, rows) = (250u16, 80u16);
+        let photo = || {
+            let mut canvas = canvas(width, rows);
+            let mut seed = 1u32;
+            for y in 0..i32::from(rows) * 2 {
+                for x in 0..i32::from(width) {
+                    seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                    let [r, g, b, _] = seed.to_be_bytes();
+                    canvas.set(x, y, Color::Rgb(r, g, b));
+                }
+            }
+            canvas
+        };
+        let bars = || {
+            let mut canvas = canvas(width, rows);
+            let height = i32::from(rows) * 2;
+            for bar in 0..i32::from(width) / 3 {
+                let top = (bar * 37) % height;
+                for y in top..height {
+                    let colour = Color::Rgb((y * 255 / height) as u8, 80, 200);
+                    canvas.set(bar * 3, y, colour);
+                    canvas.set(bar * 3 + 1, y, colour);
+                }
+            }
+            canvas
+        };
+        let area = Rect::new(0, 0, width, rows);
+        let frames = 300;
+        for (name, picture) in [("photo", &photo as &dyn Fn() -> Canvas), ("bars", &bars)] {
+            let mut buf = grounded(area);
+            let started = Instant::now();
+            for _ in 0..frames {
+                std::hint::black_box(picture());
+            }
+            let build = started.elapsed() / frames;
+            let started = Instant::now();
+            for _ in 0..frames {
+                (&picture()).render(area, &mut buf);
+            }
+            let direct = started.elapsed() / frames;
+            let started = Instant::now();
+            for _ in 0..frames {
+                Paragraph::new(picture().into_lines()).render(area, &mut buf);
+            }
+            let paragraph = started.elapsed() / frames;
+            println!(
+                ">>> {name} {width}x{rows}: {direct:?} a frame written straight in, {paragraph:?} \
+                 through the Paragraph ({build:?} of each is building the picture)"
+            );
+        }
     }
 
     #[test]
