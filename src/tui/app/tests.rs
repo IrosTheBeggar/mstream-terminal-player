@@ -2108,6 +2108,84 @@ fn a_tunnel_parent_is_kept_for_the_access_call_and_let_go_once_the_peer_is_direc
     assert!(app.tunnel_targets().contains(parent));
 }
 
+#[test]
+fn the_targets_ask_each_origin_once_in_the_order_the_queue_names_them() {
+    // Performance audit #108: a queue comes in long runs from one origin,
+    // and the targets walk each origin once — same sets, same first-seen
+    // order (reconcile_direct asks in it), however many rows repeat them.
+    let mut app = connected_app();
+    let parent = "mstream+iroh://faraway";
+    app.servers.push(faraway());
+    app.direct_offered.insert(parent.into());
+    let peer = |id: i64, path: &str| Queued { dj: None, origin: Origin { server: parent.into(), peer: Some(id) }, track: track(path) };
+    let mut rows = Vec::new();
+    for run in 0..6 {
+        for i in 0..500 {
+            let path = format!("music/{run}/{i}.mp3");
+            rows.push(match run % 3 {
+                0 => peer(9, &path),
+                1 => at(FARAWAY, &path),
+                _ => peer(7, &path),
+            });
+        }
+    }
+    rows.push(item("music/here.mp3"));
+    app.queue.replace(rows);
+    let peers: Vec<(String, i64)> = app.peer_targets().into_iter().map(|(_, parent, id)| (parent, id)).collect();
+    assert_eq!(peers, [(parent.to_string(), 9), (parent.to_string(), 7)], "each peer once, first seen first");
+    assert_eq!(app.queue_origins().len(), 4);
+    let wanted = app.tunnel_targets();
+    assert!(wanted.contains(parent) && wanted.contains(FARAWAY));
+    assert_eq!(wanted.len(), 1, "the tunnel server is the peers' parent: one tunnel, {wanted:?}");
+
+    // One access ask per peer, however many rows are its, in that order.
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    let asks = direct_asks(&app.tick_at(crate::clock::Instant::now()));
+    assert_eq!(asks, [(9, false), (7, false)]);
+}
+
+#[test]
+fn every_change_to_the_queues_rows_moves_its_revision() {
+    // Performance audit #108: the saver watches the revision instead of
+    // hashing every row, so every writer of the rows must move it — and a
+    // step that changes nothing need not.
+    let mut app = connected_app();
+    let mut last = app.queue.rev();
+    let mut moved = |app: &App, what: &str| {
+        assert_ne!(app.queue.rev(), last, "{what} moves the revision");
+        last = app.queue.rev();
+    };
+    app.replace_queue(vec![track("a.mp3"), track("b.mp3"), track("c.mp3")]);
+    moved(&app, "replace");
+    app.push_queue(track("d.mp3"));
+    moved(&app, "push");
+    app.queue.insert_next(item("e.mp3"));
+    moved(&app, "insert next");
+    app.queue.move_row(0, 2);
+    moved(&app, "a move");
+    app.queue.remove(1);
+    moved(&app, "a removal");
+    app.servers.push(KnownServer { id: "http://b".into(), name: "b".into(), token: None, username: None, self_signed: false, peer: None, pairing: None, dj: Default::default() });
+    app.queue.push(at("http://b", "b/x.mp3"));
+    moved(&app, "push");
+    app.drop_server_items("http://b");
+    moved(&app, "a server's rows swept");
+    app.rename_server("http://host:3000", "http://host:3001");
+    moved(&app, "a rename");
+    let origin = app.queue.items[0].origin.clone();
+    let path = app.queue.items[0].filepath.clone();
+    app.rate_track(&origin, &path, Some(6));
+    moved(&app, "a rating written into the row");
+    app.queue.clear();
+    moved(&app, "a clear");
+
+    let still = app.queue.rev();
+    app.queue.move_row(0, 0);
+    app.queue.remove(5);
+    app.rate_track(&origin, "not/queued.mp3", Some(2));
+    assert_eq!(app.queue.rev(), still, "nothing changed, nothing moved");
+}
+
 // ── Tunnels follow the queue (contract clause 38) ───────────────────────
 
 fn tunnel_up(local_url: &str) -> TunnelState {

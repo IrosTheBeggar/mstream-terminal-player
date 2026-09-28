@@ -971,7 +971,8 @@ pub struct Queue {
     played: usize,
     /// Moved on by every change to the rows — their number, their order, a
     /// tag learned in place — so the saver can tell rows it has written
-    /// from rows it has not (performance audit #106).
+    /// from rows it has not without reading them all again (performance
+    /// audit #106, #108).
     rev: u64,
     /// The paths of Auto DJ rows a restore let go of (contract clause 40),
     /// newest last, at most [`DJ_RETIRED_CAP`]: to the DJ's rule that a
@@ -4077,12 +4078,34 @@ impl App {
         if let Some((parent, id)) = &self.session.peer {
             add(parent, *id);
         }
-        for item in &self.queue.items {
-            if let Some(id) = item.origin.peer {
-                add(&item.origin.server, id);
+        for (server, peer) in self.queue_origins() {
+            if let Some(id) = peer {
+                add(server, id);
             }
         }
         out
+    }
+
+    /// The queue's origins, each once, in the order the rows first name
+    /// them. A queue comes in long runs from one server, and everything a
+    /// row's origin asks of a pass — its tunnel, its peer's ticket — is
+    /// the same for every row of the run: asked per row, that was a string
+    /// cloned or formatted per queued track on every loop pass
+    /// (performance audit #108).
+    fn queue_origins(&self) -> Vec<(&str, Option<i64>)> {
+        let mut origins: Vec<(&str, Option<i64>)> = Vec::new();
+        let mut last: Option<&Origin> = None;
+        for item in &self.queue.items {
+            if last == Some(&item.origin) {
+                continue;
+            }
+            last = Some(&item.origin);
+            let origin = (item.origin.server.as_str(), item.origin.peer);
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+        origins
     }
 
     /// Whether a peer's own tunnel is worth dialling: its parent offers
@@ -4655,6 +4678,10 @@ impl App {
     /// the peer refused — spaced by the record's gaps — and never again
     /// once the parent declined (contract clause 27).
     pub(crate) fn reconcile_direct(&mut self, now: crate::clock::Instant) -> Vec<Effect> {
+        // No parent offers it: nothing to ask, whoever is referenced.
+        if self.direct_offered.is_empty() {
+            return Vec::new();
+        }
         let now_wall = std::time::SystemTime::now();
         let mut asks = Vec::new();
         for (pid, parent, id) in self.peer_targets() {
@@ -4740,12 +4767,12 @@ impl App {
                 }
             }
         }
-        for item in &self.queue.items {
-            match item.origin.peer {
-                Some(id) => self.want_for_peer(&mut wanted, &item.origin.server, id),
+        for (server, peer) in self.queue_origins() {
+            match peer {
+                Some(id) => self.want_for_peer(&mut wanted, server, id),
                 None => {
-                    if crate::quickconnect::is_tunnel_id(&item.origin.server) {
-                        wanted.insert(item.origin.server.clone());
+                    if crate::quickconnect::is_tunnel_id(server) {
+                        wanted.insert(server.to_string());
                     }
                 }
             }

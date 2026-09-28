@@ -125,6 +125,18 @@ fn load_stats_snapshot() -> Option<app::stats::StatsSnapshot> {
     serde_json::from_str::<app::stats::StatsSnapshot>(&text).ok()
 }
 
+/// The queue as the saver watches it for a change (contract clause 39).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct QueueSignature {
+    rev: u64,
+    rows: usize,
+    current: Option<usize>,
+    shuffle: bool,
+    repeat: app::Repeat,
+    held: Option<usize>,
+}
+
 /// The open play session as far as a checkpoint of it matters — see
 /// [`QueueSaver::stats_progress`].
 #[cfg(not(target_arch = "wasm32"))]
@@ -148,7 +160,11 @@ struct StatsProgress {
 /// session, checkpointed.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct QueueSaver {
-    signature: u64,
+    signature: QueueSignature,
+    /// Every row's server and path, hashed, as a check on the revision:
+    /// debug builds only (see [`QueueSaver::tick`]).
+    #[cfg(debug_assertions)]
+    rows_hash: u64,
     dirty_since: Option<std::time::Instant>,
     last_write: std::time::Instant,
     /// The write of the rows this saver last made, which a checkpoint's
@@ -176,6 +192,8 @@ impl QueueSaver {
     pub(crate) fn new(app: &App) -> Self {
         QueueSaver {
             signature: Self::signature(app),
+            #[cfg(debug_assertions)]
+            rows_hash: Self::rows_hash(app),
             dirty_since: None,
             last_write: std::time::Instant::now(),
             rows_stamp: None,
@@ -252,10 +270,27 @@ impl QueueSaver {
         }
     }
 
-    /// What a change to the queue looks like from outside: the rows, the
-    /// playing one, the modes and a held spot — and a tag written into a
-    /// row in place, which the rows' revision says. Cheap enough per tick.
-    fn signature(app: &App) -> u64 {
+    /// What a change to the queue looks like from outside: the rows — their
+    /// revision, which every change to them moves, a tag written in place
+    /// included — the playing one, the modes and a held spot. The rows used
+    /// to be hashed whole on every pass, 3,000 of them a tenth of a
+    /// millisecond each time for an answer that is nearly always "the
+    /// same" (performance audit #108).
+    fn signature(app: &App) -> QueueSignature {
+        QueueSignature {
+            rev: app.queue.rev(),
+            rows: app.queue.items.len(),
+            current: app.queue.current,
+            shuffle: app.queue.shuffle,
+            repeat: app.queue.repeat,
+            held: app.resume_spot.map(|(i, _)| i),
+        }
+    }
+
+    /// The rows as the old signature saw them: every row's server, peer
+    /// and path.
+    #[cfg(debug_assertions)]
+    fn rows_hash(app: &App) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for item in &app.queue.items {
@@ -263,11 +298,6 @@ impl QueueSaver {
             item.origin.peer.hash(&mut h);
             item.filepath.hash(&mut h);
         }
-        app.queue.rev().hash(&mut h);
-        app.queue.current.hash(&mut h);
-        app.queue.shuffle.hash(&mut h);
-        app.queue.repeat.label().hash(&mut h);
-        app.resume_spot.map(|(i, _)| i).hash(&mut h);
         h.finish()
     }
 
@@ -284,6 +314,19 @@ impl QueueSaver {
         }
         self.enabled = true;
         let signature = Self::signature(app);
+        // The revision is only as good as every writer of the rows moving
+        // it — `items` is a public field. A debug build hashes the rows as
+        // the saver once did and holds the revision to it, so a writer that
+        // forgets fails its tests rather than silently going unsaved.
+        #[cfg(debug_assertions)]
+        {
+            let rows_hash = Self::rows_hash(app);
+            debug_assert!(
+                rows_hash == self.rows_hash || signature != self.signature,
+                "the queue's rows changed without Queue::touch: the saver would not see it"
+            );
+            self.rows_hash = rows_hash;
+        }
         if signature != self.signature {
             self.signature = signature;
             self.dirty_since.get_or_insert(now);
@@ -1289,6 +1332,22 @@ mod tests {
         saver.flush(&app);
         assert!(config::load_queue_file().unwrap().is_none());
         assert!(config::load_queue_place_file().unwrap().is_none(), "the place goes with its rows");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "without Queue::touch")]
+    fn a_debug_build_catches_rows_changed_behind_the_revisions_back() {
+        // Performance audit #108: the saver trusts the revision; a writer
+        // of the public rows that forgets to move it is caught here, not
+        // discovered as a queue that silently stopped being saved.
+        let _scratch = crate::config::testing::Scratch::new("queue-rev");
+        let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
+        app.push_queue(Track { filepath: "music/a.mp3".into(), metadata: Default::default() });
+        let mut saver = QueueSaver::new(&app);
+        saver.tick(&app);
+        app.queue.items[0].track.filepath = "music/b.mp3".into();
+        saver.tick(&app);
     }
 
     #[test]
