@@ -132,7 +132,20 @@ pub(crate) fn tips(gui: &Gui) -> String {
 /// loop, step for step (contract clause 5). True when the event was the
 /// screen's to take, whether or not a page was up to take it.
 pub(crate) fn pointer(gui: &mut Gui, mouse: MouseEvent) -> bool {
-    if !on_screen(gui) || mouse.row == 0 || gui.modal_open() {
+    if !on_screen(gui) {
+        // A button lifted ends a hold the page began — a scrollbar arrow
+        // pressed before the window dropped to the mini player keeps
+        // stepping in `frame` until it hears the release — whether or not
+        // the page is drawn now to take anything else (performance audit
+        // #102 follow-up). The event is still the mini player's.
+        if matches!(mouse.kind, MouseEventKind::Up(_))
+            && let Some(page) = gui.stats.page.as_mut()
+        {
+            page.ui().release();
+        }
+        return false;
+    }
+    if mouse.row == 0 || gui.modal_open() {
         return false;
     }
     let at = Position { x: mouse.column, y: mouse.row };

@@ -3686,6 +3686,16 @@ mod tests {
         assert!(stats::pointer(&mut gui, click), "the page's");
         small.draw(|frame| render(frame, &mut gui)).unwrap();
         assert!(!moving(&mut gui), "not under the mini player");
+
+        // An arrow held on the page when the window drops to the mini
+        // player: the button's release still ends it, though the page is
+        // not drawn to take the event.
+        draw(&mut gui);
+        gui.stats.page.as_mut().unwrap().ui().hold_arrow();
+        small.draw(|frame| render(frame, &mut gui)).unwrap();
+        let lift = event::MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), ..click };
+        assert!(!stats::pointer(&mut gui, lift), "still the mini player's event");
+        assert!(!gui.stats.page.as_mut().unwrap().ui().holding(), "and the hold is over");
     }
 
     #[test]

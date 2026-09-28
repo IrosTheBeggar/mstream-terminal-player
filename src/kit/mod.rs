@@ -268,6 +268,19 @@ impl<A: Clone> Surface<A> {
         self.caret_since = Instant::now().checked_sub(by);
     }
 
+    /// An arrow held down, as a press on one arms it, so a test can see
+    /// the hold end.
+    #[cfg(test)]
+    pub fn hold_arrow(&mut self) {
+        self.arrow_hold = Some((0, 1, Instant::now() + ARROW_DELAY));
+    }
+
+    /// Whether a scrollbar arrow is held or its thumb dragged.
+    #[cfg(test)]
+    pub fn holding(&self) -> bool {
+        self.drag.is_some() || self.arrow_hold.is_some()
+    }
+
     /// Register what a right click on `rect` does. The last registered
     /// wins a hit, as with clicks.
     pub fn context(&mut self, rect: Rect, act: A) {
