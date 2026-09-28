@@ -263,8 +263,9 @@ and no strip, and hide for a peer.
   time; a new server forgets both, and so does another account signing
   in on the same one, which may see other libraries.
 - **2026-09-28 — The art cache spares what is on screen** (performance
-  audit #91): the playing track's cover, the wall's page and the queue
-  panel's rows, where it spared every queued row. The queue keeps its
-  played rows and Auto DJ only appends, so a long session grew the cache
-  past its cap one album at a time. A queued row scrolled back into view
-  after its cover went is asked for once more.
+  audit #91): the playing track's cover, the wall's page, the queue
+  panel's rows and the open action sheet's cover, where it spared every
+  queued row. The queue keeps its played rows and Auto DJ only appends,
+  so a long session grew the cache past its cap one album at a time. A
+  queued row scrolled back into view after its cover went is asked for
+  once more.

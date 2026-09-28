@@ -551,6 +551,13 @@ pub(crate) fn regions(area: Rect) -> Regions {
 }
 
 pub fn render(frame: &mut Frame, app: &mut App) {
+    render_screen(frame, app);
+    // The overlays drew after the cover: a kitty picture's pixels, riding
+    // its first cell, may not have survived the frame.
+    crate::tui::graphics::verify_sent(frame.buffer_mut());
+}
+
+fn render_screen(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     app.spinner_shown.set(false);
 

@@ -2281,6 +2281,13 @@ fn handle_key(wizard: &mut Wizard, key: KeyEvent) -> Option<Outcome> {
 // ── Drawing ──────────────────────────────────────────────────────────────────
 
 fn render(frame: &mut Frame, wizard: &mut Wizard) {
+    render_page(frame, wizard);
+    // The overlays drew after the pictures: a kitty picture's pixels,
+    // riding its first cell, may not have survived the frame.
+    crate::tui::graphics::verify_sent(frame.buffer_mut());
+}
+
+fn render_page(frame: &mut Frame, wizard: &mut Wizard) {
     wizard.ui.begin_frame();
     let area = frame.area();
     // The fixed scheme paints its own ground — but only when the terminal

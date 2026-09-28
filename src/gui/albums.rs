@@ -841,6 +841,116 @@ mod tests {
             .collect()
     }
 
+    /// Every kitty transmission a frame's cells carry: the image id's low
+    /// 24 bits — what a placeholder's colour names — and the first pixel.
+    fn transmissions(buffer: &ratatui::buffer::Buffer) -> Vec<(u32, [u8; 3])> {
+        use base64::Engine;
+        let mut sent = Vec::new();
+        for cell in &buffer.content {
+            let symbol = cell.symbol();
+            for (at, _) in symbol.match_indices("a=T,") {
+                let head = &symbol[..at];
+                let id = &head[head.rfind("i=").unwrap() + 2..];
+                let id: u32 = id.split(',').next().unwrap().parse().unwrap();
+                let data = at + symbol[at..].find(';').unwrap() + 1;
+                let pixel = &symbol[data..data + 4];
+                let pixel = base64::engine::general_purpose::STANDARD.decode(pixel).unwrap();
+                sent.push((id & 0xFF_FFFF, [pixel[0], pixel[1], pixel[2]]));
+            }
+        }
+        sent
+    }
+
+    /// Every picture row on screen: its first cell, and the image id its
+    /// placeholders name in their foreground colour.
+    fn placeholders(buffer: &ratatui::buffer::Buffer) -> Vec<(u16, u16, u32)> {
+        let area = *buffer.area();
+        let mut rows = Vec::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let symbol = buffer[(x, y)].symbol();
+                if let Some(at) = symbol.find("\x1b[38;2;")
+                    && symbol.contains('\u{10EEEE}')
+                {
+                    let rest = &symbol[at + 7..];
+                    let rgb: Vec<u32> =
+                        rest[..rest.find('m').unwrap()].split(';').map(|v| v.parse().unwrap()).collect();
+                    rows.push((x, y, (rgb[0] << 16) | (rgb[1] << 8) | rgb[2]));
+                }
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn an_overlay_opening_as_the_page_turns_leaves_no_cover_of_the_last_page() {
+        // The header dropdown opens on the frame the next page's pixels go
+        // out, over the first cells they ride in. A slot keeps one kitty id
+        // for life (#94), so its placeholders showed what the id held — the
+        // last page's cover — until the slot drew another album. The
+        // frame's check sends what it lost with the next frame that draws
+        // the picture (the integration check of performance audit #95).
+        use ratatui_image::picker::ProtocolType;
+        use std::collections::HashMap;
+
+        type Store = HashMap<u32, [u8; 3]>;
+        fn frame(gui: &mut Gui, terminal: &mut Terminal<TestBackend>, store: &mut Store) {
+            terminal.draw(|frame| super::super::render(frame, gui)).unwrap();
+            store.extend(transmissions(terminal.backend().buffer()));
+        }
+        fn settle(gui: &mut Gui, terminal: &mut Terminal<TestBackend>, store: &mut Store) {
+            for _ in 0..20 {
+                frame(gui, terminal, store);
+                if !gui.hot && !gui.ui.stale() {
+                    break;
+                }
+            }
+        }
+
+        let mut gui = wall_gui(60);
+        // Saved servers enough for the dropdown to reach the wall's first row.
+        for i in 0..8 {
+            gui.config.servers.push(crate::config::ServerEntry {
+                url: format!("http://server{i}.local:3000"),
+                ..Default::default()
+            });
+        }
+        gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
+        let colour =
+            |i: usize| [(i * 37 % 251) as u8 + 1, (i * 91 % 241) as u8 + 1, (i * 13 % 239) as u8 + 1];
+        for i in 0..60 {
+            let rgb = (0..128 * 128).flat_map(|_| colour(i)).collect();
+            let art = crate::tui::art::Art::from_rgb(128, 128, rgb).unwrap();
+            gui.app.art.insert(format!("aa{i:02}.jpeg"), Some(art));
+        }
+        // What the terminal's image store holds, as the frames fill it.
+        let mut store = HashMap::new();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        settle(&mut gui, &mut terminal, &mut store);
+
+        gui.act(Act::AlbPage(1));
+        gui.act(Act::SrvMenu);
+        frame(&mut gui, &mut terminal, &mut store);
+        gui.act(Act::SrvCloseDrop);
+        settle(&mut gui, &mut terminal, &mut store);
+
+        let shape = GridShape::for_content(gui.room_rect());
+        let page = wall_ref(&gui).page;
+        assert_eq!(page, 1);
+        let shown = placeholders(terminal.backend().buffer());
+        assert!(shown.len() >= shape.capacity(), "a page of pictures: {}", shown.len());
+        for (x, y, id) in shown {
+            let Some(i) = (0..shape.capacity()).find(|&i| {
+                let cell = shape.cell(i);
+                x == cell.x && (cell.y..cell.y + COVER_H).contains(&y)
+            }) else {
+                continue;
+            };
+            let album = page * shape.capacity() + i;
+            assert_eq!(store.get(&id), Some(&colour(album)), "cell {i}, row {y}: album {album}'s");
+        }
+    }
+
     #[test]
     fn the_slots_follow_the_window_not_the_largest_page_ever_drawn() {
         // Each slot holds an encoded picture; a window that shrank used to

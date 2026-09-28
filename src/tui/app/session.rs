@@ -695,6 +695,12 @@ impl App {
                 self.art_order.clear();
                 self.art_small.clear();
                 self.path_came_up();
+                // The playing track's cover went with them, and only a
+                // track's start asked for the original: the queue panel and
+                // the wall, asking first, left its big box on their small
+                // copy for the rest of the track (the integration check of
+                // performance audit #92).
+                let playing_cover = self.fetch_art();
                 let libraries = ping.vpaths.len();
                 self.info(format!(
                     "connected to {} ({} librar{})",
@@ -720,6 +726,7 @@ impl App {
                     Effect::Audio(AudioCmd::SetPauseFade(self.pause_fade)),
                 ];
                 effects.extend(withdrawn);
+                effects.extend(playing_cover);
                 effects.extend(dj_effects);
                 // Worth persisting when we hold a token we logged in for — or
                 // a pairing code, which is the only way back to this server
