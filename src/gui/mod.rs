@@ -2501,6 +2501,10 @@ fn event_loop(
             refresh_book(gui);
         }
         terminal.draw(|frame| render(frame, gui))?;
+        // The kitty pictures this frame stopped drawing — a queue row's
+        // slot let go, a wall slot past the page — leave the terminal's
+        // store now that the frame covering their cells is out.
+        crate::tui::graphics::release_dropped();
 
         while let Ok(ev) = event_rx.try_recv() {
             // The servers layer looks first: session answers that would
@@ -2993,6 +2997,8 @@ pub fn run(
         &event_tx,
     );
 
+    // Still on the alternate screen, where kitty keeps the pictures.
+    crate::tui::graphics::release_all();
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(POINTER_RESET));

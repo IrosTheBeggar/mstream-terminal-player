@@ -1766,6 +1766,8 @@ fn run_tui(mut wizard: Wizard) -> i32 {
     // beam until the pointer first crosses a clickable.
     set_pointer_shape(false, mouse_on);
     let outcome = event_loop(&mut terminal, &mut wizard, mouse_on, &to_worker, &from_worker);
+    // Still on the alternate screen, where kitty keeps the pictures.
+    crate::tui::graphics::release_all();
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(POINTER_RESET));
@@ -1794,6 +1796,7 @@ fn event_loop(
     let mut hand = false;
     loop {
         terminal.draw(|frame| render(frame, wizard))?;
+        crate::tui::graphics::release_dropped();
 
         // Fold in whatever the worker finished, then hand it the next op.
         loop {

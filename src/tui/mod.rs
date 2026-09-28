@@ -541,6 +541,8 @@ pub fn run(server: Option<String>, token: Option<String>, bundled: Option<String
     let result =
         event_loop(&mut terminal, &mut app, &event_rx, &audio_tx, &api_tx, &event_tx, pending);
     pop_window_title();
+    // Still on the alternate screen, where kitty keeps the pictures.
+    graphics::release_all();
     if mouse {
         // Left on, the terminal goes on emitting escape sequences at whatever
         // runs next, which looks like the shell has been broken.
@@ -667,6 +669,7 @@ fn event_loop(
         }
 
         terminal.draw(|frame| ui::render(frame, app))?;
+        graphics::release_dropped();
 
         if event::poll(poll_interval(app))? {
             // Everything already queued is handled before the next draw.

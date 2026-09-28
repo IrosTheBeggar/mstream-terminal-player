@@ -25,16 +25,21 @@
 //! the word "image", so a halfblocks-only answer is treated as a no.
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::Graphics;
+pub use native::{Graphics, release_all, release_dropped};
 #[cfg(target_arch = "wasm32")]
 pub use stub::Graphics;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
+    use std::io::Write;
+    use std::sync::Mutex;
+
     use ratatui::Frame;
     use ratatui::layout::{Rect, Size};
+    use ratatui_image::picker::cap_parser::Parser;
     use ratatui_image::picker::{Picker, ProtocolType};
     use ratatui_image::protocol::Protocol;
+    use ratatui_image::protocol::kitty::Kitty;
     use ratatui_image::{Image, Resize};
 
     use crate::tui::art::Art;
@@ -72,6 +77,9 @@ mod native {
         /// hundreds of syscalls a second for an answer that changes on
         /// the scale of someone adjusting their font.
         font_checked: std::time::Instant,
+        /// The one kitty image this instance draws, for its whole life —
+        /// see [`KittyId`].
+        kitty_id: KittyId,
         /// How many render-time decodes have run, for the tests that pin
         /// the caching above — a cache that silently stopped caching would
         /// otherwise still pass every drawing assertion.
@@ -294,6 +302,7 @@ mod native {
                 adaptive: false,
                 images_outlive_resize: false,
                 font_checked: std::time::Instant::now(),
+                kitty_id: KittyId::default(),
                 #[cfg(test)]
                 decodes: std::cell::Cell::new(0),
                 #[cfg(test)]
@@ -516,7 +525,17 @@ mod native {
                 // actually takes, and Nearest enlarges into mosaic — the
                 // thing this rendering exists to be better than.
                 let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
-                let Ok(protocol) = picker.new_protocol(source, fitted, resize) else {
+                // Kitty's picture is built here rather than by the picker,
+                // to be sent under this instance's own id (`KittyId`).
+                let protocol = match picker.protocol_type() {
+                    ProtocolType::Kitty => {
+                        let tmux = wrapped_for_tmux(picker);
+                        let id = self.kitty_id.get(tmux);
+                        kitty_picture(picker, source, fitted, &resize, id, tmux)
+                    }
+                    _ => picker.new_protocol(source, fitted, resize).ok(),
+                };
+                let Some(protocol) = protocol else {
                     self.refused =
                         Some(Refusal { art: art.id(), area: Some((area.width, area.height)) });
                     return false;
@@ -552,6 +571,154 @@ mod native {
             picker.set_protocol_type(protocol);
             Graphics { picker: Some(picker), ..Graphics::disabled() }
         }
+    }
+
+    /// Kitty keeps every picture it is sent until it is told to let go —
+    /// and nothing told it. Upstream mints a random id for every encode and
+    /// never deletes one, so each new cover, wall page, screen switch and
+    /// resize left the last picture in the terminal's image store, as a GPU
+    /// texture, under a virtual placement that its alternate-screen clear
+    /// skips: up to kitty's 320 MiB quota, outliving the player until the
+    /// window closed (performance audit #94).
+    ///
+    /// So each `Graphics` owns ONE id for its whole life, and every encode
+    /// is sent under it. kitty takes a transmission to an id it already
+    /// holds as a replacement — the old image, its texture and its
+    /// placement freed in place (graphics.c, `handle_add_command`) — and
+    /// the new pixels travel in the same frame as the placeholders that
+    /// show them, so no frame shows a gap. A `Graphics` that goes away (a
+    /// queue row's slot let go, a wall slot past the page) owes the
+    /// terminal a delete, sent after the next frame has drawn over its
+    /// cells ([`release_dropped`]); leaving the alternate screen deletes
+    /// the rest ([`release_all`]).
+    ///
+    /// Ids are a random base plus a count, not a count from one: two
+    /// players in panes of one tmux share the outer kitty's store, and a
+    /// repeated id there would replace — and delete — the other's picture.
+    #[derive(Default)]
+    struct KittyId(Option<(u32, bool)>);
+
+    impl KittyId {
+        /// This instance's id, handed out on first use.
+        fn get(&mut self, tmux: bool) -> u32 {
+            if let Some((id, _)) = self.0 {
+                return id;
+            }
+            let mut ids = KITTY_IDS.lock().unwrap_or_else(|poison| poison.into_inner());
+            if ids.next == 0 {
+                ids.next = fastrand::u32(1..);
+            }
+            let id = ids.next;
+            // Zero is kitty's "no id"; the count steps over it when it wraps.
+            ids.next = ids.next.wrapping_add(1).max(1);
+            ids.live.push((id, tmux));
+            self.0 = Some((id, tmux));
+            id
+        }
+    }
+
+    impl Drop for KittyId {
+        fn drop(&mut self) {
+            if let Some(entry) = self.0.take() {
+                let mut ids = KITTY_IDS.lock().unwrap_or_else(|poison| poison.into_inner());
+                ids.live.retain(|live| live.0 != entry.0);
+                ids.gone.push(entry);
+            }
+        }
+    }
+
+    /// Every id this process has handed out and not yet deleted, with
+    /// whether its escapes go through tmux: `live` still drawn by a
+    /// `Graphics`, `gone` owed a delete.
+    struct KittyIds {
+        next: u32,
+        live: Vec<(u32, bool)>,
+        gone: Vec<(u32, bool)>,
+    }
+
+    static KITTY_IDS: Mutex<KittyIds> =
+        Mutex::new(KittyIds { next: 0, live: Vec::new(), gone: Vec::new() });
+
+    /// The deletes owed for the pictures whose `Graphics` went away — and,
+    /// with `all`, for every picture this process sent.
+    fn owed_deletes(all: bool) -> String {
+        let mut ids = KITTY_IDS.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut owed = std::mem::take(&mut ids.gone);
+        if all {
+            owed.append(&mut ids.live);
+        }
+        owed.iter().map(|&(id, tmux)| kitty_delete(id, tmux)).collect()
+    }
+
+    /// Uppercase `I`: the image's data goes too, not only its placements —
+    /// by id, because a delete-all skips the virtual placements the
+    /// placeholders draw with. `q=2`: no reply either way; a terminal that
+    /// never saw the id (a tmux reattach) has nothing to answer about.
+    fn kitty_delete(id: u32, tmux: bool) -> String {
+        let (start, escape, end) = Parser::tmux_start_escape_end(tmux);
+        format!("{start}{escape}_Ga=d,d=I,i={id},q=2{escape}\\{end}")
+    }
+
+    /// Delete, in the terminal, the kitty pictures whose `Graphics` went
+    /// away. Called after each frame is written: a picture let go while a
+    /// frame was drawing — a queue slot pruned, a wall slot past the page
+    /// — is off screen once that frame is out, so its delete never blanks
+    /// a cell still showing it. Nothing owed is nothing written.
+    pub fn release_dropped() {
+        write_deletes(&owed_deletes(false));
+    }
+
+    /// Delete every kitty picture this process sent, for leaving the
+    /// alternate screen: kitty's own clear on the way out keeps images with
+    /// virtual placements, so without this they stay in the window's store
+    /// after the player has gone. Before `ratatui::restore` — the images
+    /// live in the alternate screen's store, and a delete sent after the
+    /// switch asks the main screen's.
+    pub fn release_all() {
+        write_deletes(&owed_deletes(true));
+    }
+
+    fn write_deletes(deletes: &str) {
+        if deletes.is_empty() {
+            return;
+        }
+        let mut out = std::io::stdout();
+        let _ = out.write_all(deletes.as_bytes());
+        let _ = out.flush();
+    }
+
+    /// Whether the picker frames its escapes for tmux's passthrough. The
+    /// crate decides that when the picker is built and keeps the answer to
+    /// itself; an iTerm2 protocol carries it in a public field, so a
+    /// one-pixel one reads it back — the same answer sixel is framed by,
+    /// without a second opinion that could disagree with it.
+    fn wrapped_for_tmux(picker: &Picker) -> bool {
+        let mut asking = picker.clone();
+        asking.set_protocol_type(ProtocolType::Iterm2);
+        let pixel = image::DynamicImage::new_rgb8(1, 1);
+        matches!(
+            asking.new_protocol(pixel, Size::new(1, 1), Resize::Fit(None)),
+            Ok(Protocol::ITerm2(ratatui_image::protocol::iterm2::Iterm2 { is_tmux: true, .. }))
+        )
+    }
+
+    /// The kitty picture, fitted and resized exactly as
+    /// `Picker::new_protocol` does it for `Resize::Scale` — the same cells,
+    /// the same pixels, padded the same way — but under `id`.
+    fn kitty_picture(
+        picker: &Picker,
+        source: image::DynamicImage,
+        fitted: Size,
+        resize: &Resize,
+        id: u32,
+        tmux: bool,
+    ) -> Option<Protocol> {
+        let font = picker.font_size();
+        let cells = resize.size_for(&source, font, fitted);
+        // No background: the picker's is transparent unless set, and
+        // nothing here sets it.
+        let pixels = resize.resize(&source, font, cells, None);
+        Kitty::new(pixels, cells, id, tmux).ok().map(Protocol::Kitty)
     }
 
     /// Whether a queried protocol should give way to iTerm2's own.
@@ -917,6 +1084,131 @@ mod native {
                 graphics.refresh();
                 terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), &art))).unwrap();
                 assert_eq!(graphics.encodes(), encodes, "outlives a resize: {outlive}");
+            }
+        }
+
+        /// The image ids the frame's kitty transmissions went out under.
+        fn transmitted_ids(
+            terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+        ) -> Vec<u32> {
+            let mut ids = Vec::new();
+            for cell in &terminal.backend().buffer().content {
+                for (at, _) in cell.symbol().match_indices("_Gq=2,i=") {
+                    let digits: String = cell.symbol()[at + 8..]
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect();
+                    ids.push(digits.parse().unwrap());
+                }
+            }
+            ids
+        }
+
+        #[test]
+        fn one_graphics_sends_every_picture_it_ever_draws_under_one_id() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // A new cover, a new size, a resize's re-send: each is a new
+            // transmission, and each goes to the id the last one used — so
+            // kitty replaces the picture in place instead of keeping both
+            // (performance audit #94).
+            let (a, b) = (a_cover(64), a_cover(96));
+            let mut graphics = Graphics::forced(ProtocolType::Kitty);
+            let mut ids = Vec::new();
+            for (art, width) in [(&a, 40), (&b, 40), (&b, 12)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
+                terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), art))).unwrap();
+                ids.extend(transmitted_ids(&terminal));
+            }
+            graphics.refresh();
+            let mut terminal = Terminal::new(TestBackend::new(20, 10)).unwrap();
+            terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), &b))).unwrap();
+            ids.extend(transmitted_ids(&terminal));
+            assert_eq!(graphics.encodes(), 4, "every draw above was a new picture");
+            assert_eq!(ids.len(), 4, "{ids:?}");
+            assert!(ids.iter().all(|id| *id == ids[0] && *id != 0), "{ids:?}");
+
+            // A fork is another surface, with a picture of its own.
+            let mut fork = graphics.fork();
+            let mut terminal = Terminal::new(TestBackend::new(20, 10)).unwrap();
+            terminal.draw(|frame| assert!(fork.draw(frame, frame.area(), &b))).unwrap();
+            let forked = transmitted_ids(&terminal);
+            assert_eq!(forked.len(), 1);
+            assert_ne!(forked[0], ids[0], "a fork shares no id");
+        }
+
+        #[test]
+        fn a_graphics_let_go_owes_the_terminal_a_delete_and_leaving_owes_the_rest() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            let art = a_cover(64);
+            let mut kept = Graphics::forced(ProtocolType::Kitty);
+            let mut dropped = kept.fork();
+            let id = |graphics: &mut Graphics| {
+                let mut terminal = Terminal::new(TestBackend::new(20, 10)).unwrap();
+                terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), &art))).unwrap();
+                transmitted_ids(&terminal)[0]
+            };
+            let (kept_id, dropped_id) = (id(&mut kept), id(&mut dropped));
+            drop(dropped);
+
+            // Other tests' pictures come and go through the same ledger, so
+            // this asks only after its own two.
+            let owed = owed_deletes(false);
+            assert!(owed.contains(&format!("_Ga=d,d=I,i={dropped_id},q=2")), "{owed:?}");
+            assert!(!owed.contains(&format!("i={kept_id},")), "a live picture is not deleted");
+            assert!(!owed_deletes(false).contains(&format!("i={dropped_id},")), "owed once");
+            // Leaving the alternate screen deletes what is still drawn.
+            assert!(owed_deletes(true).contains(&format!("_Ga=d,d=I,i={kept_id},q=2")));
+        }
+
+        #[test]
+        fn a_delete_is_framed_like_the_transmission_it_undoes() {
+            assert_eq!(kitty_delete(7, false), "\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
+            // Through tmux: the passthrough wrapper, every ESC inside doubled.
+            assert_eq!(
+                kitty_delete(7, true),
+                "\x1bPtmux;\x1b\x1b_Ga=d,d=I,i=7,q=2\x1b\x1b\\\x1b\\"
+            );
+        }
+
+        #[test]
+        fn the_kitty_picture_is_the_one_the_picker_would_have_built() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // Same cells, same pixels, byte for byte: only the id differs.
+            // A square cover in a square-ish box, a banner, and a box the
+            // fit leaves transparent padding in (a 13x27 cell).
+            let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
+            let cases = [((10, 20), 128, (12, 6)), ((10, 20), 400, (30, 9)), ((13, 27), 128, (12, 6))];
+            for (font, side, fitted) in cases {
+                #[allow(deprecated)]
+                let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(font.0, font.1));
+                picker.set_protocol_type(ProtocolType::Kitty);
+                let pixels = image::RgbImage::from_fn(side, side / 2 + 1, |x, y| {
+                    image::Rgb([(x * 7) as u8, (y * 13) as u8, (x ^ y) as u8])
+                });
+                let source = image::DynamicImage::ImageRgb8(pixels);
+                let fitted = Size::new(fitted.0, fitted.1);
+                let ours = kitty_picture(&picker, source.clone(), fitted, &resize, 42, false).unwrap();
+                let theirs = picker.new_protocol(source, fitted, resize.clone()).unwrap();
+                assert_eq!(ours.size(), theirs.size(), "{font:?} {side}");
+                let sent = |protocol: &Protocol| {
+                    let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+                    terminal
+                        .draw(|frame| frame.render_widget(Image::new(protocol), frame.area()))
+                        .unwrap();
+                    let symbol = terminal.backend().buffer()[(0, 0)].symbol().to_string();
+                    // The transmission is everything before the first row's
+                    // placeholders; its id is the one field allowed to differ.
+                    let transmit = symbol.split("\x1b[s").next().unwrap().to_string();
+                    let id = transmit.split("i=").nth(1).unwrap().split(',').next().unwrap();
+                    transmit.replacen(&format!("i={id},"), "i=,", 1)
+                };
+                assert_eq!(sent(&ours), sent(&theirs), "{font:?} {side}");
             }
         }
 
