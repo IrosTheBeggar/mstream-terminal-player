@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# A new push to a PR cancels that PR's run still going. A push to main
+# gets a group of its own (the run id), so no merge waits behind another
+# or is dropped untested (performance audit #130).
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test (${{ matrix.os }})
@@ -22,7 +29,14 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
+      # Only main writes the cache; a PR restores main's (performance
+      # audit #130). One set for these jobs is ~6 GB of the repo's 10, so
+      # every PR that saved its own evicted main's, and a quarter of the
+      # jobs started cold. The price: a PR that changes Cargo.lock builds
+      # its new crates on each push until it lands.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Test
         run: cargo test
@@ -59,9 +73,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # Main's cache only, as in the test job.
       - uses: Swatinem/rust-cache@v2
         with:
           key: wasm32
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check
         run: cargo check --target wasm32-unknown-unknown
@@ -79,7 +95,10 @@ jobs:
       - name: Install ALSA dev headers + expect (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev expect
+      # Main's cache only, as in the test job.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The wizard's expect battery against the stateful fake server —
       # fully self-contained (test/e2e/README.md). macOS runners ship
       # expect; run.sh skips gracefully anywhere it is missing.
