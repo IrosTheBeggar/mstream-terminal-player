@@ -517,7 +517,9 @@ file dialog with `--same-machine` (picker gained `pick_file`), else a path modal
 completion; SEARCH IN ticks on digits; one multipart POST per file, queued; outcomes in the
 webapp's words), Access (policy radio posts at once; USER · ADMIN · TORRENTS toggles; hidden with
 one user), Client (status, saved fields, other saved clients, `t` test, `c` switch, `x`
-disconnect gate). Polls: the list every 5 s on the Torrents tab, everything every 30 s. API:
+disconnect gate). Polls: the list every 5 s on the Torrents tab while it moves (something
+downloading, verifying or queued, or the last list changed; performance audit #100), everything
+every 30 s. API:
 the torrent types, twenty calls, a raw multipart `send_bytes`, `admin_users`;
 `extract_error` now prefers a body's `message` sentence over its `error` code. Locales `tor:`
 (240 keys × 10). Live-checked on the scratch server: choose Transmission → the connect form → a
@@ -1642,7 +1644,9 @@ a LATER secondary screen (party view), Columns retired.
   elsewhere, the empty slot frame yielding once the art is decoded. The
   fetch was already free — `fetch_art` rides the App funnel. One cover per
   frame, so the single-slot encode cache holds; widening it comes with the
-  Now Playing screen.
+  Now Playing screen. (It came with the performance audit, #97: the card
+  and the mini player each draw through a `cover::Slot` of their own, and
+  Now Playing keeps `app.graphics` warm at its size.)
 - **Search ✅ 2026-08-28**: `/` (or the nav item) opens the kit query card,
   which owns the keyboard while it takes text and drives the App's own
   query via `StartSearch`/`Input`/`Submit` — so `search_submitted`'s
@@ -1677,8 +1681,9 @@ a LATER secondary screen (party view), Columns retired.
   ever grows one) and the default star; per-row actions switch · edit ·
   make default (`default_server` config key, outranks MRU at startup) ·
   pair phone (the wizard's own QR renderers, pixels or half-blocks, over
-  the stored pairing code — card cover stands down while it shows, the
-  one-slot encode cache's rule) · remove (confirm modal; removal is the
+  the stored pairing code — the card cover stood down while it showed,
+  the one-slot encode cache's rule, until the card got a slot of its own
+  in performance audit #97) · remove (confirm modal; removal is the
   ONE flow that drops a pairing code). Adding/editing validates on a
   one-shot client so the live session is never touched until the server
   answers; switching goes through the App's own funnel
