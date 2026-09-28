@@ -97,10 +97,17 @@
       canvas {
         /* The terminal is drawn on a WebGL canvas (src/web/mod.rs), sized
            here rather than by the renderer so a resize reaches it; block,
-           or the inline baseline gap grows a scrollbar. */
+           or the inline baseline gap grows a scrollbar. Its height is the
+           small viewport's where the browser knows one: a phone's 100vh is
+           the page with the toolbar hidden, which leaves the transport and
+           the status line under the toolbar whenever it shows. svh is the
+           height with the toolbar showing, and it holds still while the
+           toolbar moves (dvh would not), so the canvas never changes size
+           without the resize event the shell redraws on. */
         display: block;
         width: 100vw;
         height: 100vh;
+        height: 100svh;
       }
       pre {
         /* Where WebGL2 is missing, the terminal falls back to the DOM grid,
