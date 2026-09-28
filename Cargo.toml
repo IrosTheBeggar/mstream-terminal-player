@@ -230,6 +230,64 @@ strip = true
 lto = "thin"
 codegen-units = 1
 
+# Debug builds — `cargo run`, `cargo test`, the e2e battery, the pty smoke
+# rigs — optimise the crates that push pixels and samples, and nothing
+# else. At opt-level 0 a 400 px cover's jpeg decode took 35 ms against
+# 2.8 in release, and a 6x3 encode 4 / 13 / 5 ms (kitty / sixel / iTerm2)
+# against 0.28 / 0.56 / 0.22 (PLAN.md, cover_encode_costs); on a shared CI
+# runner a debug sixel encode took ~750 ms, which is what turned main red
+# twice on 2026-09-27 (a192aa8 reworded the wall's pacing test; this takes
+# away the slowness itself). Named crate by crate rather than "*": a
+# blanket override would optimise naga, wgpu, iroh and the TLS stack too,
+# minutes on every cold build of every worktree, for code no frame waits
+# on — these cost seconds. Our own crate stays at 0, for fast rebuilds and
+# a debugger that can see everything (performance audit #133).
+#
+# The covers: jpeg and png decode, the thumbnail and resize, the three
+# protocol encoders — ratatui-image's own loops (kitty's chunking, the
+# resize it drives), icy_sixel quantising through quantette, iTerm2's png
+# deflate and checksums — and kitty's and iTerm2's base64. ratatui-image
+# and the png helpers are not incidental: without them a kitty encode
+# stayed at 0.7 ms and an iTerm2 one at 0.9, against 0.2 with them.
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.simd-adler32]
+opt-level = 3
+[profile.dev.package.ratatui-image]
+opt-level = 3
+[profile.dev.package.icy_sixel]
+opt-level = 3
+[profile.dev.package.quantette]
+opt-level = 3
+[profile.dev.package.base64-simd]
+opt-level = 3
+# The audio: symphonia's core (its sample buffers and DSP) and the codecs
+# mStream actually serves.
+[profile.dev.package.symphonia-core]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 3
+[profile.dev.package.symphonia-codec-aac]
+opt-level = 3
+[profile.dev.package.symphonia-codec-vorbis]
+opt-level = 3
+[profile.dev.package.symphonia-codec-alac]
+opt-level = 3
+[profile.dev.package.symphonia-codec-pcm]
+opt-level = 3
+
 # cargo-deb wraps the already-cross-built binaries in the release workflow
 # (--no-build --no-strip --target <triple>); nothing here compiles anything.
 # The dependency alternative below is the noble rename of libasound2 — the
