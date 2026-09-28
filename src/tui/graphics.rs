@@ -35,7 +35,9 @@ mod native {
     use std::sync::Mutex;
 
     use ratatui::Frame;
+    use ratatui::buffer::Buffer;
     use ratatui::layout::{Rect, Size};
+    use ratatui::widgets::Widget;
     use ratatui_image::picker::cap_parser::Parser;
     use ratatui_image::picker::{Picker, ProtocolType};
     use ratatui_image::protocol::Protocol;
@@ -120,6 +122,10 @@ mod native {
         /// own size is what belongs in the middle.
         shown: (u16, u16),
         protocol: Protocol,
+        /// Kitty's pixels, until the frame that carries them to the
+        /// terminal — see [`kitty_picture`]. `None` once sent, and for
+        /// the protocols that carry their pixels in the cells.
+        transmit: Option<String>,
     }
 
     /// The answer only. A `Protocol` is a cover's worth of encoded pixels,
@@ -527,15 +533,16 @@ mod native {
                 let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
                 // Kitty's picture is built here rather than by the picker,
                 // to be sent under this instance's own id (`KittyId`).
-                let protocol = match picker.protocol_type() {
+                let built = match picker.protocol_type() {
                     ProtocolType::Kitty => {
                         let tmux = wrapped_for_tmux(picker);
                         let id = self.kitty_id.get(tmux);
                         kitty_picture(picker, source, fitted, &resize, id, tmux)
+                            .map(|(protocol, transmit)| (protocol, Some(transmit)))
                     }
-                    _ => picker.new_protocol(source, fitted, resize).ok(),
+                    _ => picker.new_protocol(source, fitted, resize).ok().map(|p| (p, None)),
                 };
-                let Some(protocol) = protocol else {
+                let Some((protocol, transmit)) = built else {
                     self.refused =
                         Some(Refusal { art: art.id(), area: Some((area.width, area.height)) });
                     return false;
@@ -549,12 +556,29 @@ mod native {
                     size,
                     shown: (shown.width, shown.height),
                     protocol,
+                    transmit,
                 });
             }
 
             // Unwrap: the branch above either filled this or returned.
-            let held = self.cached.as_ref().expect("just built");
-            frame.render_widget(Image::new(&held.protocol), centre(area, held.shown));
+            let held = self.cached.as_mut().expect("just built");
+            let placed = centre(area, held.shown);
+            frame.render_widget(Image::new(&held.protocol), placed);
+            // Kitty's pixels ride the first frame that draws the picture,
+            // ahead of the placeholders in its first cell — where upstream
+            // puts its own — and are let go once they have: after that
+            // frame nothing can send them again, so keeping them was a
+            // cover's worth of base64 held for nothing (performance audit
+            // #95). A picture that drew nothing here (its first cell off
+            // the buffer) keeps them for a frame that does.
+            if held.transmit.is_some()
+                && let Some(cell) = frame.buffer_mut().cell_mut((placed.x, placed.y))
+                && cell.symbol().contains('\u{10EEEE}')
+                && let Some(transmit) = held.transmit.take()
+            {
+                let symbol = transmit + cell.symbol();
+                cell.set_symbol(&symbol);
+            }
             true
         }
     }
@@ -704,7 +728,16 @@ mod native {
 
     /// The kitty picture, fitted and resized exactly as
     /// `Picker::new_protocol` does it for `Resize::Scale` — the same cells,
-    /// the same pixels, padded the same way — but under `id`.
+    /// the same pixels, padded the same way — but under `id`, and in two
+    /// halves: the placeholders to draw every frame, and the transmission
+    /// to send once.
+    ///
+    /// Upstream's picture keeps its transmission for as long as it lives,
+    /// though it hands it out once: a wall page held a page of base64 that
+    /// could never be written again — 5-13 MB at 200x60 (performance audit
+    /// #95). So the placeholders here are upstream's,
+    /// drawn for a one-pixel stand-in whose own transmission is spent on a
+    /// scratch cell, and the real one is the caller's to send and drop.
     fn kitty_picture(
         picker: &Picker,
         source: image::DynamicImage,
@@ -712,13 +745,48 @@ mod native {
         resize: &Resize,
         id: u32,
         tmux: bool,
-    ) -> Option<Protocol> {
+    ) -> Option<(Protocol, String)> {
         let font = picker.font_size();
         let cells = resize.size_for(&source, font, fitted);
         // No background: the picker's is transparent unless set, and
         // nothing here sets it.
         let pixels = resize.resize(&source, font, cells, None);
-        Kitty::new(pixels, cells, id, tmux).ok().map(Protocol::Kitty)
+        let transmit = kitty_transmit(&pixels, id, tmux);
+        let stand_in = image::DynamicImage::new_rgb8(1, 1);
+        let placeholders = Protocol::Kitty(Kitty::new(stand_in, cells, id, tmux).ok()?);
+        let scratch = Rect::new(0, 0, 1, 1);
+        Image::new(&placeholders).allow_clipping(true).render(scratch, &mut Buffer::empty(scratch));
+        Some((placeholders, transmit))
+    }
+
+    /// Kitty's transmit-and-place command for `img` under `id`: its pixels
+    /// in base64 chunks of 4096 characters, the protocol's ceiling, the
+    /// first carrying the image's keys and a virtual placement (U=1) for
+    /// the placeholders to draw — upstream's `transmit_virtual`, framed the
+    /// same way for tmux, and ours to drop once sent.
+    fn kitty_transmit(img: &image::DynamicImage, id: u32, tmux: bool) -> String {
+        use base64::Engine;
+        use std::fmt::Write as _;
+
+        let (w, h) = (img.width(), img.height());
+        let rgba = img.to_rgba8();
+        let (start, escape, end) = Parser::tmux_start_escape_end(tmux);
+        const CHUNK: usize = 4096 / 4 * 3;
+        let chunks = rgba.as_raw().len().div_ceil(CHUNK);
+        let per_chunk = start.len() + 2 * escape.len() + 12 + 4096 + end.len();
+        let mut data = String::with_capacity(chunks * per_chunk + 48);
+        for (i, chunk) in rgba.as_raw().chunks(CHUNK).enumerate() {
+            data.push_str(start);
+            let _ = write!(data, "{escape}_Gq=2,");
+            if i == 0 {
+                let _ = write!(data, "i={id},a=T,U=1,f=32,t=d,s={w},v={h},");
+            }
+            let _ = write!(data, "m={};", u8::from(i + 1 < chunks));
+            base64::engine::general_purpose::STANDARD.encode_string(chunk, &mut data);
+            let _ = write!(data, "{escape}\\");
+            data.push_str(end);
+        }
+        data
     }
 
     /// Whether a queried protocol should give way to iTerm2's own.
@@ -1179,6 +1247,14 @@ mod native {
             use ratatui::Terminal;
             use ratatui::backend::TestBackend;
 
+            /// Every cell of one frame drawing `protocol`, in order.
+            fn frame_of(terminal: &mut Terminal<TestBackend>, protocol: &Protocol) -> String {
+                terminal
+                    .draw(|frame| frame.render_widget(Image::new(protocol), frame.area()))
+                    .unwrap();
+                terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
+            }
+
             // Same cells, same pixels, byte for byte: only the id differs.
             // A square cover in a square-ish box, a banner, and a box the
             // fit leaves transparent padding in (a 13x27 cell).
@@ -1193,23 +1269,64 @@ mod native {
                 });
                 let source = image::DynamicImage::ImageRgb8(pixels);
                 let fitted = Size::new(fitted.0, fitted.1);
-                let ours = kitty_picture(&picker, source.clone(), fitted, &resize, 42, false).unwrap();
-                let theirs = picker.new_protocol(source, fitted, resize.clone()).unwrap();
+                let (ours, transmit) =
+                    kitty_picture(&picker, source.clone(), fitted, &resize, 42, false).unwrap();
+                let theirs = picker.new_protocol(source.clone(), fitted, resize.clone()).unwrap();
                 assert_eq!(ours.size(), theirs.size(), "{font:?} {side}");
-                let sent = |protocol: &Protocol| {
-                    let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
-                    terminal
-                        .draw(|frame| frame.render_widget(Image::new(protocol), frame.area()))
-                        .unwrap();
-                    let symbol = terminal.backend().buffer()[(0, 0)].symbol().to_string();
-                    // The transmission is everything before the first row's
-                    // placeholders; its id is the one field allowed to differ.
-                    let transmit = symbol.split("\x1b[s").next().unwrap().to_string();
-                    let id = transmit.split("i=").nth(1).unwrap().split(',').next().unwrap();
-                    transmit.replacen(&format!("i={id},"), "i=,", 1)
-                };
-                assert_eq!(sent(&ours), sent(&theirs), "{font:?} {side}");
+
+                // The picker's picture sends its transmission ahead of the
+                // first row's placeholders; ours is the same, id aside.
+                let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+                let first = frame_of(&mut terminal, &theirs);
+                let sent = first.split("\x1b[s").next().unwrap();
+                let id = sent.split("i=").nth(1).unwrap().split(',').next().unwrap();
+                assert_eq!(
+                    transmit.replacen("i=42,", "i=,", 1),
+                    sent.replacen(&format!("i={id},"), "i=,", 1),
+                    "{font:?} {side}"
+                );
+
+                // And the placeholders ours draws every frame are the ones
+                // upstream's own draws once its transmission is spent.
+                let cells = ours.size();
+                let pixels = resize.resize(&source, picker.font_size(), cells, None);
+                let upstream = Protocol::Kitty(Kitty::new(pixels, cells, 42, false).unwrap());
+                let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+                let with_pixels = frame_of(&mut terminal, &upstream);
+                assert!(with_pixels.starts_with(&transmit), "{font:?} {side}: the same bytes");
+                let mut again = Terminal::new(TestBackend::new(40, 12)).unwrap();
+                let mut spent = Terminal::new(TestBackend::new(40, 12)).unwrap();
+                assert_eq!(frame_of(&mut spent, &ours), frame_of(&mut again, &upstream));
+                assert!(!frame_of(&mut spent, &ours).contains("a=T"), "the stand-in sends nothing");
             }
+        }
+
+        #[test]
+        fn a_kitty_picture_lets_go_of_its_pixels_once_the_frame_carries_them() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            let art = a_cover(64);
+            let mut graphics = Graphics::forced(ProtocolType::Kitty);
+            let symbols = |terminal: &Terminal<TestBackend>| -> String {
+                terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
+            };
+            // The first frame carries them, once, ahead of the placeholders.
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), &art))).unwrap();
+            let first = symbols(&terminal);
+            assert_eq!(first.matches("a=T").count(), 1, "one transmission");
+            assert!(first.find("a=T") < first.find('\u{10EEEE}'), "ahead of what shows it");
+            let held = graphics.cached.as_ref().unwrap();
+            assert!(held.transmit.is_none(), "and not kept once sent");
+
+            // Every later frame is the placeholders alone, drawn warm.
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), &art))).unwrap();
+            let later = symbols(&terminal);
+            assert!(!later.contains("_G"), "nothing sent again");
+            assert_eq!(later.matches('\u{10EEEE}').count(), first.matches('\u{10EEEE}').count());
+            assert_eq!(graphics.encodes(), 1);
         }
 
         #[test]

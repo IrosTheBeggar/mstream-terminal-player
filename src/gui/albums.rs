@@ -518,6 +518,19 @@ pub(crate) fn draw_wall(frame: &mut Frame, gui: &mut Gui, content: Rect) {
         let fork = gui.app.graphics.fork();
         gui.albums.slots.push(Slot::new(fork));
     }
+    // And no more than this window's widest page — the queue panel closed —
+    // could use: a terminal that shrank lets the rest go (a kitty slot's
+    // picture deleted after this frame), where they used to hold the
+    // largest page ever drawn for the session; a panel toggle keeps its
+    // warm slots, the queue's own slack (performance audit #95).
+    let window = frame.area();
+    let widest = GridShape::for_content(super::content_rect(
+        window.width,
+        window.height,
+        false,
+        gui.footer(),
+    ));
+    gui.albums.slots.truncate(capacity.max(widest.capacity()));
     // A cover per cell whichever wall is up: the slots are the room's, keyed
     // by what they last drew.
 
@@ -763,6 +776,29 @@ mod tests {
         (0..area.height)
             .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
             .collect()
+    }
+
+    #[test]
+    fn the_slots_follow_the_window_not_the_largest_page_ever_drawn() {
+        // Each slot holds an encoded picture; a window that shrank used to
+        // keep the big page's worth for the session (performance audit #95).
+        fn slots_at(gui: &mut Gui, width: u16, height: u16) -> usize {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| super::super::render(frame, gui)).unwrap();
+            gui.albums.slots.len()
+        }
+        let widest = |width, height| {
+            GridShape::for_content(super::super::content_rect(width, height, false, false)).capacity()
+        };
+        let mut gui = wall_gui(300);
+        assert_eq!(slots_at(&mut gui, 200, 60), widest(200, 60));
+        // The queue panel takes a few columns of cells; their slots stay
+        // warm for the panel closing again.
+        gui.queue_open = true;
+        assert_eq!(slots_at(&mut gui, 200, 60), widest(200, 60));
+        // A smaller window lets the rest go.
+        assert_eq!(slots_at(&mut gui, 120, 40), widest(120, 40));
+        assert!(widest(120, 40) < widest(200, 60));
     }
 
     #[test]
