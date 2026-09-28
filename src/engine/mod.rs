@@ -962,6 +962,57 @@ impl State {
             && !self.orphaned_tail
             && !matches!(self.next, NextTrack::Opening { .. })
     }
+
+    /// Seconds left of the sounding track — negative once it has run past
+    /// the length it claimed — or None when nothing is sounding toward a
+    /// known end: stopped, paused or ramping into a pause, sink empty, or
+    /// a length the engine never learned.
+    fn until_end(&self) -> Option<f64> {
+        if self.stopped
+            || self.sink.is_paused()
+            || self.pausing.is_some()
+            || self.sink.empty()
+            || self.duration <= 0.0
+        {
+            return None;
+        }
+        Some(self.duration - self.sink.get_pos().as_secs_f64())
+    }
+}
+
+/// How far ahead of a track's computed end a driver aims its next tick,
+/// so the tick lands as the source runs dry rather than just after.
+const END_EARLY: f64 = 0.03;
+
+/// The shortest wait near a track's end. rodio moves the position every
+/// 5 ms of audio; ticking faster would only read the same number again.
+const END_POLL: Duration = Duration::from_millis(5);
+
+/// How long past its claimed length a track may run before the driver
+/// stops watching for its end closely. A length that undershoots — a wrong
+/// hint, a VBR header without a frame count — would otherwise hold the
+/// driver at END_POLL until the real end, which could be minutes of 200
+/// ticks a second; with the grace it costs at most a second of them.
+const END_GRACE: f64 = 1.0;
+
+/// When a driver that ticks every `base` should tick next. Settled, once
+/// per [`DEVICE_POLL`] (performance audit #81). With a track sounding
+/// toward a known end, just before that end — never sooner than
+/// [`END_POLL`], never later than `base` — because the tick is what notices
+/// a source ran out and starts the next one, and at a flat 250 ms the
+/// notice came U(0, 250) ms late: silence added to every natural boundary
+/// (performance audit #76; the gap Phase 1 #8 accepted, narrowed without
+/// changing the cut). Anything else keeps `base`.
+fn next_tick(settled: bool, until_end: Option<f64>, base: Duration) -> Duration {
+    if settled {
+        return base.max(DEVICE_POLL);
+    }
+    match until_end {
+        Some(left) if left > -END_GRACE => {
+            Duration::from_secs_f64((left - END_EARLY).max(0.0)).clamp(END_POLL.min(base), base)
+        }
+        _ => base,
+    }
 }
 
 /// How often the system default output is compared with the one the
@@ -1654,6 +1705,14 @@ impl Engine {
     /// (performance audit #81).
     pub fn settled(&self) -> bool {
         self.state.lock().unwrap().at_rest()
+    }
+
+    /// How long a driver that otherwise ticks every `base` may wait before
+    /// the next tick — see [`next_tick`]: a second while settled, and near
+    /// a track's end just long enough to catch it running out.
+    pub fn tick_wait(&self, base: Duration) -> Duration {
+        let s = self.state.lock().unwrap();
+        next_tick(s.at_rest(), s.until_end(), base)
     }
 
     pub fn status(&self) -> Status {
@@ -4461,6 +4520,49 @@ mod tests {
             deadline: Instant::now() + STOP_FADE,
         });
         assert!(!s.at_rest(), "a draining breath is not at rest");
+    }
+
+    #[test]
+    fn the_next_tick_lands_on_the_end_of_the_track_and_nowhere_faster() {
+        let base = Duration::from_millis(250);
+        let ms = |d: Duration| d.as_millis();
+        // Settled: the device watch's pace, whatever the base.
+        assert_eq!(next_tick(true, None, base), DEVICE_POLL);
+        assert_eq!(next_tick(true, None, Duration::from_secs(2)), Duration::from_secs(2));
+        // Nothing sounding toward a known end: the base.
+        assert_eq!(next_tick(false, None, base), base);
+        // Far from the end: the base, never longer.
+        assert_eq!(next_tick(false, Some(90.0), base), base);
+        // Inside the last quarter second: just before the end.
+        assert_eq!(ms(next_tick(false, Some(0.2), base)), 170);
+        assert_eq!(ms(next_tick(false, Some(0.05), base)), 20);
+        // At or past the end, the floor: the source is about to run dry.
+        assert_eq!(next_tick(false, Some(0.01), base), END_POLL);
+        assert_eq!(next_tick(false, Some(-0.5), base), END_POLL);
+        // Well past a length that undershot: the base again, so a wrong
+        // duration costs at most a second of fast ticks, not minutes.
+        assert_eq!(next_tick(false, Some(-1.5), base), base);
+        // A base shorter than the floor is never stretched.
+        assert_eq!(next_tick(false, Some(0.0), Duration::from_millis(2)), Duration::from_millis(2));
+    }
+
+    #[test]
+    fn until_end_counts_only_a_track_sounding_toward_a_known_end() {
+        let mut s = bare_state();
+        assert_eq!(s.until_end(), None, "stopped");
+        s.sink = loaded_sink();
+        s.stopped = false;
+        assert_eq!(s.until_end(), None, "no known length");
+        s.duration = 180.0;
+        // Nothing pulls this sink, so the position stands at zero.
+        assert_eq!(s.until_end(), Some(180.0));
+        s.pausing = Some(Instant::now());
+        assert_eq!(s.until_end(), None, "ramping into a pause");
+        s.pausing = None;
+        s.sink.pause();
+        assert_eq!(s.until_end(), None, "paused");
+        s.sink = Arc::new(Player::new().0);
+        assert_eq!(s.until_end(), None, "ran out: the tick's advance is due at once");
     }
 
     /// Run `f` on its own thread and give it `limit`: a call that waits on

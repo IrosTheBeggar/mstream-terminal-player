@@ -20,6 +20,11 @@ use crate::engine::{Engine, EngineError};
 
 pub const API_VERSION: u32 = 1;
 
+/// How often the loop ticks the engine while a track plays: auto-advance,
+/// the device watch. Near a track's end the engine asks for sooner, and
+/// while settled for later — see `Engine::tick_wait`.
+const TICK: Duration = Duration::from_millis(250);
+
 pub struct ServeOptions {
     pub host: String,
     pub port: u16,
@@ -346,13 +351,13 @@ pub fn run(opts: ServeOptions) -> Result<(), String> {
             eprintln!("[serve] {}", notice.text);
         }
 
-        // Stopped, or a landed pause with nothing in flight: the tick only
-        // has the device watch left to keep, and that polls once a second
-        // anyway. A request still wakes recv the moment it lands
-        // (performance audit #81).
-        let wait =
-            if engine.settled() { crate::engine::DEVICE_POLL } else { Duration::from_millis(250) };
-        let request = server.recv_timeout(wait);
+        // Settled, a second: the tick only has the device watch left to
+        // keep (performance audit #81). Near the end of a track, just past
+        // the moment it runs out, so the next starts on time rather than
+        // up to a whole TICK late — the hard cut stays a hard cut, only
+        // the silence the poll added to it goes (performance audit #76).
+        // A request still wakes recv the moment it lands.
+        let request = server.recv_timeout(engine.tick_wait(TICK));
         let request = match request {
             Ok(Some(r)) => r,
             Ok(None) => continue,
