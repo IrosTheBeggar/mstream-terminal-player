@@ -1608,6 +1608,12 @@ pub struct App {
     /// clause 7): the pane holds them as text rows, the wall wants the
     /// covers and years.
     pub artist_albums: Option<(String, Vec<crate::api::types::Album>)>,
+    /// Moves every time `albums` or `artist_albums` is replaced, so what is
+    /// derived from them — the GUI wall's filtered view — can tell a new
+    /// list from the one it was built on without walking either (performance
+    /// audit #103). A counter rather than the Vec's address: a freed list's
+    /// address comes back for the next one of the same length.
+    pub albums_rev: u64,
     /// The full block the sheet or Song info asked for last (track-actions
     /// contract, clause 8), by the track's path.
     pub track_info: Option<Track>,
@@ -1903,6 +1909,7 @@ impl App {
             library_stack: Drill::new(LibraryNode::Root),
             albums: None,
             artist_albums: None,
+            albums_rev: 0,
             track_info: None,
             playlist_names: PlaylistNames::Unasked,
             rating_writes: Vec::new(),
@@ -5487,11 +5494,13 @@ impl App {
                     (&node, dest, &data)
                 {
                     self.albums = Some(albums.clone());
+                    self.albums_rev = self.albums_rev.wrapping_add(1);
                 }
                 if let (LibraryNode::Artist(artist), Tab::Library, LibraryData::Albums(albums)) =
                     (&node, dest, &data)
                 {
                     self.artist_albums = Some((artist.clone(), albums.clone()));
+                    self.albums_rev = self.albums_rev.wrapping_add(1);
                 }
                 self.pane_for_mut(dest).set(entries_from_library(data));
                 self.message = None;
