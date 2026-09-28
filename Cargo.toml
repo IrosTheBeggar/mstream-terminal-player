@@ -286,3 +286,9 @@ winresource = "0.1"
 # the table as a static (src/locale_table.rs). Already in the tree as the
 # macro's dependency; pinned to rust-i18n's version, so bump them together.
 rust-i18n-support = "=3.1.5"
+
+# stream-download, vendored from the 0.24.2 release as published (licenses and
+# all) so its range bookkeeping can carry a fix upstream does not have yet
+# (performance audit #73; the fix itself is the commit after this one).
+[patch.crates-io]
+stream-download = { path = "vendor/stream-download" }
