@@ -2467,12 +2467,34 @@ fn render(frame: &mut Frame, wizard: &mut Wizard) {
         wizard.ui.pointer = live_pointer;
         wizard.ui.clear_registries();
     }
-    match wizard.modal.clone() {
+    // The folder browser and the path modal each hold a server listing —
+    // thousands of names at a music root — so they are drawn from where
+    // they live, not from a copy made every frame (performance audit #110).
+    match &mut wizard.modal {
         Modal::None => {}
         Modal::SkipWarning => draw_skip_warning(frame, wizard, area),
-        Modal::Browser(browse) => draw_browser(frame, wizard, area, &browse),
-        Modal::PathEntry(draft) => draw_path_entry(frame, wizard, area, &draft),
-        Modal::Language(sel) => draw_language(frame, wizard, area, sel),
+        Modal::Browser(_) => {
+            // Lent to its draw, which never touches the modal, and put back.
+            let modal = std::mem::replace(&mut wizard.modal, Modal::None);
+            if let Modal::Browser(browse) = &modal {
+                draw_browser(frame, wizard, area, browse);
+            }
+            wizard.modal = modal;
+        }
+        Modal::PathEntry(draft) => {
+            // The draft stays in place — its draw keeps the list's scroll
+            // there — and lends the frame only its listing.
+            let entries = std::mem::take(&mut draft.entries);
+            let lent = PathDraft { entries, ..draft.clone() };
+            draw_path_entry(frame, wizard, area, &lent);
+            if let Modal::PathEntry(draft) = &mut wizard.modal {
+                draft.entries = lent.entries;
+            }
+        }
+        Modal::Language(sel) => {
+            let sel = *sel;
+            draw_language(frame, wizard, area, sel);
+        }
     }
 
     // The tooltip draws last — over everything, once the dwell matures.
@@ -4262,4 +4284,35 @@ pub(crate) mod tests {
         assert!(matches!(wizard.queued, Some(Op::CreateAdmin)));
     }
 
+
+    #[test]
+    fn the_path_modal_is_drawn_from_its_own_draft_and_keeps_its_listing() {
+        // The draft lends the frame its listing instead of being copied
+        // with it every frame (performance audit #110): the listing is back
+        // after a draw, and the scroll the draw keeps lands in the draft.
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        rust_i18n::set_locale("en");
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        let entries: Vec<String> = (0..40).map(|i| format!("d{i:02}")).collect();
+        wizard.modal = Modal::PathEntry(PathDraft {
+            text: "/srv/".into(),
+            listed_for: "/srv/".to_string(),
+            listed_path: "/srv".to_string(),
+            entries: entries.clone(),
+            sel: Some(11),
+            ..PathDraft::default()
+        });
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|frame| render(frame, &mut wizard)).unwrap();
+        let Modal::PathEntry(draft) = &wizard.modal else { panic!("the path modal") };
+        assert_eq!(draft.entries, entries, "the listing is back after the frame");
+        assert_eq!(draft.sel_anchor, Some(11), "the draw kept its anchor");
+        assert!((6..=11).contains(&draft.scroll), "scrolled to the cursor: {}", draft.scroll);
+        // The browser is lent and put back whole.
+        let browse = Browse { path: "/srv".into(), dirs: entries, sel: 3 };
+        wizard.modal = Modal::Browser(browse.clone());
+        terminal.draw(|frame| render(frame, &mut wizard)).unwrap();
+        assert_eq!(wizard.modal, Modal::Browser(browse));
+    }
 }

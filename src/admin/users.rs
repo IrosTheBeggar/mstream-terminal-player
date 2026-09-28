@@ -279,14 +279,15 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
     std::thread::spawn(move || {
         while let Ok((client, op)) = job_rx.recv() {
             let done = match op {
-                Op::Load => Done::Loaded(client.admin_users().map(|users| {
+                // Both reads go out together: one round trip, not two
+                // (performance audit #83).
+                Op::Load => Done::Loaded(crate::api::wait(async {
+                    let (users, libraries) =
+                        tokio::join!(client.admin_users_async(), client.admin_directories_async());
                     // The library list feeds the add form and the grant
                     // modal; best-effort, the users are the point.
-                    let libraries = client
-                        .admin_directories()
-                        .map(|dirs| dirs.into_keys().collect())
-                        .unwrap_or_default();
-                    (users, libraries)
+                    let libraries = libraries.map(|dirs| dirs.into_keys().collect()).unwrap_or_default();
+                    Ok((users?, libraries))
                 })),
                 Op::Add(user) => {
                     let result = client.admin_add_user(&user).map(|_| ());
@@ -1056,14 +1057,16 @@ fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect) {
     if rows_rect.height == 0 {
         return;
     }
-    let names = room.names();
-    let users = room.users.clone();
+    // The accounts are lent to the rows and put back, not copied for them
+    // every frame: a row needs the room only for its clicks (performance
+    // audit #110).
+    let users = std::mem::take(&mut room.users);
+    let rows: Vec<(&String, &AdminUser)> = users.iter().collect();
     // A checkbox cell's glyph — a bar on the selected row, its own colour
     // otherwise — sitting one cell in from the column's left edge.
     let glyph_x = |x: u16, w: u16| x + (w.saturating_sub(3)) / 2;
-    table_rows(frame, room, rows_rect, names.len(), |frame, room, i, rect, selected, hovered| {
-        let name = &names[i];
-        let Some(u) = users.get(name) else { return };
+    table_rows(frame, room, rows_rect, rows.len(), |frame, room, i, rect, selected, hovered| {
+        let (name, u) = rows[i];
         let cell = |x: u16, w: u16| Rect { x, y: rect.y, width: w, height: 1 };
         let base = cell_style(selected, hovered, Style::default());
         frame.render_widget(
@@ -1089,6 +1092,7 @@ fn draw_body(frame: &mut Frame, room: &mut Room, column: Rect) {
         frame.render_widget(Paragraph::new(Span::styled("[X]", x_style)), x_rect);
         room.ui.click(x_rect, Act::Remove(name.clone()));
     });
+    room.users = users;
 }
 
 fn table_rows(
@@ -1741,5 +1745,38 @@ mod tests {
         r.last_load = Some(Instant::now() - POLL);
         r.tick();
         assert!(r.queued.is_none(), "never under a modal");
+    }
+
+    #[test]
+    fn a_load_asks_for_the_users_and_the_libraries_together() {
+        // One round trip, not two (performance audit #83); the library
+        // list stays best-effort.
+        let server = super::super::waves::serve(&[2], |path| match path {
+            "/api/v1/admin/users" => (200, r#"{"anna":{"admin":true,"vpaths":["music"]}}"#.into()),
+            _ => (500, "{}".into()),
+        });
+        let (to_worker, from_worker) = spawn_worker();
+        to_worker.send((Arc::new(Client::new(&server.url).expect("client")), Op::Load)).unwrap();
+        let Done::Loaded(Ok((users, libraries))) =
+            from_worker.recv_timeout(std::time::Duration::from_secs(30)).expect("an answer")
+        else {
+            panic!("a load");
+        };
+        assert_eq!(server.peak(), 2);
+        assert_eq!((users.len(), libraries.len()), (1, 0));
+    }
+
+    #[test]
+    fn a_frame_lends_the_accounts_to_the_table_and_hands_them_back() {
+        // Taken for the rows and put back rather than copied every frame
+        // (performance audit #110): the table and the cursor's note still
+        // read them.
+        let _en = english();
+        let mut r = loaded();
+        let before = r.users.clone();
+        handle_key(&mut r, key(KeyCode::Down));
+        let frame = draw(&mut r);
+        assert!(row(&frame, "anna").contains("[✓]") && frame.contains("guest"), "{frame}");
+        assert_eq!(r.users, before, "the accounts are back after the frame");
     }
 }

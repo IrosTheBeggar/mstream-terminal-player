@@ -342,11 +342,19 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
         let mut home = ServerHome::new();
         while let Ok((client, op)) = job_rx.recv() {
             let done = match op {
-                Op::Load => Done::Loaded(client.admin_backup_destinations().and_then(|dests| {
-                    let status = client.admin_backup_status()?;
+                // The three reads go out together — one round trip a poll,
+                // not three, so an op a key queues waits behind one at most
+                // (performance audit #83) — and are read in the order they
+                // were once asked: a destinations error wins.
+                Op::Load => Done::Loaded(crate::api::wait(async {
+                    let (dests, status, libraries) = tokio::join!(
+                        client.admin_backup_destinations_async(),
+                        client.admin_backup_status_async(),
+                        client.admin_directories_async(),
+                    );
+                    let (dests, status) = (dests?, status?);
                     // The library names → ids, for the add form; best-effort.
-                    let libraries = client
-                        .admin_directories()
+                    let libraries = libraries
                         .ok()
                         .map(|dirs| dirs.into_iter().map(|(name, d)| (name, d.id)).collect());
                     Ok(Box::new(Loaded { dests, status, libraries }))
@@ -1174,12 +1182,16 @@ fn render(frame: &mut Frame, room: &mut Room) {
         room.ui.pointer = live_pointer;
         room.ui.clear_registries();
     }
-    match room.modal.clone() {
+    // Lent to its draw and put back, not copied every frame: the folder
+    // browser holds a server listing, the history up to fifty runs
+    // (performance audit #110). No modal's draw touches the modal.
+    let modal = std::mem::replace(&mut room.modal, Modal::None);
+    match &modal {
         Modal::None => {}
-        Modal::Form(f) => draw_form(frame, room, area, &f),
-        Modal::Browser { browse, .. } => draw_browser(frame, room, area, &browse),
-        Modal::History { dest, runs, loaded, sel } => draw_history(frame, room, area, &dest, &runs, loaded, sel),
-        Modal::Remove(id) => {
+        Modal::Form(f) => draw_form(frame, room, area, f),
+        Modal::Browser { browse, .. } => draw_browser(frame, room, area, browse),
+        Modal::History { dest, runs, loaded, sel } => draw_history(frame, room, area, dest, runs, *loaded, *sel),
+        &Modal::Remove(id) => {
             let (lib, path) = room
                 .dest(id)
                 .map(|d| (printable(&d.library_name, 64), d.dest_path.clone()))
@@ -1195,6 +1207,7 @@ fn render(frame: &mut Frame, room: &mut Room) {
             );
         }
     }
+    room.modal = modal;
     if let Some((target, text)) = room.ui.ripe_tooltip() {
         kit::draw_tooltip(frame, area, target, text);
     }
@@ -2468,5 +2481,48 @@ mod tests {
         assert_eq!(f.numbers().unwrap_err(), "the hour is 0 to 23");
         f.hour = Input::new("3".into());
         assert_eq!(f.numbers().unwrap(), (30, 200, Some(3)));
+    }
+
+    #[test]
+    fn a_poll_asks_its_three_reads_together() {
+        // The destinations, the status and the libraries at once: one
+        // round trip a poll, not three (performance audit #83) — and a
+        // destinations error still wins over the status's.
+        let run = |url: &str| {
+            let (to_worker, from_worker) = spawn_worker();
+            to_worker.send((Arc::new(Client::new(url).expect("client")), Op::Load)).unwrap();
+            let Done::Loaded(result) = from_worker.recv_timeout(Duration::from_secs(30)).expect("an answer") else {
+                panic!("a load");
+            };
+            result
+        };
+        let server = super::super::waves::serve(&[3], |_| (200, "{}".into()));
+        let loaded = run(&server.url).expect("a load");
+        assert_eq!((server.peak(), server.paths().len()), (3, 3));
+        assert!(loaded.libraries.is_some());
+        let server = super::super::waves::serve(&[3], |path| match path {
+            "/api/v1/admin/backup/destinations" => (404, "{}".into()),
+            _ => (500, "{}".into()),
+        });
+        assert!(matches!(run(&server.url), Err(ApiError::NotFound(_))));
+    }
+
+    #[test]
+    fn a_modal_is_lent_to_its_draw_and_handed_back() {
+        // Drawn from the modal itself, not a copy made every frame
+        // (performance audit #110): after the frame it is as it was.
+        let _en = english();
+        let mut room = idle();
+        press(&mut room, KeyCode::Char('a'));
+        ctrl(&mut room, 'b');
+        room.queued = None;
+        room.apply(Done::Browsed(Ok(DirListing {
+            path: "/Volumes".into(),
+            directories: (0..300).map(|i| crate::api::types::DirEntry { name: format!("Drive {i}") }).collect(),
+            files: Vec::new(),
+        })));
+        let before = format!("{:?}", room.modal);
+        assert!(draw(&mut room).contains("▸ Drive 0"));
+        assert_eq!(format!("{:?}", room.modal), before);
     }
 }
