@@ -1328,15 +1328,17 @@ impl Client {
     }
 
     /// The cover image a track's `album-art` metadata names — raw bytes,
-    /// whatever format the server holds it in.
+    /// whatever format the server holds it in. `small` asks for the
+    /// server's 256 px copy instead of the original (see
+    /// [`urls::album_art_url`]).
     ///
     /// This is the one non-JSON GET in the client, so it does its own small
     /// version of [`Client::send`]: same header auth, same status mapping,
     /// but the body stays bytes instead of being read as text.
-    pub async fn album_art_async(&self, file: &str) -> Result<Vec<u8>, ApiError> {
+    pub async fn album_art_async(&self, file: &str, small: bool) -> Result<Vec<u8>, ApiError> {
         let url = match self.peer {
-            Some(peer) => urls::peer_art_url(&self.server(), peer, file),
-            None => urls::album_art_url(&self.server(), file),
+            Some(peer) => urls::peer_art_url(&self.server(), peer, file, small),
+            None => urls::album_art_url(&self.server(), file, small),
         }
         .map_err(ApiError::Config)?;
         let url = urls::with_local_token(url, self.local_token.as_deref());
@@ -1361,8 +1363,8 @@ impl Client {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn album_art(&self, file: &str) -> Result<Vec<u8>, ApiError> {
-        wait(self.album_art_async(file))
+    pub fn album_art(&self, file: &str, small: bool) -> Result<Vec<u8>, ApiError> {
+        wait(self.album_art_async(file, small))
     }
 
     // ── Stream URLs ─────────────────────────────────────────────────────────

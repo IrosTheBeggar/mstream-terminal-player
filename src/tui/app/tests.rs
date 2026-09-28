@@ -5418,14 +5418,14 @@ fn a_cover_reply_reaches_the_playing_track_whenever_it_lands() {
     // The reply lands — including one that took long enough for the track
     // to have been paused, seeked, anything but skipped.
     let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
-    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(art.clone()), settled: true });
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(art.clone()), settled: true, small: false });
     assert_eq!(now_art(&app), Some(&art));
 
     // "The server has no cover for this" is also an answer, and it must
     // not leave the previous track's art on screen.
     app.replace_queue(vec![track_with_cover("lib/b.mp3", "bb.jpeg")]);
     app.play_index(0);
-    app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: None, settled: true });
+    app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: None, settled: true, small: false });
     assert_eq!(now_art(&app), None);
 }
 
@@ -5443,13 +5443,13 @@ fn a_cover_nobody_answered_for_is_asked_for_again() {
 
     // The fetch dies with the network: nothing was learned, so nothing is
     // remembered, and the next play asks again.
-    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: false });
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: false, small: false });
     assert!(!app.art.contains_key("aa.jpeg"), "an unanswered ask gives the slot back");
     assert!(app.play_index(0).contains(&asked), "and playing it again asks again");
 
     // The server's own "there is no art" still settles it — the two must
     // not have been collapsed the other way round either.
-    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: true });
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: true, small: false });
     assert!(app.art.get("aa.jpeg").is_some_and(|art| art.is_none()));
     assert!(!app.play_index(0).contains(&asked));
 }
@@ -7236,7 +7236,7 @@ fn a_cover_that_lands_after_the_cache_let_go_of_its_claim_is_still_evictable() {
 
     let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
     for i in 0..ART_CACHE_CAP {
-        app.apply_event(Event::AlbumArt { file: format!("old{i}.jpeg"), art: Some(art.clone()), settled: true });
+        app.apply_event(Event::AlbumArt { file: format!("old{i}.jpeg"), art: Some(art.clone()), settled: true, small: true });
     }
     assert_eq!(app.art.len(), ART_CACHE_CAP, "the answers are kept, and the cap holds");
     assert_eq!(app.art_order.len(), app.art.len(), "every entry is one eviction can reach");
@@ -7272,7 +7272,7 @@ fn age_rung(retry: &mut HashMap<String, TunnelRetry>, name: &str, secs: u64) {
 }
 
 fn unanswered(file: &str) -> Event {
-    Event::AlbumArt { file: file.into(), art: None, settled: false }
+    Event::AlbumArt { file: file.into(), art: None, settled: false, small: true }
 }
 
 #[test]
@@ -7299,7 +7299,7 @@ fn a_wall_cover_whose_ask_failed_waits_its_rung_before_it_is_asked_again() {
     assert!(app.fetch_art_file("aa.jpeg").is_some());
 
     // An answer, even "no art", is the end of the ladder.
-    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: true });
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: true, small: true });
     assert!(app.art_retry.is_empty());
 }
 
@@ -7365,7 +7365,7 @@ fn a_long_auto_dj_session_keeps_the_art_cache_at_its_cap() {
     for n in 0..400 {
         app.push_queue(track_with_cover(&format!("lib/{n}.mp3"), &format!("{n}.jpeg")));
         app.play_index(n);
-        app.apply_event(Event::AlbumArt { file: format!("{n}.jpeg"), art: Some(art.clone()), settled: true });
+        app.apply_event(Event::AlbumArt { file: format!("{n}.jpeg"), art: Some(art.clone()), settled: true, small: false });
     }
     assert_eq!(app.art.len(), ART_CACHE_CAP, "one out, one in, however long the queue");
     assert!(now_art(&app).is_some(), "and the playing cover is never the one that goes");
@@ -7415,7 +7415,7 @@ fn nothing_the_gui_last_drew_is_evicted_for_a_late_answer() {
     }
     let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
     for i in 0..ART_CACHE_CAP {
-        app.apply_event(Event::AlbumArt { file: format!("old{i}.jpeg"), art: Some(art.clone()), settled: true });
+        app.apply_event(Event::AlbumArt { file: format!("old{i}.jpeg"), art: Some(art.clone()), settled: true, small: true });
     }
     assert!(app.art.len() <= ART_CACHE_CAP);
     assert!(page.iter().all(|file| app.art.contains_key(file)), "the wall's page stands");
@@ -7488,7 +7488,7 @@ fn a_page_of_covers_is_asked_small_top_cell_last_and_what_it_evicted_unasked_is_
     }
     let answered = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
     for i in 0..10 {
-        app.apply_event(Event::AlbumArt { file: format!("old{i}.jpeg"), art: Some(answered.clone()), settled: true });
+        app.apply_event(Event::AlbumArt { file: format!("old{i}.jpeg"), art: Some(answered.clone()), settled: true, small: true });
     }
     let page: Vec<String> = (0..20).map(|i| format!("page{i}.jpeg")).collect();
     app.set_wall_on_view(page.clone());
@@ -7508,4 +7508,51 @@ fn a_page_of_covers_is_asked_small_top_cell_last_and_what_it_evicted_unasked_is_
     app.replace_queue(vec![track_with_cover("lib/a.mp3", "playing.jpeg")]);
     let effects = app.play_index(0);
     assert!(effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::AlbumArt { small: false, file, .. }) if file == "playing.jpeg")));
+}
+
+#[test]
+fn the_playing_track_asks_for_the_original_of_a_cover_the_wall_fetched_small() {
+    // Performance audit #92: wall cells and queue rows ask for the
+    // server's 256 px copy; the playing track's big box may draw the
+    // original's pixels, so it asks for that — once — and shows the small
+    // copy meanwhile.
+    let mut app = connected_app();
+    let small = crate::tui::art::Art::from_rgb(1, 1, vec![1, 1, 1]).unwrap();
+    let full = crate::tui::art::Art::from_rgb(1, 1, vec![9, 9, 9]).unwrap();
+    assert!(matches!(app.fetch_art_file("aa.jpeg"), Some(Effect::Api(ApiCmd::AlbumArt { small: true, .. }))));
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(small.clone()), settled: true, small: true });
+
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
+    let original = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None, small: false });
+    assert!(app.play_index(0).contains(&original), "the original, for the big box");
+    assert_eq!(now_art(&app), Some(&small), "the small copy stands in until it lands");
+    assert!(app.fetch_queue_art(0).is_none(), "and the row does not ask small again");
+
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(full.clone()), settled: true, small: false });
+    assert_eq!(now_art(&app), Some(&full));
+    assert!(!app.play_index(0).contains(&original), "asked once");
+}
+
+#[test]
+fn a_small_copy_that_lands_after_the_original_was_asked_for_is_not_the_answer() {
+    let mut app = connected_app();
+    let small = crate::tui::art::Art::from_rgb(1, 1, vec![1, 1, 1]).unwrap();
+    app.fetch_art_file("aa.jpeg");
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
+    app.play_index(0);
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(small.clone()), settled: true, small: true });
+    assert_eq!(now_art(&app), None, "still waiting on the original");
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: false, small: true });
+    assert!(app.art.contains_key("aa.jpeg"), "and the small ask failing gives back nothing it no longer holds");
+
+    // The original failing where a small copy stands keeps the small copy.
+    let mut app = connected_app();
+    app.fetch_art_file("bb.jpeg");
+    app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: Some(small.clone()), settled: true, small: true });
+    app.replace_queue(vec![track_with_cover("lib/b.mp3", "bb.jpeg")]);
+    app.play_index(0);
+    app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: None, settled: false, small: false });
+    assert_eq!(now_art(&app), Some(&small));
+    let original = Effect::Api(ApiCmd::AlbumArt { file: "bb.jpeg".into(), reach: None, small: false });
+    assert!(app.play_index(0).contains(&original), "and the next start asks again");
 }

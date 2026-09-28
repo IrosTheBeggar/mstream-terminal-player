@@ -687,6 +687,11 @@ fn give_back<T>(
     {
         order.remove(at);
     }
+    climb(retry, name);
+}
+
+/// One more failure on `name`'s ladder.
+fn climb(retry: &mut HashMap<String, TunnelRetry>, name: String) {
     let now = crate::clock::Instant::now();
     let rung = retry.entry(name).or_insert(TunnelRetry { failed_at: now, failures: 0 });
     rung.failures += 1;
@@ -769,11 +774,19 @@ impl<'v> Claims<'v> {
         &mut self,
         art: &mut HashMap<String, Option<Art>>,
         order: &mut VecDeque<String>,
+        smalls: &mut HashSet<String>,
         file: &str,
         reach: Option<Reach>,
         small: bool,
     ) {
         if art.contains_key(file) {
+            // The playing track's big box wants the original's pixels: a
+            // cover the wall or the queue fetched small is asked for again
+            // at full size, and shows its small copy until that lands
+            // (performance audit #92).
+            if !small && smalls.remove(file) {
+                self.asks.push(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach, small }));
+            }
             return;
         }
         if art.len() >= ART_CACHE_CAP {
@@ -781,11 +794,17 @@ impl<'v> Claims<'v> {
             while art.len() >= ART_CACHE_CAP
                 && let Some((name, value)) = evict_oldest(art, order, pinned)
             {
+                smalls.remove(&name);
                 self.withdrawn.extend(withdrawal(name, value));
             }
         }
         art.insert(file.to_string(), None);
         order.push_back(file.to_string());
+        if small {
+            smalls.insert(file.to_string());
+        } else {
+            smalls.remove(file);
+        }
         self.asks.push(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach, small }));
     }
 }
@@ -1981,6 +2000,10 @@ pub struct App {
     /// What the GUI last drew covers for — what eviction leaves alone,
     /// with the playing track's (performance audit #91).
     art_on_view: ArtOnView,
+    /// The covers whose entry — decoded or still asked for — is the
+    /// server's 256 px copy rather than the original (performance audit
+    /// #92): what the playing track asks for again at full size.
+    art_small: HashSet<String>,
     /// Track shapes fetched this session, keyed by filepath. `None` records
     /// both "asked, nothing there" and "asked, still waiting" — the bar draws
     /// the same either way, and the entry is what stops a second request.
@@ -2161,6 +2184,7 @@ impl App {
             waveforms: HashMap::new(),
             waveform_order: VecDeque::new(),
             art_retry: HashMap::new(),
+            art_small: HashSet::new(),
             art_on_view: ArtOnView::default(),
             waveform_retry: HashMap::new(),
             graphics: crate::tui::graphics::Graphics::disabled(),
@@ -5146,7 +5170,11 @@ impl App {
         // A row whose own server cannot be reached shows no cover rather
         // than the session server's file of the same name.
         let Ok(reach) = self.playing_row_reach() else { return Vec::new() };
-        self.fetch_art_from(&file, reach, false)
+        // The original, for the big box a pixel protocol may draw it in —
+        // except in the browser, which keeps no source bytes and decodes
+        // on its only thread: there every cover is the small copy
+        // (performance audit #92).
+        self.fetch_art_from(&file, reach, cfg!(target_arch = "wasm32"))
     }
 
     /// The playing row's own server when it is not the session's (contract
@@ -5205,11 +5233,11 @@ impl App {
     /// After the first frame of a page this is hashmap lookups, and a
     /// cover waiting out a failed ask's rung is not owed yet.
     pub(crate) fn claim_wall_art(&mut self) -> Vec<Effect> {
-        let App { art, art_order, art_retry, queue, now_playing, art_on_view, .. } = self;
+        let App { art, art_order, art_small, art_retry, queue, now_playing, art_on_view, .. } = self;
         let mut claims = Claims::new(queue, now_playing.as_ref(), art_on_view);
         for file in &art_on_view.wall {
             if !art.contains_key(file) && !backing_off(art_retry, file) {
-                claims.claim(art, art_order, file, None, true);
+                claims.claim(art, art_order, art_small, file, None, true);
             }
         }
         claims.into_effects()
@@ -5253,11 +5281,11 @@ impl App {
         if asks.is_empty() {
             return Vec::new();
         }
-        let App { art, art_order, queue, now_playing, art_on_view, .. } = self;
+        let App { art, art_order, art_small, queue, now_playing, art_on_view, .. } = self;
         let mut claims = Claims::new(queue, now_playing.as_ref(), art_on_view);
         for (index, reach) in asks {
             if let Some(file) = queue.items[index].metadata.album_art.as_deref() {
-                claims.claim(art, art_order, file, reach, true);
+                claims.claim(art, art_order, art_small, file, reach, true);
             }
         }
         claims.into_effects()
@@ -5273,9 +5301,9 @@ impl App {
     /// the playing track's (see [`ApiCmd::AlbumArt`]) — with whatever the
     /// claim let go of withdrawn first.
     fn fetch_art_from(&mut self, file: &str, reach: Option<Reach>, small: bool) -> Vec<Effect> {
-        let App { art, art_order, queue, now_playing, art_on_view, .. } = self;
+        let App { art, art_order, art_small, queue, now_playing, art_on_view, .. } = self;
         let mut claims = Claims::new(queue, now_playing.as_ref(), art_on_view);
-        claims.claim(art, art_order, file, reach, small);
+        claims.claim(art, art_order, art_small, file, reach, small);
         claims.into_effects()
     }
 
@@ -5858,26 +5886,51 @@ impl App {
                 }
             },
             Event::DiscoveryProbe { available } => self.consume_discovery_probe(available),
-            Event::AlbumArt { file, art, settled } => {
+            Event::AlbumArt { file, art, settled, small } => {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just
                 // means the next track off that album finds its cover
                 // already here — and one whose claim the cache let go of
                 // meanwhile is filed where eviction can still reach it
-                // (`file_answer`). An unanswered question gives its slot
-                // back instead — the waveform's rule, learned here the
-                // hard way: a fetch that died with the wifi used to leave
-                // the album coverless for the rest of the session. The
-                // failure goes on the ladder, so the surfaces that ask
-                // every frame ask again in seconds, not every frame.
+                // (`file_answer`). The one exception is a small copy that
+                // lands after the playing track asked for the original:
+                // not the answer the entry is waiting for (performance
+                // audit #92).
+                if small && self.art.contains_key(&file) && !self.art_small.contains(&file) {
+                    return Vec::new();
+                }
+                // An unanswered question gives its slot back instead — the
+                // waveform's rule, learned here the hard way: a fetch that
+                // died with the wifi used to leave the album coverless for
+                // the rest of the session. The failure goes on the ladder,
+                // so the surfaces that ask every frame ask again in
+                // seconds, not every frame.
                 if settled {
                     self.art_retry.remove(&file);
+                    if small {
+                        self.art_small.insert(file.clone());
+                    } else {
+                        self.art_small.remove(&file);
+                    }
                     let (queue, now_playing, view) = (&self.queue, self.now_playing.as_ref(), &self.art_on_view);
                     let evicted = file_answer(&mut self.art, &mut self.art_order, file, art, || {
                         pinned_art(queue, now_playing, view)
                     });
-                    evicted.into_iter().filter_map(|(name, value)| withdrawal(name, value)).collect()
+                    evicted
+                        .into_iter()
+                        .filter_map(|(name, value)| {
+                            self.art_small.remove(&name);
+                            withdrawal(name, value)
+                        })
+                        .collect()
+                } else if !small && self.art.get(&file).is_some_and(|held| held.is_some()) {
+                    // The original failed where a small copy stands: keep
+                    // showing that, and the next start asks again.
+                    self.art_small.insert(file.clone());
+                    climb(&mut self.art_retry, file);
+                    Vec::new()
                 } else {
+                    self.art_small.remove(&file);
                     give_back(&mut self.art, &mut self.art_order, &mut self.art_retry, file);
                     Vec::new()
                 }

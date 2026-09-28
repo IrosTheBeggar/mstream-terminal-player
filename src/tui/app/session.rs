@@ -675,6 +675,7 @@ impl App {
                 // come back doubled once a late answer files it again.
                 self.art.clear();
                 self.art_order.clear();
+                self.art_small.clear();
                 self.path_came_up();
                 let libraries = ping.vpaths.len();
                 self.info(format!(

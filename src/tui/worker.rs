@@ -212,7 +212,9 @@ pub enum ApiCmd {
     /// 30); `None` asks the session. `small`: a cover for a small surface —
     /// a wall cell, a queue row — rather than the playing track's. Those
     /// come a page at a time, so they wait their turn in their server's
-    /// art lane (performance audit #88); the playing cover never does.
+    /// art lane (performance audit #88); the playing cover never does. And
+    /// they ask for the server's 256 px copy, where the playing cover's
+    /// big box may want the original's pixels (performance audit #92).
     AlbumArt { file: String, reach: Option<crate::tui::app::Reach>, small: bool },
     /// The App let go of its claim on this cover before an answer came: a
     /// lane still holding the ask drops it unasked (performance audit #88).
@@ -569,8 +571,9 @@ pub enum Event {
     /// `settled` saying which kind of `None` it is: the server's word that
     /// there is no art (remembered), or a failure to ask (forgotten, so
     /// the next track off that album asks again). Art is a nicety: nothing
-    /// about it is ever worth a message the user has to read.
-    AlbumArt { file: String, art: Option<art::Art>, settled: bool },
+    /// about it is ever worth a message the user has to read. `small`
+    /// echoes the ask's: which copy of the cover this is.
+    AlbumArt { file: String, art: Option<art::Art>, settled: bool, small: bool },
     /// A track's shape, or `None` for every flavour of "there isn't one".
     /// Like art, never worth a message: the bar it decorates draws perfectly
     /// well without it.
@@ -1403,7 +1406,7 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
         ApiCmd::Search { query, generation } => {
             c.search(&query).map(|r| Event::SearchResults { query, results: Box::new(r), generation })
         }
-        ApiCmd::AlbumArt { file, .. } => {
+        ApiCmd::AlbumArt { file, small, .. } => {
             // The waveform's rule, because this cache burned without it: a
             // 404 and bytes that won't decode are the server's own word
             // that there is no art — settled, remembered, never asked
@@ -1412,10 +1415,10 @@ fn answer(client: Option<&Client>, cmd: ApiCmd) -> Event {
             // album coverless for the rest of the session. Decoded here so
             // the render loop only ever meets covers already at terminal
             // scale.
-            let answer = c.album_art(&file);
+            let answer = c.album_art(&file, small);
             let settled = matches!(&answer, Ok(_) | Err(ApiError::NotFound(_)));
             let art = answer.ok().and_then(|bytes| art::decode(&bytes));
-            Ok(Event::AlbumArt { file, art, settled })
+            Ok(Event::AlbumArt { file, art, settled, small })
         }
         ApiCmd::Waveform { filepath, .. } => {
             // Same rule as art: a shape nobody could draw is not news. The
