@@ -29,7 +29,7 @@ use crate::tui::art::Art;
 /// surface paces its own frame's work; two on screen at once (the wall
 /// with the queue open) can spend two budgets, which kitty never reaches
 /// and sixel rations either way.
-const ENCODE_BUDGET: Duration = Duration::from_millis(40);
+pub(super) const ENCODE_BUDGET: Duration = Duration::from_millis(40);
 
 /// One slot's drawing state: its own pixel-protocol cache and its own
 /// mosaic grid, so neither thrashes when a whole page draws in one frame.
