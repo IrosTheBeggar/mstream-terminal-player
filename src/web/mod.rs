@@ -172,8 +172,10 @@ impl Backend for Canvas {
 /// frame.
 ///
 /// Frames still go through `window.requestAnimationFrame`, so index.html's
-/// hidden-page stand-in keeps a backgrounded tab's frames coming; its
-/// timers the browser throttles to about one a second, which is plenty.
+/// hidden-page stand-in keeps a backgrounded tab's frames coming — a frame
+/// already asked for when the tab hides included, which the browser would
+/// otherwise hold, and the loop with it, until the tab is shown.
+/// Its timers the browser throttles to about one a second, which is plenty.
 #[derive(Clone)]
 struct Alarm(Rc<AlarmState>);
 
@@ -281,14 +283,15 @@ pub fn run() {
 /// Start the shell — once there is somewhere to draw.
 ///
 /// An embedded or backgrounded page can finish loading before its pane has
-/// any layout: the window measures 0×0, ratzilla builds a zero-cell grid
-/// from it, and the only thing that would ever rebuild the grid is a resize
-/// event a pane that is merely *revealed* may never send. Worse, a viewport
-/// that appears between the backend measuring and the first draw leaves the
-/// buffer and the grid disagreeing about the size, and the draw indexes out
-/// of ratzilla's empty cell list — the whole tab down. So: no layout yet, no
-/// boot; try again next frame. (index.html keeps animation frames ticking
-/// while the page is hidden, so the retry runs even unseen.)
+/// any layout: the window measures 0×0, the backend sizes itself from that
+/// — the canvas to a one-cell grid, the DOM fallback to a zero-cell one —
+/// and the only thing that would ever size it again is a resize event a
+/// pane that is merely *revealed* may never send. Worse, on the DOM grid a
+/// viewport that appears between the backend measuring and the first draw
+/// leaves the buffer and the grid disagreeing about the size, and the draw
+/// indexes out of ratzilla's empty cell list — the whole tab down. So: no
+/// layout yet, no boot; try again next frame. (index.html keeps animation
+/// frames coming while the page is hidden, so the retry runs even unseen.)
 fn boot() {
     let window = ratzilla::web_sys::window();
     let px = |v: Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>| {

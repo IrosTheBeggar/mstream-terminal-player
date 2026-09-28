@@ -31,19 +31,40 @@
       });
     </script>
     <script>
-      // The terminal renders on requestAnimationFrame, which browsers stop
-      // delivering to hidden pages — an embedded or backgrounded demo would
-      // sit unpainted until first shown. While hidden, substitute a slow
-      // timer (browsers throttle it to ~1Hz, which is plenty); hand back to
-      // real frames the moment the page is visible.
+      // The shell's loop takes the next animation frame whenever something
+      // is waiting to be seen (src/web/mod.rs), and browsers stop
+      // delivering frames to hidden pages — an embedded or backgrounded
+      // demo would sit unpainted until first shown, and a frame asked for
+      // just before the tab was hidden would hold the loop, and the next
+      // track, until the tab came back. While hidden, substitute a slow
+      // timer (browsers throttle it to ~1Hz, which is plenty), and move a
+      // frame still waiting when the page hides onto one; hand back to
+      // real frames the moment the page is visible. (Nothing here cancels
+      // a frame, so a moved one needs no forwarding address.)
       (function () {
         const native = window.requestAnimationFrame.bind(window);
-        window.requestAnimationFrame = function (cb) {
-          if (document.visibilityState === "hidden") {
-            return setTimeout(function () { cb(performance.now()); }, 250);
-          }
-          return native(cb);
+        const cancel = window.cancelAnimationFrame.bind(window);
+        const standIn = function (cb) {
+          return setTimeout(function () { cb(performance.now()); }, 250);
         };
+        const waiting = new Map();
+        window.requestAnimationFrame = function (cb) {
+          if (document.visibilityState === "hidden") return standIn(cb);
+          const id = native(function (t) {
+            waiting.delete(id);
+            cb(t);
+          });
+          waiting.set(id, cb);
+          return id;
+        };
+        document.addEventListener("visibilitychange", function () {
+          if (document.visibilityState !== "hidden") return;
+          waiting.forEach(function (cb, id) {
+            cancel(id);
+            standIn(cb);
+          });
+          waiting.clear();
+        });
       })();
     </script>
     <script>
