@@ -7360,6 +7360,33 @@ fn failed_asks_leave_no_names_behind_in_the_eviction_order() {
 }
 
 #[test]
+fn a_long_outage_across_a_big_wall_leaves_only_the_rungs_still_worth_keeping() {
+    // The review of performance audit #89: a rung went only with a settled
+    // answer or a way coming up, so an outage browsed across a big wall
+    // left one behind per cover shown, outside any cap.
+    let mut app = connected_app();
+    for i in 0..RETRY_KEPT - 30 {
+        let name = format!("gone{i}.jpeg");
+        app.fetch_art_file(&name);
+        app.apply_event(unanswered(&name));
+        age_rung(&mut app.art_retry, &name, 180);
+    }
+    for i in 0..30 {
+        let name = format!("near{i}.jpeg");
+        app.fetch_art_file(&name);
+        app.apply_event(unanswered(&name));
+        app.apply_event(unanswered(&name));
+    }
+    assert_eq!(app.art_retry.len(), RETRY_KEPT, "under the bound, nothing goes");
+
+    app.fetch_art_file("new.jpeg");
+    app.apply_event(unanswered("new.jpeg"));
+    assert_eq!(app.art_retry.len(), 31, "past it, the rungs two minutes old go");
+    assert!((0..30).all(|i| app.art_retry[&format!("near{i}.jpeg")].failures == 2), "the rest keep their place");
+    assert!(app.fetch_art_file("gone0.jpeg").is_some(), "and a name let go is asked as it was, its wait long over");
+}
+
+#[test]
 fn the_next_tracks_shape_whose_ask_failed_is_not_asked_after_every_event() {
     // Performance audit #89: the prefetch runs after every event, so a
     // failing next-track shape was asked for ten times a second.

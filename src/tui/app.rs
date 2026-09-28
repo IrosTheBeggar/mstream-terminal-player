@@ -690,9 +690,26 @@ fn give_back<T>(
     climb(retry, name);
 }
 
+/// How many names a ladder holds before its stale rungs go. A rung is kept
+/// past its wait so the next failure climbs from it, but only a settled
+/// answer or a way coming up cleared one, so a long outage browsed across
+/// a big wall left a rung behind for every cover it showed (the review of
+/// performance audit #89).
+const RETRY_KEPT: usize = 4 * ART_CACHE_CAP;
+/// A rung this old is past its wait by a minute and more. A surface still
+/// showing its name has asked again long since; one no longer showing it
+/// will start from the bottom rung if it ever fails again.
+const RETRY_STALE: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// One more failure on `name`'s ladder.
 fn climb(retry: &mut HashMap<String, TunnelRetry>, name: String) {
     let now = crate::clock::Instant::now();
+    // Swept each time the ladder has grown by another bound's worth, so
+    // an outage's run of fresh failures pays one sweep per thousand names
+    // rather than one per name.
+    if retry.len() >= RETRY_KEPT && retry.len() % RETRY_KEPT == 0 && !retry.contains_key(&name) {
+        retry.retain(|_, rung| rung.failed_at.elapsed() < RETRY_STALE);
+    }
     let rung = retry.entry(name).or_insert(TunnelRetry { failed_at: now, failures: 0 });
     rung.failures += 1;
     rung.failed_at = now;
