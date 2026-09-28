@@ -260,4 +260,5 @@ and no strip, and hide for a peer.
   it: still a fresh drill at the root, as the flows say, without the
   request. Choosing the room already up asks again, the way to see a
   rescan (the wall has none yet). Recent and the play lists ask every
-  time; a new server forgets both.
+  time; a new server forgets both, and so does another account signing
+  in on the same one, which may see other libraries.

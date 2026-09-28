@@ -653,6 +653,15 @@ impl App {
                 if token.is_some() {
                     self.session.token = token;
                 }
+                if username.is_some() && username != self.session.username {
+                    // Another account on the same server can see other
+                    // libraries: the Artists and Genres lists kept for the
+                    // rooms were the last one's (performance audit #99). The
+                    // album wall keeps its own lifecycle — dropped while it
+                    // stands, it would wait on an ask nothing sent.
+                    self.artists = None;
+                    self.genre_list = None;
+                }
                 if username.is_some() {
                     self.session.username = username;
                 }

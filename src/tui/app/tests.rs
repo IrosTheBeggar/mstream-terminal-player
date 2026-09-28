@@ -4771,6 +4771,26 @@ fn the_artists_and_genres_lists_are_kept_for_the_session_and_seat_a_return() {
     app.shed_server_state();
     assert!(app.artists.is_none() && app.genre_list.is_none());
     assert!(asks(&app.open_library_node(LibraryNode::Artists, true), LibraryNode::Artists));
+
+    // And with the account (the review's note): a reconnect as the same
+    // user, or one that names none, keeps them; another user on the same
+    // server may see other libraries, and forgets them.
+    let connected = |username: Option<&str>| Event::Connected {
+        server: "http://host:3000".into(),
+        id: "http://host:3000".into(),
+        username: username.map(str::to_string),
+        token: None,
+        ping: Box::default(),
+    };
+    app.apply_event(connected(Some("alice")));
+    app.artists = Some(vec!["Air".into()]);
+    app.genre_list = Some(Vec::new());
+    app.apply_event(connected(Some("alice")));
+    app.apply_event(connected(None));
+    assert!(app.artists.is_some() && app.genre_list.is_some(), "the same account keeps its lists");
+    app.apply_event(connected(Some("bob")));
+    assert!(app.artists.is_none() && app.genre_list.is_none(), "another account's are not its own");
+    assert!(asks(&app.open_library_node(LibraryNode::Artists, true), LibraryNode::Artists));
 }
 
 #[test]
