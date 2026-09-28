@@ -313,16 +313,9 @@ fn draw_card(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, y: u16, v: &Ba
                 put(frame, fx, y + 3, &glyphs, Style::default().fg(th().gold));
                 fx += glyphs.chars().count() as u16 + 2;
             }
-            let mut facts: Vec<String> = Vec::new();
-            if let Some(key) = now.key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
-                facts.push(format!("{} {key}", if legacy_conhost() { "key" } else { "♪" }));
-            }
-            if let Some(bpm) = now.bpm.filter(|b| *b > 0) {
-                facts.push(format!("{bpm} BPM"));
-            }
-            if !facts.is_empty() {
+            if let Some(facts) = facts(now) {
                 let room = (area.width - 1).saturating_sub(fx) as usize;
-                put(frame, fx, y + 3, &clip(&facts.join(" · "), room), dim());
+                put(frame, fx, y + 3, &clip(&facts, room), dim());
             }
         }
         None => put(frame, tx, y, &t!("gui.nothing_playing"), sub_style),
@@ -385,6 +378,19 @@ fn draw_gold_bar(frame: &mut Frame, s: &mut Surface<Act>, area: Rect, top: u16, 
     draw_volume(frame, s, 1, top + 4, v.volume);
 
     draw_card(frame, s, area, y, v);
+}
+
+/// The card's last facts after the stars: the key and the tempo, where the
+/// track has them — `♪ 8A · 120 BPM`. The mini player says them the same.
+pub(super) fn facts(now: &Now) -> Option<String> {
+    let mut facts: Vec<String> = Vec::new();
+    if let Some(key) = now.key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
+        facts.push(format!("{} {key}", if legacy_conhost() { "key" } else { "♪" }));
+    }
+    if let Some(bpm) = now.bpm.filter(|b| *b > 0) {
+        facts.push(format!("{bpm} BPM"));
+    }
+    (!facts.is_empty()).then(|| facts.join(" · "))
 }
 
 fn card_styles(hover: bool, playing: bool) -> (Style, Style) {

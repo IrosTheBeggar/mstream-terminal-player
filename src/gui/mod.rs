@@ -3788,8 +3788,14 @@ mod tests {
         let lines = rows(&terminal);
         let all = lines.join("\n");
         let area = Rect { x: 0, y: 0, width: 70, height: 20 };
-        for (x, y, piece) in mini::layout(area, &t!("gui.mini.enlarge")).lines {
+        let (_, plan) = mini::plan(&gui, area);
+        for (x, y, piece) in plan.lines {
             assert!(lines[y as usize][..].contains(&piece), "the line asks for room, {piece:?} at {x},{y}:\n{all}");
+        }
+        // The song, the card's way: the demo seat's title, artist and album.
+        let block = plan.words.expect("the song's lines");
+        for (row, word) in ["Cassini IV", "Vela — Cassini", "Cassini · 2019"].iter().enumerate() {
+            assert!(lines[block.y as usize + row].contains(word), "{word:?}:\n{all}");
         }
         assert!(!all.contains("auto-dj") && !all.contains("Files"), "no bar, no rooms:\n{all}");
         assert!(all.contains('╭'), "the empty cover slot, nothing decoded yet:\n{all}");
@@ -3818,7 +3824,7 @@ mod tests {
         gui.app.art.insert("aa.jpeg".into(), Some(crate::tui::art::decode(&bytes.into_inner()).unwrap()));
 
         let area = Rect { x: 0, y: 0, width: 70, height: 20 };
-        let cover = mini::layout(area, &t!("gui.mini.enlarge")).cover.expect("room for a cover");
+        let cover = mini::plan(&gui, area).1.cover.expect("room for a cover");
         let mut terminal = Terminal::new(TestBackend::new(70, 20)).unwrap();
         terminal.draw(|frame| render(frame, &mut gui)).unwrap();
         let lines = rows(&terminal);
@@ -3830,7 +3836,7 @@ mod tests {
         terminal.draw(|frame| render(frame, &mut gui)).unwrap();
         let all = rows(&terminal).join("\n");
         assert!(all.contains("auto-dj"), "the bar is back:\n{all}");
-        let first = mini::layout(area, &t!("gui.mini.enlarge")).lines.remove(0).2;
+        let first = mini::plan(&gui, area).1.lines.remove(0).2;
         assert!(!all.contains(&first), "and the line is gone:\n{all}");
     }
     // ── The browser bar ─────────────────────────────────────────────────

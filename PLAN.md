@@ -2161,8 +2161,10 @@ a LATER secondary screen (party view), Columns retired.
 - **The mini player ✅ 2026-09-27** (docs/ux-contracts/mini-player.md) —
   below the 100×24 the screens need, the GUI no longer draws one dim line:
   it draws the playing track's cover (pixels or mosaic, the card's two
-  paths), prev · play · next in the bar's own frames, and a line asking for
-  room. The cover is stacked over the frames in a tall or narrow window and
+  paths), the song's words the card's way (title, artist, album · year,
+  spec, stars · key · tempo — the title and artist before the cover, the
+  album after it, the rest only in room the cover cannot use), prev · play
+  · next in the bar's own frames, and a line asking for room. The cover is stacked over the frames in a tall or narrow window and
   beside them in a short wide one, whichever draws it larger, never under
   the card's 8×4; below the frames' 22 columns the line stands alone, as
   before. Growing back returns the screen untouched. `src/gui/mini.rs`,
