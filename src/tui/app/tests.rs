@@ -2250,6 +2250,22 @@ fn every_change_to_the_queues_rows_moves_its_revision() {
     let path = app.queue.items[0].filepath.clone();
     app.rate_track(&origin, &path, Some(6));
     moved(&app, "a rating written into the row");
+    let mut block = track(&path);
+    block.metadata.title = Some("Learned".into());
+    app.consume_track_info(path.clone(), Some(block));
+    moved(&app, "a tag the row lacked, filled in from the details block");
+
+    // The review of #106: a block that only confirms what the row already
+    // says — a sheet opened on a tagged track — is no change to the rows,
+    // and neither is the rating the row already wears.
+    let still = app.queue.rev();
+    let mut block = track(&path);
+    block.metadata.title = Some("Other".into());
+    block.metadata.rating = Some(6);
+    app.consume_track_info(path.clone(), Some(block));
+    app.rate_track(&origin, &path, Some(6));
+    assert_eq!(app.queue.items[0].track.metadata.title.as_deref(), Some("Learned"), "a fill, not an overwrite");
+    assert_eq!(app.queue.rev(), still, "a details block with nothing new moves nothing");
     app.queue.clear();
     moved(&app, "a clear");
 
