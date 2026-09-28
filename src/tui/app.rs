@@ -506,11 +506,24 @@ impl Pane {
     /// Narrow to the rows whose name contains `filter`, ignoring case. An
     /// empty filter puts everything back.
     pub fn apply_filter(&mut self, filter: String) {
+        let needle = filter.trim().to_lowercase();
+        let shown = self.filter.trim().to_lowercase();
+        // A key that only adds to the needle can only take rows away: a name
+        // holding the new needle holds the old one inside it, so the rows on
+        // screen are the only candidates, and they narrow where they stand.
+        // Rescanning the whole list cloned every match again on every key —
+        // ~2 ms a key at 5,000 tracks, ~10 at 30,000 (performance audit
+        // #111). A widening edit still starts from the whole list.
+        if self.unfiltered.is_some() && !shown.is_empty() && needle.contains(shown.as_str()) {
+            self.entries.retain(|entry| entry.matches(&needle));
+            self.filter = filter;
+            self.rest_cursor();
+            return;
+        }
         let all = self
             .unfiltered
             .take()
             .unwrap_or_else(|| std::mem::take(&mut self.entries));
-        let needle = filter.trim().to_lowercase();
         self.filter = filter;
         if needle.is_empty() {
             self.entries = all;

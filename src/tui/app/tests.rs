@@ -223,6 +223,49 @@ fn a_filter_narrows_the_list_without_losing_the_way_out() {
 }
 
 #[test]
+fn a_growing_filter_narrows_what_is_shown_and_ends_where_a_fresh_one_would() {
+    // Performance audit #111: a key that only adds to the needle narrows
+    // the rows on screen in place rather than rescanning (and re-cloning)
+    // the whole list — and every step must show exactly what typing the
+    // same text into an unfiltered list shows, in the same order.
+    let names: Vec<String> = (0..400).map(|i| format!("{} Band {i}", ["Amber", "AMBIENT", "Bass", "Ämber"][i % 4])).collect();
+    let dirs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let shown = |app: &App| labels(app).into_iter().map(str::to_string).collect::<Vec<_>>();
+    let fresh = |text: &str| {
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &dirs, &["amber solo.mp3"]))));
+        app.pane_mut().apply_filter(text.to_string());
+        shown(&app)
+    };
+    let mut app = connected_app();
+    app.apply_event(Event::Listing(Box::new(listing("/lib/", &dirs, &["amber solo.mp3"]))));
+    type_filter(&mut app, "");
+    for (typed, key) in [("a", 'a'), ("am", 'm'), ("amb", 'b'), ("amb ", ' '), ("amb b", 'b'), ("amb b1", '1')] {
+        let rows = app.pane().entries.as_ptr();
+        app.handle_action(Action::Input(key));
+        assert_eq!(shown(&app), fresh(typed), "after {typed:?}");
+        if typed.len() > 1 {
+            assert_eq!(app.pane().entries.as_ptr(), rows, "{typed:?} narrowed the rows where they stand");
+        }
+    }
+    assert_eq!(labels(&app)[0], "..", "the way out survives every step");
+    assert_eq!(app.pane().counts().1, 401, "and nothing was lost behind the filter");
+
+    // Widening — a Backspace, or an edit that is not a longer needle —
+    // starts again from the whole list.
+    app.handle_action(Action::Backspace);
+    assert_eq!(shown(&app), fresh("amb b"));
+    for _ in 0..3 {
+        app.handle_action(Action::Backspace);
+    }
+    assert_eq!(shown(&app), fresh("am"));
+    app.pane_mut().apply_filter("bass".into());
+    assert_eq!(shown(&app), fresh("bass"));
+    app.pane_mut().apply_filter(String::new());
+    assert_eq!(labels(&app).len(), 402);
+}
+
+#[test]
 fn a_filter_survives_being_typed_but_not_a_new_listing() {
     let mut app = connected_app();
     app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Alpha", "Beta"], &[]))));
