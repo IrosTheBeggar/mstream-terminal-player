@@ -60,6 +60,10 @@ pub(crate) struct Output {
     /// missing or broken device is still an error at launch — and the
     /// engine suspends it once nothing has needed it for a while.
     awake: bool,
+    /// Up for as long as the device callback is inside a pull, raised and
+    /// lowered by the callback itself — see [`Output::suspend`] for why a
+    /// pull in flight matters.
+    pulling: Arc<AtomicBool>,
     /// The device stream. Declared last so it drops last, after the mixer,
     /// the order rodio's own sink keeps.
     stream: cpal::Stream,
@@ -83,8 +87,19 @@ impl Output {
     /// True when the stream is now asleep. A backend that cannot pause
     /// keeps running (cpal's ALSA host swallows the error on raw hardware
     /// without pause support), which costs what it always did.
+    ///
+    /// Never under a pull in flight. Pausing waits for the callback it
+    /// interrupts — CoreAudio's AudioDeviceStop queues on the lock the IO
+    /// thread holds through the callback — and a pull can be stuck: a
+    /// track whose download stalled parks the callback in the decoder's
+    /// read until the network answers, audit #48's wait. The suspend held
+    /// the tick there, and every control queued behind it (review of
+    /// audit #75). A stream mid-pull is left running and asked again at a
+    /// later tick. A callback that is not pulling cannot start a pull that
+    /// blocks, as long as the engine is at rest: a paused player never
+    /// reads its decoder, and a stopped one has left the mixer.
     pub(crate) fn suspend(&mut self) -> bool {
-        if !self.awake || self.is_dead() {
+        if !self.awake || self.is_dead() || self.pulling.load(Ordering::Acquire) {
             return false;
         }
         match self.stream.pause() {
@@ -224,10 +239,19 @@ pub(crate) fn open() -> Result<Output, String> {
     for device in candidates {
         let name = name_of(&device);
         let gone = Arc::new(AtomicBool::new(false));
-        match open_on(&device, error_callback(name.clone(), gone.clone())) {
+        let pulling = Arc::new(AtomicBool::new(false));
+        match open_on(&device, error_callback(name.clone(), gone.clone()), &pulling) {
             Ok((stream, mixer)) => {
                 etrace!("output opened on {name}");
-                return Ok(Output { mixer, name, default_at_open, gone, awake: true, stream });
+                return Ok(Output {
+                    mixer,
+                    name,
+                    default_at_open,
+                    gone,
+                    awake: true,
+                    pulling,
+                    stream,
+                });
             }
             Err(e) => {
                 first_err.get_or_insert(e);
@@ -269,7 +293,11 @@ fn error_callback(
 /// default config with rodio's ~50 ms fixed buffer first, then every
 /// config the device lists, in rodio's order, at the device's own buffer
 /// size — a fixed size is refused by some devices.
-fn open_on<E>(device: &cpal::Device, on_error: E) -> Result<(cpal::Stream, Mixer), String>
+fn open_on<E>(
+    device: &cpal::Device,
+    on_error: E,
+    pulling: &Arc<AtomicBool>,
+) -> Result<(cpal::Stream, Mixer), String>
 where
     E: FnMut(cpal::StreamError) + Clone + Send + 'static,
 {
@@ -279,11 +307,18 @@ where
         sample_rate: default.sample_rate(),
         buffer_size: BufferSize::Fixed(nearest_power_of_two(default.sample_rate() / 20)),
     };
-    start(device, default.sample_format(), &preferred, on_error.clone()).or_else(|first| {
+    let format = default.sample_format();
+    start(device, format, &preferred, on_error.clone(), pulling.clone()).or_else(|first| {
         let supported =
             rodio::stream::supported_output_configs(device).map_err(|_| first.clone())?;
         for config in supported {
-            let opened = start(device, config.sample_format(), &config.config(), on_error.clone());
+            let opened = start(
+                device,
+                config.sample_format(),
+                &config.config(),
+                on_error.clone(),
+                pulling.clone(),
+            );
             if opened.is_ok() {
                 return opened;
             }
@@ -295,12 +330,13 @@ where
 /// Build and start one stream: a fresh rodio mixer whose consuming half
 /// the device callback drains with rodio's own fill loop
 /// (`MixerDeviceSink::init_stream`), in whichever sample format the
-/// device asked for.
+/// device asked for — `pulling` up for the length of every pull.
 fn start<E>(
     device: &cpal::Device,
     format: SampleFormat,
     config: &StreamConfig,
     on_error: E,
+    pulling: Arc<AtomicBool>,
 ) -> Result<(cpal::Stream, Mixer), String>
 where
     E: FnMut(cpal::StreamError) + Send + 'static,
@@ -314,12 +350,14 @@ where
                 $(SampleFormat::$format => device.build_output_stream::<$ty, _, _>(
                     config,
                     move |data: &mut [$ty], _| {
+                        pulling.store(true, Ordering::Release);
                         for out in data.iter_mut() {
                             *out = samples
                                 .next()
                                 .map(Sample::from_sample)
                                 .unwrap_or(<$ty as Sample>::EQUILIBRIUM);
                         }
+                        pulling.store(false, Ordering::Release);
                     },
                     on_error,
                     None,

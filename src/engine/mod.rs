@@ -1316,26 +1316,41 @@ impl Engine {
         self.ensure_output();
     }
 
-    /// The tick's half of the device's sleep (performance audit #75). Once
-    /// the engine has been at rest long enough, the stream is suspended:
-    /// the callback stops, and the operating system stops keeping the audio
-    /// hardware — and on macOS the machine — awake for a player nobody is
-    /// listening to. Whenever the engine is not at rest the stream is
-    /// awake; the mutators wake it themselves, and this is the net under
-    /// any path that starts sound without asking. Nothing is lost by the
-    /// sleep: the rodio chain freezes where it stands, position and
-    /// decoder included.
-    fn rest_output(&self, s: &State) {
-        let mut w = self.output.lock().unwrap();
+    /// The tick's half of the device's sleep (performance audit #75), the
+    /// part made under the state lock. Whenever the engine is not at rest
+    /// the stream is awake; the mutators wake it themselves, and this is
+    /// the net under any path that starts sound without asking. At rest,
+    /// the answer is whether the rest is a stop (a pause otherwise), for
+    /// [`Engine::rest_output_after`] to act on once the state lock is let
+    /// go.
+    fn rest_output(&self, s: &State) -> Option<bool> {
         if !s.at_rest() {
+            let mut w = self.output.lock().unwrap();
             w.active_at = Instant::now();
             if !w.out.is_awake() {
                 etrace!("output woken by the tick");
                 w.out.wake();
             }
-            return;
+            return None;
         }
-        let after = if s.stopped { IDLE_STOPPED } else { IDLE_PAUSED };
+        Some(s.stopped)
+    }
+
+    /// Once the engine has been at rest long enough — [`IDLE_STOPPED`] or
+    /// [`IDLE_PAUSED`] — the stream is suspended: the callback stops, and
+    /// the operating system stops keeping the audio hardware — and on
+    /// macOS the machine — awake for a player nobody is listening to.
+    /// Nothing is lost by the sleep: the rodio chain freezes where it
+    /// stands, position and decoder included. Called with the state lock
+    /// let go: a suspend waits on the callback in flight, and nothing that
+    /// waits on the callback may hold the lock every control needs (audit
+    /// #48; [`output::Output::suspend`] also refuses a callback stuck
+    /// mid-pull). A command landing in between restarts the idle clock
+    /// through its own wake, so the verdict read under the lock cannot put
+    /// a new play to sleep.
+    fn rest_output_after(&self, stopped: bool) {
+        let after = if stopped { IDLE_STOPPED } else { IDLE_PAUSED };
+        let mut w = self.output.lock().unwrap();
         if !w.out.is_awake()
             || w.active_at.elapsed() < after
             || self.callback_waits.load(Ordering::Acquire) > 0
@@ -1345,7 +1360,7 @@ impl Engine {
         if w.out.suspend() {
             etrace!(
                 "output suspended ({} for {:.1}s)",
-                if s.stopped { "stopped" } else { "paused" },
+                if stopped { "stopped" } else { "paused" },
                 after.as_secs_f64()
             );
         }
@@ -2177,10 +2192,16 @@ impl Engine {
         Self::land_pause(&mut s);
         s.retire_outgoing();
         self.crossfade_step(&mut s);
-        // Asleep once at rest for long enough, awake otherwise — ahead of
-        // the advance below, which is never at rest (audit #75).
-        self.rest_output(&s);
+        // Awake unless at rest — ahead of the advance below, which is never
+        // at rest — and asleep once the rest has lasted (audit #75).
+        let resting = self.rest_output(&s);
         if !(s.sink.empty() && !s.stopped && !s.q.queue.is_empty()) {
+            // At rest always leaves here — stopped, or paused over a track
+            // still in the sink — and the sleep waits for the lock to go.
+            drop(s);
+            if let Some(stopped) = resting {
+                self.rest_output_after(stopped);
+            }
             return;
         }
         etrace!("track ran out (next={}, announced={})",
@@ -2716,6 +2737,58 @@ mod tests {
             }
         });
         format!("http://{addr}/stalling.wav")
+    }
+
+    /// A server that sends the first `sent_first` bytes of a long WAV and
+    /// holds the rest until the flag it hands back is raised — on every
+    /// connection, the download watchdog's range reconnects included, so
+    /// the stall lasts exactly as long as the test wants it to.
+    fn held_wav_server(seconds: usize, sent_first: usize) -> (String, Arc<AtomicBool>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let release = Arc::new(AtomicBool::new(false));
+        let released = release.clone();
+        std::thread::spawn(move || {
+            let body = Arc::new(wav_bytes(seconds));
+            for stream in listener.incoming().flatten() {
+                let (body, released) = (body.clone(), released.clone());
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut head = [0u8; 2048];
+                    let read = stream.read(&mut head).unwrap_or(0);
+                    let request = String::from_utf8_lossy(&head[..read]).to_ascii_lowercase();
+                    let from = request
+                        .split("range: bytes=")
+                        .nth(1)
+                        .and_then(|range| range.split('-').next())
+                        .and_then(|at| at.trim().parse::<usize>().ok());
+                    let start = from.unwrap_or(0).min(body.len());
+                    let status = match from {
+                        Some(_) => format!(
+                            "206 Partial Content\r\nContent-Range: bytes {start}-{}/{}",
+                            body.len() - 1,
+                            body.len()
+                        ),
+                        None => "200 OK".to_string(),
+                    };
+                    let sent = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: audio/wav\r\nAccept-Ranges: bytes\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len() - start
+                    );
+                    let held = sent_first.max(start);
+                    let _ = stream.write_all(sent.as_bytes());
+                    let _ = stream.write_all(&body[start..held]);
+                    let _ = stream.flush();
+                    while !released.load(Ordering::Acquire) {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    let _ = stream.write_all(&body[held..]);
+                });
+            }
+        });
+        (format!("http://{addr}/held.wav"), release)
     }
 
     /// `cargo test a_blocked_seek -- --ignored --nocapture` (local, no server)
@@ -5153,5 +5226,65 @@ mod tests {
         tick_for(&engine, IDLE_PAUSED + Duration::from_millis(300));
         assert!(!engine.output_awake(), "and lets it go when the wait ends");
         let _ = std::fs::remove_file(&tiny);
+    }
+
+    /// `cargo test a_pull_stuck -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_pull_stuck_on_the_network_keeps_the_device_and_not_the_controls() {
+        // A download that stalls mid-track parks the device callback in the
+        // decoder's read (audit #48's shape), and suspending the stream
+        // waits for the callback in flight. The sleep, tried under such a
+        // pull once a stop's threshold passed, held the tick — serve's
+        // loop, the TUI's audio thread, every control behind them — until
+        // the network answered (review of audit #75). The stream stays up
+        // instead, and sleeps once the pull comes back.
+        //
+        // The open wants about half a megabyte before it answers: three
+        // seconds of this WAV, then the hold.
+        let (url, release) = held_wav_server(30, 600_000);
+        let engine = Arc::new(Engine::new().unwrap());
+        engine.set_volume(0.0);
+        engine.play_source(url, Some(30.0)).unwrap();
+
+        // What arrived plays out and the position stops: the callback is
+        // waiting on the network.
+        let started = Instant::now();
+        let mut last = -1.0;
+        loop {
+            std::thread::sleep(Duration::from_millis(150));
+            let at = engine.status().position;
+            if at > 1.0 && at == last {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(8), "the stall never came ({at:.2})");
+            last = at;
+        }
+
+        // Stopped under the stuck pull, then ticked past everything a stop
+        // leaves to settle — its breath waits out the outgoing slack, the
+        // callback being in no state to play it — and the stopped
+        // threshold: the ticks come back, and so does status.
+        engine.stop();
+        let span = STOP_FADE + OUTGOING_SLACK + IDLE_STOPPED + Duration::from_millis(400);
+        let ticker = engine.clone();
+        within(span + Duration::from_secs(1), move || {
+            tick_for(&ticker, span);
+            assert!(ticker.settled(), "the stop has settled");
+        });
+        let asker = engine.clone();
+        assert!(!within(Duration::from_millis(500), move || asker.status()).playing);
+        assert!(engine.output_awake(), "a stream mid-pull is left running");
+
+        // The rest arrives, the pull returns, the stopped track leaves the
+        // mixer: now the stream sleeps.
+        release.store(true, Ordering::Release);
+        let ticker = engine.clone();
+        within(Duration::from_secs(8), move || {
+            while ticker.output_awake() {
+                ticker.advance_tick();
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        });
     }
 }
