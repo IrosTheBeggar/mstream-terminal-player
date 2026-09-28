@@ -20,6 +20,11 @@ use crate::engine::{Engine, EngineError};
 
 pub const API_VERSION: u32 = 1;
 
+/// How often the loop ticks the engine while a track plays: auto-advance,
+/// the device watch. Near a track's end the engine asks for sooner, and
+/// while settled for later — see `Engine::tick_wait`.
+const TICK: Duration = Duration::from_millis(250);
+
 pub struct ServeOptions {
     pub host: String,
     pub port: u16,
@@ -35,6 +40,12 @@ pub struct ServeOptions {
     /// Sample-tight transitions when no blend is configured. Same legacy
     /// stance: unreachable from `--port N`.
     pub gapless: bool,
+    /// With neither of those, open the next track ahead of its boundary
+    /// anyway, so the plain cut normally does not wait on the open; one
+    /// still running at the boundary leaves the cut to open the track
+    /// itself, as without (performance audit #77). Same legacy stance: a
+    /// prefetch is asked for, never assumed.
+    pub prefetch: bool,
 }
 
 // ── Request types (wire-compatible with rust-server-audio) ──────────────────
@@ -130,6 +141,9 @@ fn engine_error(e: EngineError, fallback: &str) -> Resp {
         EngineError::EndOfQueue => error_response("Already at end of queue"),
         EngineError::Seek(_) => error_response(&e.to_string()),
         EngineError::Unplayable(_) => error_response(fallback),
+        // Serve's routes never ask to be superseded; kept total for the
+        // match's sake, under the route's own play-failure message.
+        EngineError::Superseded => error_response(fallback),
     }
 }
 
@@ -315,6 +329,7 @@ pub fn run(opts: ServeOptions) -> Result<(), String> {
     let engine = Engine::new().map_err(|e| format!("could not initialize audio output: {}", e))?;
     engine.set_crossfade(opts.crossfade);
     engine.set_gapless(opts.gapless);
+    engine.set_prepare_plain(opts.prefetch);
 
     if opts.exit_with_parent {
         std::thread::spawn(|| {
@@ -346,7 +361,13 @@ pub fn run(opts: ServeOptions) -> Result<(), String> {
             eprintln!("[serve] {}", notice.text);
         }
 
-        let request = server.recv_timeout(Duration::from_millis(250));
+        // Settled, a second: the tick only has the device watch left to
+        // keep (performance audit #81). Near the end of a track, just past
+        // the moment it runs out, so the next starts on time rather than
+        // up to a whole TICK late — the hard cut stays a hard cut, only
+        // the silence the poll added to it goes (performance audit #76).
+        // A request still wakes recv the moment it lands.
+        let request = server.recv_timeout(engine.tick_wait(TICK));
         let request = match request {
             Ok(Some(r)) => r,
             Ok(None) => continue,

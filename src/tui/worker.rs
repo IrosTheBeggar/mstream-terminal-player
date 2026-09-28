@@ -35,10 +35,23 @@ use crate::player::PlayerStatus;
 use crate::tui::app::Tab;
 use crate::tui::art;
 
-/// How often the audio thread ticks the engine and publishes status. Also the
-/// upper bound on command latency, so keep it small enough to feel instant.
+/// How often the audio thread ticks the engine and publishes status while
+/// anything is moving: the end of a track, a blend's steps, the position
+/// the progress bar follows. A command never waits for it — the channel
+/// wakes the thread the moment one arrives.
 #[cfg(not(target_arch = "wasm32"))]
 const TICK: Duration = Duration::from_millis(120);
+
+/// The wait between ticks while the player is settled — stopped, or a
+/// landed pause, with nothing draining or opening. Nothing can change then
+/// without a command, and the tick's one standing job, the device watch,
+/// only polls once a second anyway. It was 120 ms regardless: ~8 wakeups a
+/// second for hours of a paused player, each publishing the same status
+/// (performance audit #81). A status still goes out every wake, so the UI
+/// keeps a once-a-second heartbeat, and every command batch still gets its
+/// own status straight after.
+#[cfg(not(target_arch = "wasm32"))]
+const SETTLED_TICK: Duration = crate::engine::DEVICE_POLL;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioCmd {
@@ -660,7 +673,9 @@ fn panic_note(panic: &(dyn std::any::Any + Send)) -> &str {
 /// A Play holds this thread through a whole open and format probe, so a run
 /// of them — someone leaning on `n` through remote tracks — used to be paid
 /// for one doomed fetch at a time, with every later command waiting in line
-/// behind opens for tracks nobody wanted any more (audit #50).
+/// behind opens for tracks nobody wanted any more (audit #50). A newer Play
+/// or a Stop now also cuts short the open it arrives during (audit #79,
+/// see [`listen`]); whatever came with it is boiled down here.
 ///
 /// What survives: the last Play or Stop decides the transport, and anything
 /// transport-shaped before it was about a source that is gone by the end of
@@ -747,22 +762,35 @@ fn listen_guarded(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Send
 #[cfg(not(target_arch = "wasm32"))]
 fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event>) {
     let mut watch = EndWatch::default();
+    // What arrived while a Play was opening. It is the next batch, taken
+    // without waiting — straight away when it overtook the Play.
+    let mut backlog: Vec<AudioCmd> = Vec::new();
 
     'listening: loop {
-        let batch = match rx.recv_timeout(TICK) {
-            Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) => Vec::new(),
-            Ok(first) => {
-                // Whatever else has queued up is taken now and boiled down,
-                // rather than paid for one blocking open at a time.
-                let mut batch = vec![first];
-                while let Ok(more) = rx.try_recv() {
-                    batch.push(more);
+        let batch = if backlog.is_empty() {
+            let wait = if player.settled() { SETTLED_TICK } else { TICK };
+            match rx.recv_timeout(wait) {
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => Vec::new(),
+                Ok(first) => {
+                    // Whatever else has queued up is taken now and boiled
+                    // down, rather than paid for one blocking open at a time.
+                    let mut batch = vec![first];
+                    while let Ok(more) = rx.try_recv() {
+                        batch.push(more);
+                    }
+                    collapse(batch)
                 }
-                collapse(batch)
             }
+        } else {
+            let mut batch = std::mem::take(&mut backlog);
+            while let Ok(more) = rx.try_recv() {
+                batch.push(more);
+            }
+            collapse(batch)
         };
-        for cmd in batch {
+        let mut batch = batch.into_iter();
+        while let Some(cmd) = batch.next() {
             if cmd == AudioCmd::Shutdown {
                 break 'listening;
             }
@@ -777,7 +805,19 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
                 AudioCmd::Play { url, .. } => Some(url.clone()),
                 _ => None,
             };
-            if let Some(err) = apply_audio_cmd(player, cmd) {
+            // Asked while a Play's open waits: take in whatever has arrived
+            // since, and say whether a newer Play or a Stop is among it.
+            // One is, and the open is given up — it used to run to its end
+            // (seconds over a tunnel, twenty against a stall) and then sound
+            // the unwanted track until the next command could land
+            // (performance audit #79).
+            let mut overtaken = || {
+                while let Ok(more) = rx.try_recv() {
+                    backlog.push(more);
+                }
+                backlog.iter().any(decides)
+            };
+            if let Some(err) = apply_audio_cmd(player, cmd, &mut overtaken) {
                 let event = match starting {
                     Some(source) => {
                         watch.play_failed(&source);
@@ -786,6 +826,13 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
                     None => Event::Error(err),
                 };
                 let _ = events.send(event);
+            }
+            // Overtaken: what is left of this batch was aimed at a track
+            // the newcomers have already moved past, so it goes in ahead
+            // of them and the lot is boiled down again, at once.
+            if backlog.iter().any(decides) {
+                backlog.splice(0..0, batch);
+                continue 'listening;
             }
         }
 
@@ -815,10 +862,23 @@ fn listen(player: &dyn PlayerCtl, rx: &Receiver<AudioCmd>, events: &Sender<Event
     player.stop();
 }
 
+/// Whether a command settles what the transport does next — and so makes
+/// an open still in flight moot.
 #[cfg(not(target_arch = "wasm32"))]
-fn apply_audio_cmd(player: &dyn PlayerCtl, cmd: AudioCmd) -> Option<String> {
+fn decides(cmd: &AudioCmd) -> bool {
+    matches!(cmd, AudioCmd::Play { .. } | AudioCmd::Stop | AudioCmd::Shutdown)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_audio_cmd(
+    player: &dyn PlayerCtl,
+    cmd: AudioCmd,
+    superseded: &mut dyn FnMut() -> bool,
+) -> Option<String> {
     match cmd {
-        AudioCmd::Play { url, duration_hint } => return player.play(&url, duration_hint).err(),
+        AudioCmd::Play { url, duration_hint } => {
+            return player.play_unless(&url, duration_hint, superseded).err();
+        }
         AudioCmd::Pause => player.pause(),
         AudioCmd::Resume => player.resume(),
         AudioCmd::Stop => player.stop(),
@@ -2391,6 +2451,207 @@ mod tests {
         cmd_tx.send(play("http://x/next.mp3")).expect("the channel is still alive");
         cmd_tx.send(AudioCmd::Shutdown).unwrap();
         listener.join().expect("the thread ended on its own terms");
+    }
+
+    /// A player that only counts: ticks, pauses, and whether it calls
+    /// itself settled.
+    #[derive(Clone, Default)]
+    struct Counter {
+        ticks: Arc<std::sync::atomic::AtomicUsize>,
+        pauses: Arc<std::sync::atomic::AtomicUsize>,
+        settled: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl crate::player::PlayerCtl for Counter {
+        fn play(&self, _source: &str, _hint: Option<f64>) -> Result<(), String> {
+            Ok(())
+        }
+        fn pause(&self) {
+            self.pauses.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn resume(&self) {}
+        fn stop(&self) {}
+        fn seek(&self, _position: f64) -> Result<(), String> {
+            Ok(())
+        }
+        fn set_volume(&self, _volume: f32) {}
+        fn set_crossfade(&self, _seconds: f32) {}
+        fn set_gapless(&self, _on: bool) {}
+        fn set_blend_skips(&self, _on: bool) {}
+        fn set_pause_fade(&self, _on: bool) {}
+        fn prepare_next(&self, _source: &str, _duration_hint: Option<f64>) {}
+        fn clear_next(&self) {}
+        fn status(&self) -> crate::player::PlayerStatus {
+            crate::player::PlayerStatus::default()
+        }
+        fn tick(&self) {
+            self.ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn settled(&self) -> bool {
+            self.settled.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn a_settled_player_ticks_once_a_second_and_still_hears_commands_at_once() {
+        use std::sync::atomic::Ordering;
+        let player = Counter::default();
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let theirs = player.clone();
+        let listener = thread::spawn(move || listen_guarded(&theirs, &cmd_rx, &event_tx));
+
+        // Moving: the brisk tick, ~8 a second.
+        std::thread::sleep(Duration::from_millis(1300));
+        let moving = player.ticks.swap(0, Ordering::SeqCst);
+        // Settled (paused, stopped): the device watch's pace — the wait in
+        // flight when it settled still ends on the brisk clock.
+        player.settled.store(true, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(200));
+        player.ticks.store(0, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(2300));
+        let settled = player.ticks.swap(0, Ordering::SeqCst);
+        assert!(moving >= 6, "a moving player ticks briskly: {moving} in 1.3s");
+        assert!((1..=3).contains(&settled), "a settled player ticks once a second: {settled} in 2.3s");
+
+        // A command does not wait out the lazy tick: it lands, and its
+        // status goes out, at once.
+        while event_rx.try_recv().is_ok() {}
+        let sent = std::time::Instant::now();
+        cmd_tx.send(AudioCmd::Pause).unwrap();
+        let status = loop {
+            match event_rx.recv_timeout(Duration::from_secs(2)).expect("a status after the command") {
+                Event::Status(status) => break status,
+                _ => continue,
+            }
+        };
+        assert_eq!(status, crate::player::PlayerStatus::default());
+        assert_eq!(player.pauses.load(Ordering::SeqCst), 1, "the pause was applied");
+        assert!(sent.elapsed() < Duration::from_millis(300), "took {:?}", sent.elapsed());
+
+        cmd_tx.send(AudioCmd::Shutdown).unwrap();
+        listener.join().expect("the thread ended on its own terms");
+    }
+
+    /// A player whose opens take 400 ms and can be given up, and which
+    /// writes down what happened to them, in order.
+    #[derive(Clone, Default)]
+    struct SlowOpens {
+        log: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SlowOpens {
+        fn note(&self, line: String) {
+            self.log.lock().unwrap().push(line);
+        }
+        fn lines(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::player::PlayerCtl for SlowOpens {
+        fn play(&self, source: &str, _hint: Option<f64>) -> Result<(), String> {
+            self.play_unless(source, None, &mut || false)
+        }
+        fn play_unless(
+            &self,
+            source: &str,
+            _hint: Option<f64>,
+            superseded: &mut dyn FnMut() -> bool,
+        ) -> Result<(), String> {
+            let began = std::time::Instant::now();
+            while began.elapsed() < Duration::from_millis(400) {
+                if superseded() {
+                    self.note(format!("gave up {source}"));
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            self.note(format!("playing {source}"));
+            Ok(())
+        }
+        fn pause(&self) {
+            self.note("pause".into());
+        }
+        fn resume(&self) {}
+        fn stop(&self) {
+            self.note("stop".into());
+        }
+        fn seek(&self, position: f64) -> Result<(), String> {
+            self.note(format!("seek {position}"));
+            Ok(())
+        }
+        fn set_volume(&self, _volume: f32) {}
+        fn set_crossfade(&self, _seconds: f32) {}
+        fn set_gapless(&self, _on: bool) {}
+        fn set_blend_skips(&self, _on: bool) {}
+        fn set_pause_fade(&self, _on: bool) {}
+        fn prepare_next(&self, _source: &str, _duration_hint: Option<f64>) {}
+        fn clear_next(&self) {}
+        fn status(&self) -> crate::player::PlayerStatus {
+            crate::player::PlayerStatus::default()
+        }
+        fn tick(&self) {}
+    }
+
+    /// Run `script` against a SlowOpens player: each step is sent after the
+    /// given pause, then the thread is given time and shut down. Returns
+    /// what the player saw — less the stop the thread always makes on its
+    /// way out — and every event the thread sent.
+    fn against_slow_opens(script: Vec<(u64, AudioCmd)>) -> (Vec<String>, Vec<Event>) {
+        let player = SlowOpens::default();
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let theirs = player.clone();
+        let listener = thread::spawn(move || listen_guarded(&theirs, &cmd_rx, &event_tx));
+        for (after_ms, cmd) in script {
+            std::thread::sleep(Duration::from_millis(after_ms));
+            cmd_tx.send(cmd).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(700));
+        cmd_tx.send(AudioCmd::Shutdown).unwrap();
+        listener.join().expect("the thread ended on its own terms");
+        let mut lines = player.lines();
+        assert_eq!(lines.pop().as_deref(), Some("stop"), "the thread stops the player on its way out");
+        (lines, event_rx.try_iter().collect())
+    }
+
+    #[test]
+    fn a_newer_play_or_a_stop_gives_up_the_open_in_flight() {
+        // The second pick arrives 100 ms into the first one's open: the
+        // first is given up, not played for a moment and then replaced.
+        let (lines, events) = against_slow_opens(vec![(0, play("a")), (100, play("b"))]);
+        assert_eq!(lines, vec!["gave up a", "playing b"]);
+        // Nothing failed: a play overtaken is not a play that went wrong.
+        assert!(!events.iter().any(|e| matches!(e, Event::PlaybackFailed { .. })));
+
+        // A stop the same way: the open is dropped and the stop lands now.
+        let (lines, _) = against_slow_opens(vec![(0, play("a")), (100, AudioCmd::Stop)]);
+        assert_eq!(lines, vec!["gave up a", "stop"]);
+
+        // What came with the play and was aimed at it goes with it: the
+        // seek behind a (a resume spot) dies; the pause behind b stands.
+        let (lines, _) = against_slow_opens(vec![
+            (0, play("a")),
+            (0, AudioCmd::Seek(30.0)),
+            (100, play("b")),
+            (0, AudioCmd::Pause),
+        ]);
+        assert_eq!(lines, vec!["gave up a", "playing b", "pause"]);
+    }
+
+    #[test]
+    fn a_pause_during_an_open_waits_for_it_and_lands_on_the_new_track() {
+        // Not everything overtakes: a pause or a seek sent while the track
+        // is opening is about that track, so it applies once it plays —
+        // the order the engine answers a Play's trailing Seek in. (The
+        // pair is one batch by then, and collapse puts the seek last.)
+        let (lines, _) = against_slow_opens(vec![
+            (0, play("a")),
+            (100, AudioCmd::Seek(12.0)),
+            (0, AudioCmd::Pause),
+        ]);
+        assert_eq!(lines, vec!["playing a", "pause", "seek 12"]);
     }
 
     #[test]
