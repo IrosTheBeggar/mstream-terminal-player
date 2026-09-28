@@ -607,10 +607,16 @@ pub fn modal_frame_anchored(
     max_height: u16,
     title_color: Color,
 ) -> Rect {
-    let rect = modal_rect(area, width, height, max_height);
+    frame_at(frame, modal_rect(area, width, height, max_height), title_color)
+}
+
+/// A frame where the caller puts it — a dropdown under its control, a
+/// modal at its computed spot: `Clear`, the ground repainted, a Rounded
+/// border in `color`. Returns the inner rect.
+pub fn frame_at(frame: &mut Frame, rect: Rect, color: Color) -> Rect {
     frame.render_widget(Clear, rect);
     // Clear resets cells to the terminal default — repaint the ground so
-    // the modal interior matches the fixed scheme (when it is owned).
+    // the interior matches the fixed scheme (when it is owned).
     if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
         frame.render_widget(
             Block::default().style(Style::default().bg(ground).fg(th().text)),
@@ -620,7 +626,7 @@ pub fn modal_frame_anchored(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(title_color));
+        .border_style(Style::default().fg(color));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     inner

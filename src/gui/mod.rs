@@ -102,7 +102,8 @@ pub(crate) enum Act {
     Chip(usize),
     /// The query card: start (or resume) editing the search text.
     EditQuery,
-    /// A top-bar tab: the Library, or Now Playing.
+    /// A screen: the Library or Stats from their top-bar tabs, Now Playing
+    /// from `0` — it has no tab.
     Screen(Screen),
     /// The top bar's Visualizer item: open the window, or bring it to the
     /// front (docs/ux-contracts/visualizer-window.md).
@@ -331,9 +332,10 @@ impl List {
     }
 }
 
-/// The top bar's two screens: the Library — the nav column and its rooms —
-/// and Now Playing, the playing track large. The queue panel and the bar
-/// stand under both.
+/// The screens: the Library — the nav column and its rooms, with the queue
+/// panel and the bar under it — and Now Playing, the TUI's view of the
+/// playing track, which opens on `0` and has no top-bar tab of its own
+/// (hidden 2026-09-27; the Library tab is the way back).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Screen {
     Library,
@@ -1136,15 +1138,13 @@ fn demo_now() -> Now {
 /// One run of text at a cell, clipped at the frame's edge — written into
 /// the buffer directly: the hub's primitive runs a few hundred times a
 /// frame, and a `Paragraph` per call was a handful of allocations each.
-/// The top bar's tabs at the left: the kit's tab slab for the screen that
-/// is up, dim text for the other, bright under the pointer.
+/// The top bar's tabs at the left — Library, Stats: the kit's tab slab for
+/// the screen that is up, dim text for the other, bright under the
+/// pointer. Now Playing has no tab (it opens on `0`), so while it is up no
+/// tab wears the slab.
 fn draw_top_tabs(frame: &mut Frame, gui: &mut Gui) {
     let mut x = 1;
-    let tabs = [
-        (Screen::Library, t!("gui.top.library")),
-        (Screen::NowPlaying, t!("gui.top.now")),
-        (Screen::Stats, t!("sta.title")),
-    ];
+    let tabs = [(Screen::Library, t!("gui.top.library")), (Screen::Stats, t!("sta.title"))];
     for (screen, label) in tabs {
         let text = format!(" {label} ");
         let rect = Rect { x, y: 0, width: text.chars().count() as u16, height: 1 };
@@ -3438,7 +3438,7 @@ mod tests {
         let all = rows.join("\n");
         assert!(!all.contains("Albums") && !all.contains("auto-dj"), "the nav and the bar stand down:\n{all}");
         assert!(rows[1].trim().is_empty(), "a blank row under the bar, where the page's own header would be");
-        assert!(rows[4].contains(" Overview ") && rows[4].contains(" Recent "), "the page's tab strip:\n{all}");
+        assert!(rows[2].contains(" Overview ") && rows[2].contains(" Recent "), "the page's tab strip is the page's first row:\n{all}");
         assert!(rows[29].contains("Esc library"), "the footer carries the way back after the page's hint: {}", rows[29]);
         let buf = draw_buffer(&mut gui);
         let sx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Stats ")).unwrap() as u16;
@@ -3472,26 +3472,28 @@ mod tests {
     }
 
     #[test]
-    fn the_top_bar_switches_between_the_library_and_now_playing() {
+    fn the_top_bar_has_the_library_and_stats_tabs_and_0_opens_now_playing() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut gui = browsing_gui();
         let rows = draw(&mut gui);
         assert!(!rows[0].contains("mStream"), "no wordmark: {:?}", rows[0]);
+        assert!(!rows[0].contains("Now Playing"), "no Now Playing tab — 0 opens the screen: {:?}", rows[0]);
         let lx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Library ")).unwrap() as u16;
-        let nx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Now Playing ")).unwrap() as u16;
+        let sx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Stats ")).unwrap() as u16;
         let buf = draw_buffer(&mut gui);
         assert_eq!(buf[(lx, 0)].bg, th().accent, "the Library tab wears the slab");
-        assert_ne!(buf[(nx, 0)].bg, th().accent, "the other tab does not");
+        assert_ne!(buf[(sx, 0)].bg, th().accent, "the other tab does not");
         assert!(rows.iter().any(|r| r.contains("Albums")), "the nav column is up");
-        assert_eq!(gui.ui.hit(Position { x: nx + 1, y: 0 }), Some(Act::Screen(Screen::NowPlaying)));
-        let sx = rows[0].char_indices().position(|(i, _)| rows[0][i..].starts_with(" Stats ")).unwrap() as u16;
-        assert_eq!(gui.ui.hit(Position { x: sx + 1, y: 0 }), Some(Act::Screen(Screen::Stats)), "the third tab");
+        assert_eq!(gui.ui.hit(Position { x: sx + 1, y: 0 }), Some(Act::Screen(Screen::Stats)), "the second tab");
 
-        // Now Playing: the nav, the room, the queue panel and the bar go;
-        // the TUI's view stands under the top bar (now-playing contract,
-        // clauses 1–2) with the App's full-screen flag up.
+        // Now Playing, on 0: the nav, the room, the queue panel and the bar
+        // go; the TUI's view stands under the top bar (now-playing contract,
+        // clauses 1–2) with the App's full-screen flag up, and no tab wears
+        // the slab.
         gui.act(Act::Screen(Screen::NowPlaying));
         assert!(gui.app.fullscreen, "the App's full-screen flag follows the screen");
+        let buf = draw_buffer(&mut gui);
+        assert!(buf[(lx, 0)].bg != th().accent && buf[(sx, 0)].bg != th().accent, "no tab is lit on Now Playing");
         let rows = draw(&mut gui);
         let all = rows.join("\n");
         assert!(!all.contains("Albums"), "the nav column is gone:\n{all}");

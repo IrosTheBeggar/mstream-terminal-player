@@ -1,7 +1,7 @@
 import os
 # The Stats screen against Rig B alone (stats-screen contract): the top
-# bar's third tab hosts the stats page whole under the bar — the state line
-# with the period's totals, the Overview · Top · Recent strip — on the
+# bar's third tab hosts the stats page whole under the bar — the Overview ·
+# Top · Recent strip, the period dropdown, the cards and the charts — on the
 # session the GUI holds (B's implicit account); `→` walks the page's tabs
 # (the Top tab's SHOW controls), `T` and Esc go back to the Library, `T`
 # opens it again from the Library. The GUI's bar (its "auto-dj" frame) and
@@ -18,11 +18,14 @@ def run(Gui):
     g.wait_for("Boukmanflow", 40, "B's library")
     g.pump(1.0)
 
-    # The tab: the page loads on entry and its state line names the period.
+    # The tab: the page loads on entry; the tiles carry the period's totals.
     g.click_text("Stats", 5)
     g.wait_for("Overview", 10, "the page's tab strip")
-    g.wait_for("plays", 20, "the state line's totals")
+    g.wait_for("plays", 20, "the tiles")
     g.dump("the Stats screen")
+    # No state line (clause 15): the tiles say it.
+    if g.find("plays ·"):
+        raise SystemExit("FAIL: the state line's totals are still drawn")
     # The charts' furniture (clauses 8–9): the y axis's ticks and the
     # baseline's foot.
     if not (g.find(" ┤ ") and g.find("0 ┼─")):
@@ -32,6 +35,19 @@ def run(Gui):
         raise SystemExit("FAIL: the tiles have no frames")
     if g.find("auto-dj") or g.find("LIBRARY"):
         raise SystemExit("FAIL: the GUI's bar or nav is still drawn on the Stats screen")
+    # The period is a dropdown (clause 14): p drops the list under the
+    # control, with All time last and the first play's date closing it;
+    # Esc keeps the period and takes the list away.
+    if not g.find("PERIOD"):
+        raise SystemExit("FAIL: no PERIOD control")
+    g.key("p"); g.pump(1.0)
+    g.wait_for("All time", 5, "the period list")
+    g.dump("the period list")
+    if not g.find("first play"):
+        raise SystemExit("FAIL: the list has no first-play foot")
+    g.key("\x1b"); g.pump(1.0)
+    if g.find("All time"):
+        raise SystemExit("FAIL: Esc did not close the period list")
     # The footer is a config switch (key hints); when it is on it carries
     # the page's hint and the way back.
     if g.find("q quit") and not g.find("Esc library"):

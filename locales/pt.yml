@@ -1147,10 +1147,8 @@ sta:
   tab_overview: "Resumo"
   tab_top: "Top"
   tab_recent: "Recentes"
-  note_overview: "os totais do período"
   note_top: "por reproduções, ou por tempo com m"
   note_recent: "o registro, mais recente primeiro"
-  facts: " — %{plays} · %{time} · %{tracks} · %{zone}"
   zone_local: "horários no seu fuso"
   zone_utc: "horários em UTC"
   empty_state: "• ainda sem reproduções"
@@ -1158,14 +1156,12 @@ sta:
   empty_1: "O player web informa cada faixa ao terminar, e o app móvel envia o histórico quando está"
   empty_2: "online. Apps antigos que ainda fazem scrobble aos 30 segundos também contam."
   empty_prov: "Reproduções que esta conta informa por este servidor · %{zone}"
-  nothing_state: " — nenhuma reprodução começou neste período"
   nothing_title: "Nada em %{period}"
   nothing_hint: "Seu registro começa em %{date} — [ ] percorre os períodos, p os lista."
   nothing_hint_plain: "[ ] percorre os períodos, p os lista."
   noapi_state: "• sem API de estatísticas"
   noapi_detail: " — este servidor ainda não a tem; ela chegou no mStream 6.27"
   ctl_period: "PERÍODO"
-  ctl_step: "[ ] mudar · p lista"
   ctl_origin: "ORIGEM"
   origin_all: "tudo"
   origin_local: "este servidor"
@@ -1325,7 +1321,6 @@ sta:
 gui:
   top:
     library: "Biblioteca"
-    now: "Tocando agora"
     viz: "Visualizador"
     viz_tip: "Abrir o visualizador em sua própria janela — V"
   nav:
