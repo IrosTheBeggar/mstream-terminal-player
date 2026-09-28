@@ -940,6 +940,15 @@ pub fn save_queue_file(body: &str) -> Result<(), String> {
     write_atomic(&queue_path()?, body, false)
 }
 
+/// The saved queue's file as the drive has it — its size and when it was
+/// last replaced — so the saver can tell the rows it wrote are still the
+/// rows there without reading them back (performance audit #106). `None`
+/// for no file, or a platform that keeps no times.
+pub fn queue_file_mark() -> Option<(u64, std::time::SystemTime)> {
+    let meta = fs::metadata(queue_path().ok()?).ok()?;
+    Some((meta.len(), meta.modified().ok()?))
+}
+
 /// Where the saved queue stands between writes of its rows — the playing
 /// row and the seconds into it, naming the rows it belongs to — so the
 /// ten-second checkpoint rewrites a few dozen bytes rather than every row

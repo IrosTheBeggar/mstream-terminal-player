@@ -150,12 +150,22 @@ struct StatsProgress {
     duration_ms: Option<u64>,
 }
 
+/// A write of the rows the saver made: the stamp inside it, which a
+/// checkpoint's place names, and the file as the drive had it just after.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RowsWrite {
+    stamp: u64,
+    mark: (u64, std::time::SystemTime),
+}
+
 /// Keeps `queue.json` current for the shell (contract clause 39): a write
 /// 800 ms after the queue last changed, a checkpoint every ten seconds
 /// while playing, a flush on the way out — and the file gone once a queue
-/// that existed this session is cleared, or the setting turned off. The
-/// checkpoint writes only the place, beside rows it has not touched since
-/// (performance audit #106). Keeps `stats.json` beside it the same way
+/// that existed this session is cleared, or the setting turned off (and
+/// written again soon after it is turned back on). The checkpoint writes
+/// only the place, beside rows it has not touched since (performance audit
+/// #106). Keeps `stats.json` beside it the same way
 /// (play-reporting contract, clause 9): the owed plays and the open
 /// session, checkpointed.
 #[cfg(not(target_arch = "wasm32"))]
@@ -169,8 +179,9 @@ pub(crate) struct QueueSaver {
     last_write: std::time::Instant,
     /// The write of the rows this saver last made, which a checkpoint's
     /// place names. `None` until it has made one: the file the last launch
-    /// left is not the queue a restore made of it.
-    rows_stamp: Option<u64>,
+    /// left is not the queue a restore made of it. And `None` again once
+    /// the setting takes the file away.
+    rows_written: Option<RowsWrite>,
     stats_signature: u64,
     stats_dirty_since: Option<std::time::Instant>,
     stats_last_write: std::time::Instant,
@@ -180,7 +191,8 @@ pub(crate) struct QueueSaver {
     /// the file — the empty queue a failed restore leaves behind must not
     /// destroy the snapshot it failed to read.
     had_queue: bool,
-    /// The setting as last seen, so turning it off deletes the file once.
+    /// The setting as last seen, so turning it off deletes the file once
+    /// and turning it on writes it again.
     enabled: bool,
 }
 
@@ -196,7 +208,7 @@ impl QueueSaver {
             rows_hash: Self::rows_hash(app),
             dirty_since: None,
             last_write: std::time::Instant::now(),
-            rows_stamp: None,
+            rows_written: None,
             stats_signature: Self::stats_signature(app),
             stats_dirty_since: None,
             stats_last_write: std::time::Instant::now(),
@@ -308,11 +320,18 @@ impl QueueSaver {
         if !app.resume_queue {
             if self.enabled {
                 self.enabled = false;
+                self.rows_written = None;
                 let _ = config::delete_queue_file();
             }
             return;
         }
-        self.enabled = true;
+        if !self.enabled {
+            // On again: the rows went with the file, so they are written
+            // whole once the debounce passes, playing or not — a checkpoint
+            // must never name rows that are no longer on the drive.
+            self.enabled = true;
+            self.dirty_since.get_or_insert(now);
+        }
         let signature = Self::signature(app);
         // The revision is only as good as every writer of the rows moving
         // it — `items` is a public field. A debug build hashes the rows as
@@ -372,10 +391,13 @@ impl QueueSaver {
                 let saved = serde_json::to_string(&snapshot)
                     .map_err(|e| e.to_string())
                     .and_then(|body| config::save_queue_file(&body));
-                self.rows_stamp = saved.ok().map(|()| stamp);
+                self.rows_written = saved
+                    .ok()
+                    .and_then(|()| config::queue_file_mark())
+                    .map(|mark| RowsWrite { stamp, mark });
             }
             None if self.had_queue => {
-                self.rows_stamp = None;
+                self.rows_written = None;
                 let _ = config::delete_queue_file();
             }
             None => {}
@@ -386,11 +408,13 @@ impl QueueSaver {
     /// were written, only how far into the playing one it is — so only the
     /// place goes out, a few dozen bytes naming those rows, rather than
     /// every row again (performance audit #106). Rows not written yet this
-    /// launch are written whole.
+    /// launch are written whole, and so are rows no longer on the drive as
+    /// this saver left them — taken away or replaced by another copy of the
+    /// player, or by hand; the file's size and time tell, without a read.
     fn checkpoint(&mut self, app: &App) {
-        let Some(stamp) = self.rows_stamp else {
-            self.write(app);
-            return;
+        let stamp = match self.rows_written {
+            Some(RowsWrite { stamp, mark }) if config::queue_file_mark() == Some(mark) => stamp,
+            _ => return self.write(app),
         };
         self.last_write = std::time::Instant::now();
         let (index, position) = app.queue_spot();
@@ -1332,6 +1356,84 @@ mod tests {
         saver.flush(&app);
         assert!(config::load_queue_file().unwrap().is_none());
         assert!(config::load_queue_place_file().unwrap().is_none(), "the place goes with its rows");
+    }
+
+    #[test]
+    fn rows_gone_from_the_drive_are_written_whole_again() {
+        // The review of performance audit #106: a checkpoint's place names
+        // the rows this saver wrote last. The setting turned off takes them
+        // away, and so can another copy of the player, or a hand. Turned
+        // back on, or finding them gone or replaced, the saver writes the
+        // rows whole — never a place naming rows that are not there.
+        let _scratch = crate::config::testing::Scratch::new("queue-rows-gone");
+        let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
+        app.connected = true;
+        for name in ["a", "b", "c"] {
+            app.push_queue(Track { filepath: format!("music/{name}.mp3"), metadata: Default::default() });
+        }
+        app.queue.current = Some(1);
+        app.status = crate::player::PlayerStatus {
+            playing: true,
+            position: 9.0,
+            source: "http://host:3000/media/music/b.mp3?token=tok".into(),
+            ..Default::default()
+        };
+        let mut saver = QueueSaver::new(&app);
+        let ten_seconds_on = |saver: &mut QueueSaver, app: &App| {
+            saver.last_write -= QueueSaver::CHECKPOINT;
+            saver.tick(app);
+        };
+        let saved = || load_queue_snapshot().map(|s| (s.items.len(), s.index, s.position));
+        ten_seconds_on(&mut saver, &app);
+        app.status.position = 20.0;
+        ten_seconds_on(&mut saver, &app);
+        assert!(config::load_queue_place_file().unwrap().is_some(), "checkpointing by the place");
+
+        // Off, and both files go; on again, and the rows are owed at once,
+        // playing or not — then written whole.
+        app.resume_queue = false;
+        saver.tick(&app);
+        assert!(config::load_queue_file().unwrap().is_none());
+        assert!(config::load_queue_place_file().unwrap().is_none());
+        app.resume_queue = true;
+        app.status.paused = true;
+        saver.tick(&app);
+        assert!(saver.dirty_since.is_some(), "the rows wait only for the debounce");
+        saver.dirty_since = saver.dirty_since.map(|since| since - QueueSaver::DEBOUNCE);
+        saver.tick(&app);
+        assert_eq!(saved(), Some((3, Some(1), 20.0)), "the queue is on the drive again");
+
+        // And a checkpoint that comes first writes the rows, not a place.
+        app.status.paused = false;
+        app.resume_queue = false;
+        saver.tick(&app);
+        app.resume_queue = true;
+        app.status.position = 25.0;
+        saver.checkpoint(&app);
+        assert_eq!(saved(), Some((3, Some(1), 25.0)), "off and on, the checkpoint writes the rows");
+        saver.tick(&app);
+        saver.dirty_since = saver.dirty_since.map(|since| since - QueueSaver::DEBOUNCE);
+        saver.tick(&app);
+
+        // Taken by someone else: the next checkpoint puts them back.
+        std::fs::remove_file(config::queue_path().unwrap()).unwrap();
+        app.status.position = 35.0;
+        ten_seconds_on(&mut saver, &app);
+        assert_eq!(saved(), Some((3, Some(1), 35.0)), "a deleted file is written again");
+
+        // Replaced by someone else: the same — the place alone would name
+        // rows that are not the ones there.
+        config::save_queue_file("{}").unwrap();
+        app.status.position = 45.0;
+        ten_seconds_on(&mut saver, &app);
+        assert_eq!(saved(), Some((3, Some(1), 45.0)), "a replaced file is written again");
+
+        // Left as this saver wrote it, the checkpoint is the place again.
+        let rows = config::load_queue_file().unwrap().unwrap();
+        app.status.position = 55.0;
+        ten_seconds_on(&mut saver, &app);
+        assert_eq!(config::load_queue_file().unwrap().unwrap(), rows, "the rows untouched");
+        assert_eq!(saved(), Some((3, Some(1), 55.0)));
     }
 
     #[test]

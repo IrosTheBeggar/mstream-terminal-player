@@ -260,12 +260,14 @@ parent changes a peer's label only.
     debounced on every edit and track change, checkpointed every 10 s
     while playing (the checkpoint writes the place alone — the row and the
     second, naming the rows it belongs to — beside rows unchanged since
-    their write), and flushed when the app backgrounds. An emptied queue
+    their write, and the rows whole when they are no longer on the drive
+    as written), and flushed when the app backgrounds. An emptied queue
     deletes the snapshot, but only after a queue existed this session (a
     restore that whiffed must not destroy what it failed to read). The
     setting **Resume queue on launch** ("Save the play queue and your
     place, and restore them when you reopen the app.") defaults on;
-    turning it off blocks restore and deletes the snapshot.
+    turning it off blocks restore and deletes the snapshot, and turning
+    it back on saves the queue again, playing or not.
 40. **Restore** runs after the server list has loaded. Items whose server
     is no longer configured are dropped; every surviving item gets a
     freshly built URL (the saved token and cache-buster are stale); the
@@ -634,7 +636,10 @@ additions to drawn idioms. Revisit if discussion disagrees.
   drive, to move one number: it now writes `queue-place.json` (the row and
   the second, without the flush) beside a `queue.json` it leaves alone,
   and a restore takes that place only when it names the write of the rows
-  beside it. And the record's DJ appends every pick forever, which a
-  resumed queue brought back launch after launch; here a restore with
-  the DJ armed keeps its last 100 played rows and remembers the rest by
-  path, so the no-repeat rule holds without the rows.
+  beside it; rows that are gone from the drive or replaced there (the
+  setting turned off and on, another copy of the player) are written whole
+  instead, as the old checkpoint always did. And the record's DJ appends
+  every pick forever, which a resumed queue brought back launch after
+  launch; here a restore with the DJ armed keeps its last 100 played rows
+  and remembers the rest by path, so the no-repeat rule holds without the
+  rows.
