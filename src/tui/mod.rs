@@ -957,6 +957,12 @@ pub(crate) fn install_panic_hook() {
         }
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         pop_window_title();
+        // Still on the alternate screen while the player holds it, and
+        // kitty keeps this process's pictures there until the window
+        // closes unless told otherwise: the previous hook leaves it.
+        if !crate::console::stderr_free() {
+            graphics::release_all_panicking();
+        }
         crate::console::release_terminal();
         previous(info);
     }));

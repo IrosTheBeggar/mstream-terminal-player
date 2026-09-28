@@ -25,7 +25,7 @@
 //! the word "image", so a halfblocks-only answer is treated as a no.
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{Graphics, release_all, release_dropped, verify_sent};
+pub use native::{Graphics, release_all, release_all_panicking, release_dropped, verify_sent};
 #[cfg(target_arch = "wasm32")]
 pub use stub::{Graphics, verify_sent};
 
@@ -753,7 +753,10 @@ mod native {
     /// The deletes owed for the pictures whose `Graphics` went away — and,
     /// with `all`, for every picture this process sent.
     fn owed_deletes(all: bool) -> String {
-        let mut ids = KITTY_IDS.lock().unwrap_or_else(|poison| poison.into_inner());
+        owed_by(&mut KITTY_IDS.lock().unwrap_or_else(|poison| poison.into_inner()), all)
+    }
+
+    fn owed_by(ids: &mut KittyIds, all: bool) -> String {
         let mut owed = std::mem::take(&mut ids.gone);
         if all {
             owed.append(&mut ids.live);
@@ -787,6 +790,29 @@ mod native {
     /// switch asks the main screen's.
     pub fn release_all() {
         write_deletes(&owed_deletes(true));
+    }
+
+    /// [`release_all`] from the panic hook, which runs before ratatui's
+    /// restore leaves the alternate screen — a panic was the one way out
+    /// that left this process's pictures in kitty's store until the
+    /// window closed (the integration check of performance audit #94).
+    /// The hook runs before the unwind, too: a thread that panicked while
+    /// holding the ledger would wait on itself here, and a hook that hangs
+    /// never gives the terminal back, so a ledger in use is left as it is.
+    pub fn release_all_panicking() {
+        if let Some(deletes) = owed_panicking() {
+            write_deletes(&deletes);
+        }
+    }
+
+    /// Every delete owed, unless the ledger is in use.
+    fn owed_panicking() -> Option<String> {
+        let mut ids = match KITTY_IDS.try_lock() {
+            Ok(ids) => ids,
+            Err(std::sync::TryLockError::Poisoned(poison)) => poison.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        Some(owed_by(&mut ids, true))
     }
 
     fn write_deletes(deletes: &str) {
@@ -1436,6 +1462,16 @@ mod native {
             assert!(!owed_deletes(false).contains(&format!("i={dropped_id},")), "owed once");
             // Leaving the alternate screen deletes what is still drawn.
             assert!(owed_deletes(true).contains(&format!("_Ga=d,d=I,i={kept_id},q=2")));
+        }
+
+        #[test]
+        fn a_panic_holding_the_ledger_leaves_it_rather_than_wait_on_itself() {
+            // The panic hook runs before the unwind, with whatever this
+            // thread held still held: locking again would hang the hook,
+            // and the terminal with it.
+            let held = KITTY_IDS.lock().unwrap_or_else(|poison| poison.into_inner());
+            assert_eq!(owed_panicking(), None);
+            drop(held);
         }
 
         #[test]
