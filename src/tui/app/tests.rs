@@ -5367,6 +5367,36 @@ fn selection_stays_in_bounds() {
     assert_eq!(pane.state.selected(), None);
 }
 
+#[test]
+fn the_counts_leave_out_the_way_out_whether_or_not_there_is_one() {
+    // Asked every frame, so answered from the length: `..` leads a listing
+    // or is absent (performance audit #109).
+    let node = |label: &str| Entry::Node { label: label.into(), node: LibraryNode::Artists };
+    let mut pane = Pane::default();
+    pane.set(vec![Entry::Parent, node("Alpha"), node("Beta"), node("Gamma")]);
+    assert_eq!(pane.counts(), (3, 3));
+    pane.apply_filter("et".into());
+    assert_eq!(pane.counts(), (1, 3), "Beta, behind the kept `..`");
+    pane.apply_filter("zzz".into());
+    assert_eq!(pane.counts(), (0, 3), "only the way out is left");
+
+    // A library's top has no way out to leave out.
+    pane.set(vec![node("Alpha"), node("Beta")]);
+    assert_eq!(pane.counts(), (2, 2));
+    pane.apply_filter("alp".into());
+    assert_eq!(pane.counts(), (1, 2));
+    pane.set(Vec::new());
+    assert_eq!(pane.counts(), (0, 0));
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "below the first row")]
+fn a_way_out_below_the_first_row_is_caught_where_the_list_lands() {
+    let node = |label: &str| Entry::Node { label: label.into(), node: LibraryNode::Artists };
+    Pane::default().set(vec![node("Alpha"), Entry::Parent]);
+}
+
 // ── Album art ───────────────────────────────────────────────────────────────
 
 fn track_with_cover(path: &str, cover: &str) -> Track {

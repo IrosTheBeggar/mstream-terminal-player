@@ -481,6 +481,12 @@ pub struct Pane {
 
 impl Pane {
     pub fn set(&mut self, entries: Vec<Entry>) {
+        // `..` leads a listing or is not in it: `counts` and the GUI's
+        // list rooms count on it rather than walking every row.
+        debug_assert!(
+            !entries.iter().skip(1).any(|entry| matches!(entry, Entry::Parent)),
+            "`..` below the first row"
+        );
         // A filter describes the list it was typed against. This is a
         // different list, so it goes.
         self.filter.clear();
@@ -527,8 +533,6 @@ impl Pane {
         }
     }
 
-    /// How many rows are on screen, and how many there would be with no
-    /// filter. `..` counts as neither: it is the way out, not a result.
     /// Visit every track row this pane holds — the shown ones and the ones
     /// a filter is hiding — so a patch reaches them all.
     pub(crate) fn for_each_track_mut(&mut self, mut f: impl FnMut(&mut Track)) {
@@ -539,8 +543,15 @@ impl Pane {
         }
     }
 
+    /// How many rows are on screen, and how many there would be with no
+    /// filter. `..` counts as neither: it is the way out, not a result.
+    ///
+    /// Asked every frame by the browse bar and the list rooms, so it does
+    /// not walk the rows: `..` only ever leads a listing (see [`Pane::set`];
+    /// a filter keeps the order), so it is the first row or it is absent
+    /// (performance audit #109).
     pub fn counts(&self) -> (usize, usize) {
-        let real = |list: &[Entry]| list.iter().filter(|e| !matches!(e, Entry::Parent)).count();
+        let real = |list: &[Entry]| list.len() - usize::from(matches!(list.first(), Some(Entry::Parent)));
         let shown = real(&self.entries);
         (shown, self.unfiltered.as_ref().map_or(shown, |all| real(all)))
     }
