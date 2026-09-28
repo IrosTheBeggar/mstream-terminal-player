@@ -1016,18 +1016,28 @@ impl Screen for Room {
         &mut self.ui
     }
 
-    fn pump(&mut self) {
+    fn absorb(&mut self) -> bool {
+        let mut folded = false;
         loop {
             match self.from_worker.try_recv() {
                 Ok(done) => self.apply(done),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.note = Some((t!("note.worker_gone").to_string(), true));
-                    break;
+                    return true;
                 }
             }
+            folded = true;
         }
+        folded
+    }
+
+    fn pump(&mut self) {
         self.dispatch_queued();
+    }
+
+    fn awaiting(&self) -> bool {
+        self.in_flight
     }
 
     /// The page's ten-second poll, quiet: only while on the network, and

@@ -454,8 +454,8 @@ impl Room {
     /// it — the accepted text becomes the server-resolved absolute path.
     fn accept_suggestion(&mut self, i: usize) {
         if let Modal::PathEntry(draft) = &mut self.modal {
-            let picked = match draft.suggestions().get(i) {
-                Some(entry) => entry.clone(),
+            let picked = match draft.suggestion(i) {
+                Some(entry) => entry.to_string(),
                 None => return,
             };
             let base = if draft.listed_path.is_empty() {
@@ -606,18 +606,28 @@ impl Screen for Room {
         &mut self.ui
     }
 
-    fn pump(&mut self) {
+    fn absorb(&mut self) -> bool {
+        let mut folded = false;
         loop {
             match self.from_worker.try_recv() {
                 Ok(done) => self.apply(done),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.note = Some((t!("note.worker_gone").to_string(), true));
-                    break;
+                    return true;
                 }
             }
+            folded = true;
         }
+        folded
+    }
+
+    fn pump(&mut self) {
         self.dispatch_queued();
+    }
+
+    fn awaiting(&self) -> bool {
+        self.in_flight
     }
 
     fn render(&mut self, frame: &mut Frame) {
@@ -659,7 +669,7 @@ pub(super) fn start(client: Client, same_machine: bool) -> Room {
 /// that gains nothing, start cycling.
 fn complete_path(room: &mut Room) {
     let Modal::PathEntry(draft) = &mut room.modal else { return };
-    let suggestions = draft.suggestions();
+    let suggestions: Vec<&str> = draft.suggestions().collect();
     if let Some(i) = draft.sel {
         room.accept_suggestion(i);
     } else if suggestions.len() == 1 {
@@ -691,13 +701,13 @@ fn handle_key(room: &mut Room, key: KeyEvent) -> Option<Outcome> {
                     room.open_name(path);
                 }
                 KeyCode::Down => {
-                    let n = draft.suggestions().len();
+                    let n = draft.suggestion_count();
                     if n > 0 {
                         draft.sel = Some(draft.sel.map_or(0, |i| (i + 1) % n));
                     }
                 }
                 KeyCode::Up | KeyCode::BackTab => {
-                    let n = draft.suggestions().len();
+                    let n = draft.suggestion_count();
                     if n > 0 {
                         draft.sel = Some(draft.sel.map_or(n - 1, |i| (i + n - 1) % n));
                     }
@@ -1079,8 +1089,8 @@ fn draw_browser(frame: &mut Frame, room: &mut Room, area: Rect, browse: &Browse)
 }
 
 fn draw_path_entry(frame: &mut Frame, room: &mut Room, area: Rect, draft: &PathDraft) {
-    let suggestions = draft.suggestions();
-    let shown = suggestions.len().min(6) as u16;
+    let count = draft.suggestion_count();
+    let shown = count.min(6) as u16;
     // Anchored as if always full: the title and input hold one spot and
     // the suggestion list grows DOWNWARD beneath them.
     let inner = kit::modal_frame_anchored(frame, area, 62, 7 + shown, 13, th().accent);
@@ -1099,15 +1109,15 @@ fn draw_path_entry(frame: &mut Frame, room: &mut Room, area: Rect, draft: &PathD
     );
     let sel_moved = draft.sel != draft.sel_anchor;
     let reveal = if sel_moved { draft.sel } else { None };
-    let (first, visible) = kit::table_view(suggestions.len(), reveal, draft.scroll, 6);
+    let (first, visible) = kit::table_view(count, reveal, draft.scroll, 6);
     if let Modal::PathEntry(d) = &mut room.modal {
         d.scroll = first;
         d.sel_anchor = d.sel;
     }
-    let overflow = suggestions.len() > visible;
+    let overflow = count > visible;
     let row_width = if overflow { inner.width.saturating_sub(1) } else { inner.width };
-    for (row, i) in (first..first + visible).enumerate() {
-        let entry = &suggestions[i];
+    for (row, entry) in draft.suggestions().skip(first).take(visible).enumerate() {
+        let i = first + row;
         let selected = draft.sel == Some(i);
         let rect = Rect { x: inner.x, y: inner.y + 4 + row as u16, width: row_width, height: 1 };
         let hovered = room.ui.pointer.is_some_and(|p| rect.contains(p));
@@ -1134,7 +1144,7 @@ fn draw_path_entry(frame: &mut Frame, room: &mut Room, area: Rect, draft: &PathD
         frame,
         &mut room.ui,
         bar,
-        suggestions.len(),
+        count,
         visible,
         first,
         Act::PathScroll(-1),
@@ -1340,6 +1350,38 @@ mod tests {
         out
     }
 
+    /// The hub's order (performance audit #82): an answer is folded in
+    /// before the draw, and the op a key queued meanwhile goes to the
+    /// worker only in the pump after it — the frame between shows its
+    /// busy note.
+    #[test]
+    fn absorb_folds_in_the_answer_and_leaves_the_next_call_to_the_pump() {
+        let _en = english();
+        let mut room = room(false);
+        let (answer, answers) = std::sync::mpsc::channel();
+        let (asks, asked) = std::sync::mpsc::channel();
+        room.from_worker = answers;
+        room.to_worker = asks;
+
+        handle_key(&mut room, key(KeyCode::Char('b')));
+        Screen::pump(&mut room);
+        assert!(room.awaiting(), "the browse is out with the worker");
+        assert!(asked.try_recv().is_ok());
+
+        let music = Lib { name: "music".into(), root: "/srv/music".into(), follow_symlinks: false };
+        answer.send(Done::Loaded(Ok(vec![music.clone()]))).unwrap();
+        room.queue(Op::Load, "reloading");
+        Screen::absorb(&mut room);
+        assert_eq!(room.libs, vec![music], "the answer is in before the frame is drawn");
+        assert!(!room.awaiting());
+        assert_eq!(room.queued, Some(Op::Load), "absorbing never hands the worker the next call");
+        assert!(asked.try_recv().is_err());
+
+        Screen::pump(&mut room);
+        assert!(room.awaiting());
+        assert!(matches!(asked.try_recv(), Ok((_, Op::Load))), "the pump does");
+    }
+
     #[test]
     fn b_browses_the_server_unless_this_is_the_servers_machine() {
         let _en = english();
@@ -1478,7 +1520,9 @@ mod tests {
             }),
         });
         let Modal::PathEntry(draft) = &room.modal else { panic!("the path modal") };
-        assert_eq!(draft.suggestions(), vec!["media".to_string(), "music".to_string()]);
+        assert_eq!(draft.suggestions().collect::<Vec<_>>(), vec!["media", "music"]);
+        assert_eq!(draft.suggestion_count(), 2);
+        assert_eq!(draft.suggestion(1), Some("music"));
         // Tab cannot extend past the common prefix, so it starts cycling;
         // Enter takes the text as typed.
         handle_key(&mut room, key(KeyCode::Tab));
@@ -1512,7 +1556,7 @@ mod tests {
             }),
         });
         let Modal::PathEntry(draft) = &room.modal else { panic!("the path modal") };
-        assert_eq!(draft.suggestions(), vec!["Music".to_string()]);
+        assert_eq!(draft.suggestions().collect::<Vec<_>>(), vec!["Music"]);
         // Accepting builds on the resolved home: the field turns absolute.
         handle_key(&mut room, key(KeyCode::Tab));
         let Modal::PathEntry(draft) = &room.modal else { panic!("the path modal") };

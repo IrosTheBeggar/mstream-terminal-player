@@ -1516,12 +1516,15 @@ fn room_key(gui: &mut Gui, key: KeyEvent) -> Option<bool> {
 // ── Acts ────────────────────────────────────────────────────────────────────
 
 /// One edit, through the App, then saved: the session-wide settings ride
-/// the player prefs at once, and a per-library rule comes back as its own
-/// effect (clause 51).
+/// the player prefs, written once the edits rest — a held ← on a bar is a
+/// step per key repeat, and each used to be a write of its own (performance
+/// audit #86) — and a per-library rule comes back as its own effect,
+/// written at once (clause 51): the book of servers is rebuilt from the
+/// file on every reload, and a rule still waiting would be undone by one.
 fn edit(gui: &mut Gui, edit: DjEdit) {
     let effects = gui.app.dj_edit(edit);
     gui.pend(effects);
-    gui.save_now();
+    gui.save_soon();
 }
 
 /// The DJ's side of [`Gui::act`]. True when the act was one of ours.
@@ -1987,6 +1990,30 @@ mod tests {
         let all = draw_tall(&mut gui).join("\n");
         assert!(all.contains("Over 1:30"), "{all}");
         assert!(all.contains("Include tracks of unknown length"), "a real bound reveals the checkbox");
+    }
+
+    /// A held key on a bar is a step per repeat: each lands in the App at
+    /// once, and the file is written once the steps rest (performance audit
+    /// #86).
+    #[test]
+    fn a_held_bar_is_written_once_its_steps_rest() {
+        let scratch = crate::config::testing::Scratch::new("dj-steps-rest");
+        let mut gui = room_gui();
+        gui.config_ok = true;
+        config::save(&gui.config).unwrap();
+        let file = scratch.dir.join("config.toml");
+        let before = std::fs::read_to_string(&file).unwrap();
+        gui.act(Act::DjStep(DjRow::Length, 1));
+        for _ in 0..12 {
+            gui.act(Act::DjStep(DjRow::Shortest, 1));
+        }
+        let shortest = gui.app.dj.min_seconds;
+        assert!(shortest > 0, "the steps landed: {shortest}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "not one write while the key is held");
+        gui.prefs_unsaved = gui.prefs_unsaved.map(|since| since - super::super::PREFS_REST);
+        gui.save_rested();
+        assert_ne!(std::fs::read_to_string(&file).unwrap(), before, "written once they rest");
+        assert_eq!(config::load().unwrap().player.dj.min_seconds, shortest);
     }
 
     #[test]

@@ -1131,11 +1131,15 @@ fn picker_load(gui: &mut Gui, path: String) {
 
 // ── Background replies ──────────────────────────────────────────────────────
 
-/// Drain what the threads sent since the last pass.
-pub(crate) fn poll(gui: &mut Gui) {
+/// Drain what the threads sent since the last pass; true when anything
+/// came — a frame to draw.
+pub(crate) fn poll(gui: &mut Gui) -> bool {
+    let mut folded = false;
     while let Ok(reply) = gui.torrent.rx.try_recv() {
         apply_reply(gui, reply);
+        folded = true;
     }
+    folded
 }
 
 fn apply_reply(gui: &mut Gui, reply: Reply) {

@@ -37,7 +37,9 @@ phone tunes it, and find it as you left it next time.
   is heard at once, and kept a moment after the last turn.
 - **Nothing playing, or paused**: the window is fed silence, so the
   presets settle to their quiet state at the smoothing's pace, and keep
-  moving on their own time.
+  moving on their own time. Once the silence has settled it is not sent
+  again: the window keeps the quiet texture, and the player goes back to
+  its own pace until something plays.
 - **The window closes** (Esc, `q`, its close control): the item goes dim.
   The player notices within a frame, and keeps what the window last
   reported.
@@ -59,10 +61,11 @@ phone tunes it, and find it as you left it next time.
    window, not the player.
 2. **The parent computes, the child draws.** The player reads its own tap,
    builds the audio texture (`shader::audio`, the mobile app's curve) about
-   thirty times a second, and writes it down the child's stdin as one
-   framed message; a preset choice and a raise go the same way. The child
-   never reads the tap, never touches the network, and holds no state of
-   the player's. EOF on stdin means quit.
+   thirty times a second while anything plays or silence is still settling,
+   and writes it down the child's stdin as one framed message; a preset
+   choice and a raise go the same way. The child never reads the tap, never
+   touches the network, and holds no state of the player's. EOF on stdin
+   means quit.
 3. **The feeder never blocks the player**: frames queue two deep and a
    third is dropped, so a stalled window costs frames, not the player's
    loop. The child's stderr goes to the log, never to the terminal.

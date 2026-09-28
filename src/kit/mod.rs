@@ -17,9 +17,11 @@
 //! adaptive `ui::Theme` is deliberately not part of the kit.
 //!
 //! Frames reach the terminal through [`frames`]: whole, in one write, and
-//! shown at once. Every full-screen page starts with its `init`.
+//! shown at once. Every full-screen page starts with its `init`, and waits
+//! between frames at the pace [`pace`] sets.
 
 pub mod frames;
+pub mod pace;
 pub mod theme;
 
 use std::time::{Duration, Instant};
@@ -132,6 +134,9 @@ pub struct Surface<A> {
     /// that may or may not blink is worse than one that always does.
     caret_since: Option<Instant>,
     caret_drawn: bool,
+    /// When the last frame began — what [`Surface::stale`] measures the
+    /// clocks above against.
+    drawn_at: Option<Instant>,
 }
 
 impl<A> Default for Surface<A> {
@@ -152,6 +157,7 @@ impl<A> Default for Surface<A> {
             key_hints: true,
             caret_since: None,
             caret_drawn: false,
+            drawn_at: None,
         }
     }
 }
@@ -166,6 +172,37 @@ impl<A: Clone> Surface<A> {
     pub fn begin_frame(&mut self) {
         self.covered = std::mem::take(&mut self.overlays);
         self.clear_registries();
+        self.drawn_at = Some(Instant::now());
+    }
+
+    /// Whether the last frame is out of date on time alone, with nothing
+    /// having happened: the caret it drew has blinked since, a tooltip has
+    /// ripened since, or an overlay came or went in it — the frame after
+    /// one repaints the pictures beneath it (see `overlays`). A loop that
+    /// skips unchanged frames draws when this says so (performance audit
+    /// #102); anything else that changes a frame is an input, an answer or
+    /// a timer of the loop's own.
+    pub fn stale(&self) -> bool {
+        let Some(drawn) = self.drawn_at else { return true };
+        if self.overlays != self.covered {
+            return true;
+        }
+        let now = Instant::now();
+        if let Some((_, _, since)) = &self.dwell {
+            let ripe = *since + TIP_DELAY;
+            if drawn < ripe && ripe <= now {
+                return true;
+            }
+        }
+        self.caret_drawn && self.caret_on_at(drawn) != self.caret_on_at(now)
+    }
+
+    /// The caret's blink phase at `at`: on for the first half of each
+    /// [`CARET_BLINK`] pair after the last touch, and always on before one.
+    fn caret_on_at(&self, at: Instant) -> bool {
+        self.caret_since.is_none_or(|since| {
+            (at.saturating_duration_since(since).as_millis() / CARET_BLINK.as_millis()).is_multiple_of(2)
+        })
     }
 
     /// Register something drawn over the base layer — its whole footprint,
@@ -210,7 +247,7 @@ impl<A: Clone> Surface<A> {
     /// the frame as one with a caret, for [`Self::caret_next_flip`].
     pub fn caret(&mut self) -> bool {
         self.caret_drawn = true;
-        self.caret_since.is_none_or(|since| (since.elapsed().as_millis() / CARET_BLINK.as_millis()).is_multiple_of(2))
+        self.caret_on_at(Instant::now())
     }
 
     /// How long until the drawn caret flips, if one drew this frame — the
@@ -1277,6 +1314,56 @@ mod tests {
         assert!(s.caret(), "on again in the third");
         s.clear_registries();
         assert!(s.caret_next_flip().is_none(), "the frame's mark clears with the registries");
+    }
+
+    /// What a loop that skips unchanged frames redraws for on time alone
+    /// (performance audit #102): the caret's flip, a tooltip ripening, the
+    /// frame after an overlay came or went — and nothing else.
+    #[test]
+    fn a_frame_goes_stale_only_on_a_blink_a_ripening_or_an_overlays_change() {
+        let mut s: Surface<i32> = Surface::new();
+        assert!(s.stale(), "never drawn");
+        s.begin_frame();
+        assert!(!s.stale(), "drawn, and nothing on a clock");
+
+        // The caret: stale once its phase has turned since the frame.
+        s.caret_touch();
+        assert!(s.caret());
+        assert!(!s.stale(), "the same phase as the frame");
+        s.drawn_at = Instant::now().checked_sub(CARET_BLINK + Duration::from_millis(50));
+        s.caret_since = s.drawn_at;
+        assert!(s.stale(), "blinked off since the frame");
+        s.begin_frame();
+        assert!(!s.stale(), "the next frame drew the flip");
+
+        // A tooltip: stale the moment its dwell ripens, not before or after.
+        let tip = Rect { x: 1, y: 1, width: 4, height: 1 };
+        s.tip(tip, "a tip");
+        s.pointer = Some(Position { x: 2, y: 1 });
+        s.dwell_tick();
+        assert!(!s.stale(), "still resting");
+        if let Some((_, _, since)) = s.dwell.as_mut() {
+            *since = Instant::now().checked_sub(TIP_DELAY).unwrap();
+        }
+        assert!(s.stale(), "ripe since the frame");
+        s.begin_frame();
+        s.tip(tip, "a tip");
+        s.dwell_tick();
+        assert!(!s.stale(), "the frame that shows it is not out of date");
+
+        // An overlay: the frame after it arrives and the one after it
+        // leaves repaint the pictures beneath; a standing one needs none.
+        let menu = Rect { x: 0, y: 0, width: 10, height: 5 };
+        s.begin_frame();
+        s.overlay(menu);
+        assert!(s.stale(), "an overlay just arrived");
+        s.begin_frame();
+        s.overlay(menu);
+        assert!(!s.stale(), "the same overlay standing");
+        s.begin_frame();
+        assert!(s.stale(), "it just left: the pictures beneath come back next frame");
+        s.begin_frame();
+        assert!(!s.stale());
     }
 
     #[test]

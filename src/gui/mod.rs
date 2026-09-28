@@ -36,7 +36,7 @@ mod torrent_meta;
 mod vizwin;
 
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{
@@ -52,6 +52,7 @@ use crate::config::{self, Config};
 use crate::kit::{
     GroundGuard, ListView, POINTER_RESET, Surface, dim, input_display_blink, scroll_list, set_pointer_shape,
 };
+use crate::kit::pace::{Expecting, REDRAW_ANYWAY};
 use crate::kit::theme::{self, legacy_conhost, th};
 use crate::tui::app::{
     Action, App, Effect, Entry, MessageKind, SEARCH_CLASSES, SearchClass, SearchNode, Tab,
@@ -565,7 +566,17 @@ pub(crate) struct Gui {
     /// upgrade to pixels): the event loop shortens its idle wait so the
     /// next frame comes promptly instead of a poll tick later.
     hot: bool,
+    /// When a setting last changed, while the change is not yet on disk:
+    /// the file is written once the changes rest (see [`PREFS_REST`]).
+    prefs_unsaved: Option<Instant>,
 }
+
+/// How long settings rest before they are written: a held ← on the blend
+/// or an Auto DJ bar steps at the key repeat, each step used to be a load,
+/// a serialize and a full flush of the drive, and now the file is written
+/// once, after (performance audit #86). Short, so a crash or a closed
+/// window costs a third of a second of choices at most.
+const PREFS_REST: Duration = Duration::from_millis(300);
 
 impl Gui {
     fn new(config: Config, config_ok: bool, mut app: App) -> Self {
@@ -615,6 +626,7 @@ impl Gui {
             mini_cover: None,
             last_qsel: None,
             hot: false,
+            prefs_unsaved: None,
         }
     }
 
@@ -667,7 +679,10 @@ impl Gui {
     /// Loads fresh before writing: other flows save behind this copy's back
     /// (a connect's SaveSession touches the server list, the servers room
     /// edits it), and writing the boot-time copy wholesale would undo them.
+    /// What it writes of the player's comes from the App as it stands, so a
+    /// change still waiting to be written (see [`Gui::save_soon`]) goes too.
     fn save_now(&mut self) {
+        self.prefs_unsaved = None;
         if !self.config_ok {
             return;
         }
@@ -688,6 +703,31 @@ impl Gui {
         }
     }
 
+    /// A player setting changed: written once the changes rest
+    /// ([`PREFS_REST`]), so a held key's every step is not a write of its
+    /// own. Only the player's settings wait — they live in the App, which
+    /// no reload of the config replaces; the GUI's own section is written
+    /// at once ([`Gui::set_key_hints`]).
+    fn save_soon(&mut self) {
+        self.prefs_unsaved = Some(Instant::now());
+    }
+
+    /// Once a pass: the settings written once they have rested.
+    fn save_rested(&mut self) {
+        if self.prefs_unsaved.is_some_and(|since| since.elapsed() >= PREFS_REST) {
+            self.save_now();
+        }
+    }
+
+    /// Before the config is read back from disk (a reload, another flow's
+    /// load-and-save): settings still waiting are written first, so the
+    /// file the reload reads is the file the screen shows.
+    fn flush_prefs(&mut self) {
+        if self.prefs_unsaved.is_some() {
+            self.save_now();
+        }
+    }
+
     /// The blend walks whole seconds and snaps toward the pressed direction
     /// (the TUI's rule: a hand-written 4.5 steps to 5 and 4, never 5.5).
     fn adjust_blend(&mut self, delta: i32) {
@@ -696,7 +736,7 @@ impl Gui {
         self.app.crossfade = snapped.clamp(0.0, 30.0);
         let set = AudioCmd::SetCrossfade(self.app.crossfade);
         self.pend(vec![Effect::Audio(set)]);
-        self.save_now();
+        self.save_soon();
     }
 
     fn adjust_row(&mut self, row: usize, delta: i32) {
@@ -714,23 +754,23 @@ impl Gui {
                 self.app.gapless = !self.app.gapless;
                 let cmd = AudioCmd::SetGapless(self.app.gapless);
                 self.pend(vec![Effect::Audio(cmd)]);
-                self.save_now();
+                self.save_soon();
             }
             ROW_BLEND_SKIPS => {
                 self.app.blend_skips = !self.app.blend_skips;
                 let cmd = AudioCmd::SetBlendSkips(self.app.blend_skips);
                 self.pend(vec![Effect::Audio(cmd)]);
-                self.save_now();
+                self.save_soon();
             }
             ROW_PAUSE_FADE => {
                 self.app.pause_fade = !self.app.pause_fade;
                 let cmd = AudioCmd::SetPauseFade(self.app.pause_fade);
                 self.pend(vec![Effect::Audio(cmd)]);
-                self.save_now();
+                self.save_soon();
             }
             ROW_RESUME => {
                 self.app.resume_queue = !self.app.resume_queue;
-                self.save_now();
+                self.save_soon();
             }
             ROW_HINTS => self.set_key_hints(!self.config.gui.key_hints),
             _ => {}
@@ -2507,28 +2547,23 @@ fn event_loop(
 ) -> std::io::Result<()> {
     let mut hand = false;
     let mut saver = tui::QueueSaver::new(&gui.app);
+    // Two clocks behind the brisk wait (`kit::pace`): the workers' requests
+    // the App sends, and the side threads' calls — a sign-in, a torrent
+    // check, the Stats page's load — which say themselves when they are out.
+    let mut asked = Expecting::default();
+    let mut side = Expecting::default();
+    // Whether anything happened since the last frame that it does not show
+    // yet — input, an answer, a timer of the App's — and when it was drawn.
+    // A pass with nothing new skips the draw (performance audit #102): a
+    // paused GUI redrew the same frame ten times a second, thirty with the
+    // visualizer window open, each a full render and a diff of every cell.
+    let mut dirty = true;
+    let mut drawn = Instant::now();
     loop {
-        // A SaveSession about to be dispatched writes the config behind
-        // this copy's back — a Quick Connect add mints a whole new entry
-        // there. Reload after, so the dropdown and the room list it.
-        let saving = gui
-            .pending
-            .iter()
-            .any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. } | Effect::SaveDjLibrary { .. }));
-        tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
-        saver.tick(&gui.app);
-        let ticked = gui.app.tick();
-        gui.pend(ticked);
-        if saving && let Ok(fresh) = config::load() {
-            gui.config = fresh;
-            refresh_book(gui);
-        }
-        terminal.draw(|frame| render(frame, gui))?;
-        // The kitty pictures this frame stopped drawing — a queue row's
-        // slot let go, a wall slot past the page — leave the terminal's
-        // store now that the frame covering their cells is out.
-        crate::tui::graphics::release_dropped();
-
+        // Whatever the workers sent is folded in before anything is drawn —
+        // the TUI's order. Drawn first, an answer that landed during the
+        // wait missed this frame and sat out a whole second poll for the
+        // next, and so did the requests it led to (performance audit #82).
         while let Ok(ev) = event_rx.try_recv() {
             // The servers layer looks first: session answers that would
             // land on the TUI's connect screen open the GUI's form instead.
@@ -2540,7 +2575,12 @@ fn event_loop(
             let sonic_random = matches!(ev, Event::SonicRandom { .. });
             let connected = matches!(ev, Event::Connected { .. });
             let was_results = gui.app.sonic.view == crate::tui::app::SonicView::Results;
+            // A status that says what the last one said changes nothing on
+            // screen: paused or stopped, the audio thread repeats itself
+            // every tick.
+            let repeat = matches!(&ev, Event::Status(status) if *status == gui.app.status);
             let effects = gui.app.apply_event(ev);
+            dirty |= !repeat || !effects.is_empty();
             gui.pend(effects);
             if sonic_random {
                 sonic::random_landed(gui, was_results);
@@ -2552,20 +2592,58 @@ fn event_loop(
                 stats::reopen(gui);
             }
         }
-        servers::poll(gui);
-        torrent::poll(gui);
+        dirty |= servers::poll(gui);
+        dirty |= torrent::poll(gui);
+        dirty |= stats::absorb(gui);
+
+        // A SaveSession about to be dispatched writes the config behind
+        // this copy's back — a Quick Connect add mints a whole new entry
+        // there. Reload after, so the dropdown and the room list it.
+        let saving = gui
+            .pending
+            .iter()
+            .any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. } | Effect::SaveDjLibrary { .. }));
+        if gui.pending.iter().any(tui::awaits_answer) {
+            asked.arm();
+        }
+        tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
+        saver.tick(&gui.app);
+        let ticked = gui.app.tick();
+        dirty |= !ticked.is_empty();
+        gui.pend(ticked);
+        if saving {
+            gui.flush_prefs();
+        }
+        if saving && let Ok(fresh) = config::load() {
+            gui.config = fresh;
+            refresh_book(gui);
+            dirty = true;
+        }
+        if dirty || moving(gui) || drawn.elapsed() >= REDRAW_ANYWAY {
+            terminal.draw(|frame| render(frame, gui))?;
+            // The kitty pictures this frame stopped drawing — a queue row's
+            // slot let go, a wall slot past the page — leave the terminal's
+            // store now that the frame covering their cells is out.
+            crate::tui::graphics::release_dropped();
+            drawn = Instant::now();
+            dirty = false;
+        }
 
         // The Stats screen's page pumps its worker and its controls here too.
-        let stats_over = stats::frame(gui);
+        let page = stats::frame(gui);
+        dirty |= page.stepped;
         // The visualizer window's host: the child's exit, the next texture.
-        vizwin::tick(gui);
-        let over = gui.ui.hovering_clickable() || stats_over;
+        dirty |= vizwin::tick(gui);
+        // Settings changed a moment ago, now resting: written.
+        gui.save_rested();
+        let over = gui.ui.hovering_clickable() || page.over;
         if over != hand {
             hand = over;
             set_pointer_shape(hand, mouse_on);
         }
         if let Some(act) = gui.ui.hold_action() {
             gui.act(act);
+            dirty = true;
         }
         gui.ui.dwell_tick();
 
@@ -2575,16 +2653,19 @@ fn event_loop(
         // caret wants its next frame ON the flip, not a poll tick after it.
         let wait = if gui.hot {
             Duration::from_millis(10)
-        } else if gui.app.drawing_audio() || vizwin::is_open(gui) {
+        } else if gui.app.drawing_audio() || vizwin::wants_frames(gui) {
             // The visualizer tab, moving: the TUI's thirty frames a second —
-            // and the visualizer window's feed, at the same pace.
+            // and the visualizer window's feed, at the same pace, while it
+            // has anything to say (silence, once settled, is said once).
             Duration::from_millis(33)
         } else {
             gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
         };
-        if !event::poll(wait)? {
+        side.track(gui.servers.busy() || gui.torrent.busy.is_some() || stats::awaiting(gui));
+        if !event::poll(side.wait(asked.wait(wait)))? {
             continue;
         }
+        dirty = true;
         // Drain everything queued before the next draw (the wizard's
         // collapse-moves lesson: pointer sweeps are one event per cell).
         let mut inputs = vec![event::read()?];
@@ -2688,6 +2769,15 @@ fn event_loop(
             }
         }
     }
+}
+
+/// Whether the screen moves on its own, with nothing happening: covers
+/// still upgrading to pixels, the visualizer tab settling, a caret due to
+/// blink, a tooltip ripening, the frame after an overlay came or went.
+/// Every pass draws while it does, as every pass did before frames could
+/// be skipped.
+fn moving(gui: &mut Gui) -> bool {
+    gui.hot || gui.app.drawing_audio() || gui.ui.stale() || stats::stale(gui)
 }
 
 impl Gui {
@@ -3062,6 +3152,42 @@ mod tests {
         let mut gui = Gui::new(Config::default(), false, App::new(None, None, None));
         gui.demo = Some(demo_now());
         gui
+    }
+
+    /// A held key's steps are written once they rest, not once a step; a
+    /// reload, another flow's write, and Start/Stop write what is waiting
+    /// first (performance audit #86).
+    #[test]
+    fn settings_are_written_once_they_rest_and_before_anything_rereads_them() {
+        let scratch = crate::config::testing::Scratch::new("gui-prefs-rest");
+        let mut gui = Gui::new(Config::default(), true, App::new(None, None, None));
+        config::save(&gui.config).unwrap();
+        let file = scratch.dir.join("config.toml");
+        let on_disk = || config::load().unwrap().player.crossfade_seconds;
+        let before = std::fs::read_to_string(&file).unwrap();
+
+        for _ in 0..5 {
+            gui.adjust_blend(1);
+        }
+        assert_eq!(gui.app.crossfade, 5.0, "each step lands at once");
+        gui.save_rested();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "still moving: nothing written");
+        gui.prefs_unsaved = gui.prefs_unsaved.map(|since| since - PREFS_REST);
+        gui.save_rested();
+        assert_eq!(on_disk(), 5.0, "rested: written, once");
+        assert!(gui.prefs_unsaved.is_none());
+
+        // Another flow's load-and-save writes the waiting change first.
+        gui.adjust_blend(1);
+        servers::update_config(&mut gui, |_| {});
+        assert_eq!(on_disk(), 6.0);
+        assert_eq!(gui.config.player.crossfade_seconds, 6.0, "the GUI's copy is the file's");
+
+        // The GUI's own section is written at once.
+        gui.set_key_hints(false);
+        assert!(!config::load().unwrap().gui.key_hints);
+        assert!(gui.prefs_unsaved.is_none());
+        let _ = &scratch;
     }
 
     fn track(filepath: &str, title: &str, duration: f64) -> Track {

@@ -2212,6 +2212,10 @@ pub struct App {
     /// wall clock rather than counted per draw, so it turns at one speed
     /// whether the app is idle or flooded — and stays still under test.
     pub spinner: usize,
+    /// Whether the last frame drew the spinner: a turn of it is a frame to
+    /// draw, and with none on screen it is not (performance audit #102).
+    /// Set by the drawing, which holds the App only to read it.
+    pub spinner_shown: std::cell::Cell<bool>,
     pub now_tab: NowTab,
     /// Cursor for whichever now-playing tab is not the queue. The Queue tab
     /// keeps using the queue's own selection, so `d` there removes the row you
@@ -2356,6 +2360,7 @@ impl App {
             heard: Default::default(),
             fullscreen: false,
             spinner: 0,
+            spinner_shown: std::cell::Cell::new(false),
             now_tab: NowTab::Queue,
             now_scroll: 0,
             now_offset: 0,
