@@ -13,7 +13,7 @@ use futures_util::{Future, Stream, StreamExt, TryStream};
 use handle::{
     DownloadStatus, Downloaded, NotifyRead, PositionReached, RequestedPosition, SourceHandle,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::yield_now;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -122,9 +122,10 @@ pub(crate) struct Source<S: SourceStream, W: StorageWriter> {
     content_length: Option<u64>,
     seek_tx: mpsc::Sender<u64>,
     seek_rx: mpsc::Receiver<u64>,
-    // mstream-player patch: where a waiting read's bytes run out (`SourceHandle::want`).
-    want_tx: mpsc::Sender<u64>,
-    want_rx: mpsc::Receiver<u64>,
+    // mstream-player patch: where a waiting read's bytes run out (`SourceHandle::want`): the
+    // latest such place, not a queue of them.
+    want_tx: watch::Sender<u64>,
+    want_rx: watch::Receiver<u64>,
     prefetch_bytes: u64,
     batch_write_size: usize,
     retry_timeout: Duration,
@@ -153,7 +154,9 @@ where
         // buffer size of 1 is fine here because we wait for the position to update after we send
         // each request
         let (seek_tx, seek_rx) = mpsc::channel(1);
-        let (want_tx, want_rx) = mpsc::channel(1);
+        // mstream-player patch: the initial 0 counts as seen, so nothing is wanted until a read
+        // says so.
+        let (want_tx, want_rx) = watch::channel(0);
         Self {
             writer,
             downloaded: Downloaded::default(),
@@ -216,9 +219,12 @@ where
                     // seek_tx can't be dropped here since we keep a reference in this struct
                     self.handle_seek(stream, position.expect("seek_tx dropped")).await?;
                 },
-                position = self.want_rx.recv() => {
+                changed = self.want_rx.changed() => {
                     // want_tx can't be dropped here either, for the same reason
-                    self.handle_want(stream, position.expect("want_tx dropped")).await?;
+                    changed.expect("want_tx dropped");
+                    // The latest want: any made since the last look replaced the ones before.
+                    let position = *self.want_rx.borrow_and_update();
+                    self.handle_want(stream, position).await?;
                 },
                 bytes = next_chunk => {
                     let Ok(bytes) = bytes else {

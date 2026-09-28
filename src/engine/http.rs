@@ -607,11 +607,11 @@ pub(crate) mod tests {
     /// Seek, then read `len` bytes, the way a decoder resumes after a seek:
     /// how long that took, and what came back.
     fn seek_and_read(
-        reader: &mut HttpReader,
+        reader: &mut (impl std::io::Read + std::io::Seek),
         at: u64,
         len: usize,
     ) -> std::io::Result<(Duration, Vec<u8>)> {
-        use std::io::{Read, Seek, SeekFrom};
+        use std::io::SeekFrom;
         let started = std::time::Instant::now();
         reader.seek(SeekFrom::Start(at))?;
         let mut got = vec![0u8; len];
@@ -720,6 +720,194 @@ pub(crate) mod tests {
         let (took, got) = seek_and_read(&mut reader, 1_200_000, 200_000).unwrap();
         assert!(got == body[1_200_000..1_400_000], "the island and what follows it");
         assert!(took < Duration::from_millis(1500), "the read waited {took:?}: {:?}", log.lock());
+    }
+
+    /// Somewhere to stop the download task in its tracks, from a test:
+    /// `hold_from(at)` arms it for the next pass at or past byte `at`,
+    /// `held` waits for the task to get there and says where that is,
+    /// `release` lets it go. One hold per arming, and never longer than
+    /// ten seconds, so a failing test cannot wedge the runtime it runs on.
+    #[derive(Default)]
+    struct Gate {
+        state: std::sync::Mutex<GateState>,
+        changed: std::sync::Condvar,
+    }
+
+    #[derive(Default)]
+    struct GateState {
+        armed_from: Option<u64>,
+        held_at: Option<u64>,
+    }
+
+    impl Gate {
+        fn hold_from(&self, at: u64) {
+            self.state.lock().unwrap().armed_from = Some(at);
+        }
+
+        fn pass(&self, at: u64) {
+            let mut state = self.state.lock().unwrap();
+            if state.armed_from.is_some_and(|from| at >= from) {
+                state.armed_from = None;
+                state.held_at = Some(at);
+                self.changed.notify_all();
+                let _ = self.changed.wait_timeout_while(state, Duration::from_secs(10), |state| {
+                    state.held_at.is_some()
+                });
+            }
+        }
+
+        fn held(&self) -> u64 {
+            let state = self.state.lock().unwrap();
+            let (state, waited) = self
+                .changed
+                .wait_timeout_while(state, Duration::from_secs(5), |state| state.held_at.is_none())
+                .unwrap();
+            assert!(!waited.timed_out(), "the download never reached the gate");
+            state.held_at.unwrap()
+        }
+
+        fn release(&self) {
+            self.state.lock().unwrap().held_at = None;
+            self.changed.notify_all();
+        }
+    }
+
+    /// The spool, with a gate where each network chunk's write begins:
+    /// held there, the download has taken the chunk off the wire but not
+    /// yet written it, so it can neither wake the reader waiting on it nor
+    /// hear what that reader asks for meanwhile.
+    struct GatedSpool(std::sync::Arc<Gate>);
+
+    struct GatedWriter {
+        file: fs::File,
+        gate: std::sync::Arc<Gate>,
+        chunk_start: bool,
+    }
+
+    impl std::io::Write for GatedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            use std::io::Seek;
+            // A chunk goes out in batches, and an empty write ends it.
+            if buf.is_empty() {
+                self.chunk_start = true;
+            } else if std::mem::take(&mut self.chunk_start) {
+                self.gate.pass(self.file.stream_position()?);
+            }
+            self.file.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    impl std::io::Seek for GatedWriter {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.file.seek(to)
+        }
+    }
+
+    impl stream_download::storage::StorageProvider for GatedSpool {
+        type Reader = stream_download::storage::temp::TempStorageReader;
+        type Writer = GatedWriter;
+
+        fn into_reader_writer(
+            self,
+            content_length: Option<u64>,
+        ) -> std::io::Result<(Self::Reader, Self::Writer)> {
+            let (reader, file) = spool_provider().into_reader_writer(content_length)?;
+            Ok((reader, GatedWriter { file, gate: self.0, chunk_start: true }))
+        }
+    }
+
+    #[test]
+    fn a_read_off_an_island_is_not_lost_behind_a_want_already_answered() {
+        // A read about to wait says where its bytes run out (the #73 patch's
+        // `want`). That went down a one-slot channel, and a second want sent
+        // while the first still sat there was dropped. The first is stale by
+        // then whenever the write that woke its reader got in ahead of it:
+        // the download reads it, finds those bytes already spooled, and does
+        // nothing, while the reader, now off the end of an older island,
+        // waits for the back-fill to come round (the audit's integration
+        // check caught it 1-4 times in 40 by chance). Here gates on the
+        // download task make that order certain: it is held with a chunk in
+        // hand while the reader asks at the frontier, and held again after
+        // that chunk wakes the reader, until the reader has asked again.
+        use std::io::{Read, Seek, SeekFrom};
+        use std::sync::Arc;
+        let body = patterned(3_000_000);
+        let (url, log) = range_server(body.clone(), move |start| match start {
+            // The island at 1 MB stops at 200 KB, and the file below it
+            // would take all day...
+            1_000_000 => (200_000, Duration::from_secs(60)),
+            0 => (0, Duration::from_secs(60)),
+            // ...while what the reader asks for comes at once.
+            _ => (usize::MAX, Duration::ZERO),
+        });
+        let (writes, progress) = (Arc::new(Gate::default()), Arc::new(Gate::default()));
+        // Its own runtime: the gates block one of its threads.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let reader = rt.block_on({
+            let (spool, progress) = (GatedSpool(writes.clone()), progress.clone());
+            async move {
+                let stream = HttpStream::new(build_client(false, false)?, url.parse().unwrap())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let settings = Settings::default()
+                    .prefetch_bytes(PREFETCH)
+                    .batch_write_size(WRITE_BATCH)
+                    .on_progress(move |_, state, _| progress.pass(state.current_position));
+                StreamDownload::from_stream(stream, spool, settings)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        });
+        let mut reader = reader.unwrap();
+
+        seek_and_read(&mut reader, 1_000_000, 1000).unwrap();
+        // Let the island's 200 KB land before the next seek cuts it off.
+        std::thread::sleep(Duration::from_millis(200));
+        // Past its head start, the run from 2 MB is held with a chunk in
+        // hand and the rest of the file behind it.
+        writes.hold_from(2_000_000 + PREFETCH);
+        reader.seek(SeekFrom::Start(2_000_000)).unwrap();
+        let frontier = writes.held();
+        let mut run = vec![0u8; (frontier - 2_000_000) as usize];
+        reader.read_exact(&mut run).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Wants the frontier, where the held chunk goes, and waits.
+            let mut next = [0u8; 1];
+            reader.read_exact(&mut next).unwrap();
+            // Woken, it goes back into the island and reads off its end.
+            let island = seek_and_read(&mut reader, 1_100_000, 150_000);
+            let _ = tx.send((next[0], island));
+        });
+        // The reader is waiting at the frontier, its want unread.
+        std::thread::sleep(Duration::from_millis(100));
+        progress.hold_from(0);
+        writes.release();
+        // The chunk is written and has woken the reader; the download is
+        // held again before it can look at the want, while the reader goes
+        // back into the island and asks again. (A reader slower than these
+        // sleeps would let the old channel pass; it cannot fail this one.)
+        progress.held();
+        std::thread::sleep(Duration::from_millis(100));
+        progress.release();
+
+        let (next, island) = rx.recv_timeout(Duration::from_secs(3)).unwrap_or_else(|_| {
+            panic!("the read off the island never came back: {:?}", log.lock().unwrap())
+        });
+        assert_eq!(next, body[frontier as usize]);
+        let (took, got) = island.unwrap();
+        assert!(got == body[1_100_000..1_250_000], "the island and what follows it");
+        assert!(took < Duration::from_millis(1500), "the read waited {took:?}: {:?}", log.lock());
+        rt.shutdown_background();
     }
 
     #[test]
