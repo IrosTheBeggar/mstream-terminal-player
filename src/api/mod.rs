@@ -2869,4 +2869,64 @@ mod tests {
             "Provide a .torrent file"
         );
     }
+
+    /// The two halves of one rule (performance audit #98): the API client
+    /// offers gzip and reads a gzipped answer as if it were plain, and a
+    /// stream open offers nothing, so the length it hands back for seeking
+    /// is the length the server sent. The stream half lives here because
+    /// the contrast is the point.
+    #[test]
+    fn json_may_arrive_gzipped_and_audio_never_does() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+
+        // gzip.compress(b'{"vpaths":["zipped"]}', mtime=0), from Python.
+        const ZIPPED_PING: [u8; 41] = [
+            0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xab, 0x56, 0x2a, 0x2b,
+            0x48, 0x2c, 0xc9, 0x28, 0x56, 0xb2, 0x8a, 0x56, 0xaa, 0xca, 0x2c, 0x28, 0x48, 0x4d,
+            0x51, 0x8a, 0xad, 0x05, 0x00, 0x00, 0xf2, 0x56, 0xa0, 0x15, 0x00, 0x00, 0x00,
+        ];
+        // What each request asked for, and a server that answers the way
+        // mStream's compression does: gzip only when it was offered.
+        let heads = Arc::new(Mutex::new(Vec::<String>::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = heads.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+                let offered = head.lines().any(|l| l.starts_with("accept-encoding:") && l.contains("gzip"));
+                let reply = if head.starts_with("get /api/v1/ping") && offered {
+                    let mut reply = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+                        ZIPPED_PING.len()
+                    )
+                    .into_bytes();
+                    reply.extend_from_slice(&ZIPPED_PING);
+                    reply
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: 4\r\n\r\nRIFF".to_vec()
+                };
+                seen.lock().unwrap().push(head);
+                let _ = stream.write_all(&reply);
+            }
+        });
+
+        let ping = Client::new(&format!("http://{addr}")).unwrap().ping().unwrap();
+        assert_eq!(ping.vpaths, vec!["zipped"], "the gzipped answer read as plain JSON");
+
+        let (_reader, length) = crate::engine::http::open(&format!("http://{addr}/media/a.wav")).unwrap();
+        assert_eq!(length, Some(4), "the stream kept its Content-Length");
+
+        let heads = heads.lock().unwrap();
+        let asked = |path: &str| heads.iter().find(|h| h.contains(path)).cloned().unwrap_or_default();
+        assert!(asked("/api/v1/ping").contains("accept-encoding: gzip"), "{heads:?}");
+        assert!(!asked("/media/a.wav").contains("accept-encoding"), "{heads:?}");
+    }
 }

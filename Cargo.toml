@@ -82,7 +82,19 @@ ratatui = { version = "0.30.2", features = ["crossterm"] }
 # CA on P-521 is the one case that now needs that knob), and offer the
 # X25519MLKEM768 post-quantum key share, which aws-lc-rs offered last,
 # behind X25519, used only if a server asked for it.
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider"] }
+#
+# gzip: the API client offers it and decodes transparently, so the big
+# JSON — a 16k-album list is ~4 MB plain, ~1 MB gzipped; a 5k-row folder
+# with metadata ~2.8 MB, ~0.4 MB — travels compressed wherever mStream's
+# compression toggle or a proxy in front (Caddy, nginx, Cloudflare) will
+# do it; below ~1.6 Mbit/s the plain album list outlasts the 20 s request
+# ceiling (performance audit #98). The browser build's fetch already does
+# this. gzip alone, not brotli too: mStream's brotli mode answers a
+# gzip-only client with gzip, and brotli's extra ~8% (measured on a real
+# mStream's album and folder answers) would be a decoder crate compiled
+# into every triple. The engine's stream clients opt out (engine::http):
+# a decoded body loses the Content-Length seeking needs.
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "gzip"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # Album art at the terminal's own resolution, where the terminal has one:
 # kitty, sixel or iTerm2. Native only, and for two reasons — the wasm build
