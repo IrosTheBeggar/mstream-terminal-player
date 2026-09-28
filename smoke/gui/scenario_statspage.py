@@ -23,6 +23,13 @@ def run(Gui):
     g.wait_for("Overview", 10, "the page's tab strip")
     g.wait_for("plays", 20, "the state line's totals")
     g.dump("the Stats screen")
+    # The charts' furniture (clauses 8–9): the y axis's ticks and the
+    # baseline's foot.
+    if not (g.find(" ┤ ") and g.find("0 ┼─")):
+        raise SystemExit("FAIL: the charts have no axis")
+    # The tiles are cards (clause 13).
+    if not g.find("╭"):
+        raise SystemExit("FAIL: the tiles have no frames")
     if g.find("auto-dj") or g.find("LIBRARY"):
         raise SystemExit("FAIL: the GUI's bar or nav is still drawn on the Stats screen")
     # The footer is a config switch (key hints); when it is on it carries

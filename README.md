@@ -534,9 +534,9 @@ mstream-player stats --server http://nas:3000
 The server's `/stats` page (mStream 6.27 and up) as a page of its own, in the admin rooms'
 chrome and behind the same sign-in — but for any account, not an admin's, because the
 listening log is per account. One state line carries the period and its totals; `←`/`→`
-switch three tabs. **Overview** is the webapp's six tiles (plays, listening time, tracks,
+switch three tabs. **Overview** is the webapp's six tiles as cards (plays, listening time, tracks,
 skips, streak, sessions, each against the previous period), plays per day as a column
-chart with the busiest day named, the 24-hour profile with the peak hour, and — while the
+chart on a whole-number scale with the busiest day named, the 24-hour profile with the peak hour, and — while the
 log holds federated peers' tracks — where the tracks live. **Top** ranks tracks, artists,
 albums or genres (`t` cycles) by plays or by time (`m` flips), with the share bar, the
 plays, the time and, for tracks, the last play; the cursor row's rest goes on the note line.

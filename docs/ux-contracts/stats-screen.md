@@ -69,6 +69,45 @@ federated peer's parent serves it as it serves the queue.
    page is selected or open.
 7. **The tab wears the slab** while the screen is up, as the other tabs do.
 
+### The charts
+
+The page's two column charts — plays per day (or week, or month) and the
+24-hour profile — in both hosts, the hub's terminal and this screen.
+
+8. **Every column chart reads on a scale.** Down its left, the whole-number
+   ticks: `┤` on a row whose upper edge is a whole number of plays, that
+   number before it; `│` on the rows between; `0 ┼` at the foot. Once the
+   tallest column reaches the rows' count, every row is the same whole
+   number of plays and every row is labelled (4 3 2 1; 40 30 20 10 for a
+   37-play peak, which then stands at 37/40 of the height). Below that the
+   tallest column takes the whole height and only the rows whose edge
+   falls on a whole number are labelled.
+9. **A baseline under the columns**: `─`, with `┴` under every column that
+   carries a label, and the labels on the row beneath, each starting under
+   its tick — the days, the Mondays, the months, the hours, as before. A
+   label with no room is left out, and its tick with it.
+10. **The charts grow with the screen.** The two share the rows left under
+    the tiles equally: three rows of eighth-block columns on a short
+    terminal, eight at the most, never more. When only one chart fits, the
+    day chart is drawn and the hours chart yields, as before.
+11. **No gridlines.** The ticks carry the scale; the page stays quiet.
+    Every axis glyph is CP437, so the legacy console draws the same axis
+    around its density columns.
+12. **The split beside the hours chart keeps its words.** Its share bar is
+    ten cells, fewer when the row beside the chart is short of them — the
+    axis's gutter costs that row its cells — and never fewer than four;
+    with less room than that the split is not drawn, as before.
+
+### The tiles
+
+13. **The six tiles are cards**: the kit's rounded frame, dim, no fill,
+    one cell of padding; inside, the value bold, the label and the detail
+    dim, as before. Three across, filling the column with one cell between
+    (the width's remainder goes to the first cards), the two rows stacked
+    frame to frame, the top row's frame directly under the period
+    controls. The frames cost the rows under the tiles one row against the
+    bare tiles; the charts yield as clause 10 says.
+
 ## Wording
 
 The page's own strings (`sta.*`). New: the tab is the page's title
@@ -85,3 +124,22 @@ the no-session sentence; `gui.tips.base` names `T`.
   terminal window is a per-OS guess with no answer over SSH. Hosting the
   page in the GUI's own loop has none of those, and costs the page one
   flag: no header and no tips row while hosted.
+- **2026-09-27 — The charts' furniture (clauses 8–11).** The two column
+  charts had labels under them and nothing else: no scale, no baseline, no
+  ticks, so nothing on the page said what a full column was worth. The
+  terminal-charting libraries surveyed — asciigraph and its Rust port,
+  ntcharts, ratatui's Chart and BarChart, termgraph, plotext — agree on
+  the furniture in clauses 8 and 9. Ratatui's own Chart was weighed and
+  refused: its bars are canvas markers with four levels a row against the
+  eighth blocks' eight, its labels spread evenly rather than sitting under
+  their dates, and the Windows console has no braille. Gridlines were
+  offered and declined. The charts' growth and its cap were the user's
+  call; the floor fell from four rows to three so that a 30-row terminal
+  keeps both charts and a 24-row terminal keeps one, each now a row
+  taller with its baseline.
+- **2026-09-27 — Cards (clause 13).** Asked for once the axes were in:
+  borders on the six tiles. Drawn as the kit's rounded cards, each its
+  own frame, rather than as a shared-border grid, which would have cost
+  no row: the grid reads as a table, the cards as the webapp's tiles. The
+  row the frames cost comes out of the charts' share — a 30-row hub
+  terminal keeps the day chart alone, a 24-row one the tiles alone.
