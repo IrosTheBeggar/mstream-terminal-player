@@ -81,7 +81,13 @@ phone tunes it, and find it as you left it next time.
    preset's colours are the preset's.
 6. **Paced by the display**: `PresentMode::Fifo`, a redraw requested after
    each present, no rendering while occluded or minimized, never a busy
-   loop.
+   loop. On a display faster than ~118 Hz a picture stays up for k
+   refreshes, k the rate ÷ 59 Hz rounded down (120 Hz shows 60 pictures a
+   second, 144 Hz 72, 240 Hz 60; never under 59): only the refresh that
+   starts one shades the preset and runs the controls, and the others show
+   it again. 60 a second is the rate the mobile app's render thread draws
+   at, and the pace its frame-counted presets were tuned at. A new preset,
+   a new size and a window shown again start a picture at once.
 7. **Every built-in preset**, single-pass and multipass alike (the
    renderer already draws the feedback buffers, so 11.1's six became
    eight): `→` and `←` step through them, wrapping; a preset this GPU
@@ -237,3 +243,13 @@ the phone.
 - **2026-09-27 — The German Visualizer tooltip** used an en dash before
   its key (`– V`), so the GUI's key-hints rule could not strip it; it
   reads `— V` now, as every other tooltip does.
+- **2026-09-28 — At most ~60 pictures a second past ~118 Hz** (clause 6;
+  the performance audit's #118). A picture on every refresh of a 120 Hz
+  ProMotion panel or a 144–240 Hz monitor shaded every pass of the preset
+  two to four times for each new audio texture (thirty a second), and
+  faded 05's flash, which decays per frame, two to four times as fast as
+  on the phone (`VisualizerBridge.kt` draws at 60). The window still
+  presents on every refresh, so its pace is the display's own; a timer
+  set a whole number of refreshes apart was tried first and held one
+  frame in fifteen for one refresh or three, a judder twice a second.
+  60–118 Hz displays are paced as before.
