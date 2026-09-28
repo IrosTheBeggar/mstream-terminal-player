@@ -555,6 +555,11 @@ mod native {
                         kitty_picture(picker, source, fitted, &resize, (id, tmux, deflate))
                             .map(|(protocol, transmit)| (protocol, Some(transmit)))
                     }
+                    // A cover that arrived as a JPEG goes to iTerm2 as one;
+                    // everything lossless stays lossless (`iterm2_jpeg`).
+                    ProtocolType::Iterm2 if art.source().starts_with(&[0xFF, 0xD8, 0xFF]) => {
+                        iterm2_jpeg(picker, source, fitted, &resize, self.tmux).map(|p| (p, None))
+                    }
                     _ => picker.new_protocol(source, fitted, resize).ok().map(|p| (p, None)),
                 };
                 let Some((protocol, transmit)) = built else {
@@ -821,6 +826,77 @@ mod native {
             data.push_str(end);
         }
         data
+    }
+
+    /// How hard iTerm2's JPEG covers are compressed. The source was a JPEG
+    /// already, typically saved at 80-90; at a cover's size in cells 85
+    /// keeps a detailed photograph within 35 dB of upstream's lossless PNG
+    /// of the same pixels, at a third to a sixth of the bytes.
+    const JPEG_QUALITY: u8 = 85;
+
+    /// The iTerm2 picture of a cover that arrived as a JPEG, sent as one.
+    ///
+    /// Upstream always sends PNG, and a photograph PNG-encodes to several
+    /// times its JPEG: a wall page was ~2 MB of base64 at 200x60, written
+    /// on every page turn and carried in the frame's cells — copied and
+    /// compared — every frame it stood (performance audit #96). Only art
+    /// that was already lossy goes this way: the QR code, the wordmark and
+    /// PNG covers keep upstream's lossless encode. Fitted and scaled as
+    /// upstream does it (`Resize::Scale`, Triangle), but not padded: JPEG
+    /// has no transparent to pad with, and iTerm2 draws the picture at its
+    /// own size over the cells cleared for the box — which is all the
+    /// transparent strip showed. Framed as upstream frames it, tmux and
+    /// the erased cells included.
+    fn iterm2_jpeg(
+        picker: &Picker,
+        source: image::DynamicImage,
+        fitted: Size,
+        resize: &Resize,
+        tmux: bool,
+    ) -> Option<Protocol> {
+        use base64::Engine;
+        use std::fmt::Write as _;
+
+        let font = picker.font_size();
+        let cells = resize.size_for(&source, font, fitted);
+        let (w, h) = (
+            u32::from(cells.width) * u32::from(font.width),
+            u32::from(cells.height) * u32::from(font.height),
+        );
+        let scaled = source.resize(w, h, image::imageops::FilterType::Triangle).into_rgb8();
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, JPEG_QUALITY)
+            .encode_image(&scaled)
+            .ok()?;
+        let (start, escape, end) = Parser::tmux_start_escape_end(tmux);
+        let rows = usize::from(cells.height);
+        let mut data = String::with_capacity(jpeg.len() / 3 * 4 + 16 * rows + 128);
+        data.push_str(start);
+        // Upstream's `clear_area` (crate-private): the box's cells erased a
+        // row at a time, then back to the top, so no stale text shows
+        // through where the picture does not reach.
+        if cells.height == 1 {
+            let _ = write!(data, "{escape}[{}X", cells.width);
+        } else {
+            for _ in 0..cells.height {
+                let _ = write!(data, "{escape}[{}X{escape}[1B", cells.width);
+            }
+            let _ = write!(data, "{escape}[{}A", cells.height);
+        }
+        let _ = write!(
+            data,
+            "{escape}]1337;File=inline=1;size={};width={}px;height={}px;doNotMoveCursor=1:",
+            jpeg.len(),
+            scaled.width(),
+            scaled.height()
+        );
+        base64::engine::general_purpose::STANDARD.encode_string(&jpeg, &mut data);
+        let _ = write!(data, "\x07{end}");
+        Some(Protocol::ITerm2(ratatui_image::protocol::iterm2::Iterm2 {
+            data,
+            size: cells,
+            is_tmux: tmux,
+        }))
     }
 
     /// Whether every pixel of `img` is opaque: no alpha channel, or one at
@@ -1508,6 +1584,103 @@ mod native {
             assert_eq!(graphics.encodes(), 1);
         }
 
+        /// A cover that arrived as a JPEG, as most do.
+        fn a_jpeg_cover(width: u32, height: u32) -> crate::tui::art::Art {
+            let pixels = image::RgbImage::from_fn(width, height, |x, y| {
+                let v = ((x * x + y * 3) / 7) as u8;
+                image::Rgb([v, v.wrapping_add((y / 3) as u8), 255 - v])
+            });
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
+                .encode_image(&pixels)
+                .unwrap();
+            crate::tui::art::decode(&bytes.into_inner()).unwrap()
+        }
+
+        /// The iTerm2 escape a frame carries: everything before the image
+        /// data, the image's bytes, and what follows them.
+        fn iterm2_sent(data: &str) -> (String, Vec<u8>, String) {
+            use base64::Engine;
+            let (head, rest) = data.split_once("doNotMoveCursor=1:").unwrap();
+            let (payload, tail) = rest.split_once('\x07').unwrap();
+            let bytes = base64::engine::general_purpose::STANDARD.decode(payload).unwrap();
+            (head.to_string(), bytes, tail.to_string())
+        }
+
+        #[test]
+        fn a_jpeg_cover_goes_to_iterm2_as_a_jpeg_and_lossless_art_stays_png() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // A photograph PNG-encodes to several times its JPEG, and the
+            // payload is written on every page turn and carried in the
+            // frame's cells (performance audit #96).
+            let frame_sent = |art: &crate::tui::art::Art| {
+                let mut graphics = Graphics::forced(ProtocolType::Iterm2);
+                let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+                terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), art))).unwrap();
+                let sent: String =
+                    terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect();
+                iterm2_sent(&sent)
+            };
+            let (head, jpeg, _) = frame_sent(&a_jpeg_cover(300, 300));
+            assert!(jpeg.starts_with(&[0xFF, 0xD8, 0xFF]) && jpeg.ends_with(&[0xFF, 0xD9]));
+            assert!(head.contains(&format!("size={};", jpeg.len())), "{head:?}");
+            let decoded = image::load_from_memory(&jpeg).unwrap();
+            let (w, h) = (decoded.width(), decoded.height());
+            assert!(head.contains(&format!("width={w}px;height={h}px;")), "{head:?}");
+            // The QR code, the wordmark and PNG covers stay lossless.
+            let (_, png, _) = frame_sent(&a_cover(300));
+            assert!(png.starts_with(b"\x89PNG"), "lossless art stays PNG");
+        }
+
+        #[test]
+        fn the_iterm2_jpeg_stands_where_upstreams_png_stood() {
+            // The same cells, the same erased box ahead of it, the same
+            // framing — the tmux wrapper included. Not padded: the picture
+            // is its own size, over the cells the box cleared, which is all
+            // upstream's transparent strip showed.
+            let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
+            #[allow(deprecated)]
+            let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(10, 20));
+            picker.set_protocol_type(ProtocolType::Iterm2);
+            for (width, height) in [(300, 300), (300, 150), (150, 300)] {
+                let art = a_jpeg_cover(width, height);
+                let source = image::load_from_memory(art.source()).unwrap();
+                let fitted = Size::new(24, 8);
+                let ours = iterm2_jpeg(&picker, source.clone(), fitted, &resize, false).unwrap();
+                let theirs = picker.new_protocol(source, fitted, resize.clone()).unwrap();
+                assert_eq!(ours.size(), theirs.size(), "{width}x{height}");
+                let (Protocol::ITerm2(ours), Protocol::ITerm2(theirs)) = (ours, theirs) else {
+                    panic!("iTerm2 both")
+                };
+                let (our_head, jpeg, our_tail) = iterm2_sent(&ours.data);
+                let (their_head, png, their_tail) = iterm2_sent(&theirs.data);
+                let erased = |head: &str| head.split("\x1b]1337;").next().unwrap().to_string();
+                assert_eq!(erased(&our_head), erased(&their_head), "{width}x{height}");
+                assert_eq!(our_tail, their_tail);
+                assert!(jpeg.len() * 2 < png.len(), "{} vs {}", jpeg.len(), png.len());
+                // The picture itself is the unpadded scale of the same fit.
+                let shown = image::load_from_memory(&jpeg).unwrap();
+                let padded = image::load_from_memory(&png).unwrap().to_rgba8();
+                let (w, h) = (shown.width(), shown.height());
+                assert!(w <= padded.width() && h <= padded.height());
+                assert!(w == padded.width() || h == padded.height(), "one side meets the box");
+                let beyond = padded.enumerate_pixels().filter(|(x, y, _)| *x >= w || *y >= h);
+                assert!(beyond.clone().all(|(_, _, pixel)| pixel.0[3] == 0), "padding past it");
+            }
+            let art = a_jpeg_cover(300, 300);
+            let source = image::load_from_memory(art.source()).unwrap();
+            let Some(Protocol::ITerm2(wrapped)) =
+                iterm2_jpeg(&picker, source, Size::new(24, 8), &resize, true)
+            else {
+                panic!("iTerm2")
+            };
+            assert!(wrapped.data.starts_with("\x1bPtmux;\x1b\x1b["), "{:?}", &wrapped.data[..20]);
+            assert!(wrapped.data.ends_with("\x07\x1b\\"));
+            assert!(wrapped.is_tmux);
+        }
+
         #[test]
         fn a_small_cover_is_enlarged_to_fill_its_fitted_box() {
             use ratatui::Terminal;
@@ -1710,6 +1883,32 @@ mod native {
                     "kitty {side}px: {} bytes in {fast:?}, deflated {} bytes in {slow:?}",
                     plain.len(),
                     deflated.len()
+                );
+            }
+
+            // iTerm2: upstream's PNG against the JPEG a JPEG cover now goes
+            // as, a wall cell's box and a Now Playing cover's.
+            let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
+            #[allow(deprecated)]
+            let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(10, 20));
+            picker.set_protocol_type(ProtocolType::Iterm2);
+            for cells in [Size::new(12, 6), Size::new(42, 21)] {
+                let start = std::time::Instant::now();
+                let png = picker.new_protocol(source.clone(), cells, resize.clone()).unwrap();
+                let slow = start.elapsed();
+                let start = std::time::Instant::now();
+                let jpeg = iterm2_jpeg(&picker, source.clone(), cells, &resize, false).unwrap();
+                let fast = start.elapsed();
+                let bytes = |protocol: &Protocol| match protocol {
+                    Protocol::ITerm2(iterm2) => iterm2.data.len(),
+                    _ => 0,
+                };
+                eprintln!(
+                    "iTerm2 {}x{} cells: PNG {} bytes in {slow:?}, JPEG {} bytes in {fast:?}",
+                    cells.width,
+                    cells.height,
+                    bytes(&png),
+                    bytes(&jpeg)
                 );
             }
         }
