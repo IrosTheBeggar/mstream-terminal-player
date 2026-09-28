@@ -335,6 +335,37 @@ fn the_column_behind_a_filtered_pick_holds_the_whole_folder() {
 }
 
 #[test]
+fn a_drill_moves_the_listing_into_its_column_rather_than_copying_it() {
+    // Performance audit #112: every drill replaces the pane straight after
+    // pushing its column, so the column takes the rows themselves — the
+    // shown list, or the whole one behind a filter — not a copy of them.
+    let mut app = connected_app();
+    app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Alpha", "Beta", "Betamax"], &[]))));
+    let rows = app.files.entries.as_ptr();
+    app.files.state.select(Some(2)); // Beta
+    app.handle_action(Action::Activate);
+    assert_eq!(app.files.trail[0].entries.as_ptr(), rows, "the rows moved into the column");
+    assert_eq!(app.files.trail[0].chosen, 2);
+    assert!(app.files.entries.is_empty() && app.files.loading, "the pane waits for its reply");
+
+    app.apply_event(Event::Listing(Box::new(listing("/lib/Beta/", &["One", "Two", "Twelve"], &[]))));
+    type_filter(&mut app, "twe");
+    app.handle_action(Action::Submit);
+    let whole = app.files.unfiltered.as_ref().unwrap().as_ptr();
+    app.handle_action(Action::Activate);
+    assert_eq!(app.files.trail[1].entries.as_ptr(), whole, "the whole folder, not the filtered view");
+    assert_eq!(app.files.trail[1].entries[app.files.trail[1].chosen].label(), "Twelve");
+    assert!(app.files.filter.is_empty() && app.files.unfiltered.is_none());
+
+    // Back walks out through both, with nothing hidden.
+    app.apply_event(Event::Listing(Box::new(listing("/lib/Beta/Twelve/", &[], &["x.mp3"]))));
+    app.handle_action(Action::Back);
+    assert_eq!(labels(&app), vec!["..", "One", "Two", "Twelve"]);
+    app.handle_action(Action::Back);
+    assert_eq!(labels(&app), vec!["..", "Alpha", "Beta", "Betamax"]);
+}
+
+#[test]
 fn every_tab_filters_its_own_list() {
     use crate::tui::worker::{LibraryData, LibraryNode};
     let mut app = connected_app();

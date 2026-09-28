@@ -3105,25 +3105,31 @@ impl App {
     /// Remember the listing on screen as a column, on the way into the next
     /// one. Called before the request goes out, so the context is there while
     /// the reply is still coming.
+    ///
+    /// Every caller replaces the pane straight after, so the rows move into
+    /// the column rather than being copied for a pane about to drop them — a
+    /// deep copy of every row on every drill, 2-5 ms at 20,000 (performance
+    /// audit #112). The pane stands empty, unfiltered, until that `set`.
     fn push_trail(&mut self) -> bool {
         let pane = self.pane_mut();
         if pane.entries.is_empty() {
             return false;
         }
         let chosen = pane.state.selected().unwrap_or(0);
+        let shown = std::mem::take(&mut pane.entries);
         // The column behind keeps the whole listing, not the narrowed view of
         // it. A filter is a way of finding one row, and once it has been found
         // the rest of the folder is the context worth having — which also
         // means coming back out is a list with nothing hidden and no filter
         // left over to explain.
-        let entries = pane.entries.clone();
-        let (entries, chosen) = match &pane.unfiltered {
+        let (entries, chosen) = match pane.unfiltered.take() {
             Some(all) => {
-                let row = all.iter().position(|entry| entry == &entries[chosen]);
-                (all.clone(), row.unwrap_or(0))
+                let row = shown.get(chosen).and_then(|picked| all.iter().position(|entry| entry == picked));
+                (all, row.unwrap_or(0))
             }
-            None => (entries, chosen),
+            None => (shown, chosen),
         };
+        pane.filter.clear();
         pane.trail.push(Trail { entries, chosen });
         true
     }
