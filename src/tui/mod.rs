@@ -125,6 +125,19 @@ fn load_stats_snapshot() -> Option<app::stats::StatsSnapshot> {
     serde_json::from_str::<app::stats::StatsSnapshot>(&text).ok()
 }
 
+/// The open play session as far as a checkpoint of it matters — see
+/// [`QueueSaver::stats_progress`].
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StatsProgress {
+    played_ms: u64,
+    pause_count: u32,
+    paused: bool,
+    /// `f64::to_bits`, so the whole thing compares exactly.
+    max_pos: u64,
+    duration_ms: Option<u64>,
+}
+
 /// Keeps `queue.json` current for the shell (contract clause 39): a write
 /// 800 ms after the queue last changed, a checkpoint every ten seconds
 /// while playing, a flush on the way out — and the file gone once a queue
@@ -145,6 +158,8 @@ pub(crate) struct QueueSaver {
     stats_signature: u64,
     stats_dirty_since: Option<std::time::Instant>,
     stats_last_write: std::time::Instant,
+    /// The open session's progress as the last write of it had it.
+    stats_progress: Option<StatsProgress>,
     /// A queue existed this session: only then does an empty one delete
     /// the file — the empty queue a failed restore leaves behind must not
     /// destroy the snapshot it failed to read.
@@ -167,6 +182,7 @@ impl QueueSaver {
             stats_signature: Self::stats_signature(app),
             stats_dirty_since: None,
             stats_last_write: std::time::Instant::now(),
+            stats_progress: None,
             had_queue: !app.queue.items.is_empty(),
             enabled: app.resume_queue,
         }
@@ -184,8 +200,23 @@ impl QueueSaver {
         h.finish()
     }
 
+    /// What a recovery reads off the open session (play-reporting clause
+    /// 9): the time listened, the pauses, the furthest point, the length.
+    fn stats_progress(app: &App) -> Option<StatsProgress> {
+        app.stats.session.as_ref().map(|s| StatsProgress {
+            played_ms: s.played_ms,
+            pause_count: s.pause_count,
+            paused: s.paused,
+            max_pos: s.max_pos.to_bits(),
+            duration_ms: s.duration_ms,
+        })
+    }
+
     /// The reporter's file: soon after a change, and every ten seconds
-    /// while a session is open so a crash loses little of it.
+    /// while a session's listening moves so a crash loses little of it. A
+    /// session that sits paused is written once more and then left be —
+    /// every write after that restamped the file and flushed the drive for
+    /// nothing a recovery would read (performance audit #107).
     fn tick_stats(&mut self, app: &App, now: std::time::Instant) {
         let signature = Self::stats_signature(app);
         if signature != self.stats_signature {
@@ -194,7 +225,11 @@ impl QueueSaver {
         }
         let due = match self.stats_dirty_since {
             Some(since) => now.duration_since(since) >= Self::DEBOUNCE,
-            None => app.stats.session.is_some() && now.duration_since(self.stats_last_write) >= Self::CHECKPOINT,
+            None => {
+                app.stats.session.is_some()
+                    && now.duration_since(self.stats_last_write) >= Self::CHECKPOINT
+                    && Self::stats_progress(app) != self.stats_progress
+            }
         };
         if due {
             self.write_stats(app);
@@ -204,6 +239,7 @@ impl QueueSaver {
     fn write_stats(&mut self, app: &App) {
         self.stats_dirty_since = None;
         self.stats_last_write = std::time::Instant::now();
+        self.stats_progress = Self::stats_progress(app);
         match app.stats_snapshot() {
             Some(snapshot) => {
                 if let Ok(body) = serde_json::to_string(&snapshot) {
@@ -1253,6 +1289,71 @@ mod tests {
         saver.flush(&app);
         assert!(config::load_queue_file().unwrap().is_none());
         assert!(config::load_queue_place_file().unwrap().is_none(), "the place goes with its rows");
+    }
+
+    #[test]
+    fn a_paused_session_is_checkpointed_once_and_then_left_be() {
+        // Performance audit #107: stats.json is written every ten seconds
+        // while the session's listening moves; a pause is written once —
+        // the time listened up to it, the pause counted — and then nothing
+        // until something a recovery would read changes again.
+        let _scratch = crate::config::testing::Scratch::new("stats-pause");
+        let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
+        app.connected = true;
+        app.capabilities.stats = true;
+        app.push_queue(Track { filepath: "music/a.mp3".into(), metadata: Default::default() });
+        let effects = app.handle_action(crate::tui::app::Action::PlayPause);
+        let url = effects
+            .iter()
+            .find_map(|e| match e {
+                crate::tui::app::Effect::Audio(crate::tui::worker::AudioCmd::Play { url, .. }) => Some(url.clone()),
+                _ => None,
+            })
+            .expect("a play");
+        let status = |position: f64, paused: bool| {
+            crate::tui::worker::Event::Status(crate::player::PlayerStatus {
+                playing: true,
+                paused,
+                position,
+                duration: 200.0,
+                volume: 1.0,
+                source: url.clone(),
+            })
+        };
+        let mut saver = QueueSaver::new(&app);
+        // Ten seconds on: the file's text when the checkpoint wrote it (the
+        // old one is taken away first, so any write at all shows).
+        let ten_seconds = |saver: &mut QueueSaver, app: &App| {
+            saver.stats_last_write -= QueueSaver::CHECKPOINT;
+            config::delete_stats_file().unwrap();
+            saver.tick_stats(app, std::time::Instant::now());
+            config::load_stats_file().unwrap()
+        };
+        let session = |text: Option<String>| {
+            let snapshot: crate::tui::app::stats::StatsSnapshot = serde_json::from_str(&text.expect("written")).unwrap();
+            let s = snapshot.inflight.expect("the open session");
+            (s.played_ms, s.pause_count, s.paused)
+        };
+        for p in 0..=4 {
+            app.apply_event(status(f64::from(p), false));
+        }
+        assert_eq!(session(ten_seconds(&mut saver, &app)), (4000, 0, false), "playing: checkpointed");
+        for p in 5..=6 {
+            app.apply_event(status(f64::from(p), false));
+        }
+        app.apply_event(status(6.0, true));
+        assert_eq!(session(ten_seconds(&mut saver, &app)), (6000, 1, true), "the pause, written once");
+        for _ in 0..30 {
+            assert!(ten_seconds(&mut saver, &app).is_none(), "five minutes paused: nothing new, nothing written");
+        }
+
+        // A seek while paused moves the furthest point, which decides a
+        // completion: written. Then playing again writes as before.
+        app.apply_event(status(150.0, true));
+        assert!(ten_seconds(&mut saver, &app).is_some());
+        app.apply_event(status(150.0, false));
+        app.apply_event(status(151.0, false));
+        assert_eq!(session(ten_seconds(&mut saver, &app)), (7000, 1, false));
     }
 
     #[test]
