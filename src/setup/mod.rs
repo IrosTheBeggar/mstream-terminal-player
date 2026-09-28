@@ -52,6 +52,18 @@ use crate::kit::theme::th;
 const POLL: Duration = Duration::from_millis(100);
 /// How often the Done screen re-asks for scan progress.
 const PROGRESS_EVERY: Duration = Duration::from_millis(1500);
+/// How often it re-asks once the server has said [`IDLE_REPORTS`] times in
+/// a row that everything is idle (performance audit #116). Every status
+/// answer makes the server work out enrichment coverage the wizard throws
+/// away, and its memo of that lasts fifteen seconds: a poll every second
+/// and a half kept a full recompute going every fifteen for as long as the
+/// wizard stayed open. At four memos' length a scan the server starts on
+/// its own still shows within the minute.
+const PROGRESS_IDLE_EVERY: Duration = Duration::from_secs(60);
+/// Idle reports in a row before the poll backs off: enrichment can be
+/// queued a beat after the file scan drains, so one idle between them is
+/// not the end of the story.
+const IDLE_REPORTS: u8 = 2;
 /// The one vpath name a single folder gets without being asked.
 const SINGLE_NAME: &str = "media";
 /// The widest the content column grows, in cells.
@@ -599,6 +611,10 @@ pub(crate) struct Wizard {
     in_flight: bool,
     pending_complete: Option<String>,
     last_poll: Instant,
+    /// Scan reports in a row that said everything is idle; from
+    /// [`IDLE_REPORTS`] on the poll backs off, until a commit gives the
+    /// server something new to scan.
+    idle_polls: u8,
 
     /// The folders table's first visible row (wheel-scrollable).
     tscroll: usize,
@@ -644,6 +660,7 @@ impl Wizard {
             in_flight: false,
             pending_complete: None,
             last_poll: Instant::now(),
+            idle_polls: 0,
             tscroll: 0,
             sel_anchor: None,
             ui: Surface::new(),
@@ -1023,6 +1040,20 @@ impl Wizard {
     // boot-busy server blocked the loop for eight seconds; the buffered
     // keystrokes then replayed into the wrong screens.
 
+    /// Whether the scan progress is due to be asked again: past the first
+    /// screen (folders commit on its Continue), never on the standalone QR
+    /// page, never on top of a call — every [`PROGRESS_EVERY`] while the
+    /// server has news, every [`PROGRESS_IDLE_EVERY`] once it has said
+    /// twice that it has none.
+    fn poll_due(&self) -> bool {
+        let every = if self.idle_polls >= IDLE_REPORTS { PROGRESS_IDLE_EVERY } else { PROGRESS_EVERY };
+        self.screen != Screen::Folders
+            && !self.standalone
+            && self.queued.is_none()
+            && !self.in_flight
+            && self.last_poll.elapsed() >= every
+    }
+
     /// Hand the queued op to the worker. Ops are single-flight: while one is
     /// in flight the UI shows its busy note and further queues are ignored
     /// (completion listings replace instead — typing outruns the network).
@@ -1201,6 +1232,8 @@ impl Wizard {
                 }
             }
             Done::FoldersCommitted { committed, error } => {
+                // New folders are new files to scan: the poll is brisk again.
+                self.idle_polls = 0;
                 for i in committed {
                     if let Some(folder) = self.folders.get_mut(i) {
                         folder.committed = true;
@@ -1230,6 +1263,9 @@ impl Wizard {
             }
             Done::AdminCreated(Err(e)) => self.fail(&t!("note.create_login_failed"), e),
             Done::ExtrasCommitted { applied, error } => {
+                // An extra switched on (discovery, say) queues passes of its
+                // own: the poll is brisk again.
+                self.idle_polls = 0;
                 for (i, on) in applied {
                     self.extras_done[i] = Some(on);
                 }
@@ -1283,6 +1319,14 @@ impl Wizard {
             }
             Done::Progress(rows) => {
                 self.last_poll = Instant::now();
+                match &rows {
+                    Ok(ProgressReport::Idle) => self.idle_polls = self.idle_polls.saturating_add(1),
+                    Ok(ProgressReport::Files(rows)) if rows.is_empty() => {
+                        self.idle_polls = self.idle_polls.saturating_add(1);
+                    }
+                    Ok(_) => self.idle_polls = 0,
+                    Err(_) => {}
+                }
                 match rows {
                     Ok(ProgressReport::Idle) => {
                         self.scan = Some(ScanWidget {
@@ -1857,12 +1901,7 @@ fn event_loop(
         // belongs to the layer on top.
         wizard.ui.dwell_tick();
 
-        if wizard.screen != Screen::Folders
-            && !wizard.standalone
-            && wizard.queued.is_none()
-            && !wizard.in_flight
-            && wizard.last_poll.elapsed() >= PROGRESS_EVERY
-        {
+        if wizard.poll_due() {
             wizard.queued = Some(Op::PollProgress);
             continue;
         }
@@ -3368,6 +3407,54 @@ pub(crate) mod tests {
         assert!(LOGO[2].contains(r"_ \\___ \|"), "m's trailing and S's leading backslash are ADJACENT");
         assert!(LOGO[3].contains(r"| |_| | |  __/"));
         assert!(LOGO[4].contains(r"\__|_|  \___|"));
+    }
+
+    /// Two idle reports in a row and the scan poll backs off from a second
+    /// and a half to a minute; news of a scan, or a commit that gives the
+    /// server one, brings it back (performance audit #116).
+    #[test]
+    fn the_scan_poll_backs_off_once_the_server_is_idle_and_a_commit_rearms_it() {
+        let _guard = LOCALE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let client = Client::new("http://127.0.0.1:9").expect("client");
+        let mut wizard = Wizard::new(client);
+        wizard.screen = Screen::Extras;
+        let due_after = |w: &mut Wizard, ago: Duration| {
+            w.last_poll = Instant::now() - ago;
+            w.poll_due()
+        };
+        let brisk = PROGRESS_EVERY + Duration::from_millis(10);
+        let idle = || Done::Progress(Ok(ProgressReport::Idle));
+        assert!(due_after(&mut wizard, brisk), "a scan may be starting: every second and a half");
+
+        wizard.apply(idle());
+        assert!(due_after(&mut wizard, brisk), "one idle between the files and the passes is not the end");
+        wizard.apply(Done::Progress(Ok(ProgressReport::Files(Vec::new()))));
+        assert!(!due_after(&mut wizard, brisk), "idle twice in a row: backed off");
+        assert!(due_after(&mut wizard, PROGRESS_IDLE_EVERY), "but not stopped");
+
+        wizard.apply(Done::Progress(Ok(ProgressReport::Enrichment {
+            pass: "waveform".into(),
+            attempted: 1,
+            total: None,
+            more: false,
+        })));
+        assert!(due_after(&mut wizard, brisk), "news of a pass: brisk again");
+
+        wizard.apply(idle());
+        wizard.apply(idle());
+        assert!(!due_after(&mut wizard, brisk));
+        wizard.apply(Done::Progress(Err(crate::api::ApiError::Config("net".into()))));
+        assert!(!due_after(&mut wizard, brisk), "a hiccup is no news either way");
+        wizard.apply(Done::FoldersCommitted { committed: Vec::new(), error: None });
+        assert!(due_after(&mut wizard, brisk), "new folders: brisk again");
+
+        wizard.apply(idle());
+        wizard.apply(idle());
+        wizard.apply(Done::ExtrasCommitted { applied: Vec::new(), error: None });
+        assert!(due_after(&mut wizard, brisk), "an extra switched on queues passes: brisk again");
+
+        wizard.screen = Screen::Folders;
+        assert!(!due_after(&mut wizard, PROGRESS_IDLE_EVERY), "never on the folders screen");
     }
 
     #[test]
