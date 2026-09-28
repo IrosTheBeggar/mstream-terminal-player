@@ -176,7 +176,8 @@ Most played.
   `stats.json` 360 times an hour with nothing new but the checkpoint's
   time. It now writes only when something a recovery reads has moved —
   the time listened, the pauses, the furthest point, the length — which
-  is every checkpoint while playing and one after a pause. A crash during
+  is every checkpoint while playing and one after a pause (a write that
+  fails is tried again at each checkpoint until one lands). A crash during
   a long pause recovers the same play, listened to the same second; its
   end time is the pause's (within ten seconds) rather than the crash's,
   which is what the record's webapp gives (its checkpoint rides

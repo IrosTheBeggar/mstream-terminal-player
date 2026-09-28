@@ -269,17 +269,15 @@ impl QueueSaver {
     fn write_stats(&mut self, app: &App) {
         self.stats_dirty_since = None;
         self.stats_last_write = std::time::Instant::now();
-        self.stats_progress = Self::stats_progress(app);
-        match app.stats_snapshot() {
-            Some(snapshot) => {
-                if let Ok(body) = serde_json::to_string(&snapshot) {
-                    let _ = config::save_stats_file(&body);
-                }
-            }
-            None => {
-                let _ = config::delete_stats_file();
-            }
-        }
+        let saved = match app.stats_snapshot() {
+            Some(snapshot) => serde_json::to_string(&snapshot)
+                .map_err(|e| e.to_string())
+                .and_then(|body| config::save_stats_file(&body)),
+            None => config::delete_stats_file(),
+        };
+        // Only a write that landed is the progress on the drive: one that
+        // failed is tried again at the next checkpoint, paused or not.
+        self.stats_progress = saved.ok().and(Self::stats_progress(app));
     }
 
     /// What a change to the queue looks like from outside: the rows — their
@@ -1515,6 +1513,58 @@ mod tests {
         app.apply_event(status(150.0, false));
         app.apply_event(status(151.0, false));
         assert_eq!(session(ten_seconds(&mut saver, &app)), (7000, 1, false));
+    }
+
+    #[test]
+    fn a_paused_checkpoint_that_did_not_land_is_tried_again() {
+        // The review of #107: only a write that landed counts as the
+        // session's progress on the drive. A pause whose write failed is
+        // written at a later checkpoint, not left for the next play.
+        let _scratch = crate::config::testing::Scratch::new("stats-retry");
+        let mut app = App::new(Some("http://host:3000".into()), Some("tok".into()), None);
+        app.connected = true;
+        app.capabilities.stats = true;
+        app.push_queue(Track { filepath: "music/a.mp3".into(), metadata: Default::default() });
+        let effects = app.handle_action(crate::tui::app::Action::PlayPause);
+        let Some(crate::tui::app::Effect::Audio(crate::tui::worker::AudioCmd::Play { url, .. })) =
+            effects.iter().find(|e| matches!(e, crate::tui::app::Effect::Audio(crate::tui::worker::AudioCmd::Play { .. })))
+        else {
+            panic!("a play: {effects:?}");
+        };
+        let status = |position: f64, paused: bool| {
+            crate::tui::worker::Event::Status(crate::player::PlayerStatus {
+                playing: true,
+                paused,
+                position,
+                duration: 200.0,
+                volume: 1.0,
+                source: url.clone(),
+            })
+        };
+        let mut saver = QueueSaver::new(&app);
+        let ten_seconds = |saver: &mut QueueSaver, app: &App| {
+            saver.stats_last_write -= QueueSaver::CHECKPOINT;
+            saver.tick_stats(app, std::time::Instant::now());
+        };
+        for p in 0..=4 {
+            app.apply_event(status(f64::from(p), false));
+        }
+        app.apply_event(status(4.0, true));
+
+        // A directory where the file goes: the rename over it fails.
+        let path = config::stats_path().unwrap();
+        std::fs::create_dir_all(&path).unwrap();
+        ten_seconds(&mut saver, &app);
+        assert!(path.is_dir(), "the write did not land");
+        std::fs::remove_dir(&path).unwrap();
+        ten_seconds(&mut saver, &app);
+        let text = config::load_stats_file().unwrap().expect("tried again, and written");
+        let snapshot: crate::tui::app::stats::StatsSnapshot = serde_json::from_str(&text).unwrap();
+        let s = snapshot.inflight.expect("the open session");
+        assert_eq!((s.played_ms, s.pause_count, s.paused), (4000, 1, true));
+        config::delete_stats_file().unwrap();
+        ten_seconds(&mut saver, &app);
+        assert!(config::load_stats_file().unwrap().is_none(), "and once it lands, left be");
     }
 
     #[test]
