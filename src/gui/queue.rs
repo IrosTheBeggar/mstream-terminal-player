@@ -155,7 +155,10 @@ pub(crate) fn draw(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     gui.queue_view.scroll = first;
 
     // The covers these rows still owe the cache, claimed through the App's
-    // own fetch — hashmap lookups after the first frame.
+    // own fetch — hashmap lookups after the first frame. The rows go on
+    // record first: what the panel shows is what the cache must not evict
+    // (performance audit #91).
+    gui.app.queue_on_view(first..first + visible);
     let mut fetches = Vec::new();
     for index in first..first + visible {
         if let Some(effect) = gui.app.fetch_queue_art(index) {

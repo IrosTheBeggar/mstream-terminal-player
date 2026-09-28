@@ -44,15 +44,13 @@ const SEEK_CHAIN: std::time::Duration = std::time::Duration::from_millis(2500);
 const VOLUME_STEP: f32 = 0.05;
 /// Rows a page key moves. Ctrl+u/d move half of this, as they do in vim.
 const PAGE_STEP: isize = 10;
-/// Covers held before the cache is emptied wholesale. An evening of
-/// listening crosses fewer albums than this; the point is only that a
-/// player left running for a week cannot grow without bound. Wholesale
-/// rather than LRU because correctness needs only the bound, and by the
-/// time it is hit the oldest entries are hours stale anyway.
-/// Covers and shapes kept decoded. Sized for the largest wall page plus
-/// the queue panel's rows: a page of ninety covers over a cap of sixty-four
-/// cleared the cache while claiming it and re-asked for the evicted ones
-/// every frame.
+/// Covers and shapes kept decoded; past it the oldest go, whatever is on
+/// screen aside. The point is that a player left running for a week cannot
+/// grow without bound. Sized for the largest wall page plus the queue
+/// panel's rows: a page of ninety covers over a cap of sixty-four cleared
+/// the cache while claiming it and re-asked for the evicted ones every
+/// frame. Only what is drawn is spared — a screen showing more than this
+/// holds more, and nothing else can (performance audit #91).
 const ART_CACHE_CAP: usize = 256;
 
 /// A side effect for the run loop to dispatch to a worker.
@@ -683,21 +681,32 @@ fn give_back<T>(
     rung.failed_at = now;
 }
 
-/// The covers on screen whatever else is: the playing track's and the
-/// queue's rows'. Free of the App so an answer can be filed while the
-/// cache is borrowed.
-fn pinned_art(queue: &Queue, now_playing: Option<&Track>) -> HashSet<String> {
-    queue
-        .items
+/// What the GUI last drew covers for, beside the playing track's: the
+/// wall's page, by art file, and the queue panel's rows. Each surface
+/// replaces its own part as it draws, so a surface drawn later in a frame
+/// keeps last frame's covers while an earlier one claims; one no longer
+/// drawn leaves at most a screenful behind. The TUI draws only the
+/// playing cover and records nothing.
+#[derive(Debug, Default)]
+struct ArtOnView {
+    wall: Vec<String>,
+    queue: std::ops::Range<usize>,
+}
+
+/// The covers eviction must leave alone: the playing track's and whatever
+/// the GUI last drew. Not every queue row: the queue keeps its played rows
+/// and Auto DJ only appends, so pinning them all let a long session grow
+/// the cache one album at a time past its cap, source bytes and all
+/// (performance audit #91). Free of the App so an answer can be filed
+/// while the cache is borrowed.
+fn pinned_art(queue: &Queue, now_playing: Option<&Track>, view: &ArtOnView) -> HashSet<String> {
+    let rows = view.queue.start.min(queue.items.len())..view.queue.end.min(queue.items.len());
+    queue.items[rows]
         .iter()
         .filter_map(|item| item.metadata.album_art.clone())
         .chain(now_playing.and_then(|t| t.metadata.album_art.clone()))
+        .chain(view.wall.iter().cloned())
         .collect()
-}
-
-/// The shapes eviction must leave alone: the queue's.
-fn pinned_shapes(queue: &Queue) -> HashSet<String> {
-    queue.items.iter().map(|item| item.filepath.clone()).collect()
 }
 
 /// Why Auto DJ picked a row, for the queue's badge (auto-dj contract,
@@ -1881,6 +1890,9 @@ pub struct App {
     pub art: HashMap<String, Option<Art>>,
     /// The cache's insertion order, oldest first: what goes when it fills.
     art_order: VecDeque<String>,
+    /// What the GUI last drew covers for — what eviction leaves alone,
+    /// with the playing track's (performance audit #91).
+    art_on_view: ArtOnView,
     /// Track shapes fetched this session, keyed by filepath. `None` records
     /// both "asked, nothing there" and "asked, still waiting" — the bar draws
     /// the same either way, and the entry is what stops a second request.
@@ -2061,6 +2073,7 @@ impl App {
             waveforms: HashMap::new(),
             waveform_order: VecDeque::new(),
             art_retry: HashMap::new(),
+            art_on_view: ArtOnView::default(),
             waveform_retry: HashMap::new(),
             graphics: crate::tui::graphics::Graphics::disabled(),
             audio_available: true,
@@ -5127,9 +5140,9 @@ impl App {
         }
         if self.art.len() >= ART_CACHE_CAP {
             // The oldest cover nothing on screen needs goes — never the
-            // playing track's or a queued row's; the wall's page is the
-            // newest and stays by age. Clearing the lot re-asked for
-            // ninety covers a frame (the review's finding).
+            // playing track's, a row the queue panel shows or a cell of
+            // the wall's page. Clearing the lot re-asked for ninety covers
+            // a frame (the review's finding).
             let pinned = self.pinned_art();
             while self.art.len() >= ART_CACHE_CAP
                 && evict_oldest(&mut self.art, &mut self.art_order, &pinned).is_some()
@@ -5140,10 +5153,26 @@ impl App {
         Some(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach }))
     }
 
-    /// The covers on screen whatever else is: the playing track's and the
-    /// queue's rows'.
+    /// The covers on screen whatever else is (see the free function).
     fn pinned_art(&self) -> HashSet<String> {
-        pinned_art(&self.queue, self.now_playing.as_ref())
+        pinned_art(&self.queue, self.now_playing.as_ref(), &self.art_on_view)
+    }
+
+    /// Whether the wall's page on record is this one — the check each
+    /// frame makes before [`App::set_wall_on_view`], so a page that has
+    /// not moved costs a comparison, not a vector of names.
+    pub(crate) fn wall_on_view_is<'a>(&self, page: impl Iterator<Item = &'a str>) -> bool {
+        self.art_on_view.wall.iter().map(String::as_str).eq(page)
+    }
+
+    /// The wall drew this page: its covers stay while it does.
+    pub(crate) fn set_wall_on_view(&mut self, page: Vec<String>) {
+        self.art_on_view.wall = page;
+    }
+
+    /// The queue panel drew these rows: their covers stay while it does.
+    pub(crate) fn queue_on_view(&mut self, rows: std::ops::Range<usize>) {
+        self.art_on_view.queue = rows;
     }
 
     /// The session generation (see the field): what a library or search ask
@@ -5223,8 +5252,8 @@ impl App {
             return None;
         }
         if self.waveforms.len() >= ART_CACHE_CAP {
-            // The same rule as the covers': the queue's shapes stay.
-            let pinned = pinned_shapes(&self.queue);
+            // The same rule as the covers': what is drawn stays.
+            let pinned = self.pinned_shapes();
             while self.waveforms.len() >= ART_CACHE_CAP
                 && evict_oldest(&mut self.waveforms, &mut self.waveform_order, &pinned).is_some()
             {}
@@ -5255,12 +5284,7 @@ impl App {
         // the top of the queue, and asking for it turns every keystroke on a
         // stopped player into a request.
         self.now_playing.as_ref()?;
-        let index = match &self.announced {
-            Some(_) => self.announced_still_valid()?,
-            None if !self.queue.shuffle => self.queue.next_index(false)?,
-            None => return None,
-        };
-        let item = self.queue.items.get(index)?;
+        let item = self.queue.items.get(self.prefetch_index()?)?;
         // This runs after every event, so a shape whose last ask went
         // unanswered waits out its rung here — it was re-asked on every
         // pass of the loop, ten a second, for as long as a server stayed
@@ -5271,6 +5295,26 @@ impl App {
         let next = item.filepath.clone();
         let origin = item.origin.clone();
         self.fetch_waveform(&next, &origin)
+    }
+
+    /// The row whose shape is worth having before it plays: the held
+    /// announcement's, else the plain next row — never a shuffled roll
+    /// (see [`App::prefetch_waveform`]).
+    fn prefetch_index(&self) -> Option<usize> {
+        match &self.announced {
+            Some(_) => self.announced_still_valid(),
+            None if !self.queue.shuffle => self.queue.next_index(false),
+            None => None,
+        }
+    }
+
+    /// The shapes eviction must leave alone: the playing track's, drawn
+    /// under the playhead, and the one fetched ahead for what plays next.
+    /// Not every queue row's, which let an Auto DJ session grow the cache
+    /// one track at a time past its cap (performance audit #91).
+    fn pinned_shapes(&self) -> HashSet<String> {
+        let next = self.now_playing.as_ref().and(self.prefetch_index()).and_then(|at| self.queue.items.get(at));
+        self.now_playing.iter().map(|t| t.filepath.clone()).chain(next.map(|item| item.filepath.clone())).collect()
     }
 
     fn play_pause(&mut self) -> Vec<Effect> {
@@ -5709,8 +5753,10 @@ impl App {
                 // every frame ask again in seconds, not every frame.
                 if settled {
                     self.art_retry.remove(&file);
-                    let (queue, now_playing) = (&self.queue, self.now_playing.as_ref());
-                    file_answer(&mut self.art, &mut self.art_order, file, art, || pinned_art(queue, now_playing));
+                    let (queue, now_playing, view) = (&self.queue, self.now_playing.as_ref(), &self.art_on_view);
+                    file_answer(&mut self.art, &mut self.art_order, file, art, || {
+                        pinned_art(queue, now_playing, view)
+                    });
                 } else {
                     give_back(&mut self.art, &mut self.art_order, &mut self.art_retry, file);
                 }
@@ -5726,10 +5772,8 @@ impl App {
                 // on that track for the rest of the session.
                 if settled {
                     self.waveform_retry.remove(&filepath);
-                    let queue = &self.queue;
-                    file_answer(&mut self.waveforms, &mut self.waveform_order, filepath, bars, || {
-                        pinned_shapes(queue)
-                    });
+                    let pinned = self.pinned_shapes();
+                    file_answer(&mut self.waveforms, &mut self.waveform_order, filepath, bars, || pinned);
                 } else {
                     give_back(&mut self.waveforms, &mut self.waveform_order, &mut self.waveform_retry, filepath);
                 }

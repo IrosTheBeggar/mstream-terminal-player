@@ -13,8 +13,9 @@
 //! far more than the mosaic ever needs, so an [`Art`] also keeps the bytes
 //! it was decoded from. Keeping the *encoded* bytes rather than a second
 //! larger buffer is the whole trick: a jpeg cover is tens of kilobytes
-//! where the pixels it unpacks to are hundreds, and the cache holds
-//! sixty-four of them. Who unpacks them, and how big, is `tui::graphics`.
+//! where the pixels it unpacks to are hundreds, and the cache holds two
+//! hundred and fifty-six of them, plus whatever is on screen past that.
+//! Who unpacks them, and how big, is `tui::graphics`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -128,8 +129,8 @@ const MAX_SOURCE_PIXELS: u32 = 4_194_304;
 /// And the same bound in encoded bytes. The pixel gate bounds the decode
 /// cost but not residency: a PNG can carry ancillary chunks and
 /// stored-mode deflate, so a picture of few pixels can legally arrive as
-/// a file of any size — and the art cache pins sixty-four of these for
-/// the session. Four megabytes holds cover art as it actually ships —
+/// a file of any size — and the art cache holds two hundred and fifty-six
+/// of these. Four megabytes holds cover art as it actually ships —
 /// JPEG, well under two — while a photographic PNG near the pixel cap
 /// can legitimately weigh more and quietly keeps only the thumbnail,
 /// drawing as mosaic. That trade is deliberate: residency is bounded by
@@ -153,7 +154,7 @@ pub fn decode(bytes: &[u8]) -> Option<Art> {
 
 /// Whether a cover this size — as a file, and decoded — keeps its bytes.
 /// The browser build never does — ratzilla's DOM backend has no pixel
-/// protocol, so sixty-four covers' bytes would be memory spent on nothing.
+/// protocol, so a cache of covers' bytes would be memory spent on nothing.
 fn keeps_source(len: usize, width: u32, height: u32) -> bool {
     !cfg!(target_arch = "wasm32")
         && len <= MAX_SOURCE_BYTES

@@ -250,3 +250,9 @@ and no strip, and hide for a peer.
   wanted either. The art cache lets go of its oldest cover that neither
   the playing track nor a queued row needs (clause 6), instead of clearing
   the lot at the cap.
+- **2026-09-28 — The art cache spares what is on screen** (performance
+  audit #91): the playing track's cover, the wall's page and the queue
+  panel's rows, where it spared every queued row. The queue keeps its
+  played rows and Auto DJ only appends, so a long session grew the cache
+  past its cap one album at a time. A queued row scrolled back into view
+  after its cover went is asked for once more.

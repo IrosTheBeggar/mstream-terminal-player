@@ -7196,6 +7196,7 @@ fn a_full_art_cache_lets_go_of_the_oldest_cover_nothing_on_screen_needs() {
     // cap, so a wall page over the cap re-asked for its covers every frame.
     let mut app = connected_app();
     app.replace_queue(vec![track_with_cover("lib/a.mp3", "queued.jpeg")]);
+    app.queue_on_view(0..1);
     app.now_playing = Some(track_with_cover("lib/p.mp3", "playing.jpeg"));
     app.fetch_art_from("queued.jpeg", None);
     app.fetch_art_from("playing.jpeg", None);
@@ -7223,6 +7224,7 @@ fn a_cover_that_lands_after_the_cache_let_go_of_its_claim_is_still_evictable() {
     // would be asked for again every frame while it is still on screen.
     let mut app = connected_app();
     app.replace_queue(vec![track_with_cover("lib/a.mp3", "queued.jpeg")]);
+    app.queue_on_view(0..1);
     app.fetch_art_from("queued.jpeg", None);
     for i in 0..ART_CACHE_CAP {
         app.fetch_art_file(&format!("old{i}.jpeg"));
@@ -7351,4 +7353,71 @@ fn the_next_tracks_shape_whose_ask_failed_is_not_asked_after_every_event() {
     age_rung(&mut app.waveform_retry, "b", 5);
     let effects = app.apply_event(Event::PlaylistNames { names: None });
     assert_eq!(waveforms_asked(&effects), vec!["b".to_string()]);
+}
+
+#[test]
+fn a_long_auto_dj_session_keeps_the_art_cache_at_its_cap() {
+    // Performance audit #91: every queue row was pinned, played rows too,
+    // and Auto DJ only appends — so once 256 albums had played, every new
+    // one grew the cache for good. Only what can be on screen is spared.
+    let mut app = connected_app();
+    let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+    for n in 0..400 {
+        app.push_queue(track_with_cover(&format!("lib/{n}.mp3"), &format!("{n}.jpeg")));
+        app.play_index(n);
+        app.apply_event(Event::AlbumArt { file: format!("{n}.jpeg"), art: Some(art.clone()), settled: true });
+    }
+    assert_eq!(app.art.len(), ART_CACHE_CAP, "one out, one in, however long the queue");
+    assert!(now_art(&app).is_some(), "and the playing cover is never the one that goes");
+}
+
+#[test]
+fn a_long_session_keeps_the_shape_cache_at_its_cap() {
+    // The shapes had the same rule — every queued filepath pinned — and so
+    // the same growth, a shape a track (performance audit #91).
+    let mut app = connected_app();
+    for n in 0..400 {
+        app.push_queue(track(&format!("lib/{n}.mp3")));
+    }
+    for n in 0..399 {
+        app.play_index(n);
+        for filepath in [format!("lib/{n}.mp3"), format!("lib/{}.mp3", n + 1)] {
+            app.apply_event(Event::Waveform { filepath, bars: Some(vec![1]), settled: true });
+        }
+    }
+    assert!(app.waveforms.len() <= ART_CACHE_CAP, "{}", app.waveforms.len());
+    for held in ["lib/398.mp3", "lib/399.mp3"] {
+        assert!(app.waveforms.get(held).is_some_and(|bars| bars.is_some()), "{held}: playing and next stay");
+    }
+}
+
+#[test]
+fn nothing_the_gui_last_drew_is_evicted_for_a_late_answer() {
+    // With every queue row no longer pinned, the screen is: the wall's
+    // page and the queue panel's rows. Answers for a page flipped past
+    // land after the new page is up, and must not push it out.
+    let mut app = connected_app();
+    let rows: Vec<Track> = (0..40).map(|n| track_with_cover(&format!("lib/{n}.mp3"), &format!("q{n}.jpeg"))).collect();
+    app.replace_queue(rows);
+    app.queue_on_view(10..30);
+    for index in 10..30 {
+        app.fetch_queue_art(index);
+    }
+    for i in 0..ART_CACHE_CAP {
+        app.fetch_art_file(&format!("old{i}.jpeg"));
+    }
+    let page: Vec<String> = (0..180).map(|i| format!("page{i}.jpeg")).collect();
+    assert!(!app.wall_on_view_is(page.iter().map(String::as_str)));
+    app.set_wall_on_view(page.clone());
+    assert!(app.wall_on_view_is(page.iter().map(String::as_str)));
+    for file in &page {
+        app.fetch_art_file(file);
+    }
+    let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+    for i in 0..ART_CACHE_CAP {
+        app.apply_event(Event::AlbumArt { file: format!("old{i}.jpeg"), art: Some(art.clone()), settled: true });
+    }
+    assert!(app.art.len() <= ART_CACHE_CAP);
+    assert!(page.iter().all(|file| app.art.contains_key(file)), "the wall's page stands");
+    assert!((10..30).all(|n| app.art.contains_key(&format!("q{n}.jpeg"))), "the panel's rows stand");
 }
