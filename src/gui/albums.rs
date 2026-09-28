@@ -1139,6 +1139,23 @@ mod tests {
     }
 
     #[test]
+    fn the_covers_a_frame_claims_go_out_without_a_wait() {
+        // The loop sends them at the top of its next pass; the wait before
+        // it is none, where it was a poll after a page turn's frame
+        // (performance audit #82 follow-up). Sent, and claimed once, they
+        // leave the frame after waiting as before.
+        use std::time::Duration;
+        let mut gui = wall_gui(4);
+        draw(&mut gui);
+        assert!(gui.pending.iter().any(|e| matches!(e, Effect::Api(ApiCmd::AlbumArt { .. }))));
+        assert_eq!(super::super::next_wait(&gui), Duration::ZERO, "the claims go out now");
+        gui.pending.clear(); // the next pass's dispatch
+        draw(&mut gui);
+        assert!(gui.pending.is_empty(), "claimed once");
+        assert!(super::super::next_wait(&gui) > Duration::ZERO, "nothing to send: the loop waits");
+    }
+
+    #[test]
     fn a_decoded_cover_replaces_the_empty_slot_frame() {
         let mut gui = wall_gui(1);
         let rows = draw(&mut gui);

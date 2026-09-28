@@ -2648,20 +2648,7 @@ fn event_loop(
         }
         gui.ui.dwell_tick();
 
-        // While covers are still upgrading to pixels, the next frame is
-        // wanted promptly — idling out the full poll would stretch a page
-        // turn's ~50 ms of encode work across a second of ticks. A blinking
-        // caret wants its next frame ON the flip, not a poll tick after it.
-        let wait = if gui.hot {
-            Duration::from_millis(10)
-        } else if gui.app.drawing_audio() || vizwin::wants_frames(gui) {
-            // The visualizer tab, moving: the TUI's thirty frames a second —
-            // and the visualizer window's feed, at the same pace, while it
-            // has anything to say (silence, once settled, is said once).
-            Duration::from_millis(33)
-        } else {
-            gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
-        };
+        let wait = next_wait(gui);
         side.track(gui.servers.busy() || gui.torrent.busy.is_some() || stats::awaiting(gui));
         if !event::poll(side.wait(asked.wait(wait)))? {
             continue;
@@ -2769,6 +2756,34 @@ fn event_loop(
                 _ => {}
             }
         }
+    }
+}
+
+/// How long the pass waits for input before the next one.
+fn next_wait(gui: &Gui) -> Duration {
+    // Effects this pass made after its dispatch go out at the top of the
+    // next: the covers the wall's page and the queue panel's rows claimed
+    // as the frame drew, a held control's step. They waited out the whole
+    // wait for it, so a page turn's cover asks left up to a poll after its
+    // frame (performance audit #82 follow-up). A cover is claimed once and
+    // a refused claim sends nothing, so the pass after finds nothing
+    // pending and waits as it would have.
+    if !gui.pending.is_empty() {
+        return Duration::ZERO;
+    }
+    // While covers are still upgrading to pixels, the next frame is
+    // wanted promptly — idling out the full poll would stretch a page
+    // turn's ~50 ms of encode work across a second of ticks. A blinking
+    // caret wants its next frame ON the flip, not a poll tick after it.
+    if gui.hot {
+        Duration::from_millis(10)
+    } else if gui.app.drawing_audio() || vizwin::wants_frames(gui) {
+        // The visualizer tab, moving: the TUI's thirty frames a second —
+        // and the visualizer window's feed, at the same pace, while it
+        // has anything to say (silence, once settled, is said once).
+        Duration::from_millis(33)
+    } else {
+        gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
     }
 }
 
