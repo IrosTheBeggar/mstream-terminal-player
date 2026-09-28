@@ -3118,3 +3118,130 @@ These hot paths were examined and need nothing:
 - **Viz window:** the stdin pipe (a reader thread, coalesced texture updates) and the host's `sync_channel(2)` + `try_send` never block either side.
 - **Other GUI and admin paths:** `servers::poll` and `torrent::poll` are plain `try_recv` drains with all I/O on threads. Timezone math is a binary search over transitions.
 - **Tests:** the unit suite (1,003 tests) runs in 8-10 s, and the smoke harness waits on conditions.
+
+### Fix record (2026-09-28)
+
+Every row above is fixed on `claude/repo-performance-audit-f64fcf`. #127 went in first, since it cuts
+every later release build. The other 61 were done in twelve lanes, each in its own worktree and
+branch (`perf/<lane>`, kept), then merged:
+
+| Lane | Rows |
+|---|---|
+| deps | #98, #132, #133 |
+| engine-stream | #72-#74, #78, #80 |
+| engine-control | #75-#77, #79, #81 |
+| loop | #82, #86, #102, #115, #116, #119 |
+| queue-state | #99, #106-#108, #111, #112, #114 |
+| art-cache | #84, #88-#92, #101 |
+| graphics | #93-#97 |
+| render | #103, #105, #109, #113 |
+| admin | #83, #85, #100, #104, #110 |
+| viz | #87, #117, #118, #120-#122 |
+| web | #123-#126 |
+| ci | #128-#131 |
+
+Each fix is one commit (sometimes two) whose message ends in "(audit #N)". The message carries the
+smoke test run against the real binary, before against after. Wherever the finding was measurable,
+that test uses the same harness that measured it.
+
+Every lane then went to an adversarial reviewer, who re-ran its smokes. The reviewers found five
+defects in the fixes themselves:
+- **#75:** the idle suspend could hang behind a stalled download.
+- **#79:** an abandoned open downloaded its whole track.
+- **#88:** a server switch left the new server's covers queued behind the old server's asks.
+- **#106:** turning Resume queue off and on again lost queue.json until the next edit.
+- **#124:** the WebGL canvas made the highlighted folder rows unreadable.
+
+Each defect was fixed in a follow-up commit and re-smoked before the merge.
+
+Integrated state, after the follow-ups below:
+- 1,182 unit tests pass (1,026 before).
+- The wasm32 check is clean.
+- The e2e battery passes in 2m08s (8m33s before).
+- A full release build takes 3m15s, including the dependencies the TLS change touched; the crate alone takes 2m28s (11.5-17.7 min before).
+- The binary is 32.4 MB (36.1 MB at 796da16).
+
+| # | Commits | Smoke: before → after | Left open |
+|---|---|---|---|
+| 72 | 70a176e | CBR MP3 seek to 90% at 2 Mbit/s: 27.9 s → 0.31-0.36 s, one Range request, reported position within 1 ms of the frame | VBR MP3 still walks the gap (38.6 s); needs a Xing-TOC seek (a symphonia bump or a custom source) |
+| 73 | d7f680e, f94a59a | stream-download 0.24.2 vendored at `vendor/stream-download` with the wakeup fixed (`[patch.crates-io]`; drop it when upstream releases the fix). 1 s nudge back at 8 Mbit/s: 14.1 s → 0.17 s. Seek into the last 154 KB: 29.5 s → 0.19 s. FLAC without a SEEKTABLE, 90% at 2 Mbit/s: 111.7 s → 2.6 s (with #74) | report upstream |
+| 74 | c5ab3b5 | `/play` at 2 Mbit/s: 1.07 s → 0.27 s; FLAC seek with a SEEKTABLE 2.2 s → 1.25 s; no underrun | — |
+| 75 | d56b98c, b16bb40 | coreaudiod's PreventUserIdleSystemSleep released 5 s after launch, 30 s after a pause, ~6 s after a stop, and taken again on play; seek and resume while asleep work; a stalled download defers the suspend instead of hanging it | Windows and PipeWire unverified here; raw ALSA without pause support keeps running |
+| 76 | 8b070e0, 93436de | serve's added gap per track boundary: mean 163 ms → 31 ms; `playing:false` never seen | the rest is the next file's open (#77) |
+| 77 | 6854697, b149dcc | `serve --prefetch` (opt-in): gap 529 ms → 14-17 ms over a throttled link | **decision**: keep opt-in, make it serve's default, or drop it for `--gapless` |
+| 78 | 498f0d8 | behind an h2 proxy: 7 new TLS connections for 7 quick skips → 2; the loopback bridge still never pools | pool idle 4 s (under Node's 5 s) against the verifier's 90 s plus a retry |
+| 79 | b42cb98, 699cba0 | Stop during a 4 s open: ~3.8 s → 0.14 s; the next pick's request 3.6 s → 0.02 s; a given-up download is cut when its open finishes; a stalled open still fails at 20 s | — |
+| 80 | f5d3143 | one probe a local track; Ogg `/play` 53 ms → 31 ms; LAME lengths now trimmed, as HTTP reports them | — |
+| 81 | 93acb9d | GUI paused: 18.1 → 11.3 wakeups/s, audio thread 457 → 99 µs/s; serve 4.0 → 1.1 wakeups/s | — |
+| 82 | de52ec1 | reply to screen: GUI 203 ms → 1.2-1.9 ms, TUI 101 ms → 0.7-1.1 ms, admin 202 → 1.2 ms, wizard 202 → 1.8 ms | a reply more than 1 s after its request still waits up to one poll |
+| 83 | 4a38432 | Stats load 750 ms → 107 ms (7 requests in flight); torrents 653 → 215 ms; discovery 427 → 204; federation 536 → 212; backups 527 → 308 | — |
+| 84 | e037968, 9f9d2c5 | a server hanging during a connect no longer holds the other server's covers: 10 s → 0.10 s | — |
+| 85 | cedfdfd | the key after a Tab at a 200k-entry folder: 244-258 ms → 40-111 ms; healthy completion unchanged | a dead mount could not be staged here |
+| 86 | cbca591 | a held settings key: 86 config writes → 1 (0.28 s after release); the exit path still saves | — |
+| 87 | 7f90e6f | preset switch, debug: 22-39 ms → 8-11 ms (one refresh); release was already one refresh on this Mac's warm shader cache | — |
+| 88 | 84698f9, 1e34f1f | cover fetches through a 6-wide lane per server, newest first; an evicted claim withdraws its fetch; a server switch retires the old lane (new server's first cover 0.32 s, 0 requests to the old one) | **decision**: lane width 6 |
+| 89 | 39c45c1, c76bf98 | failing art at 300×90: 638 → 7.6 requests/s, threads 141 → 15, the claim order no longer grows | — |
+| 90 | c7ec968 | covers resident after fast paging: 1,683 (382 MB heap) → 256 (200 MB) | — |
+| 91 | a83a377, bbe0f99 | a long queue no longer pins past the cap: 331 → 256 covers resident | — |
+| 92 | 4872e94 | a wall of 612 covers: 58.2 MB → 6.5 MB served, heap 41 → 20 MB, screen identical | — |
+| 93 | 61f93e7 | kitty `f=24`: a wall page −25% (3.85 → 2.89 MB); over ssh also `o=z` (−33% on photographs) | — |
+| 94 | 5d6a6b6 | kitty's image store: 1,115 images / 64.6 MB and growing → at most 68 / 3.15 MB; deleted at exit | — |
+| 95 | 739a6d4 | heap after 20 wall pages: 74.4 → 64.3 MB at 16×32 cells; a shrink lets its slots go | growing back re-sends them |
+| 96 | bc981e7 | iTerm2 wall page 2.03 → 0.61-0.69 MB; Now Playing switch 511 → 78 KB | art whose source was dropped for size still goes as PNG |
+| 97 | 1fe3267 | back to Now Playing, kitty: 869 KB and 19-24 ms → 12.5 KB and 1 ms (release); sixel 22 → 4-5 ms | — |
+| 98 | 02527e6 | 16k-album list at 2 Mbit/s: 4.06 MB, 18.3 s → 0.62 MB, 3.1 s; at 1.5 Mbit/s it now loads at all; streams still get identity bodies | brotli left out (8% over gzip) |
+| 99 | 5c50de8, 53a4ccd | Artists and Genres return without a request; another account forgets them | an admin rescan does not invalidate them |
+| 100 | a04ce71 | torrent list fetches while seeding: 12/min → 3/min; every 5 s again while something moves | — |
+| 101 | 9b42c57 | page turn with a 3,000-row queue at the cap: 291-314 ms → 94-97 ms | — |
+| 102 | 1862da4 | idle main thread: TUI 1.96 → 0.38 ms/s, GUI 2.49 → 0.51, admin 1.78 → 0.33, wizard 1.52 → 0.42; clocks, spinners and the caret unchanged | — |
+| 103 | a2cf0f2 | filtered wall at 20,000 albums: 6.0 → 0.69 ms a frame; page turn 15.0 → 0.91 ms | — |
+| 104 | b363a92 | Stats Recent at 2,000 plays, idle: 4.1-7.2% → 0.6-0.7% of a core (release) | — |
+| 105 | 0a82dcb | canvas per cell ~89 → ~5 ns; TUI visualizer Cover 3.26 → 1.26 ms a frame; cell-identical | — |
+| 106 | bcdf4ab, c574065, 78ff191, 9ba1074 | playing 60 s: queue.json 6 full rewrites → 0 (queue-place.json 6 × 70 B); restores exact; a restore keeps the last 100 played Auto DJ rows | **decision**: the restore thresholds (100 played kept, 500 retired paths) change multi-server clause 40 and auto-dj clause 14 |
+| 107 | 2a5d680, 81858fd | stats.json paused: 6 writes/min → 1; kill -9 still recovers the play | — |
+| 108 | e4a4c22 | 12,000 peer rows: 4.88 → 0.60 ms a pass | — |
+| 109 | e0a0dba | 20,000 artists: ~0.2 → ~0.17 ms a frame | — |
+| 110 | c4cbdd4 | per-frame list and modal clones gone; within process noise at these sizes | — |
+| 111 | 0f4ac06 | a filter keystroke: 1.08 → 0.40 ms | the first key still clones every match |
+| 112 | 5107a4d | a drill: 2.31 → 0.83 ms | — |
+| 113 | fe41cde | spectrum spread 45.8 → 0.5 µs a frame | — |
+| 114 | ad67abe | a drag step: 70 → ~3 µs | — |
+| 115 | 0b8b6d4 | ↓ in a 5k-entry path modal: 0.93 → 0.52 ms | the modal's per-frame clone (#110's) |
+| 116 | 8566a6b | `/scan/status` after idle: 36/min → backs off to one a minute | server side (`?coverage=0`) is mStream's |
+| 117 | d4456b7 | macOS unchanged (hidden 0 frames, shown 120); the Windows 0×0 path is pinned by a test | not run on Windows |
+| 118 | 478a2fe | 120 Hz display: 120 → 60 pictures/s, GPU busy −48%; contract clause 6 amended | CPU unchanged (presents still run) |
+| 119 | a2588b3 | paused with the window open: main thread 7.6 → 0.6 ms/s, feed 0 | — |
+| 120 | 366fc37 | after cycling the presets: 97 → 80 MB | — |
+| 121 | f421d98 | low-power GPU by default, `WGPU_POWER_PREF` to override, the choice logged | dual-GPU saving not measurable on this Mac |
+| 122 | 56a1e05 | ~200k fewer instructions per shaded frame for multi-pass presets | single submit kept (the verifiers' advice) |
+| 123 | 8f72992, acaf90e | the web demo's AudioContext suspends 5 s after pausing: the idle-sleep assertion is released | WebKit unverified |
+| 124 | 15521cd, 8e6f024, b8ad0b8 | WebGL2 backend; the palette is lifted to ≥4.5:1 (the accent is now #3a96dd) | **decision**: +0.74 MB gzip download (1.08 → 1.82 MB) for beamterm's atlas |
+| 125 | e74a16d, fd879ea | idle: 120 callbacks and 21.7 ms/s of main thread → 9.9 and 2.7 | — |
+| 126 | cf6d611 | English-only wasm: 4.14 → 3.35 MB raw, 2.12 → 1.82 MB gzip | **decision**: opt-level z (−12% gzip, a visualizer frame ~65% slower) |
+| 127 | 698dd4a | crate release compile 916 s → 2m34s; peak compiler memory 6.3 → 3.75 GB; −2.2 MB binary | — |
+| 128 | 51b5d40 | CI builds the dev profile: the crate compiles in 14 s instead of the 9-21 min release step; the Linux guard reads the debug binary | first real run is on CI |
+| 129 | 59c7761 | e2e 8m30s → 2m08s; the gates now fail when their word never comes (proved) | — |
+| 130 | eb63ec4 | rust-cache saves only from main; PR runs share a cancel-in-progress group | provable only on GitHub |
+| 131 | 3a4e9ee | a fresh fake with a 35 s reverse lookup: 36.5 s → 0.33 s to first ping | the macOS runner saving shows on CI |
+| 132 | dcad758 | aws-lc-sys gone (ring only); HTTPS, proxy and self-signed servers work; release binary −1.8 MB | — |
+| 133 | 4b175bf | debug cover decode 36.5 → 1.95 ms, sixel encode 13.6 → 0.49 ms; debug album-wall upgrade 2.0 → 0.46 s | — |
+
+**After the merge.** An integration check ran against the merged tree:
+- three cross-lane reviewers covered the event loops and pacing, the engine and network, and the caches and graphics;
+- five agents re-ran every lane's headline smoke on the merged binaries.
+
+Every smoke held. No reviewer found a blocking defect. Their notes were fixed in three follow-up lanes (`perf/fu-engine`, `perf/fu-graphics`, `perf/fu-loop`), each smoke-tested and reviewed, and one more by hand:
+- **#73, ed80c35:** the vendored crate's want channel is a `watch`, so a want can be replaced but never dropped. A deterministic test fails 5 of 5 on the old code, and a stress probe went from 10/200 stuck to 0/200.
+- **#95, 3230da2:** a kitty transmission overwritten by an overlay drawn in the same frame is sent again. 144 stale cells under the server dropdown → 0.
+- **#92, 305f67e and eb2cd04:** a reconnect mid-track asks for the playing cover's original again. The original's arrival no longer re-encodes the small queue slot: 40.2 → 25.7 KB per track change on kitty, and the store no longer grows by one image per change.
+- **#94, 1b5a848:** a panic deletes the process's kitty pictures (68 left → 0).
+- **#102, a914408:** the Stats page under the mini player no longer keeps every pass drawing: 52.6 → 14 syscalls/s, the same as the mini player over the Library.
+- **#102, 9f29870:** an arrow held on that page ends with the button. Before, the log scrolled on by itself after the release.
+- **#85, 52bf37c:** a seed-path listing still out keeps the Torrents room brisk (completion 139 → 96 ms after Tab), and it still lands after the worker has died.
+- **#82, 30cd3bc:** effects a frame makes, such as the wall's cover claims, go out without the post-draw wait. Page turn → first cover request: 111 → 15-21 ms.
+- **3c52d3e:** the "sixty-four covers" comment and library-rooms.md's #91 entry are corrected.
+
+Left as they are, all bounded:
+- The other admin rooms still draw every pass after their worker thread has died, which happens only on a panic. That is the pre-audit cost; the Torrents room got the fix.
+- A frame that carries kitty transmissions keeps a second copy of them until it ends, for the re-send check.
+- A cover sharpened from its small copy to the original re-encodes once outside the frame's encode budget.
