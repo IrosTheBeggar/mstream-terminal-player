@@ -611,10 +611,16 @@ pub struct Origin {
 fn evict_oldest<T>(
     map: &mut HashMap<String, T>,
     order: &mut VecDeque<String>,
-    pinned: &HashSet<String>,
+    pinned: &HashSet<&str>,
 ) -> Option<(String, T)> {
-    order.retain(|name| map.contains_key(name));
-    let at = order.iter().position(|name| !pinned.contains(name))?;
+    // Every key is in the order, once, so the two lengths agree exactly
+    // when the order holds no forgotten names — the usual case, now that
+    // a given-back slot takes its name with it — and then a claim need not
+    // sweep the whole order first (performance audit #101).
+    if order.len() != map.len() {
+        order.retain(|name| map.contains_key(name));
+    }
+    let at = order.iter().position(|name| !pinned.contains(name.as_str()))?;
     let name = order.remove(at)?;
     let value = map.remove(&name)?;
     Some((name, value))
@@ -629,12 +635,12 @@ fn evict_oldest<T>(
 /// past the cap for the rest of the session (performance audit #90).
 /// Dropping it instead would re-ask, every frame, for a cover still on
 /// screen.
-fn file_answer<T>(
+fn file_answer<'p, T>(
     map: &mut HashMap<String, T>,
     order: &mut VecDeque<String>,
     name: String,
     value: T,
-    pinned: impl FnOnce() -> HashSet<String>,
+    pinned: impl FnOnce() -> HashSet<&'p str>,
 ) {
     if let Some(slot) = map.get_mut(&name) {
         *slot = value;
@@ -697,16 +703,67 @@ struct ArtOnView {
 /// the GUI last drew. Not every queue row: the queue keeps its played rows
 /// and Auto DJ only appends, so pinning them all let a long session grow
 /// the cache one album at a time past its cap, source bytes and all
-/// (performance audit #91). Free of the App so an answer can be filed
-/// while the cache is borrowed.
-fn pinned_art(queue: &Queue, now_playing: Option<&Track>, view: &ArtOnView) -> HashSet<String> {
+/// (performance audit #91). Free of the App, and borrowed, so it is built
+/// while the cache is being written — once per batch of claims rather than
+/// a clone of every queue row's name per claim (performance audit #101).
+fn pinned_art<'v>(queue: &'v Queue, now_playing: Option<&'v Track>, view: &'v ArtOnView) -> HashSet<&'v str> {
     let rows = view.queue.start.min(queue.items.len())..view.queue.end.min(queue.items.len());
     queue.items[rows]
         .iter()
-        .filter_map(|item| item.metadata.album_art.clone())
-        .chain(now_playing.and_then(|t| t.metadata.album_art.clone()))
-        .chain(view.wall.iter().cloned())
+        .filter_map(|item| item.metadata.album_art.as_deref())
+        .chain(now_playing.and_then(|t| t.metadata.album_art.as_deref()))
+        .chain(view.wall.iter().map(String::as_str))
         .collect()
+}
+
+/// The shapes eviction must leave alone: the playing track's, drawn under
+/// the playhead, and the one fetched ahead for what plays next. Not every
+/// queue row's, which let a long session grow the cache one track at a
+/// time past its cap (performance audit #91).
+fn pinned_shapes<'v>(now_playing: Option<&'v Track>, next: Option<&'v Queued>) -> HashSet<&'v str> {
+    now_playing.map(|t| t.filepath.as_str()).into_iter().chain(next.map(|item| item.filepath.as_str())).collect()
+}
+
+/// One batch of cover claims: the pinned set is built by the first claim
+/// that finds the cache full, and reused by the rest. The wall claims a
+/// whole page in one frame, and rebuilding the set per claim cost a page
+/// turn tens of milliseconds against a long queue (performance audit #101).
+struct Claims<'v> {
+    queue: &'v Queue,
+    now_playing: Option<&'v Track>,
+    view: &'v ArtOnView,
+    pinned: Option<HashSet<&'v str>>,
+    effects: Vec<Effect>,
+}
+
+impl<'v> Claims<'v> {
+    fn new(queue: &'v Queue, now_playing: Option<&'v Track>, view: &'v ArtOnView) -> Self {
+        Claims { queue, now_playing, view, pinned: None, effects: Vec::new() }
+    }
+
+    /// Claim `file` unless the cache holds it or a claim is out: the
+    /// oldest cover nothing on screen needs goes to make room — never the
+    /// playing track's, a row the queue panel shows or a cell of the
+    /// wall's page. Clearing the lot re-asked for ninety covers a frame
+    /// (the review's finding).
+    fn claim(
+        &mut self,
+        art: &mut HashMap<String, Option<Art>>,
+        order: &mut VecDeque<String>,
+        file: &str,
+        reach: Option<Reach>,
+    ) {
+        if art.contains_key(file) {
+            return;
+        }
+        if art.len() >= ART_CACHE_CAP {
+            let pinned = self.pinned.get_or_insert_with(|| pinned_art(self.queue, self.now_playing, self.view));
+            while art.len() >= ART_CACHE_CAP && evict_oldest(art, order, pinned).is_some() {}
+        }
+        art.insert(file.to_string(), None);
+        order.push_back(file.to_string());
+        self.effects.push(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach }));
+    }
 }
 
 /// Why Auto DJ picked a row, for the queue's badge (auto-dj contract,
@@ -5084,10 +5141,10 @@ impl App {
     }
 
     /// Ask for one cover by the art file that names it, unless the cache
-    /// already holds it — or the placeholder a previous ask left, which is
-    /// what stops the same cover being asked for twice. The GUI's album
-    /// grid asks through here so a page of covers rides the same claim
-    /// discipline as the playing track's.
+    /// already holds it, a claim is out or its last ask is waiting out a
+    /// rung. The wall claims its page through [`App::claim_wall_art`]; this
+    /// is the one-cover form the tests reach for.
+    #[cfg(test)]
     pub(crate) fn fetch_art_file(&mut self, file: &str) -> Option<Effect> {
         if backing_off(&self.art_retry, file) {
             return None;
@@ -5097,9 +5154,8 @@ impl App {
 
     /// Whether a surface that asks every frame should claim this cover
     /// now: not cached or claimed, and not waiting out a failure's rung
-    /// (performance audit #89). The wall filters its page through this, so
-    /// a page in backoff costs lookups, not a vector of names per frame.
-    pub(crate) fn wants_art(&self, file: &str) -> bool {
+    /// (performance audit #89).
+    fn wants_art(&self, file: &str) -> bool {
         !self.art.contains_key(file) && !backing_off(&self.art_retry, file)
     }
 
@@ -5111,51 +5167,80 @@ impl App {
         self.waveform_retry.clear();
     }
 
-    /// Ask for a queue row's cover, unless the cache holds it or a claim is
-    /// out — from the row's own server when that is not the session's
-    /// (contract clause 30), the way the playing row's is fetched. A row
-    /// on a tunnel that is not up is NOT claimed: the ask would have
-    /// nowhere to go, and the placeholder a claim leaves would stand in
-    /// the picture's way for the rest of the session. The GUI's queue
-    /// panel asks through here for every row it shows, so a cover whose
-    /// last ask failed waits out its rung here (performance audit #89).
-    pub(crate) fn fetch_queue_art(&mut self, index: usize) -> Option<Effect> {
-        let item = self.queue.items.get(index)?;
-        let file = item.metadata.album_art.as_deref()?;
-        if !self.wants_art(file) {
-            return None;
+    /// Claim what the wall's page on record still owes the cache, in one
+    /// batch — the same claim discipline as the playing track's cover.
+    /// After the first frame of a page this is hashmap lookups, and a
+    /// cover waiting out a failed ask's rung is not owed yet.
+    pub(crate) fn claim_wall_art(&mut self) -> Vec<Effect> {
+        let App { art, art_order, art_retry, queue, now_playing, art_on_view, .. } = self;
+        let mut claims = Claims::new(queue, now_playing.as_ref(), art_on_view);
+        for file in &art_on_view.wall {
+            if !art.contains_key(file) && !backing_off(art_retry, file) {
+                claims.claim(art, art_order, file, None);
+            }
         }
-        let file = file.to_string();
-        let reach = if self.is_session_origin(&item.origin) {
-            None
-        } else {
-            Some(self.reach(&item.origin).ok()?)
-        };
-        self.fetch_art_from(&file, reach)
+        claims.effects
+    }
+
+    /// The queue panel drew these rows: they go on record, and what their
+    /// covers still owe the cache is claimed in one batch.
+    pub(crate) fn claim_queue_art(&mut self, rows: std::ops::Range<usize>) -> Vec<Effect> {
+        self.art_on_view.queue = rows.clone();
+        self.claim_rows(rows)
+    }
+
+    /// Claim the covers of these queue rows the cache still wants — from
+    /// each row's own server when that is not the session's (contract
+    /// clause 30), the way the playing row's is fetched. A row on a tunnel
+    /// that is not up is NOT claimed: the ask would have nowhere to go, and
+    /// the placeholder a claim leaves would stand in the picture's way for
+    /// the rest of the session. The panel asks every frame, so a cover
+    /// whose last ask failed waits out its rung here (performance audit
+    /// #89).
+    fn claim_rows(&mut self, rows: std::ops::Range<usize>) -> Vec<Effect> {
+        // Each row's reach first, while the App can still be asked. After a
+        // page's first frame nothing is wanted, and this allocates nothing.
+        let mut asks: Vec<(usize, Option<Reach>)> = Vec::new();
+        for index in rows {
+            let Some(item) = self.queue.items.get(index) else { break };
+            let Some(file) = item.metadata.album_art.as_deref() else { continue };
+            if !self.wants_art(file) {
+                continue;
+            }
+            let reach = if self.is_session_origin(&item.origin) {
+                None
+            } else {
+                match self.reach(&item.origin) {
+                    Ok(reach) => Some(reach),
+                    Err(_) => continue,
+                }
+            };
+            asks.push((index, reach));
+        }
+        if asks.is_empty() {
+            return Vec::new();
+        }
+        let App { art, art_order, queue, now_playing, art_on_view, .. } = self;
+        let mut claims = Claims::new(queue, now_playing.as_ref(), art_on_view);
+        for (index, reach) in asks {
+            if let Some(file) = queue.items[index].metadata.album_art.as_deref() {
+                claims.claim(art, art_order, file, reach);
+            }
+        }
+        claims.effects
+    }
+
+    /// One queue row's cover, the way the panel claims it — for the tests.
+    #[cfg(test)]
+    pub(crate) fn fetch_queue_art(&mut self, index: usize) -> Option<Effect> {
+        self.claim_rows(index..index + 1).pop()
     }
 
     fn fetch_art_from(&mut self, file: &str, reach: Option<Reach>) -> Option<Effect> {
-        if self.art.contains_key(file) {
-            return None;
-        }
-        if self.art.len() >= ART_CACHE_CAP {
-            // The oldest cover nothing on screen needs goes — never the
-            // playing track's, a row the queue panel shows or a cell of
-            // the wall's page. Clearing the lot re-asked for ninety covers
-            // a frame (the review's finding).
-            let pinned = self.pinned_art();
-            while self.art.len() >= ART_CACHE_CAP
-                && evict_oldest(&mut self.art, &mut self.art_order, &pinned).is_some()
-            {}
-        }
-        self.art.insert(file.to_string(), None);
-        self.art_order.push_back(file.to_string());
-        Some(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach }))
-    }
-
-    /// The covers on screen whatever else is (see the free function).
-    fn pinned_art(&self) -> HashSet<String> {
-        pinned_art(&self.queue, self.now_playing.as_ref(), &self.art_on_view)
+        let App { art, art_order, queue, now_playing, art_on_view, .. } = self;
+        let mut claims = Claims::new(queue, now_playing.as_ref(), art_on_view);
+        claims.claim(art, art_order, file, reach);
+        claims.effects.pop()
     }
 
     /// Whether the wall's page on record is this one — the check each
@@ -5170,7 +5255,9 @@ impl App {
         self.art_on_view.wall = page;
     }
 
-    /// The queue panel drew these rows: their covers stay while it does.
+    /// The queue panel drew these rows, claiming nothing — for the tests;
+    /// the panel itself goes through [`App::claim_queue_art`].
+    #[cfg(test)]
     pub(crate) fn queue_on_view(&mut self, rows: std::ops::Range<usize>) {
         self.art_on_view.queue = rows;
     }
@@ -5253,10 +5340,10 @@ impl App {
         }
         if self.waveforms.len() >= ART_CACHE_CAP {
             // The same rule as the covers': what is drawn stays.
-            let pinned = self.pinned_shapes();
-            while self.waveforms.len() >= ART_CACHE_CAP
-                && evict_oldest(&mut self.waveforms, &mut self.waveform_order, &pinned).is_some()
-            {}
+            let next = self.prefetch_row();
+            let App { waveforms, waveform_order, queue, now_playing, .. } = self;
+            let pinned = pinned_shapes(now_playing.as_ref(), next.and_then(|at| queue.items.get(at)));
+            while waveforms.len() >= ART_CACHE_CAP && evict_oldest(waveforms, waveform_order, &pinned).is_some() {}
         }
         self.waveforms.insert(filepath.to_string(), None);
         self.waveform_order.push_back(filepath.to_string());
@@ -5308,13 +5395,9 @@ impl App {
         }
     }
 
-    /// The shapes eviction must leave alone: the playing track's, drawn
-    /// under the playhead, and the one fetched ahead for what plays next.
-    /// Not every queue row's, which let an Auto DJ session grow the cache
-    /// one track at a time past its cap (performance audit #91).
-    fn pinned_shapes(&self) -> HashSet<String> {
-        let next = self.now_playing.as_ref().and(self.prefetch_index()).and_then(|at| self.queue.items.get(at));
-        self.now_playing.iter().map(|t| t.filepath.clone()).chain(next.map(|item| item.filepath.clone())).collect()
+    /// The row whose shape is fetched ahead while something plays.
+    fn prefetch_row(&self) -> Option<usize> {
+        self.now_playing.as_ref().and(self.prefetch_index())
     }
 
     fn play_pause(&mut self) -> Vec<Effect> {
@@ -5772,8 +5855,11 @@ impl App {
                 // on that track for the rest of the session.
                 if settled {
                     self.waveform_retry.remove(&filepath);
-                    let pinned = self.pinned_shapes();
-                    file_answer(&mut self.waveforms, &mut self.waveform_order, filepath, bars, || pinned);
+                    let next = self.prefetch_row();
+                    let (queue, now_playing) = (&self.queue, self.now_playing.as_ref());
+                    file_answer(&mut self.waveforms, &mut self.waveform_order, filepath, bars, || {
+                        pinned_shapes(now_playing, next.and_then(|at| queue.items.get(at)))
+                    });
                 } else {
                     give_back(&mut self.waveforms, &mut self.waveform_order, &mut self.waveform_retry, filepath);
                 }

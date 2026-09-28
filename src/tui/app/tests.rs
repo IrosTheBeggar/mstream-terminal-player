@@ -7421,3 +7421,34 @@ fn nothing_the_gui_last_drew_is_evicted_for_a_late_answer() {
     assert!(page.iter().all(|file| app.art.contains_key(file)), "the wall's page stands");
     assert!((10..30).all(|n| app.art.contains_key(&format!("q{n}.jpeg"))), "the panel's rows stand");
 }
+
+#[test]
+fn a_wall_page_is_claimed_in_one_batch_that_evicts_as_single_claims_did() {
+    // Performance audit #101: at the cap every claim rebuilt the pinned
+    // set by cloning names — a page turn against a long queue paid it a
+    // hundred and fifty times over. One borrowed set per batch evicts the
+    // same covers in the same order.
+    let mut app = connected_app();
+    let rows: Vec<Track> = (0..3000).map(|n| track_with_cover(&format!("lib/{n}.mp3"), &format!("q{}.jpeg", n % 300))).collect();
+    app.replace_queue(rows);
+    for rows in [0..20, 20..40] {
+        assert_eq!(app.claim_queue_art(rows).len(), 20, "one claim per distinct cover shown");
+    }
+    for i in 0..ART_CACHE_CAP - 40 {
+        app.fetch_art_file(&format!("old{i}.jpeg"));
+    }
+    assert_eq!(app.art.len(), ART_CACHE_CAP);
+
+    let page: Vec<String> = (0..150).map(|i| format!("page{i}.jpeg")).collect();
+    app.set_wall_on_view(page.clone());
+    let claims = app.claim_wall_art();
+    assert_eq!(claims.len(), 150);
+    assert_eq!(app.art.len(), ART_CACHE_CAP, "one out for each one in");
+    assert!(page.iter().all(|file| app.art.contains_key(file)));
+    assert!((20..40).all(|n| app.art.contains_key(&format!("q{n}.jpeg"))), "the panel's rows on record stay");
+    assert!((0..20).all(|n| !app.art.contains_key(&format!("q{n}.jpeg"))), "rows scrolled past are the oldest, and go");
+    assert!((0..130).all(|i| !app.art.contains_key(&format!("old{i}.jpeg"))), "then the oldest wall covers, in order");
+    assert!(app.art.contains_key("old130.jpeg"));
+    assert_eq!(app.art_order.len(), app.art.len());
+    assert!(app.claim_wall_art().is_empty(), "the next frame owes nothing");
+}
