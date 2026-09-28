@@ -672,8 +672,12 @@ impl App {
                 // Cover filenames only mean anything to the server that
                 // minted them; a reconnect may be a different server. The
                 // order goes with the map: a name left behind in it would
-                // come back doubled once a late answer files it again.
-                self.art.clear();
+                // come back doubled once a late answer files it again. A
+                // claim still unanswered is withdrawn as it goes, as an
+                // eviction's is: no lane asks for it once the session has
+                // moved on (the review of performance audit #88).
+                let withdrawn: Vec<Effect> =
+                    self.art.drain().filter_map(|(name, value)| super::withdrawal(name, value)).collect();
                 self.art_order.clear();
                 self.art_small.clear();
                 self.path_came_up();
@@ -701,6 +705,7 @@ impl App {
                     Effect::Audio(AudioCmd::SetBlendSkips(self.blend_skips)),
                     Effect::Audio(AudioCmd::SetPauseFade(self.pause_fade)),
                 ];
+                effects.extend(withdrawn);
                 effects.extend(dj_effects);
                 // Worth persisting when we hold a token we logged in for — or
                 // a pairing code, which is the only way back to this server

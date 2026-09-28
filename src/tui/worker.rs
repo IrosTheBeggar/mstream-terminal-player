@@ -1222,13 +1222,30 @@ fn work_through(session: &Session, lanes: &Lanes, events: &Sender<Event>) {
             continue;
         }
         drop(slot);
+        let retarget = matches!(cmd, ApiCmd::Retarget { .. });
+        let before = client.clone();
         let event = run_change(&mut client, cmd);
-        lock_session(session).client = client;
+        let mut slot = lock_session(session);
+        if replaced(before.as_ref(), client.as_ref()) {
+            lock_lanes(lanes).session_moved(client.clone(), retarget, events);
+        }
+        slot.client = client;
+        drop(slot);
         if let Some(event) = event
             && events.send(event).is_err()
         {
             return;
         }
+    }
+}
+
+/// Whether a change left the session on another client than the one it
+/// had: a failed change keeps the very one.
+#[cfg(not(target_arch = "wasm32"))]
+fn replaced(before: Option<&Arc<Client>>, after: Option<&Arc<Client>>) -> bool {
+    match (before, after) {
+        (Some(was), Some(now)) => !Arc::ptr_eq(was, now),
+        (was, now) => was.is_none() && now.is_some(),
     }
 }
 
@@ -1355,7 +1372,8 @@ fn lock_lane(lane: &Lane) -> std::sync::MutexGuard<'_, ArtLane> {
     lane.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// The lanes, one per reach the covers are asked of (`None`: the session).
+/// The lanes, one per reach the covers are asked of (`None`: the session,
+/// a fresh lane each time its client is replaced).
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
 struct ArtLanes {
@@ -1387,6 +1405,28 @@ impl ArtLanes {
         let start = lock_lane(&lane).push(client, cmd);
         if start {
             spawn_art_runner(lane, events.clone());
+        }
+    }
+
+    /// The session's client was replaced. Its covers start a lane of their
+    /// own: kept, the lane made the new session's covers wait on the old
+    /// one's asks still on the wire — six runners held twenty seconds an
+    /// ask by a server that hangs, a page taking minutes — and each waiting
+    /// ask kept the client it was queued with, so the server the user had
+    /// left went on being asked. The old lane's runners finish what they
+    /// carry and go. What it had waiting: a retarget is the same server by
+    /// another path, whose claims the App keeps, so those asks move across
+    /// onto the new client; a connect or a sign-in may be another server,
+    /// and the App lets every claim go when its Connected lands, so they
+    /// are dropped (the review of performance audit #88).
+    fn session_moved(&mut self, client: Option<Arc<Client>>, same_server: bool, events: &Sender<Event>) {
+        let Some(at) = self.shelf.iter().position(|(reach, _)| reach.is_none()) else { return };
+        let (_, old) = self.shelf.remove(at);
+        let waiting = std::mem::take(&mut lock_lane(&old).waiting);
+        if same_server {
+            for (_, cmd) in waiting {
+                self.ask(client.clone(), events, cmd);
+            }
         }
     }
 
@@ -3289,5 +3329,138 @@ mod tests {
         worker.join().unwrap();
         assert!(lock_session(&session).held.is_empty());
         assert_eq!(lock_lanes(&lanes).shelf.len(), 1, "and the lane has it");
+    }
+
+    const LANE_PING: &str = r#"{"vpaths":["lib"],"transcode":false,"noFileModify":true,"noUpload":true}"#;
+
+    fn connect_to(server: &str) -> ApiCmd {
+        ApiCmd::Connect {
+            server: server.to_string(),
+            identity: server.to_string(),
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        }
+    }
+
+    /// A server whose covers each hang `hold` before a 404, counting the
+    /// asks it was sent; its ping answers at once.
+    fn hanging_art(hold: Duration) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = asked.clone();
+        let base = test_server(move |path| match path {
+            "/api/v1/ping" => (Duration::ZERO, "200 OK", LANE_PING),
+            p if p.starts_with("/album-art/") => {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                (hold, "404 Not Found", "{}")
+            }
+            _ => (Duration::ZERO, "404 Not Found", "{}"),
+        });
+        (base, asked)
+    }
+
+    /// The next event that is not the tunnel sampler's.
+    fn next_answer(events: &Receiver<Event>, within: Duration) -> Event {
+        loop {
+            match events.recv_timeout(within).expect("an answer") {
+                Event::TunnelStatus { .. } | Event::TunnelPath { .. } => {}
+                event => return event,
+            }
+        }
+    }
+
+    /// Twenty covers on the session's lane, six of them on the wire.
+    fn twenty_covers_on(tx: &Sender<ApiCmd>, asked: &std::sync::atomic::AtomicUsize) {
+        for i in 0..20 {
+            tx.send(small_cover(&format!("old{i}.jpeg"))).unwrap();
+        }
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while asked.load(std::sync::atomic::Ordering::SeqCst) < ART_LANE_WIDTH && std::time::Instant::now() < until {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), ART_LANE_WIDTH);
+    }
+
+    #[test]
+    fn a_new_session_gets_a_lane_of_its_own_and_asks_the_old_server_nothing_more() {
+        // The review of performance audit #88: the session's lane outlived
+        // the session. After a switch away from a server whose art hangs,
+        // the leftovers kept all six runners for twenty seconds an ask, each
+        // still aimed at the server the user had left, and the new server's
+        // covers waited behind them.
+        let (old, asked_old) = hanging_art(Duration::from_millis(1500));
+        let new = test_server(|path| match path {
+            "/api/v1/ping" => (Duration::ZERO, "200 OK", LANE_PING),
+            _ => (Duration::ZERO, "404 Not Found", "{}"),
+        });
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let worker = thread::spawn(move || api_loop(&rx, &events_tx));
+        tx.send(connect_to(&old)).unwrap();
+        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Connected { .. }));
+        twenty_covers_on(&tx, &asked_old);
+
+        tx.send(connect_to(&new)).unwrap();
+        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Connected { .. }));
+        let asked = std::time::Instant::now();
+        tx.send(small_cover("new.jpeg")).unwrap();
+        match next_answer(&events, Duration::from_secs(5)) {
+            Event::AlbumArt { file, .. } => assert_eq!(file, "new.jpeg", "the new server's cover first"),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(asked.elapsed() < Duration::from_millis(1000), "it did not wait: {:?}", asked.elapsed());
+
+        // The six on the wire land; the fourteen that waited are never sent.
+        for _ in 0..ART_LANE_WIDTH {
+            assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::AlbumArt { .. }));
+        }
+        assert!(events.recv_timeout(Duration::from_millis(300)).is_err(), "nothing more is answered");
+        assert_eq!(asked_old.load(std::sync::atomic::Ordering::SeqCst), ART_LANE_WIDTH);
+        tx.send(ApiCmd::Shutdown).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_retarget_moves_the_waiting_covers_onto_the_new_path() {
+        // The same server by another way: its claims stand in the App, so
+        // what waited on the old path is asked on the new one, at once,
+        // rather than behind the old path's six on the wire.
+        let (old, asked_old) = hanging_art(Duration::from_millis(1500));
+        let new = test_server(|path| match path {
+            "/api/" => (Duration::ZERO, "200 OK", "{}"),
+            _ => (Duration::ZERO, "404 Not Found", "{}"),
+        });
+        let (tx, rx) = mpsc::channel();
+        let (events_tx, events) = mpsc::channel();
+        let worker = thread::spawn(move || api_loop(&rx, &events_tx));
+        tx.send(connect_to(&old)).unwrap();
+        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Connected { .. }));
+        twenty_covers_on(&tx, &asked_old);
+
+        let moved = std::time::Instant::now();
+        tx.send(ApiCmd::Retarget {
+            identity: old.clone(),
+            server: new,
+            token: None,
+            self_signed: false,
+            peer: None,
+            local_token: None,
+        })
+        .unwrap();
+        assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::Retargeted { .. }));
+        for _ in 0..20 - ART_LANE_WIDTH {
+            match next_answer(&events, Duration::from_secs(5)) {
+                Event::AlbumArt { settled: true, .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(moved.elapsed() < Duration::from_millis(1000), "the new path answered them: {:?}", moved.elapsed());
+        for _ in 0..ART_LANE_WIDTH {
+            assert!(matches!(next_answer(&events, Duration::from_secs(5)), Event::AlbumArt { .. }));
+        }
+        assert_eq!(asked_old.load(std::sync::atomic::Ordering::SeqCst), ART_LANE_WIDTH);
+        tx.send(ApiCmd::Shutdown).unwrap();
+        worker.join().unwrap();
     }
 }

@@ -7511,6 +7511,36 @@ fn a_page_of_covers_is_asked_small_top_cell_last_and_what_it_evicted_unasked_is_
 }
 
 #[test]
+fn a_connect_withdraws_every_claim_still_unanswered_as_it_empties_the_cache() {
+    // The review of performance audit #88: a Connected empties the cache,
+    // since a cover's name means something only to the server that minted
+    // it. Its unanswered claims went without a word, so a lane went on
+    // asking the server the user had left for a page of them.
+    let mut app = connected_app();
+    for i in 0..30 {
+        app.fetch_art_file(&format!("left{i}.jpeg"));
+    }
+    let answered = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+    for i in 0..10 {
+        app.apply_event(Event::AlbumArt { file: format!("left{i}.jpeg"), art: Some(answered.clone()), settled: true, small: true });
+    }
+    let effects = app.apply_event(Event::Connected {
+        server: "http://other:3000".into(),
+        id: "http://other:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::default(),
+    });
+    let mut withdrawn = covers_withdrawn(&effects);
+    withdrawn.sort();
+    let mut unanswered: Vec<String> = (10..30).map(|i| format!("left{i}.jpeg")).collect();
+    unanswered.sort();
+    assert_eq!(withdrawn, unanswered, "only the unanswered go back");
+    assert!(app.art.is_empty() && app.art_order.is_empty());
+    assert!(covers_asked(&effects).is_empty());
+}
+
+#[test]
 fn the_playing_track_asks_for_the_original_of_a_cover_the_wall_fetched_small() {
     // Performance audit #92: wall cells and queue rows ask for the
     // server's 256 px copy; the playing track's big box may draw the
