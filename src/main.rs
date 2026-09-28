@@ -361,6 +361,11 @@ struct ServeArgs {
     /// feeding the next track into the playing sink ahead of time.
     #[arg(long)]
     gapless: bool,
+
+    /// With no crossfade or gapless set, still open the next track ahead of
+    /// time, so the plain cut between tracks never waits on the open.
+    #[arg(long)]
+    prefetch: bool,
 }
 
 /// A blend length the engine will accept. Bounded like `listening_seconds`
@@ -477,6 +482,7 @@ fn main() {
             exit_with_parent: false,
             crossfade: 0.0,
             gapless: false,
+            prefetch: false,
         }),
         (None, None) => None,
     };
@@ -490,6 +496,7 @@ fn main() {
                 exit_with_parent: args.exit_with_parent,
                 crossfade: args.crossfade,
                 gapless: args.gapless,
+                prefetch: args.prefetch,
             };
             if let Err(e) = serve::run(opts) {
                 eprintln!("mstream-player: {e}");

@@ -616,14 +616,23 @@ struct State {
     /// across ticks — [`Engine::advance_tick`] attempts one source per call.
     advance_failures: usize,
     /// Seconds of blend between tracks. 0.0 — the default — is off. Off
-    /// (with gapless also off) means no prefetch and no transitions, as
-    /// before Phase C; the soft cuts on manual skip/stop/seek are the one
-    /// deliberate global departure (C4) — the old engine clicked.
+    /// (with gapless and prepare_plain also off) means no prefetch and no
+    /// transitions, as before Phase C; the soft cuts on manual
+    /// skip/stop/seek are the one deliberate global departure (C4) — the
+    /// old engine clicked.
     crossfade: f32,
     /// Sample-tight transitions when no blend is configured: the prepared
     /// next is appended to the playing sink instead of overlapped on a
     /// second one. Off by default for the same compatibility reason.
     gapless: bool,
+    /// With no transition configured, prepare the next track anyway and
+    /// start it from the prepared decoder at the plain cut, so the boundary
+    /// never waits on its open — which, synchronous, held the state lock
+    /// and serve's whole loop through a file probe or a network fetch
+    /// (performance audit #77). The seam is still the hard cut. Off by
+    /// default like the others: prefetch is a behavior the engine never
+    /// shows unasked (serve's `--prefetch` asks).
+    prepare_plain: bool,
     /// The source waiting inside the sink for its gapless boundary.
     appended: Option<Appended>,
     /// Manual skips blend for [`SKIP_BLEND`] instead of breathing (C6).
@@ -1127,6 +1136,7 @@ impl Engine {
             advance_failures: 0,
             crossfade: 0.0,
             gapless: false,
+            prepare_plain: false,
             appended: None,
             blend_skips: false,
             pause_fade: false,
@@ -1687,6 +1697,14 @@ impl Engine {
         self.state.lock().unwrap().gapless = on;
     }
 
+    /// Prepare the next track ahead of a plain cut (performance audit
+    /// #77): no blend, no append, the same hard cut — started from a
+    /// decoder opened ahead of time instead of one opened at the boundary
+    /// with the lock held. A configured transition outranks it.
+    pub fn set_prepare_plain(&self, on: bool) {
+        self.state.lock().unwrap().prepare_plain = on;
+    }
+
     /// Manual skips blend for a second instead of breathing (C6).
     pub fn set_blend_skips(&self, on: bool) {
         self.state.lock().unwrap().blend_skips = on;
@@ -1983,7 +2001,21 @@ impl Engine {
         }
         etrace!("track ran out (next={}, announced={})",
             s.next.name(), s.pending_next.is_some());
-        match pick_next(&s.q, false) {
+        // A prepared next committed its row when the prepare began, and
+        // under shuffle that is where the dice were rolled: rolling them
+        // again here missed the prepared decoder (N-2)/(N-1) of the time,
+        // threw it away and opened another pick with the lock held
+        // (performance audit #77). Any queue edit since would have
+        // invalidated it, so a commitment still standing is to this queue.
+        let committed = match &s.next {
+            NextTrack::Ready { prepared, index: Some(index) }
+                if s.q.queue.get(*index).is_some_and(|e| e.path == prepared.path) =>
+            {
+                Some(*index)
+            }
+            _ => None,
+        };
+        match committed.or_else(|| pick_next(&s.q, false)) {
             None => s.clear_current(),
             Some(idx) => {
                 s.q.index = idx;
@@ -2034,7 +2066,7 @@ impl Engine {
         s.promote_if_crossed();
 
         let blending = s.crossfade > 0.0;
-        if !blending && !s.gapless {
+        if !blending && !s.gapless && !s.prepare_plain {
             // Toggled off with something in flight: forget what is not yet
             // committed. An overlap already sounding retires on its own,
             // and an appended source promotes above.
@@ -2170,10 +2202,12 @@ impl Engine {
             if blending && remaining <= fade {
                 etrace!("handover at {remaining:.2}s remaining");
                 self.handover(s);
-            } else if !blending && remaining <= APPEND_LEAD {
+            } else if !blending && s.gapless && remaining <= APPEND_LEAD {
                 etrace!("gapless append at {remaining:.2}s remaining");
                 append_gapless(s);
             }
+            // A plain prepare waits in Ready for the source to run out;
+            // the advance at the boundary installs it.
         }
     }
 
@@ -2814,6 +2848,99 @@ mod tests {
         );
         engine.stop();
         let _ = std::fs::remove_file(&local);
+    }
+
+    /// Serve's `--prefetch` (audit #77): no blend and no append — the same
+    /// hard cut — but the next track is opened ahead of the boundary and
+    /// started from that decoder, where it used to be opened at the
+    /// boundary with the lock and serve's whole loop held.
+    ///
+    /// `cargo test a_plain_prepare -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_plain_prepare_opens_ahead_and_still_cuts_at_the_end() {
+        let local = std::env::temp_dir().join("mstream-plain-a.wav");
+        std::fs::write(&local, wav_bytes(3)).unwrap();
+        let (url, hits) = counting_wav_server(3);
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_prepare_plain(true);
+        engine.queue_add_many(vec![local.to_string_lossy().into_owned(), url.clone()]);
+
+        let started = std::time::Instant::now();
+        let mut opened_ahead = false;
+        let switched = loop {
+            engine.advance_tick();
+            let status = engine.status();
+            if status.file == url {
+                break started.elapsed();
+            }
+            // Opened ahead: the one request lands while the first track
+            // still plays — and nothing blends or appends meanwhile.
+            opened_ahead |= hits.load(Ordering::SeqCst) == 1 && status.playing;
+            assert!(!engine.overlap_active() && !engine.appended_waiting(), "a plain cut, not a transition");
+            assert!(started.elapsed() < Duration::from_secs(8), "the next track never came");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(opened_ahead, "the next track was not opened ahead of the boundary");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "the boundary opened it again");
+        // A cut at the end, not a blend's early switch.
+        assert!(switched > Duration::from_secs_f64(2.8), "switched at {switched:?}");
+        std::thread::sleep(Duration::from_millis(600));
+        let later = engine.status();
+        assert_eq!(later.queue_index, 1);
+        assert!(later.playing && later.position > 0.3, "the prepared track sounds: {:.2}", later.position);
+        engine.stop();
+        let _ = std::fs::remove_file(&local);
+    }
+
+    /// Under shuffle the prepare rolls the dice for the next row; the
+    /// boundary used to roll them again, miss the prepared decoder most of
+    /// the time, and open another row with the lock held (audit #77).
+    ///
+    /// `cargo test a_shuffled_boundary -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_shuffled_boundary_plays_the_row_that_was_prepared() {
+        let rows: Vec<String> = (0..5)
+            .map(|i| {
+                let path = std::env::temp_dir().join(format!("mstream-shuffle-{i}.wav"));
+                std::fs::write(&path, wav_bytes(2)).unwrap();
+                path.to_string_lossy().into_owned()
+            })
+            .collect();
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_prepare_plain(true);
+        engine.set_shuffle(true);
+        engine.queue_add_many(rows.clone());
+
+        // Three boundaries: a re-roll agreeing with the prepare by chance
+        // each time is (1/4)^3.
+        let started = std::time::Instant::now();
+        let mut committed: Option<usize> = None;
+        let mut index = engine.status().queue_index;
+        let mut crossed = 0;
+        while crossed < 3 {
+            engine.advance_tick();
+            if let NextTrack::Ready { index: Some(at), .. } = &engine.state.lock().unwrap().next {
+                committed = Some(*at);
+            }
+            let now = engine.status().queue_index;
+            if now != index {
+                assert_eq!(Some(now), committed, "the boundary played a row nobody prepared");
+                committed = None;
+                index = now;
+                crossed += 1;
+            }
+            assert!(started.elapsed() < Duration::from_secs(15), "only {crossed} boundaries");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        engine.stop();
+        for row in rows {
+            let _ = std::fs::remove_file(row);
+        }
     }
 
     /// The other half of the listening-session bug: an open that failed
@@ -4450,6 +4577,7 @@ mod tests {
             advance_failures: 0,
             crossfade: 0.0,
             gapless: false,
+            prepare_plain: false,
             appended: None,
             blend_skips: false,
             pause_fade: false,

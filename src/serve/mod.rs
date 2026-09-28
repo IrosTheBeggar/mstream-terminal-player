@@ -40,6 +40,10 @@ pub struct ServeOptions {
     /// Sample-tight transitions when no blend is configured. Same legacy
     /// stance: unreachable from `--port N`.
     pub gapless: bool,
+    /// With neither of those, open the next track ahead of its boundary
+    /// anyway, so the plain cut never waits on the open (performance audit
+    /// #77). Same legacy stance: a prefetch is asked for, never assumed.
+    pub prefetch: bool,
 }
 
 // ── Request types (wire-compatible with rust-server-audio) ──────────────────
@@ -320,6 +324,7 @@ pub fn run(opts: ServeOptions) -> Result<(), String> {
     let engine = Engine::new().map_err(|e| format!("could not initialize audio output: {}", e))?;
     engine.set_crossfade(opts.crossfade);
     engine.set_gapless(opts.gapless);
+    engine.set_prepare_plain(opts.prefetch);
 
     if opts.exit_with_parent {
         std::thread::spawn(|| {
