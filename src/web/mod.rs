@@ -39,7 +39,7 @@ use crate::config;
 use crate::input::{KeyCode, KeyEvent, KeyModifiers};
 use crate::tui::app::{App, Effect};
 use crate::tui::ui;
-use crate::tui::worker::Event;
+use crate::tui::worker::{AudioCmd, Event};
 use crate::tui::{Startup, app_from};
 use api_worker::WebApi;
 use audio::WebAudioPlayer;
@@ -387,6 +387,12 @@ fn run_inner() -> Result<(), Box<dyn std::error::Error>> {
             let Some(key) = translate(event.into()) else { return };
             if let Some(action) = shell.app.keymap.action(key, shell.app.input_mode()) {
                 let effects = shell.app.handle_action(action);
+                let plays = effects.iter().any(|effect| {
+                    matches!(effect, Effect::Audio(AudioCmd::Play { .. } | AudioCmd::Resume))
+                });
+                if plays {
+                    shell.audio.wake_in_gesture();
+                }
                 shell.pending.extend(effects);
                 shell.dirty = true;
                 key_alarm.frame();

@@ -16,6 +16,9 @@ use crate::clock::Instant;
 /// machine sleep soon after.
 pub const CONTEXT_IDLE: Duration = Duration::from_secs(5);
 
+/// How often a context that should be running, and is not, is asked again.
+const RESUME_AGAIN: Duration = Duration::from_secs(1);
+
 /// What to do with the audio context this pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextStep {
@@ -86,6 +89,12 @@ pub struct ContextIdle {
     /// and the context reads "running" until it settles — the flag keeps
     /// that to one call rather than one a pass.
     suspended: bool,
+    /// Whether the context has ever been seen running. One that never has
+    /// is waiting for the page's first keystroke (the autoplay policy), and
+    /// asking it again only puts a warning in the console.
+    ran: bool,
+    /// When a resume was last asked for, by anyone.
+    asked: Option<Instant>,
 }
 
 impl ContextIdle {
@@ -98,11 +107,25 @@ impl ContextIdle {
     /// key, or the OS's Now Playing controls — which would otherwise play
     /// into a suspended graph: the promise resolves, the position freezes,
     /// and nothing sounds.
+    ///
+    /// The same freeze follows a resume the browser turned down — the
+    /// app's own ask goes out from the loop's pass, and an engine can want
+    /// a gesture for it — or a context the system interrupted (a phone
+    /// call). So a context that has run before and is not running under a
+    /// sounding element is asked again, once a second, for as long as that
+    /// lasts.
     pub fn step(&mut self, sounding: bool, running: bool, now: Instant) -> ContextStep {
+        self.ran |= running;
         if sounding {
             self.since = None;
             if self.suspended {
                 self.suspended = false;
+                self.asked = Some(now);
+                return ContextStep::Resume;
+            }
+            let again = self.asked.is_none_or(|at| now.duration_since(at) >= RESUME_AGAIN);
+            if !running && self.ran && again {
+                self.asked = Some(now);
                 return ContextStep::Resume;
             }
             return ContextStep::Keep;
@@ -118,10 +141,11 @@ impl ContextIdle {
     }
 
     /// The app asked the context to resume (Play, Resume): the idle clock
-    /// starts over.
-    pub fn resumed(&mut self) {
+    /// starts over, and the ask counts toward the once a second.
+    pub fn resumed(&mut self, now: Instant) {
         self.since = None;
         self.suspended = false;
+        self.asked = Some(now);
     }
 }
 
@@ -168,13 +192,46 @@ mod tests {
         let mut idle = ContextIdle::default();
         idle.step(false, true, t0);
         assert_eq!(idle.step(false, true, t0 + secs(5.0)), ContextStep::Suspend);
-        idle.resumed();
+        idle.resumed(t0 + secs(5.05));
         // The Play was refused (autoplay), so the element is still paused:
         // the grace runs again from here rather than suspending at once, and
         // there is no suspend of ours left to undo.
         assert_eq!(idle.step(false, true, t0 + secs(5.1)), ContextStep::Keep);
         assert_eq!(idle.step(false, true, t0 + secs(10.0)), ContextStep::Keep);
         assert_eq!(idle.step(true, true, t0 + secs(10.1)), ContextStep::Keep);
+    }
+
+    #[test]
+    fn a_refused_resume_is_asked_again_once_a_second() {
+        // Paused past the grace, then the app's own Resume, which the
+        // browser turns down: the element sounds into a suspended context.
+        let t0 = Instant::now();
+        let mut idle = ContextIdle::default();
+        idle.step(true, true, t0);
+        idle.step(false, true, t0 + secs(1.0));
+        assert_eq!(idle.step(false, true, t0 + secs(6.0)), ContextStep::Suspend);
+        idle.resumed(t0 + secs(10.0));
+        // Not straight away: the app's own ask may still be settling.
+        assert_eq!(idle.step(true, false, t0 + secs(10.0)), ContextStep::Keep);
+        assert_eq!(idle.step(true, false, t0 + secs(10.5)), ContextStep::Keep);
+        assert_eq!(idle.step(true, false, t0 + secs(11.0)), ContextStep::Resume);
+        assert_eq!(idle.step(true, false, t0 + secs(11.5)), ContextStep::Keep);
+        assert_eq!(idle.step(true, false, t0 + secs(12.0)), ContextStep::Resume);
+        // Taken: nothing more to ask.
+        assert_eq!(idle.step(true, true, t0 + secs(12.1)), ContextStep::Keep);
+        assert_eq!(idle.step(true, true, t0 + secs(20.0)), ContextStep::Keep);
+    }
+
+    #[test]
+    fn a_context_the_system_interrupted_is_asked_again() {
+        // Suspended from outside, not by this clock, with the element still
+        // playing.
+        let t0 = Instant::now();
+        let mut idle = ContextIdle::default();
+        assert_eq!(idle.step(true, true, t0), ContextStep::Keep);
+        assert_eq!(idle.step(true, false, t0 + secs(30.0)), ContextStep::Resume);
+        assert_eq!(idle.step(true, false, t0 + secs(30.1)), ContextStep::Keep);
+        assert_eq!(idle.step(true, true, t0 + secs(30.2)), ContextStep::Keep);
     }
 
     fn ms(ms: u64) -> Duration {
@@ -220,7 +277,8 @@ mod tests {
         let mut idle = ContextIdle::default();
         assert_eq!(idle.step(false, false, t0), ContextStep::Keep);
         assert_eq!(idle.step(false, false, t0 + secs(30.0)), ContextStep::Keep);
-        // Not ours to resume either.
+        // Not ours to resume either, now or later.
         assert_eq!(idle.step(true, false, t0 + secs(31.0)), ContextStep::Keep);
+        assert_eq!(idle.step(true, false, t0 + secs(40.0)), ContextStep::Keep);
     }
 }

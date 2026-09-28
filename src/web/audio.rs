@@ -267,7 +267,24 @@ impl WebAudioPlayer {
         if let Some(graph) = &self.graph {
             let _ = graph.ctx.resume();
         }
-        self.idle.resumed();
+        self.idle.resumed(Instant::now());
+    }
+
+    /// A keystroke is about to play or resume: wake the context from inside
+    /// its handler (performance audit #123). The command itself goes out on
+    /// the loop's next pass, as every effect does, and asks again — but an
+    /// engine that lets a page start audio only while it handles a gesture
+    /// (WebKit's rule) would turn that one down, and the element would play
+    /// into a suspended graph. A first Play builds the element and its graph
+    /// here for the same reason, so the context is born inside the gesture.
+    pub fn wake_in_gesture(&mut self) {
+        if self.ensure_element().is_err() {
+            // play() tries again, and says what went wrong.
+            return;
+        }
+        if let Some(graph) = &self.graph {
+            let _ = graph.ctx.resume();
+        }
     }
 
     /// Put the context to sleep once nothing has sounded for a while, and
