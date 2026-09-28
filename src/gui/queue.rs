@@ -729,6 +729,55 @@ mod tests {
     }
 
     #[test]
+    fn the_playing_rows_original_leaves_its_cover_in_the_panel_as_drawn() {
+        // The panel shows the server's small copies; the track that starts
+        // asks for its cover's original (performance audit #92). Landing
+        // under a new id, it was a new slot for the row: a re-encode, a
+        // new kitty image on every track change, and the old one held
+        // until the pool's slack ran out (the integration check).
+        use crate::tui::worker::Event;
+        use ratatui_image::picker::ProtocolType;
+        let mut gui = gui_with(vec![
+            queued("a.mp3", "First", None, Some("aa.jpeg"), 200.0, HOME),
+            queued("b.mp3", "Second", None, Some("bb.jpeg"), 200.0, HOME),
+        ]);
+        gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
+        let cover = |side: u32, rgb: [u8; 3]| {
+            let png = image::RgbImage::from_pixel(side, side, image::Rgb(rgb));
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            png.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+            crate::tui::art::decode(&bytes.into_inner()).unwrap()
+        };
+        draw(&mut gui);
+        assert_eq!(art_asks(&gui).len(), 2, "the panel claims both, small");
+        for (file, rgb) in [("aa.jpeg", [200, 40, 40]), ("bb.jpeg", [40, 40, 200])] {
+            let art = Some(cover(256, rgb));
+            gui.app.apply_event(Event::AlbumArt { file: file.into(), art, settled: true, small: true });
+        }
+        settle(&mut gui);
+        assert_eq!(gui.queue.encodes(), 2);
+
+        // The card shows the small copy meanwhile, as the row does.
+        let asked = gui.app.play_index(1);
+        let original = Effect::Api(ApiCmd::AlbumArt { file: "bb.jpeg".into(), reach: None, small: false });
+        assert!(asked.contains(&original), "{asked:?}");
+        let buffer = settle(&mut gui);
+        assert_eq!(lines(&buffer).concat().matches("a=T").count(), 1, "the card's picture");
+
+        let full = cover(640, [40, 40, 200]);
+        let bytes = full.source().to_vec();
+        let art = Some(full);
+        gui.app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art, settled: true, small: false });
+        let buffer = settle(&mut gui);
+        assert_eq!(gui.queue.encodes(), 2, "the row's picture is the one it drew");
+        assert_eq!(gui.queue.slots.len(), 2, "in the slot it drew it in");
+        let sent = lines(&buffer).concat();
+        assert!(!sent.contains("_G"), "nothing goes to the terminal again, the card's picture included");
+        let held = gui.app.art["bb.jpeg"].as_ref().unwrap();
+        assert_eq!(held.source(), &bytes[..], "while the big box has the original's bytes");
+    }
+
+    #[test]
     fn rows_sharing_a_cover_share_one_slot_and_one_encode() {
         use ratatui_image::picker::ProtocolType;
         let mut gui = gui_with(

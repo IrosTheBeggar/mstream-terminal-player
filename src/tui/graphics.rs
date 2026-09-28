@@ -113,6 +113,12 @@ mod native {
 
     struct Cached {
         art: u64,
+        /// The bytes the picture was drawn from ([`Art::source_id`]) when
+        /// the box wanted more pixels than the thumbnail holds, so the
+        /// original of a cover drawn from its small copy is drawn again;
+        /// `None` when the thumbnail had them all, which a sharper copy
+        /// leaves exactly as it was (`Art::sharpened`).
+        bytes: Option<u64>,
         /// The pixel dimensions the fit was taken from — the thumbnail's
         /// when it had every pixel the box wanted, the decoded source's
         /// otherwise. Kept so the question "would this area want a
@@ -485,9 +491,10 @@ mod native {
             let font = (font.width, font.height);
 
             // Warm: the same cover at the same fitted size, wherever the
-            // box now stands.
+            // box now stands — from the same bytes, when they were drawn.
             let warm = self.cached.as_ref().is_some_and(|held| {
                 held.art == art.id()
+                    && held.bytes.is_none_or(|bytes| bytes == art.source_id())
                     && fit(area, font, held.source.0, held.source.1) == held.size
             });
             if !warm {
@@ -507,7 +514,8 @@ mod native {
                 }
                 let wanted =
                     (u32::from(size.0) * u32::from(font.0), u32::from(size.1) * u32::from(font.1));
-                let (source, dimensions, size) = if wanted.0 <= thumb.0 && wanted.1 <= thumb.1 {
+                let from_thumbnail = wanted.0 <= thumb.0 && wanted.1 <= thumb.1;
+                let (source, dimensions, size) = if from_thumbnail {
                     // The thumbnail has every pixel the box can show.
                     let pixels = image::RgbImage::from_raw(thumb.0, thumb.1, art.rgb().to_vec())
                         .expect("an Art's pixels match its dimensions");
@@ -576,6 +584,7 @@ mod native {
                 let shown = protocol.size();
                 self.cached = Some(Cached {
                     art: art.id(),
+                    bytes: (!from_thumbnail).then(|| art.source_id()),
                     source: dimensions,
                     size,
                     shown: (shown.width, shown.height),
@@ -1708,6 +1717,31 @@ mod native {
             assert_eq!(frame_of(&art, false).matches("a=T").count(), 1, "the new picture's own");
             assert!(!frame_of(&art, false).contains("_G"), "and nothing of the one it replaced");
             assert!(IN_FLIGHT.with_borrow(Vec::is_empty), "nothing held past the check");
+        }
+
+        #[test]
+        fn a_sharper_copy_is_drawn_again_only_where_the_thumbnail_fell_short() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // The server's small copy first, then the original, as the
+            // playing track's cover arrives (performance audit #92): a box
+            // the thumbnail fills — a queue row's 6x3 is 60 px a side —
+            // keeps its picture; one that drew from the small copy's bytes
+            // draws again from the original's.
+            let small = a_cover(256);
+            let sharp = small.clone().sharpened(a_cover(640));
+            for ((width, height), encodes, decodes) in [((6, 3), 1, 0), ((40, 20), 2, 2)] {
+                let mut graphics = Graphics::forced(ProtocolType::Kitty);
+                for art in [&small, &sharp, &sharp] {
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), art))).unwrap();
+                }
+                assert_eq!(graphics.encodes(), encodes, "{width}x{height}");
+                assert_eq!(graphics.decodes.get(), decodes, "{width}x{height}");
+                let held = graphics.cached.as_ref().unwrap();
+                assert_eq!(held.source.0, if decodes == 0 { 128 } else { 640 }, "{width}x{height}");
+            }
         }
 
         /// A cover that arrived as a JPEG, as most do.

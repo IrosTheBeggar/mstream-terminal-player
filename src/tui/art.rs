@@ -35,8 +35,13 @@ pub struct Art {
     /// Which decode this is, for caches keyed on "same cover as last
     /// frame" — comparing that is one integer where comparing the pixels
     /// is fifty kilobytes. A clone keeps its original's id, which is
-    /// right: it *is* the same picture.
+    /// right: it *is* the same picture. So does a sharper copy of it
+    /// ([`Art::sharpened`]), whose thumbnail is this one's.
     id: u64,
+    /// Which decode `source` came from: `id`, until a sharper copy's
+    /// bytes take its place. What a renderer drawing from the bytes
+    /// rather than the thumbnail keys on.
+    source_id: u64,
     width: u32,
     height: u32,
     /// Row-major RGB, three bytes a pixel.
@@ -84,11 +89,35 @@ impl Art {
         if width == 0 || height == 0 || rgb.len() != (width * height * 3) as usize {
             return None;
         }
-        Some(Art { id: NEXT.fetch_add(1, Ordering::Relaxed), width, height, rgb, source })
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        Some(Art { id, source_id: id, width, height, rgb, source })
     }
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Which decode the source bytes came from — see `source_id`.
+    pub fn source_id(&self) -> u64 {
+        self.source_id
+    }
+
+    /// This cover with `sharper`'s bytes behind it: the original of a
+    /// picture this is the server's small copy of. The thumbnail and the
+    /// id stay. The two copies shrink to the same 128 px, and every
+    /// surface drawing from the thumbnail — a queue row, the card, a wall
+    /// cell, the mosaic — keys on the id: under a new one each re-encoded
+    /// and re-sent the picture it already showed, and the queue panel's
+    /// slot for it was a new kitty image on every track change (the
+    /// integration check of performance audit #92). Only what draws from
+    /// the bytes sees the change, by [`Art::source_id`]. A copy that kept
+    /// no bytes — past the caps below — or the same bytes — a server that
+    /// sends the original for both asks — leaves this one as it is.
+    pub fn sharpened(self, sharper: Art) -> Art {
+        if sharper.source.is_empty() || sharper.source == self.source {
+            return self;
+        }
+        Art { source: sharper.source, source_id: sharper.source_id, ..self }
     }
 
     /// The bytes this cover arrived as, or empty for one built from pixels.
@@ -251,6 +280,33 @@ mod tests {
         assert!(!art.source().is_empty(), "an ordinary cover keeps its bytes");
 
         assert!(decode(b"not an image").is_none());
+    }
+
+    #[test]
+    fn a_sharper_copy_brings_its_bytes_and_leaves_the_picture_as_it_was() {
+        let png = |side: u32| {
+            let pixels = image::RgbImage::from_fn(side, side, |x, y| image::Rgb([x as u8, y as u8, 90]));
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            pixels.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+            bytes.into_inner()
+        };
+        let small = decode(&png(256)).unwrap();
+        let original = png(640);
+        let (id, thumb) = (small.id(), small.rgb().to_vec());
+        assert_eq!(small.source_id(), id, "a decode's bytes are its own");
+
+        let sharp = small.sharpened(decode(&original).unwrap());
+        assert_eq!(sharp.id(), id, "what draws from the thumbnail keys on this");
+        assert_eq!(sharp.rgb(), &thumb[..]);
+        assert_eq!(sharp.source(), &original[..]);
+        assert_ne!(sharp.source_id(), id, "what draws from the bytes sees the change");
+
+        // A copy that kept no bytes has none to bring, and one with the
+        // same bytes has nothing new in them.
+        let bare = sharp.clone().sharpened(Art::from_rgb(1, 1, vec![0; 3]).unwrap());
+        assert_eq!((bare.source(), bare.source_id()), (sharp.source(), sharp.source_id()));
+        let same = sharp.clone().sharpened(decode(&original).unwrap());
+        assert_eq!(same.source_id(), sharp.source_id());
     }
 
     #[test]

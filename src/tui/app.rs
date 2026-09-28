@@ -6213,6 +6213,15 @@ impl App {
                     } else {
                         self.art_small.remove(&file);
                     }
+                    // The original where a copy already shows keeps that
+                    // copy's thumbnail and id, so what draws from the
+                    // thumbnail — the queue row, the card, a wall cell —
+                    // keeps the picture it has (`Art::sharpened`).
+                    let copy = if small { None } else { self.art.get_mut(&file).and_then(Option::take) };
+                    let art = match (art, copy) {
+                        (Some(original), Some(copy)) => Some(copy.sharpened(original)),
+                        (art, _) => art,
+                    };
                     let (queue, now_playing, view) = (&self.queue, self.now_playing.as_ref(), &self.art_on_view);
                     let evicted = file_answer(&mut self.art, &mut self.art_order, file, art, || {
                         pinned_art(queue, now_playing, view)
