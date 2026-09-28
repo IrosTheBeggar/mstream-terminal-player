@@ -1607,11 +1607,6 @@ impl Client {
         self.get("api/v1/admin/discovery/p2p/status").await
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_discovery_status(&self) -> Result<DiscoveryStatus, ApiError> {
-        wait(self.admin_discovery_status_async())
-    }
-
     /// The catalog. `include_incompatible` lifts the server's hide-by-default
     /// filter on peers whose embedding model cannot serve this server.
     pub async fn admin_discovery_catalog_async(
@@ -1624,14 +1619,6 @@ impl Client {
             "api/v1/admin/discovery/p2p/catalog"
         };
         self.get(path).await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_discovery_catalog(
-        &self,
-        include_incompatible: bool,
-    ) -> Result<DiscoveryCatalog, ApiError> {
-        wait(self.admin_discovery_catalog_async(include_incompatible))
     }
 
     /// The discovery log ring past `since` (0 = everything it holds).
@@ -1827,20 +1814,10 @@ impl Client {
         self.get("api/v1/admin/federation").await
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_federation(&self) -> Result<FederationParams, ApiError> {
-        wait(self.admin_federation_async())
-    }
-
     /// Pairing requests in both directions — the catalog's relationship
     /// column derives from them.
     pub async fn admin_federation_requests_async(&self) -> Result<FederationRequests, ApiError> {
         self.get("api/v1/admin/federation/requests").await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_federation_requests(&self) -> Result<FederationRequests, ApiError> {
-        wait(self.admin_federation_requests_async())
     }
 
     /// Ask a discovery peer to federate: an optional message (≤ 500 chars)
@@ -1875,11 +1852,6 @@ impl Client {
     /// endpoint runs.
     pub async fn admin_federation_keys_async(&self) -> Result<Vec<FederationKey>, ApiError> {
         self.get("api/v1/admin/federation/keys").await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_federation_keys(&self) -> Result<Vec<FederationKey>, ApiError> {
-        wait(self.admin_federation_keys_async())
     }
 
     /// Mint a read-only key for `vpaths` (1–64-char name); `expires_at` is
@@ -2073,11 +2045,6 @@ impl Client {
         self.get("api/v1/admin/federation/peers").await
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_federation_peers(&self) -> Result<Vec<FederationPeer>, ApiError> {
-        wait(self.admin_federation_peers_async())
-    }
-
     /// Add a peer from a friend's `mstrfed1:` ticket; the server tests it
     /// in the background. 400 for a ticket that does not parse or one
     /// already added.
@@ -2161,18 +2128,8 @@ impl Client {
         Ok(list.destinations)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_backup_destinations(&self) -> Result<Vec<BackupDestination>, ApiError> {
-        wait(self.admin_backup_destinations_async())
-    }
-
     pub async fn admin_backup_status_async(&self) -> Result<BackupStatus, ApiError> {
         self.get("api/v1/admin/backup/status").await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_backup_status(&self) -> Result<BackupStatus, ApiError> {
-        wait(self.admin_backup_status_async())
     }
 
     /// The server's platform, home and default exclude patterns.
@@ -2293,11 +2250,6 @@ impl Client {
         self.get("api/v1/admin/torrent").await
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_torrent_params(&self) -> Result<TorrentParams, ApiError> {
-        wait(self.admin_torrent_params_async())
-    }
-
     /// Choose the client: `disabled`, `transmission`, `qbittorrent`, `deluge`.
     /// Every client keeps its saved credentials across a switch.
     pub async fn admin_torrent_set_client_async(&self, client: &str) -> Result<serde_json::Value, ApiError> {
@@ -2398,11 +2350,6 @@ impl Client {
         self.get("api/v1/admin/torrent/vpath-access").await
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_torrent_vpath_access(&self) -> Result<VpathAccess, ApiError> {
-        wait(self.admin_torrent_vpath_access_async())
-    }
-
     /// Re-run the probe for one library, or every library when `None`.
     pub async fn admin_torrent_auto_detect_async(&self, vpath: Option<&str>) -> Result<VpathAccess, ApiError> {
         let body = match vpath {
@@ -2438,11 +2385,6 @@ impl Client {
     /// Every library's template plus the server's variables and sample.
     pub async fn admin_torrent_path_templates_async(&self) -> Result<PathTemplates, ApiError> {
         self.get("api/v1/admin/torrent/path-templates").await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_torrent_path_templates(&self) -> Result<PathTemplates, ApiError> {
-        wait(self.admin_torrent_path_templates_async())
     }
 
     /// Save a library's template; `None` clears it (freeform entry again).
@@ -2486,11 +2428,6 @@ impl Client {
     /// Every user with their flags, keyed by username.
     pub async fn admin_users_async(&self) -> Result<std::collections::BTreeMap<String, AdminUser>, ApiError> {
         self.get("api/v1/admin/users").await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_users(&self) -> Result<std::collections::BTreeMap<String, AdminUser>, ApiError> {
-        wait(self.admin_users_async())
     }
 
     /// Create a user: `PUT /admin/users`. The server refuses a taken name
@@ -2567,21 +2504,11 @@ impl Client {
         self.get(&self.stats_range("api/v1/stats/summary", period, offset, tz, Some(origin))).await
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn stats_summary(&self, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsSummary, ApiError> {
-        wait(self.stats_summary_async(period, offset, tz, origin))
-    }
-
     /// Plays per bucket. Profile buckets (`hourOfDay`, `weekday`) are not
     /// narrowed by origin, so this sends none.
     pub async fn stats_timeseries_async(&self, bucket: &str, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsTimeseries, ApiError> {
         let path = self.stats_range("api/v1/stats/timeseries", period, offset, tz, Some(origin));
         self.get(&format!("{path}&bucket={bucket}")).await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn stats_timeseries(&self, bucket: &str, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsTimeseries, ApiError> {
-        wait(self.stats_timeseries_async(bucket, period, offset, tz, origin))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2613,11 +2540,6 @@ impl Client {
 
     pub async fn stats_periods_async(&self, tz: &str) -> Result<StatsPeriods, ApiError> {
         self.get(&format!("api/v1/stats/periods?tz={}", urlencode(tz))).await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn stats_periods(&self, tz: &str) -> Result<StatsPeriods, ApiError> {
-        wait(self.stats_periods_async(tz))
     }
 
     /// Forget one play: `DELETE /stats/plays/:id`. Its counters and its hour

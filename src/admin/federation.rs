@@ -367,27 +367,32 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
                 result: result.map(|_| ()),
             };
             let done = match op {
-                Op::Load => Done::Loaded(client.admin_federation().map(|params| {
+                Op::Load => Done::Loaded(crate::api::wait(async {
+                    let params = client.admin_federation_async().await?;
                     if !params.enabled {
-                        return Box::new(Loaded {
+                        return Ok(Box::new(Loaded {
                             params,
                             requests: None,
                             keys: None,
                             peers: None,
                             libraries: None,
-                        });
+                        }));
                     }
+                    // The lists need nothing of each other: they go out
+                    // together, one round trip, not four (performance
+                    // audit #83).
+                    let (requests, keys, peers, libraries) = tokio::join!(
+                        client.admin_federation_requests_async(),
+                        client.admin_federation_keys_async(),
+                        client.admin_federation_peers_async(),
+                        client.admin_directories_async(),
+                    );
                     // Best-effort lists: a list that fails keeps its last
                     // answer on screen rather than blanking the room.
-                    let requests = client
-                        .admin_federation_requests()
-                        .ok()
-                        .map(|r| (r.accept_requests, r.requests));
-                    let keys = client.admin_federation_keys().ok();
-                    let peers = client.admin_federation_peers().ok();
-                    let libraries =
-                        client.admin_directories().ok().map(|dirs| dirs.into_keys().collect());
-                    Box::new(Loaded { params, requests, keys, peers, libraries })
+                    let requests = requests.ok().map(|r| (r.accept_requests, r.requests));
+                    let (keys, peers) = (keys.ok(), peers.ok());
+                    let libraries = libraries.ok().map(|dirs| dirs.into_keys().collect());
+                    Ok(Box::new(Loaded { params, requests, keys, peers, libraries }))
                 })),
                 Op::SetEnabled(on) => {
                     Done::Enabled { on, result: client.admin_federation_enabled(on) }
@@ -2952,5 +2957,29 @@ mod tests {
         );
         assert!(decode_ticket(&ticket_for(serde_json::json!({ "k": "key" }))).is_none(), "t is required");
         assert!(iso_unix("2026-09-06 09:41:52").is_some(), "SQLite's form parses too");
+    }
+
+    #[test]
+    fn a_load_asks_for_the_lists_in_one_wave() {
+        // Federation's switch first, then the requests, keys, peers and
+        // libraries together: two round trips, not five (performance
+        // audit #83). A list that fails is left out, not the load.
+        let server = super::super::waves::serve(&[1, 4], |path| match path {
+            "/api/v1/admin/federation" => (200, r#"{"enabled":true}"#.into()),
+            "/api/v1/admin/federation/keys" => (500, "{}".into()),
+            "/api/v1/admin/federation/peers" => (200, "[]".into()),
+            _ => (200, "{}".into()),
+        });
+        let (to_worker, from_worker) = spawn_worker();
+        to_worker.send((Arc::new(Client::new(&server.url).expect("client")), Op::Load)).unwrap();
+        let Done::Loaded(Ok(loaded)) = from_worker.recv_timeout(std::time::Duration::from_secs(30)).expect("an answer")
+        else {
+            panic!("a load");
+        };
+        let paths = server.paths();
+        assert_eq!((server.peak(), paths.len()), (4, 5), "{paths:?}");
+        assert_eq!(paths[0], "/api/v1/admin/federation");
+        assert!(loaded.keys.is_none());
+        assert!(loaded.requests.is_some() && loaded.peers.is_some() && loaded.libraries.is_some());
     }
 }

@@ -625,6 +625,98 @@ pub(crate) fn join_home(home: &str, path: &str) -> String {
     }
 }
 
+/// A server for the workers' tests that answers in waves: each request is
+/// held until the rest of its wave has arrived (or two seconds pass), so
+/// reads sent together are answered together, and reads sent one at a
+/// time show up as a crowd of one — and a slow test.
+#[cfg(test)]
+pub(crate) mod waves {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct Seen {
+        arrived: usize,
+        in_flight: usize,
+        peak: usize,
+        paths: Vec<String>,
+    }
+
+    pub(crate) struct Server {
+        pub url: String,
+        seen: Arc<(Mutex<Seen>, Condvar)>,
+    }
+
+    impl Server {
+        /// The most requests the server held at once.
+        pub(crate) fn peak(&self) -> usize {
+            self.seen.0.lock().unwrap().peak
+        }
+
+        /// Every path asked for (with its query), in arrival order.
+        pub(crate) fn paths(&self) -> Vec<String> {
+            self.seen.0.lock().unwrap().paths.clone()
+        }
+    }
+
+    /// Serve `answer(path)` — a status and a JSON body — to requests that
+    /// arrive in waves of the given sizes.
+    pub(crate) fn serve(
+        sizes: &[usize],
+        answer: impl Fn(&str) -> (u16, String) + Send + Sync + 'static,
+    ) -> Server {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new((Mutex::new(Seen::default()), Condvar::new()));
+        // Where each wave ends, counted in requests.
+        let ends: Vec<usize> = sizes.iter().scan(0, |n, s| { *n += s; Some(*n) }).collect();
+        let answer = Arc::new(answer);
+        let shared = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let (seen, ends, answer) = (shared.clone(), ends.clone(), answer.clone());
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut head = Vec::new();
+                    let mut chunk = [0u8; 2048];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    let path = String::from_utf8_lossy(&head).split_whitespace().nth(1).unwrap_or("").to_string();
+                    let (lock, cvar) = &*seen;
+                    {
+                        let mut s = lock.lock().unwrap();
+                        s.arrived += 1;
+                        s.in_flight += 1;
+                        s.peak = s.peak.max(s.in_flight);
+                        s.paths.push(path.clone());
+                        cvar.notify_all();
+                        let end = ends.iter().copied().find(|e| *e >= s.arrived).unwrap_or(0);
+                        let deadline = Instant::now() + Duration::from_secs(2);
+                        while s.arrived < end && Instant::now() < deadline {
+                            let left = deadline.saturating_duration_since(Instant::now());
+                            s = cvar.wait_timeout(s, left).unwrap().0;
+                        }
+                        s.in_flight -= 1;
+                    }
+                    let (status, body) = answer(&path);
+                    let reply = format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes());
+                });
+            }
+        });
+        Server { url, seen }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

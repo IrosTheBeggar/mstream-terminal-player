@@ -435,36 +435,50 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
 }
 
 /// The whole load, on the worker: the settings first (those gate
-/// everything), then what a configured client can tell.
+/// everything), then what a configured client can tell. Each wave's calls
+/// go out together — the settings beside the users, then the four
+/// daemon-side reads — so a load is two round trips, not six, and a daemon
+/// that hangs holds it for one ceiling, not two (performance audit #83).
 fn load(client: &Client) -> Result<Loaded, ApiError> {
-    let params = client.admin_torrent_params()?;
-    let users = client.admin_users().unwrap_or_default();
-    let kind = Kind::parse(&params.client);
-    let mut loaded = Loaded { params, users, status: None, access: None, templates: None, list: None, warning: None };
-    if kind != Kind::Disabled && config_of(&loaded.params, kind).configured {
-        let warn = |e: ApiError, w: &mut Option<String>| {
-            if w.is_none() {
-                *w = Some(e.to_string());
+    crate::api::wait(async {
+        let (params, users) = tokio::join!(client.admin_torrent_params_async(), client.admin_users_async());
+        let params = params?;
+        let users = users.unwrap_or_default();
+        let kind = Kind::parse(&params.client);
+        let mut loaded = Loaded { params, users, status: None, access: None, templates: None, list: None, warning: None };
+        if kind != Kind::Disabled && config_of(&loaded.params, kind).configured {
+            let (status, access, templates, list) = tokio::join!(
+                client.admin_torrent_status_async(),
+                client.admin_torrent_vpath_access_async(),
+                client.admin_torrent_path_templates_async(),
+                client.admin_torrent_list_async(),
+            );
+            // Folded in the order they were once asked, so the warning
+            // still names the first of them that failed.
+            let warn = |e: ApiError, w: &mut Option<String>| {
+                if w.is_none() {
+                    *w = Some(e.to_string());
+                }
+            };
+            match status {
+                Ok(s) => loaded.status = Some(s),
+                Err(e) => warn(e, &mut loaded.warning),
             }
-        };
-        match client.admin_torrent_status() {
-            Ok(s) => loaded.status = Some(s),
-            Err(e) => warn(e, &mut loaded.warning),
+            match access {
+                Ok(a) => loaded.access = Some(a),
+                Err(e) => warn(e, &mut loaded.warning),
+            }
+            match templates {
+                Ok(t) => loaded.templates = Some(t),
+                Err(e) => warn(e, &mut loaded.warning),
+            }
+            match list {
+                Ok(l) => loaded.list = Some(l),
+                Err(e) => warn(e, &mut loaded.warning),
+            }
         }
-        match client.admin_torrent_vpath_access() {
-            Ok(a) => loaded.access = Some(a),
-            Err(e) => warn(e, &mut loaded.warning),
-        }
-        match client.admin_torrent_path_templates() {
-            Ok(t) => loaded.templates = Some(t),
-            Err(e) => warn(e, &mut loaded.warning),
-        }
-        match client.admin_torrent_list() {
-            Ok(l) => loaded.list = Some(l),
-            Err(e) => warn(e, &mut loaded.warning),
-        }
-    }
-    Ok(loaded)
+        Ok(loaded)
+    })
 }
 
 fn config_of(p: &TorrentParams, kind: Kind) -> &TorrentClientConfig {
@@ -3626,5 +3640,36 @@ mod tests {
             assert_eq!(expand_home("~/x.torrent"), format!("{home}/x.torrent"));
         }
         assert_eq!(expand_home("/abs"), "/abs");
+    }
+
+    #[test]
+    fn a_load_asks_in_two_waves() {
+        // The settings beside the users, then the four daemon-side reads
+        // together: two round trips, not six (performance audit #83).
+        let server = super::super::waves::serve(&[2, 4], |path| match path {
+            "/api/v1/admin/torrent" => (
+                200,
+                r#"{"client":"transmission","transmission":{"host":"nas","port":9091,"configured":true}}"#.into(),
+            ),
+            "/api/v1/admin/torrent/status" => (500, r#"{"error":"status down"}"#.into()),
+            "/api/v1/admin/torrent/path-templates" => (500, r#"{"error":"templates down"}"#.into()),
+            _ => (200, "{}".into()),
+        });
+        let loaded = load(&Client::new(&server.url).expect("client")).expect("a load");
+        let paths = server.paths();
+        assert_eq!((server.peak(), paths.len()), (4, 6), "{paths:?}");
+        let mut first: Vec<&str> = paths[..2].iter().map(String::as_str).collect();
+        first.sort();
+        assert_eq!(first, ["/api/v1/admin/torrent", "/api/v1/admin/users"]);
+        // Folded in the order they were once asked: the warning names the
+        // status probe, the first of them to fail.
+        assert!(loaded.warning.as_deref().is_some_and(|w| w.contains("status down")), "{:?}", loaded.warning);
+        assert!(loaded.status.is_none() && loaded.templates.is_none());
+        assert!(loaded.access.is_some() && loaded.list.is_some());
+        // No client configured: the settings and the users, nothing else.
+        let server = super::super::waves::serve(&[2], |_| (200, "{}".into()));
+        let loaded = load(&Client::new(&server.url).expect("client")).expect("a load");
+        assert_eq!((server.peak(), server.paths().len()), (2, 2));
+        assert!(loaded.list.is_none() && loaded.warning.is_none());
     }
 }

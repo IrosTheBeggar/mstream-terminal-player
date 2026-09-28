@@ -322,19 +322,36 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
         while let Ok((client, op)) = job_rx.recv() {
             let done = match op {
                 Op::Load { seq, period, origin, entity, metric, tz } => {
-                    let result = (|| {
+                    // No read needs another's answer, so all seven go out at
+                    // once, as the webapp's Promise.all sends them: one round
+                    // trip, not seven — over a relay that was a second a step
+                    // (performance audit #83). The answers are read in the
+                    // order they were once asked, so a failure names what it
+                    // did: the summary's first (a pre-6.27 server's 404 is
+                    // the missing API), then the rest.
+                    let (p, o) = (period.period.as_str(), origin.param());
+                    let result = crate::api::wait(async {
+                        let previous = async {
+                            match p {
+                                "all" => None,
+                                _ => client.stats_summary_async(p, period.offset - 1, &tz, o).await.ok(),
+                            }
+                        };
+                        let (periods, summary, previous, series, hours, top, history) = tokio::join!(
+                            client.stats_periods_async(&tz),
+                            client.stats_summary_async(p, period.offset, &tz, o),
+                            previous,
+                            client.stats_timeseries_async(series_bucket(p), p, period.offset, &tz, o),
+                            client.stats_timeseries_async("hourOfDay", p, period.offset, &tz, o),
+                            client.stats_top_async(entity.param(), metric.param(), p, period.offset, &tz, o, TOP_LIMIT),
+                            client.stats_history_async(p, period.offset, &tz, o, None, HISTORY_PAGE),
+                        );
                         // The periods list is best-effort: the totals are the point.
-                        let periods = client.stats_periods(&tz).ok();
-                        let summary = client.stats_summary(&period.period, period.offset, &tz, origin.param())?;
-                        let previous = (period.period != "all")
-                            .then(|| client.stats_summary(&period.period, period.offset - 1, &tz, origin.param()).ok())
-                            .flatten();
-                        let series = client.stats_timeseries(series_bucket(&period.period), &period.period, period.offset, &tz, origin.param())?;
-                        let hours = client.stats_timeseries("hourOfDay", &period.period, period.offset, &tz, origin.param())?;
-                        let top = client.stats_top(entity.param(), metric.param(), &period.period, period.offset, &tz, origin.param(), TOP_LIMIT)?;
-                        let history = client.stats_history(&period.period, period.offset, &tz, origin.param(), None, HISTORY_PAGE)?;
+                        let periods = periods.ok();
+                        let summary = summary?;
+                        let (series, hours, top, history) = (series?, hours?, top?, history?);
                         Ok(Box::new(Loaded { periods, summary, previous, series, hours, top, history }))
-                    })();
+                    });
                     Done::Loaded { seq, result }
                 }
                 Op::Top { seq, period, origin, entity, metric, tz } => Done::Top {
@@ -3139,5 +3156,70 @@ mod tests {
         let (keys, values, _) = calendar_series(&weeks, "2026-07-01T04:00:00.000Z", "2027-01-01T05:00:00.000Z", |_| -4 * 3600);
         assert_eq!(keys[0], "2026-06-29", "weeks start on their Monday");
         assert_eq!(values[1], 3);
+    }
+
+    /// The worker's answer to one op against a test server.
+    fn run_op(url: &str, op: Op) -> Done {
+        let (to_worker, from_worker) = spawn_worker();
+        to_worker.send((Arc::new(Client::new(url).expect("client")), op)).unwrap();
+        from_worker.recv_timeout(std::time::Duration::from_secs(30)).expect("an answer")
+    }
+
+    fn load_op(period: Period) -> Op {
+        Op::Load { seq: 1, period, origin: Origin::All, entity: Entity::Tracks, metric: Metric::Plays, tz: "UTC".into() }
+    }
+
+    #[test]
+    fn a_load_sends_its_reads_together() {
+        // No read waits on another's answer, so all seven are on the wire
+        // at once — the webapp's Promise.all, one round trip, not seven
+        // (performance audit #83). The server holds each answer until the
+        // wave is in; one at a time, each would wait out its two seconds.
+        let server = super::super::waves::serve(&[7], |_| (200, "{}".into()));
+        let Done::Loaded { seq: 1, result: Ok(loaded) } = run_op(&server.url, load_op(Period::this_month())) else {
+            panic!("a load");
+        };
+        assert_eq!(server.peak(), 7, "{:?}", server.paths());
+        assert!(loaded.periods.is_some() && loaded.previous.is_some());
+        // All time has no period before it: six.
+        let server = super::super::waves::serve(&[6], |_| (200, "{}".into()));
+        let Done::Loaded { result: Ok(loaded), .. } = run_op(&server.url, load_op(Period::all_time())) else {
+            panic!("a load");
+        };
+        assert_eq!((server.peak(), server.paths().len()), (6, 6));
+        assert!(loaded.previous.is_none());
+    }
+
+    #[test]
+    fn a_failed_load_names_what_it_named_when_the_reads_went_in_turn() {
+        use super::super::waves::serve;
+        let route = |path: &str| path.split('?').next().unwrap_or_default().to_string();
+        // Everything fails: the summary's 404 — a server before the Stats
+        // API — is what the page hears, as when it was asked first.
+        let server = serve(&[7], move |path| match route(path).as_str() {
+            "/api/v1/stats/summary" => (404, "{}".into()),
+            _ => (500, r#"{"error":"down"}"#.into()),
+        });
+        let Done::Loaded { result, .. } = run_op(&server.url, load_op(Period::this_month())) else { panic!("a load") };
+        assert!(matches!(result, Err(ApiError::NotFound(_))));
+        // With the summary in hand, the series' failure comes before the
+        // top's and the log's.
+        let server = serve(&[7], move |path| match route(path).as_str() {
+            "/api/v1/stats/summary" | "/api/v1/stats/periods" => (200, "{}".into()),
+            "/api/v1/stats/timeseries" => (403, r#"{"error":"series"}"#.into()),
+            _ => (500, r#"{"error":"down"}"#.into()),
+        });
+        let Done::Loaded { result, .. } = run_op(&server.url, load_op(Period::this_month())) else { panic!("a load") };
+        assert!(matches!(result, Err(ApiError::Forbidden(_))));
+        // The periods and the period before are best-effort: the load
+        // lands without them.
+        let server = serve(&[7], move |path| {
+            let previous = route(path) == "/api/v1/stats/summary" && path.contains("offset=-1");
+            if previous || route(path) == "/api/v1/stats/periods" { (500, "{}".into()) } else { (200, "{}".into()) }
+        });
+        let Done::Loaded { result: Ok(loaded), .. } = run_op(&server.url, load_op(Period::this_month())) else {
+            panic!("a load");
+        };
+        assert!(loaded.periods.is_none() && loaded.previous.is_none());
     }
 }

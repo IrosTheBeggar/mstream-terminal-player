@@ -249,7 +249,8 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
         while let Ok((client, op)) = job_rx.recv() {
             let done = match op {
                 Op::Load { include_incompatible, activity_since } => {
-                    Done::Loaded(client.admin_discovery_status().and_then(|status| {
+                    Done::Loaded(crate::api::wait(async {
+                        let status = client.admin_discovery_status_async().await?;
                         if !status.enabled {
                             return Ok(Box::new(Loaded {
                                 status,
@@ -259,14 +260,26 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
                                 activity: None,
                             }));
                         }
-                        let catalog = client.admin_discovery_catalog(include_incompatible)?;
+                        // Past the switch no read needs another's answer:
+                        // they go out together, one round trip, not four
+                        // (performance audit #83).
+                        let activity = async {
+                            match activity_since {
+                                Some(since) => client.admin_discovery_activity_async(since).await.ok(),
+                                None => None,
+                            }
+                        };
+                        let (catalog, federation, requests, activity) = tokio::join!(
+                            client.admin_discovery_catalog_async(include_incompatible),
+                            client.admin_federation_async(),
+                            client.admin_federation_requests_async(),
+                            activity,
+                        );
+                        let catalog = catalog?;
                         // Best-effort: the relationship column just stays
                         // blank when federation cannot answer.
-                        let federation = client.admin_federation().ok();
-                        let requests =
-                            client.admin_federation_requests().ok().map(|r| r.requests);
-                        let activity = activity_since
-                            .and_then(|since| client.admin_discovery_activity(since).ok());
+                        let federation = federation.ok();
+                        let requests = requests.ok().map(|r| r.requests);
                         Ok(Box::new(Loaded { status, catalog: Some(catalog), federation, requests, activity }))
                     }))
                 }
@@ -2981,5 +2994,38 @@ mod tests {
         assert_eq!(fmt_bytes(1_536), "2 KB");
         assert_eq!(short_id(&hex("8f31c0e2a7")), "8f31c0e2a78f…");
         assert_eq!(printable("bad\u{1b}[31mname\u{202E}", 10), "bad[31mnam");
+    }
+
+    #[test]
+    fn a_load_asks_past_the_switch_in_one_wave() {
+        // The status first — while it is off nothing else is asked — then
+        // the catalog, federation, the requests and the activity together:
+        // two round trips, not five (performance audit #83).
+        let answer = |catalog: u16| {
+            move |path: &str| match path.split('?').next().unwrap_or_default() {
+                "/api/v1/admin/discovery/p2p/status" => (200, r#"{"enabled":true}"#.to_string()),
+                "/api/v1/admin/discovery/p2p/catalog" => (catalog, "{}".to_string()),
+                "/api/v1/admin/federation/requests" => (500, "{}".to_string()),
+                _ => (200, "{}".to_string()),
+            }
+        };
+        let run = |url: &str| {
+            let (to_worker, from_worker) = spawn_worker();
+            let op = Op::Load { include_incompatible: false, activity_since: Some(0) };
+            to_worker.send((Arc::new(Client::new(url).expect("client")), op)).unwrap();
+            let Done::Loaded(result) = from_worker.recv_timeout(Duration::from_secs(30)).expect("an answer") else {
+                panic!("a load");
+            };
+            result
+        };
+        let server = super::super::waves::serve(&[1, 4], answer(200));
+        let loaded = run(&server.url).expect("a load");
+        let paths = server.paths();
+        assert_eq!((server.peak(), paths.len()), (4, 5), "{paths:?}");
+        assert_eq!(paths[0], "/api/v1/admin/discovery/p2p/status");
+        // The requests are best-effort; the catalog is not.
+        assert!(loaded.catalog.is_some() && loaded.activity.is_some() && loaded.requests.is_none());
+        let server = super::super::waves::serve(&[1, 4], answer(500));
+        assert!(run(&server.url).is_err());
     }
 }

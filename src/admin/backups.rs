@@ -342,11 +342,19 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
         let mut home = ServerHome::new();
         while let Ok((client, op)) = job_rx.recv() {
             let done = match op {
-                Op::Load => Done::Loaded(client.admin_backup_destinations().and_then(|dests| {
-                    let status = client.admin_backup_status()?;
+                // The three reads go out together — one round trip a poll,
+                // not three, so an op a key queues waits behind one at most
+                // (performance audit #83) — and are read in the order they
+                // were once asked: a destinations error wins.
+                Op::Load => Done::Loaded(crate::api::wait(async {
+                    let (dests, status, libraries) = tokio::join!(
+                        client.admin_backup_destinations_async(),
+                        client.admin_backup_status_async(),
+                        client.admin_directories_async(),
+                    );
+                    let (dests, status) = (dests?, status?);
                     // The library names → ids, for the add form; best-effort.
-                    let libraries = client
-                        .admin_directories()
+                    let libraries = libraries
                         .ok()
                         .map(|dirs| dirs.into_iter().map(|(name, d)| (name, d.id)).collect());
                     Ok(Box::new(Loaded { dests, status, libraries }))
@@ -2458,5 +2466,29 @@ mod tests {
         assert_eq!(f.numbers().unwrap_err(), "the hour is 0 to 23");
         f.hour = Input::new("3".into());
         assert_eq!(f.numbers().unwrap(), (30, 200, Some(3)));
+    }
+
+    #[test]
+    fn a_poll_asks_its_three_reads_together() {
+        // The destinations, the status and the libraries at once: one
+        // round trip a poll, not three (performance audit #83) — and a
+        // destinations error still wins over the status's.
+        let run = |url: &str| {
+            let (to_worker, from_worker) = spawn_worker();
+            to_worker.send((Arc::new(Client::new(url).expect("client")), Op::Load)).unwrap();
+            let Done::Loaded(result) = from_worker.recv_timeout(Duration::from_secs(30)).expect("an answer") else {
+                panic!("a load");
+            };
+            result
+        };
+        let server = super::super::waves::serve(&[3], |_| (200, "{}".into()));
+        let loaded = run(&server.url).expect("a load");
+        assert_eq!((server.peak(), server.paths().len()), (3, 3));
+        assert!(loaded.libraries.is_some());
+        let server = super::super::waves::serve(&[3], |path| match path {
+            "/api/v1/admin/backup/destinations" => (404, "{}".into()),
+            _ => (500, "{}".into()),
+        });
+        assert!(matches!(run(&server.url), Err(ApiError::NotFound(_))));
     }
 }

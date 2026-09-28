@@ -279,14 +279,15 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
     std::thread::spawn(move || {
         while let Ok((client, op)) = job_rx.recv() {
             let done = match op {
-                Op::Load => Done::Loaded(client.admin_users().map(|users| {
+                // Both reads go out together: one round trip, not two
+                // (performance audit #83).
+                Op::Load => Done::Loaded(crate::api::wait(async {
+                    let (users, libraries) =
+                        tokio::join!(client.admin_users_async(), client.admin_directories_async());
                     // The library list feeds the add form and the grant
                     // modal; best-effort, the users are the point.
-                    let libraries = client
-                        .admin_directories()
-                        .map(|dirs| dirs.into_keys().collect())
-                        .unwrap_or_default();
-                    (users, libraries)
+                    let libraries = libraries.map(|dirs| dirs.into_keys().collect()).unwrap_or_default();
+                    Ok((users?, libraries))
                 })),
                 Op::Add(user) => {
                     let result = client.admin_add_user(&user).map(|_| ());
@@ -1731,5 +1732,24 @@ mod tests {
         r.last_load = Some(Instant::now() - POLL);
         r.tick();
         assert!(r.queued.is_none(), "never under a modal");
+    }
+
+    #[test]
+    fn a_load_asks_for_the_users_and_the_libraries_together() {
+        // One round trip, not two (performance audit #83); the library
+        // list stays best-effort.
+        let server = super::super::waves::serve(&[2], |path| match path {
+            "/api/v1/admin/users" => (200, r#"{"anna":{"admin":true,"vpaths":["music"]}}"#.into()),
+            _ => (500, "{}".into()),
+        });
+        let (to_worker, from_worker) = spawn_worker();
+        to_worker.send((Arc::new(Client::new(&server.url).expect("client")), Op::Load)).unwrap();
+        let Done::Loaded(Ok((users, libraries))) =
+            from_worker.recv_timeout(std::time::Duration::from_secs(30)).expect("an answer")
+        else {
+            panic!("a load");
+        };
+        assert_eq!(server.peak(), 2);
+        assert_eq!((users.len(), libraries.len()), (1, 0));
     }
 }
