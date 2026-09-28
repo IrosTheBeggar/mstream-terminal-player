@@ -27,15 +27,23 @@ jobs:
       - name: Test
         run: cargo test
 
+      # The binary itself, which `cargo test` never builds: its
+      # #[cfg(not(test))] code and the real link, Windows' included. The
+      # dev profile, not --release: nothing in the tree differs by profile,
+      # and thin LTO over one codegen unit made this step 9-21 minutes of
+      # the crate alone on every push (performance audit #128). The
+      # release workflow builds that profile, and guards it, per target.
       - name: Build
-        run: cargo build --release
+        run: cargo build
 
       # The visualizer brought a GPU stack; it must open its drivers at run
       # time, never link them, or the binary stops starting on headless
-      # boxes. See the script.
+      # boxes. See the script. The debug link is as good a witness as the
+      # release one: the same crates, features and -l flags decide NEEDED,
+      # and without LTO it keeps every reference the release link does.
       - name: Linkage guard (Linux)
         if: runner.os == 'Linux'
-        run: sh test/linkage.sh target/release/mstream-player
+        run: sh test/linkage.sh target/debug/mstream-player
 
   # The browser build has no test runner, but it has a type system: a plain
   # check catches the native-only import or the unhandled worker command that
