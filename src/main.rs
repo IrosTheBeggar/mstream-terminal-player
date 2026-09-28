@@ -419,6 +419,9 @@ fn main() {
         eprintln!("logging to {}", path.display());
     }
 
+    // The TLS provider, before anything can dial (see runtime.rs).
+    runtime::install_tls_provider();
+
     // Streaming scratch space (PLAN A1): each playing track spools to a temp
     // file. Decide where those belong before anything can open a stream, and
     // sweep leftovers from killed runs while we're at it. When no cache dir

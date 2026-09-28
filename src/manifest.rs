@@ -46,3 +46,16 @@ fn the_debug_profile_optimises_crates_the_tree_has() {
         assert!(overrides.contains_key(name), "{name} lost its override");
     }
 }
+
+/// One crypto library, not two (performance audit #132): TLS runs on the
+/// ring that iroh brings. A dependency whose default features ask for
+/// reqwest's or rustls's defaults puts AWS-LC's C build back in the tree
+/// without a word; this is the word.
+#[test]
+fn aws_lc_stays_out_of_the_tree() {
+    let locked = locked();
+    for name in ["aws-lc-rs", "aws-lc-sys"] {
+        assert!(!locked.contains(name), "{name} is back in Cargo.lock");
+    }
+    assert!(locked.contains("ring"));
+}

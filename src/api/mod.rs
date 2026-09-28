@@ -421,6 +421,8 @@ impl Client {
         }
 
         #[cfg(not(target_arch = "wasm32"))]
+        runtime::install_tls_provider();
+        #[cfg(not(target_arch = "wasm32"))]
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)

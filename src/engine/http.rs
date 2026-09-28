@@ -154,6 +154,7 @@ fn insecure_client() -> Result<&'static Client, String> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
+            runtime::install_tls_provider();
             Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
                 .pool_max_idle_per_host(0)
@@ -169,6 +170,7 @@ fn client() -> Result<&'static Client, String> {
     static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
+            runtime::install_tls_provider();
             Client::builder()
                 .connect_timeout(CONNECT_TIMEOUT)
                 // Never reuse a kept-alive connection. A pooled connection
