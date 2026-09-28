@@ -18,7 +18,7 @@
 //! a list changed since the last look — and with everything else every
 //! thirty once it all rests.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -63,6 +63,10 @@ const PATH_MAX: usize = 400;
 const PORT_MAX: u32 = 65_535;
 /// How many completions the seed-path modal lists.
 const SUGGEST_MAX: usize = 6;
+/// How long a Tab in the seed-path modal waits for its folder's listing
+/// before the frame goes on without it: a healthy disk lists a folder of
+/// thousands well inside a frame at 30 Hz, and a dead mount costs no more.
+const SEED_LIST_WAIT: Duration = Duration::from_millis(30);
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -284,7 +288,8 @@ pub(crate) enum Modal {
     /// `t`: one library's destination template.
     Template { vpath: String, template: Input, error: Option<String> },
     /// `a` on Seeding without the OS dialog: a local `.torrent` path.
-    SeedPath { path: Input, matches: Vec<String>, error: Option<String> },
+    /// `asked` is what Tab was pressed on, while its folder is being listed.
+    SeedPath { path: Input, matches: Vec<String>, error: Option<String>, asked: Option<String> },
     /// `r`: the gate before a torrent leaves the daemon (files stay).
     Remove(String),
     /// `x`: the gate before the credentials are forgotten.
@@ -519,6 +524,13 @@ pub(crate) struct Room {
     pub seed_ticks: Vec<(String, bool)>,
     /// `.torrent` files waiting their turn on the worker.
     seed_queue: VecDeque<(PathBuf, Vec<String>)>,
+    /// The seed-path modal's folders being listed, each on a thread of
+    /// its own ([`Room::seed_tab`]), and where their listings arrive.
+    seed_listing: HashSet<String>,
+    listed_tx: Sender<(String, Vec<String>)>,
+    listed_rx: Receiver<(String, Vec<String>)>,
+    /// [`SEED_LIST_WAIT`], held here so a test can take a listing's slow road.
+    seed_wait: Duration,
     /// The client page shown on purpose (`c` on the Client tab) while a
     /// client is configured.
     pub choosing: bool,
@@ -551,6 +563,7 @@ pub(crate) struct Room {
 impl Room {
     pub(super) fn new(client: Client, same_machine: bool) -> Self {
         let (to_worker, from_worker) = spawn_worker();
+        let (listed_tx, listed_rx) = std::sync::mpsc::channel();
         Room {
             client: Arc::new(client),
             to_worker,
@@ -570,6 +583,10 @@ impl Room {
             seeds: Vec::new(),
             seed_ticks: Vec::new(),
             seed_queue: VecDeque::new(),
+            seed_listing: HashSet::new(),
+            listed_tx,
+            listed_rx,
+            seed_wait: SEED_LIST_WAIT,
             choosing: false,
             client_pick: 0,
             group: 0,
@@ -902,7 +919,51 @@ impl Room {
     fn open_seed_path(&mut self) {
         let start = self.seeds.last().and_then(|s| PathBuf::from(&s.file).parent().map(|p| p.to_string_lossy().to_string())).unwrap_or_default();
         let _ = start;
-        self.modal = Modal::SeedPath { path: Input::default(), matches: Vec::new(), error: None };
+        self.modal = Modal::SeedPath { path: Input::default(), matches: Vec::new(), error: None, asked: None };
+    }
+
+    /// Tab in the seed-path modal: its folder is listed on a thread of its
+    /// own, and the completion lands with the listing — a dead network
+    /// mount can hang `read_dir` for as long as it likes, and this is the
+    /// thread that draws and reads keys (performance audit #85). Not the
+    /// room's worker either: a hung listing there would hold the list poll
+    /// and the seed queue behind it. A folder already being listed is not
+    /// asked again, so Tabs at a dead mount leave one thread waiting, not
+    /// one each; its answer serves the latest Tab. A healthy folder
+    /// answers within [`SEED_LIST_WAIT`], and completes in this frame as
+    /// Tab always did.
+    fn seed_tab(&mut self) {
+        let Modal::SeedPath { path, error, asked, .. } = &mut self.modal else { return };
+        *error = None;
+        *asked = Some(path.value().to_string());
+        let (_, _, dir) = seed_dir(path.value());
+        if self.seed_listing.insert(dir.clone()) {
+            let tx = self.listed_tx.clone();
+            std::thread::spawn(move || {
+                let names = list_local(&dir);
+                let _ = tx.send((dir, names));
+            });
+        }
+        let until = Instant::now() + self.seed_wait;
+        while matches!(&self.modal, Modal::SeedPath { asked: Some(_), .. }) {
+            match self.listed_rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                Ok((dir, names)) => self.take_listing(dir, names),
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// A folder's listing, back: it completes the input its Tab was
+    /// pressed on — unless that input has moved on since, or the modal
+    /// has closed.
+    fn take_listing(&mut self, dir: String, names: Vec<String>) {
+        self.seed_listing.remove(&dir);
+        let Modal::SeedPath { path, matches, asked, .. } = &mut self.modal else { return };
+        if asked.as_deref() != Some(path.value()) || seed_dir(path.value()).2 != dir {
+            return;
+        }
+        *asked = None;
+        *matches = complete_from(path, &names);
     }
 
     /// Enter in a text modal.
@@ -1245,6 +1306,9 @@ impl Screen for Room {
                 }
             }
         }
+        while let Ok((dir, names)) = self.listed_rx.try_recv() {
+            self.take_listing(dir, names);
+        }
         self.dispatch_queued();
     }
 
@@ -1425,23 +1489,27 @@ fn expand_home(path: &str) -> String {
     path.to_string()
 }
 
-/// Tab in the seed-path modal: the longest common completion of what is
-/// typed — folders and `.torrent` files — and the candidates to show.
-fn complete_local(input: &mut Input) -> Vec<String> {
-    let raw = expand_home(input.value());
+/// What is typed in the seed-path modal, split: the folder part (home
+/// expanded), the name begun in it, and the folder to list.
+fn seed_dir(typed: &str) -> (String, String, String) {
+    let raw = expand_home(typed);
     let (dir, prefix) = match raw.rfind('/') {
         Some(i) => (raw[..=i].to_string(), raw[i + 1..].to_string()),
         None => (String::new(), raw.clone()),
     };
     let list_dir = if dir.is_empty() { ".".to_string() } else { dir.clone() };
-    let Ok(entries) = std::fs::read_dir(&list_dir) else { return Vec::new() };
-    let mut names: Vec<String> = entries
+    (dir, prefix, list_dir)
+}
+
+/// A folder's candidates for the seed-path modal — its folders (with their
+/// `/`) and its `.torrent` files. On a thread of its own ([`Room::seed_tab`]):
+/// a folder that cannot be read has none.
+fn list_local(dir: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            if !name.starts_with(&prefix) || (name.starts_with('.') && !prefix.starts_with('.')) {
-                return None;
-            }
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
                 Some(format!("{name}/"))
@@ -1451,6 +1519,17 @@ fn complete_local(input: &mut Input) -> Vec<String> {
                 None
             }
         })
+        .collect()
+}
+
+/// Tab in the seed-path modal, once its folder is listed: the longest
+/// common completion of what is typed and the candidates to show.
+fn complete_from(input: &mut Input, listed: &[String]) -> Vec<String> {
+    let (dir, prefix, _) = seed_dir(input.value());
+    let mut names: Vec<String> = listed
+        .iter()
+        .filter(|name| name.starts_with(&prefix) && !(name.starts_with('.') && !prefix.starts_with('.')))
+        .cloned()
         .collect();
     names.sort();
     if names.is_empty() {
@@ -1609,13 +1688,12 @@ fn handle_key(room: &mut Room, key: KeyEvent) -> Option<Outcome> {
                 }
             };
         }
-        Modal::SeedPath { path, matches, error } => {
+        Modal::SeedPath { path, matches, error, asked } => {
             return match code {
                 KeyCode::Esc => room.act(Act::ModalCancel),
                 KeyCode::Enter => room.act(Act::ModalSubmit),
                 KeyCode::Tab => {
-                    *matches = complete_local(path);
-                    *error = None;
+                    room.seed_tab();
                     None
                 }
                 KeyCode::Char(c) if c.is_control() => None,
@@ -1624,6 +1702,9 @@ fn handle_key(room: &mut Room, key: KeyEvent) -> Option<Outcome> {
                     path.handle_event(&TermEvent::Key(key));
                     matches.clear();
                     *error = None;
+                    // A listing still out was for the input as it was:
+                    // its completion is dropped when it lands.
+                    *asked = None;
                     None
                 }
             };
@@ -1939,8 +2020,11 @@ fn render(frame: &mut Frame, room: &mut Room) {
                 ],
             );
         }
-        Modal::SeedPath { path, matches, error } => {
+        Modal::SeedPath { path, matches, error, asked } => {
             let mut body = vec![Line::from(Span::styled(t!("tor.seed_path_hint").to_string(), dim()))];
+            if asked.is_some() && matches.is_empty() {
+                body.push(Line::from(Span::styled(format!("  {}", t!("busy.listing")), dim())));
+            }
             for m in &matches {
                 body.push(Line::from(Span::styled(format!("  {} {}", g("▸", "►"), clip(m, 64)), dim())));
             }
@@ -3493,11 +3577,13 @@ mod tests {
         // Tab completes what is typed: folders and .torrent files only.
         type_text(&mut room, &format!("{}/", dir.display()));
         press(&mut room, KeyCode::Tab);
+        listed(&mut room);
         let Modal::SeedPath { path, matches, .. } = &room.modal else { panic!("the path modal") };
         assert_eq!(matches, &vec!["boc.torrent".to_string(), "kob.torrent".to_string()]);
         assert!(path.value().ends_with("/"), "two candidates share no prefix beyond the folder: {}", path.value());
         type_text(&mut room, "b");
         press(&mut room, KeyCode::Tab);
+        listed(&mut room);
         let Modal::SeedPath { path, .. } = &room.modal else { panic!("the path modal") };
         assert!(path.value().ends_with("/boc.torrent"), "{}", path.value());
         assert!(draw(&mut room).contains("▸ boc.torrent"));
@@ -3832,5 +3918,79 @@ mod tests {
         // Off the Torrents tab the list is never polled on its own.
         room.tab = Tab::Libraries;
         assert_eq!(look(&mut room), None);
+    }
+
+    /// Pump the room until the seed-path modal's Tab has had its listing.
+    fn listed(room: &mut Room) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while matches!(&room.modal, Modal::SeedPath { asked: Some(_), .. }) && Instant::now() < until {
+            room.pump();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_seed_path_tab_lists_its_folder_off_the_ui_thread() {
+        // The folder is listed on a thread of its own — a dead network
+        // mount can hang read_dir, and the key handler must not
+        // (performance audit #85). A healthy folder answers within the
+        // Tab's short wait, and completes at once as it always did.
+        let _en = english();
+        let dir = std::env::temp_dir().join(format!("mstream-player-tab-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("albums")).unwrap();
+        std::fs::write(dir.join("boc.torrent"), b"d8:announce0:e").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"").unwrap();
+        let mut room = connected();
+        room.open_seed_path();
+        type_text(&mut room, &format!("{}/b", dir.display()));
+        room.seed_wait = Duration::from_secs(5);
+        press(&mut room, KeyCode::Tab);
+        let Modal::SeedPath { path, matches, asked, .. } = &room.modal else { panic!("the path modal") };
+        assert_eq!(matches, &vec!["boc.torrent".to_string()]);
+        assert!(path.value().ends_with("/boc.torrent") && asked.is_none(), "{}", path.value());
+        assert!(room.seed_listing.is_empty());
+        // A folder slower than the wait: the key returns with the listing
+        // still out, the modal says so, and the completion lands with it.
+        room.seed_wait = Duration::ZERO;
+        for _ in 0.."boc.torrent".len() {
+            press(&mut room, KeyCode::Backspace);
+        }
+        type_text(&mut room, "b");
+        press(&mut room, KeyCode::Tab);
+        assert!(
+            matches!(&room.modal, Modal::SeedPath { asked: Some(_), matches, .. } if matches.is_empty()),
+            "asked, not answered"
+        );
+        assert!(draw(&mut room).contains("listing…"));
+        listed(&mut room);
+        let Modal::SeedPath { path, matches, .. } = &room.modal else { panic!("the path modal") };
+        assert_eq!(matches, &vec!["boc.torrent".to_string()]);
+        assert!(path.value().ends_with("/boc.torrent"), "{}", path.value());
+        assert!(room.seed_listing.is_empty());
+        // A Tab, then more typing before its listing lands: the completion
+        // would be for an input that is gone, so it is dropped.
+        for _ in 0.."boc.torrent".len() {
+            press(&mut room, KeyCode::Backspace);
+        }
+        press(&mut room, KeyCode::Tab);
+        press(&mut room, KeyCode::Char('a'));
+        std::thread::sleep(Duration::from_millis(50));
+        room.pump();
+        let Modal::SeedPath { path, matches, asked, .. } = &room.modal else { panic!("the path modal") };
+        assert!(path.value().ends_with("/a") && matches.is_empty() && asked.is_none(), "{}", path.value());
+        // Tabs at a folder already being listed ask no second time; its
+        // one listing serves the latest.
+        room.seed_listing.insert(format!("{}/", dir.display()));
+        press(&mut room, KeyCode::Tab);
+        press(&mut room, KeyCode::Tab);
+        assert_eq!(room.seed_listing.len(), 1);
+        room.take_listing(format!("{}/", dir.display()), vec!["albums/".into(), "boc.torrent".into()]);
+        let Modal::SeedPath { path, asked, .. } = &room.modal else { panic!("the path modal") };
+        assert!(path.value().ends_with("/albums/") && asked.is_none(), "{}", path.value());
+        // A listing that lands after the modal closed changes nothing.
+        room.act(Act::ModalCancel);
+        room.take_listing(format!("{}/", dir.display()), vec!["boc.torrent".into()]);
+        assert!(matches!(room.modal, Modal::None));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
