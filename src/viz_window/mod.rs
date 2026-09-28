@@ -141,6 +141,11 @@ struct App {
     audio: Vec<u8>,
     audio_fresh: bool,
     occluded: bool,
+    /// Refreshes each picture stays up for, on the display the window is
+    /// on (contract clause 6).
+    every: u32,
+    /// Refreshes the picture on screen has been up for.
+    held: u32,
     started: Instant,
     last_frame: Instant,
     exit_code: i32,
@@ -182,6 +187,8 @@ impl App {
             audio: vec![0; pipe::AUDIO_LEN],
             audio_fresh: false,
             occluded: false,
+            every: 1,
+            held: u32::MAX,
             started: Instant::now(),
             last_frame: Instant::now(),
             exit_code: 0,
@@ -253,9 +260,22 @@ impl App {
             window.set_fullscreen(Some(Fullscreen::Borderless(None)));
         }
         self.retitle(&window);
+        self.repace(&window);
         window.request_redraw();
         self.window = Some(window);
         Ok(())
+    }
+
+    /// The pace for the display the window is on now (contract clause 6).
+    fn repace(&mut self, window: &Window) {
+        let refresh = window.current_monitor().and_then(|monitor| monitor.refresh_rate_millihertz());
+        let every = refreshes_per_picture(refresh);
+        if every != self.every
+            && let Some(stats) = &self.stats
+        {
+            stats.paced(refresh, every);
+        }
+        self.every = every;
     }
 
     fn retitle(&self, window: &Window) {
@@ -288,6 +308,8 @@ impl App {
         if gfx.target.size != logical {
             gfx.target = Offscreen::for_display(&gfx.gpu, logical);
             gfx.blit.bind(&gfx.gpu, &gfx.target.view);
+            // Blank: the next refresh draws a picture into it.
+            self.held = u32::MAX;
         }
         // Restored: the frames start again on their own, not when the
         // pointer next moves (performance audit #117).
@@ -344,6 +366,8 @@ impl App {
     /// and the player hears which it is (contract clause 13).
     fn front(&mut self, i: usize) {
         let changed = i != self.preset;
+        // Shown from the next refresh, not a refresh later.
+        self.held = u32::MAX;
         // The one going keeps its pipelines, for coming back to, but not
         // its full-size buffers: a feedback preset left behind would
         // otherwise hold a window's worth of textures each for the rest of
@@ -466,27 +490,40 @@ impl App {
         if !self.showing() {
             return;
         }
-        // A refusal found ahead shows in the dropdown from this frame on.
-        self.adopt();
-        // The controls first, so what they ask for is what this frame shows.
-        self.run_controls(&window);
+        // On a display faster than ~118 Hz a picture stays up for `every`
+        // refreshes, and only the refresh that starts one shades the preset
+        // and runs the controls' pass. The others show it again — the blit,
+        // and the controls as they were — so the pace is still the
+        // display's own, with no timer to drift against it and judder
+        // (performance audit #118).
+        let shade = self.held >= self.every;
+        if shade {
+            // A refusal found ahead shows in the dropdown from this frame on.
+            self.adopt();
+            // The controls first, so what they ask for is what this frame
+            // shows.
+            self.run_controls(&window);
+        }
         if !self.ensure_scene(event_loop) {
             return;
         }
         let Some(gfx) = self.gfx.as_mut() else { return };
-        let now = Instant::now();
-        let time = now.duration_since(self.started).as_secs_f32();
-        let delta = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
-        self.last_frame = now;
-        if self.audio_fresh {
-            gfx.gpu.upload_audio(&self.audio);
-            self.audio_fresh = false;
+        if shade {
+            let now = Instant::now();
+            let time = now.duration_since(self.started).as_secs_f32();
+            let delta = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
+            self.last_frame = now;
+            if self.audio_fresh {
+                gfx.gpu.upload_audio(&self.audio);
+                self.audio_fresh = false;
+            }
+            let scene = self.scenes[self.preset].as_mut().expect("ensured above");
+            // Nothing unless the window changed size since this scene last
+            // drew, or it has just come to the front.
+            scene.resize(&gfx.gpu, gfx.target.size);
+            scene.draw(&gfx.gpu, &gfx.target.view, time, delta);
         }
-        let scene = self.scenes[self.preset].as_mut().expect("ensured above");
-        // Nothing unless the window changed size since this scene last drew,
-        // or it has just come to the front.
-        scene.resize(&gfx.gpu, gfx.target.size);
-        scene.draw(&gfx.gpu, &gfx.target.view, time, delta);
+        self.held = if shade { 1 } else { self.held.saturating_add(1) };
 
         let frame = match gfx.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
@@ -511,6 +548,7 @@ impl App {
         gfx.gpu.queue.present(frame);
         if let Some(stats) = &mut self.stats {
             stats.frames += 1;
+            stats.pictures += u32::from(shade);
             if let Some(asked) = stats.asked.take() {
                 let file = self.entries[self.preset].file;
                 eprintln!("viz-window: stats: {file} on screen {:.1} ms after it was asked", ms(asked.elapsed()));
@@ -575,12 +613,25 @@ impl ApplicationHandler<Message> for App {
             ));
         match event {
             WindowEvent::CloseRequested => close(event_loop, "its close control"),
-            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => self.resize(),
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                self.resize();
+                // Fullscreen, or on another display: its rate may not be
+                // this one's.
+                if let Some(window) = self.window.clone() {
+                    self.repace(&window);
+                }
+            }
+            WindowEvent::Moved(_) => {
+                if let Some(window) = self.window.clone() {
+                    self.repace(&window);
+                }
+            }
             // Behind another window or minimized: nothing is drawn until it
             // shows again (contract clause 6).
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
                 if !occluded && let Some(window) = &self.window {
+                    self.held = u32::MAX;
                     window.request_redraw();
                 }
             }
@@ -610,12 +661,13 @@ impl ApplicationHandler<Message> for App {
                 self.draw(event_loop);
                 // Paced by the display: Fifo's acquire waits for the next
                 // vertical blank, so this is one frame per refresh, not a
-                // spin. Only a frame that reached the acquire waited for
-                // one, though: a window hidden asks for nothing more until
-                // it shows again. Windows sends no Occluded, and a 0×0
-                // window there would otherwise ask again at once, every
-                // time — a core spent on a minimized window (performance
-                // audit #117).
+                // spin (on a fast display most of them only show the last
+                // picture again; see draw). Only a frame that reached the
+                // acquire waited for one, though: a window hidden asks for
+                // nothing more until it shows again. Windows sends no
+                // Occluded, and a 0×0 window there would otherwise ask
+                // again at once, every time — a core spent on a minimized
+                // window (performance audit #117).
                 if self.showing() && let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -638,6 +690,8 @@ struct Stats {
     since: Instant,
     redraws: u32,
     frames: u32,
+    /// Frames that shaded the preset; the rest showed the last again.
+    pictures: u32,
     /// When the preset now on its way was asked for.
     asked: Option<Instant>,
 }
@@ -645,7 +699,7 @@ struct Stats {
 impl Stats {
     fn from_env() -> Option<Stats> {
         let on = std::env::var_os("MSTREAM_VIZ_STATS").is_some_and(|v| !v.is_empty());
-        on.then(|| Stats { since: Instant::now(), redraws: 0, frames: 0, asked: None })
+        on.then(|| Stats { since: Instant::now(), redraws: 0, frames: 0, pictures: 0, asked: None })
     }
 
     /// The last second, said once it has passed. Called from every event,
@@ -657,15 +711,38 @@ impl Stats {
             return;
         }
         let rate = |n: u32| f64::from(n) / elapsed.as_secs_f64();
-        eprintln!("viz-window: stats: {:.1} frames/s, {:.1} redraws/s", rate(self.frames), rate(self.redraws));
+        let (frames, pictures, redraws) = (rate(self.frames), rate(self.pictures), rate(self.redraws));
+        eprintln!("viz-window: stats: {frames:.1} frames/s ({pictures:.1} shaded), {redraws:.1} redraws/s");
         self.since = Instant::now();
         self.redraws = 0;
         self.frames = 0;
+        self.pictures = 0;
+    }
+
+    /// The pace, when it changes: the display's rate, and how many of its
+    /// refreshes each picture stays up for.
+    fn paced(&self, refresh: Option<u32>, every: u32) {
+        let rate = refresh.map_or("an unknown rate".into(), |mhz| format!("{:.2} Hz", f64::from(mhz) / 1000.0));
+        eprintln!("viz-window: stats: the display refreshes at {rate}; a picture every {every} refresh(es)");
     }
 }
 
 fn ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
+}
+
+/// How many refreshes of a display at `refresh` mHz each picture stays up
+/// for (contract clause 6; the performance audit's #118): the refresh rate
+/// over 59 Hz, rounded down — 60 and 90 Hz every refresh, 120 Hz every
+/// second (60 pictures a second), 144 Hz every second (72), 240 Hz every
+/// fourth (60), and never under 59 where the display can do more. One
+/// whose rate cannot be told gets every refresh. The audio changes thirty
+/// times a second and the mobile app draws at 60; a picture on every
+/// refresh of a 120-240 Hz display shaded every pass of the preset two to
+/// four times over for nothing, and ran 05's flash, which decays per
+/// frame, two to four times as fast as on the phone.
+fn refreshes_per_picture(refresh: Option<u32>) -> u32 {
+    refresh.map_or(1, |mhz| (mhz / 59_000).max(1))
 }
 
 /// Whether a window can show a frame: not occluded, and a surface with a
@@ -828,5 +905,20 @@ mod tests {
         // a 0×0 surface is hidden, or each frame asks for the next at once.
         assert!(!showing(false, (0, 0)), "minimized on Windows");
         assert!(!showing(false, (0, 1080)) && !showing(false, (1920, 0)), "no area is nothing to show");
+    }
+
+    #[test]
+    fn a_fast_display_shows_each_picture_for_whole_refreshes_never_under_60() {
+        let every = |mhz| refreshes_per_picture(Some(mhz));
+        let slow = [(60_000, 1), (59_940, 1), (75_000, 1), (90_000, 1), (100_000, 1), (117_000, 1)];
+        let fast = [(119_880, 2), (120_000, 2), (144_000, 2), (165_000, 2), (180_000, 3), (240_000, 4), (360_000, 6)];
+        for (mhz, k) in slow.into_iter().chain(fast) {
+            assert_eq!(every(mhz), k, "{mhz} mHz");
+        }
+        for mhz in (24_000..=500_000).step_by(1_000) {
+            let pictures = f64::from(mhz) / 1000.0 / f64::from(every(mhz));
+            assert!(pictures >= 59.0 || every(mhz) == 1, "{mhz} mHz shows {pictures} pictures a second");
+        }
+        assert_eq!(refreshes_per_picture(None), 1, "a rate winit cannot tell: every refresh");
     }
 }
