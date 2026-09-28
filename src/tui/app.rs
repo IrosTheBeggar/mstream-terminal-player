@@ -699,15 +699,19 @@ fn climb(retry: &mut HashMap<String, TunnelRetry>, name: String) {
 }
 
 /// What the GUI last drew covers for, beside the playing track's: the
-/// wall's page, by art file, and the queue panel's rows. Each surface
-/// replaces its own part as it draws, so a surface drawn later in a frame
-/// keeps last frame's covers while an earlier one claims; one no longer
-/// drawn leaves at most a screenful behind. The TUI draws only the
-/// playing cover and records nothing.
+/// wall's page, by art file, the queue panel's rows and the action sheet's
+/// one cover. Each surface replaces its own part as it draws, so a surface
+/// drawn later in a frame keeps last frame's covers while an earlier one
+/// claims; one no longer drawn leaves at most a screenful behind. The TUI
+/// draws only the playing cover and records nothing.
 #[derive(Debug, Default)]
 struct ArtOnView {
     wall: Vec<String>,
     queue: std::ops::Range<usize>,
+    /// The sheet reads its track's cover from the cache without a claim of
+    /// its own; kept here, a claim elsewhere cannot take it out from under
+    /// the open sheet (the review of performance audit #91).
+    sheet: Option<String>,
 }
 
 /// The covers eviction must leave alone: the playing track's and whatever
@@ -724,6 +728,7 @@ fn pinned_art<'v>(queue: &'v Queue, now_playing: Option<&'v Track>, view: &'v Ar
         .filter_map(|item| item.metadata.album_art.as_deref())
         .chain(now_playing.and_then(|t| t.metadata.album_art.as_deref()))
         .chain(view.wall.iter().map(String::as_str))
+        .chain(view.sheet.as_deref())
         .collect()
 }
 
@@ -5317,6 +5322,18 @@ impl App {
     /// The wall drew this page: its covers stay while it does.
     pub(crate) fn set_wall_on_view(&mut self, page: Vec<String>) {
         self.art_on_view.wall = page;
+    }
+
+    /// Whether the action sheet's cover on record is this one — checked
+    /// each frame before [`App::set_sheet_on_view`], the wall's way.
+    pub(crate) fn sheet_on_view_is(&self, cover: Option<&str>) -> bool {
+        self.art_on_view.sheet.as_deref() == cover
+    }
+
+    /// The action sheet drew this cover, or none is open: its cover stays
+    /// while it does.
+    pub(crate) fn set_sheet_on_view(&mut self, cover: Option<String>) {
+        self.art_on_view.sheet = cover;
     }
 
     /// The queue panel drew these rows, claiming nothing — for the tests;

@@ -7217,6 +7217,28 @@ fn a_full_art_cache_lets_go_of_the_oldest_cover_nothing_on_screen_needs() {
 }
 
 #[test]
+fn the_action_sheets_cover_stays_while_the_sheet_does() {
+    // The review of performance audit #91: the sheet draws its track's
+    // cover from the cache without claiming it, and with queued rows no
+    // longer pinned a claim elsewhere could evict it from the open sheet.
+    let mut app = connected_app();
+    let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+    app.fetch_art_file("sheet.jpeg");
+    app.apply_event(Event::AlbumArt { file: "sheet.jpeg".into(), art: Some(art), settled: true, small: true });
+    app.set_sheet_on_view(Some("sheet.jpeg".into()));
+    for i in 0..2 * ART_CACHE_CAP {
+        app.fetch_art_file(&format!("wall{i}.jpeg"));
+    }
+    assert!(app.art.get("sheet.jpeg").is_some_and(Option::is_some), "the oldest entry, and still here");
+    assert_eq!(app.art.len(), ART_CACHE_CAP);
+
+    // Closed, it is one more cover.
+    app.set_sheet_on_view(None);
+    app.fetch_art_file("after.jpeg");
+    assert!(!app.art.contains_key("sheet.jpeg"));
+}
+
+#[test]
 fn a_cover_that_lands_after_the_cache_let_go_of_its_claim_is_still_evictable() {
     // Performance audit #90: a wall page flipped past before its covers
     // landed was filed back outside the eviction order — kept for the
