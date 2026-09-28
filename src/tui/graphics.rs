@@ -25,13 +25,15 @@
 //! the word "image", so a halfblocks-only answer is treated as a no.
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{Graphics, release_all, release_dropped};
+pub use native::{Graphics, release_all, release_dropped, verify_sent};
 #[cfg(target_arch = "wasm32")]
-pub use stub::Graphics;
+pub use stub::{Graphics, verify_sent};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
+    use std::cell::RefCell;
     use std::io::Write;
+    use std::rc::{Rc, Weak};
     use std::sync::Mutex;
 
     use ratatui::Frame;
@@ -130,8 +132,10 @@ mod native {
         protocol: Protocol,
         /// Kitty's pixels, until the frame that carries them to the
         /// terminal — see [`kitty_picture`]. `None` once sent, and for
-        /// the protocols that carry their pixels in the cells.
-        transmit: Option<String>,
+        /// the protocols that carry their pixels in the cells. Shared with
+        /// the frame's check, which puts them back if the frame lost them
+        /// ([`verify_sent`]).
+        transmit: Rc<RefCell<Option<String>>>,
     }
 
     /// The answer only. A `Protocol` is a cover's worth of encoded pixels,
@@ -576,7 +580,7 @@ mod native {
                     size,
                     shown: (shown.width, shown.height),
                     protocol,
-                    transmit,
+                    transmit: Rc::new(RefCell::new(transmit)),
                 });
             }
 
@@ -590,17 +594,70 @@ mod native {
             // frame nothing can send them again, so keeping them was a
             // cover's worth of base64 held for nothing (performance audit
             // #95). A picture that drew nothing here (its first cell off
-            // the buffer) keeps them for a frame that does.
-            if held.transmit.is_some()
+            // the buffer) keeps them for a frame that does. Until the frame
+            // is checked they are the cell's and the check's, which hands
+            // them back should the frame lose them ([`verify_sent`]).
+            if held.transmit.borrow().is_some()
                 && let Some(cell) = frame.buffer_mut().cell_mut((placed.x, placed.y))
                 && cell.symbol().contains('\u{10EEEE}')
                 && let Some(transmit) = held.transmit.take()
             {
+                let sent = transmit.len();
                 let symbol = transmit + cell.symbol();
                 cell.set_symbol(&symbol);
+                let home = Rc::downgrade(&held.transmit);
+                IN_FLIGHT.with_borrow_mut(|flying| {
+                    flying.push(InFlight { at: (placed.x, placed.y), symbol, sent, home });
+                });
             }
             true
         }
+    }
+
+    thread_local! {
+        /// The kitty transmissions this frame's cells carry, until the
+        /// frame is checked ([`verify_sent`]). Per thread because a frame
+        /// is: drawn and checked on the one thread, and a test's frames
+        /// never meet another's.
+        static IN_FLIGHT: RefCell<Vec<InFlight>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// One transmission riding a frame's cell.
+    struct InFlight {
+        at: (u16, u16),
+        /// What the cell was given: the transmission, then the
+        /// placeholders it rides ahead of.
+        symbol: String,
+        /// How much of `symbol` is the transmission.
+        sent: usize,
+        /// The picture it goes back to, while that picture stands.
+        home: Weak<RefCell<Option<String>>>,
+    }
+
+    /// Check that this frame's kitty transmissions are still in the cells
+    /// the terminal will be sent, and hand back those that are not, for
+    /// the next frame that draws their picture to send. Called at the end
+    /// of every render, on its finished buffer.
+    ///
+    /// A transmission rides its picture's first cell, and whatever draws
+    /// after the picture in the same frame — the header dropdown, a modal,
+    /// a tooltip — can write over that cell. Its placeholders then drew
+    /// the id's last picture, since a `Graphics` keeps one id for life
+    /// (#94): the previous album's cover, until the slot drew another
+    /// (the integration check of performance audit #95). A frame that sent
+    /// nothing costs a look at an empty list.
+    pub fn verify_sent(buffer: &Buffer) {
+        IN_FLIGHT.with_borrow_mut(|flying| {
+            for InFlight { at, mut symbol, sent, home } in flying.drain(..) {
+                if buffer.cell(at).is_some_and(|cell| cell.symbol() == symbol) {
+                    continue;
+                }
+                if let Some(home) = home.upgrade() {
+                    symbol.truncate(sent);
+                    *home.borrow_mut() = Some(symbol);
+                }
+            }
+        });
     }
 
     impl Graphics {
@@ -1573,7 +1630,7 @@ mod native {
             assert_eq!(first.matches("a=T").count(), 1, "one transmission");
             assert!(first.find("a=T") < first.find('\u{10EEEE}'), "ahead of what shows it");
             let held = graphics.cached.as_ref().unwrap();
-            assert!(held.transmit.is_none(), "and not kept once sent");
+            assert!(held.transmit.borrow().is_none(), "and not kept once sent");
 
             // Every later frame is the placeholders alone, drawn warm.
             let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
@@ -1582,6 +1639,75 @@ mod native {
             assert!(!later.contains("_G"), "nothing sent again");
             assert_eq!(later.matches('\u{10EEEE}').count(), first.matches('\u{10EEEE}').count());
             assert_eq!(graphics.encodes(), 1);
+        }
+
+        #[test]
+        fn a_transmission_something_drew_over_goes_out_with_the_next_frame() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // The header dropdown, a modal, a tooltip: drawn after the
+            // picture in the frame that carries its pixels, over its first
+            // cell. The placeholders would point at whatever the id held
+            // last — the previous cover — so the check hands the pixels
+            // back, and the next frame that draws the picture sends them
+            // (the integration check of performance audit #95).
+            let art = a_cover(64);
+            let mut graphics = Graphics::forced(ProtocolType::Kitty);
+            let symbols = |terminal: &Terminal<TestBackend>| -> String {
+                terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
+            };
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            terminal
+                .draw(|frame| {
+                    assert!(graphics.draw(frame, frame.area(), &art));
+                    let buffer = frame.buffer_mut();
+                    let first = buffer.content.iter().position(|cell| cell.symbol().contains("a=T"));
+                    buffer.content[first.unwrap()].reset();
+                    verify_sent(buffer);
+                })
+                .unwrap();
+            assert!(!symbols(&terminal).contains("_G"), "the overlay's frame lost them");
+
+            // Drawn again warm: they ride this frame, and this frame keeps them.
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            terminal
+                .draw(|frame| {
+                    assert!(graphics.draw(frame, frame.area(), &art));
+                    verify_sent(frame.buffer_mut());
+                })
+                .unwrap();
+            assert_eq!(symbols(&terminal).matches("a=T").count(), 1, "sent after all");
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            terminal
+                .draw(|frame| {
+                    assert!(graphics.draw(frame, frame.area(), &art));
+                    verify_sent(frame.buffer_mut());
+                })
+                .unwrap();
+            assert!(!symbols(&terminal).contains("_G"), "and once only");
+            assert_eq!(graphics.encodes(), 1, "no encode bought any of it");
+
+            // Lost, then replaced before a frame drew them again: they go
+            // with the picture they were, never out under the next one.
+            let next = a_cover(96);
+            let mut frame_of = |art: &crate::tui::art::Art, overlay: bool| {
+                let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        assert!(graphics.draw(frame, frame.area(), art));
+                        if overlay {
+                            frame.buffer_mut().reset();
+                        }
+                        verify_sent(frame.buffer_mut());
+                    })
+                    .unwrap();
+                symbols(&terminal)
+            };
+            frame_of(&next, true);
+            assert_eq!(frame_of(&art, false).matches("a=T").count(), 1, "the new picture's own");
+            assert!(!frame_of(&art, false).contains("_G"), "and nothing of the one it replaced");
+            assert!(IN_FLIGHT.with_borrow(Vec::is_empty), "nothing held past the check");
         }
 
         /// A cover that arrived as a JPEG, as most do.
@@ -2015,6 +2141,9 @@ mod stub {
 
     #[derive(Debug)]
     pub struct Graphics;
+
+    /// Nothing is ever sent, so nothing can be lost on the way.
+    pub fn verify_sent(_buffer: &ratatui::buffer::Buffer) {}
 
     impl Graphics {
         pub fn disabled() -> Graphics {

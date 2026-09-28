@@ -1351,6 +1351,13 @@ fn clip_lead(text: &str, max: usize) -> String {
 
 /// One frame. Public to the crate so render tests can drive it.
 pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
+    draw_frame(frame, gui);
+    // The overlays drew after the covers: a kitty picture's pixels, riding
+    // its first cell, may not have survived the frame.
+    crate::tui::graphics::verify_sent(frame.buffer_mut());
+}
+
+fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     gui.ui.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
     let area = frame.area();
