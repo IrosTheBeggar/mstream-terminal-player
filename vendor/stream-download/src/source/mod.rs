@@ -122,6 +122,9 @@ pub(crate) struct Source<S: SourceStream, W: StorageWriter> {
     content_length: Option<u64>,
     seek_tx: mpsc::Sender<u64>,
     seek_rx: mpsc::Receiver<u64>,
+    // mstream-player patch: where a waiting read's bytes run out (`SourceHandle::want`).
+    want_tx: mpsc::Sender<u64>,
+    want_rx: mpsc::Receiver<u64>,
     prefetch_bytes: u64,
     batch_write_size: usize,
     retry_timeout: Duration,
@@ -129,6 +132,9 @@ pub(crate) struct Source<S: SourceStream, W: StorageWriter> {
     on_reconnect: Option<ReconnectFn<S>>,
     prefetch_complete: bool,
     prefetch_start_position: u64,
+    // mstream-player patch: where the reader last sought to. The reader reads forward from
+    // there, so the first gap at or after it is the one it will hit next.
+    last_seek_position: u64,
     remaining_bytes: Option<Bytes>,
     cancellation_token: CancellationToken,
 }
@@ -147,6 +153,7 @@ where
         // buffer size of 1 is fine here because we wait for the position to update after we send
         // each request
         let (seek_tx, seek_rx) = mpsc::channel(1);
+        let (want_tx, want_rx) = mpsc::channel(1);
         Self {
             writer,
             downloaded: Downloaded::default(),
@@ -156,6 +163,8 @@ where
             notify_read: NotifyRead::default(),
             seek_tx,
             seek_rx,
+            want_tx,
+            want_rx,
             content_length,
             prefetch_complete: settings.prefetch_bytes == 0,
             prefetch_bytes: settings.prefetch_bytes,
@@ -164,6 +173,7 @@ where
             on_progress: settings.on_progress,
             on_reconnect: settings.on_reconnect,
             prefetch_start_position: 0,
+            last_seek_position: 0,
             remaining_bytes: None,
             cancellation_token,
         }
@@ -206,6 +216,10 @@ where
                     // seek_tx can't be dropped here since we keep a reference in this struct
                     self.handle_seek(stream, position.expect("seek_tx dropped")).await?;
                 },
+                position = self.want_rx.recv() => {
+                    // want_tx can't be dropped here either, for the same reason
+                    self.handle_want(stream, position.expect("want_tx dropped")).await?;
+                },
                 bytes = next_chunk => {
                     let Ok(bytes) = bytes else {
                         self.handle_reconnect(stream).await?;
@@ -234,6 +248,7 @@ where
     }
 
     async fn handle_seek(&mut self, stream: &mut S, position: u64) -> io::Result<()> {
+        self.last_seek_position = position;
         if self.should_seek(stream, position)? {
             debug!("seek position not yet downloaded");
             let current_stream_position = self.writer.stream_position()?;
@@ -255,7 +270,17 @@ where
                     end = content_length,
                     "checking for seek range",
                 );
-                if let Some(gap) = self.downloaded.next_gap(min_start_position..content_length) {
+                // mstream-player patch: the gap that holds the seek position comes first.
+                // Searching from the writer's position alone finds the gap *below* any island
+                // that lies between the writer and the seek position, and a gap that ends
+                // before the seek position turns into an inverted range request
+                // (`bytes=27648044-14717995`), which the server refuses with a 416 and the
+                // whole download fails.
+                let gap = self
+                    .downloaded
+                    .next_gap(position..content_length)
+                    .or_else(|| self.downloaded.next_gap(min_start_position..content_length));
+                if let Some(gap) = gap {
                     // Gap start may be too low if we're seeking forward, so check it against the
                     // position
                     let seek_start = gap.start.max(position);
@@ -267,6 +292,23 @@ where
             }
         }
         Ok(())
+    }
+
+    // mstream-player patch: a read is waiting at `position`, where its bytes run out. Unless
+    // the download is already writing its way through `position` (the ordinary case: the
+    // reader caught up with the download), fetch from there, the way a seek to it would.
+    async fn handle_want(&mut self, stream: &mut S, position: u64) -> io::Result<()> {
+        let writer_position = self.writer.stream_position()?;
+        let under_way = if self.prefetch_complete {
+            writer_position == position
+        } else {
+            (self.prefetch_start_position..=writer_position).contains(&position)
+        };
+        if under_way || self.downloaded.get(position).is_some() {
+            return Ok(());
+        }
+        debug!(position, "a read is waiting where nothing is being fetched");
+        self.handle_seek(stream, position).await
     }
 
     async fn handle_reconnect(&mut self, stream: &mut S) -> io::Result<()> {
@@ -300,6 +342,7 @@ where
             self.writer.flush()?;
             let position = self.writer.stream_position()?;
             self.downloaded.add(start_position..position);
+            self.notify_if_reached(position);
 
             return self.finish_or_find_next_gap(stream).await;
         };
@@ -320,6 +363,7 @@ where
         }
         if (stream_position >= start_position + self.prefetch_bytes) || partial_write {
             self.downloaded.add(start_position..stream_position);
+            self.notify_if_reached(stream_position);
             debug!("prefetch complete");
             self.prefetch_complete = true;
         }
@@ -328,11 +372,49 @@ where
         Ok(DownloadAction::Continue)
     }
 
+    // mstream-player patch: wakes a reader parked on `requested_position` once the run of
+    // downloaded bytes ending at `end` holds it. Two ways this used to go wrong:
+    //
+    // - The prefetch recorded its range without ever checking, so a Range response that ended
+    //   inside the prefetch window (a seek just below an already-downloaded island, a seek
+    //   into the file's last `prefetch_bytes`) left the reader parked until some later write
+    //   happened to cross its position: after every lower gap had downloaded.
+    // - `write` checked only `end >= requested`, so a chunk landing *above* a reader that had
+    //   just sought back into a gap woke it before its range was even requested. The reader
+    //   then read spool the download never wrote, and its next seek found the channel still
+    //   holding this one and was dropped ("Sent multiple seek requests without waiting").
+    fn notify_if_reached(&self, end: u64) {
+        let Some(requested) = self.requested_position.get() else {
+            return;
+        };
+        let run_start = self
+            .downloaded
+            .get(end.saturating_sub(1))
+            .map_or(end, |run| run.start);
+        debug!(
+            requested_position = requested,
+            current_position = end,
+            "received requested position"
+        );
+        if run_start <= requested && requested <= end {
+            debug!("notifying position reached");
+            self.requested_position.clear();
+            self.position_reached.notify_position_reached();
+        }
+    }
+
     async fn finish_or_find_next_gap(&mut self, stream: &mut S) -> io::Result<DownloadAction> {
         if stream.supports_seek()
             && let Some(content_length) = self.content_length
         {
-            let gap = self.downloaded.next_gap(0..content_length);
+            // mstream-player patch: fill forward from the reader's last seek before wrapping
+            // around to the lowest gap. Starting from zero back-filled everything below an
+            // island first, so a reader that played past the end of its island parked there
+            // until the whole lower part of the file had downloaded.
+            let gap = self
+                .downloaded
+                .next_gap(self.last_seek_position.min(content_length)..content_length)
+                .or_else(|| self.downloaded.next_gap(0..content_length));
             if let Some(gap) = gap {
                 debug!(
                     missing = format!("{gap:?}"),
@@ -422,19 +504,7 @@ where
                 self.downloaded.add(position..new_position);
             }
 
-            if let Some(requested) = self.requested_position.get() {
-                debug!(
-                    requested_position = requested,
-                    current_position = new_position,
-                    "received requested position"
-                );
-
-                if new_position >= requested {
-                    debug!("notifying position reached");
-                    self.requested_position.clear();
-                    self.position_reached.notify_position_reached();
-                }
-            }
+            self.notify_if_reached(new_position);
             if new_written == 0 {
                 // We're not able to write any data, so we need to wait for space to be available
                 debug!("waiting for next read");
@@ -547,6 +617,7 @@ where
             notify_read: self.notify_read.clone(),
             position_reached: self.position_reached.clone(),
             seek_tx: self.seek_tx.clone(),
+            want_tx: self.want_tx.clone(),
             content_length: self.content_length,
         }
     }

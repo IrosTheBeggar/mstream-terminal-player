@@ -570,8 +570,11 @@ impl<P: StorageProvider> Read for StreamDownload<P> {
                 return self.handle_read(buf);
             }
             debug!("requested position not yet downloaded");
+            // mstream-player patch: see `SourceHandle::want`.
+            self.handle.want(closest_set.end);
         } else {
             debug!("stream position not yet downloaded");
+            self.handle.want(stream_position);
         }
 
         self.handle.wait_for_position(requested_position);

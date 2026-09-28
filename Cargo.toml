@@ -288,7 +288,17 @@ winresource = "0.1"
 rust-i18n-support = "=3.1.5"
 
 # stream-download, vendored from the 0.24.2 release as published (licenses and
-# all) so its range bookkeeping can carry a fix upstream does not have yet
-# (performance audit #73; the fix itself is the commit after this one).
+# all) with a fix to its range bookkeeping, every change marked "mstream-player
+# patch" in vendor/stream-download/src/{lib.rs,source/} (performance audit #73).
+# Unpatched, a Range response shorter than the prefetch never woke the reader
+# waiting on it (a 1s nudge back stalled 14s at 8 Mbit/s, a seek into the
+# last 154 KB 29s), the loader then refilled the file's lowest gap instead of
+# the one ahead of the reader, a read that ran off the end of an island never
+# asked for what came next, a seek past an island asked the server for an
+# inverted range (a 416 and a dead track), and a chunk landing above a reader
+# that had sought back into a gap woke it onto bytes never written. Neither
+# 0.24.3, 0.24.4 nor upstream main (checked 2026-09-28) changes those files.
+# Drop this entry and vendor/stream-download once a release does: the range
+# tests in src/engine/http.rs say whether it did.
 [patch.crates-io]
 stream-download = { path = "vendor/stream-download" }

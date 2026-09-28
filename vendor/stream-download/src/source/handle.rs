@@ -19,6 +19,8 @@ pub(crate) struct SourceHandle {
     pub(super) position_reached: PositionReached,
     pub(super) content_length: Option<u64>,
     pub(super) seek_tx: mpsc::Sender<u64>,
+    // mstream-player patch: see `want`.
+    pub(super) want_tx: mpsc::Sender<u64>,
     pub(super) notify_read: NotifyRead,
 }
 
@@ -45,6 +47,15 @@ impl SourceHandle {
             "waiting for requested position"
         );
         self.position_reached.wait_for_position_reached();
+    }
+
+    // mstream-player patch: tells the download that a read is about to wait at `position`,
+    // where the reader's bytes run out. A seek re-targets the download; a read never did, so
+    // a reader that played (or sought within the spool) past the end of an island waited
+    // there until the download happened by, after everything else. The download decides
+    // whether it is already on its way; a message still pending means one is in hand.
+    pub(crate) fn want(&self, position: u64) {
+        let _ = self.want_tx.try_send(position);
     }
 
     pub(crate) fn notify_read(&self) {

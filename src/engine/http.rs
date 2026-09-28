@@ -391,6 +391,235 @@ mod tests {
         assert_eq!(conns.load(Ordering::SeqCst), 2, "each open dials fresh");
     }
 
+    /// Every byte of the test file is a function of its offset, so a read
+    /// that came back from the wrong place (or from spool the download never
+    /// wrote) cannot pass for the right one.
+    fn patterned(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i.wrapping_mul(31) ^ (i >> 10)) as u8).collect()
+    }
+
+    /// A Range-capable server for `body` whose pace is chosen per request:
+    /// `pace(start)` says how many bytes go out at once and how long the
+    /// rest is then held back. Every request's `(start, end)` lands in the
+    /// log (end exclusive); an inverted range is logged and refused with a
+    /// 416, the way mStream's own server refuses one.
+    fn range_server(
+        body: Vec<u8>,
+        pace: impl Fn(u64) -> (usize, Duration) + Send + Sync + 'static,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<(u64, u64)>>>) {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let seen = log.clone();
+        let body = Arc::new(body);
+        let pace = Arc::new(pace);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let (body, pace, seen) = (body.clone(), pace.clone(), seen.clone());
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut head = [0u8; 2048];
+                    let n = stream.read(&mut head).unwrap_or(0);
+                    let head = String::from_utf8_lossy(&head[..n]).to_ascii_lowercase();
+                    let len = body.len() as u64;
+                    let (start, end) = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("range: bytes="))
+                        .and_then(|spec| spec.trim().split_once('-'))
+                        .map(|(a, b)| {
+                            let start = a.parse().unwrap_or(0);
+                            let end = b.parse::<u64>().map(|b| (b + 1).min(len)).unwrap_or(len);
+                            (start, end)
+                        })
+                        .unwrap_or((0, len));
+                    seen.lock().unwrap().push((start, end));
+                    if start > end {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\n\
+                              Connection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 206 Partial Content\r\nAccept-Ranges: bytes\r\n\
+                             Content-Range: bytes {start}-{}/{len}\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n",
+                            end.max(1) - 1,
+                            end - start
+                        )
+                        .as_bytes(),
+                    );
+                    let part = &body[start as usize..end as usize];
+                    let (burst, stall) = pace(start);
+                    let burst = burst.min(part.len());
+                    let _ = stream.write_all(&part[..burst]);
+                    let _ = stream.flush();
+                    std::thread::sleep(stall);
+                    let _ = stream.write_all(&part[burst..]);
+                });
+            }
+        });
+        (format!("http://{addr}/patterned.bin"), log)
+    }
+
+    /// Seek, then read `len` bytes, the way a decoder resumes after a seek:
+    /// how long that took, and what came back.
+    fn seek_and_read(
+        reader: &mut HttpReader,
+        at: u64,
+        len: usize,
+    ) -> std::io::Result<(Duration, Vec<u8>)> {
+        use std::io::{Read, Seek, SeekFrom};
+        let started = std::time::Instant::now();
+        reader.seek(SeekFrom::Start(at))?;
+        let mut got = vec![0u8; len];
+        reader.read_exact(&mut got)?;
+        Ok((started.elapsed(), got))
+    }
+
+    // The three below pin the vendored stream-download fix (performance
+    // audit #73). The held-back parts of the file stall for three seconds,
+    // inside stream-download's five-second reconnect watchdog, so a reader
+    // parked behind them takes three seconds and a reader woken when its
+    // own bytes land takes milliseconds.
+    const HELD_BACK: Duration = Duration::from_secs(3);
+
+    #[test]
+    fn a_seek_into_the_last_stretch_does_not_wait_for_the_rest_of_the_file() {
+        // The tail is shorter than the prefetch, so its Range response ends
+        // inside the prefetch window. Unpatched, nothing woke the reader
+        // there: the loader went off to back-fill the file from the bottom
+        // and the seek returned only when that crossed the tail, after the
+        // whole file (29.4s at 8 Mbit/s in the audit's measurement).
+        let body = patterned(2_000_000);
+        let len = body.len() as u64;
+        let tail = len - 20_000;
+        let (url, _) = range_server(body.clone(), move |start| {
+            if start >= tail { (usize::MAX, Duration::ZERO) } else { (300_000, HELD_BACK) }
+        });
+        let (mut reader, content_length) = open(&url).unwrap();
+        assert_eq!(content_length, Some(len));
+        // The probe's read: it waits out the open's prefetch, so the seek
+        // below restarts one rather than cutting this one short.
+        seek_and_read(&mut reader, 0, 1000).unwrap();
+
+        let (took, got) = seek_and_read(&mut reader, tail, 20_000).unwrap();
+        assert!(got == body[tail as usize..], "the tail's own bytes");
+        assert!(took < Duration::from_millis(1500), "the seek waited {took:?}");
+    }
+
+    #[test]
+    fn after_a_short_range_the_download_carries_on_ahead_of_the_reader() {
+        // Seek forward (an island starts at 1 MB), then nudge back just
+        // below it: the nudge's range fills the sliver up to the island and
+        // ends. Unpatched, the loader then refilled the file's LOWEST gap,
+        // so a reader that played through the sliver and the island found
+        // nothing past it until the whole lower part had arrived (the audit
+        // measured a 1s nudge back at 14.1s). The download belongs ahead of
+        // the reader.
+        let body = patterned(3_000_000);
+        let island = 1_000_000u64;
+        let sliver = island - 20_000;
+        let (url, log) = range_server(body.clone(), move |start| {
+            if start == island {
+                // Enough for the seek's prefetch, then the island stops
+                // growing: the gap above it is what the reader meets next.
+                (300_000, Duration::from_secs(30))
+            } else if start > island || start == sliver {
+                (usize::MAX, Duration::ZERO)
+            } else {
+                (300_000, HELD_BACK)
+            }
+        });
+        let (mut reader, _) = open(&url).unwrap();
+        let (_, got) = seek_and_read(&mut reader, island, 1000).unwrap();
+        assert!(got == body[island as usize..island as usize + 1000]);
+
+        // Through the sliver, the island, and 100 KB past the island's end.
+        let through = 20_000 + 300_000 + 100_000;
+        let (took, got) = seek_and_read(&mut reader, sliver, through).unwrap();
+        assert!(got == body[sliver as usize..sliver as usize + through]);
+        assert!(took < Duration::from_millis(1500), "the reader waited {took:?}");
+
+        let asked = log.lock().unwrap().clone();
+        let after_sliver = asked.iter().skip_while(|r| r.0 != sliver).nth(1).copied();
+        assert!(
+            after_sliver.is_some_and(|(start, _)| start > island),
+            "after the sliver the download went to {after_sliver:?}: {asked:?}"
+        );
+    }
+
+    #[test]
+    fn a_read_that_runs_off_its_island_fetches_what_comes_next() {
+        // Islands at 1 MB and 2 MB; the download, done above 2 MB, has
+        // wrapped round to the gap under 1 MB, which is slow. The reader
+        // seeks back into the 1 MB island (already spooled, so no request
+        // goes out) and reads on past its end. Only a seek ever redirected
+        // the download, so that read used to wait for everything below the
+        // island first: the FLAC bisection's last probe does exactly this
+        // (a 90% seek on a FLAC without a SEEKTABLE waited 122s at 2 Mbit/s
+        // once the prefetch was 64 KiB).
+        let body = patterned(3_000_000);
+        let (url, log) = range_server(body.clone(), move |start| match start {
+            1_000_000 => (300_000, Duration::from_secs(30)),
+            1_300_000..=2_999_999 => (usize::MAX, Duration::ZERO),
+            _ => (300_000, HELD_BACK),
+        });
+        let (mut reader, _) = open(&url).unwrap();
+        seek_and_read(&mut reader, 0, 1000).unwrap();
+        seek_and_read(&mut reader, 1_000_000, 1000).unwrap();
+        // Let the island's 300 KB land before the next seek cuts it off.
+        std::thread::sleep(Duration::from_millis(200));
+        seek_and_read(&mut reader, 2_000_000, 1000).unwrap();
+        // The tail comes at once; give the download the moment it needs to
+        // finish it and wrap round to the held-back gap below.
+        std::thread::sleep(Duration::from_millis(200));
+
+        let (took, got) = seek_and_read(&mut reader, 1_200_000, 200_000).unwrap();
+        assert!(got == body[1_200_000..1_400_000], "the island and what follows it");
+        assert!(took < Duration::from_millis(1500), "the read waited {took:?}: {:?}", log.lock());
+    }
+
+    #[test]
+    fn seeks_around_islands_read_their_own_bytes_and_never_invert_a_range() {
+        // A seek to 1 MB leaves an island; a second seek goes back to
+        // 500 KB, below it, while the island's bytes are still pouring in;
+        // a third lands above the island. Two things went wrong unpatched:
+        //
+        // * The chunk landing above the reader woke its backward seek
+        //   before that seek's range was even asked for (the wake checked
+        //   only "written past it"). The read then returned spool nobody
+        //   had written, and the third seek, finding the second still
+        //   queued, was dropped — the reader sat until the sequential
+        //   download happened by. A race, so it runs a few times.
+        // * With the download below the island, the gap search started at
+        //   the writer, found the gap below the island, and asked for
+        //   `bytes=2000000-999999`: a 416, a failed download, a dead track.
+        let body = patterned(3_000_000);
+        for round in 0..6 {
+            let (url, log) = range_server(body.clone(), move |start| match start {
+                1_000_000 | 500_000 => (300_000, Duration::from_secs(30)),
+                2_000_000 => (usize::MAX, Duration::ZERO),
+                _ => (300_000, HELD_BACK),
+            });
+            let (mut reader, _) = open(&url).unwrap();
+            for at in [1_000_000, 500_000] {
+                let (_, got) = seek_and_read(&mut reader, at, 1000).unwrap();
+                assert!(got == body[at as usize..at as usize + 1000], "round {round}: at {at}");
+            }
+
+            let third = seek_and_read(&mut reader, 2_000_000, 10_000);
+            let asked = log.lock().unwrap().clone();
+            assert!(asked.iter().all(|(start, end)| start <= end), "inverted range: {asked:?}");
+            let (took, got) = third.unwrap();
+            assert!(got == body[2_000_000..2_010_000], "round {round}");
+            assert!(took < Duration::from_millis(1500), "round {round}: waited {took:?}");
+        }
+    }
+
     #[test]
     fn a_server_that_never_answers_fails_the_open_instead_of_hanging() {
         // Bound but never accepted: on loopback the handshake still
