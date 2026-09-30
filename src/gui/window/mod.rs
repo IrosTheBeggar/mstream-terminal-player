@@ -24,9 +24,12 @@
 //! plays keys, text and pointer gestures into the window and dumps what it
 //! shows, one step a frame (script.rs has the commands): the spike's way to
 //! prove input on a machine that may not send a window synthetic events.
+//! A fourth, `MSTREAM_WINDOW_STATS=<path>`, writes what the frames cost
+//! when the window closes (stats.rs).
 
 mod input;
 mod script;
+mod stats;
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -49,6 +52,7 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 use input::{Grid, Raw, Translator};
 use script::{Input, Script, Step};
+use stats::{Counted, Stats};
 
 use super::{Channels, Ctx, Flow, Gui, Host, finish, frame, input, render};
 use crate::kit::theme::th;
@@ -74,12 +78,13 @@ const STALLED_REDRAW: Duration = Duration::from_millis(100);
 /// opening size, the resize to the grid lands a frame or two later.
 const DUMP_AT_FRAME: u32 = 5;
 
-type WindowTerminal = Terminal<WgpuBackend<'static, 'static>>;
+type WindowTerminal = Terminal<Counted<WgpuBackend<'static, 'static>>>;
 
 /// The player in a window, from a Gui and workers that `gui::start` has
 /// already brought up; the exit code is the terminal's (0, or 1 when a
 /// frame failed), or 1 when there is no window to open.
 pub(super) fn run(mut gui: Gui, channels: Channels) -> i32 {
+    let started = Instant::now();
     // No panic hook of the terminal's kind: `tui::install_panic_hook` hands
     // mouse capture back and pops a window title the player pushed — with
     // no terminal claimed, the first is noise on whatever launched the
@@ -119,6 +124,7 @@ pub(super) fn run(mut gui: Gui, channels: Channels) -> i32 {
         script_until: None,
         quit_flushed: false,
         min_surface: PhysicalSize::new(1, 1),
+        stats: Stats::from_env(started),
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("gui --window: {e}");
@@ -179,6 +185,8 @@ struct App {
     quit_flushed: bool,
     /// One cell, in pixels: the least surface the backend can draw on.
     min_surface: PhysicalSize<u32>,
+    /// What the frames cost, while `MSTREAM_WINDOW_STATS` is set.
+    stats: Option<Stats>,
 }
 
 /// The window as the loop's [`Host`]: the pointer over something
@@ -235,7 +243,7 @@ impl App {
             .with_instance(instance);
         let backend = block_on(builder.build_with_target(window.clone()))?
             .map_err(|e| format!("the window has nothing to draw with: {e}"))?;
-        let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
+        let mut terminal = Terminal::new(Counted::new(backend)).map_err(|e| e.to_string())?;
 
         // The cell's width comes back from the backend, not from
         // arithmetic here: it is the narrowest of the faces it was given,
@@ -310,12 +318,25 @@ impl App {
 
     /// The loop's frame half, and the time the next one is wanted by.
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        let started = Instant::now();
+        self.redraw_inner(event_loop, started);
+        if let Some(stats) = self.stats.as_mut() {
+            stats.redraw(started.elapsed());
+        }
+    }
+
+    fn redraw_inner(&mut self, event_loop: &ActiveEventLoop, started: Instant) {
         self.asked = None;
         let (Some(window), Some(terminal)) = (self.window.as_deref(), self.terminal.as_mut())
         else {
             return;
         };
-        match frame(terminal, &mut self.gui, &mut self.ctx, &mut WindowHost(window)) {
+        let framed = frame(terminal, &mut self.gui, &mut self.ctx, &mut WindowHost(window));
+        let (cells, flush) = terminal.backend_mut().take_cells();
+        if let Some(stats) = self.stats.as_mut() {
+            stats.frame(cells, flush, started.elapsed());
+        }
+        match framed {
             Ok(wait) => {
                 self.next_frame = Instant::now() + wait;
                 if let Some(until) = self.script_until {
@@ -516,6 +537,9 @@ impl App {
             return;
         }
         self.done = true;
+        if let Some(stats) = &self.stats {
+            stats.write();
+        }
         self.terminal = None;
         self.window = None;
         if !self.quit_flushed {
@@ -585,7 +609,12 @@ impl ApplicationHandler for App {
             // which the very first frame gets on macOS) is dropped with the
             // rows already marked clean — so a still screen would stay
             // blank. The window coming into view repaints every cell.
-            WindowEvent::Occluded(false) => self.repaint_all(),
+            WindowEvent::Occluded(false) => {
+                if let Some(stats) = self.stats.as_mut() {
+                    stats.visible();
+                }
+                self.repaint_all();
+            }
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             _ => {}
         }
