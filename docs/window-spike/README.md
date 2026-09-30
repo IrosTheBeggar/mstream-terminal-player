@@ -17,6 +17,12 @@ to 1000 px wide; the text under each name says which step and scenario produced 
   the y key typed `@€z` into the search box.
 - `6-keys-repeat-backspace.png` — the same check: `abcdefgh` typed, then Backspace held for
   one press and five auto-repeats, leaving `ab`.
+- `6-keys-pinyin-commit.png` and `6-keys-pinyin-commit-dump.txt` — the Pinyin IME in the
+  search box after `zhongguo` and Space: the dump holds `中国`; the screenshot shows the known
+  gap, an en locale has no CJK face so the two glyphs draw as bars.
+- `6-keys-japanese-preedit.log` — the window's stderr for the Japanese probe: the composition
+  `n に にh にほ にほn にほん`, then no commit on the first Enter or a Right arrow, then `preedit ""`
+  on Esc — the winit 0.30.13 commit-key defect.
 - `stats-*.json` — step 4's `MSTREAM_WINDOW_STATS` reports, release build, ~25 s each against
   demo.mstream.io: idle, the Albums wall, playback on the Library screen, Now Playing, and
   Now Playing's Visualizer tab (the one 33 ms screen); `stats-wall-with-covers-debug.json` is
