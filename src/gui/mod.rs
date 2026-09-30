@@ -20,6 +20,7 @@
 
 mod albums;
 mod bar;
+pub(crate) mod control;
 mod actions;
 mod cover;
 mod dj;
@@ -2473,6 +2474,7 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
 // ── The loop and the room it runs in ────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn event_loop(
     terminal: &mut crate::kit::frames::PageTerminal,
     gui: &mut Gui,
@@ -2481,6 +2483,7 @@ fn event_loop(
     audio_tx: &Sender<AudioCmd>,
     api_tx: &Sender<worker::ApiCmd>,
     event_tx: &Sender<Event>,
+    control_rx: Option<&Receiver<control::Request>>,
 ) -> std::io::Result<()> {
     let mut hand = false;
     let mut saver = tui::QueueSaver::new(&gui.app);
@@ -2527,6 +2530,11 @@ fn event_loop(
         }
         servers::poll(gui);
         torrent::poll(gui);
+        // The control face's requests — the server-audio remote driving
+        // this player — answered here, on the thread that owns the App.
+        if let Some(rx) = control_rx {
+            control::pump(gui, rx);
+        }
 
         // The Stats screen's page pumps its worker and its controls here too.
         let stats_over = stats::frame(gui);
@@ -2934,6 +2942,7 @@ pub fn run(
     token: Option<String>,
     torrent: Option<String>,
     bundled: Option<String>,
+    control: Option<control::Face>,
 ) -> i32 {
     // The language first — the wizard's rule, from the system locale — so
     // the ten locales the strings carry reach the screen.
@@ -2949,6 +2958,11 @@ pub fn run(
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let (audio_tx, tap) = worker::spawn_audio(event_tx.clone());
     let api_tx = worker::spawn_api(event_tx.clone());
+    // The control face, when the launcher asked for one: its listener
+    // lives for the session (the handle stops it on the way out), and the
+    // loop answers its requests each tick.
+    let control = control.map(control::spawn);
+    let control_rx = control.as_ref().map(|(_, rx)| rx);
 
     let mut app = tui::app_from(start);
     app.tap = Some(tap);
@@ -2991,6 +3005,7 @@ pub fn run(
         &audio_tx,
         &api_tx,
         &event_tx,
+        control_rx,
     );
 
     if mouse_on {
