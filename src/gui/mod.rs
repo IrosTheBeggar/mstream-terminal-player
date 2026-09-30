@@ -34,6 +34,7 @@ mod stats;
 mod torrent;
 mod torrent_meta;
 mod vizwin;
+mod window;
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
@@ -2934,10 +2935,23 @@ pub fn run(
     token: Option<String>,
     torrent: Option<String>,
     bundled: Option<String>,
+    window: bool,
 ) -> i32 {
     // The language first — the wizard's rule, from the system locale — so
     // the ten locales the strings carry reach the screen.
     crate::setup::boot_language();
+    // The window-mode spike leaves here, before anything below touches the
+    // terminal, the config or the workers: it only draws (gui/window.rs).
+    // Its Gui is the render tests' one — no workers behind it, a default
+    // config that is never written back, and the demo track in the bar so
+    // there is something to look at with no server. The palette is pinned
+    // first, because the window is not the terminal that launched it.
+    if window {
+        theme::pin_truecolor();
+        let mut gui = Gui::new(Config::default(), false, App::new(None, None, None));
+        gui.demo = Some(demo_now());
+        return window::run(gui);
+    }
     // The player's own tolerant load first — it may seed the bundled
     // server — then the GUI's read of what is on disk (the [gui] section,
     // and the save guard).

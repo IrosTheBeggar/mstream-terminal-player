@@ -195,7 +195,7 @@ type Faces = Vec<(&'static str, u32)>;
 /// Where each platform keeps a face for the language, best first, with the
 /// face's index in a collection. Noto's CJK collection holds JP, KR, SC,
 /// TC and HK in that order, so Chinese asks for the third.
-fn cjk_faces(lang: &str) -> Vec<(PathBuf, u32)> {
+pub(crate) fn cjk_faces(lang: &str) -> Vec<(PathBuf, u32)> {
     let (ja, zh): (Faces, Faces) = if cfg!(target_os = "macos") {
         (
             vec![

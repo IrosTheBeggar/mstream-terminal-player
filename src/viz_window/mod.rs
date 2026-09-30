@@ -34,7 +34,7 @@ use crate::shader::preset::Preset;
 use crate::shader::render::{Gpu, Offscreen, Scene};
 
 pub mod controls;
-mod overlay;
+pub(crate) mod overlay;
 pub mod pipe;
 
 use controls::{Command, Controls, Entry, Tuning, View};

@@ -195,10 +195,22 @@ fn palette(tier: Tier) -> Theme {
     }
 }
 
+/// The palette, once resolved: by [`th`] from the terminal's environment,
+/// or by [`pin_truecolor`] for a surface that is not a terminal.
+static THEME: OnceLock<Theme> = OnceLock::new();
+
 /// The wizard's palette, resolved once.
 pub fn th() -> &'static Theme {
-    static THEME: OnceLock<Theme> = OnceLock::new();
     THEME.get_or_init(|| palette(tier()))
+}
+
+/// The GUI's own window (the window-mode spike) draws every colour it is
+/// handed, so the canvas hexes are right whatever terminal launched it —
+/// the environment `tier` reads describes that terminal, not the window.
+/// Only the window path calls this, before anything has asked [`th`]; a
+/// palette already resolved stays as it is.
+pub(crate) fn pin_truecolor() {
+    let _ = THEME.get_or_init(|| palette(Tier::Truecolor));
 }
 
 // ── Ground ownership ─────────────────────────────────────────────────────────

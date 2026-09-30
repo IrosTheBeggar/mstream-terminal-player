@@ -168,6 +168,13 @@ epaint_default_fonts = "0.36"
 # a borrowed system face is checked the way egui will read it, because
 # egui panics on a face it cannot parse. Versioned with egui's (epaint).
 skrifa = { version = "0.44", default-features = false, features = ["std"] }
+# The GUI's own window (src/gui/window.rs; the window-mode spike, step 1):
+# a ratatui backend that draws the cell buffer onto a wgpu surface, so the
+# same `render` that fills a terminal fills a native window. It is on the
+# wgpu, ratatui-core and winit lines above, and shapes text with rustybuzz
+# over faces it is handed, so no system font stack (font-kit, freetype,
+# fontconfig) comes with it.
+ratatui-wgpu = "0.6"
 
 # The setup wizard's native folder picker. Split by backend on purpose
 # (the picker spike, mStream-side, 2026-08-21): rfd's Linux portal backend
