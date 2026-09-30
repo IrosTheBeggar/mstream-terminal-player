@@ -81,7 +81,7 @@ struct ErrorResponse {
 
 // ── HTTP helpers ────────────────────────────────────────────────────────────
 
-type Resp = Response<std::io::Cursor<Vec<u8>>>;
+pub type Resp = Response<std::io::Cursor<Vec<u8>>>;
 
 fn json_response<T: Serialize>(data: &T) -> Resp {
     let body = serde_json::to_vec(data).unwrap_or_default();
@@ -211,7 +211,7 @@ fn body_is_on_the_socket(request: &tiny_http::Request) -> bool {
 /// leaked: cleanup would allocate the declared remainder to drain a socket
 /// that has nothing more to give, and an attacker picks that number. One
 /// leaked handle against a wedge or an abort.
-fn respond_unread(request: tiny_http::Request, response: Resp) {
+pub fn respond_unread(request: tiny_http::Request, response: Resp) {
     if !body_is_on_the_socket(&request) {
         let _ = request.respond(response);
         return;
@@ -353,211 +353,381 @@ pub fn run(opts: ServeOptions) -> Result<(), String> {
             Err(_) => continue,
         };
 
-        let method = request.method().clone();
-        let path = request.url().to_string();
-
-        // Hygiene before anything else answers: refuse what we can't
-        // account for (finding #28) and what a browser could be driving
-        // (finding #30). Nothing here reads the body.
-        if request.body_length().is_none() && header_value(&request, "transfer-encoding").is_some()
-        {
-            respond_unread(request, error_response_with_status("Length required", 411));
-            continue;
+        match vet(request, &opts.host, opts.port, opts.auth_token.as_deref()) {
+            Verdict::Refuse(request, response) => respond_unread(request, response),
+            Verdict::Abandoned => {}
+            Verdict::Route(request, parsed) => {
+                let response = match parsed {
+                    Ok(cmd) => execute(&engine, cmd),
+                    Err(response) => response,
+                };
+                let _ = request.respond(response);
+            }
         }
-        if !host_allowed(header_value(&request, "host"), &opts.host, opts.port) {
-            respond_unread(
+    }
+}
+
+// ── The wire, parsed ────────────────────────────────────────────────────────
+//
+// Two faces answer the control API: the headless engine here, and the
+// desktop player's own queue (gui::control). They share one parser — every
+// hygiene rule, the token gate, the body rules and the route table live in
+// `vet` — and each executes the resulting Command its own way, so the wire
+// contract cannot drift between them.
+
+/// What one vetted request asks of the player: the control API v1 as a
+/// value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Command {
+    /// The queue becomes this one source, playing.
+    Play(String),
+    Pause,
+    Resume,
+    Stop,
+    Next,
+    Previous,
+    Seek(f64),
+    Volume(f32),
+    Shuffle(bool),
+    /// Advance the loop mode; the answer names the new one.
+    CycleLoop,
+    Status,
+    QueueAdd(String),
+    QueueAddMany(Vec<String>),
+    QueuePlayIndex(usize),
+    QueueRemove(usize),
+    QueueClear,
+    Queue,
+    /// Unauthenticated on purpose: the liveness probe.
+    Version,
+}
+
+/// A request after the hygiene, auth and body rules have had their say.
+pub enum Verdict {
+    /// Refused before its body was touched — answer it with
+    /// [`respond_unread`], which never reads a socket on the caller's
+    /// thread.
+    Refuse(tiny_http::Request, Resp),
+    /// The body is read; the route resolved to a command, or to the error
+    /// its shape earned (bad JSON, a missing body, no such route).
+    Route(tiny_http::Request, Result<Command, Resp>),
+    /// The body is still coming off the socket on a helper thread, which
+    /// answers for itself if the client ever finishes.
+    Abandoned,
+}
+
+/// Vet one request: the hygiene of findings #28/#30, the token gate (every
+/// route but `GET /version` when a token is set), the body cap and type,
+/// then the route table.
+pub fn vet(request: tiny_http::Request, bind_host: &str, port: u16, auth_token: Option<&str>) -> Verdict {
+    let method = request.method().clone();
+    let path = request.url().to_string();
+
+    // Hygiene before anything else answers: refuse what we can't account
+    // for (finding #28) and what a browser could be driving (finding #30).
+    // Nothing here reads the body.
+    if request.body_length().is_none() && header_value(&request, "transfer-encoding").is_some() {
+        return Verdict::Refuse(request, error_response_with_status("Length required", 411));
+    }
+    if !host_allowed(header_value(&request, "host"), bind_host, port) {
+        return Verdict::Refuse(request, error_response_with_status("Forbidden: unrecognized Host", 403));
+    }
+
+    // Auth gate: everything except GET /version when a token is set.
+    if let Some(expected) = auth_token {
+        let is_version = method == Method::Get && path == "/version";
+        if !is_version {
+            let authorized =
+                header_value(&request, "x-auth-token").map(|t| constant_time_eq(expected, t)).unwrap_or(false);
+            if !authorized {
+                return Verdict::Refuse(request, error_response_with_status("Unauthorized", 401));
+            }
+        }
+    }
+
+    if request.body_length().unwrap_or(0) > BODY_CAP {
+        return Verdict::Refuse(request, error_response_with_status("Payload too large", 413));
+    }
+    if method == Method::Post {
+        // A browser is the only client that announces itself with an
+        // Origin header, and no page anywhere has a legitimate call
+        // here — this is what stops a visited site driving the jukebox.
+        if header_value(&request, "origin").is_some() {
+            return Verdict::Refuse(request, error_response_with_status("Forbidden: cross-origin request", 403));
+        }
+        if request.body_length().unwrap_or(0) > 0 && !is_json(header_value(&request, "content-type")) {
+            return Verdict::Refuse(
                 request,
-                error_response_with_status("Forbidden: unrecognized Host", 403),
+                error_response_with_status("Content-Type must be application/json", 415),
             );
-            continue;
         }
+    }
 
-        // Auth gate: everything except GET /version when a token is set.
-        if let Some(expected) = &opts.auth_token {
-            let is_version = method == Method::Get && path == "/version";
-            if !is_version {
-                let supplied = header_value(&request, "x-auth-token");
-                let authorized =
-                    supplied.map(|t| constant_time_eq(expected, t)).unwrap_or(false);
-                if !authorized {
-                    respond_unread(request, error_response_with_status("Unauthorized", 401));
-                    continue;
-                }
-            }
+    let Some((request, body)) = take_body(request) else {
+        // The helper still owns it and will answer for itself.
+        return Verdict::Abandoned;
+    };
+    Verdict::Route(request, route(method, &path, body.as_deref()))
+}
+
+/// The route table: method and path to a Command, with the body each one
+/// needs parsed — or the 400/404 the request earned.
+fn route(method: Method, path: &str, body: Option<&str>) -> Result<Command, Resp> {
+    fn with_body<T: for<'de> Deserialize<'de>>(body: Option<&str>) -> Result<T, Resp> {
+        match body {
+            Some(b) => parse::<T>(b),
+            None => Err(error_response("Missing request body")),
         }
+    }
+    Ok(match (method, path) {
+        (Method::Post, "/play") => Command::Play(with_body::<PlayRequest>(body)?.file),
+        (Method::Post, "/pause") => Command::Pause,
+        (Method::Post, "/resume") => Command::Resume,
+        (Method::Post, "/stop") => Command::Stop,
+        (Method::Post, "/next") => Command::Next,
+        (Method::Post, "/previous") => Command::Previous,
+        (Method::Post, "/seek") => Command::Seek(with_body::<SeekRequest>(body)?.position),
+        (Method::Post, "/volume") => Command::Volume(with_body::<VolumeRequest>(body)?.volume),
+        (Method::Post, "/shuffle") => Command::Shuffle(with_body::<BoolRequest>(body)?.value),
+        (Method::Post, "/loop") => Command::CycleLoop,
+        (Method::Get, "/status") => Command::Status,
+        (Method::Post, "/queue/add") => Command::QueueAdd(with_body::<PlayRequest>(body)?.file),
+        (Method::Post, "/queue/add-many") => Command::QueueAddMany(with_body::<AddManyRequest>(body)?.files),
+        (Method::Post, "/queue/play-index") => Command::QueuePlayIndex(with_body::<IndexRequest>(body)?.index),
+        (Method::Post, "/queue/remove") => Command::QueueRemove(with_body::<IndexRequest>(body)?.index),
+        (Method::Post, "/queue/clear") => Command::QueueClear,
+        (Method::Get, "/queue") => Command::Queue,
+        (Method::Get, "/version") => Command::Version,
+        _ => return Err(error_response_with_status("Not found", 404)),
+    })
+}
 
-        if request.body_length().unwrap_or(0) > BODY_CAP {
-            respond_unread(request, error_response_with_status("Payload too large", 413));
-            continue;
+/// `GET /version`: who answers, and with which face — `serve` for the
+/// headless engine, `gui` for the desktop player hosting the API. The
+/// field is additive (apiVersion stays 1); mStream reads it to tell the
+/// engine it spawned from the player it is adopting.
+pub fn version_body(face: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": "mstream-player",
+        "version": env!("CARGO_PKG_VERSION"),
+        "apiVersion": API_VERSION,
+        "face": face,
+    })
+}
+
+/// An answer composed away from tiny_http — the GUI face builds these on
+/// its own thread, and its listener turns them into responses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Answer {
+    pub code: u16,
+    pub body: serde_json::Value,
+}
+
+impl Answer {
+    pub fn ok() -> Self {
+        Answer { code: 200, body: serde_json::json!({ "ok": true }) }
+    }
+    pub fn json(body: serde_json::Value) -> Self {
+        Answer { code: 200, body }
+    }
+    pub fn error(code: u16, message: &str) -> Self {
+        Answer { code, body: serde_json::json!({ "error": message }) }
+    }
+}
+
+pub fn respond_with(answer: &Answer) -> Resp {
+    json_response(&answer.body).with_status_code(answer.code)
+}
+
+/// The headless engine's execution of a command: route-for-route what
+/// rust-server-audio answered, error strings included.
+fn execute(engine: &Engine, cmd: Command) -> Resp {
+    match cmd {
+        Command::Play(file) => match engine.play_source(file, None) {
+            Ok(()) => ok_resp(),
+            Err(e) => engine_error(e, "Failed to play file"),
+        },
+        Command::Pause => {
+            engine.pause();
+            ok_resp()
         }
-        if method == Method::Post {
-            // A browser is the only client that announces itself with an
-            // Origin header, and no page anywhere has a legitimate call
-            // here — this is what stops a visited site driving the jukebox.
-            if header_value(&request, "origin").is_some() {
-                respond_unread(
-                    request,
-                    error_response_with_status("Forbidden: cross-origin request", 403),
-                );
-                continue;
-            }
-            if request.body_length().unwrap_or(0) > 0
-                && !is_json(header_value(&request, "content-type"))
-            {
-                respond_unread(
-                    request,
-                    error_response_with_status("Content-Type must be application/json", 415),
-                );
-                continue;
-            }
+        Command::Resume => {
+            engine.resume();
+            ok_resp()
         }
-
-        let Some((request, body)) = take_body(request) else {
-            // The helper still owns it and will answer for itself.
-            continue;
-        };
-
-        let response = match (method, path.as_str()) {
-            (Method::Post, "/play") => match body.as_deref() {
-                Some(b) => match parse::<PlayRequest>(b) {
-                    Ok(req) => match engine.play_source(req.file, None) {
-                        Ok(()) => ok_resp(),
-                        Err(e) => engine_error(e, "Failed to play file"),
-                    },
-                    Err(resp) => resp,
-                },
-                None => error_response("Missing request body"),
-            },
-
-            (Method::Post, "/pause") => {
-                engine.pause();
-                ok_resp()
-            }
-            (Method::Post, "/resume") => {
-                engine.resume();
-                ok_resp()
-            }
-            (Method::Post, "/stop") => {
-                engine.stop();
-                ok_resp()
-            }
-
-            (Method::Post, "/next") => match engine.next_manual() {
-                Ok(()) => ok_resp(),
-                Err(e) => engine_error(e, "Failed to play next track"),
-            },
-            (Method::Post, "/previous") => match engine.previous_manual() {
-                Ok(()) => ok_resp(),
-                Err(e) => engine_error(e, "Failed to play previous track"),
-            },
-
-            (Method::Post, "/seek") => match body.as_deref() {
-                Some(b) => match parse::<SeekRequest>(b) {
-                    Ok(req) => match engine.seek(req.position) {
-                        Ok(()) => ok_resp(),
-                        Err(e) => engine_error(e, "Seek failed"),
-                    },
-                    Err(resp) => resp,
-                },
-                None => error_response("Missing request body"),
-            },
-
-            (Method::Post, "/volume") => match body.as_deref() {
-                Some(b) => match parse::<VolumeRequest>(b) {
-                    Ok(req) => {
-                        engine.set_volume(req.volume);
-                        ok_resp()
-                    }
-                    Err(resp) => resp,
-                },
-                None => error_response("Missing request body"),
-            },
-
-            (Method::Post, "/shuffle") => match body.as_deref() {
-                Some(b) => match parse::<BoolRequest>(b) {
-                    Ok(req) => {
-                        engine.set_shuffle(req.value);
-                        ok_resp()
-                    }
-                    Err(resp) => resp,
-                },
-                None => error_response("Missing request body"),
-            },
-
-            (Method::Post, "/loop") => {
-                let mode = engine.cycle_loop();
-                json_response(&serde_json::json!({ "ok": true, "loop_mode": mode.as_str() }))
-            }
-
-            (Method::Get, "/status") => json_response(&engine.status()),
-
-            (Method::Post, "/queue/add") => match body.as_deref() {
-                Some(b) => match parse::<PlayRequest>(b) {
-                    Ok(req) => {
-                        engine.queue_add(req.file);
-                        ok_resp()
-                    }
-                    Err(resp) => resp,
-                },
-                None => error_response("Missing request body"),
-            },
-
-            (Method::Post, "/queue/add-many") => match body.as_deref() {
-                Some(b) => match parse::<AddManyRequest>(b) {
-                    Ok(req) => {
-                        engine.queue_add_many(req.files);
-                        ok_resp()
-                    }
-                    Err(resp) => resp,
-                },
-                None => error_response("Missing request body"),
-            },
-
-            (Method::Post, "/queue/play-index") => match body.as_deref() {
-                Some(b) => match parse::<IndexRequest>(b) {
-                    Ok(req) => match engine.queue_play_index(req.index) {
-                        Ok(()) => ok_resp(),
-                        Err(e) => engine_error(e, "Failed to play track at index"),
-                    },
-                    Err(resp) => resp,
-                },
-                None => error_response("Missing request body"),
-            },
-
-            (Method::Post, "/queue/remove") => match body.as_deref() {
-                Some(b) => match parse::<IndexRequest>(b) {
-                    Ok(req) => match engine.queue_remove(req.index) {
-                        Ok(()) => ok_resp(),
-                        Err(e) => engine_error(e, "Failed to remove track"),
-                    },
-                    Err(resp) => resp,
-                },
-                None => error_response("Missing request body"),
-            },
-
-            (Method::Post, "/queue/clear") => {
-                engine.queue_clear();
-                ok_resp()
-            }
-
-            (Method::Get, "/queue") => json_response(&engine.queue_snapshot()),
-
-            (Method::Get, "/version") => json_response(&serde_json::json!({
-                "name": "mstream-player",
-                "version": env!("CARGO_PKG_VERSION"),
-                "apiVersion": API_VERSION,
-            })),
-
-            _ => error_response_with_status("Not found", 404),
-        };
-
-        let _ = request.respond(response);
+        Command::Stop => {
+            engine.stop();
+            ok_resp()
+        }
+        Command::Next => match engine.next_manual() {
+            Ok(()) => ok_resp(),
+            Err(e) => engine_error(e, "Failed to play next track"),
+        },
+        Command::Previous => match engine.previous_manual() {
+            Ok(()) => ok_resp(),
+            Err(e) => engine_error(e, "Failed to play previous track"),
+        },
+        Command::Seek(position) => match engine.seek(position) {
+            Ok(()) => ok_resp(),
+            Err(e) => engine_error(e, "Seek failed"),
+        },
+        Command::Volume(volume) => {
+            engine.set_volume(volume);
+            ok_resp()
+        }
+        Command::Shuffle(value) => {
+            engine.set_shuffle(value);
+            ok_resp()
+        }
+        Command::CycleLoop => {
+            let mode = engine.cycle_loop();
+            json_response(&serde_json::json!({ "ok": true, "loop_mode": mode.as_str() }))
+        }
+        Command::Status => json_response(&engine.status()),
+        Command::QueueAdd(file) => {
+            engine.queue_add(file);
+            ok_resp()
+        }
+        Command::QueueAddMany(files) => {
+            engine.queue_add_many(files);
+            ok_resp()
+        }
+        Command::QueuePlayIndex(index) => match engine.queue_play_index(index) {
+            Ok(()) => ok_resp(),
+            Err(e) => engine_error(e, "Failed to play track at index"),
+        },
+        Command::QueueRemove(index) => match engine.queue_remove(index) {
+            Ok(()) => ok_resp(),
+            Err(e) => engine_error(e, "Failed to remove track"),
+        },
+        Command::QueueClear => {
+            engine.queue_clear();
+            ok_resp()
+        }
+        Command::Queue => json_response(&engine.queue_snapshot()),
+        Command::Version => json_response(&version_body("serve")),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request(method: Method, path: &str, body: Option<&'static str>) -> tiny_http::Request {
+        let mut t = tiny_http::TestRequest::new()
+            .with_method(method)
+            .with_path(path)
+            .with_header(Header::from_bytes("Host", "127.0.0.1:3333").unwrap());
+        if let Some(body) = body {
+            t = t.with_body(body).with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
+        }
+        t.into()
+    }
+
+    /// What `vet` made of a request: the command, or the status it earned.
+    fn routed(method: Method, path: &str, body: Option<&'static str>, token: Option<&str>) -> Result<Command, u16> {
+        match vet(request(method, path, body), "127.0.0.1", 3333, token) {
+            Verdict::Route(_, Ok(cmd)) => Ok(cmd),
+            Verdict::Route(_, Err(resp)) | Verdict::Refuse(_, resp) => Err(resp.status_code().0),
+            Verdict::Abandoned => panic!("a prebuffered body is never abandoned"),
+        }
+    }
+
+    #[test]
+    fn the_route_table_is_the_control_api() {
+        use Method::{Get, Post};
+        let table: Vec<(Method, &str, Option<&'static str>, Command)> = vec![
+            (Post, "/play", Some(r#"{"file":"Music/a.mp3"}"#), Command::Play("Music/a.mp3".into())),
+            (Post, "/pause", None, Command::Pause),
+            (Post, "/resume", None, Command::Resume),
+            (Post, "/stop", None, Command::Stop),
+            (Post, "/next", None, Command::Next),
+            (Post, "/previous", None, Command::Previous),
+            (Post, "/seek", Some(r#"{"position":12.5}"#), Command::Seek(12.5)),
+            (Post, "/volume", Some(r#"{"volume":0.5}"#), Command::Volume(0.5)),
+            (Post, "/shuffle", Some(r#"{"value":true}"#), Command::Shuffle(true)),
+            (Post, "/loop", None, Command::CycleLoop),
+            (Get, "/status", None, Command::Status),
+            (Post, "/queue/add", Some(r#"{"file":"x"}"#), Command::QueueAdd("x".into())),
+            (Post, "/queue/add-many", Some(r#"{"files":["a","b"]}"#), Command::QueueAddMany(vec!["a".into(), "b".into()])),
+            (Post, "/queue/play-index", Some(r#"{"index":2}"#), Command::QueuePlayIndex(2)),
+            (Post, "/queue/remove", Some(r#"{"index":0}"#), Command::QueueRemove(0)),
+            (Post, "/queue/clear", None, Command::QueueClear),
+            (Get, "/queue", None, Command::Queue),
+            (Get, "/version", None, Command::Version),
+        ];
+        for (method, path, body, expected) in table {
+            assert_eq!(routed(method, path, body, None), Ok(expected), "{path}");
+        }
+    }
+
+    #[test]
+    fn malformed_asks_are_answered_not_routed() {
+        assert_eq!(routed(Method::Post, "/play", None, None), Err(400), "a body is required");
+        assert_eq!(routed(Method::Post, "/play", Some("{not json"), None), Err(400));
+        assert_eq!(routed(Method::Post, "/seek", Some(r#"{"position":"soon"}"#), None), Err(400));
+        assert_eq!(routed(Method::Get, "/nowhere", None, None), Err(404));
+        assert_eq!(routed(Method::Get, "/play", None, None), Err(404), "the method is part of the route");
+    }
+
+    #[test]
+    fn the_token_gate_spares_only_the_version_probe() {
+        assert_eq!(routed(Method::Post, "/pause", None, Some("s3cret")), Err(401));
+        assert_eq!(routed(Method::Get, "/status", None, Some("s3cret")), Err(401));
+        assert_eq!(routed(Method::Get, "/version", None, Some("s3cret")), Ok(Command::Version));
+        // The right token opens every route; a wrong one is the same 401
+        // as none.
+        let signed = |token: &'static str| -> Result<Command, u16> {
+            let req = tiny_http::TestRequest::new()
+                .with_method(Method::Post)
+                .with_path("/pause")
+                .with_header(Header::from_bytes("Host", "127.0.0.1:3333").unwrap())
+                .with_header(Header::from_bytes("x-auth-token", token).unwrap());
+            match vet(req.into(), "127.0.0.1", 3333, Some("s3cret")) {
+                Verdict::Route(_, Ok(cmd)) => Ok(cmd),
+                Verdict::Route(_, Err(resp)) | Verdict::Refuse(_, resp) => Err(resp.status_code().0),
+                Verdict::Abandoned => unreachable!(),
+            }
+        };
+        assert_eq!(signed("s3cret"), Ok(Command::Pause));
+        assert_eq!(signed("s3cre7"), Err(401));
+        assert_eq!(signed("s3cret-and-more"), Err(401));
+    }
+
+    #[test]
+    fn hygiene_refuses_before_reading_a_body() {
+        // The wrong Host is a rebinding page, an Origin is a browser, and a
+        // body that is not JSON is a form a page could post — each refused
+        // unread.
+        let refused = |req: tiny_http::TestRequest| -> Option<u16> {
+            match vet(req.into(), "127.0.0.1", 3333, None) {
+                Verdict::Refuse(_, resp) => Some(resp.status_code().0),
+                Verdict::Route(..) => None,
+                Verdict::Abandoned => Some(0),
+            }
+        };
+        let host = |h: &'static str| {
+            tiny_http::TestRequest::new()
+                .with_method(Method::Get)
+                .with_path("/status")
+                .with_header(Header::from_bytes("Host", h).unwrap())
+        };
+        assert_eq!(refused(host("evil.example:3333")), Some(403));
+        assert_eq!(refused(host("127.0.0.1:3333")), None, "a legitimate Host is routed");
+        let origin = tiny_http::TestRequest::new()
+            .with_method(Method::Post)
+            .with_path("/pause")
+            .with_header(Header::from_bytes("Host", "127.0.0.1:3333").unwrap())
+            .with_header(Header::from_bytes("Origin", "https://evil.example").unwrap());
+        assert_eq!(refused(origin), Some(403));
+        let form = tiny_http::TestRequest::new()
+            .with_method(Method::Post)
+            .with_path("/play")
+            .with_header(Header::from_bytes("Host", "127.0.0.1:3333").unwrap())
+            .with_header(Header::from_bytes("Content-Type", "text/plain").unwrap())
+            .with_body(r#"{"file":"x"}"#);
+        assert_eq!(refused(form), Some(415));
+    }
 
     #[test]
     fn hosts_we_answer_to() {

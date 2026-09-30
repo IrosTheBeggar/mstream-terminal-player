@@ -2809,7 +2809,64 @@ reads a later buffer gets the frame before last, not the last frame. Both fixed,
 curve divergence, in mstream_music#207 (2026-09-22) — reproduced on the Android emulator
 before the fix and gone after it, and the Dart curve held to the same golden bytes as ours.
 
-### Phase 12 — The window spike: the GUI in a window of its own (2026-09-29/30)
+### Phase 12 — The control face: the desktop player as the server-audio engine
+
+> **Status 2026-09-28: the player half is built** — `gui --serve-port <port>` hosts the control
+> API from the GUI's own queue and worker, the sidecar publishes the port and a token, and the
+> serve module's parser is shared by both faces. Verified: 1037 unit tests, the wasm check, and a
+> live run through the mStream launcher's bundled Ghostty (the real GUI, every route over
+> loopback, the port closing with the player). The mStream half — the server adopting the face,
+> the launcher passing the port — is the next slice there (mStream Phase C).
+
+> **Decided 2026-09-30: the face is always on.** The launcher passes `--serve-port` on every
+> open, with the server's configured player port (`rustPlayerPort`, default 3333): that port is
+> mStream's player port by configuration whichever engine holds it, so the GUI needs no
+> ephemeral-port mode, and `autoBootServerAudio` decides only whether the server takes the offer
+> up. Flipping the switch never needs the player restarted, and the torrent hand-off (a second
+> `--torrent` while the player is open) gets its carrier for free: a route on this face, in a
+> later slice, instead of an inbox file. The cost is a token-guarded loopback port whenever the
+> GUI runs, so the sidecar that carries the token is written owner-only (instance.rs).
+
+mStream's server-audio feature spawns `mstream-player serve` and proxies the web remote to it.
+On a desktop where the GUI is open that made two players on one machine's speakers: the jukebox
+the remote drove, and the player the person sat at. The one-engine rule is that the GUI IS the
+engine while it is open.
+
+- **One parser, two faces.** `serve::vet` owns every rule the wire has — the hygiene of #28/#30
+  (Length required, Host, Origin, Content-Type, the body cap and the socket-reading discipline),
+  the token gate that spares only `GET /version`, and the route table — and yields a `Command`.
+  The headless engine executes it as before, route-for-route what rust-server-audio answered;
+  `gui::control` executes it against the App through the same funnel a click uses (`forward`,
+  `play_index`, `remove_queue_row`, `seek_to`, the bar's volume clamp). Neither can drift from
+  the other, and the table is pinned by a test.
+- **The listener is a thread with a channel.** It owns the socket, vets, and hands each Command
+  to the GUI loop, which drains the channel once a tick (`control::pump`) and answers through the
+  request's reply slot; three seconds of silence is a 503, never a hung socket. Loopback only.
+  The bind retries for fifteen seconds: the server stops its headless engine when it sees the
+  claim, and that engine may hold the port for its stop wait.
+- **Paths are the player's.** `/play`, `/queue/add` and `/queue/add-many` take the server's
+  library paths (vpaths) — what the GUI queues from a listing — and `/status`'s `file` and
+  `/queue`'s rows answer with the same; mStream passes its library paths through untranslated
+  for this face. A queued row starts with no tags and is filled the way the Song Info sheet's are:
+  `fetch_track_info` → `consume_track_info` patches every copy of the path.
+- **The wire's semantics kept, the App's honored.** `/pause` and `/resume` are explicit on the
+  wire and a toggle in the App, so each flips only from the other state; `/stop` keeps the queue
+  (ClearQueue's bookkeeping without the clearing); `/loop` cycles the App's repeat (off → all →
+  one) and answers the engine's words (`none`, `all`, `one`); `/play` is ClearQueue + add + play.
+  `GET /version` grew a `face` field (`serve` | `gui`), additive under apiVersion 1.
+- **The claim rides the instance lock's sidecar** (`port`, `token`; schema still 1, the fields
+  optional): the launcher hands the player `--serve-port` beside `--instance-lock`, and mStream
+  reads the sidecar behind its own liveness check — pid alive, `/version` answering as `gui`.
+  The token is 128 random bits minted at launch, in the sidecar and in the server's requests.
+
+**Left for the mStream half:** the server's external-engine mode (stop the headless engine on a
+live claim, proxy to the face with the token, respawn when the claim dies), the proxy layer's
+pass-through of library paths for this backend, the launcher passing `rustPlayerPort` as the port
+(always — see the decision above), and the pin bump. The first-version handoff carries no queue
+across: opening the GUI ends the headless engine's queue, closing it hands back an empty engine
+(the GUI's own queue persists in queue.json as ever).
+
+### Phase 13 — The window spike: the GUI in a window of its own (2026-09-29/30)
 
 > **Status: spike done, decision GO WITH CONDITIONS — nothing ships from it yet.** Five
 > commits on `claude/desktop-app-packaging-8ee4ff` (4e10926 render, 4685214 loop, de04c35

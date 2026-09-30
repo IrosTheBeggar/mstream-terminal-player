@@ -20,6 +20,7 @@
 
 mod albums;
 mod bar;
+pub(crate) mod control;
 mod actions;
 mod cover;
 mod dj;
@@ -2480,6 +2481,10 @@ struct Channels {
     audio_tx: Sender<AudioCmd>,
     api_tx: Sender<worker::ApiCmd>,
     event_tx: Sender<Event>,
+    /// The control face, when the launcher asked for one: its listener
+    /// lives for the session (the handle stops it on the way out), and the
+    /// loop answers its requests each frame — in a terminal or a window.
+    control: Option<(control::Handle, Receiver<control::Request>)>,
 }
 
 /// What the loop's two halves carry from one turn to the next, whoever
@@ -2580,6 +2585,11 @@ where
     }
     servers::poll(gui);
     torrent::poll(gui);
+    // The control face's requests — the server-audio remote driving
+    // this player — answered here, on the thread that owns the App.
+    if let Some((_, rx)) = &ctx.channels.control {
+        control::pump(gui, rx);
+    }
 
     // The Stats screen's page pumps its worker and its controls here too.
     let stats_over = stats::frame(gui);
@@ -3007,6 +3017,7 @@ pub fn run(
     token: Option<String>,
     torrent: Option<String>,
     bundled: Option<String>,
+    control: Option<control::Face>,
     window: bool,
 ) -> i32 {
     // The language first — the wizard's rule, from the system locale — so
@@ -3018,10 +3029,10 @@ pub fn run(
     // not the terminal that launched it and nothing has resolved it yet.
     if window {
         theme::pin_truecolor();
-        let (gui, channels) = start(server, token, torrent, bundled);
+        let (gui, channels) = start(server, token, torrent, bundled, control);
         return window::run(gui, channels);
     }
-    let (mut gui, channels) = start(server, token, torrent, bundled);
+    let (mut gui, channels) = start(server, token, torrent, bundled, control);
 
     let _title = crate::tui::WindowTitle::claim("mStream Player");
     // The OSC 11 ground lease runs before ratatui takes the terminal — the
@@ -3072,6 +3083,7 @@ fn start(
     token: Option<String>,
     torrent: Option<String>,
     bundled: Option<String>,
+    control: Option<control::Face>,
 ) -> (Gui, Channels) {
     // The player's own tolerant load first — it may seed the bundled
     // server — then the GUI's read of what is on disk (the [gui] section,
@@ -3084,6 +3096,10 @@ fn start(
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let (audio_tx, tap) = worker::spawn_audio(event_tx.clone());
     let api_tx = worker::spawn_api(event_tx.clone());
+    // The control face, when the launcher asked for one: its listener
+    // lives for the session (the handle stops it on the way out), and the
+    // loop answers its requests each tick.
+    let control = control.map(control::spawn);
 
     let mut app = tui::app_from(start);
     app.tap = Some(tap);
@@ -3097,7 +3113,7 @@ fn start(
     if let Some(arg) = torrent {
         torrent::arrive(&mut gui, &arg);
     }
-    (gui, Channels { event_rx, audio_tx, api_tx, event_tx })
+    (gui, Channels { event_rx, audio_tx, api_tx, event_tx, control })
 }
 
 /// The player's teardown that owes nothing to a terminal, after whatever

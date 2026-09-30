@@ -324,6 +324,14 @@ struct GuiArgs {
     #[arg(long, value_name = "FILE-OR-MAGNET")]
     torrent: Option<String>,
 
+    /// Host the server-audio control API on this loopback port
+    /// (gui/control.rs): the launcher passes the server's configured
+    /// engine port when server audio is on, so the desktop player IS the
+    /// engine the web remote drives. The port and a fresh token are
+    /// published in the instance lock's sidecar.
+    #[arg(long, hide = true, value_name = "PORT")]
+    serve_port: Option<u16>,
+
     /// The launcher passes it beside `--bundled-server` (multi-server
     /// contract, clause 57); the player has nothing to do with it yet.
     #[arg(long, hide = true)]
@@ -395,6 +403,14 @@ fn crossfade_seconds(raw: &str) -> Result<f32, String> {
     Ok(seconds)
 }
 
+/// A token for the control face: 128 random bits as hex. It lives only in
+/// the sidecar (the launcher's data home, the user's own) and in the
+/// requests the server signs with it.
+#[cfg(not(target_arch = "wasm32"))]
+fn fresh_token() -> String {
+    format!("{:016x}{:016x}", fastrand::u64(..), fastrand::u64(..))
+}
+
 /// A listening window that `Duration::from_secs_f64` will accept.
 ///
 /// The upper bound is a day rather than the type's limit: past that the flag
@@ -424,7 +440,13 @@ fn main() {
         Some(Command::Gui(args)) => (args.instance_lock.as_deref(), "gui"),
         _ => (None, ""),
     };
-    let instance = match instance::claim(lock_path, face) {
+    // The control face's port and token, minted here so the sidecar can
+    // publish them with the claim (the face itself binds later, in the GUI).
+    let control = match &cli.command {
+        Some(Command::Gui(args)) => args.serve_port.map(|port| (port, fresh_token())),
+        _ => None,
+    };
+    let instance = match instance::claim(lock_path, face, control.as_ref().map(|(port, token)| (*port, token.as_str()))) {
         Ok(instance::Claim::Held(held)) => Some(held),
         Ok(instance::Claim::Unlocked) => None,
         Ok(instance::Claim::Taken(who)) => {
@@ -479,6 +501,7 @@ fn main() {
                 args.conn.token,
                 args.torrent,
                 args.bundled_server,
+                control.map(|(port, token)| gui::control::Face { port, token }),
                 args.window,
             );
             drop(instance);

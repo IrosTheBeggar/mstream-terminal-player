@@ -1,7 +1,7 @@
 # The window spike — manual checklist
 
 What a human at a real keyboard should run before `gui --window` is offered anywhere (PLAN.md,
-Phase 12). Written by the spike's criteria judge on 2026-09-30 from the evidence of steps 1–5;
+Phase 13). Written by the spike's criteria judge on 2026-09-30 from the evidence of steps 1–5;
 each item names its expected result, and the known gaps are marked as such so a failure there is
 recorded, not a surprise. Expected numbers are from a release build on an M-series Mac.
 
