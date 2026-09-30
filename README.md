@@ -909,11 +909,9 @@ legacy alias for the old spawn contract. Changes from the original engine:
   hard cut, and manual `/next` cuts either way. Needs track durations to find the fade point, so
   sources of unknown length (a live transcode) fall back to the plain cut
 - `--gapless`: with no crossfade set, cross track boundaries sample-tight by feeding the next
-  track into the playing sink ahead of time
-- `--prefetch`: with neither set, keep the plain cut but open the next track ahead of time (from
-  12 s before the end), so the boundary normally does not wait on the open, and neither do
-  requests arriving then. If that open is still running at the boundary, the cut opens the track
-  itself, as without the flag
+  track into the playing sink ahead of time. The next track is opened ahead too (from 12 s before
+  the end), so the boundary normally does not wait on its open, and neither do requests arriving
+  then — without it, serve opens the next track at the boundary itself
 - Soft cuts everywhere, flags or no flags: manual next fades out over 150 ms, stop over 80 ms,
   and seeks dip around the jump — where the original engine cut mid-waveform and clicked
 - With a transition configured **and a next track queued**, `POST /seek` lands forward seeks no

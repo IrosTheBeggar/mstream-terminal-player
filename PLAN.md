@@ -2993,7 +2993,7 @@ its arithmetic checked by the skeptics. Severities are after measurement: #82 an
 Open PRs touch a few rows:
 - **PR #36:** fixes the frame-write finding (see Refuted below) and part of #102.
 - **PR #35:** hides #83's blank page but not its latency.
-- **PR #28:** offers #77 as an opt-in.
+- **PR #28:** lets a driver turn `--gapless` on at runtime, which is #77's answer (below).
 - Each row says where a PR bears on it.
 
 ### Playback and streaming
@@ -3167,8 +3167,8 @@ Integrated state, after the follow-ups below:
 | 73 | d7f680e, f94a59a | stream-download 0.24.2 vendored at `vendor/stream-download` with the wakeup fixed (`[patch.crates-io]`; drop it when upstream releases the fix). 1 s nudge back at 8 Mbit/s: 14.1 s → 0.17 s. Seek into the last 154 KB: 29.5 s → 0.19 s. FLAC without a SEEKTABLE, 90% at 2 Mbit/s: 111.7 s → 2.6 s (with #74) | report upstream |
 | 74 | c5ab3b5 | `/play` at 2 Mbit/s: 1.07 s → 0.27 s; FLAC seek with a SEEKTABLE 2.2 s → 1.25 s; no underrun | — |
 | 75 | d56b98c, b16bb40 | coreaudiod's PreventUserIdleSystemSleep released 5 s after launch, 30 s after a pause, ~6 s after a stop, and taken again on play; seek and resume while asleep work; a stalled download defers the suspend instead of hanging it | Windows and PipeWire unverified here; raw ALSA without pause support keeps running |
-| 76 | 8b070e0, 93436de | serve's added gap per track boundary: mean 163 ms → 31 ms; `playing:false` never seen | the rest is the next file's open (#77) |
-| 77 | 6854697, b149dcc | `serve --prefetch` (opt-in): gap 529 ms → 14-17 ms over a throttled link | **decision**: keep opt-in, make it serve's default, or drop it for `--gapless` |
+| 76 | 8b070e0, 93436de | serve's added gap per track boundary: mean 163 ms → 31 ms; `playing:false` never seen | the rest is the next file's open, which `--gapless` takes off the boundary (#77) |
+| 77 | 6854697, b149dcc, then removed | **Decided 2026-09-29: dropped in favour of `--gapless`.** `serve --prefetch` and the engine's `prepare_plain` are gone. `--gapless` already opens the next track 12 s ahead, and it removes the gap, not just the wait. On the throttled link: no flag 443 ms of silence per boundary (unchanged); `--gapless` −1 to 4 ms, with `/status` at 3 ms. Kept from #77: a boundary plays the row its prepare committed to (under shuffle it used to roll again and miss the prepared decoder), now `boundary_row`, unit-tested in CI | the legacy `--port N` spawn keeps the plain open at the boundary unless mStream turns gapless on (PR #28) |
 | 78 | 498f0d8 | behind an h2 proxy: 7 new TLS connections for 7 quick skips → 2; the loopback bridge still never pools | pool idle 4 s (under Node's 5 s) against the verifier's 90 s plus a retry |
 | 79 | b42cb98, 699cba0 | Stop during a 4 s open: ~3.8 s → 0.14 s; the next pick's request 3.6 s → 0.02 s; a given-up download is cut when its open finishes; a stalled open still fails at 20 s | — |
 | 80 | f5d3143 | one probe a local track; Ogg `/play` 53 ms → 31 ms; LAME lengths now trimmed, as HTTP reports them | — |
