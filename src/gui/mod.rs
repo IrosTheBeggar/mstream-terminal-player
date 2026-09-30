@@ -2473,189 +2473,261 @@ fn handle_key(gui: &mut Gui, key: KeyEvent) -> bool {
 
 // ── The loop and the room it runs in ────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
+/// The workers' channels, as startup opens them: what the loop dispatches
+/// through and drains, and what teardown sends the audio its shutdown on.
+struct Channels {
+    event_rx: Receiver<Event>,
+    audio_tx: Sender<AudioCmd>,
+    api_tx: Sender<worker::ApiCmd>,
+    event_tx: Sender<Event>,
+}
+
+/// What the loop's two halves carry from one turn to the next, whoever
+/// runs them — the terminal's poll loop or the window's event loop
+/// (gui/window.rs): the channels, the queue saver and whether the pointer
+/// is a hand.
+struct Ctx {
+    channels: Channels,
+    saver: tui::QueueSaver,
+    hand: bool,
+}
+
+impl Ctx {
+    /// Made where the loop begins, so the saver's first signature is the
+    /// App as the loop finds it.
+    fn new(app: &App, channels: Channels) -> Self {
+        Ctx { channels, saver: tui::QueueSaver::new(app), hand: false }
+    }
+}
+
+/// Whatever shows the GUI, for the one thing the loop asks of it beyond
+/// drawing: the pointer's shape over something clickable. The terminal
+/// writes the OSC 22 shape; a native window sets its own cursor.
+trait Host {
+    fn pointer(&mut self, hand: bool);
+}
+
+/// The terminal as a [`Host`]: the shape escape goes out only while the
+/// mouse is captured, as it always has.
+struct TermHost {
+    mouse_on: bool,
+}
+
+impl Host for TermHost {
+    fn pointer(&mut self, hand: bool) {
+        set_pointer_shape(hand, self.mouse_on);
+    }
+}
+
+/// What one input left the loop to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flow {
+    Continue,
+    Quit,
+}
+
+/// The loop's frame half: effects out, workers' answers in, one frame
+/// drawn, the per-frame pumps run — and the wait until the next frame is
+/// wanted, which the caller sleeps on while it listens for input.
+fn frame<B>(
+    terminal: &mut ratatui::Terminal<B>,
+    gui: &mut Gui,
+    ctx: &mut Ctx,
+    host: &mut impl Host,
+) -> std::io::Result<Duration>
+where
+    B: ratatui::backend::Backend<Error = std::io::Error>,
+{
+    // A SaveSession about to be dispatched writes the config behind
+    // this copy's back — a Quick Connect add mints a whole new entry
+    // there. Reload after, so the dropdown and the room list it.
+    let saving = gui.pending.iter().any(|e| {
+        matches!(e, Effect::SaveSession | Effect::SavePeers { .. } | Effect::SaveDjLibrary { .. })
+    });
+    let ch = &ctx.channels;
+    tui::dispatch(&gui.app, &mut gui.pending, &ch.audio_tx, &ch.api_tx, &ch.event_tx);
+    ctx.saver.tick(&gui.app);
+    let ticked = gui.app.tick();
+    gui.pend(ticked);
+    if saving && let Ok(fresh) = config::load() {
+        gui.config = fresh;
+        refresh_book(gui);
+    }
+    terminal.draw(|frame| render(frame, gui))?;
+
+    while let Ok(ev) = ctx.channels.event_rx.try_recv() {
+        // The servers layer looks first: session answers that would
+        // land on the TUI's connect screen open the GUI's form instead.
+        servers::observe(gui, &ev);
+        torrent::observe(gui, &ev);
+        // A random pick that lands while results are up owes them a
+        // rebuild — clause 22's promise, kept here because the App
+        // consumes the pick into the setup view first.
+        let sonic_random = matches!(ev, Event::SonicRandom { .. });
+        let connected = matches!(ev, Event::Connected { .. });
+        let was_results = gui.app.sonic.view == crate::tui::app::SonicView::Results;
+        let effects = gui.app.apply_event(ev);
+        gui.pend(effects);
+        if sonic_random {
+            sonic::random_landed(gui, was_results);
+        }
+        // A room open through a switch or a late connect asked the old
+        // server, or none: it asks this one now.
+        if connected {
+            gui.reopen_room();
+            stats::reopen(gui);
+        }
+    }
+    servers::poll(gui);
+    torrent::poll(gui);
+
+    // The Stats screen's page pumps its worker and its controls here too.
+    let stats_over = stats::frame(gui);
+    // The visualizer window's host: the child's exit, the next texture.
+    vizwin::tick(gui);
+    let over = gui.ui.hovering_clickable() || stats_over;
+    if over != ctx.hand {
+        ctx.hand = over;
+        host.pointer(ctx.hand);
+    }
+    if let Some(act) = gui.ui.hold_action() {
+        gui.act(act);
+    }
+    gui.ui.dwell_tick();
+
+    // While covers are still upgrading to pixels, the next frame is
+    // wanted promptly — idling out the full poll would stretch a page
+    // turn's ~50 ms of encode work across a second of ticks. A blinking
+    // caret wants its next frame ON the flip, not a poll tick after it.
+    let wait = if gui.hot {
+        Duration::from_millis(10)
+    } else if gui.app.drawing_audio() || vizwin::is_open(gui) {
+        // The visualizer tab, moving: the TUI's thirty frames a second —
+        // and the visualizer window's feed, at the same pace.
+        Duration::from_millis(33)
+    } else {
+        gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
+    };
+    Ok(wait)
+}
+
+/// The loop's input half, for one event. A quit flushes the queue saver
+/// before it answers [`Flow::Quit`]; the caller tears down.
+fn input(gui: &mut Gui, ctx: &mut Ctx, event: TermEvent) -> Flow {
+    match event {
+        TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+            gui.ui.dismiss_tooltip();
+            gui.ui.caret_touch();
+            if handle_key(gui, key) {
+                ctx.saver.flush(&gui.app);
+                return Flow::Quit;
+            }
+        }
+        TermEvent::Mouse(mouse) => {
+            let at = Position { x: mouse.column, y: mouse.row };
+            // The App keeps the pointer too: the Now Playing band
+            // lights under it, the TUI's way.
+            gui.app.note_pointer(at);
+            // The Stats screen's page owns the pointer below the top
+            // bar, on its own surface (stats-screen contract, clause
+            // 5); the GUI's surface still follows the motion, so the
+            // bar's own tabs light and dim as the pointer passes.
+            if stats::pointer(gui, mouse) {
+                if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
+                    gui.ui.motion(at);
+                }
+                return Flow::Continue;
+            }
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    gui.ui.caret_touch();
+                    if !gui.ui.begin_press(at) {
+                        return Flow::Continue;
+                    }
+                    // A click in the content column hands the keys
+                    // back from the queue (track-actions contract,
+                    // clause 19).
+                    if gui.app.focus == crate::tui::app::Focus::Queue
+                        && !actions::modal_open(gui)
+                        && !(gui.queue_open && at.x >= gui.queue_panel_x())
+                    {
+                        gui.app.focus = crate::tui::app::Focus::Browser;
+                        gui.queue_view.stow();
+                    }
+                    if let Some(act) = gui.ui.hit(at)
+                        && gui.act(act)
+                    {
+                        ctx.saver.flush(&gui.app);
+                        return Flow::Quit;
+                    }
+                    gui.ui.arm_bars(at);
+                }
+                // A right click on a row is its sheet (entry point 1) —
+                // never through a modal, which owns the pointer whole.
+                MouseEventKind::Down(MouseButton::Right) => {
+                    if !gui.modal_open()
+                        && let Some(act) = gui.ui.hit_context(at)
+                        && gui.act(act)
+                    {
+                        ctx.saver.flush(&gui.app);
+                        return Flow::Quit;
+                    }
+                }
+                MouseEventKind::Moved => gui.ui.motion(at),
+                MouseEventKind::Drag(_) => {
+                    gui.ui.motion(at);
+                    if gui.actions.drag.is_some() {
+                        actions::drag_to(gui, at);
+                    } else if let Some(act) = gui.ui.drag_action(at) {
+                        gui.act(act);
+                    }
+                }
+                MouseEventKind::Up(_) => {
+                    gui.ui.release();
+                    actions::drop(gui);
+                }
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    let delta = if mouse.kind == MouseEventKind::ScrollUp { -1 } else { 1 };
+                    gui.wheel(at, delta);
+                }
+                _ => {}
+            }
+        }
+        // A resized window changes the cell-to-pixel mapping the
+        // cover encodes against — the card's, every album slot's
+        // and every queue row's alike.
+        TermEvent::Resize(..) => {
+            gui.app.graphics.refresh();
+            gui.albums.on_resize();
+            gui.queue.on_resize();
+            gui.actions.on_resize();
+        }
+        _ => {}
+    }
+    Flow::Continue
+}
+
+/// The terminal's loop: a frame, then input until the frame's wait runs
+/// out — everything queued is drained before the next draw (the wizard's
+/// collapse-moves lesson: pointer sweeps are one event per cell).
 fn event_loop(
     terminal: &mut crate::kit::frames::PageTerminal,
     gui: &mut Gui,
-    mouse_on: bool,
-    event_rx: &Receiver<Event>,
-    audio_tx: &Sender<AudioCmd>,
-    api_tx: &Sender<worker::ApiCmd>,
-    event_tx: &Sender<Event>,
+    ctx: &mut Ctx,
+    host: &mut TermHost,
 ) -> std::io::Result<()> {
-    let mut hand = false;
-    let mut saver = tui::QueueSaver::new(&gui.app);
     loop {
-        // A SaveSession about to be dispatched writes the config behind
-        // this copy's back — a Quick Connect add mints a whole new entry
-        // there. Reload after, so the dropdown and the room list it.
-        let saving = gui
-            .pending
-            .iter()
-            .any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. } | Effect::SaveDjLibrary { .. }));
-        tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
-        saver.tick(&gui.app);
-        let ticked = gui.app.tick();
-        gui.pend(ticked);
-        if saving && let Ok(fresh) = config::load() {
-            gui.config = fresh;
-            refresh_book(gui);
-        }
-        terminal.draw(|frame| render(frame, gui))?;
-
-        while let Ok(ev) = event_rx.try_recv() {
-            // The servers layer looks first: session answers that would
-            // land on the TUI's connect screen open the GUI's form instead.
-            servers::observe(gui, &ev);
-            torrent::observe(gui, &ev);
-            // A random pick that lands while results are up owes them a
-            // rebuild — clause 22's promise, kept here because the App
-            // consumes the pick into the setup view first.
-            let sonic_random = matches!(ev, Event::SonicRandom { .. });
-            let connected = matches!(ev, Event::Connected { .. });
-            let was_results = gui.app.sonic.view == crate::tui::app::SonicView::Results;
-            let effects = gui.app.apply_event(ev);
-            gui.pend(effects);
-            if sonic_random {
-                sonic::random_landed(gui, was_results);
-            }
-            // A room open through a switch or a late connect asked the old
-            // server, or none: it asks this one now.
-            if connected {
-                gui.reopen_room();
-                stats::reopen(gui);
-            }
-        }
-        servers::poll(gui);
-        torrent::poll(gui);
-
-        // The Stats screen's page pumps its worker and its controls here too.
-        let stats_over = stats::frame(gui);
-        // The visualizer window's host: the child's exit, the next texture.
-        vizwin::tick(gui);
-        let over = gui.ui.hovering_clickable() || stats_over;
-        if over != hand {
-            hand = over;
-            set_pointer_shape(hand, mouse_on);
-        }
-        if let Some(act) = gui.ui.hold_action() {
-            gui.act(act);
-        }
-        gui.ui.dwell_tick();
-
-        // While covers are still upgrading to pixels, the next frame is
-        // wanted promptly — idling out the full poll would stretch a page
-        // turn's ~50 ms of encode work across a second of ticks. A blinking
-        // caret wants its next frame ON the flip, not a poll tick after it.
-        let wait = if gui.hot {
-            Duration::from_millis(10)
-        } else if gui.app.drawing_audio() || vizwin::is_open(gui) {
-            // The visualizer tab, moving: the TUI's thirty frames a second —
-            // and the visualizer window's feed, at the same pace.
-            Duration::from_millis(33)
-        } else {
-            gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
-        };
+        let wait = frame(terminal, gui, ctx, host)?;
         if !event::poll(wait)? {
             continue;
         }
-        // Drain everything queued before the next draw (the wizard's
-        // collapse-moves lesson: pointer sweeps are one event per cell).
         let mut inputs = vec![event::read()?];
         while event::poll(Duration::ZERO)? {
             inputs.push(event::read()?);
         }
-        for input in inputs {
-            match input {
-                TermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                    gui.ui.dismiss_tooltip();
-                    gui.ui.caret_touch();
-                    if handle_key(gui, key) {
-                        saver.flush(&gui.app);
-                        return Ok(());
-                    }
-                }
-                TermEvent::Mouse(mouse) => {
-                    let at = Position { x: mouse.column, y: mouse.row };
-                    // The App keeps the pointer too: the Now Playing band
-                    // lights under it, the TUI's way.
-                    gui.app.note_pointer(at);
-                    // The Stats screen's page owns the pointer below the top
-                    // bar, on its own surface (stats-screen contract, clause
-                    // 5); the GUI's surface still follows the motion, so the
-                    // bar's own tabs light and dim as the pointer passes.
-                    if stats::pointer(gui, mouse) {
-                        if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
-                            gui.ui.motion(at);
-                        }
-                        continue;
-                    }
-                    match mouse.kind {
-                        MouseEventKind::Down(MouseButton::Left) => {
-                            gui.ui.caret_touch();
-                            if !gui.ui.begin_press(at) {
-                                continue;
-                            }
-                            // A click in the content column hands the keys
-                            // back from the queue (track-actions contract,
-                            // clause 19).
-                            if gui.app.focus == crate::tui::app::Focus::Queue
-                                && !actions::modal_open(gui)
-                                && !(gui.queue_open && at.x >= gui.queue_panel_x())
-                            {
-                                gui.app.focus = crate::tui::app::Focus::Browser;
-                                gui.queue_view.stow();
-                            }
-                            if let Some(act) = gui.ui.hit(at) {
-                                if gui.act(act) {
-                                    saver.flush(&gui.app);
-                                    return Ok(());
-                                }
-                            }
-                            gui.ui.arm_bars(at);
-                        }
-                        // A right click on a row is its sheet (entry point 1).
-                        // A right click on a row is its sheet (entry point 1) —
-                        // never through a modal, which owns the pointer whole.
-                        MouseEventKind::Down(MouseButton::Right) => {
-                            if !gui.modal_open()
-                                && let Some(act) = gui.ui.hit_context(at)
-                                && gui.act(act)
-                            {
-                                saver.flush(&gui.app);
-                                return Ok(());
-                            }
-                        }
-                        MouseEventKind::Moved => gui.ui.motion(at),
-                        MouseEventKind::Drag(_) => {
-                            gui.ui.motion(at);
-                            if gui.actions.drag.is_some() {
-                                actions::drag_to(gui, at);
-                            } else if let Some(act) = gui.ui.drag_action(at) {
-                                gui.act(act);
-                            }
-                        }
-                        MouseEventKind::Up(_) => {
-                            gui.ui.release();
-                            actions::drop(gui);
-                        }
-                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                            let delta = if mouse.kind == MouseEventKind::ScrollUp { -1 } else { 1 };
-                            gui.wheel(at, delta);
-                        }
-                        _ => {}
-                    }
-                }
-                // A resized window changes the cell-to-pixel mapping the
-                // cover encodes against — the card's, every album slot's
-                // and every queue row's alike.
-                TermEvent::Resize(..) => {
-                    gui.app.graphics.refresh();
-                    gui.albums.on_resize();
-                    gui.queue.on_resize();
-                    gui.actions.on_resize();
-                }
-                _ => {}
+        for event in inputs {
+            if input(gui, ctx, event) == Flow::Quit {
+                return Ok(());
             }
         }
     }
@@ -2941,17 +3013,66 @@ pub fn run(
     // the ten locales the strings carry reach the screen.
     crate::setup::boot_language();
     // The window-mode spike leaves here, before anything below touches the
-    // terminal, the config or the workers: it only draws (gui/window.rs).
-    // Its Gui is the render tests' one — no workers behind it, a default
-    // config that is never written back, and the demo track in the bar so
-    // there is something to look at with no server. The palette is pinned
-    // first, because the window is not the terminal that launched it.
+    // terminal (gui/window.rs): the same player, started the same way, in
+    // a native window. The palette is pinned first, because the window is
+    // not the terminal that launched it and nothing has resolved it yet.
     if window {
         theme::pin_truecolor();
-        let mut gui = Gui::new(Config::default(), false, App::new(None, None, None));
-        gui.demo = Some(demo_now());
-        return window::run(gui);
+        let (gui, channels) = start(server, token, torrent, bundled);
+        return window::run(gui, channels);
     }
+    let (mut gui, channels) = start(server, token, torrent, bundled);
+
+    let _title = crate::tui::WindowTitle::claim("mStream Player");
+    // The OSC 11 ground lease runs before ratatui takes the terminal — the
+    // wizard's ordering, for the wizard's reasons.
+    let claim = theme::acquire_ground();
+    let ground_guard = GroundGuard;
+    // ratatui's init, with each frame written whole and shown at once —
+    // a resize's clear never painted on its own (`kit::frames`).
+    let mut terminal = crate::kit::frames::init();
+    // After init, like the player: a terminal that answers the pixel probe
+    // strangely makes its mess on the alternate screen, which restore
+    // throws away.
+    gui.app.graphics = crate::tui::graphics::Graphics::probe();
+    crate::console::claim_terminal();
+    let mouse_on = execute!(std::io::stdout(), EnableMouseCapture).is_ok();
+    if let Some(seq) = claim {
+        let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(seq));
+    }
+    set_pointer_shape(false, mouse_on);
+    tui::install_panic_hook();
+
+    let mut ctx = Ctx::new(&gui.app, channels);
+    let outcome = event_loop(&mut terminal, &mut gui, &mut ctx, &mut TermHost { mouse_on });
+
+    if mouse_on {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(POINTER_RESET));
+    }
+    ratatui::restore();
+    crate::console::release_terminal();
+    drop(ground_guard);
+    finish(&mut gui, &ctx);
+
+    match outcome {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("mstream-player: {e}");
+            1
+        }
+    }
+}
+
+/// The player's startup that owes nothing to a terminal, shared by the
+/// terminal and the window: the config, the workers, the App and its
+/// first effects, and the Gui around them.
+fn start(
+    server: Option<String>,
+    token: Option<String>,
+    torrent: Option<String>,
+    bundled: Option<String>,
+) -> (Gui, Channels) {
     // The player's own tolerant load first — it may seed the bundled
     // server — then the GUI's read of what is on disk (the [gui] section,
     // and the save guard).
@@ -2976,59 +3097,19 @@ pub fn run(
     if let Some(arg) = torrent {
         torrent::arrive(&mut gui, &arg);
     }
+    (gui, Channels { event_rx, audio_tx, api_tx, event_tx })
+}
 
-    let _title = crate::tui::WindowTitle::claim("mStream Player");
-    // The OSC 11 ground lease runs before ratatui takes the terminal — the
-    // wizard's ordering, for the wizard's reasons.
-    let claim = theme::acquire_ground();
-    let ground_guard = GroundGuard;
-    // ratatui's init, with each frame written whole and shown at once —
-    // a resize's clear never painted on its own (`kit::frames`).
-    let mut terminal = crate::kit::frames::init();
-    // After init, like the player: a terminal that answers the pixel probe
-    // strangely makes its mess on the alternate screen, which restore
-    // throws away.
-    gui.app.graphics = crate::tui::graphics::Graphics::probe();
-    crate::console::claim_terminal();
-    let mouse_on = execute!(std::io::stdout(), EnableMouseCapture).is_ok();
-    if let Some(seq) = claim {
-        let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(seq));
-    }
-    set_pointer_shape(false, mouse_on);
-    tui::install_panic_hook();
-
-    let outcome = event_loop(
-        &mut terminal,
-        &mut gui,
-        mouse_on,
-        &event_rx,
-        &audio_tx,
-        &api_tx,
-        &event_tx,
-    );
-
-    if mouse_on {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
-        let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(POINTER_RESET));
-    }
-    ratatui::restore();
-    crate::console::release_terminal();
-    drop(ground_guard);
+/// The player's teardown that owes nothing to a terminal, after whatever
+/// showed it has let go.
+fn finish(gui: &mut Gui, ctx: &Ctx) {
     // The visualizer window, if one is open, closes with the player.
-    vizwin::close(&mut gui);
-    let _ = audio_tx.send(AudioCmd::Shutdown);
+    vizwin::close(gui);
+    let _ = ctx.channels.audio_tx.send(AudioCmd::Shutdown);
     // The player prefs, the session and the last path persist the TUI's own
     // way; the GUI's bar choice rides its own section afterwards.
     tui::remember(&gui.app);
     gui.save_now();
-
-    match outcome {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("mstream-player: {e}");
-            1
-        }
-    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

@@ -336,9 +336,10 @@ struct GuiArgs {
     #[arg(long, hide = true, value_name = "PATH")]
     instance_lock: Option<std::path::PathBuf>,
 
-    /// The spike's own window: draw the GUI into a native window through
-    /// ratatui-wgpu instead of this terminal (gui/window.rs). Rendering
-    /// only — no input, no playback — until the spike's later steps.
+    /// The spike's own window: the GUI in a native window through
+    /// ratatui-wgpu instead of this terminal (gui/window.rs) — the real
+    /// player, workers and all, but no keys or pointer until the spike's
+    /// later steps.
     #[arg(long, hide = true)]
     window: bool,
 }
