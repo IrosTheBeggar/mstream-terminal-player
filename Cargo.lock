@@ -3433,7 +3433,7 @@ dependencies = [
 
 [[package]]
 name = "mstream-player"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "ashpd",
  "base64",
