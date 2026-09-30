@@ -3121,7 +3121,7 @@ These hot paths were examined and need nothing:
 
 ### Fix record (2026-09-28)
 
-Every row above is fixed on `claude/repo-performance-audit-f64fcf`. #127 went in first, since it cuts
+Every row above is fixed on `claude/repo-performance-audit-f64fcf`, except #77, which is answered by `--gapless` instead (see its row). #127 went in first, since it cuts
 every later release build. The other 61 were done in twelve lanes, each in its own worktree and
 branch (`perf/<lane>`, kept), then merged:
 
@@ -3155,7 +3155,7 @@ defects in the fixes themselves:
 Each defect was fixed in a follow-up commit and re-smoked before the merge.
 
 Integrated state, after the follow-ups below:
-- 1,182 unit tests pass (1,026 before).
+- 1,186 unit tests pass (1,026 before).
 - The wasm32 check is clean.
 - The e2e battery passes in 2m08s (8m33s before).
 - A full release build takes 3m15s, including the dependencies the TLS change touched; the crate alone takes 2m28s (11.5-17.7 min before).

@@ -749,10 +749,9 @@ struct State {
     /// across ticks — [`Engine::advance_tick`] attempts one source per call.
     advance_failures: usize,
     /// Seconds of blend between tracks. 0.0 — the default — is off. Off
-    /// (with gapless also off) means no prefetch and no
-    /// transitions, as before Phase C; the soft cuts on manual
-    /// skip/stop/seek are the one deliberate global departure (C4) — the
-    /// old engine clicked.
+    /// (with gapless also off) means no prefetch and no transitions, as
+    /// before Phase C; the soft cuts on manual skip/stop/seek are the one
+    /// deliberate global departure (C4) — the old engine clicked.
     crossfade: f32,
     /// Sample-tight transitions when no blend is configured: the prepared
     /// next is appended to the playing sink instead of overlapped on a
@@ -2464,7 +2463,7 @@ impl Engine {
             if blending && remaining <= fade {
                 etrace!("handover at {remaining:.2}s remaining");
                 self.handover(s);
-            } else if !blending && s.gapless && remaining <= APPEND_LEAD {
+            } else if !blending && remaining <= APPEND_LEAD {
                 etrace!("gapless append at {remaining:.2}s remaining");
                 append_gapless(s);
             }
@@ -3439,22 +3438,43 @@ mod tests {
         engine.stop();
     }
 
+    /// Temp files a test writes, gone when it ends — passing or not.
+    struct TempFiles(Vec<String>);
+
+    impl TempFiles {
+        fn wavs(tag: &str, count: usize, seconds: usize) -> TempFiles {
+            TempFiles(
+                (0..count)
+                    .map(|i| {
+                        let path = std::env::temp_dir()
+                            .join(format!("mstream-{tag}-{}-{i}.wav", std::process::id()));
+                        std::fs::write(&path, wav_bytes(seconds)).unwrap();
+                        path.to_string_lossy().into_owned()
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for TempFiles {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
     /// Under shuffle the prepare rolls the dice for the next row; the
     /// boundary used to roll them again and miss the prepared decoder most
     /// of the time (audit #77). A commitment that still names its row is
-    /// the row; one whose row no longer holds its file is not.
+    /// the row; one whose row no longer holds its file is not. The
+    /// decision alone — that the boundary asks it is the device test
+    /// below.
     #[test]
-    fn a_shuffled_boundary_plays_the_row_that_was_prepared() {
-        let rows: Vec<String> = (0..5)
-            .map(|i| {
-                let path = std::env::temp_dir()
-                    .join(format!("mstream-boundary-{}-{i}.wav", std::process::id()));
-                std::fs::write(&path, wav_bytes(1)).unwrap();
-                path.to_string_lossy().into_owned()
-            })
-            .collect();
+    fn the_boundary_row_is_the_one_the_prepare_committed_to() {
+        let rows = TempFiles::wavs("boundary", 5, 1);
         let mut state = QueueState {
-            queue: rows.iter().map(|row| QueueEntry::new(row.clone())).collect(),
+            queue: rows.0.iter().map(|row| QueueEntry::new(row.clone())).collect(),
             index: 0,
             shuffle: true,
             loop_mode: LoopMode::None,
@@ -3472,9 +3492,55 @@ mod tests {
         state.queue[3] = QueueEntry::new("elsewhere".into());
         let rolled: std::collections::HashSet<_> = (0..200).map(|_| boundary_row(&state, &next)).collect();
         assert!(rolled.len() > 1, "a stale commitment still chose the row: {rolled:?}");
-        for row in rows {
-            let _ = std::fs::remove_file(row);
+    }
+
+    /// The same, end to end: gapless and shuffle, with every row's duration
+    /// hint three seconds long — the usual road to a prepare reaching the
+    /// boundary unused, since the append window (by the hint) never comes
+    /// before the audio runs out. Three boundaries each play the row that
+    /// was prepared; a boundary that rolled again would agree with it by
+    /// chance (1/4)^3 of the time.
+    ///
+    /// `cargo test a_shuffled_boundary -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_shuffled_boundary_plays_the_row_that_was_prepared() {
+        let rows = TempFiles::wavs("shuffle", 5, 2);
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_gapless(true);
+        engine.set_shuffle(true);
+        engine.state.lock().unwrap().q.queue = rows
+            .0
+            .iter()
+            .map(|row| QueueEntry { path: row.clone(), duration_hint: Some(5.0) })
+            .collect();
+        engine.queue_play_index(0).unwrap();
+
+        let started = std::time::Instant::now();
+        let mut committed: Option<usize> = None;
+        let mut index = engine.status().queue_index;
+        let mut crossed = 0;
+        while crossed < 3 {
+            engine.advance_tick();
+            {
+                let s = engine.state.lock().unwrap();
+                assert!(s.appended.is_none(), "an append: the hint did not keep the window away");
+                if let NextTrack::Ready { index: Some(at), .. } = &s.next {
+                    committed = Some(*at);
+                }
+            }
+            let now = engine.status().queue_index;
+            if now != index {
+                assert_eq!(Some(now), committed, "the boundary played a row nobody prepared");
+                committed = None;
+                index = now;
+                crossed += 1;
+            }
+            assert!(started.elapsed() < Duration::from_secs(20), "only {crossed} boundaries");
+            std::thread::sleep(Duration::from_millis(20));
         }
+        engine.stop();
     }
 
     /// The other half of the listening-session bug: an open that failed
