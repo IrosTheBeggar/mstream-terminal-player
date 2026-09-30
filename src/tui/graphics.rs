@@ -25,7 +25,7 @@
 //! the word "image", so a halfblocks-only answer is treated as a no.
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::Graphics;
+pub use native::{Graphics, PictureHost};
 #[cfg(target_arch = "wasm32")]
 pub use stub::Graphics;
 
@@ -39,10 +39,26 @@ mod native {
 
     use crate::tui::art::Art;
 
+    /// Something that draws covers itself, beside the cells rather than in
+    /// them: the GUI's own window (gui/window/covers.rs), which paints a
+    /// texture over the grid after the text is composited. A hosted
+    /// `Graphics` hands each cover here instead of encoding it for a
+    /// terminal, so the drawing path that decides WHERE a picture goes —
+    /// the slots, the mosaic-under-overlays rule — stays the one the
+    /// terminal walks.
+    pub trait PictureHost: Send + Sync {
+        /// `art` belongs in `area` this frame, on a grid of `grid`'s size.
+        fn place(&self, area: Rect, grid: Rect, art: &Art);
+    }
+
     pub struct Graphics {
         /// `None` is the ordinary state, not the error state — see the
         /// module note.
         picker: Option<Picker>,
+        /// The window that draws pictures itself, when this is the
+        /// window's `Graphics`; `None` everywhere a terminal is the
+        /// screen. Set, it answers every draw and the picker is unused.
+        host: Option<std::sync::Arc<dyn PictureHost>>,
         /// The cover, encoded for the protocol in hand. Encoding is
         /// blocking and happens at render time, so it is done once per
         /// answer rather than once per frame: a new cover or a resized
@@ -119,6 +135,7 @@ mod native {
     impl std::fmt::Debug for Graphics {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match &self.picker {
+                _ if self.host.is_some() => write!(f, "Graphics(hosted)"),
                 Some(picker) => write!(f, "Graphics({:?})", picker.protocol_type()),
                 None => write!(f, "Graphics(off)"),
             }
@@ -278,6 +295,7 @@ mod native {
         pub fn fork(&self) -> Graphics {
             Graphics {
                 picker: self.picker.clone(),
+                host: self.host.clone(),
                 adaptive: self.adaptive,
                 images_outlive_resize: self.images_outlive_resize,
                 ..Graphics::disabled()
@@ -289,6 +307,7 @@ mod native {
         pub fn disabled() -> Graphics {
             Graphics {
                 picker: None,
+                host: None,
                 cached: None,
                 refused: None,
                 adaptive: false,
@@ -299,6 +318,19 @@ mod native {
                 #[cfg(test)]
                 encodes: std::cell::Cell::new(0),
             }
+        }
+
+        /// A `Graphics` whose every cover goes to `host`, which draws it
+        /// beside the cells — the GUI window's. No terminal is asked
+        /// anything: the window is not one.
+        pub fn hosted(host: std::sync::Arc<dyn PictureHost>) -> Graphics {
+            Graphics { host: Some(host), ..Graphics::disabled() }
+        }
+
+        /// Whether covers go to a [`PictureHost`]: recording one is free,
+        /// so there is no encode for a frame's budget to ration.
+        pub fn is_hosted(&self) -> bool {
+            self.host.is_some()
         }
 
         /// How many covers this instance has encoded — tests only.
@@ -432,6 +464,9 @@ mod native {
         /// (2026-09-20). Only a box that wants more pixels than the
         /// thumbnail holds decodes the source.
         pub fn draw(&mut self, frame: &mut Frame, area: Rect, art: &Art) -> bool {
+            if let Some(host) = &self.host {
+                return draw_hosted(host.as_ref(), frame, area, art);
+            }
             self.refresh_font();
             let Some(picker) = self.picker.as_ref() else {
                 return false;
@@ -538,6 +573,30 @@ mod native {
             frame.render_widget(Image::new(&held.protocol), centre(area, held.shown));
             true
         }
+    }
+
+    /// A hosted cover: the box's cells blanked to their own ground, and the
+    /// picture handed to the host to draw over them. Blank so nothing
+    /// text-coloured shows round a letterboxed cover or under a picture
+    /// that has not reached the screen yet, and the box's own ground so the
+    /// letterbox is the panel's, as it is round a kitty picture.
+    fn draw_hosted(host: &dyn PictureHost, frame: &mut Frame, area: Rect, art: &Art) -> bool {
+        let grid = frame.area();
+        let area = area.intersection(grid);
+        if area.is_empty() {
+            return false;
+        }
+        let buffer = frame.buffer_mut();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let cell = &mut buffer[(x, y)];
+                let ground = cell.bg;
+                cell.reset();
+                cell.set_bg(ground);
+            }
+        }
+        host.place(area, grid, art);
+        true
     }
 
     impl Graphics {

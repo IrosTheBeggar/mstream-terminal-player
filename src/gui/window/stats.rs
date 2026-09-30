@@ -191,7 +191,10 @@ impl Stats {
     }
 
     /// The report, to the lever's file; said on stderr either way.
-    pub(super) fn write(&self) {
+    /// `covers` is the cover post-processor's own count: how many frames
+    /// it composited, which with covers on screen is not only the frames
+    /// that changed a cell.
+    pub(super) fn write(&self, covers: Option<serde_json::Value>) {
         let wall = self.started.elapsed();
         let report = serde_json::json!({
             "wall_ms": ms(wall),
@@ -205,6 +208,7 @@ impl Stats {
             "flush_ms": spread(&self.flush_ms),
             "present_flush_ms": spread(&self.present_flush_ms),
             "redraw_ms": spread(&self.redraw_ms),
+            "covers": covers,
         });
         let text = serde_json::to_string_pretty(&report).unwrap_or_default() + "\n";
         match std::fs::write(&self.path, text) {

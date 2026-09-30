@@ -26,7 +26,12 @@
 //! prove input on a machine that may not send a window synthetic events.
 //! A fourth, `MSTREAM_WINDOW_STATS=<path>`, writes what the frames cost
 //! when the window closes (stats.rs).
+//!
+//! Step 5 is album art: the window draws covers as textures over the grid
+//! (covers.rs) where it drew the ▀-mosaic, through a `Graphics` that hands
+//! each cover to the window instead of encoding it for a terminal.
 
+mod covers;
 mod input;
 mod script;
 mod stats;
@@ -50,6 +55,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowId};
 
+use covers::{Board, CoverPost};
 use input::{Grid, Raw, Translator};
 use script::{Input, Script, Step};
 use stats::{Counted, Stats};
@@ -78,7 +84,7 @@ const STALLED_REDRAW: Duration = Duration::from_millis(100);
 /// opening size, the resize to the grid lands a frame or two later.
 const DUMP_AT_FRAME: u32 = 5;
 
-type WindowTerminal = Terminal<Counted<WgpuBackend<'static, 'static>>>;
+type WindowTerminal = Terminal<Counted<WgpuBackend<'static, 'static, CoverPost>>>;
 
 /// The player in a window, from a Gui and workers that `gui::start` has
 /// already brought up; the exit code is the terminal's (0, or 1 when a
@@ -104,11 +110,16 @@ pub(super) fn run(mut gui: Gui, channels: Channels) -> i32 {
         }
     };
     let dump = std::env::var_os("MSTREAM_WINDOW_DUMP").map(PathBuf::from);
+    // Covers are the window's to draw: every Graphics the GUI forks for a
+    // slot is forked from this one, so they all record onto the board.
+    let board = Arc::new(Board::default());
+    gui.app.graphics = crate::tui::graphics::Graphics::hosted(board.clone());
     let ctx = Ctx::new(&gui.app, channels);
     let mut app = App {
         gui,
         ctx,
         grid,
+        board,
         window: None,
         terminal: None,
         next_frame: Instant::now(),
@@ -159,6 +170,9 @@ struct App {
     gui: Gui,
     ctx: Ctx,
     grid: (u16, u16),
+    /// This frame's covers, between the drawing path and the backend's
+    /// post-processor.
+    board: Arc<Board>,
     window: Option<Arc<Window>>,
     terminal: Option<WindowTerminal>,
     /// When the last frame's wait runs out.
@@ -234,7 +248,7 @@ impl App {
         // The pinned truecolour palette always has a ground; black is only
         // the answer to a palette that somehow resolved without one.
         let theme = th();
-        let builder = Builder::from_font(hack()?)
+        let builder = Builder::<CoverPost>::from_font_and_user_data(hack()?, self.board.clone())
             .with_regular_fonts(faces)
             .with_font_size_px(font_px)
             .with_width_and_height(dimensions)
@@ -331,6 +345,7 @@ impl App {
         else {
             return;
         };
+        self.board.begin_frame();
         let framed = frame(terminal, &mut self.gui, &mut self.ctx, &mut WindowHost(window));
         let (cells, flush) = terminal.backend_mut().take_cells();
         if let Some(stats) = self.stats.as_mut() {
@@ -538,7 +553,8 @@ impl App {
         }
         self.done = true;
         if let Some(stats) = &self.stats {
-            stats.write();
+            let covers = self.terminal.as_ref().map(|t| t.backend().post_processor().report());
+            stats.write(covers);
         }
         self.terminal = None;
         self.window = None;
