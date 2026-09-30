@@ -12,6 +12,11 @@ to 1000 px wide; the text under each name says which step and scenario produced 
 - `5-art-wall.png` — step 5: the Albums wall with covers drawn as GPU textures.
 - `5-art-sheet-over-wall.png` — step 5: a sheet open over the wall and the queue; the covers
   under it fall back to the ▀-mosaic and the sheet reads.
+- `6-keys-german-option-chords.png` — the keyboard check (2026-09-30, real key events posted
+  through the OS with Accessibility granted): on the German layout, Option+l, Option+e and
+  the y key typed `@€z` into the search box.
+- `6-keys-repeat-backspace.png` — the same check: `abcdefgh` typed, then Backspace held for
+  one press and five auto-repeats, leaving `ab`.
 - `stats-*.json` — step 4's `MSTREAM_WINDOW_STATS` reports, release build, ~25 s each against
   demo.mstream.io: idle, the Albums wall, playback on the Library screen, Now Playing, and
   Now Playing's Visualizer tab (the one 33 ms screen); `stats-wall-with-covers-debug.json` is

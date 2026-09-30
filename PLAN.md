@@ -2813,7 +2813,7 @@ before the fix and gone after it, and the Dart curve held to the same golden byt
 
 > **Status: spike done, decision GO WITH CONDITIONS — nothing ships from it yet.** Five
 > commits on `claude/desktop-app-packaging-8ee4ff` (4e10926 render, 4685214 loop, de04c35
-> input, 4d6b4df stats, c59cbdb art), on top of v0.8.0, unpushed. Steps 1–3 and 5 were each
+> input, 4d6b4df stats, c59cbdb art) plus the keyboard check's fix, on top of v0.8.0, unpushed. Steps 1–3 and 5 were each
 > built by one implementer and judged by three adversarial reviewers with lenses that varied
 > by step (fidelity, liveness, behaviour or visual; terminal parity or footprint; code), with
 > fix rounds only for blocking findings; step 4 was two measurement legs (this Mac, and Linux
@@ -2942,9 +2942,9 @@ reviewers' caveats restored):
 | Criterion | Verdict | Why |
 |---|---|---|
 | Rendering fidelity | partial | Every cell reaches the backend (EQUAL on both platforms); pixels judged on macOS screenshots only, no tofu in en/ja/zh. Gaps: an en locale loads no CJK face, so CJK titles draw as boxes and Korean is tofu everywhere; after a wide glyph the rest of the row shifts left (the crate shapes a row as one string and the cell after a wide glyph is empty — a cover-box corner landed two cells left in the IME scenario), a crate defect needing a patch or a workaround; the darks come out darker (below). |
-| Plain input | partial | Driven end to end at 2× scale: Enter, Esc, Backspace, Down, Tab and Shift+Tab, digits and letters as text, Ctrl, clicks to the bottom row, wheel, drag. Unit-tested only: Home/End, Page keys, Left/Right, F-keys; the winit-to-raw mapping untested; real key repeat and 1× scale untested. |
-| Dead keys and AltGr | untested | Needs a human at a keyboard. Confirmed from the code: a left Ctrl+Alt standing in for AltGr on Windows falls through to the bare Latin key (German `@` becomes Ctrl+q), and Ctrl with punctuation on Dvorak, AZERTY or Bépo remaps by key place. |
-| IME | partial | Synthetic commits land as text; synthetic preedit is tracked without typing. No real session; preedit is not drawn; the candidate window sits at the origin; unverified that IME is enabled only while a text field has focus and that Enter during a composition is not delivered twice. |
+| Plain input | pass, with caveats | Driven end to end at 2× scale through the lever: Enter, Esc, Backspace, Down, Tab and Shift+Tab, digits and letters as text, Ctrl, clicks to the bottom row, wheel, drag; then at a real keyboard (the operator) and as real OS key events: every standard key, key repeat, Option chords, Cmd chords, Ctrl on a Russian layout. Unit-tested only: Home/End, Page keys, Left/Right, F-keys; 1× scale untested. |
+| Dead keys and AltGr | partial | Dead keys pass on macOS at a real keyboard; the German layout's Option chords pass as real key events. Windows AltGr untested, and confirmed from the code: a left Ctrl+Alt standing in for AltGr there falls through to the bare Latin key (German `@` becomes Ctrl+q). The Dvorak Ctrl+punctuation remap was found at the keyboard and fixed. |
+| IME | partial | Synthetic commits land as text; synthetic preedit is tracked without typing. No real session yet (no second input source is added on this Mac, and input methods refuse programmatic selection); preedit is not drawn; the candidate window sits at the origin; unverified that IME is enabled only while a text field has focus and that Enter during a composition is not delivered twice. |
 | Integration cost | partial | About 186 lines across 6 files at step 4 (all seams: the flag, the loop halves, `start`/`finish`, the palette pin, two visibilities), within the ~200 the criterion named; step 5 added graphics.rs (+61) and cover.rs (+10, the shared slot's hosted branch), about 257 lines across 8 files, over it. The raw stat reads +409/−213 because the loop body moved into `frame`/`input`. No room or widget file touched. |
 | Performance | pass, with caveats | Steady idle CPU equal to the terminal's; p95 under 5 ms; a warm first frame under 200 ms. Caveats: maxima 16–18 ms; a cold launch about 1 s; the visualizer tab costs 2.7–2.9× the terminal; art unmeasured in release. |
 | Footprint | pass | +1.1 MB, no new frameworks (before the art); Linux NEEDED unchanged, plus the libxkbcommon-x11 runtime load; the build and test times above are the larger cost. |
@@ -3001,6 +3001,28 @@ German and AltGr+A on Polish; US International dead keys; Microsoft Japanese and
 IMEs; Ctrl+V; clicks on the first and last rows and the transport at 150%; close with X and
 Alt+F4, then relaunch; a move between 100% and 150% monitors; CPU and memory idle and in the
 visualizer tab.
+
+**The keyboard check (2026-09-30).** The operator ran the macOS half at a real keyboard:
+dead keys (Option+e e → é and the rest) and every standard key passed. Accessibility was then
+granted to the Claude app, and the rest ran as real OS key events posted through a CGEvent
+helper (`keys.swift` in the session scratchpad: key down and up with the autorepeat flag,
+modifier flags, layouts switched through the Text Input Sources API), which also proved the
+OS-to-winit-to-raw path the script lever had skipped: `/` opened the search card and `cass`
+arrived through it; key repeat works (Down held into a list, Backspace held for one press and
+five repeats took six characters); on the German layout Option+l, Option+e and the y key typed
+`@€z`; Cmd+V pasted nothing and typed nothing (the known gap, safely), Cmd+W did nothing,
+Cmd+Q quit and wrote the config; on the Russian layout Ctrl+c quit. One bug: on Dvorak,
+Ctrl+' reached the GUI as `q` — the key's place stood in for every key the layout named
+with something other than a Latin letter, and the GUI quits on `q` whatever the modifier —
+so the player closed. Fixed the same day (the place stands in only for a letter of another
+script; a unit test pins it; re-run at the keyboard: Ctrl+' does nothing, Ctrl+c on Russian
+still quits). Also learned: the GUI's `q` quit ignores modifiers in both the terminal and the
+window, so Ctrl+q quits too — pre-existing, and the same on both paths. Still untested: the
+IMEs. This Mac has Japanese Romaji installed but no second input source added under Keyboard
+settings, so the menu bar offers no switch, and the Text Input Sources API refuses to select
+an input method programmatically (paramErr −50, even from a process with a key window),
+while it switches keyboard layouts freely. Once a source is added, the same helper can drive
+the Japanese and Pinyin rows through the input menu. Windows remains unrun.
 
 **Driving it.** The levers above plus `MSTREAM_WINDOW_DUMP=<dir>` (the backend's text against
 a `TestBackend` render of the same Gui — reliable only with no server, since a live listing
