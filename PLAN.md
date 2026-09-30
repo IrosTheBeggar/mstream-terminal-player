@@ -2809,6 +2809,220 @@ reads a later buffer gets the frame before last, not the last frame. Both fixed,
 curve divergence, in mstream_music#207 (2026-09-22) — reproduced on the Android emulator
 before the fix and gone after it, and the Dart curve held to the same golden bytes as ours.
 
+### Phase 12 — The window spike: the GUI in a window of its own (2026-09-29/30)
+
+> **Status: spike done, decision GO WITH CONDITIONS — nothing ships from it yet.** Five
+> commits on `claude/desktop-app-packaging-8ee4ff` (4e10926 render, 4685214 loop, de04c35
+> input, 4d6b4df stats, c59cbdb art), on top of v0.8.0, unpushed. Steps 1–3 and 5 were each
+> built by one implementer and judged by three adversarial reviewers with lenses that varied
+> by step (fidelity, liveness, behaviour or visual; terminal parity or footprint; code), with
+> fix rounds only for blocking findings; step 4 was two measurement legs (this Mac, and Linux
+> in Docker), two skeptics who re-measured, and a criteria judge. Five blocking findings were
+> raised, four distinct issues (the en stars as tofu, the pointer grid, Ctrl on non-Latin
+> layouts, a crash on absurd script numbers), all in steps 1 and 3 and each fixed at the root;
+> the implementer found and fixed a fifth crash on its own (a resize below one cell aborting
+> inside the crate). The evidence is in `docs/window-spike/` (screenshots, stats, CPU
+> samples, the Linux linkage list, the full manual checklist). This is a record of what
+> happened, not a plan to ship.
+
+**The question.** The desktop-app packaging research (2026-09-28) found that a "desktop
+app" of this player is a terminal emulator plus the player, which is why the mStream bundle
+carries Ghostty on macOS, launches through Windows Terminal on Windows and uses the user's
+own terminal on Linux. The alternative is to draw the same cell buffer ourselves: ratatui
+hands a `Backend` the cells that changed, and `ratatui-wgpu` is a backend whose surface is a
+wgpu texture in a window we own — the same winit and wgpu the visualizer window already
+links. The spike asked three things: does the GUI render faithfully that way, does input hold
+up, and how much of the GUI has to change.
+
+**What it is.** `mstream-player gui --window` (a hidden flag) runs the real player — the
+same `App`, the same audio and api workers, the same `render` — in a winit window through
+ratatui-wgpu 0.6 (`src/gui/window/`: `mod.rs` the window and its loop, `input.rs` the
+translator, `script.rs` a scripted-input lever, `stats.rs` a timing lever, `covers.rs` the
+art). The GUI loop in `src/gui/mod.rs` is split into two shared halves — `frame` (dispatch,
+tick, draw, the worker drain, the polls, the pointer through a one-method `Host` trait, the
+wait) and `input` (one crossterm-shaped event → Continue or Quit) — which the terminal loop
+calls in the old order and the window calls from its event loop at the terminal's own
+cadence (10 ms hot, 33 ms while the visualizer draws, the caret's flip, else 100 ms).
+Startup and teardown that need no terminal moved verbatim into `start` and `finish`. That
+split restructures the loop the terminal GUI ships on; the parity reviewers read it
+statement by statement and ran the GUI tests and the expect leg, and found no behaviour
+change, but it is the one part of the spike that touches the shipping path.
+
+**Steps and evidence.**
+- *1 — Render (4e10926).* Hack is the face, plus a system symbol face for the three glyphs
+  Hack lacks (★ ☆ ✓; a census test over the GUI's literals and the locales guards the list;
+  Menlo on macOS, DejaVu Sans Mono on Linux, the Windows candidates never run — on a box with
+  none of them the stars are boxes again, which a bundled face would end) and the visualizer
+  overlay's CJK face for ja and zh. The backend's `get_text()` against the same Gui drawn into
+  a `TestBackend` reads `100×30 EQUAL` in en, ja and zh: a text-level check that proves every
+  cell reached the backend, not what the pixels look like — that rests on the macOS
+  screenshots, which show rounded frames, the seek thumb, the transport glyphs, kana and
+  kanji from Hiragino, no tofu.
+- *2 — The shell (4685214).* Against demo.mstream.io the Files room lists the server's
+  library; at 70×20 the mini player shows; Cmd-Q reaches the same teardown and writes the
+  config; a resize feeds the GUI's own Resize bookkeeping after a full repaint;
+  `MSTREAM_WINDOW_SIZE=<cols>,<rows>` sets the opening grid.
+- *3 — Input (de04c35).* winit keys, text, IME commits, pointer, buttons and wheel become
+  crossterm events: named keys by name; characters from the text the OS composed; Ctrl from
+  the layout's Latin letter, else a control character, else the bare Latin key, else the
+  key's place (so a non-Latin layout still quits on Ctrl+c); Shift+Tab as BackTab; pixels to
+  cells against the backend's stretched grid; wheel turns accumulated to whole lines; held
+  buttons for drags. Accessibility is not granted on the dev Mac, so the proof is
+  `MSTREAM_WINDOW_SCRIPT=<file>` (wait/key/text/ctrl/ime/move/click/rclick/drag/wheel/
+  resize/dump/quit), which injects the raw events the winit handlers would build — one step
+  below winit, so the OS-to-winit-to-raw conversion itself is proven only by reading winit's
+  source. Through it: rooms by digit, drill, a typed query character by character, Tab and
+  Shift+Tab, an IME commit landing as text (a synthetic preedit is tracked and logged, and
+  types nothing), clicks acting on the row they land on down to the bottom row, hover verbs
+  and the hand cursor following the pointer, the wheel both ways, a right-click sheet, a
+  queue-row drag, Ctrl+c and `q` quitting through the same teardown with the config written.
+  Home/End, PageUp/Down, Left/Right and the F-keys are unit-tested only, and the winit-to-raw
+  half has no unit tests at all. 18 translator tests.
+- *4 — The numbers (4d6b4df).* `MSTREAM_WINDOW_STATS=<path>` counts, through a pass-through
+  backend, which cells ratatui handed on and times `frame`, the flush and the whole redraw.
+- *5 — Art (c59cbdb).* `Graphics::hosted`: instead of encoding a picture for a terminal
+  protocol, `draw` blanks the cover's cells and records the cell rect and the art on a
+  per-frame board; a post-processor runs ratatui-wgpu's own text blit unchanged and then
+  draws one textured quad per cover (the cell rect as a fraction of the grid, the picture
+  fitted whole and centred, `Rgba8UnormSrgb` on the sRGB surface, the 128 px thumbnail first
+  and a worker's full decode scaled to the box when it lands, at most 48 textures held).
+  The Albums wall, the bar's card, the queue rows and Now Playing show pictures; a page turn
+  and a resize keep them aligned; a queue row's sheet over the wall reads over mosaics — the
+  terminal's overlay rule, lagging one frame, so a texture paints over a freshly opened modal
+  for up to 100 ms. Slot::draw_paced in `src/gui/cover.rs`, the shared slot every room draws
+  covers through, gained the one hosted branch. Art ran on macOS Metal only.
+
+**The numbers** (release profile at step 4, before the art; this Mac; against
+demo.mstream.io; ~25 s a run; CPU as cputime over wall time from t ≥ 10 s, the steady state;
+the terminal GUI on a pty with the mosaic persona as the baseline; "first frame" counted from
+`window::run` entry, not from spawn):
+
+| Scenario | Window CPU | Terminal CPU | `frame` p50 / p95 ms | First frame ms |
+|---|---|---|---|---|
+| Idle, Library | 1.2% | 1.3% | 0.42 / 0.46 | 142 warm, 415 cold |
+| Albums wall | 1.5% | 1.4% | 0.76 / 0.86 | 175 |
+| Playback, Library | 2.9% | 2.3% | 0.54 / 2.2 | 190 |
+| Now Playing + waveform | 3.2% | 2.6% | 0.55 / 2.6 | 181 |
+| Now Playing, Visualizer tab (33 ms) | 14.8–16.7% | 5.4–5.7% | 3.1 / 4.7 | 170 |
+
+Whole-run CPU (start-up included) is higher for the window: idle 2.0% against 1.5%, the wall
+2.5 against 1.7, playback 4.2 against 3.2, Now Playing 4.6 against 3.8, the visualizer tab
+10.6 against 4.6. A frame that changes nothing costs about 3 µs to flush (the backend skips
+encode and present); a presenting flush is 1.2–2.8 ms p50, under 5 ms p95; single-frame
+maxima reached 16–18 ms, over the 16 ms the criterion named. The first cold launch after a
+build listed its window 1.0 s after spawn; there is no single spawn-to-pixel timer. RSS
+111–116 MB against the terminal's 33–38 MB — the wgpu device, the atlas and the fonts. The
+macOS binary 36,132,480 → 37,261,296 bytes at step 4 (+1.1 MB, +3.1%; the baseline is the
+fd0f13b release of 2026-09-27, one small change before v0.8.0; step 5's art was not
+re-measured in release) with no new framework or dylib (Metal, QuartzCore and AppKit were
+already linked for the visualizer). Art is measured in the DEBUG build only: 20 s on a still
+wall, `frame` p50 3.3 ms and p95 4.3 ms, but the seven frames that presented flushed at p50
+15.9 ms and p95 34 ms (uploads and shaping included), and the visual reviewer's run with four
+page turns had `frame` p95 7.6 ms and max 57 ms. Note that playback does NOT put the loop
+on 33 ms — `drawing_audio()` is the visualizer tab only — so four of the five rows run at the
+100 ms poll. A release build takes 14–17 min here, and the test profile recompiles the wgpu
+and naga stack.
+
+**The Linux leg** (Docker, `rust:1-slim-bookworm`, aarch64, the step-3 tree de04c35): the
+release build in 17.5 min cold; `test/linkage.sh` passes with NEEDED unchanged (libasound,
+libgcc_s, libm, libc — every crate ratatui-wgpu brings is pure Rust); the binary is
+45,066,952 bytes with no pre-spike baseline to set against; under Xvfb the window opens and
+quits clean in ~7 s on lavapipe (Vulkan, Mesa 22.3.6, a CPU device) and again with
+`WGPU_BACKEND=gl` on llvmpipe, the text dumps identical and `100×30 EQUAL` — text dumps
+only, en only, no screenshot, and neither the art path nor the stats lever ran there. One
+fact for a Linux desktop build: without `libxkbcommon-x11.so` the window panics before it
+opens (winit's X11 path through xkbcommon-dl, exit 101 — needs a clean error or a fall back
+to the terminal GUI, and the dependency listed). From reading the crate, not observed:
+`Font::new` reads only face 0 of a collection, so Noto CJK SC at index 2 would be skipped
+for Chinese on Linux.
+
+**The scorecard** (the criteria set before the spike started; the judge's verdicts, with the
+reviewers' caveats restored):
+
+| Criterion | Verdict | Why |
+|---|---|---|
+| Rendering fidelity | partial | Every cell reaches the backend (EQUAL on both platforms); pixels judged on macOS screenshots only, no tofu in en/ja/zh. Gaps: an en locale loads no CJK face, so CJK titles draw as boxes and Korean is tofu everywhere; after a wide glyph the rest of the row shifts left (the crate shapes a row as one string and the cell after a wide glyph is empty — a cover-box corner landed two cells left in the IME scenario), a crate defect needing a patch or a workaround; the darks come out darker (below). |
+| Plain input | partial | Driven end to end at 2× scale: Enter, Esc, Backspace, Down, Tab and Shift+Tab, digits and letters as text, Ctrl, clicks to the bottom row, wheel, drag. Unit-tested only: Home/End, Page keys, Left/Right, F-keys; the winit-to-raw mapping untested; real key repeat and 1× scale untested. |
+| Dead keys and AltGr | untested | Needs a human at a keyboard. Confirmed from the code: a left Ctrl+Alt standing in for AltGr on Windows falls through to the bare Latin key (German `@` becomes Ctrl+q), and Ctrl with punctuation on Dvorak, AZERTY or Bépo remaps by key place. |
+| IME | partial | Synthetic commits land as text; synthetic preedit is tracked without typing. No real session; preedit is not drawn; the candidate window sits at the origin; unverified that IME is enabled only while a text field has focus and that Enter during a composition is not delivered twice. |
+| Integration cost | partial | About 186 lines across 6 files at step 4 (all seams: the flag, the loop halves, `start`/`finish`, the palette pin, two visibilities), within the ~200 the criterion named; step 5 added graphics.rs (+61) and cover.rs (+10, the shared slot's hosted branch), about 257 lines across 8 files, over it. The raw stat reads +409/−213 because the loop body moved into `frame`/`input`. No room or widget file touched. |
+| Performance | pass, with caveats | Steady idle CPU equal to the terminal's; p95 under 5 ms; a warm first frame under 200 ms. Caveats: maxima 16–18 ms; a cold launch about 1 s; the visualizer tab costs 2.7–2.9× the terminal; art unmeasured in release. |
+| Footprint | pass | +1.1 MB, no new frameworks (before the art); Linux NEEDED unchanged, plus the libxkbcommon-x11 runtime load; the build and test times above are the larger cost. |
+| Platform | partial | macOS Metal proven end to end; Linux X11 under Xvfb on a CPU rasteriser, text only, on the pre-art tree (no Wayland, no real driver, no x86_64); Windows untouched. |
+
+**What the crates taught.** ratatui-wgpu 0.6: `RenderSurface` is sealed (its `Sealed` bound
+in `src/backend/mod.rs`; the headless surface is test-only), so a real window is required;
+rows are marked clean after a failed present (the first present on macOS is occluded — a
+full repaint on `Occluded(false)` is the workaround, and any other failed present, a Timeout
+or an Outdated surface during a live resize, would still leave stale pixels until a cell
+changes); the default post-processor stretches the cell grid across the whole surface, so
+pixel→cell must use the drawn grid; a 0×0 grid panics inside the crate, so the surface is
+held to one cell; `default-features = false` drops ahash and png (otherwise ahash's
+compile-time-rng leaks into egui's tree). wgpu-core 30 sorts sRGB surface formats first, so
+the surface is `Bgra8UnormSrgb`, and the crate's blit decodes with pow 2.2 while the sRGB
+store re-encodes with the exact curve: the darks come out darker (ground #12131c → #0a0b16,
+gold and text within one level), while the cover textures go through the exact curve, so
+the ground beside a cover may differ by a level. The fix is not in our tree: a one-line
+`remove_srgb_suffix()` patch carried on the crate, a colour pre-conversion in our own backend
+wrapper, or a custom blit. The visualizer tab's named ANSI colours map through the crate's
+SVG table (Blue = #0000ff) — `Builder::with_color_table` fixes that on our side. winit 0.30:
+Cmd-Q exits inside AppKit, so main's exit code and the instance-lock sidecar cleanup are
+skipped; `set_min_inner_size` is ignored by a scripted `setContentSize`; Super chords are
+dropped today, so there is no Cmd+V paste (a terminal types pasted text as keys); a platform
+that holds back redraws for a hidden window (a hidden Wayland window, for one) would stop
+`frame`, and with it the worker drain and track advance — occlusion and minimise were never
+exercised, even on macOS.
+
+**Conditions before this could replace a terminal host** (the judge's list, plus the
+reviewers' minors worth carrying): the gamma fix and the colour table; an always-on CJK
+fallback with collection indices, and the wide-glyph row shift patched or worked around; the
+libxkbcommon-x11 panic turned into a clean error and the dependency documented; a panic hook
+of the window's own and Cmd-Q routed through `finish`; paste; the IME candidate window at the
+caret, preedit drawn, IME gated to focused text fields; held buttons cleared on `CursorLeft`
+and focus loss; `ScaleFactorChanged`; a periodic or resize-triggered full repaint for failed
+presents; playback and queue advance proven while hidden or minimised; the overlay rule's
+one-frame lag; nearest-neighbour sampling for the QR code; mipmaps or a sharper resample for
+shrunk covers; resize increments so glyphs do not stretch between whole-cell sizes; a
+byte-bounded texture cache; a bundled symbol face; the timing probe gated off without its
+lever; and the manual checklist passed. The judge's gate: keep the flag hidden until the
+gamma, CJK, libxkbcommon and panic-hook conditions and the Windows run are done.
+
+**The manual checklist** (`docs/window-spike/checklist.md` has every item with its expected
+result; the shape): macOS — launch from Terminal and iTerm; the key walk (digits, arrows,
+Home/End, PageUp/Down, Tab and Shift+Tab, Enter, Esc, Backspace, Space, T); key repeat on
+Down and Backspace; Cmd+V, Cmd+Q, Cmd+W; dead keys on ABC Extended (Option+e e → é, ` a →
+à); Japanese Romaji and Pinyin in the search box; CJK titles in an en library; hover, click,
+right-click, queue drag, wheel and trackpad fling; a drag released outside the window; a
+slow corner resize and a move between Retina and non-Retina displays; the ground colour
+beside Terminal.app with Digital Color Meter; CPU in the visualizer tab; playback continuing
+while the window is covered, minimised and behind a Space switch. Windows (11, 100% and
+150%) — launch from PowerShell and Windows Terminal; the key walk plus Ctrl+C; AltGr+Q/E on
+German and AltGr+A on Polish; US International dead keys; Microsoft Japanese and Pinyin
+IMEs; Ctrl+V; clicks on the first and last rows and the transport at 150%; close with X and
+Alt+F4, then relaunch; a move between 100% and 150% monitors; CPU and memory idle and in the
+visualizer tab.
+
+**Driving it.** The levers above plus `MSTREAM_WINDOW_DUMP=<dir>` (the backend's text against
+a `TestBackend` render of the same Gui — reliable only with no server, since a live listing
+can land between the two draws). Screenshots of a background window: a swiftc
+`CGWindowListCopyWindowInfo` lister for the id, then `screencapture -l <id> -x -o`; quit
+through `NSRunningApplication.terminate` for the Cmd-Q path. Every cargo call on this Mac is
+`cargo +1.98.1` (stable is 1.94.1; egui 0.36 wants 1.95). The scratch drivers do not survive
+a session; the levers and `docs/window-spike/` do.
+
+**Recommendation** (the judge's verdict; the framing that follows it is the author's). Go,
+with the conditions above and the flag hidden until the gate clears. The budget of going:
+about 2.7–2.9× the terminal's CPU in the visualizer tab and about 78 MB more resident
+memory, in exchange for one executable per platform with no bundled terminal and pixel art
+wherever a GPU rasterises — a claim proven on macOS, run once on Linux under a CPU
+rasteriser, and not yet run on Windows. The terminal-host route (Ghostty on macOS, Windows
+Terminal on Windows, the user's terminal on Linux) ships today and does not depend on this,
+so the author's proposal is a phase of its own rather than a rider on the packaging work,
+starting with the manual checklist on macOS and Windows; if dead keys or IME fail there, the
+author's fallback to try first is egui text fields over the surface (egui and its IME
+plumbing are already linked for the visualizer's controls) — a proposal, not something the
+spike tested.
+
 ## Smoke testing
 
 `mstream-player replay "<script>"` drives the TUI from a script. Keys go through exactly the path
