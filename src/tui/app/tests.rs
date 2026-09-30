@@ -223,6 +223,49 @@ fn a_filter_narrows_the_list_without_losing_the_way_out() {
 }
 
 #[test]
+fn a_growing_filter_narrows_what_is_shown_and_ends_where_a_fresh_one_would() {
+    // Performance audit #111: a key that only adds to the needle narrows
+    // the rows on screen in place rather than rescanning (and re-cloning)
+    // the whole list — and every step must show exactly what typing the
+    // same text into an unfiltered list shows, in the same order.
+    let names: Vec<String> = (0..400).map(|i| format!("{} Band {i}", ["Amber", "AMBIENT", "Bass", "Ämber"][i % 4])).collect();
+    let dirs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let shown = |app: &App| labels(app).into_iter().map(str::to_string).collect::<Vec<_>>();
+    let fresh = |text: &str| {
+        let mut app = connected_app();
+        app.apply_event(Event::Listing(Box::new(listing("/lib/", &dirs, &["amber solo.mp3"]))));
+        app.pane_mut().apply_filter(text.to_string());
+        shown(&app)
+    };
+    let mut app = connected_app();
+    app.apply_event(Event::Listing(Box::new(listing("/lib/", &dirs, &["amber solo.mp3"]))));
+    type_filter(&mut app, "");
+    for (typed, key) in [("a", 'a'), ("am", 'm'), ("amb", 'b'), ("amb ", ' '), ("amb b", 'b'), ("amb b1", '1')] {
+        let rows = app.pane().entries.as_ptr();
+        app.handle_action(Action::Input(key));
+        assert_eq!(shown(&app), fresh(typed), "after {typed:?}");
+        if typed.len() > 1 {
+            assert_eq!(app.pane().entries.as_ptr(), rows, "{typed:?} narrowed the rows where they stand");
+        }
+    }
+    assert_eq!(labels(&app)[0], "..", "the way out survives every step");
+    assert_eq!(app.pane().counts().1, 401, "and nothing was lost behind the filter");
+
+    // Widening — a Backspace, or an edit that is not a longer needle —
+    // starts again from the whole list.
+    app.handle_action(Action::Backspace);
+    assert_eq!(shown(&app), fresh("amb b"));
+    for _ in 0..3 {
+        app.handle_action(Action::Backspace);
+    }
+    assert_eq!(shown(&app), fresh("am"));
+    app.pane_mut().apply_filter("bass".into());
+    assert_eq!(shown(&app), fresh("bass"));
+    app.pane_mut().apply_filter(String::new());
+    assert_eq!(labels(&app).len(), 402);
+}
+
+#[test]
 fn a_filter_survives_being_typed_but_not_a_new_listing() {
     let mut app = connected_app();
     app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Alpha", "Beta"], &[]))));
@@ -289,6 +332,37 @@ fn the_column_behind_a_filtered_pick_holds_the_whole_folder() {
     app.handle_action(Action::Back);
     assert_eq!(labels(&app), vec!["..", "Alpha", "Beta", "Betamax"]);
     assert!(app.pane().filter.is_empty(), "and no filter came back with it");
+}
+
+#[test]
+fn a_drill_moves_the_listing_into_its_column_rather_than_copying_it() {
+    // Performance audit #112: every drill replaces the pane straight after
+    // pushing its column, so the column takes the rows themselves — the
+    // shown list, or the whole one behind a filter — not a copy of them.
+    let mut app = connected_app();
+    app.apply_event(Event::Listing(Box::new(listing("/lib/", &["Alpha", "Beta", "Betamax"], &[]))));
+    let rows = app.files.entries.as_ptr();
+    app.files.state.select(Some(2)); // Beta
+    app.handle_action(Action::Activate);
+    assert_eq!(app.files.trail[0].entries.as_ptr(), rows, "the rows moved into the column");
+    assert_eq!(app.files.trail[0].chosen, 2);
+    assert!(app.files.entries.is_empty() && app.files.loading, "the pane waits for its reply");
+
+    app.apply_event(Event::Listing(Box::new(listing("/lib/Beta/", &["One", "Two", "Twelve"], &[]))));
+    type_filter(&mut app, "twe");
+    app.handle_action(Action::Submit);
+    let whole = app.files.unfiltered.as_ref().unwrap().as_ptr();
+    app.handle_action(Action::Activate);
+    assert_eq!(app.files.trail[1].entries.as_ptr(), whole, "the whole folder, not the filtered view");
+    assert_eq!(app.files.trail[1].entries[app.files.trail[1].chosen].label(), "Twelve");
+    assert!(app.files.filter.is_empty() && app.files.unfiltered.is_none());
+
+    // Back walks out through both, with nothing hidden.
+    app.apply_event(Event::Listing(Box::new(listing("/lib/Beta/Twelve/", &[], &["x.mp3"]))));
+    app.handle_action(Action::Back);
+    assert_eq!(labels(&app), vec!["..", "One", "Two", "Twelve"]);
+    app.handle_action(Action::Back);
+    assert_eq!(labels(&app), vec!["..", "Alpha", "Beta", "Betamax"]);
 }
 
 #[test]
@@ -2108,6 +2182,100 @@ fn a_tunnel_parent_is_kept_for_the_access_call_and_let_go_once_the_peer_is_direc
     assert!(app.tunnel_targets().contains(parent));
 }
 
+#[test]
+fn the_targets_ask_each_origin_once_in_the_order_the_queue_names_them() {
+    // Performance audit #108: a queue comes in long runs from one origin,
+    // and the targets walk each origin once — same sets, same first-seen
+    // order (reconcile_direct asks in it), however many rows repeat them.
+    let mut app = connected_app();
+    let parent = "mstream+iroh://faraway";
+    app.servers.push(faraway());
+    app.direct_offered.insert(parent.into());
+    let peer = |id: i64, path: &str| Queued { dj: None, origin: Origin { server: parent.into(), peer: Some(id) }, track: track(path) };
+    let mut rows = Vec::new();
+    for run in 0..6 {
+        for i in 0..500 {
+            let path = format!("music/{run}/{i}.mp3");
+            rows.push(match run % 3 {
+                0 => peer(9, &path),
+                1 => at(FARAWAY, &path),
+                _ => peer(7, &path),
+            });
+        }
+    }
+    rows.push(item("music/here.mp3"));
+    app.queue.replace(rows);
+    let peers: Vec<(String, i64)> = app.peer_targets().into_iter().map(|(_, parent, id)| (parent, id)).collect();
+    assert_eq!(peers, [(parent.to_string(), 9), (parent.to_string(), 7)], "each peer once, first seen first");
+    assert_eq!(app.queue_origins().len(), 4);
+    let wanted = app.tunnel_targets();
+    assert!(wanted.contains(parent) && wanted.contains(FARAWAY));
+    assert_eq!(wanted.len(), 1, "the tunnel server is the peers' parent: one tunnel, {wanted:?}");
+
+    // One access ask per peer, however many rows are its, in that order.
+    app.tunnels.insert(FARAWAY.into(), tunnel_up("http://127.0.0.1:4242"));
+    let asks = direct_asks(&app.tick_at(crate::clock::Instant::now()));
+    assert_eq!(asks, [(9, false), (7, false)]);
+}
+
+#[test]
+fn every_change_to_the_queues_rows_moves_its_revision() {
+    // Performance audit #108: the saver watches the revision instead of
+    // hashing every row, so every writer of the rows must move it — and a
+    // step that changes nothing need not.
+    let mut app = connected_app();
+    let mut last = app.queue.rev();
+    let mut moved = |app: &App, what: &str| {
+        assert_ne!(app.queue.rev(), last, "{what} moves the revision");
+        last = app.queue.rev();
+    };
+    app.replace_queue(vec![track("a.mp3"), track("b.mp3"), track("c.mp3")]);
+    moved(&app, "replace");
+    app.push_queue(track("d.mp3"));
+    moved(&app, "push");
+    app.queue.insert_next(item("e.mp3"));
+    moved(&app, "insert next");
+    app.queue.move_row(0, 2);
+    moved(&app, "a move");
+    app.queue.remove(1);
+    moved(&app, "a removal");
+    app.servers.push(KnownServer { id: "http://b".into(), name: "b".into(), token: None, username: None, self_signed: false, peer: None, pairing: None, dj: Default::default() });
+    app.queue.push(at("http://b", "b/x.mp3"));
+    moved(&app, "push");
+    app.drop_server_items("http://b");
+    moved(&app, "a server's rows swept");
+    app.rename_server("http://host:3000", "http://host:3001");
+    moved(&app, "a rename");
+    let origin = app.queue.items[0].origin.clone();
+    let path = app.queue.items[0].filepath.clone();
+    app.rate_track(&origin, &path, Some(6));
+    moved(&app, "a rating written into the row");
+    let mut block = track(&path);
+    block.metadata.title = Some("Learned".into());
+    app.consume_track_info(path.clone(), Some(block));
+    moved(&app, "a tag the row lacked, filled in from the details block");
+
+    // The review of #106: a block that only confirms what the row already
+    // says — a sheet opened on a tagged track — is no change to the rows,
+    // and neither is the rating the row already wears.
+    let still = app.queue.rev();
+    let mut block = track(&path);
+    block.metadata.title = Some("Other".into());
+    block.metadata.rating = Some(6);
+    app.consume_track_info(path.clone(), Some(block));
+    app.rate_track(&origin, &path, Some(6));
+    assert_eq!(app.queue.items[0].track.metadata.title.as_deref(), Some("Learned"), "a fill, not an overwrite");
+    assert_eq!(app.queue.rev(), still, "a details block with nothing new moves nothing");
+    app.queue.clear();
+    moved(&app, "a clear");
+
+    let still = app.queue.rev();
+    app.queue.move_row(0, 0);
+    app.queue.remove(5);
+    app.rate_track(&origin, "not/queued.mp3", Some(2));
+    assert_eq!(app.queue.rev(), still, "nothing changed, nothing moved");
+}
+
 // ── Tunnels follow the queue (contract clause 38) ───────────────────────
 
 fn tunnel_up(local_url: &str) -> TunnelState {
@@ -2365,7 +2533,7 @@ fn a_playing_row_from_another_server_asks_that_server_for_its_cover_and_shape() 
     assert!(
         effects.iter().any(|e| matches!(
             e,
-            Effect::Api(ApiCmd::AlbumArt { file, reach: Some(Reach { base, local_token, .. }) })
+            Effect::Api(ApiCmd::AlbumArt { file, reach: Some(Reach { base, local_token, .. }), .. })
                 if file == "far.jpg" && base == "http://127.0.0.1:4242" && local_token.as_deref() == Some("lt")
         )),
         "the cover comes from the row's server: {effects:?}"
@@ -2383,7 +2551,7 @@ fn a_playing_row_from_another_server_asks_that_server_for_its_cover_and_shape() 
     assert!(
         effects.iter().any(|e| matches!(
             e,
-            Effect::Api(ApiCmd::AlbumArt { file, reach: None }) if file == "near.jpg"
+            Effect::Api(ApiCmd::AlbumArt { file, reach: None, .. }) if file == "near.jpg"
         )),
         "{effects:?}"
     );
@@ -2729,6 +2897,7 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
     long.track.metadata.duration = Some(300.0);
     let snapshot = QueueSnapshot {
         version: QUEUE_SNAPSHOT_VERSION,
+        stamp: None,
         index: Some(2),
         position: 42.5,
         shuffle: true,
@@ -2739,6 +2908,7 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
             long,
             at("http://gone", "music/lost2.mp3"),
         ],
+        retired: Vec::new(),
     };
     assert!(app.restore_queue(snapshot));
     assert_eq!(app.queue.items.len(), 2, "the two rows whose servers are known");
@@ -2763,19 +2933,23 @@ fn a_restored_queue_opens_paused_at_its_spot_and_drops_rows_whose_server_is_gone
     let mut fresh = connected_app();
     assert!(!fresh.restore_queue(QueueSnapshot {
         version: QUEUE_SNAPSHOT_VERSION + 1,
+        stamp: None,
         index: None,
         position: 0.0,
         shuffle: false,
         repeat: "off".into(),
         items: vec![at("http://host:3000", "music/1.mp3")],
+        retired: Vec::new(),
     }));
     assert!(!fresh.restore_queue(QueueSnapshot {
         version: QUEUE_SNAPSHOT_VERSION,
+        stamp: None,
         index: Some(0),
         position: 0.0,
         shuffle: false,
         repeat: "off".into(),
         items: vec![at("http://gone", "music/1.mp3")],
+        retired: Vec::new(),
     }));
     assert!(fresh.queue.items.is_empty());
 }
@@ -2804,6 +2978,151 @@ fn a_snapshot_round_trips_and_keeps_a_held_spot_until_something_plays() {
 
     // An empty queue has nothing to write.
     assert!(App::new(None, None, None).queue_snapshot().is_none());
+}
+
+#[test]
+fn the_borrowed_snapshot_writes_exactly_what_the_owned_one_does() {
+    // Performance audit #106: the saver serializes the rows where they
+    // stand instead of cloning them first — and must not change a byte.
+    let mut app = connected_app();
+    let mut tagged = track("music/b.flac");
+    tagged.metadata.title = Some("Bé".into());
+    tagged.metadata.genres = vec!["Ambient".into()];
+    tagged.metadata.duration = Some(61.5);
+    app.push_queue(track("music/a.mp3"));
+    app.push_queue(tagged);
+    app.queue.items[1].dj = Some(DjMark { sonic: true });
+    let effects = app.play_index(1);
+    app.status = PlayerStatus { playing: true, position: 17.25, source: played_url(&effects), ..Default::default() };
+    let owned = serde_json::to_string(&app.queue_snapshot().unwrap()).unwrap();
+    let borrowed = serde_json::to_string(&app.queue_snapshot_ref(None).unwrap()).unwrap();
+    assert_eq!(borrowed, owned);
+    // The shape of old: nothing new in a file with no stamp and nothing
+    // let go, so an older player reads it as it always did.
+    assert!(owned.starts_with(r#"{"version":1,"index":1,"position":17.25,"shuffle":false,"repeat":"off","items":[{"#), "{owned}");
+    assert!(!owned.contains("stamp") && !owned.contains("retired"), "{owned}");
+
+    // Stamped and with rows let go, the two still agree, and read back whole.
+    app.queue.retired = vec!["music/old.mp3".into()];
+    let mut owned = app.queue_snapshot().unwrap();
+    owned.stamp = Some(7);
+    let text = serde_json::to_string(&owned).unwrap();
+    assert_eq!(serde_json::to_string(&app.queue_snapshot_ref(Some(7)).unwrap()).unwrap(), text);
+    assert_eq!(serde_json::from_str::<QueueSnapshot>(&text).unwrap(), owned);
+}
+
+#[test]
+fn a_checkpoint_place_is_taken_only_by_the_rows_it_names() {
+    // Performance audit #106: the ten-second checkpoint writes the place
+    // alone; it stands for the rows of the same stamp, never for others.
+    let mut app = connected_app();
+    app.push_queue(track("music/a.mp3"));
+    app.push_queue(track("music/b.mp3"));
+    let mut snapshot = app.queue_snapshot().unwrap();
+    snapshot.stamp = Some(41);
+    let place = QueuePlace { version: QUEUE_SNAPSHOT_VERSION, stamp: 41, index: Some(1), position: 88.0 };
+    let other = QueuePlace { stamp: 40, ..place.clone() };
+    let newer = QueuePlace { version: QUEUE_SNAPSHOT_VERSION + 1, ..place.clone() };
+    let mut unstamped = snapshot.clone();
+    unstamped.stamp = None;
+    assert!(!snapshot.clone().adopt(&other), "another write's place");
+    assert!(!snapshot.clone().adopt(&newer), "another shape's");
+    assert!(!unstamped.adopt(&place), "rows an older player wrote have no place");
+    assert!(snapshot.adopt(&place));
+    assert_eq!((snapshot.index, snapshot.position), (Some(1), 88.0));
+}
+
+/// An Auto DJ pick on the test server.
+fn dj_row(path: &str) -> Queued {
+    Queued { dj: Some(DjMark { sonic: false }), ..item(path) }
+}
+
+#[test]
+fn a_restored_dj_queue_keeps_its_last_hundred_played_picks_and_remembers_the_rest() {
+    // Contract clause 40, performance audit #106: the DJ only appends, so
+    // with it armed a restore brings back the last DJ_PLAYED_KEPT of its
+    // played rows; every row the user queued and every row still to come
+    // stays, and the let-go paths still count as queued to the DJ.
+    let rows = |dj_played: usize| {
+        let mut items: Vec<Queued> = (0..dj_played).map(|i| dj_row(&format!("dj/{i:03}.mp3"))).collect();
+        items.insert(10, item("mine/early.mp3"));
+        items.push(dj_row("dj/playing.mp3"));
+        items.push(dj_row("dj/next.mp3"));
+        items
+    };
+    let snapshot = |dj_played: usize, shuffle: bool, repeat: &str| QueueSnapshot {
+        version: QUEUE_SNAPSHOT_VERSION,
+        stamp: None,
+        index: Some(dj_played + 1),
+        position: 30.0,
+        shuffle,
+        repeat: repeat.into(),
+        items: rows(dj_played),
+        retired: vec!["dj/older.mp3".into()],
+    };
+    let mut app = connected_app();
+    app.dj_server = Some(HOST.into());
+    assert!(app.restore_queue(snapshot(130, false, "off")));
+    let paths: Vec<&str> = app.queue.items.iter().map(|i| i.filepath.as_str()).collect();
+    assert_eq!(paths.len(), 1 + DJ_PLAYED_KEPT + 2, "the user's row, the last hundred picks, the playing and the next");
+    assert_eq!(paths[0], "mine/early.mp3", "what the user queued comes back wherever it stood");
+    assert_eq!(paths[1], "dj/030.mp3", "the thirty oldest picks are let go");
+    assert_eq!(app.queue.current, Some(DJ_PLAYED_KEPT + 1));
+    assert_eq!(app.queue.items[app.queue.current.unwrap()].filepath, "dj/playing.mp3", "the spot rides its row");
+    assert_eq!(app.resume_spot, Some((DJ_PLAYED_KEPT + 1, 30.0)));
+    assert_eq!(app.queue.retired.len(), 31);
+    assert_eq!((app.queue.retired[0].as_str(), app.queue.retired[30].as_str()), ("dj/older.mp3", "dj/029.mp3"));
+    assert_eq!(app.queue_snapshot().unwrap().retired, app.queue.retired, "and they are saved with the queue");
+
+    // A pick the DJ let go is as queued as any row: not queued again.
+    let epoch = app.lane.epoch;
+    app.apply_event(pick(epoch, vec![track("dj/005.mp3"), track("dj/next.mp3")]));
+    assert_eq!(app.queue.items.len(), 1 + DJ_PLAYED_KEPT + 2, "nothing new");
+    app.apply_event(pick(epoch, vec![track("dj/005.mp3"), track("dj/fresh.mp3")]));
+    assert_eq!(app.queue.items.last().unwrap().filepath, "dj/fresh.mp3");
+
+    // Nothing is let go while its rows are still to come or the DJ is off:
+    // shuffled, wrapping, or disarmed.
+    for (shuffle, repeat, armed) in [(true, "off", true), (false, "all", true), (false, "off", false)] {
+        let mut app = connected_app();
+        app.dj_server = armed.then(|| HOST.to_string());
+        assert!(app.restore_queue(snapshot(130, shuffle, repeat)));
+        assert_eq!(app.queue.items.len(), 133, "shuffle {shuffle}, repeat {repeat}, armed {armed}");
+        assert_eq!(app.queue.retired, ["dj/older.mp3"], "what was let go before stays let go");
+    }
+
+    // The memory is bounded, oldest out; a new queue forgets it.
+    let mut app = connected_app();
+    app.dj_server = Some(HOST.into());
+    let mut big = snapshot(DJ_PLAYED_KEPT + DJ_RETIRED_CAP + 5, false, "one");
+    big.retired = Vec::new();
+    assert!(app.restore_queue(big));
+    assert_eq!(app.queue.retired.len(), DJ_RETIRED_CAP);
+    assert_eq!(app.queue.retired[0], "dj/005.mp3", "the oldest five fell out");
+    app.replace_queue(vec![track("x.mp3")]);
+    assert!(app.queue.retired.is_empty());
+
+    // The saved row's server is gone: the spot is the row after it,
+    // counted among the rows kept. The saved index clamped would skip
+    // ahead by the thirty let go (the review's note) — here, to the last.
+    let mut app = connected_app();
+    app.dj_server = Some(HOST.into());
+    let mut gone = snapshot(130, false, "off");
+    gone.items[131] = Queued { dj: Some(DjMark { sonic: false }), ..at("http://gone", "dj/playing.mp3") };
+    gone.items.extend([dj_row("dj/next2.mp3"), dj_row("dj/next3.mp3")]);
+    assert!(app.restore_queue(gone));
+    assert_eq!(app.queue.items.len(), 1 + DJ_PLAYED_KEPT + 3, "the gone row dropped, the thirty let go");
+    let spot = app.queue.current.expect("a spot");
+    assert_eq!(app.queue.items[spot].filepath, "dj/next.mp3", "the row after the one that is gone");
+    assert_eq!(app.resume_spot, Some((spot, 30.0)));
+    assert_eq!(app.resume_track.as_deref(), Some("dj/next.mp3"));
+
+    // And a saved index past the rows lands on the last (clause 40).
+    let mut app = connected_app();
+    let mut past = snapshot(130, false, "off");
+    past.index = Some(999);
+    assert!(app.restore_queue(past));
+    assert_eq!(app.queue.current, Some(132), "clamped to the last row");
 }
 
 #[test]
@@ -2837,6 +3156,28 @@ fn add_next_lands_after_the_playing_row_and_play_now_starts_it() {
     let paths: Vec<&str> = app.queue.items.iter().map(|i| i.filepath.as_str()).collect();
     assert_eq!(paths, ["music/a.mp3", "music/c.mp3", "music/b.mp3", "music/z.mp3"]);
     assert_eq!(app.queue.current, Some(1));
+}
+
+#[test]
+fn a_move_lands_every_row_where_taking_it_out_and_putting_it_back_would() {
+    // Performance audit #114: a move rotates the rows between its two ends
+    // instead of shifting the whole tail twice. Every pair of ends, both
+    // ways, against the remove-and-insert it replaces — rows and current.
+    let names: Vec<String> = (0..12).map(|i| format!("r{i}")).collect();
+    for from in 0..12 {
+        for to in 0..12 {
+            for current in [None, Some(0), Some(from), Some(to), Some(5), Some(11)] {
+                let mut queue = Queue { items: names.iter().map(|n| item(n)).collect(), current, ..Default::default() };
+                let mut expected: Vec<&str> = names.iter().map(String::as_str).collect();
+                let moved = expected.remove(from);
+                expected.insert(to, moved);
+                let playing = current.map(|c| names[c].as_str());
+                queue.move_row(from, to);
+                assert_eq!(queue.items.iter().map(|i| i.filepath.as_str()).collect::<Vec<_>>(), expected, "{from} -> {to}");
+                assert_eq!(queue.current.map(|c| queue.items[c].filepath.as_str()), playing, "{from} -> {to}: current stays on its track");
+            }
+        }
+    }
 }
 
 #[test]
@@ -4384,6 +4725,75 @@ fn a_playlist_change_reasks_an_open_playlists_view() {
 }
 
 #[test]
+fn the_artists_and_genres_lists_are_kept_for_the_session_and_seat_a_return() {
+    // Performance audit #99: the two root lists change only with a
+    // rescan; once answered, opening the room again seats the session's
+    // copy — a fresh drill, no request — and a new server forgets them.
+    use crate::api::types::Genre;
+    let asks = |effects: &[Effect], node: LibraryNode| {
+        effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::Library { node: n, .. }) if *n == node))
+    };
+    let mut app = connected_app();
+    let effects = app.open_library_node(LibraryNode::Artists, true);
+    assert!(asks(&effects, LibraryNode::Artists), "the first opening asks");
+    let generation = app.session_gen();
+    app.apply_event(Event::Library {
+        node: LibraryNode::Artists,
+        dest: Tab::Library,
+        data: LibraryData::Artists(vec!["Air".into(), "Bonobo".into()]),
+        generation,
+    });
+    app.library.state.select(Some(2));
+    app.handle_action(Action::Activate); // down into Bonobo
+    assert!(matches!(app.library_stack.here(), LibraryNode::Artist(_)));
+
+    let effects = app.open_library_node(LibraryNode::Artists, true);
+    assert!(effects.is_empty(), "a return asks nothing: {effects:?}");
+    assert!(matches!(app.library_stack.here(), LibraryNode::Artists), "at the root again");
+    assert!(app.library.trail.is_empty() && !app.library.loading);
+    assert_eq!(app.library.entries.iter().map(Entry::label).collect::<Vec<_>>(), ["..", "Air", "Bonobo"]);
+
+    let effects = app.open_library_node(LibraryNode::Genres, true);
+    assert!(asks(&effects, LibraryNode::Genres));
+    app.apply_event(Event::Library {
+        node: LibraryNode::Genres,
+        dest: Tab::Library,
+        data: LibraryData::Genres(vec![Genre { name: "Dub".into(), track_count: Some(3) }]),
+        generation,
+    });
+    assert!(app.open_library_node(LibraryNode::Genres, true).is_empty());
+    assert!(asks(&app.open_library_node(LibraryNode::Recent, true), LibraryNode::Recent), "recent means now");
+
+    // Forgotten on request (the GUI's second choice of the room), and with
+    // the server.
+    app.forget_root_list(&LibraryNode::Genres);
+    assert!(asks(&app.open_library_node(LibraryNode::Genres, true), LibraryNode::Genres));
+    app.shed_server_state();
+    assert!(app.artists.is_none() && app.genre_list.is_none());
+    assert!(asks(&app.open_library_node(LibraryNode::Artists, true), LibraryNode::Artists));
+
+    // And with the account (the review's note): a reconnect as the same
+    // user, or one that names none, keeps them; another user on the same
+    // server may see other libraries, and forgets them.
+    let connected = |username: Option<&str>| Event::Connected {
+        server: "http://host:3000".into(),
+        id: "http://host:3000".into(),
+        username: username.map(str::to_string),
+        token: None,
+        ping: Box::default(),
+    };
+    app.apply_event(connected(Some("alice")));
+    app.artists = Some(vec!["Air".into()]);
+    app.genre_list = Some(Vec::new());
+    app.apply_event(connected(Some("alice")));
+    app.apply_event(connected(None));
+    assert!(app.artists.is_some() && app.genre_list.is_some(), "the same account keeps its lists");
+    app.apply_event(connected(Some("bob")));
+    assert!(app.artists.is_none() && app.genre_list.is_none(), "another account's are not its own");
+    assert!(asks(&app.open_library_node(LibraryNode::Artists, true), LibraryNode::Artists));
+}
+
+#[test]
 fn a_random_pick_lands_on_the_side_that_asked() {
     let mut app = connected_app();
     app.apply_event(Event::SonicRandom {
@@ -5367,6 +5777,36 @@ fn selection_stays_in_bounds() {
     assert_eq!(pane.state.selected(), None);
 }
 
+#[test]
+fn the_counts_leave_out_the_way_out_whether_or_not_there_is_one() {
+    // Asked every frame, so answered from the length: `..` leads a listing
+    // or is absent (performance audit #109).
+    let node = |label: &str| Entry::Node { label: label.into(), node: LibraryNode::Artists };
+    let mut pane = Pane::default();
+    pane.set(vec![Entry::Parent, node("Alpha"), node("Beta"), node("Gamma")]);
+    assert_eq!(pane.counts(), (3, 3));
+    pane.apply_filter("et".into());
+    assert_eq!(pane.counts(), (1, 3), "Beta, behind the kept `..`");
+    pane.apply_filter("zzz".into());
+    assert_eq!(pane.counts(), (0, 3), "only the way out is left");
+
+    // A library's top has no way out to leave out.
+    pane.set(vec![node("Alpha"), node("Beta")]);
+    assert_eq!(pane.counts(), (2, 2));
+    pane.apply_filter("alp".into());
+    assert_eq!(pane.counts(), (1, 2));
+    pane.set(Vec::new());
+    assert_eq!(pane.counts(), (0, 0));
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "below the first row")]
+fn a_way_out_below_the_first_row_is_caught_where_the_list_lands() {
+    let node = |label: &str| Entry::Node { label: label.into(), node: LibraryNode::Artists };
+    Pane::default().set(vec![node("Alpha"), Entry::Parent]);
+}
+
 // ── Album art ───────────────────────────────────────────────────────────────
 
 fn track_with_cover(path: &str, cover: &str) -> Track {
@@ -5392,7 +5832,7 @@ fn starting_a_track_asks_for_its_cover_once() {
     ]);
 
     let effects = app.play_index(0);
-    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None });
+    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None, small: false });
     assert!(effects.contains(&asked), "got {effects:?}");
 
     // The next track shares the cover and the first ask is still out; the
@@ -5418,14 +5858,14 @@ fn a_cover_reply_reaches_the_playing_track_whenever_it_lands() {
     // The reply lands — including one that took long enough for the track
     // to have been paused, seeked, anything but skipped.
     let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
-    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(art.clone()), settled: true });
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(art.clone()), settled: true, small: false });
     assert_eq!(now_art(&app), Some(&art));
 
     // "The server has no cover for this" is also an answer, and it must
     // not leave the previous track's art on screen.
     app.replace_queue(vec![track_with_cover("lib/b.mp3", "bb.jpeg")]);
     app.play_index(0);
-    app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: None, settled: true });
+    app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: None, settled: true, small: false });
     assert_eq!(now_art(&app), None);
 }
 
@@ -5438,18 +5878,18 @@ fn a_cover_nobody_answered_for_is_asked_for_again() {
     // waveform's rule, applied here.
     let mut app = connected_app();
     app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
-    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None });
+    let asked = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None, small: false });
     assert!(app.play_index(0).contains(&asked));
 
     // The fetch dies with the network: nothing was learned, so nothing is
     // remembered, and the next play asks again.
-    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: false });
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: false, small: false });
     assert!(!app.art.contains_key("aa.jpeg"), "an unanswered ask gives the slot back");
     assert!(app.play_index(0).contains(&asked), "and playing it again asks again");
 
     // The server's own "there is no art" still settles it — the two must
     // not have been collapsed the other way round either.
-    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: true });
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: true, small: false });
     assert!(app.art.get("aa.jpeg").is_some_and(|art| art.is_none()));
     assert!(!app.play_index(0).contains(&asked));
 }
@@ -7196,14 +7636,15 @@ fn a_full_art_cache_lets_go_of_the_oldest_cover_nothing_on_screen_needs() {
     // cap, so a wall page over the cap re-asked for its covers every frame.
     let mut app = connected_app();
     app.replace_queue(vec![track_with_cover("lib/a.mp3", "queued.jpeg")]);
+    app.queue_on_view(0..1);
     app.now_playing = Some(track_with_cover("lib/p.mp3", "playing.jpeg"));
-    app.fetch_art_from("queued.jpeg", None);
-    app.fetch_art_from("playing.jpeg", None);
+    app.fetch_art_from("queued.jpeg", None, true);
+    app.fetch_art_from("playing.jpeg", None, true);
     for i in 0..ART_CACHE_CAP - 2 {
-        app.fetch_art_from(&format!("wall{i}.jpeg"), None);
+        app.fetch_art_from(&format!("wall{i}.jpeg"), None, true);
     }
     assert_eq!(app.art.len(), ART_CACHE_CAP);
-    app.fetch_art_from("new.jpeg", None);
+    app.fetch_art_from("new.jpeg", None, true);
     assert_eq!(app.art.len(), ART_CACHE_CAP, "one out, one in");
     assert!(!app.art.contains_key("wall0.jpeg"), "the oldest unpinned cover went");
     for kept in ["queued.jpeg", "playing.jpeg", "new.jpeg", "wall1.jpeg"] {
@@ -7211,6 +7652,477 @@ fn a_full_art_cache_lets_go_of_the_oldest_cover_nothing_on_screen_needs() {
     }
     // A slot given back by an unanswered ask is forgotten, not evicted twice.
     app.art.remove("wall1.jpeg");
-    app.fetch_art_from("newer.jpeg", None);
+    app.fetch_art_from("newer.jpeg", None, true);
     assert!(app.art.contains_key("wall2.jpeg") && app.art.contains_key("newer.jpeg"), "nothing else went for a gap");
+}
+
+#[test]
+fn the_action_sheets_cover_stays_while_the_sheet_does() {
+    // The review of performance audit #91: the sheet draws its track's
+    // cover from the cache without claiming it, and with queued rows no
+    // longer pinned a claim elsewhere could evict it from the open sheet.
+    let mut app = connected_app();
+    let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+    app.fetch_art_file("sheet.jpeg");
+    app.apply_event(Event::AlbumArt { file: "sheet.jpeg".into(), art: Some(art), settled: true, small: true });
+    app.set_sheet_on_view(Some("sheet.jpeg".into()));
+    for i in 0..2 * ART_CACHE_CAP {
+        app.fetch_art_file(&format!("wall{i}.jpeg"));
+    }
+    assert!(app.art.get("sheet.jpeg").is_some_and(Option::is_some), "the oldest entry, and still here");
+    assert_eq!(app.art.len(), ART_CACHE_CAP);
+
+    // Closed, it is one more cover.
+    app.set_sheet_on_view(None);
+    app.fetch_art_file("after.jpeg");
+    assert!(!app.art.contains_key("sheet.jpeg"));
+}
+
+#[test]
+fn a_cover_that_lands_after_the_cache_let_go_of_its_claim_is_still_evictable() {
+    // Performance audit #90: a wall page flipped past before its covers
+    // landed was filed back outside the eviction order — kept for the
+    // session, past the cap, with its source bytes. Dropped instead, it
+    // would be asked for again every frame while it is still on screen.
+    let mut app = connected_app();
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "queued.jpeg")]);
+    app.queue_on_view(0..1);
+    app.fetch_art_from("queued.jpeg", None, true);
+    for i in 0..ART_CACHE_CAP {
+        app.fetch_art_file(&format!("old{i}.jpeg"));
+    }
+    for i in 0..ART_CACHE_CAP {
+        app.fetch_art_file(&format!("new{i}.jpeg"));
+    }
+    assert!(!app.art.contains_key("old0.jpeg"), "the first page's claims went while still out");
+
+    let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+    for i in 0..ART_CACHE_CAP {
+        app.apply_event(Event::AlbumArt { file: format!("old{i}.jpeg"), art: Some(art.clone()), settled: true, small: true });
+    }
+    assert_eq!(app.art.len(), ART_CACHE_CAP, "the answers are kept, and the cap holds");
+    assert_eq!(app.art_order.len(), app.art.len(), "every entry is one eviction can reach");
+    assert!(app.art.contains_key("old255.jpeg") && app.art.contains_key("queued.jpeg"));
+
+    // Reachable means it goes: a fresh page lets every one of them go.
+    for i in 0..ART_CACHE_CAP {
+        app.fetch_art_file(&format!("next{i}.jpeg"));
+    }
+    assert!(app.art.keys().all(|k| k.starts_with("next") || k == "queued.jpeg"), "nothing outlived the cap");
+    assert_eq!(app.art.len(), ART_CACHE_CAP);
+}
+
+#[test]
+fn a_shape_that_lands_after_the_cache_let_go_of_its_claim_is_still_evictable() {
+    // The waveforms' copy of the covers' rule (performance audit #90).
+    let mut app = connected_app();
+    let origin = Origin { server: "http://host:3000".into(), peer: None };
+    for i in 0..2 * ART_CACHE_CAP {
+        app.fetch_waveform(&format!("t{i}.mp3"), &origin);
+    }
+    for i in 0..ART_CACHE_CAP {
+        app.apply_event(Event::Waveform { filepath: format!("t{i}.mp3"), bars: Some(vec![1]), settled: true });
+    }
+    assert_eq!(app.waveforms.len(), ART_CACHE_CAP);
+    assert_eq!(app.waveform_order.len(), app.waveforms.len());
+}
+
+/// Pretend `name`'s last failed ask happened `secs` ago.
+fn age_rung(retry: &mut HashMap<String, TunnelRetry>, name: &str, secs: u64) {
+    retry.get_mut(name).expect("a failure on the ladder").failed_at =
+        crate::clock::Instant::now() - std::time::Duration::from_secs(secs);
+}
+
+fn unanswered(file: &str) -> Event {
+    Event::AlbumArt { file: file.into(), art: None, settled: false, small: true }
+}
+
+#[test]
+fn a_wall_cover_whose_ask_failed_waits_its_rung_before_it_is_asked_again() {
+    // Performance audit #89: the wall and the queue panel claim whatever
+    // is missing on every frame, so a cover the server kept failing was
+    // asked for every other frame — ~500 requests a second for a 300x90
+    // wall answering 500. The slot is still given back; the next ask waits
+    // out the tunnels' ladder.
+    let mut app = connected_app();
+    assert!(app.fetch_art_file("aa.jpeg").is_some());
+    app.apply_event(unanswered("aa.jpeg"));
+    assert!(!app.art.contains_key("aa.jpeg"), "the slot is given back, as ever");
+    assert!(!app.wants_art("aa.jpeg") && app.fetch_art_file("aa.jpeg").is_none(), "but the next frame does not ask");
+
+    age_rung(&mut app.art_retry, "aa.jpeg", 5);
+    assert!(app.wants_art("aa.jpeg") && app.fetch_art_file("aa.jpeg").is_some(), "five seconds on, it does");
+
+    // A second failure climbs a rung.
+    app.apply_event(unanswered("aa.jpeg"));
+    age_rung(&mut app.art_retry, "aa.jpeg", 6);
+    assert!(app.fetch_art_file("aa.jpeg").is_none(), "ten seconds, this time");
+    age_rung(&mut app.art_retry, "aa.jpeg", 10);
+    assert!(app.fetch_art_file("aa.jpeg").is_some());
+
+    // An answer, even "no art", is the end of the ladder.
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: true, small: true });
+    assert!(app.art_retry.is_empty());
+}
+
+#[test]
+fn a_queue_rows_cover_whose_ask_failed_waits_its_rung_too() {
+    let mut app = connected_app();
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
+    assert!(app.fetch_queue_art(0).is_some());
+    app.apply_event(unanswered("aa.jpeg"));
+    assert!(app.fetch_queue_art(0).is_none());
+    age_rung(&mut app.art_retry, "aa.jpeg", 5);
+    assert!(app.fetch_queue_art(0).is_some());
+
+    // A new way to the server is news: what failed is asked for at once.
+    app.apply_event(unanswered("aa.jpeg"));
+    assert!(app.fetch_queue_art(0).is_none());
+    app.apply_event(Event::Retargeted { identity: "elsewhere".into(), server: "http://x/".into(), token: None });
+    assert!(app.fetch_queue_art(0).is_some());
+}
+
+#[test]
+fn failed_asks_leave_no_names_behind_in_the_eviction_order() {
+    // Performance audit #89: each re-claim pushed the name onto the order
+    // again, and the order was only pruned at the cap — which a cache of
+    // failures never reaches. ~90 MB an hour for one failing wall page.
+    let mut app = connected_app();
+    let origin = Origin { server: "http://host:3000".into(), peer: None };
+    for _ in 0..1000 {
+        assert!(!app.fetch_art_from("aa.jpeg", None, true).is_empty());
+        app.apply_event(unanswered("aa.jpeg"));
+        assert!(app.fetch_waveform("a.mp3", &origin).is_some());
+        app.apply_event(Event::Waveform { filepath: "a.mp3".into(), bars: None, settled: false });
+    }
+    assert!(app.art_order.is_empty() && app.art.is_empty());
+    assert!(app.waveform_order.is_empty() && app.waveforms.is_empty());
+}
+
+#[test]
+fn a_long_outage_across_a_big_wall_leaves_only_the_rungs_still_worth_keeping() {
+    // The review of performance audit #89: a rung went only with a settled
+    // answer or a way coming up, so an outage browsed across a big wall
+    // left one behind per cover shown, outside any cap.
+    let mut app = connected_app();
+    for i in 0..RETRY_KEPT - 30 {
+        let name = format!("gone{i}.jpeg");
+        app.fetch_art_file(&name);
+        app.apply_event(unanswered(&name));
+        age_rung(&mut app.art_retry, &name, 180);
+    }
+    for i in 0..30 {
+        let name = format!("near{i}.jpeg");
+        app.fetch_art_file(&name);
+        app.apply_event(unanswered(&name));
+        app.apply_event(unanswered(&name));
+    }
+    assert_eq!(app.art_retry.len(), RETRY_KEPT, "under the bound, nothing goes");
+
+    app.fetch_art_file("new.jpeg");
+    app.apply_event(unanswered("new.jpeg"));
+    assert_eq!(app.art_retry.len(), 31, "past it, the rungs two minutes old go");
+    assert!((0..30).all(|i| app.art_retry[&format!("near{i}.jpeg")].failures == 2), "the rest keep their place");
+    assert!(app.fetch_art_file("gone0.jpeg").is_some(), "and a name let go is asked as it was, its wait long over");
+}
+
+#[test]
+fn the_next_tracks_shape_whose_ask_failed_is_not_asked_after_every_event() {
+    // Performance audit #89: the prefetch runs after every event, so a
+    // failing next-track shape was asked for ten times a second.
+    let mut app = connected_app();
+    app.replace_queue(vec![track("a"), track("b")]);
+    assert!(waveforms_asked(&app.handle_action(Action::PlayPause)).contains(&"b".to_string()));
+
+    let effects = app.apply_event(Event::Waveform { filepath: "b".into(), bars: None, settled: false });
+    assert!(waveforms_asked(&effects).is_empty(), "{effects:?}");
+    let effects = app.apply_event(Event::PlaylistNames { names: None });
+    assert!(waveforms_asked(&effects).is_empty(), "{effects:?}");
+
+    age_rung(&mut app.waveform_retry, "b", 5);
+    let effects = app.apply_event(Event::PlaylistNames { names: None });
+    assert_eq!(waveforms_asked(&effects), vec!["b".to_string()]);
+}
+
+#[test]
+fn a_long_auto_dj_session_keeps_the_art_cache_at_its_cap() {
+    // Performance audit #91: every queue row was pinned, played rows too,
+    // and Auto DJ only appends — so once 256 albums had played, every new
+    // one grew the cache for good. Only what can be on screen is spared.
+    let mut app = connected_app();
+    let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+    for n in 0..400 {
+        app.push_queue(track_with_cover(&format!("lib/{n}.mp3"), &format!("{n}.jpeg")));
+        app.play_index(n);
+        app.apply_event(Event::AlbumArt { file: format!("{n}.jpeg"), art: Some(art.clone()), settled: true, small: false });
+    }
+    assert_eq!(app.art.len(), ART_CACHE_CAP, "one out, one in, however long the queue");
+    assert!(now_art(&app).is_some(), "and the playing cover is never the one that goes");
+}
+
+#[test]
+fn a_long_session_keeps_the_shape_cache_at_its_cap() {
+    // The shapes had the same rule — every queued filepath pinned — and so
+    // the same growth, a shape a track (performance audit #91).
+    let mut app = connected_app();
+    for n in 0..400 {
+        app.push_queue(track(&format!("lib/{n}.mp3")));
+    }
+    for n in 0..399 {
+        app.play_index(n);
+        for filepath in [format!("lib/{n}.mp3"), format!("lib/{}.mp3", n + 1)] {
+            app.apply_event(Event::Waveform { filepath, bars: Some(vec![1]), settled: true });
+        }
+    }
+    assert!(app.waveforms.len() <= ART_CACHE_CAP, "{}", app.waveforms.len());
+    for held in ["lib/398.mp3", "lib/399.mp3"] {
+        assert!(app.waveforms.get(held).is_some_and(|bars| bars.is_some()), "{held}: playing and next stay");
+    }
+}
+
+#[test]
+fn nothing_the_gui_last_drew_is_evicted_for_a_late_answer() {
+    // With every queue row no longer pinned, the screen is: the wall's
+    // page and the queue panel's rows. Answers for a page flipped past
+    // land after the new page is up, and must not push it out.
+    let mut app = connected_app();
+    let rows: Vec<Track> = (0..40).map(|n| track_with_cover(&format!("lib/{n}.mp3"), &format!("q{n}.jpeg"))).collect();
+    app.replace_queue(rows);
+    app.queue_on_view(10..30);
+    for index in 10..30 {
+        app.fetch_queue_art(index);
+    }
+    for i in 0..ART_CACHE_CAP {
+        app.fetch_art_file(&format!("old{i}.jpeg"));
+    }
+    let page: Vec<String> = (0..180).map(|i| format!("page{i}.jpeg")).collect();
+    assert!(!app.wall_on_view_is(page.iter().map(String::as_str)));
+    app.set_wall_on_view(page.clone());
+    assert!(app.wall_on_view_is(page.iter().map(String::as_str)));
+    for file in &page {
+        app.fetch_art_file(file);
+    }
+    let art = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+    for i in 0..ART_CACHE_CAP {
+        app.apply_event(Event::AlbumArt { file: format!("old{i}.jpeg"), art: Some(art.clone()), settled: true, small: true });
+    }
+    assert!(app.art.len() <= ART_CACHE_CAP);
+    assert!(page.iter().all(|file| app.art.contains_key(file)), "the wall's page stands");
+    assert!((10..30).all(|n| app.art.contains_key(&format!("q{n}.jpeg"))), "the panel's rows stand");
+}
+
+#[test]
+fn a_wall_page_is_claimed_in_one_batch_that_evicts_as_single_claims_did() {
+    // Performance audit #101: at the cap every claim rebuilt the pinned
+    // set by cloning names — a page turn against a long queue paid it a
+    // hundred and fifty times over. One borrowed set per batch evicts the
+    // same covers in the same order.
+    let mut app = connected_app();
+    let rows: Vec<Track> = (0..3000).map(|n| track_with_cover(&format!("lib/{n}.mp3"), &format!("q{}.jpeg", n % 300))).collect();
+    app.replace_queue(rows);
+    for rows in [0..20, 20..40] {
+        assert_eq!(app.claim_queue_art(rows).len(), 20, "one claim per distinct cover shown");
+    }
+    for i in 0..ART_CACHE_CAP - 40 {
+        app.fetch_art_file(&format!("old{i}.jpeg"));
+    }
+    assert_eq!(app.art.len(), ART_CACHE_CAP);
+
+    let page: Vec<String> = (0..150).map(|i| format!("page{i}.jpeg")).collect();
+    app.set_wall_on_view(page.clone());
+    let claims = app.claim_wall_art();
+    assert_eq!(covers_asked(&claims).len(), 150);
+    assert_eq!(app.art.len(), ART_CACHE_CAP, "one out for each one in");
+    assert!(page.iter().all(|file| app.art.contains_key(file)));
+    assert!((20..40).all(|n| app.art.contains_key(&format!("q{n}.jpeg"))), "the panel's rows on record stay");
+    assert!((0..20).all(|n| !app.art.contains_key(&format!("q{n}.jpeg"))), "rows scrolled past are the oldest, and go");
+    assert!((0..130).all(|i| !app.art.contains_key(&format!("old{i}.jpeg"))), "then the oldest wall covers, in order");
+    assert!(app.art.contains_key("old130.jpeg"));
+    assert_eq!(app.art_order.len(), app.art.len());
+    assert!(app.claim_wall_art().is_empty(), "the next frame owes nothing");
+}
+
+/// Every cover ask in these effects, by file, in dispatch order.
+fn covers_asked(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Api(ApiCmd::AlbumArt { file, .. }) => Some(file.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every withdrawal in these effects, by file.
+fn covers_withdrawn(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Api(ApiCmd::ArtWithdraw { file }) => Some(file.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_page_of_covers_is_asked_small_top_cell_last_and_what_it_evicted_unasked_is_withdrawn() {
+    // Performance audit #88: a page's covers queue in their server's art
+    // lane, served newest first — so the batch goes out last cell first,
+    // and the top-left cover is the first answered. A claim the page
+    // evicted before its answer came is withdrawn, so a lane still holding
+    // it drops it instead of spending the link on a page flipped past.
+    let mut app = connected_app();
+    for i in 0..ART_CACHE_CAP {
+        app.fetch_art_file(&format!("old{i}.jpeg"));
+    }
+    let answered = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+    for i in 0..10 {
+        app.apply_event(Event::AlbumArt { file: format!("old{i}.jpeg"), art: Some(answered.clone()), settled: true, small: true });
+    }
+    let page: Vec<String> = (0..20).map(|i| format!("page{i}.jpeg")).collect();
+    app.set_wall_on_view(page.clone());
+    let effects = app.claim_wall_art();
+
+    let asked = covers_asked(&effects);
+    assert_eq!(asked.first().map(String::as_str), Some("page19.jpeg"));
+    assert_eq!(asked.last().map(String::as_str), Some("page0.jpeg"), "served last in, first out: the top cell first");
+    assert!(effects.iter().all(|e| !matches!(e, Effect::Api(ApiCmd::AlbumArt { small: false, .. }))), "all small");
+
+    let withdrawn = covers_withdrawn(&effects);
+    assert_eq!(withdrawn, (10..20).map(|i| format!("old{i}.jpeg")).collect::<Vec<_>>(), "only the unanswered go back");
+    let first_ask = effects.iter().position(|e| matches!(e, Effect::Api(ApiCmd::AlbumArt { .. }))).unwrap();
+    assert!(effects[..first_ask].iter().all(|e| matches!(e, Effect::Api(ApiCmd::ArtWithdraw { .. }))), "withdrawn before anything is asked");
+
+    // The playing track's cover never queues behind a page.
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "playing.jpeg")]);
+    let effects = app.play_index(0);
+    assert!(effects.iter().any(|e| matches!(e, Effect::Api(ApiCmd::AlbumArt { small: false, file, .. }) if file == "playing.jpeg")));
+}
+
+#[test]
+fn a_connect_withdraws_every_claim_still_unanswered_as_it_empties_the_cache() {
+    // The review of performance audit #88: a Connected empties the cache,
+    // since a cover's name means something only to the server that minted
+    // it. Its unanswered claims went without a word, so a lane went on
+    // asking the server the user had left for a page of them.
+    let mut app = connected_app();
+    for i in 0..30 {
+        app.fetch_art_file(&format!("left{i}.jpeg"));
+    }
+    let answered = crate::tui::art::Art::from_rgb(1, 1, vec![1, 2, 3]).unwrap();
+    for i in 0..10 {
+        app.apply_event(Event::AlbumArt { file: format!("left{i}.jpeg"), art: Some(answered.clone()), settled: true, small: true });
+    }
+    let effects = app.apply_event(Event::Connected {
+        server: "http://other:3000".into(),
+        id: "http://other:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::default(),
+    });
+    let mut withdrawn = covers_withdrawn(&effects);
+    withdrawn.sort();
+    let mut unanswered: Vec<String> = (10..30).map(|i| format!("left{i}.jpeg")).collect();
+    unanswered.sort();
+    assert_eq!(withdrawn, unanswered, "only the unanswered go back");
+    assert!(app.art.is_empty() && app.art_order.is_empty());
+    assert!(covers_asked(&effects).is_empty());
+}
+
+#[test]
+fn the_playing_track_asks_for_the_original_of_a_cover_the_wall_fetched_small() {
+    // Performance audit #92: wall cells and queue rows ask for the
+    // server's 256 px copy; the playing track's big box may draw the
+    // original's pixels, so it asks for that — once — and shows the small
+    // copy meanwhile.
+    let mut app = connected_app();
+    let small = decoded_cover(256);
+    let full = decoded_cover(640);
+    assert!(matches!(app.fetch_art_file("aa.jpeg"), Some(Effect::Api(ApiCmd::AlbumArt { small: true, .. }))));
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(small.clone()), settled: true, small: true });
+
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
+    let original = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None, small: false });
+    assert!(app.play_index(0).contains(&original), "the original, for the big box");
+    assert_eq!(now_art(&app), Some(&small), "the small copy stands in until it lands");
+    assert!(app.fetch_queue_art(0).is_none(), "and the row does not ask small again");
+
+    // It lands behind the small copy's thumbnail and id: the queue row and
+    // the card keep the picture they drew, the big box draws the bytes
+    // (the integration check of #92).
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(full.clone()), settled: true, small: false });
+    let now = now_art(&app).unwrap();
+    assert_eq!((now.id(), now.rgb()), (small.id(), small.rgb()));
+    assert_eq!((now.source(), now.source_id()), (full.source(), full.source_id()));
+    assert!(!app.play_index(0).contains(&original), "asked once");
+}
+
+/// A cover decoded from real bytes, `side` pixels square: what the server
+/// sends, source kept — the small copy at 256, an original past it.
+fn decoded_cover(side: u32) -> crate::tui::art::Art {
+    let pixels = image::RgbImage::from_fn(side, side, |x, y| image::Rgb([x as u8, y as u8, side as u8]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    pixels.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+    crate::tui::art::decode(&bytes.into_inner()).unwrap()
+}
+
+#[test]
+fn a_connect_mid_track_asks_for_the_playing_cover_at_full_size_again() {
+    // A connect empties the cache — a switch and back, a re-login, a Quick
+    // Connect add — and only a track's start asked for the original: the
+    // queue panel re-asking first left Now Playing's big box, the card and
+    // the mini player on the small copy for the rest of the track (the
+    // integration check of performance audit #92).
+    let mut app = connected_app();
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg"), track_with_cover("lib/b.mp3", "bb.jpeg")]);
+    app.play_index(0);
+    let full = decoded_cover(640);
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(full.clone()), settled: true, small: false });
+    let effects = app.apply_event(Event::Connected {
+        server: "http://host:3000".into(),
+        id: "http://host:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::default(),
+    });
+    let original = Effect::Api(ApiCmd::AlbumArt { file: "aa.jpeg".into(), reach: None, small: false });
+    assert!(effects.contains(&original), "{effects:?}");
+    assert_eq!(covers_asked(&app.claim_queue_art(0..2)), vec!["bb.jpeg".to_string()], "the panel asks only the rest");
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(full.clone()), settled: true, small: false });
+    assert_eq!(now_art(&app).map(|art| art.source()), Some(full.source()));
+
+    // Nothing playing, nothing asked.
+    let mut idle = connected_app();
+    let effects = idle.apply_event(Event::Connected {
+        server: "http://host:3000".into(),
+        id: "http://host:3000".into(),
+        username: None,
+        token: None,
+        ping: Box::default(),
+    });
+    assert!(covers_asked(&effects).is_empty(), "{effects:?}");
+}
+
+#[test]
+fn a_small_copy_that_lands_after_the_original_was_asked_for_is_not_the_answer() {
+    let mut app = connected_app();
+    let small = crate::tui::art::Art::from_rgb(1, 1, vec![1, 1, 1]).unwrap();
+    app.fetch_art_file("aa.jpeg");
+    app.replace_queue(vec![track_with_cover("lib/a.mp3", "aa.jpeg")]);
+    app.play_index(0);
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: Some(small.clone()), settled: true, small: true });
+    assert_eq!(now_art(&app), None, "still waiting on the original");
+    app.apply_event(Event::AlbumArt { file: "aa.jpeg".into(), art: None, settled: false, small: true });
+    assert!(app.art.contains_key("aa.jpeg"), "and the small ask failing gives back nothing it no longer holds");
+
+    // The original failing where a small copy stands keeps the small copy.
+    let mut app = connected_app();
+    app.fetch_art_file("bb.jpeg");
+    app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: Some(small.clone()), settled: true, small: true });
+    app.replace_queue(vec![track_with_cover("lib/b.mp3", "bb.jpeg")]);
+    app.play_index(0);
+    app.apply_event(Event::AlbumArt { file: "bb.jpeg".into(), art: None, settled: false, small: false });
+    assert_eq!(now_art(&app), Some(&small));
+    let original = Effect::Api(ApiCmd::AlbumArt { file: "bb.jpeg".into(), reach: None, small: false });
+    assert!(app.play_index(0).contains(&original), "and the next start asks again");
 }

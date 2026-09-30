@@ -13,6 +13,7 @@
 
 pub(crate) mod fade;
 pub(crate) mod http;
+mod mpeg;
 pub(crate) mod output;
 pub(crate) mod tap;
 pub(crate) mod trace;
@@ -22,7 +23,7 @@ use trace::etrace;
 use std::fmt;
 use std::fs::File;
 use std::io::BufReader;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -31,10 +32,6 @@ use rodio::{Decoder, Player, Source};
 use serde::Serialize;
 
 use crate::player::DeviceNotice;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 
 // ── Loop mode ───────────────────────────────────────────────────────────────
 
@@ -86,6 +83,10 @@ pub enum EngineError {
     OutOfBounds,
     EndOfQueue,
     Seek(String),
+    /// A play given up because a newer command made it moot while its
+    /// source was still opening. Not a failure: playback stands as it was,
+    /// and the newer command says what happens next.
+    Superseded,
 }
 
 impl fmt::Display for EngineError {
@@ -96,6 +97,7 @@ impl fmt::Display for EngineError {
             EngineError::OutOfBounds => write!(f, "Index out of bounds"),
             EngineError::EndOfQueue => write!(f, "Already at end of queue"),
             EngineError::Seek(e) => write!(f, "Seek failed: {}", e),
+            EngineError::Superseded => write!(f, "Superseded by a newer command"),
         }
     }
 }
@@ -224,16 +226,72 @@ const START_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(test)]
 const START_TIMEOUT: Duration = Duration::from_millis(1500);
 
+/// How often a direct open waiting on its thread asks whether it is still
+/// wanted (performance audit #79). Short enough that a stop or a newer play
+/// feels immediate; the question is a few channel reads.
+const SUPERSEDE_POLL: Duration = Duration::from_millis(20);
+
+/// How many opens given up for a newer command may still be running
+/// (giving one up does not stop it mid-request) before the next one waits
+/// for one of them to finish. Skimming a remote queue would otherwise start
+/// an open per keypress, every one pulling its probe over the link the
+/// wanted one needs (performance audit #79) — where the old blocking wait,
+/// with collapse, never ran more than two in a row.
+const MAX_ABANDONED: usize = 2;
+
+/// An open running on its own thread: the channel its answer comes down,
+/// and the thread.
+struct Opener {
+    rx: mpsc::Receiver<Result<Prepared, String>>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Opener {
+    /// Walk away from the open. The receiver goes now, so the answer drops
+    /// into a closed channel on the open's own thread the moment it
+    /// arrives — the reader, its download and its spool file with it — as
+    /// a deadline's abandonment always has. A receiver kept to count the
+    /// open by kept that answer too: a live reader downloading a track
+    /// nobody wanted, whole, beside the one that was, until something next
+    /// looked at the list (review of audit #79). The thread is handed back
+    /// for the counting — see [`MAX_ABANDONED`].
+    fn give_up(self) -> std::thread::JoinHandle<()> {
+        self.thread
+    }
+}
+
+/// Why a direct open produced no source.
+enum OpenError {
+    /// It failed, and why — for the logs and the queue's failure path.
+    Failed(String),
+    /// A newer command made it moot before it finished — with the opener
+    /// when one was running, for the engine to give up and count.
+    Superseded(Option<Opener>),
+}
+
 /// [`open_entry`] with a deadline, for the path that blocks the audio
 /// thread. Same thread-and-channel shape as [`spawn_prepare`], and the
 /// same abandonment contract: a result that arrives after the deadline
 /// drops into a closed channel, taking the reader and its spool file
 /// with it.
 fn open_entry_bounded(entry: &QueueEntry) -> Result<Prepared, String> {
+    open_entry_unless(entry, &mut || false).map_err(|e| match e {
+        OpenError::Failed(reason) => reason,
+        // Never asked, so never given up; for the match's sake.
+        OpenError::Superseded(_) => EngineError::Superseded.to_string(),
+    })
+}
+
+/// [`open_entry_bounded`], giving up as soon as `superseded` says the
+/// source is no longer wanted — see [`await_open`].
+fn open_entry_unless(
+    entry: &QueueEntry,
+    superseded: &mut dyn FnMut() -> bool,
+) -> Result<Prepared, OpenError> {
     if !http::is_http_url(&entry.path) {
         // Local files open or fail in microseconds; a thread per open
         // would be pure ceremony.
-        return open_entry(entry);
+        return open_entry(entry).map_err(OpenError::Failed);
     }
     let (tx, rx) = mpsc::channel();
     let moved = entry.clone();
@@ -250,20 +308,48 @@ fn open_entry_bounded(entry: &QueueEntry) -> Result<Prepared, String> {
                 let _ = tx.send(result);
             }
         });
-    if spawned.is_err() {
+    let Ok(thread) = spawned else {
         // A box that cannot spawn a thread still deserves its music; the
         // unbounded open is the behaviour this path always had.
-        return open_entry(entry);
-    }
-    match rx.recv_timeout(START_TIMEOUT) {
-        Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
-            "the stream stalled while opening — gave up after {}s",
-            START_TIMEOUT.as_secs()
-        )),
-        // The open thread panicked and the catch dropped the sender.
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err("the decoder gave up on the stream".into())
+        return open_entry(entry).map_err(OpenError::Failed);
+    };
+    await_open(Opener { rx, thread }, superseded)
+}
+
+/// Wait for an opener's answer: at most [`START_TIMEOUT`], and only for as
+/// long as the source is wanted. The wait parks the audio thread, so a
+/// stop or a newer play used to queue behind it — the rest of a doomed
+/// open, seconds over a tunnel, twenty against a stall — and then find the
+/// unwanted track installed and sounding for a moment before it could act
+/// (performance audit #79). Now the thread asks `superseded` every
+/// [`SUPERSEDE_POLL`] and walks away on a yes, handing the opener back to
+/// be given up ([`Opener::give_up`]) — the same abandonment the deadline
+/// uses. The open-then-swap order is untouched: nothing has happened to
+/// the playing sink yet.
+fn await_open(
+    opener: Opener,
+    superseded: &mut dyn FnMut() -> bool,
+) -> Result<Prepared, OpenError> {
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match opener.rx.recv_timeout(left.min(SUPERSEDE_POLL)) {
+            Ok(result) => return result.map_err(OpenError::Failed),
+            // The open thread panicked and the catch dropped the sender.
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(OpenError::Failed("the decoder gave up on the stream".into()));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if Instant::now() >= deadline {
+                    return Err(OpenError::Failed(format!(
+                        "the stream stalled while opening — gave up after {}s",
+                        START_TIMEOUT.as_secs()
+                    )));
+                }
+                if superseded() {
+                    return Err(OpenError::Superseded(Some(opener)));
+                }
+            }
         }
     }
 }
@@ -276,21 +362,32 @@ fn open_entry(entry: &QueueEntry) -> Result<Prepared, String> {
     // PlaybackFailed. Serve and the CLI keep the lines (audit #43).
     let (opened, duration) = if http::is_http_url(&path) {
         let redacted = http::redact_source(&path);
-        let (reader, content_length) = http::open(&path).map_err(|e| {
+        let (mut reader, content_length) = http::open(&path).map_err(|e| {
             crate::stderrln!("[engine] open failed for {}: {}", redacted, e);
             e
         })?;
-        if content_length.is_none() {
+        let mut builder = Decoder::builder().with_seekable(true);
+        if let Some(len) = content_length {
+            // A constant-bitrate MP3 seeks by byte offset: one Range request
+            // where the frame walk would read every byte up to the target as
+            // the download delivered it (performance audit #72; the why is
+            // in engine::mpeg). Only with a length, which the offset is
+            // computed from: symphonia refuses a coarse seek without one.
+            let cbr = mpeg::is_cbr_mp3(&mut reader).map_err(|e| {
+                crate::stderrln!("[engine] open failed for {}: {}", redacted, e);
+                e.to_string()
+            })?;
+            if cbr {
+                etrace!("{redacted}: constant bitrate, so seeks go by byte offset");
+            }
+            builder = builder.with_byte_len(len).with_coarse_seek(cbr);
+        } else {
             crate::stderrln!(
                 "[engine] {}: no content length — seek limited to downloaded data",
                 redacted
             );
         }
-        let mut builder = Decoder::builder().with_data(reader).with_seekable(true);
-        if let Some(len) = content_length {
-            builder = builder.with_byte_len(len);
-        }
-        let decoder = builder.build().map_err(|e| {
+        let decoder = builder.with_data(reader).build().map_err(|e| {
             crate::stderrln!("[engine] decode failed for {}: {}", redacted, e);
             e.to_string()
         })?;
@@ -314,7 +411,15 @@ fn open_entry(entry: &QueueEntry) -> Result<Prepared, String> {
             crate::stderrln!("[engine] decode failed for {}: {}", path, e);
             e.to_string()
         })?;
-        let duration = entry.duration_hint.unwrap_or_else(|| probe_duration(&path));
+        // The decoder that just probed the file knows its length, as for a
+        // stream. A second open and probe used to supply it (performance
+        // audit #80): serve's queue carries no hint, so every local track
+        // paid it, re-reading any embedded cover, and for a LAME MP3 it
+        // counted the encoder delay and padding the decoder trims away.
+        let duration = entry
+            .duration_hint
+            .or_else(|| decoder.total_duration().map(|d| d.as_secs_f64()))
+            .unwrap_or(0.0);
         (Opened::Local(decoder), duration)
     };
     Ok(Prepared { opened, path, duration })
@@ -433,10 +538,10 @@ enum NextTrack {
     /// Nothing decided — the resting state, and all of it when crossfade
     /// is off.
     Idle,
-    /// A thread is opening the pick; its answer arrives on `rx`. Dropping
-    /// the receiver is the cancellation: the opener's send fails, the
-    /// decoder drops, and its spool file deletes itself.
-    Opening { index: Option<usize>, rx: mpsc::Receiver<Result<Prepared, String>> },
+    /// A thread is opening the pick; its answer arrives on `opener`.
+    /// Dropping the receiver is the cancellation: the opener's send fails,
+    /// the decoder drops, and its spool file deletes itself.
+    Opening { index: Option<usize>, opener: Opener },
     /// Opened, decoded, spooling — waiting for the fade window to arrive.
     Ready { prepared: Prepared, index: Option<usize> },
     /// The open failed, and when. Remembered so the tick does not walk
@@ -460,6 +565,28 @@ impl NextTrack {
             NextTrack::Failed { .. } => "failed",
         }
     }
+}
+
+/// The row a natural boundary plays: the one a prepared decoder committed
+/// to when its prepare began, while that row still holds its file, else the
+/// queue's own next. A prepare that reaches the boundary unused is a blend
+/// or an append that missed its window — a duration hint running long, a
+/// transition still draining. Under shuffle the prepare is where the dice
+/// were rolled, and rolling them again here missed the prepared decoder
+/// (N-2)/(N-1) of the time: it was thrown away and another pick opened with
+/// the lock held (found under performance audit #77). Any queue edit since
+/// the prepare would have invalidated it, so a commitment still standing is
+/// to this queue.
+fn boundary_row(q: &QueueState, next: &NextTrack) -> Option<usize> {
+    let committed = match next {
+        NextTrack::Ready { prepared, index: Some(index) }
+            if q.queue.get(*index).is_some_and(|e| e.path == prepared.path) =>
+        {
+            Some(*index)
+        }
+        _ => None,
+    };
+    committed.or_else(|| pick_next(q, false))
 }
 
 /// The committed pick for the track after this one, or None when no
@@ -527,7 +654,7 @@ fn spawn_prepare(entry: QueueEntry, index: Option<usize>) -> NextTrack {
             }
         });
     match spawned {
-        Ok(_) => NextTrack::Opening { index, rx },
+        Ok(thread) => NextTrack::Opening { index, opener: Opener { rx, thread } },
         // A box that cannot spawn a thread still has the ordinary advance
         // path; a blend is not worth an error.
         Err(_) => NextTrack::Failed { at: Instant::now() },
@@ -558,6 +685,12 @@ fn attach(
         (Opened::Http(d), None) => sink.append(fade::Faded::new(d, fade.clone())),
     }
     (fade, live)
+}
+
+/// A next track taken over by a play — see [`State::take_ahead`].
+enum Ahead {
+    Ready(Prepared),
+    Opening(Opener),
 }
 
 /// A sink on its way out of a blend: still connected to the mixer, ramping
@@ -651,6 +784,10 @@ struct State {
     /// session it exists to hold (PR #5 review). Edge-triggered, the same
     /// gate says its piece once and then keeps quiet.
     gate_noted: Option<&'static str>,
+    /// When the sounding track's end was due by the wall clock, noted the
+    /// first time a driver asked for its pace inside the track's last
+    /// moments — see [`State::until_end_paced`].
+    end_due: Option<Instant>,
     /// What the TUI said should play after the current track. The TUI keeps
     /// its own queue and feeds this engine one source at a time, so unlike
     /// serve mode the engine cannot pick a next; it has to be told. Consulted
@@ -882,6 +1019,32 @@ impl State {
         }
     }
 
+    /// The next track, taken out of the slot, when it is `source` and has
+    /// already been opened or is opening: a manual pick of what was
+    /// announced (or committed) to follow, inside its prepare window. The
+    /// play takes it over rather than throwing it away and fetching the
+    /// same track again with the audio thread waiting (performance audit
+    /// #79). Anything else stays where it was.
+    fn take_ahead(&mut self, source: &str) -> Option<Ahead> {
+        match std::mem::replace(&mut self.next, NextTrack::Idle) {
+            NextTrack::Ready { prepared, .. } if prepared.path == source => {
+                Some(Ahead::Ready(prepared))
+            }
+            NextTrack::Opening { index, opener }
+                if match index {
+                    None => self.pending_next.as_ref().is_some_and(|e| e.path == source),
+                    Some(at) => self.q.queue.get(at).is_some_and(|e| e.path == source),
+                } =>
+            {
+                Some(Ahead::Opening(opener))
+            }
+            other => {
+                self.next = other;
+                None
+            }
+        }
+    }
+
     /// Forget whatever was decided or prepared about the next track. Any
     /// queue mutation calls this: the committed pick was made against a
     /// queue that no longer exists, and over-forgetting only costs a
@@ -949,14 +1112,102 @@ impl State {
         self.pending_next = None;
         self.cancel_overlap();
     }
+
+    /// Whether nothing here can change until a command arrives: stopped, or
+    /// paused with the pause landed and a track still in the sink — and no
+    /// breath draining, no orphaned remnant to skip, no open in flight.
+    /// Every other state has something the tick will do on its own.
+    fn at_rest(&self) -> bool {
+        let still = self.stopped || (self.sink.is_paused() && !self.sink.empty());
+        still
+            && self.pausing.is_none()
+            && self.outgoing.is_empty()
+            && !self.orphaned_tail
+            && !matches!(self.next, NextTrack::Opening { .. })
+    }
+
+    /// Seconds left of the sounding track — negative once it has run past
+    /// the length it claimed — or None when nothing is sounding toward a
+    /// known end: stopped, paused or ramping into a pause, sink empty, or
+    /// a length the engine never learned.
+    fn until_end(&self) -> Option<f64> {
+        if self.stopped
+            || self.sink.is_paused()
+            || self.pausing.is_some()
+            || self.sink.empty()
+            || self.duration <= 0.0
+        {
+            return None;
+        }
+        Some(self.duration - self.sink.get_pos().as_secs_f64())
+    }
+
+    /// [`State::until_end`] for a driver's pace ([`next_tick`]): None once
+    /// the end is more than [`END_GRACE`] overdue by the wall clock. The
+    /// due time is noted at the first look inside the last `base` of the
+    /// track, and forgotten when the track leaves that window. END_GRACE on
+    /// the position covers a track that runs long; this covers one whose
+    /// position stopped short of the end — a callback parked on a stalled
+    /// download, a device lost in an outage with nothing to reopen — which
+    /// would otherwise hold the driver at END_POLL for as long as it stays
+    /// stopped (review of audit #76).
+    fn until_end_paced(&mut self, base: Duration, now: Instant) -> Option<f64> {
+        let left = self.until_end();
+        let Some(near) = left.filter(|&left| left < base.as_secs_f64()) else {
+            self.end_due = None;
+            return left;
+        };
+        let due = *self.end_due.get_or_insert(now + Duration::from_secs_f64(near.max(0.0)));
+        if now.saturating_duration_since(due).as_secs_f64() > END_GRACE {
+            return None;
+        }
+        Some(near)
+    }
+}
+
+/// How far ahead of a track's computed end a driver aims its next tick,
+/// so the tick lands as the source runs dry rather than just after.
+const END_EARLY: f64 = 0.03;
+
+/// The shortest wait near a track's end. rodio moves the position every
+/// 5 ms of audio; ticking faster would only read the same number again.
+const END_POLL: Duration = Duration::from_millis(5);
+
+/// How long past its claimed length a track may run before the driver
+/// stops watching for its end closely. A length that undershoots — a wrong
+/// hint, a VBR header without a frame count — would otherwise hold the
+/// driver at END_POLL until the real end, which could be minutes of 200
+/// ticks a second; with the grace it costs at most a second of them.
+const END_GRACE: f64 = 1.0;
+
+/// When a driver that ticks every `base` should tick next. Settled, once
+/// per [`DEVICE_POLL`] (performance audit #81). With a track sounding
+/// toward a known end, just before that end — never sooner than
+/// [`END_POLL`], never later than `base` — because the tick is what notices
+/// a source ran out and starts the next one, and at a flat 250 ms the
+/// notice came U(0, 250) ms late: silence added to every natural boundary
+/// (performance audit #76; the gap Phase 1 #8 accepted, narrowed without
+/// changing the cut). Anything else keeps `base`.
+fn next_tick(settled: bool, until_end: Option<f64>, base: Duration) -> Duration {
+    if settled {
+        return base.max(DEVICE_POLL);
+    }
+    match until_end {
+        Some(left) if left > -END_GRACE => {
+            Duration::from_secs_f64((left - END_EARLY).max(0.0)).clamp(END_POLL.min(base), base)
+        }
+        _ => base,
+    }
 }
 
 /// How often the system default output is compared with the one the
 /// stream opened on. Plugging in headphones (or a Bluetooth speaker
 /// connecting) moves the default without touching the running stream —
 /// the OS leaves it playing on the old endpoint — so the only way to
-/// hear about it is to ask.
-const DEVICE_POLL: Duration = Duration::from_secs(1);
+/// hear about it is to ask. Also how long the drivers wait between ticks
+/// while the engine is [settled](Engine::settled): the watch is then the
+/// only thing the tick has to do, and it keeps its pace.
+pub(crate) const DEVICE_POLL: Duration = Duration::from_secs(1);
 
 /// How long a failed output rebuild rests before the next try: the
 /// outage where nothing will open at all (the lone Bluetooth headset
@@ -964,9 +1215,32 @@ const DEVICE_POLL: Duration = Duration::from_secs(1);
 /// device answers.
 const REBUILD_RETRY: Duration = Duration::from_secs(2);
 
+/// How long a stopped engine — or one that has never played anything —
+/// keeps the device stream running before it lets it sleep (performance
+/// audit #75). Long enough that a stop's breath, and whatever a stop left
+/// in the mixer, have long since played out; short next to what a running
+/// stream costs: the machine it keeps from idle-sleeping.
+#[cfg(not(test))]
+const IDLE_STOPPED: Duration = Duration::from_secs(5);
+/// How long a landed pause keeps it running. Longer than a stop: resuming
+/// from a sleeping stream restarts the device, which takes a few ms on a
+/// wired output but can clip the first few hundred on a Bluetooth link,
+/// and a short pause should come back exactly as it always has.
+#[cfg(not(test))]
+const IDLE_PAUSED: Duration = Duration::from_secs(30);
+/// Tests watch the stream go to sleep; nobody wants half a minute of it.
+#[cfg(test)]
+const IDLE_STOPPED: Duration = Duration::from_millis(400);
+#[cfg(test)]
+const IDLE_PAUSED: Duration = Duration::from_millis(800);
+
 /// The output device under watch, and the watch's own bookkeeping.
 struct OutputWatch {
     out: output::Output,
+    /// When something last needed the device callback: a command about to
+    /// lean on a Player, or a tick that found the engine anything but at
+    /// rest. The idle clock that suspends the stream runs from here.
+    active_at: Instant,
     /// When the default-device identity was last polled.
     polled: Instant,
     /// When a rebuild last failed outright, so the retries pace
@@ -995,6 +1269,36 @@ pub struct Engine {
     /// audio worker, serve's loop). Bounded by [`Engine::push_notice`];
     /// drained by [`Engine::take_device_notices`].
     notices: Mutex<Vec<DeviceNotice>>,
+    /// The threads of opens given up for a newer command, and when each
+    /// was given up — see [`MAX_ABANDONED`]. Only the threads: the answers
+    /// were let go with their receivers ([`Opener::give_up`]), and drop on
+    /// those threads as they finish. Pruned once finished, or once older
+    /// than [`START_TIMEOUT`], the most any open is waited.
+    abandoned: Mutex<Vec<(Instant, std::thread::JoinHandle<()>)>>,
+    /// Calls blocked on the device callback right now: a seek's try_seek,
+    /// made with the state lock released (audit #48). The stream is never
+    /// suspended under one — its answer would never come. Both drivers
+    /// tick on the thread that runs their commands, so a wait and a tick
+    /// never overlap there; the count is what keeps that true for any
+    /// driver that ticks from elsewhere.
+    callback_waits: AtomicUsize,
+}
+
+/// One call waiting on the device callback, counted for as long as it
+/// waits — see [`Engine::callback_waits`].
+struct CallbackWait<'a>(&'a AtomicUsize);
+
+impl<'a> CallbackWait<'a> {
+    fn new(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::AcqRel);
+        CallbackWait(count)
+    }
+}
+
+impl Drop for CallbackWait<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl Engine {
@@ -1020,6 +1324,7 @@ impl Engine {
             pausing: None,
             orphaned_tail: false,
             gate_noted: None,
+            end_due: None,
             pending_next: None,
             next: NextTrack::Idle,
             outgoing: Vec::new(),
@@ -1035,12 +1340,107 @@ impl Engine {
             state,
             output: Mutex::new(OutputWatch {
                 out: device,
+                active_at: Instant::now(),
                 polled: Instant::now(),
                 failed_at: None,
                 outage_told: false,
             }),
             notices: Mutex::new(Vec::new()),
+            abandoned: Mutex::new(Vec::new()),
+            callback_waits: AtomicUsize::new(0),
         })
+    }
+
+    /// Before a direct open starts: wait, for as long as the play is still
+    /// wanted, until fewer than [`MAX_ABANDONED`] given-up opens are still
+    /// running.
+    fn make_room(&self, superseded: &mut dyn FnMut() -> bool) -> Result<(), OpenError> {
+        loop {
+            {
+                let mut gone = self.abandoned.lock().unwrap();
+                gone.retain(|(since, thread)| {
+                    since.elapsed() < START_TIMEOUT && !thread.is_finished()
+                });
+                if gone.len() < MAX_ABANDONED {
+                    return Ok(());
+                }
+            }
+            std::thread::sleep(SUPERSEDE_POLL);
+            if superseded() {
+                return Err(OpenError::Superseded(None));
+            }
+        }
+    }
+
+    /// Wake the device stream for a call about to lean on a Player, and
+    /// restart the idle clock (performance audit #75). rodio performs
+    /// seeks, stops and skips inside the device callback, and a new sink
+    /// only sounds once the callback pulls it: against a suspended stream
+    /// a seek would wait forever and a play would start silent. Takes only
+    /// the output lock, so it may run under the state lock or before it.
+    fn wake(&self) {
+        let mut w = self.output.lock().unwrap();
+        w.active_at = Instant::now();
+        w.out.wake();
+    }
+
+    /// [`Engine::wake`], then [`Engine::ensure_output`]: the entry every
+    /// mutator about to lean on the sink makes. The wake goes first so a
+    /// stream that will not restart — its device gone while it slept — is
+    /// rebuilt before the caller touches it.
+    fn wake_output(&self) {
+        self.wake();
+        self.ensure_output();
+    }
+
+    /// The tick's half of the device's sleep (performance audit #75), the
+    /// part made under the state lock. Whenever the engine is not at rest
+    /// the stream is awake; the mutators wake it themselves, and this is
+    /// the net under any path that starts sound without asking. At rest,
+    /// the answer is whether the rest is a stop (a pause otherwise), for
+    /// [`Engine::rest_output_after`] to act on once the state lock is let
+    /// go.
+    fn rest_output(&self, s: &State) -> Option<bool> {
+        if !s.at_rest() {
+            let mut w = self.output.lock().unwrap();
+            w.active_at = Instant::now();
+            if !w.out.is_awake() {
+                etrace!("output woken by the tick");
+                w.out.wake();
+            }
+            return None;
+        }
+        Some(s.stopped)
+    }
+
+    /// Once the engine has been at rest long enough — [`IDLE_STOPPED`] or
+    /// [`IDLE_PAUSED`] — the stream is suspended: the callback stops, and
+    /// the operating system stops keeping the audio hardware — and on
+    /// macOS the machine — awake for a player nobody is listening to.
+    /// Nothing is lost by the sleep: the rodio chain freezes where it
+    /// stands, position and decoder included. Called with the state lock
+    /// let go: a suspend waits on the callback in flight, and nothing that
+    /// waits on the callback may hold the lock every control needs (audit
+    /// #48; [`output::Output::suspend`] also refuses a callback stuck
+    /// mid-pull). A command landing in between restarts the idle clock
+    /// through its own wake, so the verdict read under the lock cannot put
+    /// a new play to sleep.
+    fn rest_output_after(&self, stopped: bool) {
+        let after = if stopped { IDLE_STOPPED } else { IDLE_PAUSED };
+        let mut w = self.output.lock().unwrap();
+        if !w.out.is_awake()
+            || w.active_at.elapsed() < after
+            || self.callback_waits.load(Ordering::Acquire) > 0
+        {
+            return;
+        }
+        if w.out.suspend() {
+            etrace!(
+                "output suspended ({} for {:.1}s)",
+                if stopped { "stopped" } else { "paused" },
+                after.as_secs_f64()
+            );
+        }
     }
 
     /// Keep the output stream on the device the system says it should be
@@ -1048,8 +1448,9 @@ impl Engine {
     /// the device died under us — and a poll of the system default — a
     /// new device became the default while the old stream plays on
     /// unaware. Either way the cure is the same rebuild. Called from the
-    /// tick and from every mutator about to lean on the sink; the healthy
-    /// path costs an atomic load, plus one identity poll a second.
+    /// tick and, through [`Engine::wake_output`], from every mutator about
+    /// to lean on the sink; the healthy path costs an atomic load, plus one
+    /// identity poll a second.
     fn ensure_output(&self) {
         let why = {
             let mut w = self.output.lock().unwrap();
@@ -1132,6 +1533,9 @@ impl Engine {
         let was_outage = {
             let mut w = self.output.lock().unwrap();
             let old = std::mem::replace(&mut w.out, fresh);
+            // The fresh stream opens running; the idle clock starts over
+            // with it, so a paused resume still gets its full grace.
+            w.active_at = Instant::now();
             w.polled = Instant::now();
             w.failed_at = None;
             let was = w.outage_told;
@@ -1198,6 +1602,7 @@ impl Engine {
         // state lock must not wait with it (the lesson of audit #48).
         if let Some((sink, fade)) = restore {
             if position > Duration::from_millis(250) {
+                let _waiting = CallbackWait::new(&self.callback_waits);
                 let sought = sink.try_seek(position);
                 etrace!(
                     "rebuild seek to {:.2}: {}",
@@ -1258,16 +1663,35 @@ impl Engine {
 
     /// Clear the queue, add one source (path or URL), play it.
     pub fn play_source(&self, source: String, duration_hint: Option<f64>) -> Result<(), EngineError> {
+        self.play_source_unless(source, duration_hint, &mut || false)
+    }
+
+    /// [`Engine::play_source`] for a driver that can tell when the play has
+    /// been overtaken — the TUI's audio thread, whose channel may hold a
+    /// newer play or a stop by the time a slow open finishes. `superseded`
+    /// is asked while the open waits (see [`await_open`]); on a yes the
+    /// open is abandoned and the answer is [`EngineError::Superseded`], the
+    /// playing sink untouched, exactly as a failed open leaves it.
+    pub fn play_source_unless(
+        &self,
+        source: String,
+        duration_hint: Option<f64>,
+        superseded: &mut dyn FnMut() -> bool,
+    ) -> Result<(), EngineError> {
         etrace!("play {} hint={:?}", http::redact_source(&source), duration_hint);
         // Before the state lock, here and in every mutator below: the
         // rebuild takes that lock itself, and this Mutex does not forgive
         // a second lock from the same thread.
-        self.ensure_output();
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         // Boundary first, staging second — every mutator's discipline now:
         // promotion writes the index and queue, and must never overwrite
         // what this caller is about to decide (fix-round review).
         s.promote_if_crossed();
+        // Before the announcement goes: a pick of the very track it
+        // announced keeps the open already made for it.
+        let ahead = s.take_ahead(&source);
+        let redacted = http::redact_source(&source);
         s.q.queue.clear();
         s.q.queue.push(QueueEntry { path: source, duration_hint });
         s.q.index = 0;
@@ -1280,7 +1704,45 @@ impl Engine {
         // the failed-jump review finding, caught by its verifier).
         s.pending_next = None;
         s.invalidate_next();
-        s.start_current(self.output.lock().unwrap().mixer())
+        // Opened and decoded BEFORE the running sink is touched, with the
+        // lock held — start_current's order — so a bad source, or one given
+        // up on, leaves current playback as it was.
+        let opened = match ahead {
+            Some(Ahead::Ready(prepared)) => {
+                etrace!("play takes over the prepared {redacted}");
+                Ok(prepared)
+            }
+            Some(Ahead::Opening(opener)) => {
+                etrace!("play takes over the open of {redacted}");
+                await_open(opener, superseded)
+            }
+            None => {
+                let entry = s.q.queue[0].clone();
+                // Only a network open is ever left running; a local one is
+                // over in microseconds.
+                let room =
+                    if http::is_http_url(&entry.path) { self.make_room(superseded) } else { Ok(()) };
+                room.and_then(|()| open_entry_unless(&entry, superseded))
+            }
+        };
+        match opened {
+            Ok(mut prepared) => {
+                // The play's own hint, like a fresh open would take it.
+                if let Some(hint) = duration_hint {
+                    prepared.duration = hint;
+                }
+                s.install(self.output.lock().unwrap().mixer(), prepared);
+                Ok(())
+            }
+            Err(OpenError::Failed(e)) => Err(EngineError::Unplayable(e)),
+            Err(OpenError::Superseded(opener)) => {
+                etrace!("play {redacted} given up: a newer command came");
+                if let Some(opener) = opener {
+                    self.abandoned.lock().unwrap().push((Instant::now(), opener.give_up()));
+                }
+                Err(EngineError::Superseded)
+            }
+        }
     }
 
     /// Announce what should play after the current track, so a blend can
@@ -1358,6 +1820,10 @@ impl Engine {
     }
 
     pub fn resume(&self) {
+        // A pause long enough put the device to sleep; the resume is what
+        // wakes it (audit #75), and a stream that will not restart is
+        // rebuilt — paused, where it stood — before the resume lands.
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         // A soft pause still mid-ramp: the resume overtakes it — cancel the
         // landing and ramp straight back up from wherever the fade stands.
@@ -1378,16 +1844,24 @@ impl Engine {
     }
 
     pub fn stop(&self) {
+        // Awake so the stop can finish: the breath, and the stopped
+        // sink's source leaving the mixer, both happen in the callback.
+        // No rebuild for a dead device — there is nothing left to keep.
+        self.wake();
         self.state.lock().unwrap().stop_softly();
     }
 
     pub fn seek(&self, position: f64) -> Result<(), EngineError> {
         let mut target = seek_target(position)?;
+        // Counted from before the wake to the end of the wait: the tick
+        // never suspends the stream under a seek (audit #75).
+        let _waiting = CallbackWait::new(&self.callback_waits);
         // A seek against a dead device would never return: try_seek waits
-        // on a feedback the dead callback can never send. Rebuild first —
+        // on a feedback the dead callback can never send — and a sleeping
+        // one is the same wait, so the stream wakes first. Rebuild first —
         // and when no device would open at all, refuse rather than wedge
         // this thread until one comes back.
-        self.ensure_output();
+        self.wake_output();
         if self.output.lock().unwrap().out.is_dead() {
             return Err(EngineError::NoDevice("no output device".to_string()));
         }
@@ -1509,6 +1983,25 @@ impl Engine {
         self.state.lock().unwrap().pause_fade = on;
     }
 
+    /// Whether nothing can change until a command arrives: stopped, or a
+    /// landed pause, with no breath draining, no ramp owed, no open in
+    /// flight. A driver may tick lazily then — once per [`DEVICE_POLL`],
+    /// which is all the device watch asks — where it otherwise ticks every
+    /// ~100 ms to catch the end of a track, a blend's steps and position
+    /// (performance audit #81).
+    pub fn settled(&self) -> bool {
+        self.state.lock().unwrap().at_rest()
+    }
+
+    /// How long a driver that otherwise ticks every `base` may wait before
+    /// the next tick — see [`next_tick`]: a second while settled, and near
+    /// a track's end just long enough to catch it running out.
+    pub fn tick_wait(&self, base: Duration) -> Duration {
+        let mut s = self.state.lock().unwrap();
+        let left = s.until_end_paced(base, Instant::now());
+        next_tick(s.at_rest(), left, base)
+    }
+
     pub fn status(&self) -> Status {
         let mut s = self.state.lock().unwrap();
         // A crossed gapless boundary is promoted before answering, not a
@@ -1535,7 +2028,7 @@ impl Engine {
     }
 
     pub fn next_manual(&self) -> Result<(), EngineError> {
-        self.ensure_output();
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         match pick_next(&s.q, true) {
@@ -1556,9 +2049,10 @@ impl Engine {
     }
 
     pub fn previous_manual(&self) -> Result<(), EngineError> {
-        // The restart branch below seeks, and a seek against a dead
-        // device never returns — same reasoning as Engine::seek.
-        self.ensure_output();
+        // The restart branch below seeks, and a seek against a dead or a
+        // sleeping device never returns — same reasoning as Engine::seek.
+        let _waiting = CallbackWait::new(&self.callback_waits);
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         if s.q.index == 0 {
@@ -1630,7 +2124,7 @@ impl Engine {
     /// (finding #68). Hints still reach the player that has them, through
     /// [`Engine::play_source`].
     pub fn queue_add(&self, file: String) {
-        self.ensure_output();
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         let was_empty = s.q.queue.is_empty();
@@ -1648,7 +2142,7 @@ impl Engine {
     }
 
     pub fn queue_add_many(&self, files: Vec<String>) {
-        self.ensure_output();
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         let was_empty = s.q.queue.is_empty();
@@ -1661,7 +2155,7 @@ impl Engine {
     }
 
     pub fn queue_play_index(&self, index: usize) -> Result<(), EngineError> {
-        self.ensure_output();
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         if index >= s.q.queue.len() {
@@ -1676,7 +2170,7 @@ impl Engine {
     }
 
     pub fn queue_remove(&self, index: usize) -> Result<(), EngineError> {
-        self.ensure_output();
+        self.wake_output();
         let mut s = self.state.lock().unwrap();
         s.promote_if_crossed();
         if index >= s.q.queue.len() {
@@ -1730,6 +2224,8 @@ impl Engine {
     }
 
     pub fn queue_clear(&self) {
+        // Awake for the stop's sake, as in Engine::stop.
+        self.wake();
         let mut s = self.state.lock().unwrap();
         s.stop_softly();
         s.q.queue.clear();
@@ -1766,12 +2262,21 @@ impl Engine {
         Self::land_pause(&mut s);
         s.retire_outgoing();
         self.crossfade_step(&mut s);
+        // Awake unless at rest — ahead of the advance below, which is never
+        // at rest — and asleep once the rest has lasted (audit #75).
+        let resting = self.rest_output(&s);
         if !(s.sink.empty() && !s.stopped && !s.q.queue.is_empty()) {
+            // At rest always leaves here — stopped, or paused over a track
+            // still in the sink — and the sleep waits for the lock to go.
+            drop(s);
+            if let Some(stopped) = resting {
+                self.rest_output_after(stopped);
+            }
             return;
         }
         etrace!("track ran out (next={}, announced={})",
             s.next.name(), s.pending_next.is_some());
-        match pick_next(&s.q, false) {
+        match boundary_row(&s.q, &s.next) {
             None => s.clear_current(),
             Some(idx) => {
                 s.q.index = idx;
@@ -1838,7 +2343,7 @@ impl Engine {
 
         // Collect the opener's answer if one has arrived.
         s.next = match std::mem::replace(&mut s.next, NextTrack::Idle) {
-            NextTrack::Opening { index, rx } => match rx.try_recv() {
+            NextTrack::Opening { index, opener } => match opener.rx.try_recv() {
                 Ok(Ok(prepared)) => {
                     etrace!("prepared {} ({:.1}s)",
                         http::redact_source(&prepared.path), prepared.duration);
@@ -1855,7 +2360,7 @@ impl Engine {
                     etrace!("open FAILED: opener panicked");
                     NextTrack::Failed { at: Instant::now() }
                 }
-                Err(mpsc::TryRecvError::Empty) => NextTrack::Opening { index, rx },
+                Err(mpsc::TryRecvError::Empty) => NextTrack::Opening { index, opener },
             },
             other => other,
         };
@@ -2020,6 +2525,12 @@ impl Engine {
         }
     }
 
+    /// Whether the device stream is running, or asleep (audit #75).
+    #[cfg(test)]
+    fn output_awake(&self) -> bool {
+        self.output.lock().unwrap().out.is_awake()
+    }
+
     /// Whether a blend is running — the outgoing half still draining.
     #[cfg(test)]
     fn overlap_active(&self) -> bool {
@@ -2045,7 +2556,7 @@ impl Engine {
     }
 }
 
-// ── Duration detection via symphonia (local files only) ────────────────────
+// ── Seek positions ──────────────────────────────────────────────────────────
 
 /// Turn a wire position into a Duration, or refuse it. Finite and
 /// non-negative have been checked since finding #11; magnitude was the
@@ -2058,46 +2569,6 @@ fn seek_target(position: f64) -> Result<Duration, EngineError> {
     }
     Duration::try_from_secs_f64(position)
         .map_err(|_| EngineError::Seek("position out of range".to_string()))
-}
-
-fn probe_duration(path: &str) -> f64 {
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return 0.0,
-    };
-
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let probed = match symphonia::default::get_probe().format(
-        &hint,
-        mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
-    ) {
-        Ok(p) => p,
-        Err(_) => return 0.0,
-    };
-
-    if let Some(track) = probed.format.default_track() {
-        if let Some(n_frames) = track.codec_params.n_frames {
-            if let Some(sr) = track.codec_params.sample_rate {
-                if sr > 0 {
-                    return n_frames as f64 / sr as f64;
-                }
-            }
-        }
-        if let Some(tb) = track.codec_params.time_base {
-            if let Some(n_frames) = track.codec_params.n_frames {
-                let d = tb.calc_time(n_frames);
-                return d.seconds as f64 + d.frac;
-            }
-        }
-    }
-    0.0
 }
 
 // ── Tests (pure queue logic; no audio device required) ─────────────────────
@@ -2145,6 +2616,219 @@ mod tests {
         assert!(err.contains("stalled while opening"), "{err}");
         // Bounded is the claim, not sharp: a busy CI box wakes late.
         assert!(waited < Duration::from_secs(10), "took {waited:?}");
+    }
+
+    /// An MP3 that decodes: an Info or Xing frame carrying the frame count,
+    /// then `frames` frames of 128 kbps 44.1 kHz silence (zeroed side
+    /// information decodes to nothing at all).
+    fn silent_mp3(tag: &[u8; 4], frames: u32) -> Vec<u8> {
+        let frame = |padded: bool| {
+            let mut bytes = vec![0u8; 417 + usize::from(padded)];
+            bytes[..4].copy_from_slice(&[0xFF, 0xFB, 0x90 | u8::from(padded) << 1, 0x40]);
+            bytes
+        };
+        let mut mp3 = frame(false);
+        mp3[36..40].copy_from_slice(tag);
+        mp3[43] = 1; // flags: the frame count follows
+        mp3[44..48].copy_from_slice(&frames.to_be_bytes());
+        for i in 0..frames {
+            // 128 kbps at 44.1 kHz is 417.96 bytes a frame: pad 24 in 25.
+            mp3.extend(frame(i % 25 != 0));
+        }
+        mp3
+    }
+
+    #[test]
+    fn a_local_file_takes_its_length_from_the_decoder_that_opened_it() {
+        // One open and one probe per local track (performance audit #80).
+        // The length is the decoder's, as for a stream, and for a LAME file
+        // that is the length it plays: the encoder's delay and padding
+        // trimmed, where the old second probe (gapless off) counted them.
+        let mut mp3 = silent_mp3(b"Info", 100);
+        // The LAME extension after the frame count: encoder, then the delay
+        // (576, plus the decoder's 529) and padding (1000, less 529) in 24
+        // bits, then the tag's CRC-16 over everything before it.
+        mp3[48..57].copy_from_slice(b"LAME3.100");
+        mp3[69..72].copy_from_slice(&[0x24, 0x03, 0xE8]);
+        let crc = mp3[..82].iter().fold(0u16, |crc, &byte| {
+            (0..8).fold(crc ^ u16::from(byte), |c, _| if c & 1 == 1 { c >> 1 ^ 0xA001 } else { c >> 1 })
+        });
+        mp3[82..84].copy_from_slice(&crc.to_be_bytes());
+        let path = std::env::temp_dir()
+            .join(format!("mstream-local-length-{}.mp3", std::process::id()));
+        std::fs::write(&path, &mp3).unwrap();
+        let played = (100.0 * 1152.0 - (576.0 + 529.0) - (1000.0 - 529.0)) / 44_100.0;
+
+        let mut entry = QueueEntry::new(path.to_string_lossy().into_owned());
+        let opened = open_entry(&entry).map(|prepared| prepared.duration);
+        entry.duration_hint = Some(99.0);
+        let hinted = open_entry(&entry).map(|prepared| prepared.duration);
+        let _ = std::fs::remove_file(&path);
+
+        let length = opened.unwrap();
+        assert!((length - played).abs() < 1e-6, "{length} against {played}");
+        assert_eq!(hinted.unwrap(), 99.0, "a hint still wins");
+    }
+
+    #[test]
+    fn a_cbr_mp3_over_http_seeks_by_byte_offset_not_by_reading_up_to_the_target() {
+        // The first 300 KB arrive at once and the rest of the file is held
+        // back, as on a slow link a few seconds into a track. Symphonia's
+        // accurate seek walks every frame from here to the target, reading
+        // each as the download delivers it: the seek waited for the whole
+        // gap (37.8s for a 90% seek at 2 Mbit/s in the audit's
+        // measurement). A constant-bitrate stream seeks by byte offset
+        // instead, one Range request just short of the target (performance
+        // audit #72).
+        use http::tests::{HELD_BACK, range_server};
+        let mp3 = silent_mp3(b"Info", 2000);
+        let len = mp3.len() as u64;
+        let (url, log) = range_server(mp3, |start| {
+            if start == 0 { (300_000, HELD_BACK) } else { (usize::MAX, Duration::ZERO) }
+        });
+        let entry = QueueEntry { path: url, duration_hint: None };
+        let Opened::Http(mut decoder) = open_entry(&entry).unwrap().opened else {
+            panic!("an http source opens as one")
+        };
+        let total = decoder.total_duration().expect("the Info frame's count");
+        assert!((total.as_secs_f64() - 2000.0 * 1152.0 / 44_100.0).abs() < 0.01, "{total:?}");
+
+        let started = Instant::now();
+        decoder.try_seek(total.mul_f64(0.9)).unwrap();
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(1500), "the seek waited {took:?}");
+        assert!(decoder.next().is_some(), "and decodes on from there");
+        let asked = log.lock().unwrap().clone();
+        assert!(
+            asked.iter().any(|&(start, _)| start > len * 85 / 100 && start <= len * 90 / 100),
+            "one Range request just short of the target: {asked:?}"
+        );
+    }
+
+    /// A server that sends headers and a few bytes, then nothing, forever:
+    /// an open that can only end by a deadline or by being given up.
+    fn stalled_url() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut request = [0u8; 1024];
+                    let _ = stream.read(&mut request);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 1000000\r\n\
+                          content-type: audio/mpeg\r\n\r\nID3\x04\x00\x00\x00\x00\x00\x00",
+                    );
+                    let _ = stream.flush();
+                    std::thread::sleep(Duration::from_secs(60));
+                });
+            }
+        });
+        format!("http://{addr}/stalled.mp3")
+    }
+
+    #[test]
+    fn an_open_nobody_wants_any_more_is_given_up_at_once() {
+        // The same stall the deadline exists for, but a newer command
+        // arrives 200 ms in: the wait ends then, not at START_TIMEOUT
+        // (audit #79) — and without anyone calling it a failure.
+        let entry = QueueEntry { path: stalled_url(), duration_hint: None };
+        let started = Instant::now();
+        let mut asked = 0;
+        let outcome = open_entry_unless(&entry, &mut || {
+            asked += 1;
+            started.elapsed() > Duration::from_millis(200)
+        });
+        let waited = started.elapsed();
+        assert!(matches!(outcome, Err(OpenError::Superseded(Some(_)))), "given up, not failed");
+        assert!(waited < START_TIMEOUT / 2, "took {waited:?}");
+        assert!(asked >= 5, "asked every poll while it waited ({asked} times)");
+
+        // Nobody superseding: the deadline still ends it, as before.
+        let started = Instant::now();
+        let outcome = open_entry_unless(&entry, &mut || false);
+        assert!(matches!(outcome, Err(OpenError::Failed(ref e)) if e.contains("stalled while opening")));
+        assert!(started.elapsed() >= START_TIMEOUT, "the full deadline, not less");
+    }
+
+    /// A WAV that answers after `delay`, sends enough at once for an open
+    /// to finish, then trickles the rest for longer than any test runs —
+    /// and reports when the client hangs up.
+    fn trickling_wav_server(delay: Duration) -> (String, mpsc::Receiver<Instant>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (hung_up, hang_ups) = mpsc::channel();
+        // Twenty seconds of WAV: eighteen seconds of trickle, well past
+        // the end of any test.
+        let body = Arc::new(wav_bytes(20));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let (body, hung_up) = (body.clone(), hung_up.clone());
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut request = [0u8; 2048];
+                    let _ = stream.read(&mut request);
+                    std::thread::sleep(delay);
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(&body[..600_000]);
+                    for chunk in body[600_000..].chunks(8_192) {
+                        if stream.write_all(chunk).is_err() {
+                            let _ = hung_up.send(Instant::now());
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}/trickling.wav"), hang_ups)
+    }
+
+    #[test]
+    fn a_given_up_open_takes_its_download_with_it_when_it_finishes() {
+        // An open given up mid-request runs on, and what it opens must not
+        // outlive it. The engine used to keep the receiver to count the
+        // open by, which kept the answer too: a live reader downloading the
+        // whole unwanted track beside the wanted one until something next
+        // pruned the list (review of audit #79). Given up, the answer drops
+        // on the open's own thread the moment it arrives.
+        let (url, hang_ups) = trickling_wav_server(Duration::from_millis(100));
+        let entry = QueueEntry { path: url, duration_hint: None };
+
+        // Waited for, the same open succeeds: a real track, not a failure
+        // whose connection would close on its own. Dropped here, which is
+        // the hang-up the server reports first.
+        assert!(open_entry_bounded(&entry).is_ok(), "the track opens");
+        hang_ups.recv_timeout(Duration::from_secs(3)).expect("a dropped track hangs up");
+
+        let asked = Instant::now();
+        let outcome =
+            open_entry_unless(&entry, &mut || asked.elapsed() > Duration::from_millis(20));
+        let Err(OpenError::Superseded(Some(opener))) = outcome else {
+            panic!("given up while its request was out");
+        };
+        let thread = opener.give_up();
+        let until = Instant::now() + Duration::from_secs(5);
+        while !thread.is_finished() {
+            assert!(Instant::now() < until, "the open never finished");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let finished = Instant::now();
+        // Finished, and its download went with it: the server hears the
+        // hang-up, not a request for the rest of the track.
+        let hung_up = hang_ups
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the download ran on after its open was given up");
+        let after = hung_up.saturating_duration_since(finished);
+        assert!(after < Duration::from_secs(1), "hung up {after:?} after the open finished");
     }
 
     #[test]
@@ -2232,6 +2916,58 @@ mod tests {
             }
         });
         format!("http://{addr}/stalling.wav")
+    }
+
+    /// A server that sends the first `sent_first` bytes of a long WAV and
+    /// holds the rest until the flag it hands back is raised — on every
+    /// connection, the download watchdog's range reconnects included, so
+    /// the stall lasts exactly as long as the test wants it to.
+    fn held_wav_server(seconds: usize, sent_first: usize) -> (String, Arc<AtomicBool>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let release = Arc::new(AtomicBool::new(false));
+        let released = release.clone();
+        std::thread::spawn(move || {
+            let body = Arc::new(wav_bytes(seconds));
+            for stream in listener.incoming().flatten() {
+                let (body, released) = (body.clone(), released.clone());
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut head = [0u8; 2048];
+                    let read = stream.read(&mut head).unwrap_or(0);
+                    let request = String::from_utf8_lossy(&head[..read]).to_ascii_lowercase();
+                    let from = request
+                        .split("range: bytes=")
+                        .nth(1)
+                        .and_then(|range| range.split('-').next())
+                        .and_then(|at| at.trim().parse::<usize>().ok());
+                    let start = from.unwrap_or(0).min(body.len());
+                    let status = match from {
+                        Some(_) => format!(
+                            "206 Partial Content\r\nContent-Range: bytes {start}-{}/{}",
+                            body.len() - 1,
+                            body.len()
+                        ),
+                        None => "200 OK".to_string(),
+                    };
+                    let sent = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: audio/wav\r\nAccept-Ranges: bytes\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len() - start
+                    );
+                    let held = sent_first.max(start);
+                    let _ = stream.write_all(sent.as_bytes());
+                    let _ = stream.write_all(&body[start..held]);
+                    let _ = stream.flush();
+                    while !released.load(Ordering::Acquire) {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    let _ = stream.write_all(&body[held..]);
+                });
+            }
+        });
+        (format!("http://{addr}/held.wav"), release)
     }
 
     /// `cargo test a_blocked_seek -- --ignored --nocapture` (local, no server)
@@ -2596,6 +3332,215 @@ mod tests {
         );
         engine.stop();
         let _ = std::fs::remove_file(&local);
+    }
+
+    /// A manual pick of the announced next inside its prepare window —
+    /// `n` in a track's last seconds with gapless on, the default — used
+    /// to throw the prepared decoder away and fetch the track again with
+    /// the audio thread waiting (audit #79). The play takes it over.
+    ///
+    /// `cargo test a_manual_pick_of -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_manual_pick_of_the_announced_next_takes_over_its_open() {
+        let local = std::env::temp_dir().join("mstream-takeover-a.wav");
+        std::fs::write(&local, wav_bytes(20)).unwrap();
+        let (url, hits) = counting_wav_server(4);
+
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_gapless(true);
+        // A hint of 5 s puts the whole track inside PREPARE_LEAD: the
+        // announcement is opened at the first tick.
+        engine.play_source(local.to_string_lossy().into_owned(), Some(5.0)).unwrap();
+        engine.prepare_next(url.clone(), Some(4.0));
+        let started = std::time::Instant::now();
+        while !matches!(engine.state.lock().unwrap().next, NextTrack::Ready { .. }) {
+            engine.advance_tick();
+            assert!(started.elapsed() < Duration::from_secs(5), "the announcement never opened");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        engine.play_source(url.clone(), Some(4.0)).unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "the play fetched the track again");
+        std::thread::sleep(Duration::from_millis(600));
+        let status = engine.status();
+        assert_eq!(status.file, url);
+        assert!(status.playing && status.position > 0.3, "the taken-over track plays");
+        engine.stop();
+        let _ = std::fs::remove_file(&local);
+    }
+
+    /// A play given up for a newer command leaves playback as it was — the
+    /// open-then-swap order, the same as a failed open.
+    ///
+    /// `cargo test a_play_given_up -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_play_given_up_leaves_the_old_track_playing() {
+        let local = std::env::temp_dir().join("mstream-given-up-a.wav");
+        std::fs::write(&local, wav_bytes(30)).unwrap();
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.play_source(local.to_string_lossy().into_owned(), None).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let before = engine.status();
+
+        let asked = std::time::Instant::now();
+        let outcome = engine.play_source_unless(stalled_url(), None, &mut || {
+            asked.elapsed() > Duration::from_millis(300)
+        });
+        assert!(matches!(outcome, Err(EngineError::Superseded)), "{outcome:?}");
+        assert!(asked.elapsed() < Duration::from_secs(1), "gave up in {:?}", asked.elapsed());
+        std::thread::sleep(Duration::from_millis(400));
+        let after = engine.status();
+        assert_eq!(after.file, before.file, "the old track is still the one playing");
+        assert!(after.playing && after.position > before.position + 0.5);
+        engine.stop();
+        let _ = std::fs::remove_file(&local);
+    }
+
+    /// Opens given up for newer commands keep running until their request
+    /// ends, so skimming could stack them one per keypress; past
+    /// MAX_ABANDONED the next open waits for one to finish — for as long
+    /// as it is itself still wanted (audit #79).
+    ///
+    /// `cargo test given_up_opens -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn given_up_opens_still_running_hold_the_next_one_back() {
+        let (url, hits) = counting_wav_server(3);
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        let mut running = Vec::new();
+        for _ in 0..MAX_ABANDONED {
+            let (tx, rx) = mpsc::channel::<()>();
+            running.push(tx);
+            let thread = std::thread::spawn(move || {
+                let _ = rx.recv();
+            });
+            engine.abandoned.lock().unwrap().push((Instant::now(), thread));
+        }
+
+        // Full: the open waits, and is given up in its turn, never started.
+        let asked = Instant::now();
+        let outcome =
+            engine.play_source_unless(url.clone(), None, &mut || asked.elapsed() > Duration::from_millis(300));
+        assert!(matches!(outcome, Err(EngineError::Superseded)), "{outcome:?}");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "no open may start while the room is full");
+
+        // One of them ends: there is room, and the play goes ahead.
+        drop(running.pop());
+        engine.play_source(url.clone(), None).unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.status().file, url);
+        engine.stop();
+    }
+
+    /// Temp files a test writes, gone when it ends — passing or not.
+    struct TempFiles(Vec<String>);
+
+    impl TempFiles {
+        fn wavs(tag: &str, count: usize, seconds: usize) -> TempFiles {
+            TempFiles(
+                (0..count)
+                    .map(|i| {
+                        let path = std::env::temp_dir()
+                            .join(format!("mstream-{tag}-{}-{i}.wav", std::process::id()));
+                        std::fs::write(&path, wav_bytes(seconds)).unwrap();
+                        path.to_string_lossy().into_owned()
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for TempFiles {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    /// Under shuffle the prepare rolls the dice for the next row; the
+    /// boundary used to roll them again and miss the prepared decoder most
+    /// of the time (audit #77). A commitment that still names its row is
+    /// the row; one whose row no longer holds its file is not. The
+    /// decision alone — that the boundary asks it is the device test
+    /// below.
+    #[test]
+    fn the_boundary_row_is_the_one_the_prepare_committed_to() {
+        let rows = TempFiles::wavs("boundary", 5, 1);
+        let mut state = QueueState {
+            queue: rows.0.iter().map(|row| QueueEntry::new(row.clone())).collect(),
+            index: 0,
+            shuffle: true,
+            loop_mode: LoopMode::None,
+        };
+        let next = NextTrack::Ready { prepared: open_entry(&state.queue[3]).unwrap(), index: Some(3) };
+        // A re-roll agrees with row 3 a quarter of the time.
+        for _ in 0..50 {
+            assert_eq!(boundary_row(&state, &next), Some(3), "the boundary rolled again");
+        }
+        // Nothing prepared: the queue's own shuffled next, as before.
+        let rolled: std::collections::HashSet<_> =
+            (0..200).map(|_| boundary_row(&state, &NextTrack::Idle)).collect();
+        assert!(rolled.len() > 1, "{rolled:?}");
+        // The row moved on under the commitment: it decides nothing.
+        state.queue[3] = QueueEntry::new("elsewhere".into());
+        let rolled: std::collections::HashSet<_> = (0..200).map(|_| boundary_row(&state, &next)).collect();
+        assert!(rolled.len() > 1, "a stale commitment still chose the row: {rolled:?}");
+    }
+
+    /// The same, end to end: gapless and shuffle, with every row's duration
+    /// hint three seconds long — the usual road to a prepare reaching the
+    /// boundary unused, since the append window (by the hint) never comes
+    /// before the audio runs out. Three boundaries each play the row that
+    /// was prepared; a boundary that rolled again would agree with it by
+    /// chance (1/4)^3 of the time.
+    ///
+    /// `cargo test a_shuffled_boundary -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_shuffled_boundary_plays_the_row_that_was_prepared() {
+        let rows = TempFiles::wavs("shuffle", 5, 2);
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.set_gapless(true);
+        engine.set_shuffle(true);
+        engine.state.lock().unwrap().q.queue = rows
+            .0
+            .iter()
+            .map(|row| QueueEntry { path: row.clone(), duration_hint: Some(5.0) })
+            .collect();
+        engine.queue_play_index(0).unwrap();
+
+        let started = std::time::Instant::now();
+        let mut committed: Option<usize> = None;
+        let mut index = engine.status().queue_index;
+        let mut crossed = 0;
+        while crossed < 3 {
+            engine.advance_tick();
+            {
+                let s = engine.state.lock().unwrap();
+                assert!(s.appended.is_none(), "an append: the hint did not keep the window away");
+                if let NextTrack::Ready { index: Some(at), .. } = &s.next {
+                    committed = Some(*at);
+                }
+            }
+            let now = engine.status().queue_index;
+            if now != index {
+                assert_eq!(Some(now), committed, "the boundary played a row nobody prepared");
+                committed = None;
+                index = now;
+                crossed += 1;
+            }
+            assert!(started.elapsed() < Duration::from_secs(20), "only {crossed} boundaries");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        engine.stop();
     }
 
     /// The other half of the listening-session bug: an open that failed
@@ -4215,5 +5160,363 @@ mod tests {
             later.position
         );
         engine.stop();
+    }
+
+    /// A State with no device behind it: the sink is a rodio Player that
+    /// nothing pulls, which is all the bookkeeping predicates need.
+    fn bare_state() -> State {
+        State {
+            sink: Arc::new(Player::new().0),
+            fade: fade::FadeHandle::new(1.0),
+            tap_live: Arc::new(AtomicBool::new(true)),
+            tap: None,
+            current_file: String::new(),
+            duration: 0.0,
+            stopped: true,
+            volume: 1.0,
+            advance_failures: 0,
+            crossfade: 0.0,
+            gapless: false,
+            appended: None,
+            blend_skips: false,
+            pause_fade: false,
+            pausing: None,
+            orphaned_tail: false,
+            gate_noted: None,
+            end_due: None,
+            pending_next: None,
+            next: NextTrack::Idle,
+            outgoing: Vec::new(),
+            q: QueueState { queue: Vec::new(), index: 0, shuffle: false, loop_mode: LoopMode::None },
+        }
+    }
+
+    /// A sink with a track in it, as far as the bookkeeping can tell.
+    fn loaded_sink() -> Arc<Player> {
+        let sink = Player::new().0;
+        sink.append(rodio::source::Zero::new(
+            std::num::NonZero::new(2).unwrap(),
+            std::num::NonZero::new(44_100).unwrap(),
+        ));
+        Arc::new(sink)
+    }
+
+    #[test]
+    fn at_rest_is_stopped_or_a_landed_pause_with_nothing_in_flight() {
+        // Never played, and stopped: nothing will happen without a command.
+        let mut s = bare_state();
+        assert!(s.at_rest(), "a fresh engine is at rest");
+
+        // Playing is never at rest.
+        s.sink = loaded_sink();
+        s.stopped = false;
+        assert!(!s.at_rest(), "a sounding track is not at rest");
+
+        // A landed pause with the track still in the sink is.
+        s.sink.pause();
+        assert!(s.at_rest(), "a landed pause is at rest");
+        // A soft pause still ramping down is not: the tick owes it a landing.
+        s.pausing = Some(Instant::now());
+        assert!(!s.at_rest(), "a pause still ramping is not at rest");
+        s.pausing = None;
+        // A prepared next waiting out the pause changes nothing; an open in
+        // flight is the tick's to collect.
+        s.next = NextTrack::Failed { at: Instant::now() };
+        assert!(s.at_rest());
+        let (_tx, rx) = mpsc::channel();
+        let opener = Opener { rx, thread: std::thread::spawn(|| {}) };
+        s.next = NextTrack::Opening { index: None, opener };
+        assert!(!s.at_rest(), "an open in flight is not at rest");
+        s.next = NextTrack::Idle;
+        // An orphaned remnant is the tick's to skip.
+        s.orphaned_tail = true;
+        assert!(!s.at_rest());
+        s.orphaned_tail = false;
+
+        // A pause over an empty sink is a track that ran out under the
+        // pause key: the advance is still owed, so it is not rest.
+        s.sink = Arc::new(Player::new().0);
+        s.sink.pause();
+        assert!(!s.at_rest(), "an ended track under a pause still advances");
+
+        // Stopped with a breath still draining is not rest either: the
+        // callback has to play the breath out.
+        let mut s = bare_state();
+        s.outgoing.push(Outgoing {
+            sink: loaded_sink(),
+            fade: fade::FadeHandle::new(1.0),
+            fade_dur: STOP_FADE,
+            deadline: Instant::now() + STOP_FADE,
+        });
+        assert!(!s.at_rest(), "a draining breath is not at rest");
+    }
+
+    #[test]
+    fn the_next_tick_lands_on_the_end_of_the_track_and_nowhere_faster() {
+        let base = Duration::from_millis(250);
+        let ms = |d: Duration| d.as_millis();
+        // Settled: the device watch's pace, whatever the base.
+        assert_eq!(next_tick(true, None, base), DEVICE_POLL);
+        assert_eq!(next_tick(true, None, Duration::from_secs(2)), Duration::from_secs(2));
+        // Nothing sounding toward a known end: the base.
+        assert_eq!(next_tick(false, None, base), base);
+        // Far from the end: the base, never longer.
+        assert_eq!(next_tick(false, Some(90.0), base), base);
+        // Inside the last quarter second: just before the end.
+        assert_eq!(ms(next_tick(false, Some(0.2), base)), 170);
+        assert_eq!(ms(next_tick(false, Some(0.05), base)), 20);
+        // At or past the end, the floor: the source is about to run dry.
+        assert_eq!(next_tick(false, Some(0.01), base), END_POLL);
+        assert_eq!(next_tick(false, Some(-0.5), base), END_POLL);
+        // Well past a length that undershot: the base again, so a wrong
+        // duration costs at most a second of fast ticks, not minutes.
+        assert_eq!(next_tick(false, Some(-1.5), base), base);
+        // A base shorter than the floor is never stretched.
+        assert_eq!(next_tick(false, Some(0.0), Duration::from_millis(2)), Duration::from_millis(2));
+    }
+
+    #[test]
+    fn until_end_counts_only_a_track_sounding_toward_a_known_end() {
+        let mut s = bare_state();
+        assert_eq!(s.until_end(), None, "stopped");
+        s.sink = loaded_sink();
+        s.stopped = false;
+        assert_eq!(s.until_end(), None, "no known length");
+        s.duration = 180.0;
+        // Nothing pulls this sink, so the position stands at zero.
+        assert_eq!(s.until_end(), Some(180.0));
+        s.pausing = Some(Instant::now());
+        assert_eq!(s.until_end(), None, "ramping into a pause");
+        s.pausing = None;
+        s.sink.pause();
+        assert_eq!(s.until_end(), None, "paused");
+        s.sink = Arc::new(Player::new().0);
+        assert_eq!(s.until_end(), None, "ran out: the tick's advance is due at once");
+    }
+
+    #[test]
+    fn an_end_that_stops_short_is_watched_closely_for_a_second_and_no_longer() {
+        // A position frozen a few ms short of the end — a callback parked
+        // on a stalled download — never runs past it, so the grace on the
+        // position never ends the close watch: serve ticked every 5 ms for
+        // as long as the freeze lasted (review of audit #76). The wall
+        // clock ends it a second after the end was due.
+        let base = Duration::from_millis(250);
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut s = bare_state();
+        s.sink = loaded_sink();
+        s.stopped = false;
+        // Far from the end: nothing noted.
+        s.duration = 30.0;
+        assert_eq!(s.until_end_paced(base, at(0)), Some(30.0));
+        assert!(s.end_due.is_none());
+        // 20 ms short, and nothing pulls this sink: the position stays put.
+        s.duration = 0.02;
+        assert_eq!(s.until_end_paced(base, at(0)), Some(0.02));
+        assert_eq!(next_tick(false, Some(0.02), base), END_POLL);
+        assert_eq!(s.until_end_paced(base, at(1000)), Some(0.02), "inside the grace");
+        assert_eq!(s.until_end_paced(base, at(1030)), None, "a second overdue");
+        assert_eq!(next_tick(false, None, base), base, "back to the driver's own pace");
+        assert_eq!(s.until_end_paced(base, at(9000)), None, "and it stays there");
+        // Leaving the window — the next track, a seek back — starts over.
+        s.duration = 30.0;
+        assert_eq!(s.until_end_paced(base, at(9100)), Some(30.0));
+        s.duration = 0.02;
+        assert_eq!(s.until_end_paced(base, at(9200)), Some(0.02), "a fresh end, watched");
+        // So does a pause: the wall clock does not run toward an end
+        // while nothing sounds.
+        s.sink.pause();
+        assert_eq!(s.until_end_paced(base, at(9300)), None);
+        assert!(s.end_due.is_none());
+    }
+
+    /// Run `f` on its own thread and give it `limit`: a call that waits on
+    /// a callback that never comes must fail the test, not hang it.
+    fn within<T: Send + 'static>(
+        limit: Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(limit).expect("the call never returned — waiting on a sleeping device?")
+    }
+
+    /// Tick for `span`, the way a driver would.
+    fn tick_for(engine: &Engine, span: Duration) {
+        let until = Instant::now() + span;
+        while Instant::now() < until {
+            engine.advance_tick();
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    }
+
+    /// `cargo test the_device_sleeps -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn the_device_sleeps_when_nothing_needs_it_and_wakes_for_what_does() {
+        // The stream used to run for the whole process — stopped, paused,
+        // never played — holding the machine awake (audit #75). Now it
+        // sleeps after a quiet spell, and everything that needs the
+        // callback wakes it first: a seek would otherwise wait forever.
+        let first = std::env::temp_dir().join("mstream-idle-a.wav");
+        let second = std::env::temp_dir().join("mstream-idle-b.wav");
+        std::fs::write(&first, wav_bytes(30)).unwrap();
+        std::fs::write(&second, wav_bytes(30)).unwrap();
+        let engine = Arc::new(Engine::new().unwrap());
+        engine.set_volume(0.0);
+
+        // Never played: awake at the open (it proves the device), asleep
+        // once the stopped threshold passes.
+        engine.advance_tick();
+        assert!(engine.output_awake(), "the open starts the stream");
+        tick_for(&engine, IDLE_STOPPED + Duration::from_millis(300));
+        assert!(!engine.output_awake(), "a never-played engine lets the device sleep");
+
+        // A play wakes it, and the track sounds: the position advances.
+        engine.queue_add_many(vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ]);
+        assert!(engine.output_awake(), "a play wakes the device before it starts");
+        tick_for(&engine, Duration::from_millis(900));
+        let played = engine.status();
+        assert!(played.playing && played.position > 0.4, "the play sounded: {:.2}", played.position);
+
+        // Playing never sleeps, however long it runs.
+        tick_for(&engine, IDLE_PAUSED + Duration::from_millis(300));
+        assert!(engine.output_awake(), "a playing engine keeps the device");
+
+        // A landed pause sleeps after the (longer) paused threshold.
+        engine.pause();
+        tick_for(&engine, IDLE_STOPPED + Duration::from_millis(100));
+        assert!(engine.output_awake(), "a pause gets longer grace than a stop");
+        tick_for(&engine, IDLE_PAUSED);
+        assert!(!engine.output_awake(), "a landed pause lets the device sleep");
+        let held = engine.status();
+        assert!(held.paused);
+
+        // A seek against the sleeping stream wakes it and lands.
+        let seeker = engine.clone();
+        within(Duration::from_secs(5), move || seeker.seek(12.0)).expect("the seek landed");
+        let sought = engine.status();
+        assert!(sought.paused, "a seek keeps the pause");
+        assert!((sought.position - 12.0).abs() < 0.5, "landed at {:.2}", sought.position);
+
+        // Asleep again, then a resume wakes it and the track runs on.
+        tick_for(&engine, IDLE_PAUSED + Duration::from_millis(300));
+        assert!(!engine.output_awake());
+        engine.resume();
+        assert!(engine.output_awake(), "a resume wakes the device");
+        tick_for(&engine, Duration::from_millis(900));
+        let resumed = engine.status();
+        assert!(resumed.playing && resumed.position > sought.position + 0.4,
+            "resumed from {:.2} to {:.2}", sought.position, resumed.position);
+
+        // Next against a sleeping device: the second track starts and runs.
+        engine.pause();
+        tick_for(&engine, IDLE_PAUSED + Duration::from_millis(300));
+        assert!(!engine.output_awake());
+        let skipper = engine.clone();
+        within(Duration::from_secs(5), move || skipper.next_manual()).expect("next started");
+        tick_for(&engine, Duration::from_millis(900));
+        let next = engine.status();
+        assert_eq!(next.queue_index, 1);
+        assert!(next.playing && next.position > 0.4, "next sounded: {:.2}", next.position);
+
+        // A stop, and the stopped threshold.
+        engine.stop();
+        tick_for(&engine, IDLE_STOPPED + Duration::from_millis(400));
+        assert!(!engine.output_awake(), "a stopped engine lets the device sleep");
+        // Previous restarts by seeking — against a sleeping device too.
+        let restarter = engine.clone();
+        within(Duration::from_secs(5), move || restarter.previous_manual()).expect("previous");
+        engine.stop();
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
+
+    /// `cargo test a_seek_waiting -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_seek_waiting_on_the_callback_holds_the_device_awake() {
+        // A seek waits on the callback with the state lock released (audit
+        // #48); a tick from another thread must not put the device to sleep
+        // under it, or the answer never comes.
+        let tiny = std::env::temp_dir().join("mstream-idle-wait.wav");
+        std::fs::write(&tiny, wav_bytes(30)).unwrap();
+        let engine = Engine::new().unwrap();
+        engine.set_volume(0.0);
+        engine.play_source(tiny.to_string_lossy().into_owned(), None).unwrap();
+        engine.pause();
+        let waiting = CallbackWait::new(&engine.callback_waits);
+        tick_for(&engine, IDLE_PAUSED + Duration::from_millis(300));
+        assert!(engine.output_awake(), "a waiting seek holds the device awake");
+        drop(waiting);
+        tick_for(&engine, IDLE_PAUSED + Duration::from_millis(300));
+        assert!(!engine.output_awake(), "and lets it go when the wait ends");
+        let _ = std::fs::remove_file(&tiny);
+    }
+
+    /// `cargo test a_pull_stuck -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs an audio device"]
+    fn a_pull_stuck_on_the_network_keeps_the_device_and_not_the_controls() {
+        // A download that stalls mid-track parks the device callback in the
+        // decoder's read (audit #48's shape), and suspending the stream
+        // waits for the callback in flight. The sleep, tried under such a
+        // pull once a stop's threshold passed, held the tick — serve's
+        // loop, the TUI's audio thread, every control behind them — until
+        // the network answered (review of audit #75). The stream stays up
+        // instead, and sleeps once the pull comes back.
+        //
+        // The open wants about half a megabyte before it answers: three
+        // seconds of this WAV, then the hold.
+        let (url, release) = held_wav_server(30, 600_000);
+        let engine = Arc::new(Engine::new().unwrap());
+        engine.set_volume(0.0);
+        engine.play_source(url, Some(30.0)).unwrap();
+
+        // What arrived plays out and the position stops: the callback is
+        // waiting on the network.
+        let started = Instant::now();
+        let mut last = -1.0;
+        loop {
+            std::thread::sleep(Duration::from_millis(150));
+            let at = engine.status().position;
+            if at > 1.0 && at == last {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(8), "the stall never came ({at:.2})");
+            last = at;
+        }
+
+        // Stopped under the stuck pull, then ticked past everything a stop
+        // leaves to settle — its breath waits out the outgoing slack, the
+        // callback being in no state to play it — and the stopped
+        // threshold: the ticks come back, and so does status.
+        engine.stop();
+        let span = STOP_FADE + OUTGOING_SLACK + IDLE_STOPPED + Duration::from_millis(400);
+        let ticker = engine.clone();
+        within(span + Duration::from_secs(1), move || {
+            tick_for(&ticker, span);
+            assert!(ticker.settled(), "the stop has settled");
+        });
+        let asker = engine.clone();
+        assert!(!within(Duration::from_millis(500), move || asker.status()).playing);
+        assert!(engine.output_awake(), "a stream mid-pull is left running");
+
+        // The rest arrives, the pull returns, the stopped track leaves the
+        // mixer: now the stream sleeps.
+        release.store(true, Ordering::Release);
+        let ticker = engine.clone();
+        within(Duration::from_secs(8), move || {
+            while ticker.output_awake() {
+                ticker.advance_tick();
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        });
     }
 }

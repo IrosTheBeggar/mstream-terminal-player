@@ -176,7 +176,7 @@ matches nothing keeps the bar contract's rule (the way back is one key).
 
 | Record | Here |
 |---|---|
-| The drawer's Library entries | The nav rows Artists · Genres · Recent; each `Act::Nav` opens the root node fresh (`open_library_node(node, true)`) and points the App's tab at Library, the wall's way |
+| The drawer's Library entries | The nav rows Artists · Genres · Recent; each `Act::Nav` opens the root node fresh (`open_library_node(node, true)`) and points the App's tab at Library, the wall's way. Artists and Genres keep their answered list for the session (`App.artists`, `App.genre_list`, beside `App.albums`) and seat a return from it; the row chosen again while its room is up asks afresh |
 | The webapp's side-nav entries Recently Played / Most Played | Two more rows at the LIBRARY group's end, Last played · Most played (2026-09-23), hidden for a peer like Playlists; no digit, so the pointer's; the heading is the nav label; the "Get last [n]" box is not ported — a fixed hundred, as Recent. The column grew to fourteen rows, so Files and Search now stand together at its top |
 | A list of DisplayItems | The App's Library pane drawn by `draw_pane_rows` (rows, the cursor while the keyboard holds it, hover verbs, kit scrollbar), under `draw_bar_controls` — the Files room's grammar with the pane swapped |
 | The album grid for an artist | `albums.rs` generalized: the wall draws whichever album list the App holds for the view on screen — `App.albums` for the root wall as today, and the artist's albums kept beside it for the `Artist` node — with the cells, pages, cover slots and keys shared |
@@ -187,7 +187,9 @@ matches nothing keeps the bar contract's rule (the way back is one key).
 
 ### What the tests pin
 
-Each room fetches its root on entry and draws the pane; the genres row
+Each room fetches its root on entry and draws the pane — Artists and
+Genres on their first, a return seating the session's copy at the root
+with no request, the room chosen again asking afresh; the genres row
 shows its count; Recent asks with the limit and shows track rows with the
 verbs; an artist row opens a wall of its albums with the artist's header,
 and a card opens the tracks with the artist as Back; the singles card;
@@ -250,3 +252,20 @@ and no strip, and hide for a peer.
   wanted either. The art cache lets go of its oldest cover that neither
   the playing track nor a queued row needs (clause 6), instead of clearing
   the lot at the cap.
+- **2026-09-28 — Artists and Genres are kept for the session** (entry
+  point 1; performance audit #99). Every return to either room asked for
+  the whole list again — 0.25-0.6 MB and up to a second over a relay for
+  a big library's artists — though it changes only with a rescan. The
+  answered list is now kept beside the Albums wall's and a return seats
+  it: still a fresh drill at the root, as the flows say, without the
+  request. Choosing the room already up asks again, the way to see a
+  rescan (the wall has none yet). Recent and the play lists ask every
+  time; a new server forgets both, and so does another account signing
+  in on the same one, which may see other libraries.
+- **2026-09-28 — The art cache spares what is on screen** (performance
+  audit #91): the playing track's cover, the wall's page, the queue
+  panel's rows and the open action sheet's cover, where it spared every
+  queued row. The queue keeps its played rows and Auto DJ only appends,
+  so a long session grew the cache past its cap one album at a time. A
+  queued row scrolled back into view after its cover went is asked for
+  once more.

@@ -15,6 +15,18 @@ cd "$(dirname "$0")/../.."
 E2E=test/e2e
 BIN="${BIN:-target/debug/mstream-player}"
 
+# README law 3, checked before anything runs: a braced pattern list is a
+# list only as `expect`'s sole argument with a newline after the brace.
+# On one line, or after -timeout/-i, it is ONE glob that never matches —
+# the gate waits out its timeout and cannot fail. Nineteen did, for 390 s
+# a run (performance audit #129). Comments are skipped; -brace is fine.
+one_line='^[^#]*(^|[^[:alnum:]_])expect[[:space:]]+\{[[:space:]]*[^[:space:]]'
+after_flag='^[^#]*(^|[^[:alnum:]_])expect([[:space:]]+-(timeout|i)[[:space:]]+[^[:space:]]+)+[[:space:]]+\{'
+if grep -nE -e "$one_line" -e "$after_flag" "$E2E"/legs/*.exp; then
+  echo "FAIL a braced expect above is one glob, not a pattern list: put \`expect {\` alone on its line (README law 3)"
+  exit 1
+fi
+
 command -v expect >/dev/null || { echo "SKIP: expect(1) not installed"; exit 0; }
 command -v python3 >/dev/null || { echo "SKIP: python3 not installed"; exit 0; }
 
@@ -29,14 +41,21 @@ FAILS=0
 
 port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'; }
 
+# Prints the port once the fake answers, or fails: callers run it in
+# $(...), where an exit would only end the subshell, so each checks the
+# status. Every probe is bounded — macOS drops a SYN to a port that is
+# bound but not listening yet instead of refusing it, and an unbounded
+# curl then hangs ~8 s a try, forty of them minutes (performance audit
+# #131, which also took the ~35 s bind-to-listen stall out of the fake).
 start_fake() { # $1 = name
   local p; p="$(port)"
   python3 "$E2E/fake_mstream.py" "$p" >/dev/null 2>&1 & echo $! > "$WORK/fake.pid"
   for _ in $(seq 1 40); do
-    curl -s -o /dev/null "http://127.0.0.1:$p/api/v1/ping" && break
+    curl -s --connect-timeout 1 -m 2 -o /dev/null "http://127.0.0.1:$p/api/v1/ping" && { echo "$p"; return 0; }
     sleep 0.25
   done
-  echo "$p"
+  echo "FAIL fake $1 never answered on :$p" >&2
+  return 1
 }
 
 stop_fake() { kill "$(cat "$WORK/fake.pid" 2>/dev/null)" 2>/dev/null; sleep 0.2; }
@@ -58,7 +77,7 @@ assert() { # $1 label, $2 python expr over WORK/PORT env
 }
 
 # ── Scenario A: the full English walk, then the QR pages on its session ──
-PORT="$(start_fake A)"
+PORT="$(start_fake A)" || exit 1
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 mkdir -p "$WORK/music"
 leg drive-en drive-en.exp "$WORK/h1" "$WORK/drive-en.out" env WIZMUSIC="$WORK/music"
@@ -80,13 +99,13 @@ leg qr-buttons qr-buttons.exp "$WORK/h1" "$WORK/qr-buttons.out" env MSTREAM_NO_G
 stop_fake
 
 # ── Scenario B: the same walk auf Deutsch ────────────────────────────────
-PORT="$(start_fake B)"
+PORT="$(start_fake B)" || exit 1
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg drive-de drive-de.exp "$WORK/h2" "$WORK/drive-de.out" env WIZMUSIC="$WORK/music"
 stop_fake
 
 # ── Scenario C: quit before the login, reopen, finish (seeding) ─────────
-PORT="$(start_fake C)"
+PORT="$(start_fake C)" || exit 1
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg reopen-phase1 reopen.exp "$WORK/h3" "$WORK/reopen1.out" env WIZMUSIC="$WORK/music"
 mkdir -p "$WORK/music2"
@@ -100,7 +119,7 @@ assert s['users'], 'no user after reopen'
 stop_fake
 
 # ── Scenario D: public mode still shows the code ─────────────────────────
-PORT="$(start_fake D)"
+PORT="$(start_fake D)" || exit 1
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg skip-public skip.exp "$WORK/h4" "$WORK/skip.out" env WIZMUSIC="$WORK/music"
 assert "public-mode Done renders the half-block code" "
@@ -114,7 +133,7 @@ assert out.count('█')>10, 'no code on the public-mode Done page'
 stop_fake
 
 # ── Scenario E: click-to-rename on a fresh row ───────────────────────────
-PORT="$(start_fake E)"
+PORT="$(start_fake E)" || exit 1
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg rename rename.exp "$WORK/h5" "$WORK/rename.out" env WIZMUSIC="$WORK/music"
 assert "the mouse rename landed" "
@@ -128,7 +147,7 @@ assert 'mediax' in out, 'renamed row not found'
 stop_fake
 
 # ── Scenario F: the scan widget's whole choreography ─────────────────────
-PORT="$(start_fake F)"
+PORT="$(start_fake F)" || exit 1
 ARGS=(setup --server "http://127.0.0.1:$PORT")
 leg scan scan.exp "$WORK/h6" "$WORK/scan.out"
 if python3 "$E2E/check_scan.py" "$WORK/scan.out" "$E2E/replay.py"; then
@@ -142,7 +161,7 @@ stop_fake
 # A fake with the auth wall up and one account: the tokenless pre-flight
 # ping is a 401, the sign-in page comes first, the room after; the second
 # run on the same HOME rides the kept session straight into the room.
-PORT="$(FAKE_AUTH=1 start_fake G)"
+PORT="$(FAKE_AUTH=1 start_fake G)" || exit 1
 curl -s -o /dev/null -X PUT -H 'Content-Type: application/json'   -d '{"username":"alice","password":"hunter2","admin":true}'   "http://127.0.0.1:$PORT/api/v1/admin/users"
 ARGS=(admin --server "http://127.0.0.1:$PORT")
 leg admin-signin admin-signin.exp "$WORK/h7" "$WORK/admin-signin.out"

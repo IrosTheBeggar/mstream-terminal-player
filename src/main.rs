@@ -15,6 +15,11 @@ mod input;
 /// level type and switches are shared, because the Settings tab that
 /// drives them is drawing code the browser build keeps.
 mod logging;
+/// The strings behind t!(), as static data written by build.rs.
+mod locale_table;
+/// Tests over Cargo.toml and Cargo.lock: dependency and profile choices.
+#[cfg(test)]
+mod manifest;
 mod player;
 mod tui;
 
@@ -57,6 +62,15 @@ mod admin;
 /// drawing code and the worker message types compile unchanged there.
 #[cfg(target_arch = "wasm32")]
 mod web;
+/// The browser shell's timing rules and its canvas colours (src/web/pace.rs,
+/// src/web/colours.rs), which are pure: compiled here too so their tests
+/// run where `cargo test` does.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "web/pace.rs"]
+mod web_pace;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "web/colours.rs"]
+mod web_colours;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod discovery;
@@ -194,8 +208,12 @@ mod quickconnect {
 
 // The locale table, embedded at compile time from locales/*.yml: the
 // wizard's, the GUI's, and the shared App's own notes — every target.
-// Crate root because t!() resolves crate::_rust_i18n_translate.
-rust_i18n::i18n!("locales", fallback = "en");
+// Crate root because t!() resolves crate::_rust_i18n_translate. The strings
+// themselves come from build.rs as one static (locale_table.rs): the macro
+// is pointed at a folder that does not exist, so it generates only the
+// t!() machinery and none of the 17k statements that used to dominate the
+// release build.
+rust_i18n::i18n!("locales-come-from-build-rs", fallback = "en", backend = crate::locale_table::Table);
 
 #[cfg(not(target_arch = "wasm32"))]
 use clap::{Args, Parser, Subcommand};
@@ -447,6 +465,9 @@ fn main() {
     if let Some(path) = logging::init(run) {
         eprintln!("logging to {}", path.display());
     }
+
+    // The TLS provider, before anything can dial (see runtime.rs).
+    runtime::install_tls_provider();
 
     // Streaming scratch space (PLAN A1): each playing track spools to a temp
     // file. Decide where those belong before anything can open a stream, and

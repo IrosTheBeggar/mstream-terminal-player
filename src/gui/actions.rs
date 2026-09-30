@@ -291,6 +291,14 @@ fn info_rows(track: &Track) -> Vec<(String, String)> {
 
 /// The sheet, then whichever of the picker or Song info stands over it.
 pub(crate) fn draw_modals(frame: &mut Frame, gui: &mut Gui, area: Rect) {
+    // The sheet's cover goes on record while the sheet stands, so the
+    // cache keeps it (performance audit #91); a comparison per frame, and
+    // a name only when the sheet opens, changes track or closes.
+    let cover = gui.actions.sheet.as_ref().and_then(|sheet| current_track(&gui.app, sheet).metadata.album_art.as_deref());
+    if !gui.app.sheet_on_view_is(cover) {
+        let cover = cover.map(str::to_string);
+        gui.app.set_sheet_on_view(cover);
+    }
     if gui.actions.sheet.is_none() {
         return;
     }
@@ -926,6 +934,24 @@ mod tests {
         draw_buffer(&mut gui);
         let buffer = draw_buffer(&mut gui);
         assert!(placeholders(&buffer), "the pixels return once nothing stands over the sheet");
+    }
+
+    #[test]
+    fn the_sheets_cover_is_on_record_while_the_sheet_stands() {
+        // The review of performance audit #91: the cache keeps what is on
+        // screen, and the sheet's cover is on screen.
+        let mut gui = files_gui();
+        if let Some(Entry::Track { track, .. }) = gui.app.files.entries.get_mut(0) {
+            track.metadata.album_art = Some("aa.jpeg".into());
+        }
+        draw(&mut gui);
+        assert!(gui.app.sheet_on_view_is(None));
+        gui.act(Act::More(Tab::Files, 0));
+        draw(&mut gui);
+        assert!(gui.app.sheet_on_view_is(Some("aa.jpeg")));
+        gui.act(Act::SheetClose);
+        draw(&mut gui);
+        assert!(gui.app.sheet_on_view_is(None), "closed, it lets go");
     }
 
     /// `cargo test dump_actions -- --ignored --nocapture` to eyeball the

@@ -14,9 +14,11 @@
 //!
 //! Every server call runs on a worker thread (the wizard's Job/Done
 //! pattern). The daemon's list is polled every five seconds while the
-//! Torrents tab shows, everything else every thirty.
+//! Torrents tab shows something moving — a download, a check, a queue, or
+//! a list changed since the last look — and with everything else every
+//! thirty once it all rests.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -41,12 +43,13 @@ use crate::api::types::{
     Torrent, TorrentClientConfig, TorrentList, TorrentParams, TorrentStatus, VpathAccess,
 };
 use crate::api::{ApiError, Client, TorrentCreds};
+use crate::kit::pace::BRISK_FOR;
 use crate::kit::theme::th;
 use crate::kit::{self, Surface, bold, dim};
 use crate::setup::g;
 use crate::setup::picker::{self, Pick};
 
-/// The daemon's list, while the Torrents tab shows.
+/// The daemon's list, while the Torrents tab shows it moving.
 const POLL_LIST: Duration = Duration::from_secs(5);
 /// Everything else: the status probe, the libraries, the users.
 const POLL_STATE: Duration = Duration::from_secs(30);
@@ -61,6 +64,10 @@ const PATH_MAX: usize = 400;
 const PORT_MAX: u32 = 65_535;
 /// How many completions the seed-path modal lists.
 const SUGGEST_MAX: usize = 6;
+/// How long a Tab in the seed-path modal waits for its folder's listing
+/// before the frame goes on without it: a healthy disk lists a folder of
+/// thousands well inside a frame at 30 Hz, and a dead mount costs no more.
+const SEED_LIST_WAIT: Duration = Duration::from_millis(30);
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -282,7 +289,8 @@ pub(crate) enum Modal {
     /// `t`: one library's destination template.
     Template { vpath: String, template: Input, error: Option<String> },
     /// `a` on Seeding without the OS dialog: a local `.torrent` path.
-    SeedPath { path: Input, matches: Vec<String>, error: Option<String> },
+    /// `asked` is what Tab was pressed on, while its folder is being listed.
+    SeedPath { path: Input, matches: Vec<String>, error: Option<String>, asked: Option<String> },
     /// `r`: the gate before a torrent leaves the daemon (files stay).
     Remove(String),
     /// `x`: the gate before the credentials are forgotten.
@@ -435,36 +443,50 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
 }
 
 /// The whole load, on the worker: the settings first (those gate
-/// everything), then what a configured client can tell.
+/// everything), then what a configured client can tell. Each wave's calls
+/// go out together — the settings beside the users, then the four
+/// daemon-side reads — so a load is two round trips, not six, and a daemon
+/// that hangs holds it for one ceiling, not two (performance audit #83).
 fn load(client: &Client) -> Result<Loaded, ApiError> {
-    let params = client.admin_torrent_params()?;
-    let users = client.admin_users().unwrap_or_default();
-    let kind = Kind::parse(&params.client);
-    let mut loaded = Loaded { params, users, status: None, access: None, templates: None, list: None, warning: None };
-    if kind != Kind::Disabled && config_of(&loaded.params, kind).configured {
-        let warn = |e: ApiError, w: &mut Option<String>| {
-            if w.is_none() {
-                *w = Some(e.to_string());
+    crate::api::wait(async {
+        let (params, users) = tokio::join!(client.admin_torrent_params_async(), client.admin_users_async());
+        let params = params?;
+        let users = users.unwrap_or_default();
+        let kind = Kind::parse(&params.client);
+        let mut loaded = Loaded { params, users, status: None, access: None, templates: None, list: None, warning: None };
+        if kind != Kind::Disabled && config_of(&loaded.params, kind).configured {
+            let (status, access, templates, list) = tokio::join!(
+                client.admin_torrent_status_async(),
+                client.admin_torrent_vpath_access_async(),
+                client.admin_torrent_path_templates_async(),
+                client.admin_torrent_list_async(),
+            );
+            // Folded in the order they were once asked, so the warning
+            // still names the first of them that failed.
+            let warn = |e: ApiError, w: &mut Option<String>| {
+                if w.is_none() {
+                    *w = Some(e.to_string());
+                }
+            };
+            match status {
+                Ok(s) => loaded.status = Some(s),
+                Err(e) => warn(e, &mut loaded.warning),
             }
-        };
-        match client.admin_torrent_status() {
-            Ok(s) => loaded.status = Some(s),
-            Err(e) => warn(e, &mut loaded.warning),
+            match access {
+                Ok(a) => loaded.access = Some(a),
+                Err(e) => warn(e, &mut loaded.warning),
+            }
+            match templates {
+                Ok(t) => loaded.templates = Some(t),
+                Err(e) => warn(e, &mut loaded.warning),
+            }
+            match list {
+                Ok(l) => loaded.list = Some(l),
+                Err(e) => warn(e, &mut loaded.warning),
+            }
         }
-        match client.admin_torrent_vpath_access() {
-            Ok(a) => loaded.access = Some(a),
-            Err(e) => warn(e, &mut loaded.warning),
-        }
-        match client.admin_torrent_path_templates() {
-            Ok(t) => loaded.templates = Some(t),
-            Err(e) => warn(e, &mut loaded.warning),
-        }
-        match client.admin_torrent_list() {
-            Ok(l) => loaded.list = Some(l),
-            Err(e) => warn(e, &mut loaded.warning),
-        }
-    }
-    Ok(loaded)
+        Ok(loaded)
+    })
 }
 
 fn config_of(p: &TorrentParams, kind: Kind) -> &TorrentClientConfig {
@@ -488,6 +510,10 @@ pub(crate) struct Room {
     /// When the status last answered, for "reachable N ago".
     status_at: Option<Instant>,
     pub torrents: Vec<Torrent>,
+    /// Each torrent's name and hash, lowercased once as the list lands,
+    /// for the filter that runs over them every frame (performance audit
+    /// #110) — the GUI's torrent picker keeps its names the same way.
+    hay: Vec<String>,
     pub list_error: Option<String>,
     list_loaded: bool,
     pub access: BTreeMap<String, AccessRow>,
@@ -499,6 +525,16 @@ pub(crate) struct Room {
     pub seed_ticks: Vec<(String, bool)>,
     /// `.torrent` files waiting their turn on the worker.
     seed_queue: VecDeque<(PathBuf, Vec<String>)>,
+    /// The seed-path modal's folders being listed, each on a thread of
+    /// its own ([`Room::seed_tab`]), and where their listings arrive.
+    seed_listing: HashSet<String>,
+    listed_tx: Sender<(String, Vec<String>)>,
+    listed_rx: Receiver<(String, Vec<String>)>,
+    /// [`SEED_LIST_WAIT`], held here so a test can take a listing's slow road.
+    seed_wait: Duration,
+    /// When the last Tab asked — a listing still out is waited for
+    /// briskly from then (see [`Room::listing_awaited`]).
+    seed_asked_at: Option<Instant>,
     /// The client page shown on purpose (`c` on the Client tab) while a
     /// client is configured.
     pub choosing: bool,
@@ -518,16 +554,23 @@ pub(crate) struct Room {
     busy: Option<String>,
     queued: Option<Op>,
     in_flight: bool,
+    /// The worker thread is gone: its channel is not read again, and its
+    /// note stands.
+    worker_gone: bool,
     tscroll: usize,
     sel_anchor: Option<usize>,
     last_load: Option<Instant>,
     last_list: Option<Instant>,
+    /// The last list differed from the one before it — a torrent came or
+    /// went, or one's state or progress moved: worth another look soon.
+    list_moved: bool,
     ui: Surface<Act>,
 }
 
 impl Room {
     pub(super) fn new(client: Client, same_machine: bool) -> Self {
         let (to_worker, from_worker) = spawn_worker();
+        let (listed_tx, listed_rx) = std::sync::mpsc::channel();
         Room {
             client: Arc::new(client),
             to_worker,
@@ -538,6 +581,7 @@ impl Room {
             status: None,
             status_at: None,
             torrents: Vec::new(),
+            hay: Vec::new(),
             list_error: None,
             list_loaded: false,
             access: BTreeMap::new(),
@@ -546,6 +590,11 @@ impl Room {
             seeds: Vec::new(),
             seed_ticks: Vec::new(),
             seed_queue: VecDeque::new(),
+            seed_listing: HashSet::new(),
+            listed_tx,
+            listed_rx,
+            seed_wait: SEED_LIST_WAIT,
+            seed_asked_at: None,
             choosing: false,
             client_pick: 0,
             group: 0,
@@ -559,10 +608,12 @@ impl Room {
             busy: None,
             queued: None,
             in_flight: false,
+            worker_gone: false,
             tscroll: 0,
             sel_anchor: None,
             last_load: None,
             last_list: None,
+            list_moved: false,
             ui: Surface::new(),
         }
     }
@@ -628,8 +679,9 @@ impl Room {
         let q = self.filter.value().trim().to_lowercase();
         self.torrents
             .iter()
+            .zip(&self.hay)
             .enumerate()
-            .filter(|(_, t)| q.is_empty() || t.name.to_lowercase().contains(&q) || t.info_hash.to_lowercase().contains(&q))
+            .filter(|(_, (_, hay))| q.is_empty() || hay.contains(&q))
             .map(|(i, _)| i)
             .collect()
     }
@@ -643,6 +695,19 @@ impl Room {
             Tab::Access => self.users.len(),
             Tab::Client => 0,
         }
+    }
+
+    /// Whether the list is worth a look every five seconds: something in
+    /// it is moving — downloading, being checked, waiting its turn — or
+    /// the last look found it changed. At rest (seeding, paused, stopped)
+    /// the thirty-second load keeps it fresh: each look is the daemon
+    /// walking its whole list and ~420 bytes a torrent on the wire, and
+    /// nothing on screen can have moved (performance audit #100).
+    fn list_live(&self) -> bool {
+        self.list_moved
+            || self.torrents.iter().any(|t| {
+                matches!(t.status.as_str(), "downloading" | "verifying" | "queued") || t.rate_download > 0.0
+            })
     }
 
     fn selected_torrent(&self) -> Option<&Torrent> {
@@ -863,7 +928,62 @@ impl Room {
     fn open_seed_path(&mut self) {
         let start = self.seeds.last().and_then(|s| PathBuf::from(&s.file).parent().map(|p| p.to_string_lossy().to_string())).unwrap_or_default();
         let _ = start;
-        self.modal = Modal::SeedPath { path: Input::default(), matches: Vec::new(), error: None };
+        self.modal = Modal::SeedPath { path: Input::default(), matches: Vec::new(), error: None, asked: None };
+    }
+
+    /// Tab in the seed-path modal: its folder is listed on a thread of its
+    /// own, and the completion lands with the listing — a dead network
+    /// mount can hang `read_dir` for as long as it likes, and this is the
+    /// thread that draws and reads keys (performance audit #85). Not the
+    /// room's worker either: a hung listing there would hold the list poll
+    /// and the seed queue behind it. A folder already being listed is not
+    /// asked again, so Tabs at a dead mount leave one thread waiting, not
+    /// one each; its answer serves the latest Tab. A healthy folder
+    /// answers within [`SEED_LIST_WAIT`], and completes in this frame as
+    /// Tab always did.
+    fn seed_tab(&mut self) {
+        let Modal::SeedPath { path, error, asked, .. } = &mut self.modal else { return };
+        *error = None;
+        *asked = Some(path.value().to_string());
+        self.seed_asked_at = Some(Instant::now());
+        let (_, _, dir) = seed_dir(path.value());
+        if self.seed_listing.insert(dir.clone()) {
+            let tx = self.listed_tx.clone();
+            std::thread::spawn(move || {
+                let names = list_local(&dir);
+                let _ = tx.send((dir, names));
+            });
+        }
+        let until = Instant::now() + self.seed_wait;
+        while matches!(&self.modal, Modal::SeedPath { asked: Some(_), .. }) {
+            match self.listed_rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                Ok((dir, names)) => self.take_listing(dir, names),
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// Whether a listing a Tab left out is still worth a brisk wait: its
+    /// completion repaints, and one slower than [`SEED_LIST_WAIT`] waited
+    /// out a whole poll to show (performance audit #85 follow-up). For
+    /// [`BRISK_FOR`] after the Tab and no longer — a dead mount's listing
+    /// may never come, and counted for good it would hold the loop's
+    /// clock through every worker call after it.
+    fn listing_awaited(&self) -> bool {
+        !self.seed_listing.is_empty() && self.seed_asked_at.is_some_and(|at| at.elapsed() < BRISK_FOR)
+    }
+
+    /// A folder's listing, back: it completes the input its Tab was
+    /// pressed on — unless that input has moved on since, or the modal
+    /// has closed.
+    fn take_listing(&mut self, dir: String, names: Vec<String>) {
+        self.seed_listing.remove(&dir);
+        let Modal::SeedPath { path, matches, asked, .. } = &mut self.modal else { return };
+        if asked.as_deref() != Some(path.value()) || seed_dir(path.value()).2 != dir {
+            return;
+        }
+        *asked = None;
+        *matches = complete_from(path, &names);
     }
 
     /// Enter in a text modal.
@@ -967,6 +1087,7 @@ impl Room {
                 if self.phase() != Phase::Tabs {
                     self.status = None;
                     self.torrents.clear();
+                    self.hay.clear();
                     self.list_error = None;
                     self.list_loaded = false;
                     self.sel = None;
@@ -1154,6 +1275,13 @@ impl Room {
     }
 
     fn take_list(&mut self, list: TorrentList) {
+        // What a row shows that can move: which torrents, their state and
+        // their progress (a download's rate moves only while it downloads).
+        let same = |a: &Torrent, b: &Torrent| a.info_hash == b.info_hash && a.status == b.status && a.percent == b.percent;
+        self.list_moved = self.torrents.len() != list.torrents.len()
+            || !self.torrents.iter().zip(&list.torrents).all(|(a, b)| same(a, b));
+        // A line apart: nothing typed into the filter spans the two.
+        self.hay = list.torrents.iter().map(|t| format!("{}\n{}", t.name, t.info_hash).to_lowercase()).collect();
         self.torrents = list.torrents;
         self.list_error = list.error.filter(|e| !e.trim().is_empty());
         self.list_loaded = true;
@@ -1187,30 +1315,64 @@ impl Screen for Room {
         &mut self.ui
     }
 
-    fn pump(&mut self) {
-        loop {
+    fn absorb(&mut self) -> bool {
+        let mut folded = false;
+        while !self.worker_gone {
             match self.from_worker.try_recv() {
                 Ok(done) => self.apply(done),
                 Err(TryRecvError::Empty) => break,
+                // Nothing is out with a worker that is gone.
                 Err(TryRecvError::Disconnected) => {
-                    self.note = Some((t!("note.worker_gone").to_string(), true));
-                    break;
+                    self.worker_gone = true;
+                    self.in_flight = false;
                 }
             }
+            folded = true;
         }
+        // Its note stands for good — one a tab switch cleared is back the
+        // next pass — but is set only when it is not up: returning from
+        // here with it every pass redrew the room every pass and skipped
+        // the listings below, which have threads of their own (performance
+        // audit #85 follow-up).
+        if self.worker_gone {
+            let gone = t!("note.worker_gone");
+            if !self.note.as_ref().is_some_and(|(note, _)| *note == gone) {
+                self.note = Some((gone.to_string(), true));
+                folded = true;
+            }
+        }
+        // The seed path's folder listings, read off the draw thread
+        // (performance audit #85): a completion that lands repaints.
+        while let Ok((dir, names)) = self.listed_rx.try_recv() {
+            self.take_listing(dir, names);
+            folded = true;
+        }
+        folded
+    }
+
+    fn pump(&mut self) {
         self.dispatch_queued();
     }
 
+    /// A call out with the worker, or a seed-path listing still out.
+    fn awaiting(&self) -> bool {
+        self.in_flight || self.listing_awaited()
+    }
+
     /// The polls, quiet: the list every five seconds while the Torrents
-    /// tab shows, everything else every thirty — only on the tabs page, and
-    /// never on top of a call already queued or running.
+    /// tab shows it moving, everything else — the list with it — every
+    /// thirty; only on the tabs page, and never on top of a call already
+    /// queued or running.
     fn tick(&mut self) {
         if self.phase() != Phase::Tabs || self.in_flight || self.queued.is_some() {
             return;
         }
         if self.last_load.is_none_or(|t| t.elapsed() >= POLL_STATE) {
             self.reload(false);
-        } else if self.tab == Tab::Torrents && self.last_list.is_none_or(|t| t.elapsed() >= POLL_LIST) {
+        } else if self.tab == Tab::Torrents
+            && self.list_live()
+            && self.last_list.is_none_or(|t| t.elapsed() >= POLL_LIST)
+        {
             self.queued = Some(Op::List);
         }
     }
@@ -1374,23 +1536,27 @@ fn expand_home(path: &str) -> String {
     path.to_string()
 }
 
-/// Tab in the seed-path modal: the longest common completion of what is
-/// typed — folders and `.torrent` files — and the candidates to show.
-fn complete_local(input: &mut Input) -> Vec<String> {
-    let raw = expand_home(input.value());
+/// What is typed in the seed-path modal, split: the folder part (home
+/// expanded), the name begun in it, and the folder to list.
+fn seed_dir(typed: &str) -> (String, String, String) {
+    let raw = expand_home(typed);
     let (dir, prefix) = match raw.rfind('/') {
         Some(i) => (raw[..=i].to_string(), raw[i + 1..].to_string()),
         None => (String::new(), raw.clone()),
     };
     let list_dir = if dir.is_empty() { ".".to_string() } else { dir.clone() };
-    let Ok(entries) = std::fs::read_dir(&list_dir) else { return Vec::new() };
-    let mut names: Vec<String> = entries
+    (dir, prefix, list_dir)
+}
+
+/// A folder's candidates for the seed-path modal — its folders (with their
+/// `/`) and its `.torrent` files. On a thread of its own ([`Room::seed_tab`]):
+/// a folder that cannot be read has none.
+fn list_local(dir: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
         .flatten()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
-            if !name.starts_with(&prefix) || (name.starts_with('.') && !prefix.starts_with('.')) {
-                return None;
-            }
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if is_dir {
                 Some(format!("{name}/"))
@@ -1400,6 +1566,17 @@ fn complete_local(input: &mut Input) -> Vec<String> {
                 None
             }
         })
+        .collect()
+}
+
+/// Tab in the seed-path modal, once its folder is listed: the longest
+/// common completion of what is typed and the candidates to show.
+fn complete_from(input: &mut Input, listed: &[String]) -> Vec<String> {
+    let (dir, prefix, _) = seed_dir(input.value());
+    let mut names: Vec<String> = listed
+        .iter()
+        .filter(|name| name.starts_with(&prefix) && !(name.starts_with('.') && !prefix.starts_with('.')))
+        .cloned()
         .collect();
     names.sort();
     if names.is_empty() {
@@ -1558,13 +1735,12 @@ fn handle_key(room: &mut Room, key: KeyEvent) -> Option<Outcome> {
                 }
             };
         }
-        Modal::SeedPath { path, matches, error } => {
+        Modal::SeedPath { path, matches, error, asked } => {
             return match code {
                 KeyCode::Esc => room.act(Act::ModalCancel),
                 KeyCode::Enter => room.act(Act::ModalSubmit),
                 KeyCode::Tab => {
-                    *matches = complete_local(path);
-                    *error = None;
+                    room.seed_tab();
                     None
                 }
                 KeyCode::Char(c) if c.is_control() => None,
@@ -1573,6 +1749,9 @@ fn handle_key(room: &mut Room, key: KeyEvent) -> Option<Outcome> {
                     path.handle_event(&TermEvent::Key(key));
                     matches.clear();
                     *error = None;
+                    // A listing still out was for the input as it was:
+                    // its completion is dropped when it lands.
+                    *asked = None;
                     None
                 }
             };
@@ -1888,8 +2067,11 @@ fn render(frame: &mut Frame, room: &mut Room) {
                 ],
             );
         }
-        Modal::SeedPath { path, matches, error } => {
+        Modal::SeedPath { path, matches, error, asked } => {
             let mut body = vec![Line::from(Span::styled(t!("tor.seed_path_hint").to_string(), dim()))];
+            if asked.is_some() && matches.is_empty() {
+                body.push(Line::from(Span::styled(format!("  {}", t!("busy.listing")), dim())));
+            }
             for m in &matches {
                 body.push(Line::from(Span::styled(format!("  {} {}", g("▸", "►"), clip(m, 64)), dim())));
             }
@@ -1991,7 +2173,7 @@ fn state_spans(room: &Room) -> (Vec<Span<'static>>, Option<String>) {
             None,
         );
     }
-    let polls = Some(if room.tab == Tab::Torrents { t!("tor.polls") } else { t!("tor.polls_slow") }.to_string());
+    let polls = Some(if room.tab == Tab::Torrents && room.list_live() { t!("tor.polls") } else { t!("tor.polls_slow") }.to_string());
     match &room.status {
         None => (
             vec![
@@ -2434,7 +2616,10 @@ fn draw_torrents(frame: &mut Frame, room: &mut Room, body: Rect) {
         return;
     }
     let rows_rect = Rect { x: table.x, y: rows_y, width: table.width, height: table.bottom().saturating_sub(rows_y) };
-    let torrents = room.torrents.clone();
+    // The list is lent to the rows and put back, not copied for them every
+    // frame — it is the daemon's whole list, and a row needs the room only
+    // for its tooltip (performance audit #110).
+    let torrents = std::mem::take(&mut room.torrents);
     table_rows(frame, room, rows_rect, filtered.len(), |frame, room, i, rect, selected, hovered| {
         let t = &torrents[filtered[i]];
         let cell = |x: u16, w: u16| Rect { x, y: rect.y, width: w, height: 1 };
@@ -2472,10 +2657,12 @@ fn draw_torrents(frame: &mut Frame, room: &mut Room, body: Rect) {
         };
         frame.render_widget(Paragraph::new(Span::styled(clip(&by, by_w), cell_style(selected, hovered, own))), cell(by_x, by_w));
     });
-    // The cursor row's hash, error and origin ride the note line.
+    room.torrents = torrents;
+    // The cursor row's hash, error and origin ride the note line — found
+    // through this frame's filter, not a second run of it.
     if room.note.is_none()
         && room.busy.is_none()
-        && let Some(t) = room.selected_torrent()
+        && let Some(t) = room.sel.and_then(|s| filtered.get(s)).and_then(|&i| room.torrents.get(i))
     {
         let mut spans = vec![Span::styled(short_id(&t.info_hash), dim())];
         if !t.error_message.trim().is_empty() {
@@ -2727,9 +2914,12 @@ fn draw_access(frame: &mut Frame, room: &mut Room, body: Rect) {
         return;
     }
     let rows_rect = Rect { x: table.x, y: rows_y, width: table.width, height: table.bottom().saturating_sub(rows_y) };
-    let users: Vec<(String, AdminUser)> = room.users.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    table_rows(frame, room, rows_rect, users.len(), |frame, room, i, rect, selected, hovered| {
-        let (name, u) = &users[i];
+    // Lent to the rows and put back, not copied every frame (performance
+    // audit #110): a row needs the room only for its click.
+    let users = std::mem::take(&mut room.users);
+    let rows: Vec<(&String, &AdminUser)> = users.iter().collect();
+    table_rows(frame, room, rows_rect, rows.len(), |frame, room, i, rect, selected, hovered| {
+        let (name, u) = rows[i];
         let cell = |x: u16, w: u16| Rect { x, y: rect.y, width: w, height: 1 };
         // With every user allowed, the ticks are information, not a lever: dim.
         let own = if whitelist { Style::default() } else { dim() };
@@ -2743,6 +2933,7 @@ fn draw_access(frame: &mut Frame, room: &mut Room, body: Rect) {
         frame.render_widget(Paragraph::new(Span::styled(glyph, cell_style(selected, hovered, glyph_style))), glyph_rect);
         room.ui.click(glyph_rect, Act::UserToggle(name.clone()));
     });
+    room.users = users;
     if room.note.is_none()
         && room.busy.is_none()
         && let Some(name) = room.selected_user()
@@ -3294,7 +3485,8 @@ mod tests {
             result: Ok(RemoveAnswer { ok: true, daemon_remove_ok: false, daemon_remove_error: Some("daemon offline".into()) }),
         });
         assert!(room.note.as_ref().is_some_and(|(n, e)| *e && n.contains("the daemon-side remove failed: daemon offline")));
-        // The polls: the list every five seconds here, everything every thirty.
+        // The polls: with a download running, the list every five seconds
+        // here, everything every thirty.
         room.queued = None;
         room.last_load = Some(Instant::now());
         room.last_list = Some(Instant::now() - Duration::from_secs(6));
@@ -3432,11 +3624,13 @@ mod tests {
         // Tab completes what is typed: folders and .torrent files only.
         type_text(&mut room, &format!("{}/", dir.display()));
         press(&mut room, KeyCode::Tab);
+        listed(&mut room);
         let Modal::SeedPath { path, matches, .. } = &room.modal else { panic!("the path modal") };
         assert_eq!(matches, &vec!["boc.torrent".to_string(), "kob.torrent".to_string()]);
         assert!(path.value().ends_with("/"), "two candidates share no prefix beyond the folder: {}", path.value());
         type_text(&mut room, "b");
         press(&mut room, KeyCode::Tab);
+        listed(&mut room);
         let Modal::SeedPath { path, .. } = &room.modal else { panic!("the path modal") };
         assert!(path.value().ends_with("/boc.torrent"), "{}", path.value());
         assert!(draw(&mut room).contains("▸ boc.torrent"));
@@ -3626,5 +3820,264 @@ mod tests {
             assert_eq!(expand_home("~/x.torrent"), format!("{home}/x.torrent"));
         }
         assert_eq!(expand_home("/abs"), "/abs");
+    }
+
+    #[test]
+    fn a_load_asks_in_two_waves() {
+        // The settings beside the users, then the four daemon-side reads
+        // together: two round trips, not six (performance audit #83).
+        let server = super::super::waves::serve(&[2, 4], |path| match path {
+            "/api/v1/admin/torrent" => (
+                200,
+                r#"{"client":"transmission","transmission":{"host":"nas","port":9091,"configured":true}}"#.into(),
+            ),
+            "/api/v1/admin/torrent/status" => (500, r#"{"error":"status down"}"#.into()),
+            "/api/v1/admin/torrent/path-templates" => (500, r#"{"error":"templates down"}"#.into()),
+            _ => (200, "{}".into()),
+        });
+        let loaded = load(&Client::new(&server.url).expect("client")).expect("a load");
+        let paths = server.paths();
+        assert_eq!((server.peak(), paths.len()), (4, 6), "{paths:?}");
+        let mut first: Vec<&str> = paths[..2].iter().map(String::as_str).collect();
+        first.sort();
+        assert_eq!(first, ["/api/v1/admin/torrent", "/api/v1/admin/users"]);
+        // Folded in the order they were once asked: the warning names the
+        // status probe, the first of them to fail.
+        assert!(loaded.warning.as_deref().is_some_and(|w| w.contains("status down")), "{:?}", loaded.warning);
+        assert!(loaded.status.is_none() && loaded.templates.is_none());
+        assert!(loaded.access.is_some() && loaded.list.is_some());
+        // No client configured: the settings and the users, nothing else.
+        let server = super::super::waves::serve(&[2], |_| (200, "{}".into()));
+        let loaded = load(&Client::new(&server.url).expect("client")).expect("a load");
+        assert_eq!((server.peak(), server.paths().len()), (2, 2));
+        assert!(loaded.list.is_none() && loaded.warning.is_none());
+    }
+
+    #[test]
+    fn a_frame_lends_the_list_to_its_rows_and_hands_it_back() {
+        // The rows draw from the list itself, taken for the frame and put
+        // back rather than copied (performance audit #110): after a draw
+        // the room holds every torrent, and the cursor's note is found
+        // through the frame's own filter, whatever the case typed.
+        let _en = english();
+        let mut room = connected();
+        press(&mut room, KeyCode::Char('/'));
+        type_text(&mut room, "RAINBOWS");
+        press(&mut room, KeyCode::Enter);
+        press(&mut room, KeyCode::Down);
+        let frame = draw(&mut room);
+        assert!(frame.contains("1 of 4 match") && frame.contains("Radiohead - In Rainbows"), "{frame}");
+        assert!(frame.contains("e5f6e5f6e5f6… · Tracker gave HTTP response code 403"), "the cursor's note:\n{frame}");
+        assert_eq!(room.torrents.len(), 4, "the list is back after the frame");
+        // A hash matches too, in either case.
+        press(&mut room, KeyCode::Char('/'));
+        for _ in 0.."RAINBOWS".len() {
+            press(&mut room, KeyCode::Backspace);
+        }
+        type_text(&mut room, "C3D4");
+        assert_eq!(room.filtered().len(), 1);
+        assert!(draw(&mut room).contains("linux-6.9.iso"));
+        assert_eq!(room.torrents.len(), 4);
+        // The Access tab lends the users the same way.
+        press(&mut room, KeyCode::Enter);
+        room.tab = Tab::Access;
+        let frame = draw(&mut room);
+        assert!(frame.contains("iros") && frame.contains("dj-tom"), "{frame}");
+        assert_eq!(room.users.len(), 4, "the accounts are back after the frame");
+    }
+
+    /// `cargo test --release torrents_tab_frame_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check; run --release with --nocapture"]
+    fn torrents_tab_frame_cost() {
+        let _en = english();
+        for n in [1_000, 5_000] {
+            for filter in ["", "flac"] {
+                let mut room = connected();
+                let mut many = list();
+                many.torrents = (0..n)
+                    .map(|i| torrent(&format!("{i:04x}"), &format!("Some.Torrent.Name.{i:04}.FLAC-GROUP"), "seeding", 1.0, 0.0, 400_000_000, Some("iros")))
+                    .collect();
+                room.apply(Done::Listed(Ok(many)));
+                if !filter.is_empty() {
+                    room.filter = Input::new(filter.into());
+                    room.sel = Some(0);
+                }
+                let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+                let frames = 200;
+                let started = Instant::now();
+                for _ in 0..frames {
+                    terminal.draw(|frame| render(frame, &mut room)).unwrap();
+                }
+                let per = started.elapsed().as_secs_f64() * 1000.0 / frames as f64;
+                println!("torrents tab, {n} torrents, filter {filter:?}: {per:.3} ms a frame");
+            }
+        }
+    }
+
+    #[test]
+    fn a_list_at_rest_waits_for_the_thirty_second_load() {
+        // A five-second look only while something moves — a download, a
+        // check, a queue, or a list changed since the last look; at rest
+        // the thirty-second load keeps it fresh (performance audit #100).
+        let _en = english();
+        let mut room = connected();
+        let mut quiet = list();
+        for t in &mut quiet.torrents {
+            t.status = "seeding".into();
+            t.percent = 1.0;
+            t.rate_download = 0.0;
+        }
+        let look = |room: &mut Room| {
+            room.queued = None;
+            room.last_list = Some(Instant::now() - Duration::from_secs(6));
+            room.tick();
+            room.queued.take()
+        };
+        room.last_load = Some(Instant::now());
+        // The downloads just finished: the list changed, so one more look.
+        room.apply(Done::Listed(Ok(quiet.clone())));
+        assert_eq!(look(&mut room), Some(Op::List));
+        assert!(draw(&mut room).contains("polls every 5 s"));
+        // The same again: nothing moves, nothing to look at until the load.
+        room.apply(Done::Listed(Ok(quiet.clone())));
+        assert_eq!(look(&mut room), None);
+        assert!(draw(&mut room).contains("polls every 30 s"));
+        room.last_load = Some(Instant::now() - Duration::from_secs(31));
+        room.tick();
+        assert_eq!(room.queued.take(), Some(Op::Load), "the load comes as ever, the list with it");
+        room.last_load = Some(Instant::now());
+        // One starts downloading: five seconds again, for as long as it runs.
+        let mut moving = quiet.clone();
+        moving.torrents[2].status = "downloading".into();
+        room.apply(Done::Listed(Ok(moving.clone())));
+        room.apply(Done::Listed(Ok(moving)));
+        assert_eq!(look(&mut room), Some(Op::List));
+        assert!(draw(&mut room).contains("polls every 5 s"));
+        // Queued and checking count as moving too.
+        for status in ["queued", "verifying"] {
+            let mut waiting = quiet.clone();
+            waiting.torrents[0].status = status.into();
+            room.apply(Done::Listed(Ok(waiting.clone())));
+            room.apply(Done::Listed(Ok(waiting)));
+            assert_eq!(look(&mut room), Some(Op::List), "{status}");
+        }
+        // Off the Torrents tab the list is never polled on its own.
+        room.tab = Tab::Libraries;
+        assert_eq!(look(&mut room), None);
+    }
+
+    /// Pump the room until the seed-path modal's Tab has had its listing.
+    fn listed(room: &mut Room) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while matches!(&room.modal, Modal::SeedPath { asked: Some(_), .. }) && Instant::now() < until {
+            room.absorb();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_seed_path_tab_lists_its_folder_off_the_ui_thread() {
+        // The folder is listed on a thread of its own — a dead network
+        // mount can hang read_dir, and the key handler must not
+        // (performance audit #85). A healthy folder answers within the
+        // Tab's short wait, and completes at once as it always did.
+        let _en = english();
+        let dir = std::env::temp_dir().join(format!("mstream-player-tab-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("albums")).unwrap();
+        std::fs::write(dir.join("boc.torrent"), b"d8:announce0:e").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"").unwrap();
+        let mut room = connected();
+        room.open_seed_path();
+        type_text(&mut room, &format!("{}/b", dir.display()));
+        room.seed_wait = Duration::from_secs(5);
+        press(&mut room, KeyCode::Tab);
+        let Modal::SeedPath { path, matches, asked, .. } = &room.modal else { panic!("the path modal") };
+        assert_eq!(matches, &vec!["boc.torrent".to_string()]);
+        assert!(path.value().ends_with("/boc.torrent") && asked.is_none(), "{}", path.value());
+        assert!(room.seed_listing.is_empty());
+        // A folder slower than the wait: the key returns with the listing
+        // still out, the modal says so, and the completion lands with it.
+        room.seed_wait = Duration::ZERO;
+        for _ in 0.."boc.torrent".len() {
+            press(&mut room, KeyCode::Backspace);
+        }
+        type_text(&mut room, "b");
+        press(&mut room, KeyCode::Tab);
+        assert!(
+            matches!(&room.modal, Modal::SeedPath { asked: Some(_), matches, .. } if matches.is_empty()),
+            "asked, not answered"
+        );
+        assert!(draw(&mut room).contains("listing…"));
+        listed(&mut room);
+        let Modal::SeedPath { path, matches, .. } = &room.modal else { panic!("the path modal") };
+        assert_eq!(matches, &vec!["boc.torrent".to_string()]);
+        assert!(path.value().ends_with("/boc.torrent"), "{}", path.value());
+        assert!(room.seed_listing.is_empty());
+        // A Tab, then more typing before its listing lands: the completion
+        // would be for an input that is gone, so it is dropped.
+        for _ in 0.."boc.torrent".len() {
+            press(&mut room, KeyCode::Backspace);
+        }
+        press(&mut room, KeyCode::Tab);
+        press(&mut room, KeyCode::Char('a'));
+        std::thread::sleep(Duration::from_millis(50));
+        room.absorb();
+        let Modal::SeedPath { path, matches, asked, .. } = &room.modal else { panic!("the path modal") };
+        assert!(path.value().ends_with("/a") && matches.is_empty() && asked.is_none(), "{}", path.value());
+        // Tabs at a folder already being listed ask no second time; its
+        // one listing serves the latest.
+        room.seed_listing.insert(format!("{}/", dir.display()));
+        press(&mut room, KeyCode::Tab);
+        press(&mut room, KeyCode::Tab);
+        assert_eq!(room.seed_listing.len(), 1);
+        room.take_listing(format!("{}/", dir.display()), vec!["albums/".into(), "boc.torrent".into()]);
+        let Modal::SeedPath { path, asked, .. } = &room.modal else { panic!("the path modal") };
+        assert!(path.value().ends_with("/albums/") && asked.is_none(), "{}", path.value());
+        // A listing that lands after the modal closed changes nothing.
+        room.act(Act::ModalCancel);
+        room.take_listing(format!("{}/", dir.display()), vec!["boc.torrent".into()]);
+        assert!(matches!(room.modal, Modal::None));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_listing_still_out_is_waited_for_and_lands_after_the_worker_is_gone() {
+        // Its completion repaints, so a listing slower than the Tab's own
+        // wait keeps the loop brisk as a worker's call does — for
+        // BRISK_FOR after its Tab, not for as long as a dead mount holds
+        // it (performance audit #85 follow-up).
+        let _en = english();
+        let mut room = connected();
+        assert!(!room.awaiting());
+        room.open_seed_path();
+        type_text(&mut room, "/nowhere/b");
+        room.seed_wait = Duration::ZERO;
+        // The folder is being listed already: the Tab asks nothing new, and
+        // its listing stays out until the test sends it.
+        room.seed_listing.insert("/nowhere/".into());
+        press(&mut room, KeyCode::Tab);
+        assert!(room.awaiting(), "a listing is out: waited for briskly");
+        room.seed_asked_at = room.seed_asked_at.and_then(|at| at.checked_sub(BRISK_FOR));
+        assert!(!room.awaiting(), "past BRISK_FOR a listing that never comes holds nothing");
+        press(&mut room, KeyCode::Tab);
+        assert!(room.awaiting(), "the next Tab waits again");
+
+        // The worker dies with a call out: said once, the room stops
+        // redrawing for it, and the listing still lands.
+        let (_, dead) = std::sync::mpsc::channel();
+        room.from_worker = dead;
+        room.in_flight = true;
+        assert!(room.absorb(), "the worker's end is news");
+        assert!(room.note.as_ref().is_some_and(|(note, err)| *err && note.contains("worker thread is gone")));
+        assert!(!room.absorb(), "once: nothing to redraw for on the passes after");
+        room.note = None; // a tab switch's
+        assert!(room.absorb() && room.note.as_ref().is_some_and(|(_, err)| *err), "the note stands");
+        assert!(!room.absorb());
+        room.listed_tx.send(("/nowhere/".into(), vec!["albums/".into(), "boc.torrent".into()])).unwrap();
+        assert!(room.absorb(), "a listing after the worker's end still lands");
+        let Modal::SeedPath { path, asked, .. } = &room.modal else { panic!("the path modal") };
+        assert!(path.value() == "/nowhere/boc.torrent" && asked.is_none(), "{}", path.value());
+        assert!(!room.awaiting(), "nothing is out: not the listing, not the dead worker's call");
     }
 }

@@ -103,9 +103,9 @@ pub fn peer_media_url(
 
 /// `{server}/api/v1/federation/peers/{peer}/art/{file}` — a peer's cover
 /// through the parent's art proxy; the token travels in the header, as for
-/// [`album_art_url`].
-pub fn peer_art_url(server: &str, peer: i64, file: &str) -> Result<String, String> {
-    build(server, &format!("api/v1/federation/peers/{peer}/art"), file).map(|url| url.to_string())
+/// [`album_art_url`], and so does `small` (the proxy forwards `compress`).
+pub fn peer_art_url(server: &str, peer: i64, file: &str, small: bool) -> Result<String, String> {
+    build(server, &format!("api/v1/federation/peers/{peer}/art"), file).map(|url| sized(url, small))
 }
 
 /// `{server}/album-art/{file}` — the cover the server extracted and cached,
@@ -114,8 +114,24 @@ pub fn peer_art_url(server: &str, peer: i64, file: &str) -> Result<String, Strin
 /// No `?token=`: unlike the stream URLs this one is fetched by the client
 /// itself, so the token can travel in the header where it stays out of
 /// server logs.
-pub fn album_art_url(server: &str, file: &str) -> Result<String, String> {
-    build(server, "album-art", file).map(|url| url.to_string())
+///
+/// `small` asks for the server's own 256 px copy (`?compress=l`), which
+/// mStream writes beside every cover it scans and serves in place of the
+/// original — falling back to the original when it has none. A wall cell
+/// or a queue row never draws more than that, and the originals are
+/// commonly 1000 px and hundreds of kilobytes apiece (performance audit
+/// #92). Not `s`: its 92 px is below the 128 px thumbnail kept here.
+pub fn album_art_url(server: &str, file: &str, small: bool) -> Result<String, String> {
+    build(server, "album-art", file).map(|url| sized(url, small))
+}
+
+/// The `compress=l` pair on a small ask — its own pair, ahead of the
+/// loopback token [`with_local_token`] appends.
+fn sized(mut url: Url, small: bool) -> String {
+    if small {
+        url.query_pairs_mut().append_pair("compress", "l");
+    }
+    url.to_string()
 }
 
 /// `{server}/transcode/{vpath}?codec=...&bitrate=...&token=...`
@@ -175,8 +191,10 @@ mod tests {
             with_local_token(media, Some("lt9")),
             "http://127.0.0.1:4242/media/lib/a.mp3?token=t&__lt=lt9"
         );
-        let art = album_art_url("http://127.0.0.1:4242", "x.jpg").unwrap();
+        let art = album_art_url("http://127.0.0.1:4242", "x.jpg", false).unwrap();
         assert_eq!(with_local_token(art, Some("lt9")), "http://127.0.0.1:4242/album-art/x.jpg?__lt=lt9");
+        let art = album_art_url("http://127.0.0.1:4242", "x.jpg", true).unwrap();
+        assert_eq!(with_local_token(art, Some("lt9")), "http://127.0.0.1:4242/album-art/x.jpg?compress=l&__lt=lt9");
         // A direct server has no gate, so nothing is appended.
         let plain = media_url("http://host:3000", "lib/a.mp3", None).unwrap();
         assert_eq!(with_local_token(plain.clone(), None), plain);
@@ -191,8 +209,18 @@ mod tests {
 
     #[test]
     fn album_art_url_carries_no_token() {
-        let u = album_art_url("http://host/mstream", "b0445bafc2e9a817.jpeg").unwrap();
+        let u = album_art_url("http://host/mstream", "b0445bafc2e9a817.jpeg", false).unwrap();
         assert_eq!(u, "http://host/mstream/album-art/b0445bafc2e9a817.jpeg");
+    }
+
+    #[test]
+    fn a_small_cover_asks_for_the_servers_own_256px_copy() {
+        // Performance audit #92: mStream serves `zl-<file>` for
+        // `?compress=l` and the original when it has none.
+        let u = album_art_url("http://host/mstream", "b0445bafc2e9a817.jpeg", true).unwrap();
+        assert_eq!(u, "http://host/mstream/album-art/b0445bafc2e9a817.jpeg?compress=l");
+        let u = peer_art_url("http://parent:3000", 3, "cover.jpeg", true).unwrap();
+        assert_eq!(u, "http://parent:3000/api/v1/federation/peers/3/art/cover.jpeg?compress=l");
     }
 
     #[test]
@@ -228,7 +256,7 @@ mod tests {
     fn a_peers_bytes_and_art_come_through_the_parents_proxies() {
         let u = peer_media_url("http://parent:3000/", 3, "music/Söng.flac", Some("pt")).unwrap();
         assert_eq!(u, "http://parent:3000/api/v1/federation/peers/3/stream/music/S%C3%B6ng.flac?token=pt");
-        let u = peer_art_url("http://parent:3000", 3, "cover.jpeg").unwrap();
+        let u = peer_art_url("http://parent:3000", 3, "cover.jpeg", false).unwrap();
         assert_eq!(u, "http://parent:3000/api/v1/federation/peers/3/art/cover.jpeg");
     }
 }

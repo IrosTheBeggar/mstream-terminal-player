@@ -33,7 +33,7 @@ scenarios, each on a fresh fake and a fresh `$HOME`:
   screen, `q` quits clean. The review's key-routing bug showed with no
   server; this leg would have caught it.
 
-## The two harness laws (learned the hard way)
+## The three harness laws (learned the hard way)
 
 1. **Never grep the raw stream for anything that repaints in place.**
    ratatui's diff renderer emits only changed cells — a later
@@ -44,6 +44,12 @@ scenarios, each on a fresh fake and a fresh `$HOME`:
 2. **Drain, don't sleep.** A pty whose output buffer fills freezes the
    TUI mid-run; every wait in a leg is an `expect -timeout N timeout {}`
    drain that keeps reading.
+3. **`expect {` ends its line.** expect reads a braced argument as a
+   pattern list only when it is the sole argument and a newline comes
+   before its first pattern. On one line, or after a flag, the whole
+   `"X" {} timeout {…}` is ONE glob that never matches: the gate waits
+   out its timeout, runs no arm, and can never fail. Nineteen gates did
+   that until the performance audit (#129); `run.sh` refuses the form.
 
 Env seams the legs rely on: `MSTREAM_SETUP_LANG` (deterministic
 language), `MSTREAM_NO_GRAPHICS=1` (no pixel probe — nothing answers

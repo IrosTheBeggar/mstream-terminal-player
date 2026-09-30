@@ -36,7 +36,7 @@ mod torrent_meta;
 mod vizwin;
 
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{
@@ -46,13 +46,13 @@ use ratatui::crossterm::event::{
 use ratatui::crossterm::execute;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::Paragraph;
 use rust_i18n::t;
 
 use crate::config::{self, Config};
 use crate::kit::{
     GroundGuard, ListView, POINTER_RESET, Surface, dim, input_display_blink, scroll_list, set_pointer_shape,
 };
+use crate::kit::pace::{Expecting, REDRAW_ANYWAY};
 use crate::kit::theme::{self, legacy_conhost, th};
 use crate::tui::app::{
     Action, App, Effect, Entry, MessageKind, SEARCH_CLASSES, SearchClass, SearchNode, Tab,
@@ -556,13 +556,27 @@ pub(crate) struct Gui {
     library: library::LibraryUi,
     /// Track actions: the sheet, its picker and info, a grip drag.
     actions: actions::ActionsUi,
+    /// The bar card's cover and the mini player's, a slot each — see
+    /// [`draw_card_cover`].
+    card: Option<cover::Slot>,
+    mini_cover: Option<cover::Slot>,
     /// The queue's highlighted row last drawn, so a new one is revealed.
     last_qsel: Option<usize>,
     /// The last frame left paced work unfinished (covers still waiting to
     /// upgrade to pixels): the event loop shortens its idle wait so the
     /// next frame comes promptly instead of a poll tick later.
     hot: bool,
+    /// When a setting last changed, while the change is not yet on disk:
+    /// the file is written once the changes rest (see [`PREFS_REST`]).
+    prefs_unsaved: Option<Instant>,
 }
+
+/// How long settings rest before they are written: a held ← on the blend
+/// or an Auto DJ bar steps at the key repeat, each step used to be a load,
+/// a serialize and a full flush of the drive, and now the file is written
+/// once, after (performance audit #86). Short, so a crash or a closed
+/// window costs a third of a second of choices at most.
+const PREFS_REST: Duration = Duration::from_millis(300);
 
 impl Gui {
     fn new(config: Config, config_ok: bool, mut app: App) -> Self {
@@ -608,8 +622,11 @@ impl Gui {
             dj: dj::DjUi::new(),
             library: library::LibraryUi::new(),
             actions: actions::ActionsUi::new(),
+            card: None,
+            mini_cover: None,
             last_qsel: None,
             hot: false,
+            prefs_unsaved: None,
         }
     }
 
@@ -662,7 +679,10 @@ impl Gui {
     /// Loads fresh before writing: other flows save behind this copy's back
     /// (a connect's SaveSession touches the server list, the servers room
     /// edits it), and writing the boot-time copy wholesale would undo them.
+    /// What it writes of the player's comes from the App as it stands, so a
+    /// change still waiting to be written (see [`Gui::save_soon`]) goes too.
     fn save_now(&mut self) {
+        self.prefs_unsaved = None;
         if !self.config_ok {
             return;
         }
@@ -683,6 +703,31 @@ impl Gui {
         }
     }
 
+    /// A player setting changed: written once the changes rest
+    /// ([`PREFS_REST`]), so a held key's every step is not a write of its
+    /// own. Only the player's settings wait — they live in the App, which
+    /// no reload of the config replaces; the GUI's own section is written
+    /// at once ([`Gui::set_key_hints`]).
+    fn save_soon(&mut self) {
+        self.prefs_unsaved = Some(Instant::now());
+    }
+
+    /// Once a pass: the settings written once they have rested.
+    fn save_rested(&mut self) {
+        if self.prefs_unsaved.is_some_and(|since| since.elapsed() >= PREFS_REST) {
+            self.save_now();
+        }
+    }
+
+    /// Before the config is read back from disk (a reload, another flow's
+    /// load-and-save): settings still waiting are written first, so the
+    /// file the reload reads is the file the screen shows.
+    fn flush_prefs(&mut self) {
+        if self.prefs_unsaved.is_some() {
+            self.save_now();
+        }
+    }
+
     /// The blend walks whole seconds and snaps toward the pressed direction
     /// (the TUI's rule: a hand-written 4.5 steps to 5 and 4, never 5.5).
     fn adjust_blend(&mut self, delta: i32) {
@@ -691,7 +736,7 @@ impl Gui {
         self.app.crossfade = snapped.clamp(0.0, 30.0);
         let set = AudioCmd::SetCrossfade(self.app.crossfade);
         self.pend(vec![Effect::Audio(set)]);
-        self.save_now();
+        self.save_soon();
     }
 
     fn adjust_row(&mut self, row: usize, delta: i32) {
@@ -709,23 +754,23 @@ impl Gui {
                 self.app.gapless = !self.app.gapless;
                 let cmd = AudioCmd::SetGapless(self.app.gapless);
                 self.pend(vec![Effect::Audio(cmd)]);
-                self.save_now();
+                self.save_soon();
             }
             ROW_BLEND_SKIPS => {
                 self.app.blend_skips = !self.app.blend_skips;
                 let cmd = AudioCmd::SetBlendSkips(self.app.blend_skips);
                 self.pend(vec![Effect::Audio(cmd)]);
-                self.save_now();
+                self.save_soon();
             }
             ROW_PAUSE_FADE => {
                 self.app.pause_fade = !self.app.pause_fade;
                 let cmd = AudioCmd::SetPauseFade(self.app.pause_fade);
                 self.pend(vec![Effect::Audio(cmd)]);
-                self.save_now();
+                self.save_soon();
             }
             ROW_RESUME => {
                 self.app.resume_queue = !self.app.resume_queue;
-                self.save_now();
+                self.save_soon();
             }
             ROW_HINTS => self.set_key_hints(!self.config.gui.key_hints),
             _ => {}
@@ -810,6 +855,9 @@ impl Gui {
             }
             Act::VizWindow => vizwin::toggle(self),
             Act::Nav(i) => {
+                // The room already up, chosen again: the Library rooms ask
+                // the server afresh (below).
+                let again = i == self.active && self.screen == Screen::Library;
                 // A nav row is the Library's: it brings that screen back.
                 self.screen = Screen::Library;
                 self.app.fullscreen = false;
@@ -859,10 +907,17 @@ impl Gui {
                 // The shell's own note was about the room being left.
                 self.note = None;
                 // The Library rooms open their root list fresh on every
-                // visit (library-rooms contract, entry point 1).
+                // visit (library-rooms contract, entry point 1) — Artists
+                // and Genres from the session's copy once they have one, a
+                // whole list's round trip saved per return (performance
+                // audit #99). Choosing the room already up asks again: the
+                // lists change only with a rescan, and that is how to see it.
                 if let Some(root) = library::root_of(i)
                     && self.app.connected
                 {
+                    if again {
+                        self.app.forget_root_list(&root);
+                    }
                     library::open(self, root);
                 }
                 if i != SETTINGS_NAV {
@@ -1296,8 +1351,16 @@ fn clip_lead(text: &str, max: usize) -> String {
 
 /// One frame. Public to the crate so render tests can drive it.
 pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
+    draw_frame(frame, gui);
+    // The overlays drew after the covers: a kitty picture's pixels, riding
+    // its first cell, may not have survived the frame.
+    crate::tui::graphics::verify_sent(frame.buffer_mut());
+}
+
+fn draw_frame(frame: &mut Frame, gui: &mut Gui) {
     gui.ui.begin_frame();
     gui.hot = false; // this frame's draws re-raise it if work remains
+    gui.stats.drawn = false; // and the Stats screen's says it drew
     let area = frame.area();
     if let Some(ground) = th().ground.filter(|_| theme::ground_owned()) {
         frame.render_widget(
@@ -1454,11 +1517,9 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
     }
 
     // The bar, under the Library alone: the Now Playing view carries its
-    // own scrubber and transport. While the pairing QR is up, the card
-    // cover stands down: the graphics encode cache holds ONE image, and two
-    // per frame thrash it.
+    // own scrubber and transport.
     if gui.screen == Screen::Library {
-        let has_art = playing_cover_ready(&gui.app) && gui.servers.qr.is_none();
+        let has_art = playing_cover_ready(&gui.app);
         let now = gui.bar_now();
         let view = BarView {
             now: now.as_ref(),
@@ -1477,7 +1538,7 @@ pub(crate) fn render(frame: &mut Frame, gui: &mut Gui) {
             // The mosaic where an overlay stood last frame — the rule every
             // other cover follows, since a picture's cells are skipped.
             let mosaic = gui.ui.covered_last_frame(cover);
-            draw_card_cover(frame, cover, &mut gui.app, mosaic);
+            draw_card_cover(frame, cover, &gui.app, &mut gui.card, mosaic);
         }
     }
 
@@ -1512,10 +1573,21 @@ fn playing_cover_ready(app: &App) -> bool {
 /// terminal can (kitty · sixel · iTerm2), the ▀-mosaic everywhere else —
 /// the same two paths the TUI's facts column walks. The kit's rule holds:
 /// pixels are for album art only, never chrome.
-fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App, mosaic: bool) {
-    // Field by field, the way the TUI spells it: the art cache's borrow
-    // must be visibly disjoint from the graphics and cover-pane fields
-    // taken mutably below.
+///
+/// Through a slot of its own — the bar's, or the mini player's — not
+/// `app.graphics`, which the Now Playing cover draws through at its own
+/// size: sharing its one encoded picture, every switch between the two
+/// screens decoded and encoded the cover again (60-180 ms on sixel, a
+/// megabyte or two re-sent on kitty) for a picture drawn a moment ago
+/// (performance audit #97). Forked on first draw, which is after the
+/// probe: a fork taken with the Gui would be of the disabled answer.
+fn draw_card_cover(
+    frame: &mut Frame,
+    rect: Rect,
+    app: &App,
+    slot: &mut Option<cover::Slot>,
+    mosaic: bool,
+) {
     let cover = app
         .now_playing
         .as_ref()
@@ -1525,13 +1597,12 @@ fn draw_card_cover(frame: &mut Frame, rect: Rect, app: &mut App, mosaic: bool) {
     let Some(cover) = cover else {
         return;
     };
-    if !mosaic && app.graphics.draw(frame, rect, cover) {
-        return;
-    }
-    let mut canvas = crate::tui::canvas::Canvas::new(rect);
-    if !canvas.is_empty() {
-        app.cover_pane.draw(&mut canvas, cover);
-        frame.render_widget(Paragraph::new(canvas.into_lines()), rect);
+    let slot = slot.get_or_insert_with(|| cover::Slot::new(app.graphics.fork()));
+    if mosaic {
+        slot.draw_mosaic(frame, rect, cover);
+    } else {
+        // One cover: a frame's whole budget, never starved.
+        slot.draw_paced(frame, rect, cover, &cover::Pace::frame());
     }
 }
 
@@ -2484,24 +2555,23 @@ fn event_loop(
 ) -> std::io::Result<()> {
     let mut hand = false;
     let mut saver = tui::QueueSaver::new(&gui.app);
+    // Two clocks behind the brisk wait (`kit::pace`): the workers' requests
+    // the App sends, and the side threads' calls — a sign-in, a torrent
+    // check, the Stats page's load — which say themselves when they are out.
+    let mut asked = Expecting::default();
+    let mut side = Expecting::default();
+    // Whether anything happened since the last frame that it does not show
+    // yet — input, an answer, a timer of the App's — and when it was drawn.
+    // A pass with nothing new skips the draw (performance audit #102): a
+    // paused GUI redrew the same frame ten times a second, thirty with the
+    // visualizer window open, each a full render and a diff of every cell.
+    let mut dirty = true;
+    let mut drawn = Instant::now();
     loop {
-        // A SaveSession about to be dispatched writes the config behind
-        // this copy's back — a Quick Connect add mints a whole new entry
-        // there. Reload after, so the dropdown and the room list it.
-        let saving = gui
-            .pending
-            .iter()
-            .any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. } | Effect::SaveDjLibrary { .. }));
-        tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
-        saver.tick(&gui.app);
-        let ticked = gui.app.tick();
-        gui.pend(ticked);
-        if saving && let Ok(fresh) = config::load() {
-            gui.config = fresh;
-            refresh_book(gui);
-        }
-        terminal.draw(|frame| render(frame, gui))?;
-
+        // Whatever the workers sent is folded in before anything is drawn —
+        // the TUI's order. Drawn first, an answer that landed during the
+        // wait missed this frame and sat out a whole second poll for the
+        // next, and so did the requests it led to (performance audit #82).
         while let Ok(ev) = event_rx.try_recv() {
             // The servers layer looks first: session answers that would
             // land on the TUI's connect screen open the GUI's form instead.
@@ -2513,7 +2583,12 @@ fn event_loop(
             let sonic_random = matches!(ev, Event::SonicRandom { .. });
             let connected = matches!(ev, Event::Connected { .. });
             let was_results = gui.app.sonic.view == crate::tui::app::SonicView::Results;
+            // A status that says what the last one said changes nothing on
+            // screen: paused or stopped, the audio thread repeats itself
+            // every tick.
+            let repeat = matches!(&ev, Event::Status(status) if *status == gui.app.status);
             let effects = gui.app.apply_event(ev);
+            dirty |= !repeat || !effects.is_empty();
             gui.pend(effects);
             if sonic_random {
                 sonic::random_landed(gui, was_results);
@@ -2525,39 +2600,67 @@ fn event_loop(
                 stats::reopen(gui);
             }
         }
-        servers::poll(gui);
-        torrent::poll(gui);
+        dirty |= servers::poll(gui);
+        dirty |= torrent::poll(gui);
+        dirty |= stats::absorb(gui);
+
+        // A SaveSession about to be dispatched writes the config behind
+        // this copy's back — a Quick Connect add mints a whole new entry
+        // there. Reload after, so the dropdown and the room list it.
+        let saving = gui
+            .pending
+            .iter()
+            .any(|e| matches!(e, Effect::SaveSession | Effect::SavePeers { .. } | Effect::SaveDjLibrary { .. }));
+        if gui.pending.iter().any(tui::awaits_answer) {
+            asked.arm();
+        }
+        tui::dispatch(&gui.app, &mut gui.pending, audio_tx, api_tx, event_tx);
+        saver.tick(&gui.app);
+        let ticked = gui.app.tick();
+        dirty |= !ticked.is_empty();
+        gui.pend(ticked);
+        if saving {
+            gui.flush_prefs();
+        }
+        if saving && let Ok(fresh) = config::load() {
+            gui.config = fresh;
+            refresh_book(gui);
+            dirty = true;
+        }
+        if dirty || moving(gui) || drawn.elapsed() >= REDRAW_ANYWAY {
+            terminal.draw(|frame| render(frame, gui))?;
+            // The kitty pictures this frame stopped drawing — a queue row's
+            // slot let go, a wall slot past the page — leave the terminal's
+            // store now that the frame covering their cells is out.
+            crate::tui::graphics::release_dropped();
+            drawn = Instant::now();
+            dirty = false;
+        }
 
         // The Stats screen's page pumps its worker and its controls here too.
-        let stats_over = stats::frame(gui);
+        let page = stats::frame(gui);
+        dirty |= page.stepped;
         // The visualizer window's host: the child's exit, the next texture.
-        vizwin::tick(gui);
-        let over = gui.ui.hovering_clickable() || stats_over;
+        dirty |= vizwin::tick(gui);
+        // Settings changed a moment ago, now resting: written.
+        gui.save_rested();
+        let over = gui.ui.hovering_clickable() || page.over;
         if over != hand {
             hand = over;
             set_pointer_shape(hand, mouse_on);
         }
         if let Some(act) = gui.ui.hold_action() {
             gui.act(act);
+            dirty = true;
         }
         gui.ui.dwell_tick();
 
-        // While covers are still upgrading to pixels, the next frame is
-        // wanted promptly — idling out the full poll would stretch a page
-        // turn's ~50 ms of encode work across a second of ticks. A blinking
-        // caret wants its next frame ON the flip, not a poll tick after it.
-        let wait = if gui.hot {
-            Duration::from_millis(10)
-        } else if gui.app.drawing_audio() || vizwin::is_open(gui) {
-            // The visualizer tab, moving: the TUI's thirty frames a second —
-            // and the visualizer window's feed, at the same pace.
-            Duration::from_millis(33)
-        } else {
-            gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
-        };
-        if !event::poll(wait)? {
+        let wait = next_wait(gui);
+        side.track(gui.servers.busy() || gui.torrent.busy.is_some() || stats::awaiting(gui));
+        if !event::poll(side.wait(asked.wait(wait)))? {
             continue;
         }
+        dirty = true;
         // Drain everything queued before the next draw (the wizard's
         // collapse-moves lesson: pointer sweeps are one event per cell).
         let mut inputs = vec![event::read()?];
@@ -2650,6 +2753,9 @@ fn event_loop(
                 // and every queue row's alike.
                 TermEvent::Resize(..) => {
                     gui.app.graphics.refresh();
+                    for slot in [&mut gui.card, &mut gui.mini_cover].into_iter().flatten() {
+                        slot.on_resize();
+                    }
                     gui.albums.on_resize();
                     gui.queue.on_resize();
                     gui.actions.on_resize();
@@ -2658,6 +2764,43 @@ fn event_loop(
             }
         }
     }
+}
+
+/// How long the pass waits for input before the next one.
+fn next_wait(gui: &Gui) -> Duration {
+    // Effects this pass made after its dispatch go out at the top of the
+    // next: the covers the wall's page and the queue panel's rows claimed
+    // as the frame drew, a held control's step. They waited out the whole
+    // wait for it, so a page turn's cover asks left up to a poll after its
+    // frame (performance audit #82 follow-up). A cover is claimed once and
+    // a refused claim sends nothing, so the pass after finds nothing
+    // pending and waits as it would have.
+    if !gui.pending.is_empty() {
+        return Duration::ZERO;
+    }
+    // While covers are still upgrading to pixels, the next frame is
+    // wanted promptly — idling out the full poll would stretch a page
+    // turn's ~50 ms of encode work across a second of ticks. A blinking
+    // caret wants its next frame ON the flip, not a poll tick after it.
+    if gui.hot {
+        Duration::from_millis(10)
+    } else if gui.app.drawing_audio() || vizwin::wants_frames(gui) {
+        // The visualizer tab, moving: the TUI's thirty frames a second —
+        // and the visualizer window's feed, at the same pace, while it
+        // has anything to say (silence, once settled, is said once).
+        Duration::from_millis(33)
+    } else {
+        gui.ui.caret_next_flip().map_or(POLL, |flip| flip.min(POLL))
+    }
+}
+
+/// Whether the screen moves on its own, with nothing happening: covers
+/// still upgrading to pixels, the visualizer tab settling, a caret due to
+/// blink, a tooltip ripening, the frame after an overlay came or went.
+/// Every pass draws while it does, as every pass did before frames could
+/// be skipped.
+fn moving(gui: &mut Gui) -> bool {
+    gui.hot || gui.app.drawing_audio() || gui.ui.stale() || stats::stale(gui)
 }
 
 impl Gui {
@@ -2993,6 +3136,8 @@ pub fn run(
         &event_tx,
     );
 
+    // Still on the alternate screen, where kitty keeps the pictures.
+    crate::tui::graphics::release_all();
     if mouse_on {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         let _ = execute!(std::io::stdout(), ratatui::crossterm::style::Print(POINTER_RESET));
@@ -3030,6 +3175,42 @@ mod tests {
         let mut gui = Gui::new(Config::default(), false, App::new(None, None, None));
         gui.demo = Some(demo_now());
         gui
+    }
+
+    /// A held key's steps are written once they rest, not once a step; a
+    /// reload, another flow's write, and Start/Stop write what is waiting
+    /// first (performance audit #86).
+    #[test]
+    fn settings_are_written_once_they_rest_and_before_anything_rereads_them() {
+        let scratch = crate::config::testing::Scratch::new("gui-prefs-rest");
+        let mut gui = Gui::new(Config::default(), true, App::new(None, None, None));
+        config::save(&gui.config).unwrap();
+        let file = scratch.dir.join("config.toml");
+        let on_disk = || config::load().unwrap().player.crossfade_seconds;
+        let before = std::fs::read_to_string(&file).unwrap();
+
+        for _ in 0..5 {
+            gui.adjust_blend(1);
+        }
+        assert_eq!(gui.app.crossfade, 5.0, "each step lands at once");
+        gui.save_rested();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before, "still moving: nothing written");
+        gui.prefs_unsaved = gui.prefs_unsaved.map(|since| since - PREFS_REST);
+        gui.save_rested();
+        assert_eq!(on_disk(), 5.0, "rested: written, once");
+        assert!(gui.prefs_unsaved.is_none());
+
+        // Another flow's load-and-save writes the waiting change first.
+        gui.adjust_blend(1);
+        servers::update_config(&mut gui, |_| {});
+        assert_eq!(on_disk(), 6.0);
+        assert_eq!(gui.config.player.crossfade_seconds, 6.0, "the GUI's copy is the file's");
+
+        // The GUI's own section is written at once.
+        gui.set_key_hints(false);
+        assert!(!config::load().unwrap().gui.key_hints);
+        assert!(gui.prefs_unsaved.is_none());
+        let _ = &scratch;
     }
 
     fn track(filepath: &str, title: &str, duration: f64) -> Track {
@@ -3472,6 +3653,52 @@ mod tests {
     }
 
     #[test]
+    fn a_stats_page_under_the_mini_player_is_not_on_screen() {
+        // The mini player stands in for every screen and draws no page: a
+        // page chosen under it has no frame to be out of date, so its
+        // surface's clocks do not redraw the mini player every pass
+        // (performance audit #102 follow-up), and the pointer below the
+        // bar is the mini player's transport, not the undrawn page's.
+        use crate::admin::Screen as _;
+        let mut gui = browsing_gui();
+        gui.app.session.server = "http://host.invalid:3000".into();
+        gui.app.session.server_id = "http://host.invalid:3000".into();
+        gui.act(Act::Screen(Screen::Stats));
+        assert!(gui.stats.page.is_some());
+        let mut small = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        small.draw(|frame| render(frame, &mut gui)).unwrap();
+        assert!(gui.stats.page.as_mut().unwrap().ui().stale(), "never drawn: its own surface says so");
+        assert!(!moving(&mut gui), "but it is not on screen");
+        let click = event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(!stats::pointer(&mut gui, click), "the mini player's to take");
+
+        // Full size: the page draws, and its clocks and pointer are the
+        // frame's again.
+        draw(&mut gui);
+        assert!(!moving(&mut gui), "drawn, and nothing on a clock");
+        gui.stats.page.as_mut().unwrap().ui().overlay(Rect::new(2, 2, 10, 4));
+        assert!(moving(&mut gui), "an overlay came: the page owes a frame");
+        assert!(stats::pointer(&mut gui, click), "the page's");
+        small.draw(|frame| render(frame, &mut gui)).unwrap();
+        assert!(!moving(&mut gui), "not under the mini player");
+
+        // An arrow held on the page when the window drops to the mini
+        // player: the button's release still ends it, though the page is
+        // not drawn to take the event.
+        draw(&mut gui);
+        gui.stats.page.as_mut().unwrap().ui().hold_arrow();
+        small.draw(|frame| render(frame, &mut gui)).unwrap();
+        let lift = event::MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), ..click };
+        assert!(!stats::pointer(&mut gui, lift), "still the mini player's event");
+        assert!(!gui.stats.page.as_mut().unwrap().ui().holding(), "and the hold is over");
+    }
+
+    #[test]
     fn the_top_bar_has_the_library_and_stats_tabs_and_0_opens_now_playing() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut gui = browsing_gui();
@@ -3855,6 +4082,44 @@ mod tests {
         let first = mini::plan(&gui, area).mini.lines.remove(0).2;
         assert!(!all.contains(&first), "and the line is gone:\n{all}");
     }
+
+    #[test]
+    fn the_card_now_playing_and_the_mini_player_keep_a_cover_each() {
+        // One encoded picture shared by the card and Now Playing meant every
+        // switch between the two screens decoded and encoded the cover
+        // again (performance audit #97); the mini player made three.
+        use ratatui_image::picker::ProtocolType;
+        let mut gui = test_gui();
+        gui.app.graphics = crate::tui::graphics::Graphics::forced(ProtocolType::Kitty);
+        let mut playing = track("music/a.mp3", "Night Drive", 252.0);
+        playing.metadata.album_art = Some("aa.jpeg".into());
+        gui.app.now_playing = Some(playing);
+        // Larger than the thumbnail, so Now Playing's box decodes the source.
+        let cover = image::RgbImage::from_fn(400, 400, |x, y| image::Rgb([x as u8, y as u8, 90]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        cover.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        gui.app.art.insert("aa.jpeg".into(), Some(crate::tui::art::decode(&bytes.into_inner()).unwrap()));
+
+        let mut full = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut small = Terminal::new(TestBackend::new(70, 20)).unwrap();
+        for _ in 0..3 {
+            full.draw(|frame| render(frame, &mut gui)).unwrap();
+            gui.act(Act::Screen(Screen::NowPlaying));
+            full.draw(|frame| render(frame, &mut gui)).unwrap();
+            gui.act(Act::Screen(Screen::Library));
+            small.draw(|frame| render(frame, &mut gui)).unwrap();
+        }
+        let encodes = |slot: &Option<cover::Slot>| slot.as_ref().map(cover::Slot::encodes);
+        assert_eq!(gui.app.graphics.encodes(), 1, "Now Playing's cover, once");
+        assert_eq!(encodes(&gui.card), Some(1), "the card's, once");
+        assert_eq!(encodes(&gui.mini_cover), Some(1), "the mini player's, once");
+        let placed = |terminal: &Terminal<TestBackend>| {
+            let cells = &terminal.backend().buffer().content;
+            cells.iter().any(|cell| cell.symbol().contains('\u{10EEEE}'))
+        };
+        assert!(placed(&full) && placed(&small), "and each drew as pixels");
+    }
+
     // ── The browser bar ─────────────────────────────────────────────────
 
     #[test]

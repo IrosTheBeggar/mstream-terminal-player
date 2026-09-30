@@ -21,18 +21,40 @@ expect {
     eof { puts "DIED-EARLY"; exit 6 }
     timeout { puts "NO-LIBRARY-SCREEN"; exec kill -9 [exp_pid]; expect eof; exit 2 }
 }
-expect { "Cassini IV" {} timeout { puts "NO-DEMO-SEAT"; exec kill -9 [exp_pid]; expect eof; exit 3 } }
+expect {
+    "Cassini IV" {}
+    eof { puts "DIED-BEFORE-DEMO-SEAT"; exit 6 }
+    timeout { puts "NO-DEMO-SEAT"; exec kill -9 [exp_pid]; expect eof; exit 3 }
+}
 drain 1
 send "0"
-expect { "1:Queue" {} timeout { puts "NO-NOW-PLAYING"; exec kill -9 [exp_pid]; expect eof; exit 4 } }
+expect {
+    "1:Queue" {}
+    eof { puts "DIED-BEFORE-NOW-PLAYING"; exit 6 }
+    timeout { puts "NO-NOW-PLAYING"; exec kill -9 [exp_pid]; expect eof; exit 4 }
+}
 drain 1
 send "3"
-expect { "visualiser goes here" {} timeout { puts "DIGIT-LEFT-THE-SCREEN"; exec kill -9 [exp_pid]; expect eof; exit 5 } }
+# The mode's name on the tab's last row, where the queue tab drew nothing.
+# Not the placeholder: it lands on the queue's "nothing queued" and one
+# `e` stays put, so the diff renderer never sends it whole (README law 1).
+expect {
+    "spectrum" {}
+    eof { puts "DIED-ON-THE-DIGIT"; exit 6 }
+    timeout { puts "DIGIT-LEFT-THE-SCREEN"; exec kill -9 [exp_pid]; expect eof; exit 5 }
+}
 drain 1
 send "\x1b"
-expect { "Add a server" {} timeout { puts "NO-WAY-BACK"; exec kill -9 [exp_pid]; expect eof; exit 7 } }
+expect {
+    "Add a server" {}
+    eof { puts "DIED-ON-ESC"; exit 6 }
+    timeout { puts "NO-WAY-BACK"; exec kill -9 [exp_pid]; expect eof; exit 7 }
+}
 drain 1
 send "q"
-expect { eof {} timeout { exec kill -9 [exp_pid]; expect eof; exit 8 } }
+expect {
+    eof {}
+    timeout { puts "NO-EXIT: still alive after q; killing"; exec kill -9 [exp_pid]; expect eof; exit 8 }
+}
 catch wait result
 exit [lindex $result 3]

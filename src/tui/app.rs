@@ -44,15 +44,13 @@ const SEEK_CHAIN: std::time::Duration = std::time::Duration::from_millis(2500);
 const VOLUME_STEP: f32 = 0.05;
 /// Rows a page key moves. Ctrl+u/d move half of this, as they do in vim.
 const PAGE_STEP: isize = 10;
-/// Covers held before the cache is emptied wholesale. An evening of
-/// listening crosses fewer albums than this; the point is only that a
-/// player left running for a week cannot grow without bound. Wholesale
-/// rather than LRU because correctness needs only the bound, and by the
-/// time it is hit the oldest entries are hours stale anyway.
-/// Covers and shapes kept decoded. Sized for the largest wall page plus
-/// the queue panel's rows: a page of ninety covers over a cap of sixty-four
-/// cleared the cache while claiming it and re-asked for the evicted ones
-/// every frame.
+/// Covers and shapes kept decoded; past it the oldest go, whatever is on
+/// screen aside. The point is that a player left running for a week cannot
+/// grow without bound. Sized for the largest wall page plus the queue
+/// panel's rows: a page of ninety covers over a cap of sixty-four cleared
+/// the cache while claiming it and re-asked for the evicted ones every
+/// frame. Only what is drawn is spared — a screen showing more than this
+/// holds more, and nothing else can (performance audit #91).
 const ART_CACHE_CAP: usize = 256;
 
 /// A side effect for the run loop to dispatch to a worker.
@@ -481,6 +479,12 @@ pub struct Pane {
 
 impl Pane {
     pub fn set(&mut self, entries: Vec<Entry>) {
+        // `..` leads a listing or is not in it: `counts` and the GUI's
+        // list rooms count on it rather than walking every row.
+        debug_assert!(
+            !entries.iter().skip(1).any(|entry| matches!(entry, Entry::Parent)),
+            "`..` below the first row"
+        );
         // A filter describes the list it was typed against. This is a
         // different list, so it goes.
         self.filter.clear();
@@ -506,11 +510,24 @@ impl Pane {
     /// Narrow to the rows whose name contains `filter`, ignoring case. An
     /// empty filter puts everything back.
     pub fn apply_filter(&mut self, filter: String) {
+        let needle = filter.trim().to_lowercase();
+        let shown = self.filter.trim().to_lowercase();
+        // A key that only adds to the needle can only take rows away: a name
+        // holding the new needle holds the old one inside it, so the rows on
+        // screen are the only candidates, and they narrow where they stand.
+        // Rescanning the whole list cloned every match again on every key —
+        // ~2 ms a key at 5,000 tracks, ~10 at 30,000 (performance audit
+        // #111). A widening edit still starts from the whole list.
+        if self.unfiltered.is_some() && !shown.is_empty() && needle.contains(shown.as_str()) {
+            self.entries.retain(|entry| entry.matches(&needle));
+            self.filter = filter;
+            self.rest_cursor();
+            return;
+        }
         let all = self
             .unfiltered
             .take()
             .unwrap_or_else(|| std::mem::take(&mut self.entries));
-        let needle = filter.trim().to_lowercase();
         self.filter = filter;
         if needle.is_empty() {
             self.entries = all;
@@ -527,8 +544,6 @@ impl Pane {
         }
     }
 
-    /// How many rows are on screen, and how many there would be with no
-    /// filter. `..` counts as neither: it is the way out, not a result.
     /// Visit every track row this pane holds — the shown ones and the ones
     /// a filter is hiding — so a patch reaches them all.
     pub(crate) fn for_each_track_mut(&mut self, mut f: impl FnMut(&mut Track)) {
@@ -539,8 +554,15 @@ impl Pane {
         }
     }
 
+    /// How many rows are on screen, and how many there would be with no
+    /// filter. `..` counts as neither: it is the way out, not a result.
+    ///
+    /// Asked every frame by the browse bar and the list rooms, so it does
+    /// not walk the rows: `..` only ever leads a listing (see [`Pane::set`];
+    /// a filter keeps the order), so it is the first row or it is absent
+    /// (performance audit #109).
     pub fn counts(&self) -> (usize, usize) {
-        let real = |list: &[Entry]| list.iter().filter(|e| !matches!(e, Entry::Parent)).count();
+        let real = |list: &[Entry]| list.len() - usize::from(matches!(list.first(), Some(Entry::Parent)));
         let shown = real(&self.entries);
         (shown, self.unfiltered.as_ref().map_or(shown, |all| real(all)))
     }
@@ -608,14 +630,236 @@ pub struct Origin {
 
 /// Drop the oldest entry of a full cache that nothing pinned needs — or
 /// nothing, when every entry is pinned. A name the map no longer holds (an
-/// unanswered ask gave its slot back) is forgotten on the way.
-fn evict_oldest<T>(map: &mut HashMap<String, T>, order: &mut VecDeque<String>, pinned: &HashSet<String>) {
-    order.retain(|name| map.contains_key(name));
-    if let Some(at) = order.iter().position(|name| !pinned.contains(name))
-        && let Some(name) = order.remove(at)
-    {
-        map.remove(&name);
+/// unanswered ask gave its slot back) is forgotten on the way. Hands back
+/// what went, so a caller shedding several knows when to stop.
+fn evict_oldest<T>(
+    map: &mut HashMap<String, T>,
+    order: &mut VecDeque<String>,
+    pinned: &HashSet<&str>,
+) -> Option<(String, T)> {
+    // Every key is in the order, once, so the two lengths agree exactly
+    // when the order holds no forgotten names — the usual case, now that
+    // a given-back slot takes its name with it — and then a claim need not
+    // sweep the whole order first (performance audit #101).
+    if order.len() != map.len() {
+        order.retain(|name| map.contains_key(name));
     }
+    let at = order.iter().position(|name| !pinned.contains(name.as_str()))?;
+    let name = order.remove(at)?;
+    let value = map.remove(&name)?;
+    Some((name, value))
+}
+
+/// File a settled answer. A claim still standing is filled in place. One
+/// the cache let go of while its question was out — the wall turned past
+/// its page before the covers landed — goes back in as the newest entry,
+/// and the cache sheds its oldest to stay at the cap. The answer is paid
+/// for and never stale, but filed outside the order nothing could evict it
+/// again: a fast flip through a slow server's wall left hundreds of covers
+/// past the cap for the rest of the session (performance audit #90).
+/// Dropping it instead would re-ask, every frame, for a cover still on
+/// screen.
+fn file_answer<'p, T>(
+    map: &mut HashMap<String, T>,
+    order: &mut VecDeque<String>,
+    name: String,
+    value: T,
+    pinned: impl FnOnce() -> HashSet<&'p str>,
+) -> Vec<(String, T)> {
+    let mut evicted = Vec::new();
+    if let Some(slot) = map.get_mut(&name) {
+        *slot = value;
+        return evicted;
+    }
+    map.insert(name.clone(), value);
+    order.push_back(name);
+    if map.len() > ART_CACHE_CAP {
+        let pinned = pinned();
+        while map.len() > ART_CACHE_CAP
+            && let Some(gone) = evict_oldest(map, order, &pinned)
+        {
+            evicted.push(gone);
+        }
+    }
+    evicted
+}
+
+/// Whether `name`'s last ask went unanswered too recently for a caller
+/// that asks every frame to ask again: the tunnels' rungs, five seconds
+/// doubling to a minute. Without it a failing cover was re-asked every
+/// other frame — a 300x90 wall of them was ~500 requests a second at a
+/// server answering 500 (performance audit #89).
+fn backing_off(retry: &HashMap<String, TunnelRetry>, name: &str) -> bool {
+    retry
+        .get(name)
+        .is_some_and(|r| r.failed_at.elapsed() < tunnel_retry_delay(r.failures.min(TUNNEL_RETRY_LONG_AFTER)))
+}
+
+/// Give back the slot an unanswered ask held, and put the failure on the
+/// ladder. Its place in the order goes with it: the next claim pushes the
+/// name again, and a cover failing every other frame used to leave a name
+/// behind each time — ~90 MB an hour for one wall page, never returned
+/// (performance audit #89).
+fn give_back<T>(
+    map: &mut HashMap<String, T>,
+    order: &mut VecDeque<String>,
+    retry: &mut HashMap<String, TunnelRetry>,
+    name: String,
+) {
+    if map.remove(&name).is_some()
+        && let Some(at) = order.iter().rposition(|held| *held == name)
+    {
+        order.remove(at);
+    }
+    climb(retry, name);
+}
+
+/// How many names a ladder holds before its stale rungs go. A rung is kept
+/// past its wait so the next failure climbs from it, but only a settled
+/// answer or a way coming up cleared one, so a long outage browsed across
+/// a big wall left a rung behind for every cover it showed (the review of
+/// performance audit #89).
+const RETRY_KEPT: usize = 4 * ART_CACHE_CAP;
+/// A rung this old is past its wait by a minute and more. A surface still
+/// showing its name has asked again long since; one no longer showing it
+/// will start from the bottom rung if it ever fails again.
+const RETRY_STALE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// One more failure on `name`'s ladder.
+fn climb(retry: &mut HashMap<String, TunnelRetry>, name: String) {
+    let now = crate::clock::Instant::now();
+    // Swept each time the ladder has grown by another bound's worth, so
+    // an outage's run of fresh failures pays one sweep per thousand names
+    // rather than one per name.
+    if retry.len() >= RETRY_KEPT && retry.len() % RETRY_KEPT == 0 && !retry.contains_key(&name) {
+        retry.retain(|_, rung| rung.failed_at.elapsed() < RETRY_STALE);
+    }
+    let rung = retry.entry(name).or_insert(TunnelRetry { failed_at: now, failures: 0 });
+    rung.failures += 1;
+    rung.failed_at = now;
+}
+
+/// What the GUI last drew covers for, beside the playing track's: the
+/// wall's page, by art file, the queue panel's rows and the action sheet's
+/// one cover. Each surface replaces its own part as it draws, so a surface
+/// drawn later in a frame keeps last frame's covers while an earlier one
+/// claims; one no longer drawn leaves at most a screenful behind. The TUI
+/// draws only the playing cover and records nothing.
+#[derive(Debug, Default)]
+struct ArtOnView {
+    wall: Vec<String>,
+    queue: std::ops::Range<usize>,
+    /// The sheet reads its track's cover from the cache without a claim of
+    /// its own; kept here, a claim elsewhere cannot take it out from under
+    /// the open sheet (the review of performance audit #91).
+    sheet: Option<String>,
+}
+
+/// The covers eviction must leave alone: the playing track's and whatever
+/// the GUI last drew. Not every queue row: the queue keeps its played rows
+/// and Auto DJ only appends, so pinning them all let a long session grow
+/// the cache one album at a time past its cap, source bytes and all
+/// (performance audit #91). Free of the App, and borrowed, so it is built
+/// while the cache is being written — once per batch of claims rather than
+/// a clone of every queue row's name per claim (performance audit #101).
+fn pinned_art<'v>(queue: &'v Queue, now_playing: Option<&'v Track>, view: &'v ArtOnView) -> HashSet<&'v str> {
+    let rows = view.queue.start.min(queue.items.len())..view.queue.end.min(queue.items.len());
+    queue.items[rows]
+        .iter()
+        .filter_map(|item| item.metadata.album_art.as_deref())
+        .chain(now_playing.and_then(|t| t.metadata.album_art.as_deref()))
+        .chain(view.wall.iter().map(String::as_str))
+        .chain(view.sheet.as_deref())
+        .collect()
+}
+
+/// The shapes eviction must leave alone: the playing track's, drawn under
+/// the playhead, and the one fetched ahead for what plays next. Not every
+/// queue row's, which let a long session grow the cache one track at a
+/// time past its cap (performance audit #91).
+fn pinned_shapes<'v>(now_playing: Option<&'v Track>, next: Option<&'v Queued>) -> HashSet<&'v str> {
+    now_playing.map(|t| t.filepath.as_str()).into_iter().chain(next.map(|item| item.filepath.as_str())).collect()
+}
+
+/// One batch of cover claims: the pinned set is built by the first claim
+/// that finds the cache full, and reused by the rest. The wall claims a
+/// whole page in one frame, and rebuilding the set per claim cost a page
+/// turn tens of milliseconds against a long queue (performance audit #101).
+struct Claims<'v> {
+    queue: &'v Queue,
+    now_playing: Option<&'v Track>,
+    view: &'v ArtOnView,
+    pinned: Option<HashSet<&'v str>>,
+    /// Claims the cache let go of before an answer came, told to the
+    /// worker so a lane still holding the ask drops it (performance audit
+    /// #88).
+    withdrawn: Vec<Effect>,
+    asks: Vec<Effect>,
+}
+
+impl<'v> Claims<'v> {
+    fn new(queue: &'v Queue, now_playing: Option<&'v Track>, view: &'v ArtOnView) -> Self {
+        Claims { queue, now_playing, view, pinned: None, withdrawn: Vec::new(), asks: Vec::new() }
+    }
+
+    /// The batch as effects: the withdrawals first, then the asks — last
+    /// claimed first, because a lane serves its newest ask first and the
+    /// page reads from its top-left cell (performance audit #88).
+    fn into_effects(self) -> Vec<Effect> {
+        let mut effects = self.withdrawn;
+        effects.extend(self.asks.into_iter().rev());
+        effects
+    }
+
+    /// Claim `file` unless the cache holds it or a claim is out: the
+    /// oldest cover nothing on screen needs goes to make room — never the
+    /// playing track's, a row the queue panel shows or a cell of the
+    /// wall's page. Clearing the lot re-asked for ninety covers a frame
+    /// (the review's finding).
+    fn claim(
+        &mut self,
+        art: &mut HashMap<String, Option<Art>>,
+        order: &mut VecDeque<String>,
+        smalls: &mut HashSet<String>,
+        file: &str,
+        reach: Option<Reach>,
+        small: bool,
+    ) {
+        if art.contains_key(file) {
+            // The playing track's big box wants the original's pixels: a
+            // cover the wall or the queue fetched small is asked for again
+            // at full size, and shows its small copy until that lands
+            // (performance audit #92).
+            if !small && smalls.remove(file) {
+                self.asks.push(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach, small }));
+            }
+            return;
+        }
+        if art.len() >= ART_CACHE_CAP {
+            let pinned = self.pinned.get_or_insert_with(|| pinned_art(self.queue, self.now_playing, self.view));
+            while art.len() >= ART_CACHE_CAP
+                && let Some((name, value)) = evict_oldest(art, order, pinned)
+            {
+                smalls.remove(&name);
+                self.withdrawn.extend(withdrawal(name, value));
+            }
+        }
+        art.insert(file.to_string(), None);
+        order.push_back(file.to_string());
+        if small {
+            smalls.insert(file.to_string());
+        } else {
+            smalls.remove(file);
+        }
+        self.asks.push(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach, small }));
+    }
+}
+
+/// What an evicted cover owes the worker: nothing for a decoded one, a
+/// withdrawal for an empty slot — a claim still waiting its turn, most
+/// likely, whose ask a lane can drop unasked (performance audit #88).
+fn withdrawal(name: String, value: Option<Art>) -> Option<Effect> {
+    value.is_none().then_some(Effect::Api(ApiCmd::ArtWithdraw { file: name }))
 }
 
 /// Why Auto DJ picked a row, for the queue's badge (auto-dj contract,
@@ -826,7 +1070,8 @@ pub(crate) fn ticket_stale(ticket: &crate::api::types::DirectTicket, now: std::t
     }
 }
 
-/// A tunnel's failed dials, for the ladder.
+/// A tunnel's failed dials, for the ladder — and a cover's or a shape's
+/// failed fetches, spaced by the same rungs.
 #[derive(Debug, Clone)]
 pub struct TunnelRetry {
     pub failed_at: crate::clock::Instant,
@@ -873,14 +1118,77 @@ pub(crate) fn transient_failure(error: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct QueueSnapshot {
     pub version: u32,
+    /// Which write of the rows this is: the ten-second checkpoint's
+    /// [`QueuePlace`] names it, and is only read against it. Absent from a
+    /// file an older player wrote, which then has no place beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<u64>,
     pub index: Option<usize>,
     pub position: f64,
     pub shuffle: bool,
     pub repeat: String,
     pub items: Vec<Queued>,
+    /// [`Queue::retired`]: the Auto DJ rows a restore let go of, by path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired: Vec<String>,
+}
+
+impl QueueSnapshot {
+    /// Take the checkpoint's place when it belongs to these rows — the same
+    /// shape, the same write of them — and keep the rows' own otherwise: a
+    /// place from another write indexes other rows.
+    pub fn adopt(&mut self, place: &QueuePlace) -> bool {
+        if place.version != self.version || self.stamp != Some(place.stamp) {
+            return false;
+        }
+        self.index = place.index;
+        self.position = place.position;
+        true
+    }
+}
+
+/// [`QueueSnapshot`] as it is written, borrowing the rows rather than
+/// cloning every one of them for a write that only reads them (performance
+/// audit #106). The same fields in the same order, so the text is byte for
+/// byte what the owned shape writes and reads back.
+#[derive(Debug, serde::Serialize)]
+pub struct QueueSnapshotRef<'a> {
+    pub version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<u64>,
+    pub index: Option<usize>,
+    pub position: f64,
+    pub shuffle: bool,
+    pub repeat: &'a str,
+    pub items: &'a [Queued],
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    pub retired: &'a [String],
+}
+
+/// Where the saved queue stands — the playing row and the seconds into it —
+/// for the ten-second checkpoint (contract clause 39). The rows have not
+/// changed since they were written, so only this is, beside them, rather
+/// than every row again for the one number that moved (performance audit
+/// #106). `stamp` names the write of the rows it belongs to.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QueuePlace {
+    pub version: u32,
+    pub stamp: u64,
+    pub index: Option<usize>,
+    pub position: f64,
 }
 
 pub const QUEUE_SNAPSHOT_VERSION: u32 = 1;
+
+/// How many played Auto DJ rows a restore brings back ahead of the playing
+/// one (contract clause 40). The DJ only ever appends and a resumed queue
+/// brought every pick back, so a lean-back queue grew ~15 rows an hour,
+/// launch after launch, and every per-row cost with it (performance audit
+/// #106).
+pub const DJ_PLAYED_KEPT: usize = 100;
+/// How many let-go DJ rows [`Queue::retired`] remembers, newest last — the
+/// server's own cap on the ignore list's wire.
+pub const DJ_RETIRED_CAP: usize = 500;
 
 /// A position at or within a second of the track's end restarts the track:
 /// resuming there would seek past the end and stop on play (contract
@@ -906,6 +1214,16 @@ pub struct Queue {
     /// can see the end of the queue coming positionally; shuffle has no
     /// position, so its end is this count reaching the queue's length.
     played: usize,
+    /// Moved on by every change to the rows — their number, their order, a
+    /// tag learned in place — so the saver can tell rows it has written
+    /// from rows it has not without reading them all again (performance
+    /// audit #106, #108).
+    rev: u64,
+    /// The paths of Auto DJ rows a restore let go of (contract clause 40),
+    /// newest last, at most [`DJ_RETIRED_CAP`]: to the DJ's rule that a
+    /// pick already queued is not queued again they are still here.
+    /// Gone with the rows they stood beside when the queue is replaced.
+    pub retired: Vec<String>,
 }
 
 impl Default for Repeat {
@@ -915,13 +1233,27 @@ impl Default for Repeat {
 }
 
 impl Queue {
+    /// Note a change to the rows made from outside these methods — a sweep
+    /// that assigned them, a rename or a tag written in place.
+    pub(crate) fn touch(&mut self) {
+        self.rev = self.rev.wrapping_add(1);
+    }
+
+    /// Which edit of the rows this is (see the field).
+    pub(crate) fn rev(&self) -> u64 {
+        self.rev
+    }
+
     pub fn replace(&mut self, tracks: Vec<Queued>) {
+        self.touch();
         self.items = tracks;
+        self.retired.clear();
         self.current = None;
         self.state.select(if self.items.is_empty() { None } else { Some(0) });
     }
 
     pub fn push(&mut self, track: Queued) {
+        self.touch();
         self.items.push(track);
         if self.state.selected().is_none() {
             self.state.select(Some(0));
@@ -935,6 +1267,7 @@ impl Queue {
             Some(current) if current < self.items.len() => current + 1,
             _ => self.items.len(),
         };
+        self.touch();
         self.items.insert(at, track);
         if self.state.selected().is_none() {
             self.state.select(Some(0));
@@ -947,8 +1280,15 @@ impl Queue {
         if from >= self.items.len() || to >= self.items.len() || from == to {
             return;
         }
-        let item = self.items.remove(from);
-        self.items.insert(to, item);
+        self.touch();
+        // Rotate the rows between the two ends by one: a remove and an insert
+        // each shifted the whole tail behind them, ~2.4 MB of rows per drag
+        // step near the top of a 3,000-row queue (performance audit #114).
+        if from < to {
+            self.items[from..=to].rotate_left(1);
+        } else {
+            self.items[to..=from].rotate_right(1);
+        }
         self.current = self.current.map(|cur| {
             if cur == from {
                 to
@@ -963,7 +1303,9 @@ impl Queue {
     }
 
     pub fn clear(&mut self) {
+        self.touch();
         self.items.clear();
+        self.retired.clear();
         self.current = None;
         self.state.select(None);
     }
@@ -978,6 +1320,7 @@ impl Queue {
         if index >= self.items.len() {
             return false;
         }
+        self.touch();
         self.items.remove(index);
 
         let was_current = match self.current {
@@ -1608,6 +1951,19 @@ pub struct App {
     /// clause 7): the pane holds them as text rows, the wall wants the
     /// covers and years.
     pub artist_albums: Option<(String, Vec<crate::api::types::Album>)>,
+    /// Moves every time `albums` or `artist_albums` is replaced, so what is
+    /// derived from them — the GUI wall's filtered view — can tell a new
+    /// list from the one it was built on without walking either (performance
+    /// audit #103). A counter rather than the Vec's address: a freed list's
+    /// address comes back for the next one of the same length.
+    pub albums_rev: u64,
+    /// The Artists and Genres root lists, kept whole the way `albums` is:
+    /// they change only with a rescan, and a return to the GUI's room
+    /// seats its list from here instead of asking for all of it again
+    /// (library-rooms contract, entry point 1; performance audit #99).
+    /// Cleared with the session.
+    pub artists: Option<Vec<String>>,
+    pub genre_list: Option<Vec<crate::api::types::Genre>>,
     /// The full block the sheet or Song info asked for last (track-actions
     /// contract, clause 8), by the track's path.
     pub track_info: Option<Track>,
@@ -1798,6 +2154,13 @@ pub struct App {
     pub art: HashMap<String, Option<Art>>,
     /// The cache's insertion order, oldest first: what goes when it fills.
     art_order: VecDeque<String>,
+    /// What the GUI last drew covers for — what eviction leaves alone,
+    /// with the playing track's (performance audit #91).
+    art_on_view: ArtOnView,
+    /// The covers whose entry — decoded or still asked for — is the
+    /// server's 256 px copy rather than the original (performance audit
+    /// #92): what the playing track asks for again at full size.
+    art_small: HashSet<String>,
     /// Track shapes fetched this session, keyed by filepath. `None` records
     /// both "asked, nothing there" and "asked, still waiting" — the bar draws
     /// the same either way, and the entry is what stops a second request.
@@ -1807,6 +2170,12 @@ pub struct App {
     /// this turns over faster than [`App::art`] does.
     pub waveforms: HashMap<String, Option<Vec<u8>>>,
     waveform_order: VecDeque<String>,
+    /// Covers and shapes whose last ask went unanswered, and how often:
+    /// what the tunnels' ladder spaces the next ask by (performance audit
+    /// #89). Beside the caches rather than in them, so the slot a failure
+    /// gave back still reads as a gap to everything that draws.
+    art_retry: HashMap<String, TunnelRetry>,
+    waveform_retry: HashMap<String, TunnelRetry>,
     /// What the terminal can draw as pixels rather than characters, and the
     /// cover encoded for it. Starts off and is only ever turned on by the
     /// real binary against a real terminal — a test, a replay run and the
@@ -1843,6 +2212,10 @@ pub struct App {
     /// wall clock rather than counted per draw, so it turns at one speed
     /// whether the app is idle or flooded — and stays still under test.
     pub spinner: usize,
+    /// Whether the last frame drew the spinner: a turn of it is a frame to
+    /// draw, and with none on screen it is not (performance audit #102).
+    /// Set by the drawing, which holds the App only to read it.
+    pub spinner_shown: std::cell::Cell<bool>,
     pub now_tab: NowTab,
     /// Cursor for whichever now-playing tab is not the queue. The Queue tab
     /// keeps using the queue's own selection, so `d` there removes the row you
@@ -1903,6 +2276,9 @@ impl App {
             library_stack: Drill::new(LibraryNode::Root),
             albums: None,
             artist_albums: None,
+            albums_rev: 0,
+            artists: None,
+            genre_list: None,
             track_info: None,
             playlist_names: PlaylistNames::Unasked,
             rating_writes: Vec::new(),
@@ -1971,6 +2347,10 @@ impl App {
             art_order: VecDeque::new(),
             waveforms: HashMap::new(),
             waveform_order: VecDeque::new(),
+            art_retry: HashMap::new(),
+            art_small: HashSet::new(),
+            art_on_view: ArtOnView::default(),
+            waveform_retry: HashMap::new(),
             graphics: crate::tui::graphics::Graphics::disabled(),
             audio_available: true,
             tap: None,
@@ -1980,6 +2360,7 @@ impl App {
             heard: Default::default(),
             fullscreen: false,
             spinner: 0,
+            spinner_shown: std::cell::Cell::new(false),
             now_tab: NowTab::Queue,
             now_scroll: 0,
             now_offset: 0,
@@ -3000,25 +3381,31 @@ impl App {
     /// Remember the listing on screen as a column, on the way into the next
     /// one. Called before the request goes out, so the context is there while
     /// the reply is still coming.
+    ///
+    /// Every caller replaces the pane straight after, so the rows move into
+    /// the column rather than being copied for a pane about to drop them — a
+    /// deep copy of every row on every drill, 2-5 ms at 20,000 (performance
+    /// audit #112). The pane stands empty, unfiltered, until that `set`.
     fn push_trail(&mut self) -> bool {
         let pane = self.pane_mut();
         if pane.entries.is_empty() {
             return false;
         }
         let chosen = pane.state.selected().unwrap_or(0);
+        let shown = std::mem::take(&mut pane.entries);
         // The column behind keeps the whole listing, not the narrowed view of
         // it. A filter is a way of finding one row, and once it has been found
         // the rest of the folder is the context worth having — which also
         // means coming back out is a list with nothing hidden and no filter
         // left over to explain.
-        let entries = pane.entries.clone();
-        let (entries, chosen) = match &pane.unfiltered {
+        let (entries, chosen) = match pane.unfiltered.take() {
             Some(all) => {
-                let row = all.iter().position(|entry| entry == &entries[chosen]);
-                (all.clone(), row.unwrap_or(0))
+                let row = shown.get(chosen).and_then(|picked| all.iter().position(|entry| entry == picked));
+                (all, row.unwrap_or(0))
             }
-            None => (entries, chosen),
+            None => (shown, chosen),
         };
+        pane.filter.clear();
         pane.trail.push(Trail { entries, chosen });
         true
     }
@@ -3986,12 +4373,34 @@ impl App {
         if let Some((parent, id)) = &self.session.peer {
             add(parent, *id);
         }
-        for item in &self.queue.items {
-            if let Some(id) = item.origin.peer {
-                add(&item.origin.server, id);
+        for (server, peer) in self.queue_origins() {
+            if let Some(id) = peer {
+                add(server, id);
             }
         }
         out
+    }
+
+    /// The queue's origins, each once, in the order the rows first name
+    /// them. A queue comes in long runs from one server, and everything a
+    /// row's origin asks of a pass — its tunnel, its peer's ticket — is
+    /// the same for every row of the run: asked per row, that was a string
+    /// cloned or formatted per queued track on every loop pass
+    /// (performance audit #108).
+    fn queue_origins(&self) -> Vec<(&str, Option<i64>)> {
+        let mut origins: Vec<(&str, Option<i64>)> = Vec::new();
+        let mut last: Option<&Origin> = None;
+        for item in &self.queue.items {
+            if last == Some(&item.origin) {
+                continue;
+            }
+            last = Some(&item.origin);
+            let origin = (item.origin.server.as_str(), item.origin.peer);
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+        origins
     }
 
     /// Whether a peer's own tunnel is worth dialling: its parent offers
@@ -4184,6 +4593,7 @@ impl App {
         // re-announces from wherever playback lands.
         self.announced = None;
         self.queue.items = sweep.keep;
+        self.queue.touch();
         if self.queue.items.is_empty() {
             self.queue.clear();
             self.now_playing = None;
@@ -4214,12 +4624,46 @@ impl App {
     /// What to write down for next time (contract clause 39): every row,
     /// the playing one and the seconds into it — or the spot a restore is
     /// still holding, so a checkpoint before anything plays cannot write
-    /// track 1 / 0:00 over the real place. `None` for an empty queue.
+    /// track 1 / 0:00 over the real place. `None` for an empty queue. Owned,
+    /// for the tests; the saver writes [`App::queue_snapshot_ref`].
+    #[cfg(test)]
     pub fn queue_snapshot(&self) -> Option<QueueSnapshot> {
+        let snapshot = self.queue_snapshot_ref(None)?;
+        Some(QueueSnapshot {
+            version: snapshot.version,
+            stamp: snapshot.stamp,
+            index: snapshot.index,
+            position: snapshot.position,
+            shuffle: snapshot.shuffle,
+            repeat: snapshot.repeat.to_string(),
+            items: snapshot.items.to_vec(),
+            retired: snapshot.retired.to_vec(),
+        })
+    }
+
+    /// [`App::queue_snapshot`] as the saver writes it: borrowed, and
+    /// carrying the write's `stamp` (performance audit #106).
+    pub fn queue_snapshot_ref(&self, stamp: Option<u64>) -> Option<QueueSnapshotRef<'_>> {
         if self.queue.items.is_empty() {
             return None;
         }
-        let (index, position) = match (self.resume_spot, self.queue.current) {
+        let (index, position) = self.queue_spot();
+        Some(QueueSnapshotRef {
+            version: QUEUE_SNAPSHOT_VERSION,
+            stamp,
+            index,
+            position,
+            shuffle: self.queue.shuffle,
+            repeat: self.queue.repeat.label(),
+            items: &self.queue.items,
+            retired: &self.queue.retired,
+        })
+    }
+
+    /// The playing row and the seconds into it, as a snapshot writes them —
+    /// or the spot a restore is still holding (clause 40).
+    pub fn queue_spot(&self) -> (Option<usize>, f64) {
+        match (self.resume_spot, self.queue.current) {
             // The held spot rides the row the queue keeps current — edits
             // before the first play re-index the rows under the spot.
             (Some((_, position)), _) if self.status.is_idle() => (self.queue.current, position),
@@ -4228,22 +4672,15 @@ impl App {
                 (Some(current), position)
             }
             (_, None) => (None, 0.0),
-        };
-        Some(QueueSnapshot {
-            version: QUEUE_SNAPSHOT_VERSION,
-            index,
-            position,
-            shuffle: self.queue.shuffle,
-            repeat: self.queue.repeat.label().to_string(),
-            items: self.queue.items.clone(),
-        })
+        }
     }
 
     /// Bring a saved queue back (contract clause 40): rows whose server is
     /// no longer known are dropped, the playing row keeps its place when it
     /// survives (else the index is clamped), a position at the end restarts
     /// the track, and nothing plays — the spot waits for the first play.
-    /// Returns whether anything came back.
+    /// With the DJ armed, only the last [`DJ_PLAYED_KEPT`] of its played
+    /// rows come back. Returns whether anything came back.
     pub fn restore_queue(&mut self, snapshot: QueueSnapshot) -> bool {
         if snapshot.version != QUEUE_SNAPSHOT_VERSION {
             return false;
@@ -4253,22 +4690,48 @@ impl App {
             origin.server == live.server
                 || self.servers.iter().any(|s| crate::config::same_server(&s.id, &origin.server))
         };
-        let mut kept = Vec::with_capacity(snapshot.items.len());
+        // The DJ appends every pick, so a queue it works grows as it plays
+        // (performance audit #106). Played straight through — no shuffle,
+        // no wrap — the rows before the saved one are behind it for good:
+        // the oldest of the DJ's are let go, their paths kept so it does
+        // not pick them again. What the user queued always comes back.
+        let straight = !snapshot.shuffle && Repeat::from_label(&snapshot.repeat) != Repeat::All;
+        let played = match snapshot.index {
+            Some(at) if straight && self.dj_armed() => snapshot.items[..at.min(snapshot.items.len())]
+                .iter()
+                .filter(|item| item.dj.is_some() && known(&item.origin))
+                .count(),
+            _ => 0,
+        };
+        let mut let_go = played.saturating_sub(DJ_PLAYED_KEPT);
+        let mut retired = snapshot.retired;
+        let mut kept = Vec::with_capacity(snapshot.items.len() - let_go);
         let mut index = None;
         for (i, item) in snapshot.items.into_iter().enumerate() {
+            // The saved row's place among the rows kept: its own, or when
+            // its server is gone, the row after it — counted past the rows
+            // dropped or let go before it, not from the saved index.
+            if snapshot.index == Some(i) {
+                index = Some(kept.len());
+            }
             if !known(&item.origin) {
                 continue;
             }
-            if snapshot.index == Some(i) {
-                index = Some(kept.len());
+            if let_go > 0 && item.dj.is_some() && snapshot.index.is_some_and(|at| i < at) {
+                let_go -= 1;
+                retired.push(item.track.filepath);
+                continue;
             }
             kept.push(item);
         }
         if kept.is_empty() {
             return false;
         }
-        let index = index.or_else(|| snapshot.index.map(|i| i.min(kept.len() - 1)));
+        // An index past the rows (clause 40's clamp) lands on the last.
+        let index = snapshot.index.map(|_| index.unwrap_or(kept.len()).min(kept.len() - 1));
+        retired.drain(..retired.len().saturating_sub(DJ_RETIRED_CAP));
         self.queue.replace(kept);
+        self.queue.retired = retired;
         self.queue.shuffle = snapshot.shuffle;
         self.queue.repeat = Repeat::from_label(&snapshot.repeat);
         if let Some(index) = index {
@@ -4514,6 +4977,10 @@ impl App {
     /// the peer refused — spaced by the record's gaps — and never again
     /// once the parent declined (contract clause 27).
     pub(crate) fn reconcile_direct(&mut self, now: crate::clock::Instant) -> Vec<Effect> {
+        // No parent offers it: nothing to ask, whoever is referenced.
+        if self.direct_offered.is_empty() {
+            return Vec::new();
+        }
         let now_wall = std::time::SystemTime::now();
         let mut asks = Vec::new();
         for (pid, parent, id) in self.peer_targets() {
@@ -4599,12 +5066,12 @@ impl App {
                 }
             }
         }
-        for item in &self.queue.items {
-            match item.origin.peer {
-                Some(id) => self.want_for_peer(&mut wanted, &item.origin.server, id),
+        for (server, peer) in self.queue_origins() {
+            match peer {
+                Some(id) => self.want_for_peer(&mut wanted, server, id),
                 None => {
-                    if crate::quickconnect::is_tunnel_id(&item.origin.server) {
-                        wanted.insert(item.origin.server.clone());
+                    if crate::quickconnect::is_tunnel_id(server) {
+                        wanted.insert(server.to_string());
                     }
                 }
             }
@@ -4947,12 +5414,18 @@ impl App {
     /// Ask for the cover of what just started, unless the cache already
     /// holds it — or already holds the placeholder a previous ask left, so
     /// skipping n-n-n through one album costs one request, not five.
-    fn fetch_art(&mut self) -> Option<Effect> {
-        let file = self.now_playing.as_ref()?.metadata.album_art.clone()?;
+    fn fetch_art(&mut self) -> Vec<Effect> {
+        let Some(file) = self.now_playing.as_ref().and_then(|t| t.metadata.album_art.clone()) else {
+            return Vec::new();
+        };
         // A row whose own server cannot be reached shows no cover rather
         // than the session server's file of the same name.
-        let reach = self.playing_row_reach().ok()?;
-        self.fetch_art_from(&file, reach)
+        let Ok(reach) = self.playing_row_reach() else { return Vec::new() };
+        // The original, for the big box a pixel protocol may draw it in —
+        // except in the browser, which keeps no source bytes and decodes
+        // on its only thread: there every cover is the small copy
+        // (performance audit #92).
+        self.fetch_art_from(&file, reach, cfg!(target_arch = "wasm32"))
     }
 
     /// The playing row's own server when it is not the session's (contract
@@ -4980,61 +5453,140 @@ impl App {
     }
 
     /// Ask for one cover by the art file that names it, unless the cache
-    /// already holds it — or the placeholder a previous ask left, which is
-    /// what stops the same cover being asked for twice. The GUI's album
-    /// grid asks through here so a page of covers rides the same claim
-    /// discipline as the playing track's.
+    /// already holds it, a claim is out or its last ask is waiting out a
+    /// rung. The wall claims its page through [`App::claim_wall_art`]; this
+    /// is the one-cover form the tests reach for.
+    #[cfg(test)]
     pub(crate) fn fetch_art_file(&mut self, file: &str) -> Option<Effect> {
-        self.fetch_art_from(file, None)
+        if backing_off(&self.art_retry, file) {
+            return None;
+        }
+        self.fetch_art_from(file, None, true).pop()
     }
 
-    /// Ask for a queue row's cover, unless the cache holds it or a claim is
-    /// out — from the row's own server when that is not the session's
-    /// (contract clause 30), the way the playing row's is fetched. A row
-    /// on a tunnel that is not up is NOT claimed: the ask would have
-    /// nowhere to go, and the placeholder a claim leaves would stand in
-    /// the picture's way for the rest of the session. The GUI's queue
-    /// panel asks through here for every row it shows.
+    /// Whether a surface that asks every frame should claim this cover
+    /// now: not cached or claimed, and not waiting out a failure's rung
+    /// (performance audit #89).
+    fn wants_art(&self, file: &str) -> bool {
+        !self.art.contains_key(file) && !backing_off(&self.art_retry, file)
+    }
+
+    /// A way to a server just answered — a connect, a tunnel up, a
+    /// retarget — so covers and shapes that failed before are worth
+    /// asking for at once rather than at their next rung.
+    fn path_came_up(&mut self) {
+        self.art_retry.clear();
+        self.waveform_retry.clear();
+    }
+
+    /// Claim what the wall's page on record still owes the cache, in one
+    /// batch — the same claim discipline as the playing track's cover.
+    /// After the first frame of a page this is hashmap lookups, and a
+    /// cover waiting out a failed ask's rung is not owed yet.
+    pub(crate) fn claim_wall_art(&mut self) -> Vec<Effect> {
+        let App { art, art_order, art_small, art_retry, queue, now_playing, art_on_view, .. } = self;
+        let mut claims = Claims::new(queue, now_playing.as_ref(), art_on_view);
+        for file in &art_on_view.wall {
+            if !art.contains_key(file) && !backing_off(art_retry, file) {
+                claims.claim(art, art_order, art_small, file, None, true);
+            }
+        }
+        claims.into_effects()
+    }
+
+    /// The queue panel drew these rows: they go on record, and what their
+    /// covers still owe the cache is claimed in one batch.
+    pub(crate) fn claim_queue_art(&mut self, rows: std::ops::Range<usize>) -> Vec<Effect> {
+        self.art_on_view.queue = rows.clone();
+        self.claim_rows(rows)
+    }
+
+    /// Claim the covers of these queue rows the cache still wants — from
+    /// each row's own server when that is not the session's (contract
+    /// clause 30), the way the playing row's is fetched. A row on a tunnel
+    /// that is not up is NOT claimed: the ask would have nowhere to go, and
+    /// the placeholder a claim leaves would stand in the picture's way for
+    /// the rest of the session. The panel asks every frame, so a cover
+    /// whose last ask failed waits out its rung here (performance audit
+    /// #89).
+    fn claim_rows(&mut self, rows: std::ops::Range<usize>) -> Vec<Effect> {
+        // Each row's reach first, while the App can still be asked. After a
+        // page's first frame nothing is wanted, and this allocates nothing.
+        let mut asks: Vec<(usize, Option<Reach>)> = Vec::new();
+        for index in rows {
+            let Some(item) = self.queue.items.get(index) else { break };
+            let Some(file) = item.metadata.album_art.as_deref() else { continue };
+            if !self.wants_art(file) {
+                continue;
+            }
+            let reach = if self.is_session_origin(&item.origin) {
+                None
+            } else {
+                match self.reach(&item.origin) {
+                    Ok(reach) => Some(reach),
+                    Err(_) => continue,
+                }
+            };
+            asks.push((index, reach));
+        }
+        if asks.is_empty() {
+            return Vec::new();
+        }
+        let App { art, art_order, art_small, queue, now_playing, art_on_view, .. } = self;
+        let mut claims = Claims::new(queue, now_playing.as_ref(), art_on_view);
+        for (index, reach) in asks {
+            if let Some(file) = queue.items[index].metadata.album_art.as_deref() {
+                claims.claim(art, art_order, art_small, file, reach, true);
+            }
+        }
+        claims.into_effects()
+    }
+
+    /// One queue row's cover, the way the panel claims it — for the tests.
+    #[cfg(test)]
     pub(crate) fn fetch_queue_art(&mut self, index: usize) -> Option<Effect> {
-        let item = self.queue.items.get(index)?;
-        let file = item.metadata.album_art.clone()?;
-        if self.art.contains_key(&file) {
-            return None;
-        }
-        let reach = if self.is_session_origin(&item.origin) {
-            None
-        } else {
-            Some(self.reach(&item.origin).ok()?)
-        };
-        self.fetch_art_from(&file, reach)
+        self.claim_rows(index..index + 1).pop()
     }
 
-    fn fetch_art_from(&mut self, file: &str, reach: Option<Reach>) -> Option<Effect> {
-        if self.art.contains_key(file) {
-            return None;
-        }
-        if self.art.len() >= ART_CACHE_CAP {
-            // The oldest cover nothing on screen needs goes — never the
-            // playing track's or a queued row's; the wall's page is the
-            // newest and stays by age. Clearing the lot re-asked for
-            // ninety covers a frame (the review's finding).
-            let pinned = self.pinned_art();
-            evict_oldest(&mut self.art, &mut self.art_order, &pinned);
-        }
-        self.art.insert(file.to_string(), None);
-        self.art_order.push_back(file.to_string());
-        Some(Effect::Api(ApiCmd::AlbumArt { file: file.to_string(), reach }))
+    /// Claim one cover — `small` for a wall cell or a queue row, not for
+    /// the playing track's (see [`ApiCmd::AlbumArt`]) — with whatever the
+    /// claim let go of withdrawn first.
+    fn fetch_art_from(&mut self, file: &str, reach: Option<Reach>, small: bool) -> Vec<Effect> {
+        let App { art, art_order, art_small, queue, now_playing, art_on_view, .. } = self;
+        let mut claims = Claims::new(queue, now_playing.as_ref(), art_on_view);
+        claims.claim(art, art_order, art_small, file, reach, small);
+        claims.into_effects()
     }
 
-    /// The covers on screen whatever else is: the playing track's and the
-    /// queue's rows'.
-    fn pinned_art(&self) -> HashSet<String> {
-        self.queue
-            .items
-            .iter()
-            .filter_map(|item| item.metadata.album_art.clone())
-            .chain(self.now_playing.as_ref().and_then(|t| t.metadata.album_art.clone()))
-            .collect()
+    /// Whether the wall's page on record is this one — the check each
+    /// frame makes before [`App::set_wall_on_view`], so a page that has
+    /// not moved costs a comparison, not a vector of names.
+    pub(crate) fn wall_on_view_is<'a>(&self, page: impl Iterator<Item = &'a str>) -> bool {
+        self.art_on_view.wall.iter().map(String::as_str).eq(page)
+    }
+
+    /// The wall drew this page: its covers stay while it does.
+    pub(crate) fn set_wall_on_view(&mut self, page: Vec<String>) {
+        self.art_on_view.wall = page;
+    }
+
+    /// Whether the action sheet's cover on record is this one — checked
+    /// each frame before [`App::set_sheet_on_view`], the wall's way.
+    pub(crate) fn sheet_on_view_is(&self, cover: Option<&str>) -> bool {
+        self.art_on_view.sheet.as_deref() == cover
+    }
+
+    /// The action sheet drew this cover, or none is open: its cover stays
+    /// while it does.
+    pub(crate) fn set_sheet_on_view(&mut self, cover: Option<String>) {
+        self.art_on_view.sheet = cover;
+    }
+
+    /// The queue panel drew these rows, claiming nothing — for the tests;
+    /// the panel itself goes through [`App::claim_queue_art`].
+    #[cfg(test)]
+    pub(crate) fn queue_on_view(&mut self, rows: std::ops::Range<usize>) {
+        self.art_on_view.queue = rows;
     }
 
     /// The session generation (see the field): what a library or search ask
@@ -5071,8 +5623,34 @@ impl App {
             self.push_trail();
         }
         self.library_stack.enter(node.clone());
+        // A root list the session holds is seated from it: a fresh drill,
+        // no request (performance audit #99).
+        if fresh && let Some(data) = self.root_list(&node) {
+            self.library.set(entries::entries_from_library(data));
+            return Vec::new();
+        }
         self.library.set(Vec::new());
         vec![self.ask_library(node, Tab::Library)]
+    }
+
+    /// The session's copy of a room's root list, when it has one — Artists
+    /// and Genres; Recent and the play lists mean now and always ask.
+    fn root_list(&self, node: &LibraryNode) -> Option<LibraryData> {
+        match node {
+            LibraryNode::Artists => self.artists.clone().map(LibraryData::Artists),
+            LibraryNode::Genres => self.genre_list.clone().map(LibraryData::Genres),
+            _ => None,
+        }
+    }
+
+    /// Let a room's root list go, so the next opening asks the server: the
+    /// GUI's click on the room already up — the way to see a rescan.
+    pub(crate) fn forget_root_list(&mut self, node: &LibraryNode) {
+        match node {
+            LibraryNode::Artists => self.artists = None,
+            LibraryNode::Genres => self.genre_list = None,
+            _ => {}
+        }
     }
 
     /// Whether the Library pane's drill stands on the Albums wall, or on an
@@ -5114,9 +5692,11 @@ impl App {
             return None;
         }
         if self.waveforms.len() >= ART_CACHE_CAP {
-            // The same rule as the covers': the queue's shapes stay.
-            let pinned: HashSet<String> = self.queue.items.iter().map(|item| item.filepath.clone()).collect();
-            evict_oldest(&mut self.waveforms, &mut self.waveform_order, &pinned);
+            // The same rule as the covers': what is drawn stays.
+            let next = self.prefetch_row();
+            let App { waveforms, waveform_order, queue, now_playing, .. } = self;
+            let pinned = pinned_shapes(now_playing.as_ref(), next.and_then(|at| queue.items.get(at)));
+            while waveforms.len() >= ART_CACHE_CAP && evict_oldest(waveforms, waveform_order, &pinned).is_some() {}
         }
         self.waveforms.insert(filepath.to_string(), None);
         self.waveform_order.push_back(filepath.to_string());
@@ -5144,15 +5724,33 @@ impl App {
         // the top of the queue, and asking for it turns every keystroke on a
         // stopped player into a request.
         self.now_playing.as_ref()?;
-        let index = match &self.announced {
-            Some(_) => self.announced_still_valid()?,
-            None if !self.queue.shuffle => self.queue.next_index(false)?,
-            None => return None,
-        };
-        let item = self.queue.items.get(index)?;
+        let item = self.queue.items.get(self.prefetch_index()?)?;
+        // This runs after every event, so a shape whose last ask went
+        // unanswered waits out its rung here — it was re-asked on every
+        // pass of the loop, ten a second, for as long as a server stayed
+        // down (performance audit #89). The track's own start still asks.
+        if self.waveforms.contains_key(&item.filepath) || backing_off(&self.waveform_retry, &item.filepath) {
+            return None;
+        }
         let next = item.filepath.clone();
         let origin = item.origin.clone();
         self.fetch_waveform(&next, &origin)
+    }
+
+    /// The row whose shape is worth having before it plays: the held
+    /// announcement's, else the plain next row — never a shuffled roll
+    /// (see [`App::prefetch_waveform`]).
+    fn prefetch_index(&self) -> Option<usize> {
+        match &self.announced {
+            Some(_) => self.announced_still_valid(),
+            None if !self.queue.shuffle => self.queue.next_index(false),
+            None => None,
+        }
+    }
+
+    /// The row whose shape is fetched ahead while something plays.
+    fn prefetch_row(&self) -> Option<usize> {
+        self.now_playing.as_ref().and(self.prefetch_index())
     }
 
     fn play_pause(&mut self) -> Vec<Effect> {
@@ -5487,11 +6085,23 @@ impl App {
                     (&node, dest, &data)
                 {
                     self.albums = Some(albums.clone());
+                    self.albums_rev = self.albums_rev.wrapping_add(1);
                 }
                 if let (LibraryNode::Artist(artist), Tab::Library, LibraryData::Albums(albums)) =
                     (&node, dest, &data)
                 {
                     self.artist_albums = Some((artist.clone(), albums.clone()));
+                    self.albums_rev = self.albums_rev.wrapping_add(1);
+                }
+                // The Artists and Genres rooms' copies — see the fields.
+                match (&node, dest, &data) {
+                    (LibraryNode::Artists, Tab::Library, LibraryData::Artists(names)) => {
+                        self.artists = Some(names.clone());
+                    }
+                    (LibraryNode::Genres, Tab::Library, LibraryData::Genres(genres)) => {
+                        self.genre_list = Some(genres.clone());
+                    }
+                    _ => {}
                 }
                 self.pane_for_mut(dest).set(entries_from_library(data));
                 self.message = None;
@@ -5577,20 +6187,63 @@ impl App {
                 }
             },
             Event::DiscoveryProbe { available } => self.consume_discovery_probe(available),
-            Event::AlbumArt { file, art, settled } => {
+            Event::AlbumArt { file, art, settled, small } => {
                 // Keyed by the server's own filename, an answer is never
                 // stale: one that lands after the player has moved on just
                 // means the next track off that album finds its cover
-                // already here. An unanswered question gives its slot back
-                // instead — the waveform's rule, learned here the hard
-                // way: a fetch that died with the wifi used to leave the
-                // album coverless for the rest of the session.
-                if settled {
-                    self.art.insert(file, art);
-                } else {
-                    self.art.remove(&file);
+                // already here — and one whose claim the cache let go of
+                // meanwhile is filed where eviction can still reach it
+                // (`file_answer`). The one exception is a small copy that
+                // lands after the playing track asked for the original:
+                // not the answer the entry is waiting for (performance
+                // audit #92).
+                if small && self.art.contains_key(&file) && !self.art_small.contains(&file) {
+                    return Vec::new();
                 }
-                Vec::new()
+                // An unanswered question gives its slot back instead — the
+                // waveform's rule, learned here the hard way: a fetch that
+                // died with the wifi used to leave the album coverless for
+                // the rest of the session. The failure goes on the ladder,
+                // so the surfaces that ask every frame ask again in
+                // seconds, not every frame.
+                if settled {
+                    self.art_retry.remove(&file);
+                    if small {
+                        self.art_small.insert(file.clone());
+                    } else {
+                        self.art_small.remove(&file);
+                    }
+                    // The original where a copy already shows keeps that
+                    // copy's thumbnail and id, so what draws from the
+                    // thumbnail — the queue row, the card, a wall cell —
+                    // keeps the picture it has (`Art::sharpened`).
+                    let copy = if small { None } else { self.art.get_mut(&file).and_then(Option::take) };
+                    let art = match (art, copy) {
+                        (Some(original), Some(copy)) => Some(copy.sharpened(original)),
+                        (art, _) => art,
+                    };
+                    let (queue, now_playing, view) = (&self.queue, self.now_playing.as_ref(), &self.art_on_view);
+                    let evicted = file_answer(&mut self.art, &mut self.art_order, file, art, || {
+                        pinned_art(queue, now_playing, view)
+                    });
+                    evicted
+                        .into_iter()
+                        .filter_map(|(name, value)| {
+                            self.art_small.remove(&name);
+                            withdrawal(name, value)
+                        })
+                        .collect()
+                } else if !small && self.art.get(&file).is_some_and(|held| held.is_some()) {
+                    // The original failed where a small copy stands: keep
+                    // showing that, and the next start asks again.
+                    self.art_small.insert(file.clone());
+                    climb(&mut self.art_retry, file);
+                    Vec::new()
+                } else {
+                    self.art_small.remove(&file);
+                    give_back(&mut self.art, &mut self.art_order, &mut self.art_retry, file);
+                    Vec::new()
+                }
             }
             // Same rule, and here it is the whole point: a shape asked for
             // ahead of the track lands while something else is still
@@ -5601,9 +6254,14 @@ impl App {
                 // back — otherwise one dropped connection is the last word
                 // on that track for the rest of the session.
                 if settled {
-                    self.waveforms.insert(filepath, bars);
+                    self.waveform_retry.remove(&filepath);
+                    let next = self.prefetch_row();
+                    let (queue, now_playing) = (&self.queue, self.now_playing.as_ref());
+                    file_answer(&mut self.waveforms, &mut self.waveform_order, filepath, bars, || {
+                        pinned_shapes(now_playing, next.and_then(|at| queue.items.get(at)))
+                    });
                 } else {
-                    self.waveforms.remove(&filepath);
+                    give_back(&mut self.waveforms, &mut self.waveform_order, &mut self.waveform_retry, filepath);
                 }
                 Vec::new()
             }
@@ -5661,6 +6319,7 @@ impl App {
                     self.session.server = server;
                     self.session.token = token;
                 }
+                self.path_came_up();
                 Vec::new()
             }
             Event::RetargetFailed { identity, why } => {

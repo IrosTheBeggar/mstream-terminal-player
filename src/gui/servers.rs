@@ -232,6 +232,13 @@ impl ServersUi {
         self.form.is_some() || self.confirm.is_some() || self.qr.is_some()
     }
 
+    /// Whether a thread of this layer's is out — a form's submit, a version
+    /// probe — so the loop waits briskly for its answer (`kit::pace`).
+    pub(crate) fn busy(&self) -> bool {
+        self.form.as_ref().is_some_and(|form| form.submitting)
+            || self.versions.values().any(|probe| matches!(probe, Probe::Pending))
+    }
+
     fn version_label(&self, key: &str) -> String {
         match self.versions.get(key) {
             Some(Probe::Pending) => "…".to_string(),
@@ -408,6 +415,7 @@ pub(crate) fn update_config(gui: &mut Gui, mutate: impl FnOnce(&mut Config)) -> 
     if !gui.config_ok {
         return false;
     }
+    gui.flush_prefs();
     let mut config = match config::load() {
         Ok(config) => config,
         Err(e) => {
@@ -595,6 +603,7 @@ pub(crate) fn switch_to(gui: &mut Gui, index: usize) {
 
     // The outgoing session's place is worth keeping before it is replaced.
     if gui.app.connected {
+        gui.flush_prefs();
         crate::tui::remember(&gui.app);
         if let Ok(fresh) = config::load() {
             gui.config = fresh;
@@ -877,13 +886,16 @@ pub(crate) fn submit_form(gui: &mut Gui) {
 
 // ── Background replies ──────────────────────────────────────────────────────
 
-/// Drain what the threads sent since the last pass.
-pub(crate) fn poll(gui: &mut Gui) {
+/// Drain what the threads sent since the last pass; true when anything
+/// came — a frame to draw.
+pub(crate) fn poll(gui: &mut Gui) -> bool {
+    let mut folded = false;
     loop {
         let reply = match gui.servers.rx.try_recv() {
             Ok(reply) => reply,
-            Err(_) => return,
+            Err(_) => return folded,
         };
+        folded = true;
         match reply {
             Reply::Version { key, version } => {
                 let state = version.map_or(Probe::Unreachable, Probe::Version);

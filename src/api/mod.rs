@@ -421,6 +421,8 @@ impl Client {
         }
 
         #[cfg(not(target_arch = "wasm32"))]
+        runtime::install_tls_provider();
+        #[cfg(not(target_arch = "wasm32"))]
         let http = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
@@ -1328,15 +1330,17 @@ impl Client {
     }
 
     /// The cover image a track's `album-art` metadata names — raw bytes,
-    /// whatever format the server holds it in.
+    /// whatever format the server holds it in. `small` asks for the
+    /// server's 256 px copy instead of the original (see
+    /// [`urls::album_art_url`]).
     ///
     /// This is the one non-JSON GET in the client, so it does its own small
     /// version of [`Client::send`]: same header auth, same status mapping,
     /// but the body stays bytes instead of being read as text.
-    pub async fn album_art_async(&self, file: &str) -> Result<Vec<u8>, ApiError> {
+    pub async fn album_art_async(&self, file: &str, small: bool) -> Result<Vec<u8>, ApiError> {
         let url = match self.peer {
-            Some(peer) => urls::peer_art_url(&self.server(), peer, file),
-            None => urls::album_art_url(&self.server(), file),
+            Some(peer) => urls::peer_art_url(&self.server(), peer, file, small),
+            None => urls::album_art_url(&self.server(), file, small),
         }
         .map_err(ApiError::Config)?;
         let url = urls::with_local_token(url, self.local_token.as_deref());
@@ -1361,8 +1365,8 @@ impl Client {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn album_art(&self, file: &str) -> Result<Vec<u8>, ApiError> {
-        wait(self.album_art_async(file))
+    pub fn album_art(&self, file: &str, small: bool) -> Result<Vec<u8>, ApiError> {
+        wait(self.album_art_async(file, small))
     }
 
     // ── Stream URLs ─────────────────────────────────────────────────────────
@@ -1607,11 +1611,6 @@ impl Client {
         self.get("api/v1/admin/discovery/p2p/status").await
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_discovery_status(&self) -> Result<DiscoveryStatus, ApiError> {
-        wait(self.admin_discovery_status_async())
-    }
-
     /// The catalog. `include_incompatible` lifts the server's hide-by-default
     /// filter on peers whose embedding model cannot serve this server.
     pub async fn admin_discovery_catalog_async(
@@ -1624,14 +1623,6 @@ impl Client {
             "api/v1/admin/discovery/p2p/catalog"
         };
         self.get(path).await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_discovery_catalog(
-        &self,
-        include_incompatible: bool,
-    ) -> Result<DiscoveryCatalog, ApiError> {
-        wait(self.admin_discovery_catalog_async(include_incompatible))
     }
 
     /// The discovery log ring past `since` (0 = everything it holds).
@@ -1827,20 +1818,10 @@ impl Client {
         self.get("api/v1/admin/federation").await
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_federation(&self) -> Result<FederationParams, ApiError> {
-        wait(self.admin_federation_async())
-    }
-
     /// Pairing requests in both directions — the catalog's relationship
     /// column derives from them.
     pub async fn admin_federation_requests_async(&self) -> Result<FederationRequests, ApiError> {
         self.get("api/v1/admin/federation/requests").await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_federation_requests(&self) -> Result<FederationRequests, ApiError> {
-        wait(self.admin_federation_requests_async())
     }
 
     /// Ask a discovery peer to federate: an optional message (≤ 500 chars)
@@ -1875,11 +1856,6 @@ impl Client {
     /// endpoint runs.
     pub async fn admin_federation_keys_async(&self) -> Result<Vec<FederationKey>, ApiError> {
         self.get("api/v1/admin/federation/keys").await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_federation_keys(&self) -> Result<Vec<FederationKey>, ApiError> {
-        wait(self.admin_federation_keys_async())
     }
 
     /// Mint a read-only key for `vpaths` (1–64-char name); `expires_at` is
@@ -2073,11 +2049,6 @@ impl Client {
         self.get("api/v1/admin/federation/peers").await
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_federation_peers(&self) -> Result<Vec<FederationPeer>, ApiError> {
-        wait(self.admin_federation_peers_async())
-    }
-
     /// Add a peer from a friend's `mstrfed1:` ticket; the server tests it
     /// in the background. 400 for a ticket that does not parse or one
     /// already added.
@@ -2161,18 +2132,8 @@ impl Client {
         Ok(list.destinations)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_backup_destinations(&self) -> Result<Vec<BackupDestination>, ApiError> {
-        wait(self.admin_backup_destinations_async())
-    }
-
     pub async fn admin_backup_status_async(&self) -> Result<BackupStatus, ApiError> {
         self.get("api/v1/admin/backup/status").await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_backup_status(&self) -> Result<BackupStatus, ApiError> {
-        wait(self.admin_backup_status_async())
     }
 
     /// The server's platform, home and default exclude patterns.
@@ -2293,11 +2254,6 @@ impl Client {
         self.get("api/v1/admin/torrent").await
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_torrent_params(&self) -> Result<TorrentParams, ApiError> {
-        wait(self.admin_torrent_params_async())
-    }
-
     /// Choose the client: `disabled`, `transmission`, `qbittorrent`, `deluge`.
     /// Every client keeps its saved credentials across a switch.
     pub async fn admin_torrent_set_client_async(&self, client: &str) -> Result<serde_json::Value, ApiError> {
@@ -2398,11 +2354,6 @@ impl Client {
         self.get("api/v1/admin/torrent/vpath-access").await
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_torrent_vpath_access(&self) -> Result<VpathAccess, ApiError> {
-        wait(self.admin_torrent_vpath_access_async())
-    }
-
     /// Re-run the probe for one library, or every library when `None`.
     pub async fn admin_torrent_auto_detect_async(&self, vpath: Option<&str>) -> Result<VpathAccess, ApiError> {
         let body = match vpath {
@@ -2438,11 +2389,6 @@ impl Client {
     /// Every library's template plus the server's variables and sample.
     pub async fn admin_torrent_path_templates_async(&self) -> Result<PathTemplates, ApiError> {
         self.get("api/v1/admin/torrent/path-templates").await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_torrent_path_templates(&self) -> Result<PathTemplates, ApiError> {
-        wait(self.admin_torrent_path_templates_async())
     }
 
     /// Save a library's template; `None` clears it (freeform entry again).
@@ -2486,11 +2432,6 @@ impl Client {
     /// Every user with their flags, keyed by username.
     pub async fn admin_users_async(&self) -> Result<std::collections::BTreeMap<String, AdminUser>, ApiError> {
         self.get("api/v1/admin/users").await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn admin_users(&self) -> Result<std::collections::BTreeMap<String, AdminUser>, ApiError> {
-        wait(self.admin_users_async())
     }
 
     /// Create a user: `PUT /admin/users`. The server refuses a taken name
@@ -2567,21 +2508,11 @@ impl Client {
         self.get(&self.stats_range("api/v1/stats/summary", period, offset, tz, Some(origin))).await
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn stats_summary(&self, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsSummary, ApiError> {
-        wait(self.stats_summary_async(period, offset, tz, origin))
-    }
-
     /// Plays per bucket. Profile buckets (`hourOfDay`, `weekday`) are not
     /// narrowed by origin, so this sends none.
     pub async fn stats_timeseries_async(&self, bucket: &str, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsTimeseries, ApiError> {
         let path = self.stats_range("api/v1/stats/timeseries", period, offset, tz, Some(origin));
         self.get(&format!("{path}&bucket={bucket}")).await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn stats_timeseries(&self, bucket: &str, period: &str, offset: i32, tz: &str, origin: &str) -> Result<StatsTimeseries, ApiError> {
-        wait(self.stats_timeseries_async(bucket, period, offset, tz, origin))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2613,11 +2544,6 @@ impl Client {
 
     pub async fn stats_periods_async(&self, tz: &str) -> Result<StatsPeriods, ApiError> {
         self.get(&format!("api/v1/stats/periods?tz={}", urlencode(tz))).await
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn stats_periods(&self, tz: &str) -> Result<StatsPeriods, ApiError> {
-        wait(self.stats_periods_async(tz))
     }
 
     /// Forget one play: `DELETE /stats/plays/:id`. Its counters and its hour
@@ -2866,5 +2792,65 @@ mod tests {
             extract_error(r#"{"ok":false,"error":"no_source","message":"Provide a .torrent file"}"#),
             "Provide a .torrent file"
         );
+    }
+
+    /// The two halves of one rule (performance audit #98): the API client
+    /// offers gzip and reads a gzipped answer as if it were plain, and a
+    /// stream open offers nothing, so the length it hands back for seeking
+    /// is the length the server sent. The stream half lives here because
+    /// the contrast is the point.
+    #[test]
+    fn json_may_arrive_gzipped_and_audio_never_does() {
+        use std::io::{Read, Write};
+        use std::sync::{Arc, Mutex};
+
+        // gzip.compress(b'{"vpaths":["zipped"]}', mtime=0), from Python.
+        const ZIPPED_PING: [u8; 41] = [
+            0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xab, 0x56, 0x2a, 0x2b,
+            0x48, 0x2c, 0xc9, 0x28, 0x56, 0xb2, 0x8a, 0x56, 0xaa, 0xca, 0x2c, 0x28, 0x48, 0x4d,
+            0x51, 0x8a, 0xad, 0x05, 0x00, 0x00, 0xf2, 0x56, 0xa0, 0x15, 0x00, 0x00, 0x00,
+        ];
+        // What each request asked for, and a server that answers the way
+        // mStream's compression does: gzip only when it was offered.
+        let heads = Arc::new(Mutex::new(Vec::<String>::new()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = heads.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&head).to_ascii_lowercase();
+                let offered = head.lines().any(|l| l.starts_with("accept-encoding:") && l.contains("gzip"));
+                let reply = if head.starts_with("get /api/v1/ping") && offered {
+                    let mut reply = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+                        ZIPPED_PING.len()
+                    )
+                    .into_bytes();
+                    reply.extend_from_slice(&ZIPPED_PING);
+                    reply
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: 4\r\n\r\nRIFF".to_vec()
+                };
+                seen.lock().unwrap().push(head);
+                let _ = stream.write_all(&reply);
+            }
+        });
+
+        let ping = Client::new(&format!("http://{addr}")).unwrap().ping().unwrap();
+        assert_eq!(ping.vpaths, vec!["zipped"], "the gzipped answer read as plain JSON");
+
+        let (_reader, length) = crate::engine::http::open(&format!("http://{addr}/media/a.wav")).unwrap();
+        assert_eq!(length, Some(4), "the stream kept its Content-Length");
+
+        let heads = heads.lock().unwrap();
+        let asked = |path: &str| heads.iter().find(|h| h.contains(path)).cloned().unwrap_or_default();
+        assert!(asked("/api/v1/ping").contains("accept-encoding: gzip"), "{heads:?}");
+        assert!(!asked("/media/a.wav").contains("accept-encoding"), "{heads:?}");
     }
 }

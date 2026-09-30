@@ -37,7 +37,9 @@ phone tunes it, and find it as you left it next time.
   is heard at once, and kept a moment after the last turn.
 - **Nothing playing, or paused**: the window is fed silence, so the
   presets settle to their quiet state at the smoothing's pace, and keep
-  moving on their own time.
+  moving on their own time. Once the silence has settled it is not sent
+  again: the window keeps the quiet texture, and the player goes back to
+  its own pace until something plays.
 - **The window closes** (Esc, `q`, its close control): the item goes dim.
   The player notices within a frame, and keeps what the window last
   reported.
@@ -59,10 +61,11 @@ phone tunes it, and find it as you left it next time.
    window, not the player.
 2. **The parent computes, the child draws.** The player reads its own tap,
    builds the audio texture (`shader::audio`, the mobile app's curve) about
-   thirty times a second, and writes it down the child's stdin as one
-   framed message; a preset choice and a raise go the same way. The child
-   never reads the tap, never touches the network, and holds no state of
-   the player's. EOF on stdin means quit.
+   thirty times a second while anything plays or silence is still settling,
+   and writes it down the child's stdin as one framed message; a preset
+   choice and a raise go the same way. The child never reads the tap, never
+   touches the network, and holds no state of the player's. EOF on stdin
+   means quit.
 3. **The feeder never blocks the player**: frames queue two deep and a
    third is dropped, so a stalled window costs frames, not the player's
    loop. The child's stderr goes to the log, never to the terminal.
@@ -81,7 +84,13 @@ phone tunes it, and find it as you left it next time.
    preset's colours are the preset's.
 6. **Paced by the display**: `PresentMode::Fifo`, a redraw requested after
    each present, no rendering while occluded or minimized, never a busy
-   loop.
+   loop. On a display faster than ~118 Hz a picture stays up for k
+   refreshes, k the rate ÷ 59 Hz rounded down (120 Hz shows 60 pictures a
+   second, 144 Hz 72, 240 Hz 60; never under 59): only the refresh that
+   starts one shades the preset and runs the controls, and the others show
+   it again. 60 a second is the rate the mobile app's render thread draws
+   at, and the pace its frame-counted presets were tuned at. A new preset,
+   a new size and a window shown again start a picture at once.
 7. **Every built-in preset**, single-pass and multipass alike (the
    renderer already draws the feedback buffers, so 11.1's six became
    eight): `→` and `←` step through them, wrapping; a preset this GPU
@@ -237,3 +246,13 @@ the phone.
 - **2026-09-27 — The German Visualizer tooltip** used an en dash before
   its key (`– V`), so the GUI's key-hints rule could not strip it; it
   reads `— V` now, as every other tooltip does.
+- **2026-09-28 — At most ~60 pictures a second past ~118 Hz** (clause 6;
+  the performance audit's #118). A picture on every refresh of a 120 Hz
+  ProMotion panel or a 144–240 Hz monitor shaded every pass of the preset
+  two to four times for each new audio texture (thirty a second), and
+  faded 05's flash, which decays per frame, two to four times as fast as
+  on the phone (`VisualizerBridge.kt` draws at 60). The window still
+  presents on every refresh, so its pace is the display's own; a timer
+  set a whole number of refreshes apart was tried first and held one
+  frame in fifteen for one refresh or three, a judder twice a second.
+  60–118 Hz displays are paced as before.

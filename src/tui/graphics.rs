@@ -25,16 +25,25 @@
 //! the word "image", so a halfblocks-only answer is treated as a no.
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::Graphics;
+pub use native::{Graphics, release_all, release_all_panicking, release_dropped, verify_sent};
 #[cfg(target_arch = "wasm32")]
-pub use stub::Graphics;
+pub use stub::{Graphics, verify_sent};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
+    use std::cell::RefCell;
+    use std::io::Write;
+    use std::rc::{Rc, Weak};
+    use std::sync::Mutex;
+
     use ratatui::Frame;
+    use ratatui::buffer::Buffer;
     use ratatui::layout::{Rect, Size};
+    use ratatui::widgets::Widget;
+    use ratatui_image::picker::cap_parser::Parser;
     use ratatui_image::picker::{Picker, ProtocolType};
     use ratatui_image::protocol::Protocol;
+    use ratatui_image::protocol::kitty::Kitty;
     use ratatui_image::{Image, Resize};
 
     use crate::tui::art::Art;
@@ -66,12 +75,21 @@ mod native {
         /// cached picture, and a wall of covers is not sent again for
         /// every cell a window edge is dragged across.
         images_outlive_resize: bool,
+        /// Whether kitty's pixels go deflated — see [`deflate_kitty`].
+        deflate: bool,
+        /// Whether escapes this instance builds itself go through tmux's
+        /// passthrough: the picker's own answer, read once for it
+        /// ([`wrapped_for_tmux`]) rather than on every encode.
+        tmux: bool,
         /// When the window-size ioctl was last consulted. One cover per
         /// frame was this module's design point; the GUI's album wall
         /// draws fifteen, and re-asking for every one of them was
         /// hundreds of syscalls a second for an answer that changes on
         /// the scale of someone adjusting their font.
         font_checked: std::time::Instant,
+        /// The one kitty image this instance draws, for its whole life —
+        /// see [`KittyId`].
+        kitty_id: KittyId,
         /// How many render-time decodes have run, for the tests that pin
         /// the caching above — a cache that silently stopped caching would
         /// otherwise still pass every drawing assertion.
@@ -95,6 +113,12 @@ mod native {
 
     struct Cached {
         art: u64,
+        /// The bytes the picture was drawn from ([`Art::source_id`]) when
+        /// the box wanted more pixels than the thumbnail holds, so the
+        /// original of a cover drawn from its small copy is drawn again;
+        /// `None` when the thumbnail had them all, which a sharper copy
+        /// leaves exactly as it was (`Art::sharpened`).
+        bytes: Option<u64>,
         /// The pixel dimensions the fit was taken from — the thumbnail's
         /// when it had every pixel the box wanted, the decoded source's
         /// otherwise. Kept so the question "would this area want a
@@ -112,6 +136,12 @@ mod native {
         /// own size is what belongs in the middle.
         shown: (u16, u16),
         protocol: Protocol,
+        /// Kitty's pixels, until the frame that carries them to the
+        /// terminal — see [`kitty_picture`]. `None` once sent, and for
+        /// the protocols that carry their pixels in the cells. Shared with
+        /// the frame's check, which puts them back if the frame lost them
+        /// ([`verify_sent`]).
+        transmit: Rc<RefCell<Option<String>>>,
     }
 
     /// The answer only. A `Protocol` is a cover's worth of encoded pixels,
@@ -178,11 +208,13 @@ mod native {
                     picker.set_protocol_type(protocol);
                     tracing::info!("terminal graphics: forced {forced:?}, cell {font:?}");
                     return Graphics {
+                        tmux: wrapped_for_tmux(&picker),
                         picker: Some(picker),
                         adaptive: true,
                         images_outlive_resize: images_outlive_resize(protocol, |var| {
                             std::env::var(var).ok()
                         }),
+                        deflate: deflate_kitty(|var| std::env::var(var).ok()),
                         ..Graphics::disabled()
                     };
                 }
@@ -235,9 +267,11 @@ mod native {
                 images_outlive_resize(p.protocol_type(), |var| std::env::var(var).ok())
             });
             let graphics = Graphics {
+                tmux: picker.as_ref().is_some_and(wrapped_for_tmux),
                 picker,
                 adaptive: true,
                 images_outlive_resize: outlive,
+                deflate: deflate_kitty(|var| std::env::var(var).ok()),
                 ..Graphics::disabled()
             };
             // One line in the flight recorder: which way this terminal
@@ -280,6 +314,8 @@ mod native {
                 picker: self.picker.clone(),
                 adaptive: self.adaptive,
                 images_outlive_resize: self.images_outlive_resize,
+                deflate: self.deflate,
+                tmux: self.tmux,
                 ..Graphics::disabled()
             }
         }
@@ -293,7 +329,10 @@ mod native {
                 refused: None,
                 adaptive: false,
                 images_outlive_resize: false,
+                deflate: false,
+                tmux: false,
                 font_checked: std::time::Instant::now(),
+                kitty_id: KittyId::default(),
                 #[cfg(test)]
                 decodes: std::cell::Cell::new(0),
                 #[cfg(test)]
@@ -389,6 +428,7 @@ mod native {
             #[allow(deprecated)]
             let mut rebuilt = Picker::from_fontsize(fresh);
             rebuilt.set_protocol_type(protocol);
+            self.tmux = wrapped_for_tmux(&rebuilt);
             self.picker = Some(rebuilt);
             // Everything remembered was measured against the old cells.
             self.cached = None;
@@ -451,9 +491,10 @@ mod native {
             let font = (font.width, font.height);
 
             // Warm: the same cover at the same fitted size, wherever the
-            // box now stands.
+            // box now stands — from the same bytes, when they were drawn.
             let warm = self.cached.as_ref().is_some_and(|held| {
                 held.art == art.id()
+                    && held.bytes.is_none_or(|bytes| bytes == art.source_id())
                     && fit(area, font, held.source.0, held.source.1) == held.size
             });
             if !warm {
@@ -473,7 +514,8 @@ mod native {
                 }
                 let wanted =
                     (u32::from(size.0) * u32::from(font.0), u32::from(size.1) * u32::from(font.1));
-                let (source, dimensions, size) = if wanted.0 <= thumb.0 && wanted.1 <= thumb.1 {
+                let from_thumbnail = wanted.0 <= thumb.0 && wanted.1 <= thumb.1;
+                let (source, dimensions, size) = if from_thumbnail {
                     // The thumbnail has every pixel the box can show.
                     let pixels = image::RgbImage::from_raw(thumb.0, thumb.1, art.rgb().to_vec())
                         .expect("an Art's pixels match its dimensions");
@@ -488,8 +530,9 @@ mod native {
                         return false;
                     }
                     // Decoded here rather than kept decoded: the cache holds
-                    // sixty-four covers, and at this size the pixels are an
-                    // order of magnitude more memory than the bytes.
+                    // two hundred and fifty-six covers, and at this size the
+                    // pixels are an order of magnitude more memory than the
+                    // bytes.
                     #[cfg(test)]
                     self.decodes.set(self.decodes.get() + 1);
                     let Ok(source) = image::load_from_memory(art.source()) else {
@@ -516,7 +559,23 @@ mod native {
                 // actually takes, and Nearest enlarges into mosaic — the
                 // thing this rendering exists to be better than.
                 let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
-                let Ok(protocol) = picker.new_protocol(source, fitted, resize) else {
+                // Kitty's picture is built here rather than by the picker,
+                // to be sent under this instance's own id (`KittyId`).
+                let built = match picker.protocol_type() {
+                    ProtocolType::Kitty => {
+                        let (tmux, deflate) = (self.tmux, self.deflate);
+                        let id = self.kitty_id.get(tmux);
+                        kitty_picture(picker, source, fitted, &resize, (id, tmux, deflate))
+                            .map(|(protocol, transmit)| (protocol, Some(transmit)))
+                    }
+                    // A cover that arrived as a JPEG goes to iTerm2 as one;
+                    // everything lossless stays lossless (`iterm2_jpeg`).
+                    ProtocolType::Iterm2 if art.source().starts_with(&[0xFF, 0xD8, 0xFF]) => {
+                        iterm2_jpeg(picker, source, fitted, &resize, self.tmux).map(|p| (p, None))
+                    }
+                    _ => picker.new_protocol(source, fitted, resize).ok().map(|p| (p, None)),
+                };
+                let Some((protocol, transmit)) = built else {
                     self.refused =
                         Some(Refusal { art: art.id(), area: Some((area.width, area.height)) });
                     return false;
@@ -526,18 +585,89 @@ mod native {
                 let shown = protocol.size();
                 self.cached = Some(Cached {
                     art: art.id(),
+                    bytes: (!from_thumbnail).then(|| art.source_id()),
                     source: dimensions,
                     size,
                     shown: (shown.width, shown.height),
                     protocol,
+                    transmit: Rc::new(RefCell::new(transmit)),
                 });
             }
 
             // Unwrap: the branch above either filled this or returned.
-            let held = self.cached.as_ref().expect("just built");
-            frame.render_widget(Image::new(&held.protocol), centre(area, held.shown));
+            let held = self.cached.as_mut().expect("just built");
+            let placed = centre(area, held.shown);
+            frame.render_widget(Image::new(&held.protocol), placed);
+            // Kitty's pixels ride the first frame that draws the picture,
+            // ahead of the placeholders in its first cell — where upstream
+            // puts its own — and are let go once they have: after that
+            // frame nothing can send them again, so keeping them was a
+            // cover's worth of base64 held for nothing (performance audit
+            // #95). A picture that drew nothing here (its first cell off
+            // the buffer) keeps them for a frame that does. Until the frame
+            // is checked they are the cell's and the check's, which hands
+            // them back should the frame lose them ([`verify_sent`]).
+            if held.transmit.borrow().is_some()
+                && let Some(cell) = frame.buffer_mut().cell_mut((placed.x, placed.y))
+                && cell.symbol().contains('\u{10EEEE}')
+                && let Some(transmit) = held.transmit.take()
+            {
+                let sent = transmit.len();
+                let symbol = transmit + cell.symbol();
+                cell.set_symbol(&symbol);
+                let home = Rc::downgrade(&held.transmit);
+                IN_FLIGHT.with_borrow_mut(|flying| {
+                    flying.push(InFlight { at: (placed.x, placed.y), symbol, sent, home });
+                });
+            }
             true
         }
+    }
+
+    thread_local! {
+        /// The kitty transmissions this frame's cells carry, until the
+        /// frame is checked ([`verify_sent`]). Per thread because a frame
+        /// is: drawn and checked on the one thread, and a test's frames
+        /// never meet another's.
+        static IN_FLIGHT: RefCell<Vec<InFlight>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// One transmission riding a frame's cell.
+    struct InFlight {
+        at: (u16, u16),
+        /// What the cell was given: the transmission, then the
+        /// placeholders it rides ahead of.
+        symbol: String,
+        /// How much of `symbol` is the transmission.
+        sent: usize,
+        /// The picture it goes back to, while that picture stands.
+        home: Weak<RefCell<Option<String>>>,
+    }
+
+    /// Check that this frame's kitty transmissions are still in the cells
+    /// the terminal will be sent, and hand back those that are not, for
+    /// the next frame that draws their picture to send. Called at the end
+    /// of every render, on its finished buffer.
+    ///
+    /// A transmission rides its picture's first cell, and whatever draws
+    /// after the picture in the same frame — the header dropdown, a modal,
+    /// a tooltip — can write over that cell. Its placeholders then drew
+    /// the id's last picture, since a `Graphics` keeps one id for life
+    /// (#94): the previous album's cover, until the slot drew another
+    /// (the integration check of performance audit #95). A frame that sent
+    /// nothing costs a look at an empty list.
+    pub fn verify_sent(buffer: &Buffer) {
+        IN_FLIGHT.with_borrow_mut(|flying| {
+            for InFlight { at, mut symbol, sent, home } in flying.drain(..) {
+                if buffer.cell(at).is_some_and(|cell| cell.symbol() == symbol) {
+                    continue;
+                }
+                if let Some(home) = home.upgrade() {
+                    symbol.truncate(sent);
+                    *home.borrow_mut() = Some(symbol);
+                }
+            }
+        });
     }
 
     impl Graphics {
@@ -550,8 +680,346 @@ mod native {
             #[allow(deprecated)]
             let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(10, 20));
             picker.set_protocol_type(protocol);
-            Graphics { picker: Some(picker), ..Graphics::disabled() }
+            let tmux = wrapped_for_tmux(&picker);
+            Graphics { picker: Some(picker), tmux, ..Graphics::disabled() }
         }
+    }
+
+    /// Kitty keeps every picture it is sent until it is told to let go —
+    /// and nothing told it. Upstream mints a random id for every encode and
+    /// never deletes one, so each new cover, wall page, screen switch and
+    /// resize left the last picture in the terminal's image store, as a GPU
+    /// texture, under a virtual placement that its alternate-screen clear
+    /// skips: up to kitty's 320 MiB quota, outliving the player until the
+    /// window closed (performance audit #94).
+    ///
+    /// So each `Graphics` owns ONE id for its whole life, and every encode
+    /// is sent under it. kitty takes a transmission to an id it already
+    /// holds as a replacement — the old image, its texture and its
+    /// placement freed in place (graphics.c, `handle_add_command`) — and
+    /// the new pixels travel in the same frame as the placeholders that
+    /// show them, so no frame shows a gap. A `Graphics` that goes away (a
+    /// queue row's slot let go, a wall slot past the page) owes the
+    /// terminal a delete, sent after the next frame has drawn over its
+    /// cells ([`release_dropped`]); leaving the alternate screen deletes
+    /// the rest ([`release_all`]).
+    ///
+    /// Ids are a random base plus a count, not a count from one: two
+    /// players in panes of one tmux share the outer kitty's store, and a
+    /// repeated id there would replace — and delete — the other's picture.
+    #[derive(Default)]
+    struct KittyId(Option<(u32, bool)>);
+
+    impl KittyId {
+        /// This instance's id, handed out on first use.
+        fn get(&mut self, tmux: bool) -> u32 {
+            if let Some((id, _)) = self.0 {
+                return id;
+            }
+            let mut ids = KITTY_IDS.lock().unwrap_or_else(|poison| poison.into_inner());
+            if ids.next == 0 {
+                ids.next = fastrand::u32(1..);
+            }
+            let id = ids.next;
+            // Zero is kitty's "no id"; the count steps over it when it wraps.
+            ids.next = ids.next.wrapping_add(1).max(1);
+            ids.live.push((id, tmux));
+            self.0 = Some((id, tmux));
+            id
+        }
+    }
+
+    impl Drop for KittyId {
+        fn drop(&mut self) {
+            if let Some(entry) = self.0.take() {
+                let mut ids = KITTY_IDS.lock().unwrap_or_else(|poison| poison.into_inner());
+                ids.live.retain(|live| live.0 != entry.0);
+                ids.gone.push(entry);
+            }
+        }
+    }
+
+    /// Every id this process has handed out and not yet deleted, with
+    /// whether its escapes go through tmux: `live` still drawn by a
+    /// `Graphics`, `gone` owed a delete.
+    struct KittyIds {
+        next: u32,
+        live: Vec<(u32, bool)>,
+        gone: Vec<(u32, bool)>,
+    }
+
+    static KITTY_IDS: Mutex<KittyIds> =
+        Mutex::new(KittyIds { next: 0, live: Vec::new(), gone: Vec::new() });
+
+    /// The deletes owed for the pictures whose `Graphics` went away — and,
+    /// with `all`, for every picture this process sent.
+    fn owed_deletes(all: bool) -> String {
+        owed_by(&mut KITTY_IDS.lock().unwrap_or_else(|poison| poison.into_inner()), all)
+    }
+
+    fn owed_by(ids: &mut KittyIds, all: bool) -> String {
+        let mut owed = std::mem::take(&mut ids.gone);
+        if all {
+            owed.append(&mut ids.live);
+        }
+        owed.iter().map(|&(id, tmux)| kitty_delete(id, tmux)).collect()
+    }
+
+    /// Uppercase `I`: the image's data goes too, not only its placements —
+    /// by id, because a delete-all skips the virtual placements the
+    /// placeholders draw with. `q=2`: no reply either way; a terminal that
+    /// never saw the id (a tmux reattach) has nothing to answer about.
+    fn kitty_delete(id: u32, tmux: bool) -> String {
+        let (start, escape, end) = Parser::tmux_start_escape_end(tmux);
+        format!("{start}{escape}_Ga=d,d=I,i={id},q=2{escape}\\{end}")
+    }
+
+    /// Delete, in the terminal, the kitty pictures whose `Graphics` went
+    /// away. Called after each frame is written: a picture let go while a
+    /// frame was drawing — a queue slot pruned, a wall slot past the page
+    /// — is off screen once that frame is out, so its delete never blanks
+    /// a cell still showing it. Nothing owed is nothing written.
+    pub fn release_dropped() {
+        write_deletes(&owed_deletes(false));
+    }
+
+    /// Delete every kitty picture this process sent, for leaving the
+    /// alternate screen: kitty's own clear on the way out keeps images with
+    /// virtual placements, so without this they stay in the window's store
+    /// after the player has gone. Before `ratatui::restore` — the images
+    /// live in the alternate screen's store, and a delete sent after the
+    /// switch asks the main screen's.
+    pub fn release_all() {
+        write_deletes(&owed_deletes(true));
+    }
+
+    /// [`release_all`] from the panic hook, which runs before ratatui's
+    /// restore leaves the alternate screen — a panic was the one way out
+    /// that left this process's pictures in kitty's store until the
+    /// window closed (the integration check of performance audit #94).
+    /// The hook runs before the unwind, too: a thread that panicked while
+    /// holding the ledger would wait on itself here, and a hook that hangs
+    /// never gives the terminal back, so a ledger in use is left as it is.
+    pub fn release_all_panicking() {
+        if let Some(deletes) = owed_panicking() {
+            write_deletes(&deletes);
+        }
+    }
+
+    /// Every delete owed, unless the ledger is in use.
+    fn owed_panicking() -> Option<String> {
+        let mut ids = match KITTY_IDS.try_lock() {
+            Ok(ids) => ids,
+            Err(std::sync::TryLockError::Poisoned(poison)) => poison.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        Some(owed_by(&mut ids, true))
+    }
+
+    fn write_deletes(deletes: &str) {
+        if deletes.is_empty() {
+            return;
+        }
+        let mut out = std::io::stdout();
+        let _ = out.write_all(deletes.as_bytes());
+        let _ = out.flush();
+    }
+
+    /// Whether the picker frames its escapes for tmux's passthrough. The
+    /// crate decides that when the picker is built and keeps the answer to
+    /// itself; an iTerm2 protocol carries it in a public field, so a
+    /// one-pixel one reads it back — the same answer sixel is framed by,
+    /// without a second opinion that could disagree with it.
+    fn wrapped_for_tmux(picker: &Picker) -> bool {
+        let mut asking = picker.clone();
+        asking.set_protocol_type(ProtocolType::Iterm2);
+        let pixel = image::DynamicImage::new_rgb8(1, 1);
+        matches!(
+            asking.new_protocol(pixel, Size::new(1, 1), Resize::Fit(None)),
+            Ok(Protocol::ITerm2(ratatui_image::protocol::iterm2::Iterm2 { is_tmux: true, .. }))
+        )
+    }
+
+    /// The kitty picture, fitted and resized exactly as
+    /// `Picker::new_protocol` does it for `Resize::Scale` — the same cells,
+    /// the same pixels, padded the same way — but under `id`, and in two
+    /// halves: the placeholders to draw every frame, and the transmission
+    /// to send once.
+    ///
+    /// Upstream's picture keeps its transmission for as long as it lives,
+    /// though it hands it out once: a wall page held a page of base64 that
+    /// could never be written again — 5-13 MB at 200x60 (performance audit
+    /// #95). So the placeholders here are upstream's,
+    /// drawn for a one-pixel stand-in whose own transmission is spent on a
+    /// scratch cell, and the real one is the caller's to send and drop.
+    fn kitty_picture(
+        picker: &Picker,
+        source: image::DynamicImage,
+        fitted: Size,
+        resize: &Resize,
+        (id, tmux, deflate): (u32, bool, bool),
+    ) -> Option<(Protocol, String)> {
+        let font = picker.font_size();
+        let cells = resize.size_for(&source, font, fitted);
+        // No background: the picker's is transparent unless set, and
+        // nothing here sets it.
+        let pixels = resize.resize(&source, font, cells, None);
+        let transmit = kitty_transmit(&pixels, id, tmux, deflate);
+        let stand_in = image::DynamicImage::new_rgb8(1, 1);
+        let placeholders = Protocol::Kitty(Kitty::new(stand_in, cells, id, tmux).ok()?);
+        let scratch = Rect::new(0, 0, 1, 1);
+        Image::new(&placeholders).allow_clipping(true).render(scratch, &mut Buffer::empty(scratch));
+        Some((placeholders, transmit))
+    }
+
+    /// Kitty's transmit-and-place command for `img` under `id`: its pixels
+    /// in base64 chunks of 4096 characters, the protocol's ceiling, the
+    /// first carrying the image's keys and a virtual placement (U=1) for
+    /// the placeholders to draw — upstream's `transmit_virtual`, framed the
+    /// same way for tmux, and ours to drop once sent.
+    ///
+    /// Upstream always sends RGBA, uncompressed: 5.3 bytes on the wire a
+    /// pixel, a quarter of them an alpha byte that is constant for a cover
+    /// (performance audit #93). An opaque picture goes as RGB (f=24) here —
+    /// the pixels being sent decide, not the source's format: a fit that
+    /// leaves slack is padded onto transparent, and f=24 would paint that
+    /// strip black. And with `deflate` the pixels go through zlib (o=z).
+    fn kitty_transmit(img: &image::DynamicImage, id: u32, tmux: bool, deflate: bool) -> String {
+        use base64::Engine;
+        use std::fmt::Write as _;
+
+        let (w, h) = (img.width(), img.height());
+        let (format, pixels) = if opaque(img) {
+            (24, img.to_rgb8().into_raw())
+        } else {
+            (32, img.to_rgba8().into_raw())
+        };
+        // Level 1, zlib's fastest: over a slow link the bytes are the
+        // cost, and past its first level deflate buys a few per cent more
+        // for several times the time.
+        let (payload, compression) = if deflate {
+            (miniz_oxide::deflate::compress_to_vec_zlib(&pixels, 1), "o=z,")
+        } else {
+            (pixels, "")
+        };
+        let (start, escape, end) = Parser::tmux_start_escape_end(tmux);
+        const CHUNK: usize = 4096 / 4 * 3;
+        let chunks = payload.len().div_ceil(CHUNK);
+        let per_chunk = start.len() + 2 * escape.len() + 12 + 4096 + end.len();
+        let mut data = String::with_capacity(chunks * per_chunk + 48);
+        for (i, chunk) in payload.chunks(CHUNK).enumerate() {
+            data.push_str(start);
+            let _ = write!(data, "{escape}_Gq=2,");
+            if i == 0 {
+                let _ = write!(data, "i={id},a=T,U=1,f={format},{compression}t=d,s={w},v={h},");
+            }
+            let _ = write!(data, "m={};", u8::from(i + 1 < chunks));
+            base64::engine::general_purpose::STANDARD.encode_string(chunk, &mut data);
+            let _ = write!(data, "{escape}\\");
+            data.push_str(end);
+        }
+        data
+    }
+
+    /// How hard iTerm2's JPEG covers are compressed. The source was a JPEG
+    /// already, typically saved at 80-90; at a cover's size in cells 85
+    /// keeps a detailed photograph within 35 dB of upstream's lossless PNG
+    /// of the same pixels, at a third to a sixth of the bytes.
+    const JPEG_QUALITY: u8 = 85;
+
+    /// The iTerm2 picture of a cover that arrived as a JPEG, sent as one.
+    ///
+    /// Upstream always sends PNG, and a photograph PNG-encodes to several
+    /// times its JPEG: a wall page was ~2 MB of base64 at 200x60, written
+    /// on every page turn and carried in the frame's cells — copied and
+    /// compared — every frame it stood (performance audit #96). Only art
+    /// that was already lossy goes this way: the QR code, the wordmark and
+    /// PNG covers keep upstream's lossless encode. Fitted and scaled as
+    /// upstream does it (`Resize::Scale`, Triangle), but not padded: JPEG
+    /// has no transparent to pad with, and iTerm2 draws the picture at its
+    /// own size over the cells cleared for the box — which is all the
+    /// transparent strip showed. Framed as upstream frames it, tmux and
+    /// the erased cells included.
+    fn iterm2_jpeg(
+        picker: &Picker,
+        source: image::DynamicImage,
+        fitted: Size,
+        resize: &Resize,
+        tmux: bool,
+    ) -> Option<Protocol> {
+        use base64::Engine;
+        use std::fmt::Write as _;
+
+        let font = picker.font_size();
+        let cells = resize.size_for(&source, font, fitted);
+        let (w, h) = (
+            u32::from(cells.width) * u32::from(font.width),
+            u32::from(cells.height) * u32::from(font.height),
+        );
+        let scaled = source.resize(w, h, image::imageops::FilterType::Triangle).into_rgb8();
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, JPEG_QUALITY)
+            .encode_image(&scaled)
+            .ok()?;
+        let (start, escape, end) = Parser::tmux_start_escape_end(tmux);
+        let rows = usize::from(cells.height);
+        let mut data = String::with_capacity(jpeg.len() / 3 * 4 + 16 * rows + 128);
+        data.push_str(start);
+        // Upstream's `clear_area` (crate-private): the box's cells erased a
+        // row at a time, then back to the top, so no stale text shows
+        // through where the picture does not reach.
+        if cells.height == 1 {
+            let _ = write!(data, "{escape}[{}X", cells.width);
+        } else {
+            for _ in 0..cells.height {
+                let _ = write!(data, "{escape}[{}X{escape}[1B", cells.width);
+            }
+            let _ = write!(data, "{escape}[{}A", cells.height);
+        }
+        let _ = write!(
+            data,
+            "{escape}]1337;File=inline=1;size={};width={}px;height={}px;doNotMoveCursor=1:",
+            jpeg.len(),
+            scaled.width(),
+            scaled.height()
+        );
+        base64::engine::general_purpose::STANDARD.encode_string(&jpeg, &mut data);
+        let _ = write!(data, "\x07{end}");
+        Some(Protocol::ITerm2(ratatui_image::protocol::iterm2::Iterm2 {
+            data,
+            size: cells,
+            is_tmux: tmux,
+        }))
+    }
+
+    /// Whether every pixel of `img` is opaque: no alpha channel, or one at
+    /// full everywhere. RGBA8 is the one alpha layout a resize here makes
+    /// (the padding); any other is taken at its word.
+    fn opaque(img: &image::DynamicImage) -> bool {
+        match img {
+            image::DynamicImage::ImageRgba8(rgba) => {
+                rgba.pixels().all(|pixel| pixel.0[3] == u8::MAX)
+            }
+            other => !other.color().has_alpha(),
+        }
+    }
+
+    /// Whether kitty's pixels go deflated (`o=z`). Over ssh a wall page is
+    /// megabytes down a link counted in Mbit/s — seconds of frozen screen
+    /// at 20 — and zlib's fastest level sends 40-60% of them; locally the
+    /// pty moves that page in tens of milliseconds, less than deflating it
+    /// would take out of the frame's encode budget (~0.5 ms a wall cover,
+    /// ~12 ms a 640 px one — the audit's measurements, #93). And only to
+    /// kitty and Ghostty, which inflate: the capability query asks about
+    /// f=24, never o=z, and with q=2 a terminal that could not inflate
+    /// would show nothing and say nothing. Both name themselves in TERM,
+    /// which ssh carries; under tmux TERM is tmux's own, and the pixels go
+    /// plain.
+    fn deflate_kitty(env: impl Fn(&str) -> Option<String>) -> bool {
+        let remote = env("SSH_CONNECTION").is_some() || env("SSH_TTY").is_some();
+        let inflates =
+            env("TERM").is_some_and(|term| term == "xterm-kitty" || term == "xterm-ghostty");
+        remote && inflates
     }
 
     /// Whether a queried protocol should give way to iTerm2's own.
@@ -920,6 +1388,496 @@ mod native {
             }
         }
 
+        /// The image ids the frame's kitty transmissions went out under.
+        fn transmitted_ids(
+            terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+        ) -> Vec<u32> {
+            let mut ids = Vec::new();
+            for cell in &terminal.backend().buffer().content {
+                for (at, _) in cell.symbol().match_indices("_Gq=2,i=") {
+                    let digits: String = cell.symbol()[at + 8..]
+                        .chars()
+                        .take_while(char::is_ascii_digit)
+                        .collect();
+                    ids.push(digits.parse().unwrap());
+                }
+            }
+            ids
+        }
+
+        #[test]
+        fn one_graphics_sends_every_picture_it_ever_draws_under_one_id() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // A new cover, a new size, a resize's re-send: each is a new
+            // transmission, and each goes to the id the last one used — so
+            // kitty replaces the picture in place instead of keeping both
+            // (performance audit #94).
+            let (a, b) = (a_cover(64), a_cover(96));
+            let mut graphics = Graphics::forced(ProtocolType::Kitty);
+            let mut ids = Vec::new();
+            for (art, width) in [(&a, 40), (&b, 40), (&b, 12)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
+                terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), art))).unwrap();
+                ids.extend(transmitted_ids(&terminal));
+            }
+            graphics.refresh();
+            let mut terminal = Terminal::new(TestBackend::new(20, 10)).unwrap();
+            terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), &b))).unwrap();
+            ids.extend(transmitted_ids(&terminal));
+            assert_eq!(graphics.encodes(), 4, "every draw above was a new picture");
+            assert_eq!(ids.len(), 4, "{ids:?}");
+            assert!(ids.iter().all(|id| *id == ids[0] && *id != 0), "{ids:?}");
+
+            // A fork is another surface, with a picture of its own.
+            let mut fork = graphics.fork();
+            let mut terminal = Terminal::new(TestBackend::new(20, 10)).unwrap();
+            terminal.draw(|frame| assert!(fork.draw(frame, frame.area(), &b))).unwrap();
+            let forked = transmitted_ids(&terminal);
+            assert_eq!(forked.len(), 1);
+            assert_ne!(forked[0], ids[0], "a fork shares no id");
+        }
+
+        #[test]
+        fn a_graphics_let_go_owes_the_terminal_a_delete_and_leaving_owes_the_rest() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            let art = a_cover(64);
+            let mut kept = Graphics::forced(ProtocolType::Kitty);
+            let mut dropped = kept.fork();
+            let id = |graphics: &mut Graphics| {
+                let mut terminal = Terminal::new(TestBackend::new(20, 10)).unwrap();
+                terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), &art))).unwrap();
+                transmitted_ids(&terminal)[0]
+            };
+            let (kept_id, dropped_id) = (id(&mut kept), id(&mut dropped));
+            drop(dropped);
+
+            // Other tests' pictures come and go through the same ledger, so
+            // this asks only after its own two.
+            let owed = owed_deletes(false);
+            assert!(owed.contains(&format!("_Ga=d,d=I,i={dropped_id},q=2")), "{owed:?}");
+            assert!(!owed.contains(&format!("i={kept_id},")), "a live picture is not deleted");
+            assert!(!owed_deletes(false).contains(&format!("i={dropped_id},")), "owed once");
+            // Leaving the alternate screen deletes what is still drawn.
+            assert!(owed_deletes(true).contains(&format!("_Ga=d,d=I,i={kept_id},q=2")));
+        }
+
+        #[test]
+        fn a_panic_holding_the_ledger_leaves_it_rather_than_wait_on_itself() {
+            // The panic hook runs before the unwind, with whatever this
+            // thread held still held: locking again would hang the hook,
+            // and the terminal with it.
+            let held = KITTY_IDS.lock().unwrap_or_else(|poison| poison.into_inner());
+            assert_eq!(owed_panicking(), None);
+            drop(held);
+        }
+
+        #[test]
+        fn a_delete_is_framed_like_the_transmission_it_undoes() {
+            assert_eq!(kitty_delete(7, false), "\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
+            // Through tmux: the passthrough wrapper, every ESC inside doubled.
+            assert_eq!(
+                kitty_delete(7, true),
+                "\x1bPtmux;\x1b\x1b_Ga=d,d=I,i=7,q=2\x1b\x1b\\\x1b\\"
+            );
+        }
+
+        /// A kitty transmission as the terminal reads it: the first chunk's
+        /// keys, and the chunks' base64 joined and — for `o=z` — inflated.
+        fn received(transmit: &str) -> (String, Vec<u8>) {
+            use base64::Engine;
+            let (mut keys, mut payload) = (String::new(), Vec::new());
+            for command in transmit.split("\x1b_G").skip(1) {
+                let command = command.split("\x1b\\").next().unwrap();
+                let (control, data) = command.split_once(';').unwrap();
+                assert!(data.len() <= 4096, "a chunk past the protocol's ceiling");
+                if keys.is_empty() {
+                    keys = control.to_string();
+                }
+                payload.extend(base64::engine::general_purpose::STANDARD.decode(data).unwrap());
+            }
+            if keys.contains("o=z") {
+                payload = miniz_oxide::inflate::decompress_to_vec_zlib(&payload).unwrap();
+            }
+            (keys, payload)
+        }
+
+        /// Received pixels as RGBA, whichever format they came in.
+        fn rgba(keys: &str, pixels: Vec<u8>) -> Vec<u8> {
+            if !keys.contains("f=24") {
+                return pixels;
+            }
+            pixels.chunks(3).flat_map(|p| [p[0], p[1], p[2], u8::MAX]).collect()
+        }
+
+        #[test]
+        fn opaque_pixels_go_as_rgb_and_only_the_fits_padding_keeps_its_alpha() {
+            // The alpha byte was a constant quarter of every opaque cover
+            // on the wire (performance audit #93).
+            let rgb = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(30, 20, |x, y| {
+                image::Rgb([x as u8, y as u8, 7])
+            }));
+            let (keys, pixels) = received(&kitty_transmit(&rgb, 9, false, false));
+            assert!(keys.contains("f=24,t=d,s=30,v=20,") && !keys.contains("o=z"), "{keys}");
+            assert_eq!(pixels, rgb.to_rgb8().into_raw());
+            // RGBA that is opaque everywhere is RGB on the wire too.
+            let solid = image::DynamicImage::ImageRgba8(rgb.to_rgba8());
+            let (keys, pixels) = received(&kitty_transmit(&solid, 9, false, false));
+            assert!(keys.contains("f=24"), "{keys}");
+            assert_eq!(pixels, rgb.to_rgb8().into_raw());
+            // The fit's padding is transparent, and stays so: f=24 would
+            // paint the strip black over the ground.
+            let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
+            let font = ratatui_image::FontSize::new(13, 27);
+            let padded = resize.resize(&rgb, font, Size::new(12, 6), None);
+            assert!(padded.to_rgba8().pixels().any(|pixel| pixel.0[3] == 0), "the test's premise");
+            let (keys, pixels) = received(&kitty_transmit(&padded, 9, false, false));
+            assert!(keys.contains("f=32"), "{keys}");
+            assert_eq!(pixels, padded.to_rgba8().into_raw());
+        }
+
+        #[test]
+        fn deflated_pixels_inflate_to_exactly_what_was_drawn_in_fewer_bytes() {
+            // Something photographic enough to compress like a cover does.
+            let cover = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(192, 192, |x, y| {
+                let v = ((x * x + y * 3) / 7) as u8;
+                image::Rgb([v, v.wrapping_add((y / 3) as u8), 255 - v])
+            }));
+            let plain = kitty_transmit(&cover, 5, false, false);
+            let deflated = kitty_transmit(&cover, 5, false, true);
+            let (keys, pixels) = received(&deflated);
+            assert!(keys.starts_with("q=2,i=5,a=T,U=1,f=24,o=z,t=d,s=192,v=192,"), "{keys}");
+            assert_eq!(pixels, cover.to_rgb8().into_raw());
+            assert!(deflated.len() < plain.len() * 3 / 4, "{} vs {}", deflated.len(), plain.len());
+            // Through tmux, every chunk is wrapped the way the rest are.
+            let wrapped = kitty_transmit(&cover, 5, true, true);
+            let chunks = wrapped.matches("\x1bPtmux;\x1b\x1b_Gq=2,").count();
+            assert_eq!(chunks, deflated.matches("\x1b_Gq=2,").count());
+            assert_eq!(wrapped.matches("\x1b\x1b\\\x1b\\").count(), chunks);
+        }
+
+        #[test]
+        fn pixels_go_deflated_only_over_ssh_to_a_terminal_known_to_inflate() {
+            type Env = &'static [(&'static str, &'static str)];
+            fn env(pairs: Env) -> impl Fn(&str) -> Option<String> {
+                move |var| pairs.iter().find(|(name, _)| *name == var).map(|(_, v)| v.to_string())
+            }
+            const SSH: (&str, &str) = ("SSH_CONNECTION", "10.0.0.2 50000 10.0.0.1 22");
+            const TTY: (&str, &str) = ("SSH_TTY", "/dev/ttys003");
+            assert!(deflate_kitty(env(&[SSH, ("TERM", "xterm-kitty")])));
+            assert!(deflate_kitty(env(&[TTY, ("TERM", "xterm-ghostty")])));
+            // Locally the pty moves a page faster than zlib compresses it.
+            assert!(!deflate_kitty(env(&[("TERM", "xterm-kitty"), ("KITTY_WINDOW_ID", "1")])));
+            // Nobody known to inflate: under tmux TERM is tmux's own.
+            assert!(!deflate_kitty(env(&[TTY, ("TERM", "tmux-256color")])));
+            assert!(!deflate_kitty(env(&[TTY, ("TERM", "xterm-256color")])));
+
+            // The answer rides with the Graphics, forks included.
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+            let art = a_cover(64);
+            let remote = Graphics { deflate: true, ..Graphics::forced(ProtocolType::Kitty) };
+            let local = Graphics::forced(ProtocolType::Kitty);
+            for (mut graphics, deflated) in [(remote.fork(), true), (local, false)] {
+                let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+                terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), &art))).unwrap();
+                let sent: String =
+                    terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect();
+                assert_eq!(sent.contains(",o=z,"), deflated, "deflated: {deflated}");
+            }
+        }
+
+        #[test]
+        fn the_kitty_picture_is_the_one_the_picker_would_have_built() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            /// Every cell of one frame drawing `protocol`, in order.
+            fn frame_of(terminal: &mut Terminal<TestBackend>, protocol: &Protocol) -> String {
+                terminal
+                    .draw(|frame| frame.render_widget(Image::new(protocol), frame.area()))
+                    .unwrap();
+                terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
+            }
+
+            // Same cells, same pixels: only the id and the wire format
+            // differ. A square cover that fits its box exactly, a banner,
+            // and a cover the fit leaves transparent padding beside.
+            let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
+            let cases = [
+                ((10, 20), (128, 128), (12, 6)),
+                ((10, 20), (400, 201), (30, 9)),
+                ((13, 27), (128, 65), (12, 6)),
+            ];
+            let mut formats = Vec::new();
+            for (font, (side, tall), fitted) in cases {
+                #[allow(deprecated)]
+                let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(font.0, font.1));
+                picker.set_protocol_type(ProtocolType::Kitty);
+                let pixels = image::RgbImage::from_fn(side, tall, |x, y| {
+                    image::Rgb([(x * 7) as u8, (y * 13) as u8, (x ^ y) as u8])
+                });
+                let source = image::DynamicImage::ImageRgb8(pixels);
+                let fitted = Size::new(fitted.0, fitted.1);
+                let (ours, transmit) =
+                    kitty_picture(&picker, source.clone(), fitted, &resize, (42, false, false))
+                        .unwrap();
+                let theirs = picker.new_protocol(source.clone(), fitted, resize.clone()).unwrap();
+                assert_eq!(ours.size(), theirs.size(), "{font:?} {side}");
+
+                // The picker's picture sends its transmission ahead of the
+                // first row's placeholders; ours is the same picture, pixel
+                // for pixel, whichever format carries it.
+                let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+                let first = frame_of(&mut terminal, &theirs);
+                let (their_keys, their_pixels) = received(first.split("\x1b[s").next().unwrap());
+                let (our_keys, our_pixels) = received(&transmit);
+                assert_eq!(rgba(&our_keys, our_pixels), their_pixels, "{font:?} {side}");
+                let size = |keys: &str| keys.split(",t=d,").nth(1).unwrap().to_string();
+                assert_eq!(size(&our_keys), size(&their_keys), "{font:?} {side}");
+                // RGB where every pixel is opaque, RGBA where the fit padded.
+                let padded = their_pixels.chunks(4).any(|pixel| pixel[3] != u8::MAX);
+                assert_eq!(our_keys.contains("f=32"), padded, "{font:?} {side}: {our_keys}");
+                assert_eq!(our_keys.contains("f=24"), !padded, "{font:?} {side}: {our_keys}");
+                formats.push(padded);
+
+                // And the placeholders ours draws every frame are the ones
+                // upstream's own draws once its transmission is spent.
+                let cells = ours.size();
+                let pixels = resize.resize(&source, picker.font_size(), cells, None);
+                let upstream = Protocol::Kitty(Kitty::new(pixels, cells, 42, false).unwrap());
+                let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+                frame_of(&mut terminal, &upstream);
+                let mut again = Terminal::new(TestBackend::new(40, 12)).unwrap();
+                let mut spent = Terminal::new(TestBackend::new(40, 12)).unwrap();
+                assert_eq!(frame_of(&mut spent, &ours), frame_of(&mut again, &upstream));
+                assert!(!frame_of(&mut spent, &ours).contains("a=T"), "the stand-in sends nothing");
+            }
+            assert!(formats.contains(&true) && formats.contains(&false), "{formats:?}");
+        }
+
+        #[test]
+        fn a_kitty_picture_lets_go_of_its_pixels_once_the_frame_carries_them() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            let art = a_cover(64);
+            let mut graphics = Graphics::forced(ProtocolType::Kitty);
+            let symbols = |terminal: &Terminal<TestBackend>| -> String {
+                terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
+            };
+            // The first frame carries them, once, ahead of the placeholders.
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), &art))).unwrap();
+            let first = symbols(&terminal);
+            assert_eq!(first.matches("a=T").count(), 1, "one transmission");
+            assert!(first.find("a=T") < first.find('\u{10EEEE}'), "ahead of what shows it");
+            let held = graphics.cached.as_ref().unwrap();
+            assert!(held.transmit.borrow().is_none(), "and not kept once sent");
+
+            // Every later frame is the placeholders alone, drawn warm.
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), &art))).unwrap();
+            let later = symbols(&terminal);
+            assert!(!later.contains("_G"), "nothing sent again");
+            assert_eq!(later.matches('\u{10EEEE}').count(), first.matches('\u{10EEEE}').count());
+            assert_eq!(graphics.encodes(), 1);
+        }
+
+        #[test]
+        fn a_transmission_something_drew_over_goes_out_with_the_next_frame() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // The header dropdown, a modal, a tooltip: drawn after the
+            // picture in the frame that carries its pixels, over its first
+            // cell. The placeholders would point at whatever the id held
+            // last — the previous cover — so the check hands the pixels
+            // back, and the next frame that draws the picture sends them
+            // (the integration check of performance audit #95).
+            let art = a_cover(64);
+            let mut graphics = Graphics::forced(ProtocolType::Kitty);
+            let symbols = |terminal: &Terminal<TestBackend>| -> String {
+                terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
+            };
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            terminal
+                .draw(|frame| {
+                    assert!(graphics.draw(frame, frame.area(), &art));
+                    let buffer = frame.buffer_mut();
+                    let first = buffer.content.iter().position(|cell| cell.symbol().contains("a=T"));
+                    buffer.content[first.unwrap()].reset();
+                    verify_sent(buffer);
+                })
+                .unwrap();
+            assert!(!symbols(&terminal).contains("_G"), "the overlay's frame lost them");
+
+            // Drawn again warm: they ride this frame, and this frame keeps them.
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            terminal
+                .draw(|frame| {
+                    assert!(graphics.draw(frame, frame.area(), &art));
+                    verify_sent(frame.buffer_mut());
+                })
+                .unwrap();
+            assert_eq!(symbols(&terminal).matches("a=T").count(), 1, "sent after all");
+            let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+            terminal
+                .draw(|frame| {
+                    assert!(graphics.draw(frame, frame.area(), &art));
+                    verify_sent(frame.buffer_mut());
+                })
+                .unwrap();
+            assert!(!symbols(&terminal).contains("_G"), "and once only");
+            assert_eq!(graphics.encodes(), 1, "no encode bought any of it");
+
+            // Lost, then replaced before a frame drew them again: they go
+            // with the picture they were, never out under the next one.
+            let next = a_cover(96);
+            let mut frame_of = |art: &crate::tui::art::Art, overlay: bool| {
+                let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        assert!(graphics.draw(frame, frame.area(), art));
+                        if overlay {
+                            frame.buffer_mut().reset();
+                        }
+                        verify_sent(frame.buffer_mut());
+                    })
+                    .unwrap();
+                symbols(&terminal)
+            };
+            frame_of(&next, true);
+            assert_eq!(frame_of(&art, false).matches("a=T").count(), 1, "the new picture's own");
+            assert!(!frame_of(&art, false).contains("_G"), "and nothing of the one it replaced");
+            assert!(IN_FLIGHT.with_borrow(Vec::is_empty), "nothing held past the check");
+        }
+
+        #[test]
+        fn a_sharper_copy_is_drawn_again_only_where_the_thumbnail_fell_short() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // The server's small copy first, then the original, as the
+            // playing track's cover arrives (performance audit #92): a box
+            // the thumbnail fills — a queue row's 6x3 is 60 px a side —
+            // keeps its picture; one that drew from the small copy's bytes
+            // draws again from the original's.
+            let small = a_cover(256);
+            let sharp = small.clone().sharpened(a_cover(640));
+            for ((width, height), encodes, decodes) in [((6, 3), 1, 0), ((40, 20), 2, 2)] {
+                let mut graphics = Graphics::forced(ProtocolType::Kitty);
+                for art in [&small, &sharp, &sharp] {
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), art))).unwrap();
+                }
+                assert_eq!(graphics.encodes(), encodes, "{width}x{height}");
+                assert_eq!(graphics.decodes.get(), decodes, "{width}x{height}");
+                let held = graphics.cached.as_ref().unwrap();
+                assert_eq!(held.source.0, if decodes == 0 { 128 } else { 640 }, "{width}x{height}");
+            }
+        }
+
+        /// A cover that arrived as a JPEG, as most do.
+        fn a_jpeg_cover(width: u32, height: u32) -> crate::tui::art::Art {
+            let pixels = image::RgbImage::from_fn(width, height, |x, y| {
+                let v = ((x * x + y * 3) / 7) as u8;
+                image::Rgb([v, v.wrapping_add((y / 3) as u8), 255 - v])
+            });
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90)
+                .encode_image(&pixels)
+                .unwrap();
+            crate::tui::art::decode(&bytes.into_inner()).unwrap()
+        }
+
+        /// The iTerm2 escape a frame carries: everything before the image
+        /// data, the image's bytes, and what follows them.
+        fn iterm2_sent(data: &str) -> (String, Vec<u8>, String) {
+            use base64::Engine;
+            let (head, rest) = data.split_once("doNotMoveCursor=1:").unwrap();
+            let (payload, tail) = rest.split_once('\x07').unwrap();
+            let bytes = base64::engine::general_purpose::STANDARD.decode(payload).unwrap();
+            (head.to_string(), bytes, tail.to_string())
+        }
+
+        #[test]
+        fn a_jpeg_cover_goes_to_iterm2_as_a_jpeg_and_lossless_art_stays_png() {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // A photograph PNG-encodes to several times its JPEG, and the
+            // payload is written on every page turn and carried in the
+            // frame's cells (performance audit #96).
+            let frame_sent = |art: &crate::tui::art::Art| {
+                let mut graphics = Graphics::forced(ProtocolType::Iterm2);
+                let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+                terminal.draw(|frame| assert!(graphics.draw(frame, frame.area(), art))).unwrap();
+                let sent: String =
+                    terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect();
+                iterm2_sent(&sent)
+            };
+            let (head, jpeg, _) = frame_sent(&a_jpeg_cover(300, 300));
+            assert!(jpeg.starts_with(&[0xFF, 0xD8, 0xFF]) && jpeg.ends_with(&[0xFF, 0xD9]));
+            assert!(head.contains(&format!("size={};", jpeg.len())), "{head:?}");
+            let decoded = image::load_from_memory(&jpeg).unwrap();
+            let (w, h) = (decoded.width(), decoded.height());
+            assert!(head.contains(&format!("width={w}px;height={h}px;")), "{head:?}");
+            // The QR code, the wordmark and PNG covers stay lossless.
+            let (_, png, _) = frame_sent(&a_cover(300));
+            assert!(png.starts_with(b"\x89PNG"), "lossless art stays PNG");
+        }
+
+        #[test]
+        fn the_iterm2_jpeg_stands_where_upstreams_png_stood() {
+            // The same cells, the same erased box ahead of it, the same
+            // framing — the tmux wrapper included. Not padded: the picture
+            // is its own size, over the cells the box cleared, which is all
+            // upstream's transparent strip showed.
+            let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
+            #[allow(deprecated)]
+            let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(10, 20));
+            picker.set_protocol_type(ProtocolType::Iterm2);
+            for (width, height) in [(300, 300), (300, 150), (150, 300)] {
+                let art = a_jpeg_cover(width, height);
+                let source = image::load_from_memory(art.source()).unwrap();
+                let fitted = Size::new(24, 8);
+                let ours = iterm2_jpeg(&picker, source.clone(), fitted, &resize, false).unwrap();
+                let theirs = picker.new_protocol(source, fitted, resize.clone()).unwrap();
+                assert_eq!(ours.size(), theirs.size(), "{width}x{height}");
+                let (Protocol::ITerm2(ours), Protocol::ITerm2(theirs)) = (ours, theirs) else {
+                    panic!("iTerm2 both")
+                };
+                let (our_head, jpeg, our_tail) = iterm2_sent(&ours.data);
+                let (their_head, png, their_tail) = iterm2_sent(&theirs.data);
+                let erased = |head: &str| head.split("\x1b]1337;").next().unwrap().to_string();
+                assert_eq!(erased(&our_head), erased(&their_head), "{width}x{height}");
+                assert_eq!(our_tail, their_tail);
+                assert!(jpeg.len() * 2 < png.len(), "{} vs {}", jpeg.len(), png.len());
+                // The picture itself is the unpadded scale of the same fit.
+                let shown = image::load_from_memory(&jpeg).unwrap();
+                let padded = image::load_from_memory(&png).unwrap().to_rgba8();
+                let (w, h) = (shown.width(), shown.height());
+                assert!(w <= padded.width() && h <= padded.height());
+                assert!(w == padded.width() || h == padded.height(), "one side meets the box");
+                let beyond = padded.enumerate_pixels().filter(|(x, y, _)| *x >= w || *y >= h);
+                assert!(beyond.clone().all(|(_, _, pixel)| pixel.0[3] == 0), "padding past it");
+            }
+            let art = a_jpeg_cover(300, 300);
+            let source = image::load_from_memory(art.source()).unwrap();
+            let Some(Protocol::ITerm2(wrapped)) =
+                iterm2_jpeg(&picker, source, Size::new(24, 8), &resize, true)
+            else {
+                panic!("iTerm2")
+            };
+            assert!(wrapped.data.starts_with("\x1bPtmux;\x1b\x1b["), "{:?}", &wrapped.data[..20]);
+            assert!(wrapped.data.ends_with("\x07\x1b\\"));
+            assert!(wrapped.is_tmux);
+        }
+
         #[test]
         fn a_small_cover_is_enlarged_to_fill_its_fitted_box() {
             use ratatui::Terminal;
@@ -1106,6 +2064,50 @@ mod native {
                     graphics.decodes.get()
                 );
             }
+
+            // What deflating a kitty transmission adds, and saves, at a
+            // wall cover's size and at a large Now Playing cover's.
+            let source = image::load_from_memory(&jpeg).unwrap();
+            for side in [120, 192, 400] {
+                let pixels = source.resize_exact(side, side, image::imageops::FilterType::Triangle);
+                let start = std::time::Instant::now();
+                let plain = kitty_transmit(&pixels, 1, false, false);
+                let fast = start.elapsed();
+                let start = std::time::Instant::now();
+                let deflated = kitty_transmit(&pixels, 1, false, true);
+                let slow = start.elapsed();
+                eprintln!(
+                    "kitty {side}px: {} bytes in {fast:?}, deflated {} bytes in {slow:?}",
+                    plain.len(),
+                    deflated.len()
+                );
+            }
+
+            // iTerm2: upstream's PNG against the JPEG a JPEG cover now goes
+            // as, a wall cell's box and a Now Playing cover's.
+            let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
+            #[allow(deprecated)]
+            let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(10, 20));
+            picker.set_protocol_type(ProtocolType::Iterm2);
+            for cells in [Size::new(12, 6), Size::new(42, 21)] {
+                let start = std::time::Instant::now();
+                let png = picker.new_protocol(source.clone(), cells, resize.clone()).unwrap();
+                let slow = start.elapsed();
+                let start = std::time::Instant::now();
+                let jpeg = iterm2_jpeg(&picker, source.clone(), cells, &resize, false).unwrap();
+                let fast = start.elapsed();
+                let bytes = |protocol: &Protocol| match protocol {
+                    Protocol::ITerm2(iterm2) => iterm2.data.len(),
+                    _ => 0,
+                };
+                eprintln!(
+                    "iTerm2 {}x{} cells: PNG {} bytes in {slow:?}, JPEG {} bytes in {fast:?}",
+                    cells.width,
+                    cells.height,
+                    bytes(&png),
+                    bytes(&jpeg)
+                );
+            }
         }
 
         #[test]
@@ -1210,6 +2212,9 @@ mod stub {
 
     #[derive(Debug)]
     pub struct Graphics;
+
+    /// Nothing is ever sent, so nothing can be lost on the way.
+    pub fn verify_sent(_buffer: &ratatui::buffer::Buffer) {}
 
     impl Graphics {
         pub fn disabled() -> Graphics {

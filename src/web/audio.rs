@@ -19,6 +19,10 @@
 //! so there are no retained JS closures; the one future is `play()`'s
 //! promise, watched for the autoplay-policy refusal so the UI can say
 //! "press a key" instead of playing silence.
+//!
+//! The context is only awake while something sounds: `tick()` suspends it a
+//! few seconds into a pause, a stop or the end of the queue, and play wakes
+//! it (see [`ContextIdle`] for why the browser will not do this itself).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -30,14 +34,12 @@ use web_sys::{
     AnalyserNode, AudioContext, AudioContextState, ChannelSplitterNode, HtmlAudioElement,
 };
 
+use super::Waker;
+use super::pace::{self, ContextIdle, ContextStep};
 use crate::clock::Instant;
 use crate::engine::tap::AudioTap;
 use crate::player::PlayerStatus;
 use crate::tui::worker::{AudioCmd, Event};
-
-/// Time-domain window the analysers hold. Matches the tap's own sizing
-/// story: enough to draw from, recent enough to be what you are hearing.
-const FFT_SIZE: usize = 2048;
 
 pub struct WebAudioPlayer {
     tap: Arc<AudioTap>,
@@ -46,6 +48,8 @@ pub struct WebAudioPlayer {
     /// Whether building the graph was already tried — one element supports
     /// exactly one `createMediaElementSource`, ever, so no retries.
     graph_built: bool,
+    /// When the context goes to sleep and wakes (performance audit #123).
+    idle: ContextIdle,
 
     /// What the player has been told, as opposed to what the element reports:
     /// the element flickers `paused` while `play()` settles, and the UI
@@ -58,6 +62,8 @@ pub struct WebAudioPlayer {
     /// Failures that surface inside futures (autoplay refusals), drained by
     /// `tick` like everything else.
     async_events: Rc<RefCell<VecDeque<Event>>>,
+    /// Brings the shell's loop round for them.
+    wake: Waker,
     last_tick: Option<Instant>,
     scratch_l: Vec<f32>,
     scratch_r: Vec<f32>,
@@ -70,25 +76,38 @@ struct Graph {
     ctx: AudioContext,
     left: AnalyserNode,
     right: AnalyserNode,
+    /// The analysers' time-domain window, in frames: long enough to reach
+    /// back to the last copy (see [`pace::analyser_window`]).
+    window: usize,
 }
 
 impl WebAudioPlayer {
-    pub fn new(tap: Arc<AudioTap>) -> Self {
+    pub fn new(tap: Arc<AudioTap>, wake: Waker) -> Self {
         WebAudioPlayer {
             tap,
             element: None,
             graph: None,
             graph_built: false,
+            idle: ContextIdle::default(),
             source: String::new(),
             playing: false,
             paused: false,
             duration_hint: None,
             async_events: Rc::new(RefCell::new(VecDeque::new())),
+            wake,
             last_tick: None,
-            scratch_l: vec![0.0; FFT_SIZE],
-            scratch_r: vec![0.0; FFT_SIZE],
-            batch: Vec::with_capacity(FFT_SIZE * 2),
+            // Sized with the graph, which knows the sample rate.
+            scratch_l: Vec::new(),
+            scratch_r: Vec::new(),
+            batch: Vec::new(),
         }
+    }
+
+    /// Whether something is waiting for `tick` — a command's fresh status,
+    /// or a refusal from a future. The shell's loop runs a tick for it at
+    /// once rather than at the next poll.
+    pub fn has_news(&self) -> bool {
+        !self.async_events.borrow().is_empty()
     }
 
     pub fn dispatch(&mut self, cmd: AudioCmd) {
@@ -102,6 +121,9 @@ impl WebAudioPlayer {
             }
             AudioCmd::Resume => {
                 self.paused = false;
+                // A pause longer than a few seconds suspended the context;
+                // a keypress is what brings it back, the same as Play.
+                self.resume_context();
                 if let Some(el) = &self.element {
                     self.watch_play(el);
                 }
@@ -143,8 +165,9 @@ impl WebAudioPlayer {
         self.async_events.borrow_mut().push_back(Event::Status(self.status()));
     }
 
-    /// Advance: poll the element for what actually happened since last frame,
-    /// copy the analysers into the tap, and report.
+    /// Advance: poll the element for what actually happened since the last
+    /// tick, copy the analysers into the tap, and report. The shell ticks
+    /// once a poll (or at once, for news), not once a frame.
     pub fn tick(&mut self) -> Vec<Event> {
         let now = Instant::now();
         let dt = match self.last_tick.replace(now) {
@@ -154,6 +177,8 @@ impl WebAudioPlayer {
 
         let mut events: Vec<Event> =
             self.async_events.borrow_mut().drain(..).collect();
+
+        self.pace_context(now);
 
         if let Some(el) = &self.element {
             if self.playing {
@@ -231,12 +256,55 @@ impl WebAudioPlayer {
         el.set_src(&url);
         el.load();
         // The context starts suspended until the page has user activation;
-        // every Play arrives on a keypress, which is exactly that. Resuming
-        // is idempotent, so just always ask.
+        // every Play arrives on a keypress, which is exactly that — or on
+        // a track ending, which the idle grace outlasts, so the context is
+        // still awake. Resuming is idempotent, so just always ask.
+        self.resume_context();
+        self.watch_play(&el);
+    }
+
+    fn resume_context(&mut self) {
         if let Some(graph) = &self.graph {
             let _ = graph.ctx.resume();
         }
-        self.watch_play(&el);
+        self.idle.resumed(Instant::now());
+    }
+
+    /// A keystroke is about to play or resume: wake the context from inside
+    /// its handler (performance audit #123). The command itself goes out on
+    /// the loop's next pass, as every effect does, and asks again — but an
+    /// engine that lets a page start audio only while it handles a gesture
+    /// (WebKit's rule) would turn that one down, and the element would play
+    /// into a suspended graph. A first Play builds the element and its graph
+    /// here for the same reason, so the context is born inside the gesture.
+    pub fn wake_in_gesture(&mut self) {
+        if self.ensure_element().is_err() {
+            // play() tries again, and says what went wrong.
+            return;
+        }
+        if let Some(graph) = &self.graph {
+            let _ = graph.ctx.resume();
+        }
+    }
+
+    /// Put the context to sleep once nothing has sounded for a while, and
+    /// wake it if the element starts from outside the app (performance
+    /// audit #123). Judged by the element, not the commanded state: a media
+    /// key can play or pause it behind the app's back, and a failed stream
+    /// sits "not paused" with nothing coming.
+    fn pace_context(&mut self, now: Instant) {
+        let (Some(el), Some(graph)) = (&self.element, &self.graph) else { return };
+        let sounding = !el.paused() && !el.ended() && el.error().is_none();
+        let running = graph.ctx.state() == AudioContextState::Running;
+        match self.idle.step(sounding, running, now) {
+            ContextStep::Keep => {}
+            ContextStep::Suspend => {
+                let _ = graph.ctx.suspend();
+            }
+            ContextStep::Resume => {
+                let _ = graph.ctx.resume();
+            }
+        }
     }
 
     /// Call `play()` and watch the promise: the browser's autoplay policy
@@ -250,12 +318,14 @@ impl WebAudioPlayer {
             return;
         };
         let queue = self.async_events.clone();
+        let wake = self.wake.clone();
         spawn_local(async move {
             if wasm_bindgen_futures::JsFuture::from(promise).await.is_err() {
                 queue.borrow_mut().push_back(Event::AudioFailed(
                     "the browser blocked sound until you press a key — press space to resume"
                         .into(),
                 ));
+                wake();
             }
         });
     }
@@ -283,24 +353,28 @@ impl WebAudioPlayer {
         self.graph = try_build_graph(el);
     }
 
-    /// Copy roughly the audio that played since last frame from the
-    /// analysers into the tap. The analysers hold the most recent FFT_SIZE
+    /// Copy roughly the audio that played since the last tick from the
+    /// analysers into the tap. The analysers hold the most recent `window`
     /// samples; taking the tail sized by wall-clock keeps the ring's
     /// contents close to a continuous stream rather than overlapping
-    /// snapshots.
+    /// snapshots — which needs the window to reach back past the gap
+    /// between ticks.
     fn feed_tap(&mut self, dt: f64) {
         let Some(graph) = &self.graph else { return };
         if graph.ctx.state() != AudioContextState::Running {
             return;
         }
         let rate = graph.ctx.sample_rate();
-        let fresh = ((dt * f64::from(rate)) as usize).clamp(1, FFT_SIZE);
+        let window = graph.window;
+        let fresh = ((dt * f64::from(rate)) as usize).clamp(1, window);
 
+        self.scratch_l.resize(window, 0.0);
+        self.scratch_r.resize(window, 0.0);
         graph.left.get_float_time_domain_data(&mut self.scratch_l);
         graph.right.get_float_time_domain_data(&mut self.scratch_r);
 
         self.batch.clear();
-        for i in (FFT_SIZE - fresh)..FFT_SIZE {
+        for i in (window - fresh)..window {
             self.batch.push(self.scratch_l[i]);
             self.batch.push(self.scratch_r[i]);
         }
@@ -320,14 +394,15 @@ fn try_build_graph(el: &HtmlAudioElement) -> Option<Graph> {
         ctx.create_channel_splitter_with_number_of_outputs(2).ok()?;
     source.connect_with_audio_node(&splitter).ok()?;
 
+    let window = pace::analyser_window(ctx.sample_rate());
     let left = ctx.create_analyser().ok()?;
     let right = ctx.create_analyser().ok()?;
-    left.set_fft_size(FFT_SIZE as u32);
-    right.set_fft_size(FFT_SIZE as u32);
+    left.set_fft_size(window as u32);
+    right.set_fft_size(window as u32);
     splitter.connect_with_audio_node_and_output(&left, 0).ok()?;
     splitter.connect_with_audio_node_and_output(&right, 1).ok()?;
 
-    Some(Graph { ctx, left, right })
+    Some(Graph { ctx, left, right, window })
 }
 
 fn media_error_text(error: &web_sys::MediaError) -> String {

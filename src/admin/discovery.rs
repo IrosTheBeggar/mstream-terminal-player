@@ -249,7 +249,8 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
         while let Ok((client, op)) = job_rx.recv() {
             let done = match op {
                 Op::Load { include_incompatible, activity_since } => {
-                    Done::Loaded(client.admin_discovery_status().and_then(|status| {
+                    Done::Loaded(crate::api::wait(async {
+                        let status = client.admin_discovery_status_async().await?;
                         if !status.enabled {
                             return Ok(Box::new(Loaded {
                                 status,
@@ -259,14 +260,26 @@ fn spawn_worker() -> (Sender<(Arc<Client>, Op)>, Receiver<Done>) {
                                 activity: None,
                             }));
                         }
-                        let catalog = client.admin_discovery_catalog(include_incompatible)?;
+                        // Past the switch no read needs another's answer:
+                        // they go out together, one round trip, not four
+                        // (performance audit #83).
+                        let activity = async {
+                            match activity_since {
+                                Some(since) => client.admin_discovery_activity_async(since).await.ok(),
+                                None => None,
+                            }
+                        };
+                        let (catalog, federation, requests, activity) = tokio::join!(
+                            client.admin_discovery_catalog_async(include_incompatible),
+                            client.admin_federation_async(),
+                            client.admin_federation_requests_async(),
+                            activity,
+                        );
+                        let catalog = catalog?;
                         // Best-effort: the relationship column just stays
                         // blank when federation cannot answer.
-                        let federation = client.admin_federation().ok();
-                        let requests =
-                            client.admin_federation_requests().ok().map(|r| r.requests);
-                        let activity = activity_since
-                            .and_then(|since| client.admin_discovery_activity(since).ok());
+                        let federation = federation.ok();
+                        let requests = requests.ok().map(|r| r.requests);
                         Ok(Box::new(Loaded { status, catalog: Some(catalog), federation, requests, activity }))
                     }))
                 }
@@ -426,16 +439,24 @@ impl Room {
     /// The catalog rows the table shows: the filter's matches, in the
     /// server's order (seeders, then online, then size).
     pub(crate) fn rows(&self) -> Vec<&CatalogPeer> {
+        self.row_indices().into_iter().map(|i| &self.catalog.peers[i]).collect()
+    }
+
+    /// [`Room::rows`] as places in the catalog — what the table draws
+    /// from, beside the room it registers its clicks on.
+    fn row_indices(&self) -> Vec<usize> {
         let q = if self.filter_on { self.filter.value().trim().to_lowercase() } else { String::new() };
         self.catalog
             .peers
             .iter()
-            .filter(|p| {
+            .enumerate()
+            .filter(|(_, p)| {
                 q.is_empty()
                     || p.payload.name.to_lowercase().contains(&q)
                     || p.payload.description.to_lowercase().contains(&q)
                     || p.from.to_lowercase().contains(&q)
             })
+            .map(|(i, _)| i)
             .collect()
     }
 
@@ -1016,18 +1037,28 @@ impl Screen for Room {
         &mut self.ui
     }
 
-    fn pump(&mut self) {
+    fn absorb(&mut self) -> bool {
+        let mut folded = false;
         loop {
             match self.from_worker.try_recv() {
                 Ok(done) => self.apply(done),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.note = Some((t!("note.worker_gone").to_string(), true));
-                    break;
+                    return true;
                 }
             }
+            folded = true;
         }
+        folded
+    }
+
+    fn pump(&mut self) {
         self.dispatch_queued();
+    }
+
+    fn awaiting(&self) -> bool {
+        self.in_flight
     }
 
     /// The page's ten-second poll, quiet: only while on the network, and
@@ -1357,11 +1388,15 @@ fn render(frame: &mut Frame, room: &mut Room) {
 
     draw_header(frame, area, &t!("p2p.title"), &host_of(&room.client));
     let column = Rect { x: 2, y: 2, width: area.width.saturating_sub(4), height: area.height.saturating_sub(5) };
-    match room.status.clone() {
+    // Lent to the draw and put back, not copied every frame (performance
+    // audit #110): nothing the page draws reads it off the room.
+    let status = room.status.take();
+    match &status {
         None => {}
-        Some(s) if !s.enabled => draw_off(frame, room, column, &s),
-        Some(s) => draw_on(frame, room, column, &s),
+        Some(s) if !s.enabled => draw_off(frame, room, column, s),
+        Some(s) => draw_on(frame, room, column, s),
     }
+    room.status = status;
     draw_bottom(frame, area, room.note.as_ref(), room.busy.as_deref(), &footer_hint(room));
 
     if modal_open {
@@ -1914,7 +1949,9 @@ fn draw_servers(frame: &mut Frame, room: &mut Room, table: Rect, s: &DiscoverySt
     frame.render_widget(Paragraph::new(Span::styled("─".repeat(table.width as usize), dim())), line(y));
     y += 1;
 
-    let rows: Vec<CatalogPeer> = room.rows().into_iter().cloned().collect();
+    // Places in the catalog, not copies of its peers: each row on screen
+    // is read where it lives (performance audit #110).
+    let rows = room.row_indices();
     if rows.is_empty() {
         let text = if room.filter_on && !room.catalog.peers.is_empty() { t!("p2p.empty_filter") } else { t!("p2p.empty_servers") };
         frame.render_widget(Paragraph::new(Span::styled(text.to_string(), dim())), line(y));
@@ -1931,7 +1968,8 @@ fn draw_servers(frame: &mut Frame, room: &mut Room, table: Rect, s: &DiscoverySt
     }
     let rows_y = y;
     let now = unix_now();
-    for (i, peer) in rows.iter().enumerate().skip(first).take(visible) {
+    for (i, &at) in rows.iter().enumerate().skip(first).take(visible) {
+        let peer = &room.catalog.peers[at];
         let selected = room.sel == Some(i);
         let rect = line(y);
         let hovered = !selected && room.ui.pointer.is_some_and(|p| rect.contains(p));
@@ -1994,7 +2032,7 @@ fn draw_servers(frame: &mut Frame, room: &mut Room, table: Rect, s: &DiscoverySt
     // else is on it.
     if room.note.is_none()
         && room.busy.is_none()
-        && let Some(peer) = room.selected_peer()
+        && let Some(peer) = room.sel.and_then(|s| rows.get(s)).map(|&at| &room.catalog.peers[at])
         && !peer.payload.description.trim().is_empty()
     {
         let text = format!("{} · {}", display_name(peer), printable(&peer.payload.description, DESCRIPTION_MAX));
@@ -2981,5 +3019,61 @@ mod tests {
         assert_eq!(fmt_bytes(1_536), "2 KB");
         assert_eq!(short_id(&hex("8f31c0e2a7")), "8f31c0e2a78f…");
         assert_eq!(printable("bad\u{1b}[31mname\u{202E}", 10), "bad[31mnam");
+    }
+
+    #[test]
+    fn a_load_asks_past_the_switch_in_one_wave() {
+        // The status first — while it is off nothing else is asked — then
+        // the catalog, federation, the requests and the activity together:
+        // two round trips, not five (performance audit #83).
+        let answer = |catalog: u16| {
+            move |path: &str| match path.split('?').next().unwrap_or_default() {
+                "/api/v1/admin/discovery/p2p/status" => (200, r#"{"enabled":true}"#.to_string()),
+                "/api/v1/admin/discovery/p2p/catalog" => (catalog, "{}".to_string()),
+                "/api/v1/admin/federation/requests" => (500, "{}".to_string()),
+                _ => (200, "{}".to_string()),
+            }
+        };
+        let run = |url: &str| {
+            let (to_worker, from_worker) = spawn_worker();
+            let op = Op::Load { include_incompatible: false, activity_since: Some(0) };
+            to_worker.send((Arc::new(Client::new(url).expect("client")), op)).unwrap();
+            let Done::Loaded(result) = from_worker.recv_timeout(Duration::from_secs(30)).expect("an answer") else {
+                panic!("a load");
+            };
+            result
+        };
+        let server = super::super::waves::serve(&[1, 4], answer(200));
+        let loaded = run(&server.url).expect("a load");
+        let paths = server.paths();
+        assert_eq!((server.peak(), paths.len()), (4, 5), "{paths:?}");
+        assert_eq!(paths[0], "/api/v1/admin/discovery/p2p/status");
+        // The requests are best-effort; the catalog is not.
+        assert!(loaded.catalog.is_some() && loaded.activity.is_some() && loaded.requests.is_none());
+        let server = super::super::waves::serve(&[1, 4], answer(500));
+        assert!(run(&server.url).is_err());
+    }
+
+    #[test]
+    fn a_frame_reads_the_catalog_where_it_lives_and_keeps_the_status() {
+        // The table draws each row from the catalog by its place, and the
+        // page from the status lent for the frame — no copies made every
+        // frame (performance audit #110). The filter matches whatever the
+        // case, and the cursor's note is the filtered row's.
+        let _en = english();
+        let mut room = on();
+        handle_key(&mut room, key(KeyCode::Char('/')));
+        type_text(&mut room, "JAZZ");
+        handle_key(&mut room, key(KeyCode::Enter));
+        assert_eq!(room.rows().len(), 1);
+        handle_key(&mut room, key(KeyCode::Down));
+        let frame = draw(&mut room);
+        assert!(frame.contains("jazz-corner"), "{frame}");
+        assert!(room.status.is_some(), "the status is back after the frame");
+        let peer = room.selected_peer().expect("the cursor's peer");
+        assert_eq!(display_name(peer), "jazz-corner");
+        if !peer.payload.description.trim().is_empty() {
+            assert!(frame.contains(&format!("jazz-corner · {}", printable(&peer.payload.description, DESCRIPTION_MAX))), "{frame}");
+        }
     }
 }

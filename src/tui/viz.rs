@@ -94,6 +94,8 @@ pub struct Visualizer {
     /// same size as the frame it stands in for, and it used to be a fresh
     /// zero vec every paused frame — the other half of finding #52.
     quiet: TapFrame,
+    /// The heat ramp by pixel row, refilled each frame — see [`ramp_rows`].
+    ramp: Vec<Color>,
 }
 
 /// Assumed for the first frame, and the ceiling for a long gap — coming back
@@ -154,7 +156,7 @@ impl Visualizer {
                 // room before dividing.
                 let count = (canvas.width() as usize + BAR_GAP) / (BAR_WIDTH + BAR_GAP);
                 self.bars.update(heard, count, elapsed);
-                draw_bars(canvas, &self.bars.heights);
+                draw_bars(canvas, &self.bars.heights, &mut self.ramp);
             }
             // A band per two columns, like the spectrum, but drawn gapless —
             // that is what lets the columns add up to a picture. The same
@@ -163,7 +165,7 @@ impl Visualizer {
             VizMode::Cover => {
                 let bands = (canvas.width() as usize).div_ceil(BAR_WIDTH);
                 self.bars.update(heard, bands, elapsed);
-                draw_cover(canvas, &self.bars.heights, cover, &mut self.cover_grid);
+                draw_cover(canvas, &self.bars.heights, cover, &mut self.cover_grid, &mut self.ramp);
             }
             VizMode::Scope => draw_scope(canvas, heard, self.scatter),
             VizMode::Vectorscope => draw_vectorscope(canvas, heard, self.scatter),
@@ -486,17 +488,7 @@ impl Bars {
             *band = ((db - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0);
         }
 
-        // Neighbour smoothing, cava's "monstercat": every bar lifts the ones
-        // beside it by a share that decays with distance.
-        self.spread.clear();
-        self.spread.extend_from_slice(&self.bands);
-        for (i, &lifted) in self.bands.iter().enumerate() {
-            for (j, bar) in self.spread.iter_mut().enumerate() {
-                if i != j {
-                    *bar = bar.max(lifted / SPREAD.powi(i.abs_diff(j) as i32));
-                }
-            }
-        }
+        spread_into(&self.bands, &mut self.spread);
 
         let settle = (-elapsed / SMOOTH_SECS).exp();
         let mut loudest = 0.0f32;
@@ -537,8 +529,43 @@ impl Bars {
     }
 }
 
-fn draw_bars(canvas: &mut Canvas, bars: &[f32]) {
+/// Neighbour smoothing, cava's "monstercat": every bar lifts the ones beside
+/// it by a share that decays with distance, and stands at the highest of
+/// them — `max(bands[i] / SPREAD^|i - j|)` over every band `i`.
+///
+/// Two sweeps, not every pair: carried left to right, a band's share of the
+/// bar `k` places on is its share of the bar before divided once more, so
+/// the running maximum divided by SPREAD per step is the best any band to
+/// the left offers; the sweep back does the right. The pairwise loop was
+/// bands² `powi` calls a frame — 15,500 at a 300-column Cover panel — for
+/// the same numbers, give or take the last bit of rounding (performance
+/// audit #113).
+fn spread_into(bands: &[f32], out: &mut Vec<f32>) {
+    out.clear();
+    let mut carry = 0.0f32;
+    for &band in bands {
+        carry = (carry / SPREAD).max(band);
+        out.push(carry);
+    }
+    let mut carry = 0.0f32;
+    for (bar, &band) in out.iter_mut().zip(bands).rev() {
+        carry = (carry / SPREAD).max(band);
+        *bar = bar.max(carry);
+    }
+}
+
+/// The heat ramp by pixel row, top to bottom, into a table the caller keeps.
+/// A pixel's colour depends on its height alone, so a frame works it out
+/// once per row rather than once per lit pixel — a few hundred [`ramp`]s a
+/// frame instead of up to tens of thousands (performance audit #113).
+fn ramp_rows(height: i32, rows: &mut Vec<Color>) {
+    rows.clear();
+    rows.extend((0..height).map(|y| ramp(1.0 - y as f32 / height as f32)));
+}
+
+fn draw_bars(canvas: &mut Canvas, bars: &[f32], ramp_by_row: &mut Vec<Color>) {
     let height = canvas.height() as i32;
+    ramp_rows(height, ramp_by_row);
     for (i, &bar) in bars.iter().enumerate() {
         let top = height - (bar.clamp(0.0, 1.0) * height as f32).round() as i32;
         let x = (i * (BAR_WIDTH + BAR_GAP)) as i32;
@@ -547,7 +574,7 @@ fn draw_bars(canvas: &mut Canvas, bars: &[f32]) {
             // is, so the gradient stands still while the bars move through
             // it — the whole picture flashing at once is a headache. One
             // colour per row, shared across the bar's width.
-            let colour = ramp(1.0 - y as f32 / height as f32);
+            let colour = ramp_by_row[y as usize];
             for dx in 0..BAR_WIDTH as i32 {
                 canvas.set(x + dx, y, colour);
             }
@@ -618,11 +645,18 @@ impl CoverGrid {
 /// background: the mode keeps working, it just has nothing to light. No
 /// `NO_COLOR` gate, unlike the static card — a colourless curtain is still
 /// a working spectrum, where a colourless mosaic was a grey rectangle.
-fn draw_cover(canvas: &mut Canvas, bars: &[f32], cover: Option<&Art>, grid: &mut CoverGrid) {
+fn draw_cover(
+    canvas: &mut Canvas,
+    bars: &[f32],
+    cover: Option<&Art>,
+    grid: &mut CoverGrid,
+    ramp_by_row: &mut Vec<Color>,
+) {
     let height = i32::from(canvas.height());
     let width = i32::from(canvas.width());
-    if let Some(art) = cover {
-        grid.refresh(art, canvas.width(), canvas.height());
+    match cover {
+        Some(art) => grid.refresh(art, canvas.width(), canvas.height()),
+        None => ramp_rows(height, ramp_by_row),
     }
     for x in 0..width {
         let band = bars.get(x as usize / BAR_WIDTH).copied().unwrap_or(0.0);
@@ -634,7 +668,7 @@ fn draw_cover(canvas: &mut Canvas, bars: &[f32], cover: Option<&Art>, grid: &mut
             }
         } else {
             for y in top..height {
-                canvas.set(x, y, ramp(1.0 - y as f32 / height as f32));
+                canvas.set(x, y, ramp_by_row[y as usize]);
             }
         }
     }
@@ -1128,6 +1162,125 @@ mod tests {
         assert!((fast - slow).abs() < 0.12, "three tenths either way: {fast} vs {slow}");
     }
 
+    /// The spread as it was first written — every band against every bar,
+    /// cava's own shape — kept as the oracle for the two sweeps.
+    fn spread_pairwise(bands: &[f32]) -> Vec<f32> {
+        let mut spread = bands.to_vec();
+        for (i, &lifted) in bands.iter().enumerate() {
+            for (j, bar) in spread.iter_mut().enumerate() {
+                if i != j {
+                    *bar = bar.max(lifted / SPREAD.powi(i.abs_diff(j) as i32));
+                }
+            }
+        }
+        spread
+    }
+
+    #[test]
+    fn the_two_sweep_spread_is_the_pairwise_one() {
+        // Performance audit #113: O(bands) for the O(bands²) it replaced,
+        // with the same answer — to the last bit or two of rounding, far
+        // under the half-pixel a height would need to move to draw
+        // differently.
+        let mut seed = 0x2545_f491_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32
+        };
+        let mut shapes: Vec<Vec<f32>> = vec![
+            Vec::new(),
+            vec![0.7],
+            vec![0.0; 40],
+            vec![1.0; 40],
+            (0..125).map(|i| if i == 62 { 1.0 } else { 0.0 }).collect(),
+            (0..125).map(|i| i as f32 / 124.0).collect(),
+        ];
+        for count in [2, 3, 17, 26, 50, 83, 125, 200] {
+            for _ in 0..50 {
+                // Mostly quiet with a few loud bands, as music draws — and
+                // some all-noise vectors, where most bars stand on their own.
+                let sparse = next() < 0.5;
+                shapes.push(
+                    (0..count)
+                        .map(|_| {
+                            let v = next();
+                            if sparse && next() < 0.8 { v * 0.1 } else { v }
+                        })
+                        .collect(),
+                );
+            }
+        }
+        let mut swept = Vec::new();
+        let mut worst = 0.0f32;
+        for bands in &shapes {
+            spread_into(bands, &mut swept);
+            let pairwise = spread_pairwise(bands);
+            assert_eq!(swept.len(), pairwise.len());
+            for (j, (a, b)) in swept.iter().zip(&pairwise).enumerate() {
+                let off = (a - b).abs();
+                worst = worst.max(off);
+                assert!(off <= 1e-6, "bar {j} of {}: {a} against {b}", bands.len());
+            }
+        }
+        assert!(worst < 1e-6, "{worst}");
+    }
+
+    /// Not a check, a measurement (performance audit #113): the spread both
+    /// ways at a 300x90 panel's band counts —
+    /// `cargo test --release spread_both_ways -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check; run --release with --nocapture"]
+    fn time_the_spread_both_ways() {
+        use std::time::Instant;
+        for count in [83, 125] {
+            let bands: Vec<f32> = (0..count).map(|i| ((i * 37) % 101) as f32 / 100.0).collect();
+            let frames = 3_000;
+            let started = Instant::now();
+            for _ in 0..frames {
+                std::hint::black_box(spread_pairwise(std::hint::black_box(&bands)));
+            }
+            let pairwise = started.elapsed() / frames;
+            let mut out = Vec::new();
+            let started = Instant::now();
+            for _ in 0..frames {
+                spread_into(std::hint::black_box(&bands), &mut out);
+                std::hint::black_box(&out);
+            }
+            let swept = started.elapsed() / frames;
+            println!(">>> {count} bands: {pairwise:?} a frame pairwise, {swept:?} in two sweeps");
+        }
+
+        // And the ramp, at full height across a 250x82 panel: a colour
+        // worked out per lit pixel, as the bars used to, against a row
+        // table.
+        let bars = vec![1.0f32; 83];
+        let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 250, height: 82 });
+        let height = canvas.height() as i32;
+        let frames = 1_000;
+        let started = Instant::now();
+        for _ in 0..frames {
+            for (i, &bar) in bars.iter().enumerate() {
+                let top = height - (bar * height as f32).round() as i32;
+                let x = (i * (BAR_WIDTH + BAR_GAP)) as i32;
+                for y in top..height {
+                    let colour = ramp(1.0 - y as f32 / height as f32);
+                    canvas.set(x, y, colour);
+                    canvas.set(x + 1, y, colour);
+                }
+            }
+        }
+        let per_pixel = started.elapsed() / frames;
+        let mut table = Vec::new();
+        let started = Instant::now();
+        for _ in 0..frames {
+            draw_bars(&mut canvas, std::hint::black_box(&bars), &mut table);
+        }
+        let per_row = started.elapsed() / frames;
+        println!(">>> 83 full bars on 250x82: {per_pixel:?} a frame ramped per pixel, {per_row:?} by row");
+    }
+
     #[test]
     fn a_neighbour_of_a_struck_bar_is_lifted_but_not_as_far() {
         let mut bars = Bars::default();
@@ -1314,7 +1467,7 @@ mod tests {
         let bright = Color::Rgb(230, 120, 10);
         let rest = dimmed(bright, COVER_REST);
         let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 8, height: 5 });
-        draw_cover(&mut canvas, &[0.5; 4], Some(&orange_art()), &mut CoverGrid::default());
+        draw_cover(&mut canvas, &[0.5; 4], Some(&orange_art()), &mut CoverGrid::default(), &mut Vec::new());
 
         let lines = canvas.into_lines();
         // Cell row 0 holds pixel rows 0-1: both dim. Row 1 holds 2-3: the
@@ -1339,7 +1492,7 @@ mod tests {
         let rest = dimmed(bright, COVER_REST);
         let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 8, height: 5 });
         let mut grid = CoverGrid::default();
-        draw_cover(&mut canvas, &[1.0, 0.0, 1.0, 0.0], Some(&orange_art()), &mut grid);
+        draw_cover(&mut canvas, &[1.0, 0.0, 1.0, 0.0], Some(&orange_art()), &mut grid, &mut Vec::new());
 
         let lines = canvas.into_lines();
         let row = &lines[0].spans;
@@ -1464,13 +1617,32 @@ mod tests {
     }
 
     #[test]
+    fn a_ramp_row_is_the_colour_every_pixel_on_it_used_to_work_out() {
+        // Performance audit #113: one ramp per row a frame, read by every
+        // lit pixel on it — the colours the per-pixel ramp gave.
+        for height in [1, 4, 10, 164] {
+            let mut rows = Vec::new();
+            ramp_rows(height, &mut rows);
+            assert_eq!(rows.len(), height as usize);
+            for (y, colour) in rows.iter().enumerate() {
+                assert_eq!(*colour, ramp(1.0 - y as f32 / height as f32), "row {y} of {height}");
+            }
+        }
+        // And the table is refilled, not grown, frame on frame.
+        let mut rows = Vec::new();
+        ramp_rows(10, &mut rows);
+        ramp_rows(6, &mut rows);
+        assert_eq!(rows.len(), 6);
+    }
+
+    #[test]
     fn a_bar_is_two_cells_wide_with_a_gap_between_neighbours() {
         // Four full-height bars on an 11-column canvas land on columns 0-1,
         // 3-4, 6-7 and 9-10 with one dark column between neighbours — and
         // the last bar sits flush against the right edge, which is why the
         // caller budgets one trailing gap it never draws.
         let mut canvas = Canvas::new(Rect { x: 0, y: 0, width: 11, height: 4 });
-        draw_bars(&mut canvas, &[1.0; 4]);
+        draw_bars(&mut canvas, &[1.0; 4], &mut Vec::new());
 
         let mut lit = [false; 11];
         for line in canvas.into_lines() {

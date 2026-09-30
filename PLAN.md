@@ -517,7 +517,9 @@ file dialog with `--same-machine` (picker gained `pick_file`), else a path modal
 completion; SEARCH IN ticks on digits; one multipart POST per file, queued; outcomes in the
 webapp's words), Access (policy radio posts at once; USER · ADMIN · TORRENTS toggles; hidden with
 one user), Client (status, saved fields, other saved clients, `t` test, `c` switch, `x`
-disconnect gate). Polls: the list every 5 s on the Torrents tab, everything every 30 s. API:
+disconnect gate). Polls: the list every 5 s on the Torrents tab while it moves (something
+downloading, verifying or queued, or the last list changed; performance audit #100), everything
+every 30 s. API:
 the torrent types, twenty calls, a raw multipart `send_bytes`, `admin_users`;
 `extract_error` now prefers a body's `message` sentence over its `error` code. Locales `tor:`
 (240 keys × 10). Live-checked on the scratch server: choose Transmission → the connect form → a
@@ -1642,7 +1644,9 @@ a LATER secondary screen (party view), Columns retired.
   elsewhere, the empty slot frame yielding once the art is decoded. The
   fetch was already free — `fetch_art` rides the App funnel. One cover per
   frame, so the single-slot encode cache holds; widening it comes with the
-  Now Playing screen.
+  Now Playing screen. (It came with the performance audit, #97: the card
+  and the mini player each draw through a `cover::Slot` of their own, and
+  Now Playing keeps `app.graphics` warm at its size.)
 - **Search ✅ 2026-08-28**: `/` (or the nav item) opens the kit query card,
   which owns the keyboard while it takes text and drives the App's own
   query via `StartSearch`/`Input`/`Submit` — so `search_submitted`'s
@@ -1677,8 +1681,9 @@ a LATER secondary screen (party view), Columns retired.
   ever grows one) and the default star; per-row actions switch · edit ·
   make default (`default_server` config key, outranks MRU at startup) ·
   pair phone (the wizard's own QR renderers, pixels or half-blocks, over
-  the stored pairing code — card cover stands down while it shows, the
-  one-slot encode cache's rule) · remove (confirm modal; removal is the
+  the stored pairing code — the card cover stood down while it showed,
+  the one-slot encode cache's rule, until the card got a slot of its own
+  in performance audit #97) · remove (confirm modal; removal is the
   ONE flow that drops a pairing code). Adding/editing validates on a
   one-shot client so the live session is never touched until the server
   answers; switching goes through the App's own funnel
@@ -2945,3 +2950,298 @@ dropped as misreadings and six were downgraded. Numbering continues the Phase 1 
 | 68 | `Engine::queue_add_entry` exists to carry a duration hint, but its only caller always passes `None` and the serve routes have no way to supply one — so the module header's promise that hints save a second fetch is dead in the only mode that uses the engine queue | inline it, or thread hints through the serve queue routes |
 | 69 | `tokio::time::timeout` is used in three places in `quickconnect.rs` — the timeouts that keep a dead tunnel from hanging the api thread — but `time` isn't in our tokio feature list. It builds only because iroh and reqwest happen to enable it and Cargo unifies features; a dependency diet breaks the build pointing at the wrong file | add `"time"` |
 | 70 | `base64` is pinned at 0.23 while every other consumer in the tree (reqwest, iroh, portmapper, tokio-websockets) is on 0.22.1, so both compile | drop our pin to `"0.22"` |
+
+## Appendix — Performance audit (of this repo @ 796da16, 2026-09-28)
+
+A performance-only sweep of the whole tree. Sixteen readers each took a subsystem (engine, TUI loop,
+TUI drawing, network, GUI core, GUI rooms, the two halves of the admin rooms, the visualizer
+window, platform/web, build and CI) or a lens that cut across the whole tree (idle cost,
+allocation churn, blocking, algorithms, disk and network I/O). They raised 121 candidates, which
+merged into 58.
+
+Verification worked like this:
+- Every medium or high candidate went to three independent skeptics, each told to refute it on a
+  different ground: is the path really hot, is the cost real, is the fix sound given the comments
+  and contracts. Every low candidate went to one skeptic covering all three.
+- A candidate survived only on a majority, and 52 did.
+- A completeness critic then named the gaps: terminal writes, stream pooling, the web demo,
+  long-session memory and the wizard. A second round of readers covered those, under the same
+  verification.
+
+The costs that could be measured were measured:
+- **Playback:** a release build in serve mode against a throttled Range server.
+- **GUI and TUI:** driven on a pty against local fake mStream servers (instant, jittered,
+  failing, and 20,000-album).
+- **Build:** profiled with `-Z time-passes -Z llvm-time-trace`, with the fix built and timed in a
+  scratch copy.
+- **CI:** read from the Actions history.
+
+Every number marked *measured* comes from one of these runs; everything else is an estimate with
+its arithmetic checked by the skeptics. Severities are after measurement: #82 and #89 went up, and
+#102 and #108 came down. Anchors are at 796da16. Numbering continues from #71 (cited in
+`discovery.rs`).
+
+**Where to start:**
+- **#127:** one change takes the release compile from ~20 min to ~5 min.
+- **#73 and #74:** a one-line prefetch setting plus a patched stream-download end the seek
+  stalls that last tens of seconds on slow links.
+- **#82:** a reordered loop takes 100 ms off every GUI reply.
+- **#75:** stops the player keeping a laptop awake.
+- **#89–#91:** stop the art cache growing without bound.
+- **#129:** cheap, and fixes a test-harness correctness bug on the way.
+
+Open PRs touch a few rows:
+- **PR #36:** fixes the frame-write finding (see Refuted below) and part of #102.
+- **PR #35:** hides #83's blank page but not its latency.
+- **PR #28:** lets a driver turn `--gapless` on at runtime, which is #77's answer (below).
+- Each row says where a PR bears on it.
+
+### Playback and streaming
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| 72 | HTTP decoders use symphonia's Accurate seek (`src/engine/mod.rs:289`), and for MP3 that reads forward from the download frontier: a seek past it downloads the whole gap sequentially on the original connection, with no Range request, while the audio thread (and serve's request loop) waits. *Measured* (serve mode, throttled link, n=3 per cell, 0 Range requests in 54 trials): a seek to 90% one second into a 6-min VBR MP3 stalls **37.8 s at 2 Mbit/s and 8.7 s at 8 Mbit/s**, exactly gap ÷ link rate. A single-Range seek over the same distance takes 1.1 s / 0.3 s | high | build the decoder with `with_coarse_seek(true)` only when it is exact: HTTP, Content-Length known, and CBR MPEG. Sniff the head in `open_entry` (skip ID3v2, read the first frame header, look for a Xing/Info tag). Keep Accurate for VBR, FLAC, AAC and OGG, and for chunked /transcode responses with no Content-Length, where `preseek_coarse` returns Unseekable |
+| 73 | **stream-download 0.24.2 loses the reader's wakeup** when a Range request is shorter than the prefetch (`src/engine/http.rs:212`, `Settings::default()`). `handle_prefetch` writes the range but never calls `notify_position_reached`. When the range ends inside the prefetch, `finish_or_find_next_gap` picks `next_gap(0..len)`, the *lowest* gap, not the reader's. The parked reader (a `Condvar` wait with no timeout) wakes only when some later `write()` crosses its position, which happens after every lower gap has downloaded. Confirmed in the crate's `src/source/mod.rs`. *Measured*: a 1 s nudge back after a seek (a 128 KB range) stalls **14.1 s at 8 Mbit/s** (a 5 s nudge: 0.31 s); a seek into the last 154 KB stalls 29.4 s (the whole file downloads first); a 90% seek on a FLAC without a SEEKTABLE (bisection probes of ~120-270 KB) stalls **111.7 s at 2 Mbit/s** | high | report upstream and carry the fix through `[patch.crates-io]` until it lands: call `notify_position_reached` in `handle_prefetch` when a write crosses `requested_position`, and look for the next gap from the reader's position. A smaller prefetch (#74) shrinks the window but does not close it: any range shorter than the prefetch still triggers the stall |
+| 74 | stream-download's default 256 KiB prefetch is paid before the first read of every HTTP open, and again on every out-of-range Range seek. *Measured*: `/play` returns after exactly 256 KiB ÷ link, **1.07 s at 2 Mbit/s** and 0.26 s at 8 Mbit/s, for MP3, FLAC and WAV alike. The open needs only 17-38 KB for MP3 (the ID3 tag plus a frame) and under 1 KB for FLAC or WAV, or ~31-63 KB with symphonia's read-ahead. A FLAC seek with a seektable pays the prefetch twice (2.2 s at 2 Mbit/s); a FLAC seek without one pays it 6-14 times. The 4 KiB write batches cost ~1.1 ms of CPU per MB (negligible) | medium | `Settings::default().prefetch_bytes(64 * 1024)` in `http.rs:212`. That covers the probe; the spool cushion then rebuilds at link rate minus bitrate. Estimated 0.13-0.25 s to first audio at 2 Mbit/s instead of 1.07 s. It does not touch the retry watchdog `http.rs:98-120` relies on |
+| 75 | The rodio/cpal output stream runs for the whole life of every TUI, GUI and serve process: stopped, paused and never-played alike (`src/engine/output.rs:156`). `MixerDeviceSink` starts the cpal stream and exposes no pause. `Engine::new` opens it at launch, and pause and stop only change the Player. While stopped, the keep-alive queue boxes a fresh `Zero` every 512 samples. *Measured*: coreaudiod holds `PreventUserIdleSystemSleep` for the player's PID, so **a Mac with the player paused never idle-sleeps**. The CoreAudio IO thread takes 0.4-0.75% of a core even when nothing has ever played, 60-75% of the idle process's CPU. On Linux PulseAudio/PipeWire cannot suspend the sink; Windows lists the stream under `powercfg /requests` | high | own the stream: build the mixer with the public `rodio::mixer::mixer(channels, rate)` and the cpal stream with `build_output_stream` (rodio's own ~15-line callback), and keep the `cpal::Stream` in `Output` with `suspend()`/`wake()`. `advance_tick` suspends after ~5-10 s of quiet; every mutator calls `wake()` before touching a Player, because rodio completes seek/stop/skip inside the callback and would otherwise hang. A smaller first step: open on first play and drop the Output after N s stopped; `rebuild_output` already re-attaches |
+| 76 | Serve notices a track's end only on its 250 ms poll (`src/serve/mod.rs:349`), adding U(0,250) ms (mean ~125) of silence to every natural boundary. The gap is an accepted limitation (Phase 1 #8), but the fix below keeps the compatible hard cut | medium | a deadline-aware wait: have `advance_tick` return `duration − position` while something is sounding (None when stopped or paused, so it cannot become fast polling) and sleep `min(250 ms, that)`. That is ~50 extra wakeups a track, and 10-40 ms gaps |
+| 77 | With neither crossfade nor gapless, which is serve's default and the legacy `--port N` spawn, `crossfade_step` never prepares the next track (`src/engine/mod.rs:1795`, 1825-1834). So every natural boundary opens it synchronously on the serve loop with the state lock held: 5-30 ms on a local SSD, seconds on a spun-down NAS disk, and TCP+TLS plus #74's prefetch for a URL. PR #28's `POST /settings` offers gapless as an opt-in; the default path is unchanged | low | an engine flag (`prepare_plain`) that serve sets, so the prepare runs within `PREPARE_LEAD` while the boundary stays a plain cut. `advance_tick` already installs a Ready decoder for the index (1784-1793) |
+| 78 | The engine's stream client sets `pool_max_idle_per_host(0)` for every host (`src/engine/http.rs:172-186`), although the stated reason is the Quick Connect loopback bridge. Behind an h2 reverse proxy, every skip, play and seek pays fresh TCP+TLS: ~100 ms more at 50 ms RTT (measured with engine-shaped opens: 108 vs 53 ms to headers) | low | keep the pool-free client for loopback hosts (bridge URLs are always `127.0.0.1`); use `pool_max_idle_per_host(2)` and a 4 s idle timeout (under Node's 5 s) elsewhere |
+| 79 | A direct Play parks the audio control thread for the whole open (`src/engine/mod.rs:258`), up to `START_TIMEOUT` (20 s). A Stop, or a newer Play, arriving during a slow open waits for it and then gets an unwanted intermediate track. Status and pause cost nothing extra | low | an async start that keeps the open-then-swap order and the 20 s deadline (the lesson of 50bc972): store a `Starting` in State and fail it from the tick |
+| 80 | Local files without a duration hint are probed twice (`src/engine/mod.rs:317`): rodio's decoder, then `probe_duration`. That is 0.2-1 ms a track on a warm disk and more on NAS mounts; serve's queue never carries a hint (#68) | low | mirror the HTTP branch: `entry.duration_hint.or_else(\|\| decoder.total_duration()…)` and delete `probe_duration` |
+| 81 | The audio control thread wakes every 120 ms forever and sends an identical Status even when stopped or paused (`src/tui/worker.rs:752`): ~8 wakeups/s, ~0.01% of a core | low | a `settled()` check on `PlayerCtl`, and wait up to 1 s when settled. Commands still wake the thread through `recv_timeout` |
+
+### Responsiveness
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| 82 | Worker replies cannot wake crossterm's input poll, and the GUI (`src/gui/mod.rs:2500-2502`), the admin hub (`src/admin/mod.rs:293`) and the wizard (`src/setup/mod.rs:1795`) draw **before** they drain replies. A reply that lands during a pass waits for the next poll and the draw after it. *Measured* on a pty against an instant local server (n=150): **the GUI paints a 0.5 ms reply 203 ms after the server answered** (sd 1.1 ms: always two poll periods), the TUI 101.5 ms. With a 0-300 ms server the GUI adds 108-204 ms and the TUI 5-101 ms. Chained requests stack: the Albums wall's first cover request goes out **305 ms** after the album list arrives | high | (a) move the `event_rx` drain, `servers::poll` and `torrent::poll` above the draw, in the TUI's order (drain, dispatch, tick, draw), in all three loops. Keep the hover/pointer checks after the draw, since they read the hit regions it registers. That alone halves the delay. (b) Give input its own thread feeding the same channel and wait on `recv_timeout`, so a reply paints in ~1 ms |
+| 83 | Admin rooms load and poll with 3-7 independent GETs in series on a single-flight worker (stats 7 at `src/admin/stats.rs:307-321`, torrents 6, discovery/federation 4-5, backups 3). Every refresh and user action waits N round trips: ~1 s of blank Stats page per period step over a relay. PR #35 keeps the old numbers up during the load; the latency stays | medium | `tokio::join!` the independent reads inside the op (the webapp does the same). `wait` is already `pub(crate)` for this |
+| 84 | Connect, Login and Retarget run inline on the API dispatch thread (`src/tui/worker.rs:985-1022`), so one stalled endpoint holds replies for rows on other servers for 5-20 s. This is deliberate (reaching a different server mid-dial "is a contradiction"); only the unrelated reads need not wait | low | run connection changes one at a time on their own thread, and hold back only the reads that depend on the change |
+| 85 | Seed-path Tab completion in the Torrents room runs `read_dir` on the UI thread (`src/admin/torrents.rs:1379-1386`): a dead SMB/NFS mount freezes the GUI for the mount timeout | low | list on a thread and reply over a channel, as `gui/torrent.rs:1055-1058` already does |
+| 86 | Every GUI Settings or Auto DJ step runs a synchronous config load, TOML serialize and F_FULLFSYNC save on the UI thread (`src/gui/dj.rs:1521`), once per key auto-repeat: ~3 ms each (measured), 3-10% of wall time with a key held | low | mark prefs dirty and save once edits rest for ~300 ms; flush before any reload, on Start/Stop and on exit (so "persist as they happen" still holds within a second) |
+| 87 | The first view of each visualizer preset compiles its pipelines on the viz-window event loop (`src/viz_window/mod.rs:277`): a 26-292 ms freeze per preset (PLAN.md Phase 11 timings) | low | pre-compile on a worker thread (with a 16 MiB stack), in order: the opening preset, then its neighbours, then the rest. Keep the synchronous path as a fallback |
+
+### Covers: network, memory and terminal bytes
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| 88 | Cover fetches fan out without limit (`src/tui/worker.rs:1137`): one OS thread and one HTTP/1.1 connection per cover, a whole wall page at once, never cancelled when the page turns. On a LAN it is harmless. Over a 5-10 Mbit/s Quick Connect relay a 65-cover page of full-size art (#92) runs into the 20 s deadline together, and the playing track's spool gets 1/(P+1) of the link. *Measured* (the failing-art run of #89): threads 13 → 163 at 300×90 | high | a small art lane (4-6 workers per reach, LIFO so the visible page goes first) with a "still wanted" check before each fetch. Waveforms and interactive reads stay on `spawn_read`, so #63's fix stands |
+| 89 | A failed cover or waveform fetch gives its slot back and is re-claimed with no backoff (`src/tui/app.rs:5588`). Each re-claim pushes the name onto `art_order`/`waveform_order` again (`app.rs:5025`), and those are pruned only when the map is at its cap. *Measured* on the wall with art returning 500: **3.27 requests/s per cover**, i.e. 26/s at 120×34 and **498/s at 300×90** (+6% of a core); footprint grows **~89 MB/h** and is not returned when the outage ends. A 502 on the next track's waveform is re-asked 9.8/s in the TUI. A *stalled* server is not a storm (one request per 20 s timeout) | high (during an outage) | keep failures in a side map (`art_retry`) with the existing tunnel ladder (5, 10, 20, 40, 60 s), not in `art`, so the GUI's `contains_key` filters keep working. Drop the name from the order in the unsettled arms, and clear the orders with the maps at `session.rs:674` |
+| 90 | Art-cache leak: an answer for a claim that was evicted while in flight is inserted again outside `art_order` (`src/tui/app.rs:5589`), so it can never be evicted. Paging a 2,000-album wall over a slow link orphans up to ~1,700 covers (roughly 170-600 MB), held until a reconnect, and the cache then sits permanently at its cap | high | keep the late answer but make it evictable: if the key was missing, insert, `push_back` onto the order and run `evict_oldest`. Simply dropping the answer (the obvious fix) re-requests every frame once the pinned covers and the visible page exceed 256 |
+| 91 | The 256 cap does not bound pinned covers. Every queue row, played rows included, is pinned (`src/tui/app.rs:610`, `pinned_art` at 5031). Auto DJ only appends (see #106) and `resume_queue` restores the history, so a GUI with a large queue pins most wall covers and passes the cap within minutes, and a TUI Auto DJ session grows ~15 covers/h after 256 have played. The bound is the queue's distinct albums (~300 MB for 1,000 albums). The "sixty-four" comments in `art.rs:17`, `art.rs:131` and `graphics.rs:467` predate the 256 cap | medium | pin only what can be on screen: the playing row, the queue panel's visible rows, and ±N around `queue.current`. Wall covers stay unpinned. Add a test that appends 300 Auto DJ rows with distinct covers and asserts `art.len() <= ART_CACHE_CAP` |
+| 92 | Every cover is downloaded and decoded at full size (`src/api/mod.rs:1336`), though mStream serves 256 px and 92 px variants through `?compress=l` and `?compress=s` (and falls back to the original when none exists). Per 65-cover wall page of 1200 px art: 19.5 MB against 1.1 MB, ~15 s extra over a 10 Mbit/s relay, and 0.6-1 s of background decode. The web demo decodes the full cover on its only thread (*measured* 7-38 ms at 1000-2000 px, 113-261 ms at 3000-4500 px progressive) | medium | carry a `small` flag on `ApiCmd::AlbumArt`: wall cells, queue rows and the whole wasm build ask for `compress=l`. Keep originals for the large Now Playing box, which `art.rs:10-17` keeps source bytes for |
+| 93 | Kitty covers go out as uncompressed 32-bit RGBA in base64 (`src/tui/graphics.rs:497` → ratatui-image `kitty.rs:224-262`: `f=32`, no `o=z`), ~5.3 bytes a pixel for opaque JPEGs. A Retina wall cover is ~197 KB and a Now Playing cover ~2.2 MB a track change; ~40 covers can go out in one frame and block on the pty (or an ssh channel). PR #36 removes only the resize re-send, in native kitty | medium | patch ratatui-image (upstream, or `[patch.crates-io]` meanwhile): `f=24` with `to_rgb8()` when the image has no alpha (−25%, free), and `o=z` at a fast level, perhaps only under `SSH_CONNECTION`, since it costs 1-3 ms a cover out of `ENCODE_BUDGET` |
+| 94 | No kitty image is ever deleted (`src/tui/graphics.rs:505`). Every re-encode (track change, wall page, Library↔Now, resize) uploads a new random-id image with a persistent virtual placement, so the terminal's image store fills to kitty's 320 MiB quota within an evening. That memory is GPU textures in the terminal's process, and it outlives the player until the kitty window closes (or tmux reattaches) | medium | own the ids (`Kitty::new(image, size, id, is_tmux)` is public): allocate from a counter, keep the id in `Cached`, and queue `ESC _G a=d,d=I,i=<id>,q=2 ESC \` (tmux-wrapped) after the frame that stopped using it |
+| 95 | Kitty protocols keep their full base64 transmission after sending it (ratatui-image's `KittyProtoState.transmit_str`), and album-wall slots only grow (`src/gui/albums.rs:517`), so the wall holds the largest page ever drawn: 5-32 MB of dead payload at 200×60-300×90, plus ~2 MB for the Now Playing cover. Sixel and iTerm2 slots from a larger window stay resident too | medium | drop the transmit copy after the first render (with the owned ids of #94, or a ratatui-image patch); `slots.truncate(capacity)` after the grow loop, and clear slot caches when leaving the wall |
+| 96 | iTerm2 covers are sent as lossless base64 PNG (`src/tui/graphics.rs:497`; upstream's hard-coded choice), 5-10× a JPEG: 1.5-3.9 MB per wall page turn at 200×60, encoded on the UI thread and memcmp'd per frame | medium | build `Protocol::ITerm2` from JPEG only when the art was already lossy (source starts `FF D8 FF`). The QR code and the wordmark stay PNG |
+| 97 | The bar's card cover and Now Playing share one single-entry Graphics picture cache (`src/gui/mod.rs:1525`), so every Library↔Now Playing switch re-decodes and re-encodes the cover: 10-25 ms plus ~0.9-2.4 MB re-sent on kitty, 35-75 ms on iTerm2, 80-180 ms on sixel. PR #36's mini player is a third consumer of the same cache | medium | give the card its own lazily built `cover::Slot` (after `Graphics::probe`, the `actions.rs:339` pattern). PLAN.md:1639-1641 already deferred this "widening" to the Now Playing screen, which now exists |
+| 98 | reqwest is built without gzip or brotli (`Cargo.toml:35`), so the album list (~4 MB for 16k albums; ~1 MB gzipped) and large folder listings always travel uncompressed. That is 16 s instead of 4 s at 2 Mbit/s, and below ~1.6 Mbit/s the album list exceeds the 20 s `REQUEST_TIMEOUT` and the view fails | medium | enable `gzip` for the API client; add `.no_gzip().no_brotli().no_zstd().no_deflate()` on the engine's two stream builders (`http.rs:157`, `:172`), because decoding strips the Content-Length that seeking depends on |
+| 99 | The GUI Artists and Genres rooms (and TUI library nodes) refetch their whole list on every visit (`src/gui/mod.rs:860`), while Albums keeps its list. That is 0.25-0.6 MB and 0.3-1 s over a relay per re-entry | low | cache `artists`/`genres` on App next to `albums`, cleared on session change; seat the pane from the cache with a fresh drill, which keeps library-rooms.md's "opens its root list again" |
+| 100 | The Torrents tab downloads the daemon's whole list every 5 s (`src/admin/torrents.rs:1213`) even when nothing can change: ~420 KB a poll at 1,000 rows, ~300 MB/h over a tunnel | low | poll at 5 s only while something is downloading, verifying or queued, or the last list changed; otherwise let the 30 s Load pick it up |
+| 101 | At the cap, every cover claim rebuilds `pinned_art`, a HashSet that clones every queue row's `album_art` (`src/tui/app.rs:5016`): 8-11 ms per fresh page turn at 3,000 rows, 24-34 ms for a 160-cover page | low | build the pinned set once per batch with borrowed `&str`s; #91 shrinks it to the visible rows anyway |
+
+### Idle and per-frame work
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| 102 | The TUI, GUI, admin and wizard loops redraw every 100 ms whatever happens (`src/tui/mod.rs:669`). *Measured*: ~10 passes a second at 0.19-0.3 ms each, 0.2-0.3% of a core; at HEAD each identical frame also writes 25 B of SGR resets, and PR #36 makes it 0 B. Rated medium on estimates; the measurement puts it at low. The bigger idle cost is #75's audio thread | low | once #36 lands, skip `terminal.draw` when no dirty source fired (input, pending effects, a reply, a timer the frame shows), keeping each loop's pass cadence so its timers still fire |
+| 103 | The album wall recomputes its visible list and letter index over every album, every frame (`src/gui/albums.rs:161`), and while a filter stands it formats and lowercases every label to do it. *Measured* (pty, 160×48): **5.2 ms a frame at 20,000 albums filtered, 5.5% of a core** idle, ~15% with the viz window open, and **15.4 ms from key to first byte** for a page turn (three scans a key). Unfiltered it costs +0.14-0.26 ms at 20k. 2,000 albums filtered costs 0.9-1 ms | medium | cache the view on the wall: key (albums revision, len, lowercased needle) → `Option<Vec<usize>>` (None = every index, so the unfiltered case allocates nothing) and the strip buckets; share it between the key handler and the draw |
+| 104 | The Stats Recent tab formats every loaded history row every frame, about 35-40 allocations a row (`src/admin/stats.rs:1473-1474`), though only the visible rows are drawn: 4-5 ms a frame at 2,000 rows. PR #35 keeps old rows formatting through a period change | medium | build each row inside the `table_rows` closure and pass `history.len()` as the length |
+| 105 | Half-block Canvas pictures (the TUI visualizer at 30 Hz, every cover mosaic) go through one String per run and a Paragraph that re-segments every cell, every frame (`src/tui/canvas.rs:86`): ~90 ns a cell against ~10 ns written directly, ~5% of a core at 300×90 in Cover mode | medium | `impl Widget for &Canvas` writing `set_symbol`/`set_style` straight into the Buffer, clipped to `area.intersection(buf.area)` (indexing out of bounds panics where Paragraph clipped silently) |
+| 106 | The 10 s queue checkpoint deep-clones, re-serializes and F_FULLFSYNCs the whole queue.json on the UI thread while playing (`src/tui/mod.rs:238`), though only the position changed. Auto DJ appends every played row forever (`src/tui/app/autodj.rs:802`) and `resume_queue` restores them all, so the queue grows ~15 rows per listening hour across sessions. At 2,520 rows that is a 1.7 MB fsync'd write every 10 s (0.61 GB/h); at 16,000 rows, 12 ms of UI thread and 3.9 GB/h. Every O(queue) row here grows with it | medium | serialize from a borrowed snapshot (`QueueSnapshotRef<'a>`, byte-identical), and write items only when the queue's signature changed, the position otherwise (clause 39's cadence holds). Bound the played history while the DJ is armed (keep the last ~100 played rows), and keep a small recent-set so the no-repeat rule still holds |
+| 107 | stats.json is rewritten and F_FULLFSYNC'd every 10 s for as long as playback sits paused (`src/tui/mod.rs:182`): 360 forced drive-cache flushes an hour (3.5 ms each, measured) with nothing new to say | low | gate the timed checkpoint on the session's progress changing (played ms, pause count, max position), which keeps play-reporting.md clause 9's crash recovery exactly |
+| 108 | Every loop pass walks the whole queue three times: the QueueSaver SipHash, plus `tunnel_targets`/`peer_targets` rebuilds that allocate per row (`src/tui/app.rs:4591`). *Measured*: +0.17 ms a pass at 3,030 rows (58 ns a row), 0.17% of a core. Tunnel and peer rows cost more (estimated up to ~1.3 ms at 3,000 peer rows) | low | dedupe origins within a pass (queues come in long runs from one origin); keep a revision counter for the saver instead of hashing |
+| 109 | Library rooms and Search rebuild row vectors, letter indexes and counts over the whole list every frame, and the queue panel re-sums every duration (`src/gui/library.rs:83`). *Measured*: +0.3 ms a frame at 20,000 artists | low | slice past the Parent row instead of collecting, and cache the counts with the pane |
+| 110 | Admin rooms, setup modals and the GUI DJ genre picker deep-clone whole lists or modal state every frame to satisfy `table_rows`' `&mut Room` closure (`src/admin/torrents.rs:2437` and siblings): ~0.3-1 ms a frame at 1,000 rows | low | `std::mem::take` the list around `table_rows` and put it back, or split the closure's borrows. PLAN.md:1707-1712 already endorses split borrows over clones |
+| 111 | Each pane-filter keystroke lowercases every label and deep-clones every match (`src/tui/app.rs:518`): ~2 ms a key at 5k tracks, ~10 ms early in a 30k-track genre | low | when the new needle contains the old one, narrow in place with `retain`; rebuild only on a widening edit |
+| 112 | `push_trail` deep-clones the listing it is about to discard (`src/tui/app.rs:3014`): 2-5 ms a navigation at 20k nodes | low | move the entries into the trail with `std::mem::take` |
+| 113 | The Spectrum/Cover visualizer does an O(bands²) `powi` spread and per-pixel colour ramps every frame (`src/tui/viz.rs:493-499`): 0.2-0.6% of a core at 300×90 | low | a forward and backward max-decay pass (O(n), same result) and one ramp row table per frame |
+| 114 | `Queue::move_row` shifts the queue tail twice per drag step (`src/tui/app.rs:950`) | low | `rotate_left(1)` / `rotate_right(1)` over the span |
+| 115 | `PathDraft::suggestions()` clones every matching entry on each path-modal frame and on each Down/Up/Tab (`src/setup/mod.rs:181-188`; also the admin Libraries room), though at most 6 rows show: 155 µs and 5,013 allocations per call at 5k entries (measured), ~1.4% of a core with Down held | low | `suggestion_count()` plus a borrowed `suggestion_window(first, n)`; clone only the accepted one |
+| 116 | The wizard polls `/scan/status` every 1.5 s for as long as it is open, even after the scan reports Idle (`src/setup/mod.rs:1829-1837`), and each poll makes the server recompute enrichment coverage the wizard discards: ~430 ms of Node main thread per window at 25k tracks | low | back off after two Idle reports; re-arm when a folder is committed. Server side: accept `?coverage=0` |
+
+### Visualizer window
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| 117 | A minimised visualizer window busy-loops a core on Windows (`src/viz_window/mod.rs:524`). Windows sends no Occluded event on minimise, and the zero-size early return in the draw path still re-requests a redraw, so each turn is WM_PAINT plus an egui pass, back to back: ~100% of one core for as long as it stays minimised (the same shape as emilk/egui issue 3982). Not measured on Windows; derived from winit 0.30.13 and wgpu-core | high | in `RedrawRequested`, re-arm only when `!self.occluded` and the surface is non-zero (the 0×0 config already records "minimised"). In `resize()`, request a redraw when the size goes back from zero. Move the zero-size check above `run_controls` |
+| 118 | The window draws at the display's refresh (120-240 Hz on ProMotion and gaming panels) while its audio texture changes at 30 Hz (`src/viz_window/mod.rs:529`): 4-28% of the GPU busy at 120 Hz in the default window, against 2-14% at 60 Hz | medium | cap at a whole number of vblanks, never below ~60 fps: k = max(1, refresh_mHz / 59_000), which keeps Fifo and the occlusion rule. Contract clause 6 ("Paced by the display") needs the matching amendment |
+| 119 | An open visualizer window pins the GUI loop at a 33 ms wake with a full redraw indefinitely (`src/gui/mod.rs:2548`), and keeps piping an unchanging silent texture while paused or stopped: ~0.3-1% of a core and 20 extra wakeups a second in both the GUI and the terminal. PR #36 removes the identical frames' bytes | medium | once a silent texture has been sent, stop sending it and fall back to the normal poll while nothing plays; resume on play |
+| 120 | Every preset ever shown keeps its full-size ping-pong textures for the session (`src/viz_window/mod.rs:265`), and every Resized reallocates all of them: 32·W·H bytes held, e.g. 62 MB at 1728×1117 and 265 MB at 4K | medium | resize a scene lazily right before it draws, and release only the full-size buffers of scenes not in front (1×1 state buffers keep their contents, per `render.rs:289-291`) |
+| 121 | `PowerPreference::HighPerformance` (`src/viz_window/mod.rs:198`) powers up the discrete GPU on dual-GPU laptops while the window is open: a 5-10 W floor, roughly 40-50% of battery runtime at light use | medium | one helper returning `wgpu::PowerPreference::from_env()` (reads `WGPU_POWER_PREF`) or else a per-platform default, `LowPower` on macOS |
+| 122 | The shader renderer allocates per-pass staging buffers and bind groups every frame and uses two encoders and submits (`src/shader/render.rs:349`), though each pass has only two possible bind groups: 0.05-0.7% of a core | low | one uniform buffer at `min_uniform_buffer_offset_alignment` strides with bind groups made once in `Gpu::load`; one `write_buffer` a frame |
+
+### Web demo
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| 123 | The web player resumes its AudioContext on Play but never suspends it (`src/web/audio.rs:236`): after the first track, a paused, stopped or finished tab keeps the browser's audio output running. *Measured* in Chromium on this Mac: coreaudiod's `PreventUserIdleSystemSleep` is held for the browser's AudioService for as long as the tab stays paused (≥6 min observed), plus ~1.1-1.7% of a core. After `ctx.suspend()` it is released in under 5 s. The web mirror of #75 | medium | in `tick()`, suspend after ~5-10 s of not playing; resume in `dispatch(Resume)` beside `watch_play`. `feed_tap` already returns early when the context is not Running |
+| 124 | The demo renders through ratzilla's DomBackend (`src/web/mod.rs:183`), rewriting innerHTML and an inline style per changed cell: 3.5-10 ms a frame (11-30% of the tab's main thread) with the visualizer up. Every window resize rebuilds the whole ~10k-span grid, ~62 ms of main thread per resize event (measured on a replica and the debug demo; ~200 ms at first paint) | medium | switch to `WebGl2Backend` (with a dynamic font atlas, `disable_auto_css_resize`, and a full-viewport canvas rule) |
+| 125 | The web shell does work on every requestAnimationFrame even when idle (`src/web/mod.rs:249`): a 323 KB Buffer clone, a full-grid diff and an audio Status through `apply_event`, 0.5-2.4% of a core and 60-120 wakeups a second where 10 would do | medium | a single scheduler: rAF when a frame is wanted, `setTimeout(poll − elapsed)` otherwise, and `terminal.draw` only when due |
+| 126 | The wasm bundle ships all ten locales and is built for speed (opt-level 3, thin LTO, wasm-opt -O2; `index.html:14`). The locales are 1.2-2 MB of the raw .wasm and most of the first `t!()`'s 17k-entry init | low | a wasm-only `i18n!` over an English-only sibling folder (the native glob is recursive, so not a subfolder); then consider opt-level z and `-Oz`. #127's static table makes the init cost disappear either way |
+
+### Build, CI and tests
+
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| 127 | **`rust_i18n::i18n!` (`src/main.rs:196`) expands into one closure of ~17,400 `add_translations` statements, and LLVM's cost on it is superlinear.** *Measured* (release profile, rustc 1.98.1, `-Z llvm-time-trace`): that one function is **893.6 s of 1,156.7 s of LLVM time (77%)**, nearly all of it on the crate's single thin-LTO backend thread (Greedy Register Allocator 347 s, Register Coalescer 278 s, SLPVectorizer 108 s). The crate takes 916 s wall of a ~20.5 min full release build, and 98% of that is LLVM. In isolation the cost grows roughly cubically with the key count: 11.5k statements 262 s, 14.6k 446 s, 17.4k 906 s of CPU, so every string added makes every release build slower. LLVM 22 (rustc 1.98) is ~30% slower on it than LLVM 21. The function is 2.4 MB of machine code (9.4% of `__text`, 21× the next largest); the first `t!()` builds the table at run time (4.5-4.7 ms, +2.24 MB footprint). It is probably also what overflowed LLVM's stack in v0.6.0 (the 64 MiB `RUST_MIN_STACK` in `release.yml:84-95`) | high | generate the table as static data. `build.rs` calls `rust_i18n_support::load_locales` (the macro's own loader, already in the lock and built for the host) and writes a sorted `static LOCALES: &[(&str, &[(&str, &str)])]` to OUT_DIR. A small `Backend` does a locale find and a key binary search, and `i18n!` points at it with `backend = …` over an empty folder. *Measured* in a scratch copy: all 17,370 (locale, key) pairs and every fallback case (xx, de-AT, zh-Hant-TW, empty, unknown keys) are identical. **Crate compile 916 s → 140 s (−85%)**, peak compiler memory 6.3 → 3.2 GB, `__text` −2.4 MB, first `t!()` 4.6 ms → 10 µs, −2.2 MB footprint. A full release build is projected to go from ~20.5 min to ~5 min (dependencies 2m50s plus ~2.3 min for the crate), locally and in CI's release step |
+| 128 | CI builds the full thin-LTO, cgu=1 release binary on every PR push on both OSes (`.github/workflows/ci.yml:31`), and only the Linux linkage guard uses it. *Measured* over 7 runs: the Build step is 11-15.6 min on ubuntu and 9-21 min on windows, 60-92% of each test job and the CI critical path | high | build the dev profile instead on both OSes (still compiling the `cfg(not(test))` code), and point the Linux guard at `target/debug/mstream-player`; NEEDED is decided by the same crates and flags. The release workflow keeps guarding shipped binaries (`release.yml:103-105`). #127 cuts whatever release build remains by ~75% |
+| 129 | **19 single-line `expect { "pattern" }` gates in the e2e legs parse as one literal pattern** (e.g. `test/e2e/legs/skip.exp:13`), so each waits its full timeout and **can never fail**. That is ~390 s of pure waiting per E2E job: ubuntu E2E 12.8 → ~6.3 min and macOS 17.4 → ~10.9 min once fixed. Confirmed leg by leg against CI logs and with a local expect experiment | medium (and a correctness bug) | convert all 21 one-liners (two are eof gates) to the multi-line form `drive-en.exp` uses, or drop the outer braces; add a grep guard to `run.sh` so the form cannot return. Expect some gates to start failing honestly |
+| 130 | PR-scoped duplicate rust-cache saves pin the Actions cache at its 10 GB cap (`.github/workflows/ci.yml:25`), so 28% of sampled jobs ran cold; a cold windows test job takes 23-34 min against 13-14.5 warm | medium | `save-if: ${{ github.ref == 'refs/heads/main' }}` on all three rust-cache steps; a PR-only concurrency group (`ci-${{ github.event.pull_request.number \|\| github.run_id }}`) so main pushes are never cancelled |
+| 131 | On macOS runners each fresh fake mStream costs ~35 s in `HTTPServer.server_bind`'s `socket.getfqdn()` reverse lookup (`test/e2e/fake_mstream.py:161`): ~4 min, a quarter of each macOS E2E job | medium | override `server_bind` to call `socketserver.TCPServer.server_bind` and set `server_name` to `127.0.0.1` |
+| 132 | Two TLS crypto libraries are compiled and linked: aws-lc-sys (369 C/asm objects) through reqwest's and stream-download's defaults, and ring through iroh (`Cargo.toml:35`). Removing aws-lc saves ~10-60 s of build time (2-6%) and binary weight | low | reqwest `default-features = false` with `rustls-no-provider`, `charset`, `http2`, `system-proxy`; stream-download with `reqwest` and `temp-storage` only; install ring as the process provider once, native only. OS-trust TLS and proxy support are kept |
+| 133 | The dev profile builds every dependency at opt-level 0 (`Cargo.toml:225`), so debug test harnesses decode and encode covers 12-23× slower than release. Debug icy_sixel took ~750 ms a sixel encode on the ubuntu runner, the cause of the two red main runs on 2026-09-27 (the wall's pacing test, since reworded in a192aa8) | low | `[profile.dev.package.<crate>] opt-level = 3` for the pixel and audio crates only (zune-jpeg, image, png, fdeflate, miniz_oxide, icy_sixel, quantette, symphonia's codecs). That costs seconds on a cold build, not the minutes a `"*"` override would |
+
+### Refuted, or already in flight
+
+- **Frame writes through std's 1 KB `LineWriter`, with no synchronized output** (critic, `src/tui/mod.rs:522`): accurate at HEAD, and **fixed in open PR #36** (467f8fc, `kit::frames`: one write a frame, fenced in mode 2026, nothing written for an unchanged frame).
+- **An abandoned HTTP open whose body stalls lives for the session** (`src/engine/mod.rs:246`): the transport layer's timeouts end it.
+- **The cpal error callback logs on the real-time thread for every ALSA xrun** (`src/engine/output.rs:160-163`): cold path, microseconds a call. The comment's claim about which thread runs it is wrong, though, and worth correcting.
+- **Every Connected rewrites config and credentials** (`src/tui/app/session.rs:704`): cold, and hidden behind the round trip already in flight.
+- **Cover encodes run inside `render()`** (`src/gui/cover.rs:32`): warm, not hot. `Slot::draw_paced` encodes only on a key change, within the documented budget.
+- **Log lines are allocated and written unbuffered on the emitting thread** (`src/logging.rs:321`): not hot at the levels people run.
+- **The tap reallocates its ring inside the audio callback on a channel change** (`src/engine/tap.rs:157`): real but rare (32-64 KB, once per format change).
+- **Web: large library replies are parsed on the main thread** (`src/api/mod.rs:612`), and **the hidden-tab rAF shim renders four times a second** (`index.html:33`): both negligible on measurement.
+- **Wizard: a dead worker would spin the post-Folders loop** (`src/setup/mod.rs:1829-1837`): latent only; the worker has no path that dies silently.
+
+### Checked and found clean
+
+These hot paths were examined and need nothing:
+- **Audio callback chain:** `Faded::next` is one multiply and atomics; `Tapped::next` pushes into a preallocated 2048-sample batch and hands off with `try_lock`, dropping on contention.
+- **Engine:** seek and `rebuild_output` release the state lock before `try_seek` (#48); `advance_tick` tries one source a call (#49); `collapse()` coalesces command bursts (#50).
+- **TUI lists:** `visible_rows` windows every list (#46), and input is drained and pointer moves collapsed (#47).
+- **Visualizer and art:** the visualizer idles when still (#51); FFT scratch persists (#52, #53); `CoverGrid` resamples only on (art id, size) changes.
+- **Regexes and runtime:** every regex is compiled once in a `OnceLock` (`torrent_meta.rs`, `replay.rs`). The tokio runtime is one lazy 2-worker `OnceLock`.
+- **Clients and reads:** the session client is shared, and other reaches ride a 16-slot client shelf. API reads run concurrently (#63).
+- **Logging:** the log ring is bounded (2,000 lines / 2 MiB), and filtered `tracing` callsites cost one cached check.
+- **Viz window:** the stdin pipe (a reader thread, coalesced texture updates) and the host's `sync_channel(2)` + `try_send` never block either side.
+- **Other GUI and admin paths:** `servers::poll` and `torrent::poll` are plain `try_recv` drains with all I/O on threads. Timezone math is a binary search over transitions.
+- **Tests:** the unit suite (1,003 tests) runs in 8-10 s, and the smoke harness waits on conditions.
+
+### Fix record (2026-09-28)
+
+Every row above is fixed on `claude/repo-performance-audit-f64fcf`, except #77, which is answered by `--gapless` instead (see its row). #127 went in first, since it cuts
+every later release build. The other 61 were done in twelve lanes, each in its own worktree and
+branch (`perf/<lane>`, kept), then merged:
+
+| Lane | Rows |
+|---|---|
+| deps | #98, #132, #133 |
+| engine-stream | #72-#74, #78, #80 |
+| engine-control | #75-#77, #79, #81 |
+| loop | #82, #86, #102, #115, #116, #119 |
+| queue-state | #99, #106-#108, #111, #112, #114 |
+| art-cache | #84, #88-#92, #101 |
+| graphics | #93-#97 |
+| render | #103, #105, #109, #113 |
+| admin | #83, #85, #100, #104, #110 |
+| viz | #87, #117, #118, #120-#122 |
+| web | #123-#126 |
+| ci | #128-#131 |
+
+Each fix is one commit (sometimes two) whose message ends in "(audit #N)". The message carries the
+smoke test run against the real binary, before against after. Wherever the finding was measurable,
+that test uses the same harness that measured it.
+
+Every lane then went to an adversarial reviewer, who re-ran its smokes. The reviewers found five
+defects in the fixes themselves:
+- **#75:** the idle suspend could hang behind a stalled download.
+- **#79:** an abandoned open downloaded its whole track.
+- **#88:** a server switch left the new server's covers queued behind the old server's asks.
+- **#106:** turning Resume queue off and on again lost queue.json until the next edit.
+- **#124:** the WebGL canvas made the highlighted folder rows unreadable.
+
+Each defect was fixed in a follow-up commit and re-smoked before the merge.
+
+Integrated state, after the follow-ups below:
+- 1,186 unit tests pass (1,026 before).
+- The wasm32 check is clean.
+- The e2e battery passes in 2m08s (8m33s before).
+- A full release build takes 3m15s, including the dependencies the TLS change touched; the crate alone takes 2m28s (11.5-17.7 min before).
+- The binary is 32.4 MB (36.1 MB at 796da16).
+
+| # | Commits | Smoke: before → after | Left open |
+|---|---|---|---|
+| 72 | 70a176e | CBR MP3 seek to 90% at 2 Mbit/s: 27.9 s → 0.31-0.36 s, one Range request, reported position within 1 ms of the frame | VBR MP3 still walks the gap (38.6 s); needs a Xing-TOC seek (a symphonia bump or a custom source) |
+| 73 | d7f680e, f94a59a | stream-download 0.24.2 vendored at `vendor/stream-download` with the wakeup fixed (`[patch.crates-io]`; drop it when upstream releases the fix). 1 s nudge back at 8 Mbit/s: 14.1 s → 0.17 s. Seek into the last 154 KB: 29.5 s → 0.19 s. FLAC without a SEEKTABLE, 90% at 2 Mbit/s: 111.7 s → 2.6 s (with #74) | report upstream |
+| 74 | c5ab3b5 | `/play` at 2 Mbit/s: 1.07 s → 0.27 s; FLAC seek with a SEEKTABLE 2.2 s → 1.25 s; no underrun | — |
+| 75 | d56b98c, b16bb40 | coreaudiod's PreventUserIdleSystemSleep released 5 s after launch, 30 s after a pause, ~6 s after a stop, and taken again on play; seek and resume while asleep work; a stalled download defers the suspend instead of hanging it | Windows and PipeWire unverified here; raw ALSA without pause support keeps running |
+| 76 | 8b070e0, 93436de | serve's added gap per track boundary: mean 163 ms → 31 ms; `playing:false` never seen | the rest is the next file's open, which `--gapless` takes off the boundary (#77) |
+| 77 | 6854697, b149dcc, then removed | **Decided 2026-09-29: dropped in favour of `--gapless`.** `serve --prefetch` and the engine's `prepare_plain` are gone. `--gapless` already opens the next track 12 s ahead, and it removes the gap, not just the wait. On the throttled link: no flag 443 ms of silence per boundary (unchanged); `--gapless` −1 to 4 ms, with `/status` at 3 ms. Kept from #77: a boundary plays the row its prepare committed to (under shuffle it used to roll again and miss the prepared decoder), now `boundary_row`, unit-tested in CI | the legacy `--port N` spawn keeps the plain open at the boundary unless mStream turns gapless on (PR #28) |
+| 78 | 498f0d8 | behind an h2 proxy: 7 new TLS connections for 7 quick skips → 2; the loopback bridge still never pools | pool idle 4 s (under Node's 5 s) against the verifier's 90 s plus a retry |
+| 79 | b42cb98, 699cba0 | Stop during a 4 s open: ~3.8 s → 0.14 s; the next pick's request 3.6 s → 0.02 s; a given-up download is cut when its open finishes; a stalled open still fails at 20 s | — |
+| 80 | f5d3143 | one probe a local track; Ogg `/play` 53 ms → 31 ms; LAME lengths now trimmed, as HTTP reports them | — |
+| 81 | 93acb9d | GUI paused: 18.1 → 11.3 wakeups/s, audio thread 457 → 99 µs/s; serve 4.0 → 1.1 wakeups/s | — |
+| 82 | de52ec1 | reply to screen: GUI 203 ms → 1.2-1.9 ms, TUI 101 ms → 0.7-1.1 ms, admin 202 → 1.2 ms, wizard 202 → 1.8 ms | a reply more than 1 s after its request still waits up to one poll |
+| 83 | 4a38432 | Stats load 750 ms → 107 ms (7 requests in flight); torrents 653 → 215 ms; discovery 427 → 204; federation 536 → 212; backups 527 → 308 | — |
+| 84 | e037968, 9f9d2c5 | a server hanging during a connect no longer holds the other server's covers: 10 s → 0.10 s | — |
+| 85 | cedfdfd | the key after a Tab at a 200k-entry folder: 244-258 ms → 40-111 ms; healthy completion unchanged | a dead mount could not be staged here |
+| 86 | cbca591 | a held settings key: 86 config writes → 1 (0.28 s after release); the exit path still saves | — |
+| 87 | 7f90e6f | preset switch, debug: 22-39 ms → 8-11 ms (one refresh); release was already one refresh on this Mac's warm shader cache | — |
+| 88 | 84698f9, 1e34f1f | cover fetches through a 6-wide lane per server, newest first; an evicted claim withdraws its fetch; a server switch retires the old lane (new server's first cover 0.32 s, 0 requests to the old one) | **decision**: lane width 6 |
+| 89 | 39c45c1, c76bf98 | failing art at 300×90: 638 → 7.6 requests/s, threads 141 → 15, the claim order no longer grows | — |
+| 90 | c7ec968 | covers resident after fast paging: 1,683 (382 MB heap) → 256 (200 MB) | — |
+| 91 | a83a377, bbe0f99 | a long queue no longer pins past the cap: 331 → 256 covers resident | — |
+| 92 | 4872e94 | a wall of 612 covers: 58.2 MB → 6.5 MB served, heap 41 → 20 MB, screen identical | — |
+| 93 | 61f93e7 | kitty `f=24`: a wall page −25% (3.85 → 2.89 MB); over ssh also `o=z` (−33% on photographs) | — |
+| 94 | 5d6a6b6 | kitty's image store: 1,115 images / 64.6 MB and growing → at most 68 / 3.15 MB; deleted at exit | — |
+| 95 | 739a6d4 | heap after 20 wall pages: 74.4 → 64.3 MB at 16×32 cells; a shrink lets its slots go | growing back re-sends them |
+| 96 | bc981e7 | iTerm2 wall page 2.03 → 0.61-0.69 MB; Now Playing switch 511 → 78 KB | art whose source was dropped for size still goes as PNG |
+| 97 | 1fe3267 | back to Now Playing, kitty: 869 KB and 19-24 ms → 12.5 KB and 1 ms (release); sixel 22 → 4-5 ms | — |
+| 98 | 02527e6 | 16k-album list at 2 Mbit/s: 4.06 MB, 18.3 s → 0.62 MB, 3.1 s; at 1.5 Mbit/s it now loads at all; streams still get identity bodies | brotli left out (8% over gzip) |
+| 99 | 5c50de8, 53a4ccd | Artists and Genres return without a request; another account forgets them | an admin rescan does not invalidate them |
+| 100 | a04ce71 | torrent list fetches while seeding: 12/min → 3/min; every 5 s again while something moves | — |
+| 101 | 9b42c57 | page turn with a 3,000-row queue at the cap: 291-314 ms → 94-97 ms | — |
+| 102 | 1862da4 | idle main thread: TUI 1.96 → 0.38 ms/s, GUI 2.49 → 0.51, admin 1.78 → 0.33, wizard 1.52 → 0.42; clocks, spinners and the caret unchanged | — |
+| 103 | a2cf0f2 | filtered wall at 20,000 albums: 6.0 → 0.69 ms a frame; page turn 15.0 → 0.91 ms | — |
+| 104 | b363a92 | Stats Recent at 2,000 plays, idle: 4.1-7.2% → 0.6-0.7% of a core (release) | — |
+| 105 | 0a82dcb | canvas per cell ~89 → ~5 ns; TUI visualizer Cover 3.26 → 1.26 ms a frame; cell-identical | — |
+| 106 | bcdf4ab, c574065, 78ff191, 9ba1074 | playing 60 s: queue.json 6 full rewrites → 0 (queue-place.json 6 × 70 B); restores exact; a restore keeps the last 100 played Auto DJ rows | **decision**: the restore thresholds (100 played kept, 500 retired paths) change multi-server clause 40 and auto-dj clause 14 |
+| 107 | 2a5d680, 81858fd | stats.json paused: 6 writes/min → 1; kill -9 still recovers the play | — |
+| 108 | e4a4c22 | 12,000 peer rows: 4.88 → 0.60 ms a pass | — |
+| 109 | e0a0dba | 20,000 artists: ~0.2 → ~0.17 ms a frame | — |
+| 110 | c4cbdd4 | per-frame list and modal clones gone; within process noise at these sizes | — |
+| 111 | 0f4ac06 | a filter keystroke: 1.08 → 0.40 ms | the first key still clones every match |
+| 112 | 5107a4d | a drill: 2.31 → 0.83 ms | — |
+| 113 | fe41cde | spectrum spread 45.8 → 0.5 µs a frame | — |
+| 114 | ad67abe | a drag step: 70 → ~3 µs | — |
+| 115 | 0b8b6d4 | ↓ in a 5k-entry path modal: 0.93 → 0.52 ms | the modal's per-frame clone (#110's) |
+| 116 | 8566a6b | `/scan/status` after idle: 36/min → backs off to one a minute | server side (`?coverage=0`) is mStream's |
+| 117 | d4456b7 | macOS unchanged (hidden 0 frames, shown 120); the Windows 0×0 path is pinned by a test | not run on Windows |
+| 118 | 478a2fe | 120 Hz display: 120 → 60 pictures/s, GPU busy −48%; contract clause 6 amended | CPU unchanged (presents still run) |
+| 119 | a2588b3 | paused with the window open: main thread 7.6 → 0.6 ms/s, feed 0 | — |
+| 120 | 366fc37 | after cycling the presets: 97 → 80 MB | — |
+| 121 | f421d98 | low-power GPU by default, `WGPU_POWER_PREF` to override, the choice logged | dual-GPU saving not measurable on this Mac |
+| 122 | 56a1e05 | ~200k fewer instructions per shaded frame for multi-pass presets | single submit kept (the verifiers' advice) |
+| 123 | 8f72992, acaf90e | the web demo's AudioContext suspends 5 s after pausing: the idle-sleep assertion is released | WebKit unverified |
+| 124 | 15521cd, 8e6f024, b8ad0b8 | WebGL2 backend; the palette is lifted to ≥4.5:1 (the accent is now #3a96dd) | **decision**: +0.74 MB gzip download (1.08 → 1.82 MB) for beamterm's atlas |
+| 125 | e74a16d, fd879ea | idle: 120 callbacks and 21.7 ms/s of main thread → 9.9 and 2.7 | — |
+| 126 | cf6d611 | English-only wasm: 4.14 → 3.35 MB raw, 2.12 → 1.82 MB gzip | **decision**: opt-level z (−12% gzip, a visualizer frame ~65% slower) |
+| 127 | 698dd4a | crate release compile 916 s → 2m34s; peak compiler memory 6.3 → 3.75 GB; −2.2 MB binary | — |
+| 128 | 51b5d40 | CI builds the dev profile: the crate compiles in 14 s instead of the 9-21 min release step; the Linux guard reads the debug binary | first real run is on CI |
+| 129 | 59c7761 | e2e 8m30s → 2m08s; the gates now fail when their word never comes (proved) | — |
+| 130 | eb63ec4 | rust-cache saves only from main; PR runs share a cancel-in-progress group | provable only on GitHub |
+| 131 | 3a4e9ee | a fresh fake with a 35 s reverse lookup: 36.5 s → 0.33 s to first ping | the macOS runner saving shows on CI |
+| 132 | dcad758 | aws-lc-sys gone (ring only); HTTPS, proxy and self-signed servers work; release binary −1.8 MB | — |
+| 133 | 4b175bf | debug cover decode 36.5 → 1.95 ms, sixel encode 13.6 → 0.49 ms; debug album-wall upgrade 2.0 → 0.46 s | — |
+
+**After the merge.** An integration check ran against the merged tree:
+- three cross-lane reviewers covered the event loops and pacing, the engine and network, and the caches and graphics;
+- five agents re-ran every lane's headline smoke on the merged binaries.
+
+Every smoke held. No reviewer found a blocking defect. Their notes were fixed in three follow-up lanes (`perf/fu-engine`, `perf/fu-graphics`, `perf/fu-loop`), each smoke-tested and reviewed, and one more by hand:
+- **#73, ed80c35:** the vendored crate's want channel is a `watch`, so a want can be replaced but never dropped. A deterministic test fails 5 of 5 on the old code, and a stress probe went from 10/200 stuck to 0/200.
+- **#95, 3230da2:** a kitty transmission overwritten by an overlay drawn in the same frame is sent again. 144 stale cells under the server dropdown → 0.
+- **#92, 305f67e and eb2cd04:** a reconnect mid-track asks for the playing cover's original again. The original's arrival no longer re-encodes the small queue slot: 40.2 → 25.7 KB per track change on kitty, and the store no longer grows by one image per change.
+- **#94, 1b5a848:** a panic deletes the process's kitty pictures (68 left → 0).
+- **#102, a914408:** the Stats page under the mini player no longer keeps every pass drawing: 52.6 → 14 syscalls/s, the same as the mini player over the Library.
+- **#102, 9f29870:** an arrow held on that page ends with the button. Before, the log scrolled on by itself after the release.
+- **#85, 52bf37c:** a seed-path listing still out keeps the Torrents room brisk (completion 139 → 96 ms after Tab), and it still lands after the worker has died.
+- **#82, 30cd3bc:** effects a frame makes, such as the wall's cover claims, go out without the post-draw wait. Page turn → first cover request: 111 → 15-21 ms.
+- **3c52d3e:** the "sixty-four covers" comment and library-rooms.md's #91 entry are corrected.
+
+Left as they are, all bounded:
+- The other admin rooms still draw every pass after their worker thread has died, which happens only on a panic. That is the pre-audit cost; the Torrents room got the fix.
+- A frame that carries kitty transmissions keeps a second copy of them until it ends, for the re-send check.
+- A cover sharpened from its small copy to the original re-encodes once outside the frame's encode budget.

@@ -294,6 +294,7 @@ impl App {
         for item in &mut self.queue.items {
             rename(&mut item.origin.server);
         }
+        self.queue.touch();
         for owed in &mut self.stats.outbox {
             rename(&mut owed.origin.server);
         }
@@ -370,9 +371,13 @@ impl App {
         self.search.set(Vec::new());
         self.files.set(Vec::new());
         self.files.loading = true;
-        // The album wall was the old server's too.
+        // The album wall was the old server's too, and so were the
+        // Artists and Genres lists.
         self.albums = None;
         self.artist_albums = None;
+        self.albums_rev = self.albums_rev.wrapping_add(1);
+        self.artists = None;
+        self.genre_list = None;
         self.library.set(Vec::new());
         self.library_stack = super::nav::Drill::new(crate::tui::worker::LibraryNode::Root);
     }
@@ -649,6 +654,15 @@ impl App {
                 if token.is_some() {
                     self.session.token = token;
                 }
+                if username.is_some() && username != self.session.username {
+                    // Another account on the same server can see other
+                    // libraries: the Artists and Genres lists kept for the
+                    // rooms were the last one's (performance audit #99). The
+                    // album wall keeps its own lifecycle — dropped while it
+                    // stands, it would wait on an ask nothing sent.
+                    self.artists = None;
+                    self.genre_list = None;
+                }
                 if username.is_some() {
                     self.session.username = username;
                 }
@@ -670,8 +684,23 @@ impl App {
                 }
                 self.libraries = ping.vpaths.clone();
                 // Cover filenames only mean anything to the server that
-                // minted them; a reconnect may be a different server.
-                self.art.clear();
+                // minted them; a reconnect may be a different server. The
+                // order goes with the map: a name left behind in it would
+                // come back doubled once a late answer files it again. A
+                // claim still unanswered is withdrawn as it goes, as an
+                // eviction's is: no lane asks for it once the session has
+                // moved on (the review of performance audit #88).
+                let withdrawn: Vec<Effect> =
+                    self.art.drain().filter_map(|(name, value)| super::withdrawal(name, value)).collect();
+                self.art_order.clear();
+                self.art_small.clear();
+                self.path_came_up();
+                // The playing track's cover went with them, and only a
+                // track's start asked for the original: the queue panel and
+                // the wall, asking first, left its big box on their small
+                // copy for the rest of the track (the integration check of
+                // performance audit #92).
+                let playing_cover = self.fetch_art();
                 let libraries = ping.vpaths.len();
                 self.info(format!(
                     "connected to {} ({} librar{})",
@@ -696,6 +725,8 @@ impl App {
                     Effect::Audio(AudioCmd::SetBlendSkips(self.blend_skips)),
                     Effect::Audio(AudioCmd::SetPauseFade(self.pause_fade)),
                 ];
+                effects.extend(withdrawn);
+                effects.extend(playing_cover);
                 effects.extend(dj_effects);
                 // Worth persisting when we hold a token we logged in for — or
                 // a pairing code, which is the only way back to this server
@@ -822,6 +853,7 @@ impl App {
                     },
                 );
                 self.tunnel_retry.remove(&id);
+                self.path_came_up();
                 let mut effects = Vec::new();
                 if self.pending_tunnel.as_deref() == Some(id.as_str()) {
                     self.pending_tunnel = None;

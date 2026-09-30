@@ -245,6 +245,7 @@ const CURSOR: &str = "> ";
 /// glyph sets — braille turns in ten, ASCII in four — so the modulo has to
 /// ask the set rather than a constant.
 fn spinner_frame(app: &App) -> &'static str {
+    app.spinner_shown.set(true);
     let frames = glyphs().spinner;
     frames[app.spinner % frames.len()]
 }
@@ -550,7 +551,15 @@ pub(crate) fn regions(area: Rect) -> Regions {
 }
 
 pub fn render(frame: &mut Frame, app: &mut App) {
+    render_screen(frame, app);
+    // The overlays drew after the cover: a kitty picture's pixels, riding
+    // its first cell, may not have survived the frame.
+    crate::tui::graphics::verify_sent(frame.buffer_mut());
+}
+
+fn render_screen(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    app.spinner_shown.set(false);
 
     if !app.connected {
         render_connect(frame, area, app);
@@ -1624,7 +1633,7 @@ fn render_now_visualizer(frame: &mut Frame, area: Rect, app: &mut App) {
             .and_then(|file| app.art.get(file))
             .and_then(|art| art.as_ref());
         app.viz.draw(&mut canvas, &app.heard, sounding, cover);
-        frame.render_widget(Paragraph::new(canvas.into_lines()), picture);
+        frame.render_widget(&canvas, picture);
     }
 }
 
@@ -1764,7 +1773,7 @@ fn render_facts_cover(frame: &mut Frame, area: Rect, app: &mut App, mosaic: bool
     let mut canvas = crate::tui::canvas::Canvas::new(area);
     if !canvas.is_empty() {
         app.cover_pane.draw(&mut canvas, cover);
-        frame.render_widget(Paragraph::new(canvas.into_lines()), area);
+        frame.render_widget(&canvas, area);
     }
     Some(area)
 }
@@ -5596,6 +5605,21 @@ mod tests {
         app.spinner += 1;
         let second = draw(&mut app);
         assert_ne!(first, second, "advancing the tick changes the frame");
+    }
+
+    /// The loop skips unchanged frames, and a turn of the spinner is news
+    /// only to a frame that drew one (performance audit #102).
+    #[test]
+    fn the_frame_says_whether_it_drew_the_spinner() {
+        let mut app = connected_app();
+        draw(&mut app);
+        assert!(!app.spinner_shown.get(), "nothing loading, nothing turning");
+        on_the_playlists_node(&mut app);
+        draw(&mut app);
+        assert!(app.spinner_shown.get(), "a pane loading shows it");
+        app.apply_event(Event::Error("server said no".into()));
+        draw(&mut app);
+        assert!(!app.spinner_shown.get(), "the answer took it away again");
     }
 
     #[test]
