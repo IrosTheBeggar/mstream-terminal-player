@@ -168,7 +168,7 @@ epaint_default_fonts = "0.36"
 # a borrowed system face is checked the way egui will read it, because
 # egui panics on a face it cannot parse. Versioned with egui's (epaint).
 skrifa = { version = "0.44", default-features = false, features = ["std"] }
-# The GUI's own window (src/gui/window.rs; the window-mode spike): a
+# The GUI's own window (src/gui/window/; the window-mode spike): a
 # ratatui backend that draws the cell buffer onto a wgpu surface, so the
 # same `render` that fills a terminal fills a native window. It is on the
 # wgpu and ratatui-core lines above and draws onto any surface target, the

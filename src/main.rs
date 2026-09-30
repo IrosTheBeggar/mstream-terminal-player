@@ -337,9 +337,9 @@ struct GuiArgs {
     instance_lock: Option<std::path::PathBuf>,
 
     /// The spike's own window: the GUI in a native window through
-    /// ratatui-wgpu instead of this terminal (gui/window.rs) — the real
-    /// player, workers and all, but no keys or pointer until the spike's
-    /// later steps.
+    /// ratatui-wgpu instead of this terminal (gui/window/) — the real
+    /// player, workers and all, with the window's keys, pointer, wheel and
+    /// IME translated into the GUI's own events.
     #[arg(long, hide = true)]
     window: bool,
 }

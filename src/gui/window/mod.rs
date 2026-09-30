@@ -10,16 +10,23 @@
 //! on each redraw, and the wait it answers is when the next redraw is asked
 //! for, so the terminal's cadence carries over: 10 ms while covers are hot,
 //! 33 ms while audio draws, a blinking caret's flip, else the 100 ms poll.
-//! The only input fed so far is the window's own resize; the keyboard and
-//! the pointer are later steps. The terminal path does not come through
-//! this file at all.
+//! Step 3 is input: the keyboard, an input method and the pointer, turned
+//! into the crossterm events a terminal would have sent (input.rs) and fed
+//! through the same input half. The terminal path does not come through
+//! this module at all.
 //!
-//! Two levers ride along, both hidden. `MSTREAM_WINDOW_SIZE=<cols>,<rows>`
+//! Three levers ride along, all hidden. `MSTREAM_WINDOW_SIZE=<cols>,<rows>`
 //! opens the window at another grid than 100×30 — 70,20 shows the mini
 //! player. `MSTREAM_WINDOW_DUMP=<dir>` writes what the window holds as text,
 //! and the same Gui drawn into a `TestBackend` of the same size, a few
 //! frames in, and says on stderr whether they match. That is how the spike
-//! checks fidelity without reading pixels.
+//! checks fidelity without reading pixels. `MSTREAM_WINDOW_SCRIPT=<file>`
+//! plays keys, text and pointer gestures into the window and dumps what it
+//! shows, one step a frame (script.rs has the commands): the spike's way to
+//! prove input on a machine that may not send a window synthetic events.
+
+mod input;
+mod script;
 
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -34,10 +41,14 @@ use ratatui::style::Color;
 use ratatui_wgpu::{Builder, Dimensions, Font, WgpuBackend};
 use unicode_width::UnicodeWidthStr;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::WindowEvent;
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use winit::event::{ElementState, Ime, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window, WindowId};
+
+use input::{Grid, Raw, Translator};
+use script::{Input, Script, Step};
 
 use super::{Channels, Ctx, Flow, Gui, Host, finish, frame, input, render};
 use crate::kit::theme::th;
@@ -101,6 +112,13 @@ pub(super) fn run(mut gui: Gui, channels: Channels) -> i32 {
         dump,
         exit_code: 0,
         done: false,
+        translator: Translator::new(),
+        modifiers: ModifiersState::empty(),
+        preedit: String::new(),
+        script: Script::from_env(),
+        script_until: None,
+        quit_flushed: false,
+        min_surface: PhysicalSize::new(1, 1),
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("gui --window: {e}");
@@ -146,6 +164,21 @@ struct App {
     exit_code: i32,
     /// The teardown has run.
     done: bool,
+    /// Pixels to cells, and the mouse state a terminal keeps.
+    translator: Translator,
+    /// The modifiers held, as winit last reported them: its key events
+    /// carry none of their own.
+    modifiers: ModifiersState,
+    /// What an input method is composing, not yet committed.
+    preedit: String,
+    script: Option<Script>,
+    /// When the script's current `wait` runs out.
+    script_until: Option<Instant>,
+    /// A quit came through the input half, which flushed the saver: the
+    /// teardown does not flush it again, and input stops.
+    quit_flushed: bool,
+    /// One cell, in pixels: the least surface the backend can draw on.
+    min_surface: PhysicalSize<u32>,
 }
 
 /// The window as the loop's [`Host`]: the pointer over something
@@ -204,18 +237,21 @@ impl App {
             .map_err(|e| format!("the window has nothing to draw with: {e}"))?;
         let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
-        // The cell comes back from the backend, not from arithmetic here:
-        // its width is the narrowest of the faces it was given. The window
-        // is then set to the grid exactly — grown when the opening guess
-        // fell short, trimmed when it overshot — so the window and the
-        // render tests draw the same number of cells.
+        // The cell's width comes back from the backend, not from
+        // arithmetic here: it is the narrowest of the faces it was given,
+        // which the backend keeps to itself. The surface's width over its
+        // columns is that width exactly, because the spare pixels (fewer
+        // than a cell) are fewer than the columns for any grid wider than a
+        // cell is. Rows are not so lucky — 30 rows of 32 px can have 31
+        // spare — but a row is the type's size exactly, which is what the
+        // builder was given. The window is then set to the grid exactly —
+        // grown when the opening guess fell short, trimmed when it
+        // overshot — so the window and the render tests draw the same
+        // number of cells.
         let reported = terminal.backend_mut().window_size().map_err(|e| e.to_string())?;
         let (got_cols, got_rows) =
             (reported.columns_rows.width.max(1), reported.columns_rows.height.max(1));
-        let cell = (
-            u32::from(reported.pixels.width) / u32::from(got_cols),
-            u32::from(reported.pixels.height) / u32::from(got_rows),
-        );
+        let cell = (u32::from(reported.pixels.width) / u32::from(got_cols), font_px);
         let want = PhysicalSize::new(cell.0 * u32::from(cols), cell.1 * u32::from(rows));
         eprintln!(
             "gui --window: {font_px} px type at scale {}, cell {}×{} px, opened at \
@@ -231,6 +267,23 @@ impl App {
         {
             terminal.backend_mut().resize(now.width, now.height);
         }
+
+        // The input method's text arrives as its own events from here on
+        // (dead keys on macOS among them). Its candidate window wants the
+        // caret's place, but the kit draws its caret as a glyph and never
+        // tells the terminal where it is, so there is no caret cell to
+        // hand over cheaply: the window's top-left, one cell big, until
+        // the kit reports one.
+        // A terminal is never less than a cell, and ratatui-wgpu counts on
+        // that: a surface with room for no whole cell reports a 0×0 grid,
+        // and its cursor clamp (`width - 1`) then underflows. The window is
+        // held to one cell for the platforms that honour a minimum, and
+        // `resized` holds the surface to it for any that do not.
+        self.min_surface = PhysicalSize::new(cell.0.max(1), cell.1.max(1));
+        window.set_min_inner_size(Some(self.min_surface));
+
+        window.set_ime_allowed(true);
+        window.set_ime_cursor_area(PhysicalPosition::new(0, 0), PhysicalSize::new(cell.0, cell.1));
 
         window.request_redraw();
         self.asked = Some(Instant::now());
@@ -263,7 +316,12 @@ impl App {
             return;
         };
         match frame(terminal, &mut self.gui, &mut self.ctx, &mut WindowHost(window)) {
-            Ok(wait) => self.next_frame = Instant::now() + wait,
+            Ok(wait) => {
+                self.next_frame = Instant::now() + wait;
+                if let Some(until) = self.script_until {
+                    self.next_frame = self.next_frame.min(until);
+                }
+            }
             // The terminal's way with a frame that fails: the player
             // tears down and exits 1.
             Err(e) => {
@@ -280,25 +338,179 @@ impl App {
         {
             eprintln!("gui --window: the dump failed: {e}");
         }
+        self.play(event_loop);
     }
 
-    /// One input through the loop's input half. A quit has flushed the
-    /// saver already; the teardown in `exiting` does the rest. Anything
-    /// else wants a frame now, as the terminal draws after every batch.
-    fn feed(&mut self, event_loop: &ActiveEventLoop, event: TermEvent) {
+    /// One input through the loop's input half; false once it quit. A
+    /// quit has flushed the saver already; the teardown in `exiting` does
+    /// the rest. Anything else wants a frame now, as the terminal draws
+    /// after every batch.
+    fn feed(&mut self, event_loop: &ActiveEventLoop, event: TermEvent) -> bool {
+        if self.quit_flushed {
+            return false;
+        }
         if input(&mut self.gui, &mut self.ctx, event) == Flow::Quit {
+            self.quit_flushed = true;
             event_loop.exit();
-            return;
+            return false;
         }
         self.ask_redraw();
+        true
+    }
+
+    /// What the window saw, translated and fed. Composition in progress
+    /// stops here: the kit has no way to draw uncommitted text yet, so the
+    /// preedit is kept and said on stderr once per change — which is how a
+    /// person testing an input method sees composition happen at all.
+    fn feed_raw(&mut self, event_loop: &ActiveEventLoop, raw: Raw) {
+        if let Raw::ImePreedit(text) = &raw {
+            if *text != self.preedit {
+                eprintln!("gui --window: preedit {text:?}");
+                self.preedit.clone_from(text);
+            }
+            return;
+        }
+        if let Raw::ImeCommit(_) = raw {
+            self.preedit.clear();
+        }
+        let Some(grid) = self.grid() else { return };
+        for event in self.translator.translate(raw, grid) {
+            if !self.feed(event_loop, event) {
+                return;
+            }
+        }
+        self.ask_redraw();
+    }
+
+    /// The grid as the backend holds it now: the whole surface and the
+    /// cells stretched over it (input.rs's [`Grid`] says why no cell size).
+    fn grid(&mut self) -> Option<Grid> {
+        let reported = self.terminal.as_mut()?.backend_mut().window_size().ok()?;
+        Some(Grid {
+            width: u32::from(reported.pixels.width).max(1),
+            height: u32::from(reported.pixels.height).max(1),
+            cols: reported.columns_rows.width.max(1),
+            rows: reported.columns_rows.height.max(1),
+        })
+    }
+
+    /// The script's next steps, after a frame: everything up to the next
+    /// input or wait, so each input is drawn before the one after it.
+    fn play(&mut self, event_loop: &ActiveEventLoop) {
+        if self.quit_flushed {
+            return;
+        }
+        if let Some(until) = self.script_until {
+            if Instant::now() < until {
+                return;
+            }
+            self.script_until = None;
+        }
+        while let Some(step) = self.script.as_mut().and_then(Script::next) {
+            match step {
+                Step::Wait(time) => {
+                    let until = Instant::now() + time;
+                    self.script_until = Some(until);
+                    self.next_frame = self.next_frame.min(until);
+                    break;
+                }
+                Step::Inputs(inputs) => {
+                    let Some(grid) = self.grid() else { break };
+                    for step_input in inputs {
+                        let raw = match step_input {
+                            Input::Raw(raw) => raw,
+                            Input::MoveTo(col, row) => {
+                                let (x, y) = grid.centre(col, row);
+                                Raw::Move { x, y }
+                            }
+                        };
+                        self.feed_raw(event_loop, raw);
+                    }
+                    // One input a frame; the redraw it asked for comes back
+                    // here.
+                    self.ask_redraw();
+                    break;
+                }
+                Step::Dump(path) => {
+                    if let Err(e) = self.script_dump(&path) {
+                        eprintln!("gui --window: script dump {}: {e}", path.display());
+                    }
+                }
+                Step::Say(text) => eprintln!("gui --window: script says {text}"),
+                // The window asks the platform for a size, as a drag on its
+                // corner would; the platform answers with `Resized` (or at
+                // once, where it can), and the step waits for the frame
+                // after.
+                Step::Resize(width, height) => {
+                    let Some(window) = self.window.clone() else { break };
+                    eprintln!("gui --window: script asks for {width}×{height} px");
+                    if let Some(now) = window.request_inner_size(PhysicalSize::new(width, height)) {
+                        self.resized(event_loop, now);
+                    }
+                    self.ask_redraw();
+                    break;
+                }
+                Step::Quit => {
+                    event_loop.exit();
+                    break;
+                }
+            }
+        }
+        if self.script.as_ref().is_some_and(Script::is_done) {
+            eprintln!("gui --window: script done");
+            self.script = None;
+        }
+    }
+
+    /// A new surface size: to the backend, then a whole repaint, then the
+    /// GUI's own resize bookkeeping through the input half.
+    fn resized(&mut self, event_loop: &ActiveEventLoop, size: PhysicalSize<u32>) {
+        let Some(terminal) = self.terminal.as_mut() else { return };
+        // A zero side (a window minimised on Windows) goes through as it
+        // is: the backend keeps its last surface for it. Anything else
+        // smaller than a cell becomes one cell, drawn scaled into the
+        // sliver, rather than a grid of none.
+        let side = |got: u32, least: u32| if got == 0 { 0 } else { got.max(least) };
+        let (width, height) =
+            (side(size.width, self.min_surface.width), side(size.height, self.min_surface.height));
+        terminal.backend_mut().resize(width, height);
+        let _ = terminal.clear();
+        let Ok(grid) = terminal.backend_mut().size() else { return };
+        self.feed(event_loop, TermEvent::Resize(grid.width, grid.height));
+    }
+
+    /// The window's text, row by row, then what the pointer is doing: the
+    /// cell it is over, whether it is the hand, and any composition.
+    fn script_dump(&mut self, path: &Path) -> std::io::Result<()> {
+        let grid = self.grid();
+        let Some(terminal) = self.terminal.as_ref() else { return Ok(()) };
+        let mut text = terminal.backend().get_text();
+        let pointer = grid.map_or((0, 0), |grid| self.translator.pointer(grid));
+        let surface = grid.map_or((0, 0), |grid| (grid.width, grid.height));
+        text.push_str(&format!(
+            "-- pointer {},{} at {:.1},{:.1} px; surface {}×{} px; cursor {}; preedit {:?}\n",
+            pointer.0,
+            pointer.1,
+            self.translator.pixel().0,
+            self.translator.pixel().1,
+            surface.0,
+            surface.1,
+            if self.ctx.hand { "hand" } else { "default" },
+            self.preedit,
+        ));
+        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, text)?;
+        eprintln!("gui --window: script dumped {}", path.display());
+        Ok(())
     }
 
     /// The end of gui::run, minus the terminal's own steps: the window and
     /// its surface go first, the way the terminal is restored first, then
     /// the player's teardown. The close button and Cmd-Q arrive here
     /// without passing through a quit in `input`, so the saver is flushed
-    /// here; after a quit that did pass through, this writes the same
-    /// files again.
+    /// here — unless a quit that did pass through flushed it already.
     fn teardown(&mut self) {
         if self.done {
             return;
@@ -306,7 +518,9 @@ impl App {
         self.done = true;
         self.terminal = None;
         self.window = None;
-        self.ctx.saver.flush(&self.gui.app);
+        if !self.quit_flushed {
+            self.ctx.saver.flush(&self.gui.app);
+        }
         finish(&mut self.gui, &self.ctx);
     }
 }
@@ -323,9 +537,10 @@ impl ApplicationHandler for App {
         }
     }
 
-    // Esc does not close the window: the GUI's own keys, a later step,
-    // give Esc to the modals and rooms that back out with it, as the
-    // terminal does. The close button and the app menu's Quit close it.
+    // Esc does not close the window: the GUI's own keys give Esc to the
+    // modals and rooms that back out with it, as the terminal does. The
+    // close button, the app menu's Quit and the GUI's own quit keys close
+    // it.
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -334,12 +549,36 @@ impl ApplicationHandler for App {
             // against a surface mid-resize can, so the next frame draws
             // every cell. The GUI's own resize bookkeeping runs through the
             // input half with the grid the surface now holds.
-            WindowEvent::Resized(size) => {
-                let Some(terminal) = self.terminal.as_mut() else { return };
-                terminal.backend_mut().resize(size.width, size.height);
-                let _ = terminal.clear();
-                let Ok(grid) = terminal.backend_mut().size() else { return };
-                self.feed(event_loop, TermEvent::Resize(grid.width, grid.height));
+            WindowEvent::Resized(size) => self.resized(event_loop, size),
+            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            // A synthetic key is one winit makes up for a key already held
+            // when the window gained focus (X11, Windows): no terminal would
+            // report it, and a held Enter must not open whatever is under
+            // the cursor.
+            WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
+                let raw = input::from_winit_key(&event, self.modifiers);
+                self.feed_raw(event_loop, raw);
+            }
+            WindowEvent::Ime(Ime::Preedit(text, _)) => {
+                self.feed_raw(event_loop, Raw::ImePreedit(text))
+            }
+            WindowEvent::Ime(Ime::Commit(text)) => self.feed_raw(event_loop, Raw::ImeCommit(text)),
+            // An input method switched off or away drops what it was
+            // composing.
+            WindowEvent::Ime(Ime::Enabled | Ime::Disabled) => {
+                self.feed_raw(event_loop, Raw::ImePreedit(String::new()))
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.feed_raw(event_loop, Raw::Move { x: position.x, y: position.y })
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if let Some(button) = input::from_winit_button(button) {
+                    let down = state == ElementState::Pressed;
+                    self.feed_raw(event_loop, Raw::Button { button, down });
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.feed_raw(event_loop, Raw::Wheel(input::from_winit_wheel(delta)))
             }
             // ratatui-wgpu presents only cells that changed, and a present
             // that finds the window not on screen yet (wgpu's `Occluded`,

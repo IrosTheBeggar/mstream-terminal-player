@@ -2484,7 +2484,7 @@ struct Channels {
 
 /// What the loop's two halves carry from one turn to the next, whoever
 /// runs them — the terminal's poll loop or the window's event loop
-/// (gui/window.rs): the channels, the queue saver and whether the pointer
+/// (gui/window/): the channels, the queue saver and whether the pointer
 /// is a hand.
 struct Ctx {
     channels: Channels,
@@ -3013,7 +3013,7 @@ pub fn run(
     // the ten locales the strings carry reach the screen.
     crate::setup::boot_language();
     // The window-mode spike leaves here, before anything below touches the
-    // terminal (gui/window.rs): the same player, started the same way, in
+    // terminal (gui/window/): the same player, started the same way, in
     // a native window. The palette is pinned first, because the window is
     // not the terminal that launched it and nothing has resolved it yet.
     if window {
