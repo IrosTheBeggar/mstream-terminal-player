@@ -1,6 +1,6 @@
 [package]
 name = "mstream-player"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Terminal player and headless server-audio engine for mStream"
@@ -130,6 +130,10 @@ tiny_http = "0.12"
 # transcode codec=mp3/aac rule from PLAN.md finding #14 stands either way.)
 symphonia = { version = "0.5", features = ["all"] }
 clap = { version = "4", features = ["derive", "env"] }
+# The launcher's one-desktop-player rule: an advisory lock the player holds
+# for its lifetime (src/instance.rs). flock on unix, LockFileEx on Windows —
+# the same crate the mStream tray launcher tries it with.
+fslock = "0.2"
 # Only what engine::http uses: the reqwest source and the temp-file spool.
 # The defaults would ask for reqwest's default TLS again, aws-lc and all.
 stream-download = { version = "0.24.2", default-features = false, features = ["reqwest", "temp-storage"] }
