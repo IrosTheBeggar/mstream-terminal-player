@@ -424,7 +424,18 @@ fn ctrl_letter(text: Option<&str>, bare: Option<char>, physical: Option<char>) -
     text.and_then(single)
         .and_then(|c| latin(c).or_else(|| control(c)))
         .or_else(|| bare.and_then(latin))
-        .or_else(|| physical.and_then(latin))
+        .or_else(|| match bare {
+            // The key's place stands in only for a LETTER of another script
+            // — Ctrl+ф on a Russian layout is the C0 byte of the Latin key at
+            // that place, which is what a terminal sends — and for a key the
+            // layout could not name at all. Punctuation stays itself: Ctrl+'
+            // on Dvorak is an apostrophe, not the q whose place it took, or
+            // the player would quit on it (found at a real keyboard,
+            // 2026-09-30).
+            Some(c) if c.is_alphabetic() && !c.is_ascii() => physical.and_then(latin),
+            None => physical.and_then(latin),
+            Some(_) => None,
+        })
 }
 
 /// A character in lower case, when it has a single-character one.
@@ -707,6 +718,18 @@ mod tests {
 
     const CTRL: KeyModifiers = KeyModifiers::CONTROL;
     const CTRL_SHIFT: KeyModifiers = KeyModifiers::CONTROL.union(KeyModifiers::SHIFT);
+
+    #[test]
+    fn ctrl_with_punctuation_is_the_punctuation_not_the_keys_place() {
+        // Dvorak keeps its apostrophe where QWERTY keeps q. At a real keyboard
+        // Ctrl+' reached the GUI as q — and q quits the player, whatever the
+        // modifier — because the key's place stood in for every key the layout
+        // named with something other than a Latin letter. Punctuation is
+        // itself; only a letter of another script takes its place.
+        assert_eq!(ctrl(Some("'"), '\'', Some('q')), vec![(KeyCode::Char('\''), KeyModifiers::CONTROL)]);
+        assert_eq!(ctrl(None, '\'', Some('q')), vec![(KeyCode::Char('\''), KeyModifiers::CONTROL)]);
+        assert_eq!(ctrl(None, 'ф', Some('a')), vec![(KeyCode::Char('a'), KeyModifiers::CONTROL)]);
+    }
 
     #[test]
     fn ctrl_c_arrives_as_c_with_control() {
