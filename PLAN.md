@@ -49,6 +49,27 @@ Additions (v1, additive only):
 - Legacy alias: `mstream-player --port N` ≡ `mstream-player serve --port N`, so the binary
   is a rename-and-drop-in replacement under mStream's existing spawn contract
 
+Additions for configuring a running jukebox (v1, additive; for mStream's admin panel). A client
+may be pinned to a build that predates any of them, so `GET /version` carries `capabilities` —
+the names below — and a client checks there before it calls. An absent key means none of this.
+
+- `capabilities: ["settings", "output"]` and `formats: {codecs, containers}` in `GET /version`.
+  The codec list is read from symphonia's registry at runtime, so it cannot drift from the
+  build (no `opus` — finding #14 — until a symphonia release has the decoder)
+- `GET /settings` → `{crossfade, gapless, blend_skips, pause_fade}`; `POST /settings` takes any
+  subset and answers the result. Applied under one lock while playing: no restart, the queue and
+  position untouched. Out-of-range `crossfade` (not 0–30 s) and unknown keys are 400s, not
+  clamps or shrugs
+- `GET /output` → `{device, available, notices: [{seq, at, text, lost}]}` — the output device's
+  name, whether anything can sound, and the last 16 lines of device news that until now reached
+  only stderr. `/status` deliberately gains nothing: it is polled at 2 Hz by clients written
+  against the original wire
+
+Not done here, in the order they are worth doing: choosing the output device
+(`GET /output/devices`, `POST /output/device`, a test tone), a volume ceiling and a starting
+volume, a `GET`/`POST /state` snapshot so a restart can bring the queue back, per-track gain on
+`/queue/add` for ReplayGain, and `queue/insert` + `queue/move` (mStream's web remote fakes both).
+
 ## Phases
 
 ### Phase 1 — Port the engine (this repo, behavior-compatible)
