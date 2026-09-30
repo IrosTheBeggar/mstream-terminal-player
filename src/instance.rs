@@ -71,6 +71,15 @@ pub struct Sidecar {
     /// Seconds since the Unix epoch.
     #[serde(rename = "startedAt")]
     pub started_at: u64,
+    /// The control API this player hosts on loopback (gui/control.rs:
+    /// `gui --serve-port`), and the token every route but `GET /version`
+    /// wants in `x-auth-token`. Absent on a player launched without a
+    /// port. mStream's server reads both to adopt the desktop player as
+    /// its server-audio engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 /// The sidecar's path for a lock path: the same name with a `.json`
@@ -80,12 +89,13 @@ pub fn sidecar_path(lock: &Path) -> PathBuf {
 }
 
 /// Take the lock at `path` for this process, or learn who has it. `face`
-/// is what this run is (`gui`, `tui`) for the sidecar. `None` is the
-/// unlocked run. Errors are the lock file itself being unusable (a
+/// is what this run is (`gui`, `tui`) for the sidecar; `control` the port
+/// and token of the control face this run will host, published with it.
+/// `None` is the unlocked run. Errors are the lock file itself being unusable (a
 /// directory that cannot be created, permissions) — the caller carries on
 /// without a lock and says so; the sidecar failing to write is not an
 /// error, only a missing hint.
-pub fn claim(path: Option<&Path>, face: &str) -> Result<Claim, String> {
+pub fn claim(path: Option<&Path>, face: &str, control: Option<(u16, &str)>) -> Result<Claim, String> {
     let Some(path) = path else { return Ok(Claim::Unlocked) };
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)
@@ -107,6 +117,8 @@ pub fn claim(path: Option<&Path>, face: &str) -> Result<Claim, String> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
+        port: control.map(|(port, _)| port),
+        token: control.map(|(_, token)| token.to_string()),
     };
     if let Err(e) = write_sidecar(&sidecar, &who) {
         eprintln!("warning: could not write {}: {e}", sidecar.display());
@@ -125,9 +137,29 @@ pub fn already_open_line(who: Option<&Sidecar>) -> String {
     }
 }
 
+/// Write the sidecar for this holder's eyes only: it carries the control
+/// face's token, and the data home may be readable by other users of the
+/// machine (a 0755 home on Linux). Owner-only from the first byte — the
+/// mode is set at creation, not after the write — and re-asserted on a
+/// file that already existed with a wider mode. Windows keeps the profile
+/// directory's own ACL.
 fn write_sidecar(path: &Path, who: &Sidecar) -> std::io::Result<()> {
+    use std::io::Write;
     let body = serde_json::to_string_pretty(who).map_err(std::io::Error::other)?;
-    std::fs::write(path, body)
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
+    }
+    let mut file = open.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(body.as_bytes())
 }
 
 fn read_sidecar(path: &Path) -> Option<Sidecar> {
@@ -178,12 +210,34 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_sidecar_is_the_holders_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("mode");
+        let lock = dir.join("desktop-player.lock");
+        let sidecar = sidecar_path(&lock);
+        // A sidecar left behind wide open (a crash under an older build, a
+        // hand-edited file) is tightened, not trusted.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&sidecar, "{}").unwrap();
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let held = match claim(Some(&lock), "gui", Some((3333, "tok-en"))).unwrap() {
+            Claim::Held(h) => h,
+            _ => panic!("the claim must hold"),
+        };
+        let mode = std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the token inside is nobody else's business: {mode:o}");
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_lock_admits_one_player_and_the_sidecar_names_it() {
         let dir = scratch("one");
         let lock = dir.join("desktop-player.lock");
         // The directory does not exist yet: claim makes it.
-        let first = claim(Some(&lock), "gui").unwrap();
+        let first = claim(Some(&lock), "gui", Some((3333, "tok-en"))).unwrap();
         let held = match first {
             Claim::Held(h) => h,
             _ => panic!("the first claim must hold"),
@@ -196,10 +250,11 @@ mod tests {
         assert_eq!(who.face, "gui");
         assert!(!who.host.is_empty());
         assert!(who.started_at > 1_700_000_000, "{}", who.started_at);
+        assert_eq!((who.port, who.token.as_deref()), (Some(3333), Some("tok-en")));
 
         // A second claim, from another handle on the same file, is refused
         // and told who holds it.
-        match claim(Some(&lock), "tui").unwrap() {
+        match claim(Some(&lock), "tui", None).unwrap() {
             Claim::Taken(Some(s)) => assert_eq!(s, who),
             Claim::Taken(None) => panic!("the sidecar should be readable"),
             _ => panic!("the second claim must be refused"),
@@ -213,13 +268,23 @@ mod tests {
         // Dropping the holder releases the lock and removes the sidecar.
         drop(held);
         assert!(!sidecar.exists(), "the sidecar is gone with the holder");
-        assert!(matches!(claim(Some(&lock), "gui").unwrap(), Claim::Held(_)));
+        let again = match claim(Some(&lock), "gui", None).unwrap() {
+            Claim::Held(held) => held,
+            _ => panic!("the lock is free again"),
+        };
+        // A run without a control face writes no port and no token — read
+        // while the holder lives, since its drop takes the sidecar with it.
+        let text = std::fs::read_to_string(&sidecar).unwrap();
+        let bare: Sidecar = serde_json::from_str(&text).unwrap();
+        assert_eq!((bare.port, bare.token), (None, None));
+        assert!(!text.contains("port"), "absent, not null: {text}");
+        drop(again);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn no_path_means_no_lock() {
-        assert!(matches!(claim(None, "gui").unwrap(), Claim::Unlocked));
+        assert!(matches!(claim(None, "gui", None).unwrap(), Claim::Unlocked));
     }
 
     #[test]
