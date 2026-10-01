@@ -2866,6 +2866,38 @@ pass-through of library paths for this backend, the launcher passing `rustPlayer
 across: opening the GUI ends the headless engine's queue, closing it hands back an empty engine
 (the GUI's own queue persists in queue.json as ever).
 
+### Phase 13 — The MP3 player's flasher (`mstream-player device flash`)
+
+> **Status 2026-09-30: built, unreleased** — the page, the `--yes` line mode, `device list`,
+> the fake board and its e2e leg. The firmware's first release (v0.5.0) is still to come; until
+> it does, the pin in `src/device/firmware.rs` is empty and `--firmware` / `--release` are the
+> ways in. The mStream launcher's menu item is the next slice there.
+
+The mStream MP3 player (IrosTheBeggar/mstream-mp3-player) is an M5Stack Core2; its firmware
+reaches the board over USB through the ESP32's serial bootloader. The flasher lives in this
+player rather than in the tray launcher (decided 2026-09-30): flashing is a conversation —
+which board, what is on it, erase or not, progress, what went wrong — and this is where the
+pages are; the launcher stays the thin supervisor and opens this page the way it opens the
+admin rooms.
+
+- **espflash as a library** (`default-features = false`, `serialport`): the reset dance, the
+  RAM stub, compressed writes, the MD5 skip-and-verify. serialport with libudev off, because
+  test/linkage.sh refuses a binary that needs it. About 2 MB on each binary.
+- **The firmware's contracts.** The merged `*-full.bin` written at 0x0 keeps the settings (NVS
+  sits above the image in the firmware's layout); ESP-IDF's app description at 0x10020 names
+  the firmware and its version, so what is on a board is read from its flash — no console
+  command, and a board whose firmware does not boot still answers.
+- **Trust.** The pin is a tag plus the sha256 of its `-full.bin` (release assets are mutable);
+  `--release` trusts the release's own `SHA256SUMS`; every local file is vetted by its
+  description before anything is written.
+- **The worker** (src/device/flow.rs) holds the board in its bootloader from the probe to the
+  write, so one reset serves both, and restarts it on every way out before the write; the page
+  cannot leave a write. The baud ladder (921600 → 460800 → 115200) covers bridges and cables
+  that cannot hold the fast rate, on connect and again on a write that dies.
+- **Left:** the pin (after firmware v0.5.0); the launcher's item (mStream: `PlayerPage::Device`,
+  a version gate, the web installer as the fallback); Wi-Fi and pairing over the same port
+  (the hidden `--server` flag is accepted for it); a udev rule in mStream's deb/rpm.
+
 ## Smoke testing
 
 `mstream-player replay "<script>"` drives the TUI from a script. Keys go through exactly the path

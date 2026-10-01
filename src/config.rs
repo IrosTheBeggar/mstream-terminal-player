@@ -990,6 +990,13 @@ pub fn log_dir() -> Option<PathBuf> {
     cache_root().map(|root| root.join("logs"))
 }
 
+/// Where downloaded MP3-player firmware images are kept (src/device): one
+/// folder per release tag in the same cache, re-checked against their
+/// checksum on every use, so a damaged copy is just downloaded again.
+pub fn firmware_dir() -> Option<PathBuf> {
+    cache_root().map(|root| root.join("firmware"))
+}
+
 fn cache_root() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("MSTREAM_PLAYER_CACHE_DIR") {
         return Some(expand_home(PathBuf::from(dir)));

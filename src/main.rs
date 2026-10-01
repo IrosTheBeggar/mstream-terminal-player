@@ -51,6 +51,10 @@ mod kit;
 mod setup;
 #[cfg(not(target_arch = "wasm32"))]
 mod admin;
+/// The MP3 player (an M5Stack Core2) over USB: `device list`, `device
+/// flash`. Native only — a serial port is an OS handle.
+#[cfg(not(target_arch = "wasm32"))]
+mod device;
 
 /// The browser build (see its module note). Everything below this line that
 /// swaps a module out for a hand-written stand-in exists so the App, the
@@ -237,6 +241,8 @@ enum Command {
     Stats(admin::StatsArgs),
     /// Show the server's Quick Connect code as a scannable QR page
     Qr(setup::QrArgs),
+    /// The mStream MP3 player (an M5Stack Core2) over USB: list the boards, install or update its firmware
+    Device(device::DeviceArgs),
     /// Authenticate against an mStream server and save the session
     Login(cmd_library::LoginArgs),
     /// Forget the saved session
@@ -504,6 +510,7 @@ fn main() {
         (Some(Command::Admin(args)), _) => std::process::exit(admin::run(args)),
         (Some(Command::Stats(args)), _) => std::process::exit(admin::run_stats(args)),
         (Some(Command::Qr(args)), _) => std::process::exit(setup::run_qr(args)),
+        (Some(Command::Device(args)), _) => std::process::exit(device::run(args)),
         (Some(Command::Login(args)), _) => std::process::exit(cmd_library::login(args)),
         (Some(Command::Logout), _) => std::process::exit(cmd_library::logout()),
         (Some(Command::Info(conn)), _) => std::process::exit(cmd_library::info(conn)),

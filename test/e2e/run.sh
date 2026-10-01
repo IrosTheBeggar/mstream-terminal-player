@@ -164,5 +164,38 @@ stop_fake
 ARGS=(gui)
 leg gui-now gui-now.exp "$WORK/h8" "$WORK/gui-now.out"
 
+# ── Scenario I: the MP3 player's flash page, against the scripted board ──
+# No fake mStream at all: the page talks to a board, and the board is the
+# fake behind MSTREAM_DEVICE_FAKE. The image is a merged one in miniature —
+# the two image headers and the app description the page reads the version
+# from (src/device/firmware.rs).
+python3 - "$WORK/fw.bin" <<'PY'
+import struct, sys
+desc = bytearray(256)
+struct.pack_into('<I', desc, 0, 0xABCD5432)
+desc[16:22] = b'v0.5.0'
+desc[48:66] = b'mstream-mp3-player'
+img = bytearray(b'\xff' * 0x10200)
+img[0x1000] = 0xE9
+img[0x10000] = 0xE9
+img[0x10020:0x10120] = desc
+open(sys.argv[1], 'wb').write(img)
+PY
+ARGS=(device flash --firmware "$WORK/fw.bin")
+leg device-flash device-flash.exp "$WORK/h9" "$WORK/device-flash.out" env MSTREAM_DEVICE_FAKE=ours:v0.4.0
+assert "device list names the fake boards; --yes writes a fresh board; a held port is refused" "
+import os, subprocess
+env = dict(os.environ, HOME='$WORK/h9', MSTREAM_DEVICE_FAKE='two')
+out = subprocess.run(['$BIN', 'device', 'list'], capture_output=True, text=True, env=env)
+assert out.returncode == 0 and 'FAKE0' in out.stdout and 'FAKE1' in out.stdout, (out.returncode, out.stdout, out.stderr)
+env['MSTREAM_DEVICE_FAKE'] = 'fresh'
+out = subprocess.run(['$BIN', 'device', 'flash', '--yes', '--firmware', '$WORK/fw.bin'], capture_output=True, text=True, env=env)
+assert out.returncode == 0, (out.returncode, out.stdout, out.stderr)
+assert 'install, erase first' in out.stdout and 'v0.5.0 is on the board' in out.stdout, out.stdout
+env['MSTREAM_DEVICE_FAKE'] = 'busy'
+out = subprocess.run(['$BIN', 'device', 'flash', '--yes', '--firmware', '$WORK/fw.bin'], capture_output=True, text=True, env=env)
+assert out.returncode == 1 and 'in use' in out.stderr, (out.returncode, out.stdout, out.stderr)
+"
+
 echo
 if [ "$FAILS" -eq 0 ]; then echo "e2e: ALL PASS"; else echo "e2e: $FAILS FAILURE(S)"; exit 1; fi

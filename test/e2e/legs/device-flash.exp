@@ -1,0 +1,30 @@
+#!/usr/bin/expect -f
+# The MP3 player's flash page on the fake board (MSTREAM_DEVICE_FAKE in
+# the environment, the image file in argv): the question shows the board
+# running an older version of our firmware, Enter writes, the bar runs,
+# Done names the version and the board's first line, Enter closes.
+set timeout 20
+set env(TERM) xterm-256color
+set env(MSTREAM_SETUP_LANG) en
+set env(MSTREAM_NO_GRAPHICS) 1
+set env(HOME) $::env(WIZHOME)
+set env(XDG_CONFIG_HOME) $::env(WIZHOME)/.config
+proc drain {secs} { expect -timeout $secs timeout {} }
+spawn {*}$argv
+exec stty rows 30 columns 100 < $spawn_out(slave,name)
+# The primary button's verb: the fake board holds v0.4.0, the image v0.5.0.
+expect {
+  "Update" {}
+  timeout { puts "NO-QUESTION"; exec kill -9 [exp_pid]; expect eof; exit 2 }
+}
+drain 1
+send "\r"
+# The fake's write takes about a second; Done is the title that follows.
+expect {
+  "Done" {}
+  timeout { puts "NO-DONE"; exec kill -9 [exp_pid]; expect eof; exit 3 }
+}
+drain 1
+send "\r"
+expect eof
+exit 0
