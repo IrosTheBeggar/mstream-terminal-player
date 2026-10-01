@@ -2868,9 +2868,12 @@ across: opening the GUI ends the headless engine's queue, closing it hands back 
 
 ### Phase 13 — The window spike: the GUI in a window of its own (2026-09-29/30)
 
-> **Status: spike done, decision GO WITH CONDITIONS — nothing ships from it yet.** Five
+> **Status: spike done, decision GO WITH CONDITIONS — nothing ships from it yet; the
+> conditions and the Windows run are worked (below) and the flag stays hidden.** Five
 > commits on `claude/desktop-app-packaging-8ee4ff` (4e10926 render, 4685214 loop, de04c35
-> input, 4d6b4df stats, c59cbdb art) plus the keyboard check's fix, on top of v0.8.0, unpushed. Steps 1–3 and 5 were each
+> input, 4d6b4df stats, c59cbdb art) plus the keyboard check's fix, on top of v0.8.0, pushed
+> as PR #41 (not for merge); the condition lanes and the Windows machine's two fixes followed
+> on the same branch. Steps 1–3 and 5 were each
 > built by one implementer and judged by three adversarial reviewers with lenses that varied
 > by step (fidelity, liveness, behaviour or visual; terminal parity or footprint; code), with
 > fix rounds only for blocking findings; step 4 was two measurement legs (this Mac, and Linux
@@ -3100,12 +3103,80 @@ after the window appeared (stages instrumented; the retest names the slow one); 
 11 s to exit (timings added). Untestable there: AltGr, dead keys and IMEs (no second layout
 without elevation, and the hang), 150%, a scale move.
 
-**Still open after the lanes.** The Windows retest of the five items above; Korean on
-macOS (no source enabled); a hidden window on Windows and Wayland (frames measured on macOS
-only); Wayland paste without XWayland; the emoji faces (a flag candidate draws as boxes);
-Hangul drawn at its own face's line height, smaller than the kana beside it; the cell after
-a modal opens still paints a cover for one short frame; the tag characters in emoji flag
-sequences, which paste still drops.
+**The Windows retest and the hand-off (2026-10-01, the same machine, c2c81bb then de9084a).**
+The retest passed the glyph tier, Ctrl+V, Ctrl+Alt+q, the quit paths, minimise, AltGr and
+the dead keys (later also the dead-key Space fix: `'` `e` → `é`, `'` Space → `'`, `^` Space
+→ `^`); startup there was 1.4–1.7 s warm, the Vulkan instance alone 0.5 s; the posted
+layout change still froze inside `DefWindowProcW`, an opengl32 hook sitting in the
+window-procedure chain; and the queue drag read as a one-column miss. Three items went back
+to the Windows agent with ownership of the files involved, and all three came back:
+- *C, not a bug.* The grip is at window width − 7 (column 93 at 100 columns), `[⋯]` at
+  95–97, and the earlier presses were at 94, a cell only the row covers. A press on the grip
+  through the lever reads `QueueGrip`, the drag begins, and the release reorders the queue.
+- *B, fixed by the backend mask (d50bd5d).* The repro on `WGPU_BACKEND=dx12` alone and on
+  `vulkan` alone did not freeze, so it was the GL backend's presence, not winit, and the
+  vendored winit is untouched. On Windows the window now builds a DX12-only instance first
+  and a Vulkan-only one only when DX12 finds no adapter, never GL; `WGPU_BACKEND` still
+  overrides. Three posted layout changes with the window focused: no hang, dumps continuing,
+  AltGr+Q on the switched layout typing `@`. First present 1.0–1.2 s warm against
+  1.6–1.8 s: the instance 22–39 ms where Vulkan's was 575–893, and DX12's adapter request,
+  ~0.5 s for two GPUs, the long pole now.
+- *F, the window hidden until its first present (ec1ab37).* Windows only: created with
+  `with_visible(false)` and shown the moment a frame hands the backend cells, or at a 4 s
+  deadline regardless. A hidden window gets no `WM_PAINT`, so until it is shown the frames
+  run from `about_to_wait`. The window appears already drawn about 1 s after spawn warm,
+  where it had stood blank from ~300 ms for 1.3–2.4 s; `first_visible_present_ms` fills on
+  Windows. Under a compile-like load the baseline went "Not Responding" with a DWM ghost in
+  its place from ~8 s until its first present at ~20 s; after, no ghost at all, since DWM
+  does not ghost a hidden window. But the deadline is checked only once `open()` has
+  returned from joining the GPU thread, so under that load it fired 17 s in, and the main
+  thread sat hung through the join — the follow-up lane below.
+- *Found there, outside its files:* the six offscreen render tests lock up when the harness
+  runs them concurrently on NVIDIA — one test's Vulkan device going down inside nvoglv64.dll
+  while another's all-backend instance brings a WGL context up in the same DLL, neither
+  returning. Fixed here by taking the GPU one at a time (7b4399c). CI's Windows runner has
+  no NVIDIA driver, which is why its leg stayed green.
+
+**Lane 6 (f57faec), the review of the Windows commits, worked.** A reviewer read d50bd5d
+and ec1ab37 against wgpu-hal 30.0.1 and found six minors, none blocking, and this lane did
+them with the same shape (one implementer, a code lens and a macOS lens, no fix round
+needed):
+- One module, `src/gpu_pick.rs`, now chooses the instance and adapter for the GUI window,
+  the visualizer's own process and the headless `viz-probe`: on Windows a DX12-only instance
+  first, Vulkan alone only when DX12 has no hardware adapter, never GL, so no process of ours
+  brings up the backend that froze the window unless `WGPU_BACKEND` asks. DX12 answers even
+  without D3D12 hardware, with WARP, Microsoft's software rasteriser, which had made the
+  Vulkan fallback all but dead and would have drawn such a machine's frames on the CPU: a
+  software adapter is now held while Vulkan is tried and taken only as the last resort (the
+  rule is a pure function over lazy tries, with tests that the walk stops at hardware).
+- `open()` no longer joins the early threads. When they are not done, the loop polls them
+  every 4 ms, builds the backend on the turn they finish and answers window events meanwhile;
+  a hidden window shown at the deadline draws one frame first, so a late window is not blank
+  (the Windows run under load had the main thread hung through the join and the deadline
+  firing 17 s in). On this Mac the threads finish before the window exists, so nothing
+  changes: first present 165 vs 167 ms warm medians, A/B; a 1.5 s delay planted on the GPU
+  thread put the first present at 1.65 s with the window answering throughout.
+- The "drawing with … through …" line is printed once, after the backend is built, naming
+  the adapter the backend holds (the vendored builder now reports it, change 13), with ", in
+  software" for a CPU adapter; the main-thread fallback hands its adapter and device to the
+  builder instead of dropping them; on Windows `first_visible_present_ms` records the frame
+  that showed the window, not the repaint after it; a `threads.wait` stage joins the stats.
+Left as minors: the offscreen render tests still build the crate's default instance (GL in a
+test process on Windows; the mutex covers the hang); the visualizer child prints no adapter
+line; input that arrives before the backend exists is dropped, not held (a quit key in that
+gap does nothing, the close button still works); and the backend build itself (surface,
+configure, pipelines) still runs on the loop thread. The Windows paths of this lane are
+reasoned through and compiled by CI's Windows leg, not run.
+
+**Still open after the Windows run.** The WARP rule, the polled startup under load and the
+visualizer's window on a layout switch, unrun on Windows; Korean on macOS (no source
+enabled); a hidden window
+on Wayland (frames measured on macOS, minimise with playback proven on Windows); Wayland
+paste without XWayland; the emoji faces (a flag candidate draws as boxes); Hangul drawn at
+its own face's line height, smaller than the kana beside it; the cell after a modal opens
+still paints a cover for one short frame; the tag characters in emoji flag sequences, which
+paste still drops; on Windows, 150%, a move between scales and the IMEs, untestable there
+without elevation.
 
 **The manual checklist** (`docs/window-spike/checklist.md` has every item with its expected
 result; the shape): macOS — launch from Terminal and iTerm; the key walk (digits, arrows,
