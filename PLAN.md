@@ -3045,6 +3045,68 @@ byte-bounded texture cache; a bundled symbol face; the timing probe gated off wi
 lever; and the manual checklist passed. The judge's gate: keep the flag hidden until the
 gamma, CJK, libxkbcommon and panic-hook conditions and the Windows run are done.
 
+**The conditions, worked (2026-09-30 to 10-01).** Five lanes on the same branch, each one
+implementer and three adversarial reviewers as the spike was, each committed on its own:
+- *Lane 1 (e8fe96e)* — ratatui-wgpu and winit vendored under `[patch.crates-io]`
+  (`vendor/`, each with a VENDORED.md naming every change); winit carries Warp's 0.30
+  backport of rust-windowing/winit#4478 (Korean: a key dropped after a commit, a doubled
+  Space), untested here for want of a Korean source. The lane also showed the Japanese
+  "swallowed Enter" was native Kotoeri (above).
+- *Lane 2 (b5384fc)* — the renderer: headless rendering made public with a pixel readback and
+  offscreen tests of our own; the surface takes the non-sRGB twin of the format wgpu offered,
+  so bytes pass through exactly (ground #12131c and gold #e5c07b measure exact), with the
+  exact sRGB curve where only sRGB exists; faces open by collection index; a failed present
+  is owed, not lost; a font's id hashes a bounded prefix; a glyph narrower than its box is
+  centred rather than enlarged, which was clipping Hangul; the wide-glyph "shift" was the
+  text dump's spelling, shown by a test that draws AB日本CD. The window: a colour table for
+  the named ANSI colours; CJK and Hangul faces for every locale through memory-mapped files
+  at unchanged RSS; the QR code sampled nearest; covers resampled when a box shrinks; a byte
+  bound on the texture cache; the timing probe idle without its lever.
+- *Lane 3 (689df49)* — a composition drawn inline at the caret (the kit splices it, inert
+  without one); IME allowed only while a field has the keyboard, placed at the caret's cell,
+  with a modal taking the keyboard from the field beneath it; paste (Cmd+V, Ctrl+V,
+  Ctrl+Shift+V) into a field only, the clipboard's first line typed as keys; the pointer
+  leaving or focus lost releases held buttons; a scale-factor change rebuilds the fonts and
+  re-grids; `scale`, `leave`, `alt`, `ctrlalt`, `minimise`, `frame`, `press`, `release`
+  joined the lever.
+- *Lane 4 (dc0ad19)* — a clean line and exit 1 when libxkbcommon-x11 is missing on an X11
+  session, the package recommended by the deb and rpm; a panic hook of the window's own; the
+  instance lock dropped by the window on Cmd-Q; the kit reports moved overlays and the next
+  frame runs hot, so a cover paints over a fresh modal for ~20 ms, not ~100; a minimised
+  window on macOS keeps its frames, clock and queue (measured over 20 s, so no hidden-window
+  timer); resize increments; the field's window counts cells, so wide text fits (a shared
+  correctness fix); a masked composition; paste capped at 4096 and stripped of stray format
+  characters; a narrower cell replacing a wide one clears the continuation cell (a residue
+  the window had shown).
+- *Lane 5 (dde0aa4)* — from the Windows report: the glyph tier pinned modern under the
+  window; Warp's backport of rust-windowing/winit#4582 against the layout-switch freeze; an
+  Alt chord delivers only what the OS composed (AltGr's @ and €; Ctrl+Alt+q nothing, where
+  it had quit the player); startup stages timed and the face discovery and the wgpu adapter
+  and device moved to threads started before the window exists (warm first frame here
+  ~180 → ~150 ms); every quit path exits within 50 ms here, with a "way out" timing line
+  for Windows' 11 s Ctrl+Q; the dump names the last press and what it hit, for the queue
+  drag that never starts there.
+
+**The Windows run (2026-10-01, Windows 10 22H2, one display at 200%, NVIDIA via Vulkan,
+rustc 1.98.1).** Build and tests green; the automated pass green (keys, mouse to the bottom
+row, resize to a cell without a crash, covers as pictures, 1× through a DPI-unaware launch);
+real input green for the key walk, clicks, the transport, close by X and Alt+F4 with the
+sidecar removed, minimise with playback continuing; CPU idle 0.5% and the visualizer tab
+15.9% in release. Defects: the conhost glyph set from a plain console (fixed, lane 5); a hang
+on every keyboard-layout switch (the winit freeze, backported, untested until the retest);
+the queue drag never starting (not reproducible here; evidence added for the retest);
+Ctrl+V typing a `v` (paste, lane 3); Ctrl+Alt+q quitting (lane 5); the first frame 2–3 s
+after the window appeared (stages instrumented; the retest names the slow one); Ctrl+Q
+11 s to exit (timings added). Untestable there: AltGr, dead keys and IMEs (no second layout
+without elevation, and the hang), 150%, a scale move.
+
+**Still open after the lanes.** The Windows retest of the five items above; Korean on
+macOS (no source enabled); a hidden window on Windows and Wayland (frames measured on macOS
+only); Wayland paste without XWayland; the emoji faces (a flag candidate draws as boxes);
+Hangul drawn at its own face's line height, smaller than the kana beside it; the cell after
+a modal opens still paints a cover for one short frame; the tag characters in emoji flag
+sequences, which paste still drops.
+
 **The manual checklist** (`docs/window-spike/checklist.md` has every item with its expected
 result; the shape): macOS — launch from Terminal and iTerm; the key walk (digits, arrows,
 Home/End, PageUp/Down, Tab and Shift+Tab, Enter, Esc, Backspace, Space, T); key repeat on
