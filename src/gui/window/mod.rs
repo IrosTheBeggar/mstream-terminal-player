@@ -30,6 +30,14 @@
 //! Step 5 is album art: the window draws covers as textures over the grid
 //! (covers.rs) where it drew the ▀-mosaic, through a `Graphics` that hands
 //! each cover to the window instead of encoding it for a terminal.
+//!
+//! What a terminal does for its programs without being asked, the window
+//! does here: an input method's composition is drawn in the field that has
+//! the keyboard, and its candidate list floats by that field's caret; the
+//! input method is on only while a field has the keyboard, so a Japanese
+//! keyboard's digits still switch rooms; Cmd+V (Ctrl+V elsewhere) types the
+//! clipboard into the field; a button let go outside the window lets go;
+//! and a move to a screen of another scale re-sizes the type.
 
 mod covers;
 mod input;
@@ -48,7 +56,7 @@ use ratatui::backend::{Backend, TestBackend};
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::Event as TermEvent;
 use ratatui::style::Color;
-use ratatui_wgpu::{Builder, ColorTable, Dimensions, Font, WgpuBackend};
+use ratatui_wgpu::{Builder, ColorTable, Dimensions, Font, Fonts, WgpuBackend};
 use unicode_width::UnicodeWidthStr;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -133,6 +141,10 @@ pub(super) fn run(mut gui: Gui, channels: Channels) -> i32 {
         translator: Translator::new(),
         modifiers: ModifiersState::empty(),
         preedit: String::new(),
+        ime_allowed: false,
+        ime_area: None,
+        faces: Vec::new(),
+        scale: 1.0,
         script: Script::from_env(),
         script_until: None,
         quit_flushed: false,
@@ -191,8 +203,19 @@ struct App {
     /// The modifiers held, as winit last reported them: its key events
     /// carry none of their own.
     modifiers: ModifiersState,
-    /// What an input method is composing, not yet committed.
+    /// What an input method is composing, not yet committed; the kit draws
+    /// it in the focused field from its own copy (`Surface::composition`).
     preedit: String,
+    /// The input method is on: last frame drew a field with the keyboard.
+    ime_allowed: bool,
+    /// The caret cell the input method was last told of, in pixels: the
+    /// top-left and the size.
+    ime_area: Option<((u32, u32), (u32, u32))>,
+    /// The regular faces the backend was built with, Hack first, kept to
+    /// build them again at another size when the display's scale changes.
+    faces: Vec<Font<'static>>,
+    /// The display scale the type is sized for.
+    scale: f64,
     script: Option<Script>,
     /// When the script's current `wait` runs out.
     script_until: Option<Instant>,
@@ -226,7 +249,8 @@ impl App {
                 .create_window(attributes)
                 .map_err(|e| format!("the window would not open: {e}"))?,
         );
-        let font_px = (FONT_PT * window.scale_factor()).round() as u32;
+        self.scale = window.scale_factor();
+        let font_px = font_px(self.scale);
         // The display handle goes in with the instance, as the visualizer's
         // window does it: on Wayland and X11 the backend needs it before a
         // surface can exist.
@@ -248,6 +272,7 @@ impl App {
         let mut faces = vec![hack()?];
         faces.extend(symbol_fallback());
         faces.extend(script_fallbacks(&rust_i18n::locale()));
+        self.faces.clone_from(&faces);
         // The pinned truecolour palette always has a ground; black is only
         // the answer to a palette that somehow resolved without one.
         let theme = th();
@@ -280,7 +305,7 @@ impl App {
         let (got_cols, got_rows) =
             (reported.columns_rows.width.max(1), reported.columns_rows.height.max(1));
         let cell = (u32::from(reported.pixels.width) / u32::from(got_cols), font_px);
-        let want = PhysicalSize::new(cell.0 * u32::from(cols), cell.1 * u32::from(rows));
+        let want = fit(cell, (cols, rows));
         eprintln!(
             "gui --window: {font_px} px type at scale {}, cell {}×{} px, opened at \
              {got_cols}×{got_rows} cells; sizing to {cols}×{rows}, {}×{} px",
@@ -296,12 +321,6 @@ impl App {
             terminal.backend_mut().resize(now.width, now.height);
         }
 
-        // The input method's text arrives as its own events from here on
-        // (dead keys on macOS among them). Its candidate window wants the
-        // caret's place, but the kit draws its caret as a glyph and never
-        // tells the terminal where it is, so there is no caret cell to
-        // hand over cheaply: the window's top-left, one cell big, until
-        // the kit reports one.
         // A terminal is never less than a cell, and ratatui-wgpu counts on
         // that: a surface with room for no whole cell reports a 0×0 grid,
         // and its cursor clamp (`width - 1`) then underflows. The window is
@@ -309,9 +328,8 @@ impl App {
         // `resized` holds the surface to it for any that do not.
         self.min_surface = PhysicalSize::new(cell.0.max(1), cell.1.max(1));
         window.set_min_inner_size(Some(self.min_surface));
-
-        window.set_ime_allowed(true);
-        window.set_ime_cursor_area(PhysicalPosition::new(0, 0), PhysicalSize::new(cell.0, cell.1));
+        // The input method stays off until a field has the keyboard
+        // (`sync_ime`, after each frame); winit opens a window with it off.
 
         window.request_redraw();
         self.asked = Some(Instant::now());
@@ -381,6 +399,7 @@ impl App {
         {
             eprintln!("gui --window: the dump failed: {e}");
         }
+        self.sync_ime();
         self.play(event_loop);
     }
 
@@ -401,20 +420,93 @@ impl App {
         true
     }
 
-    /// What the window saw, translated and fed. Composition in progress
-    /// stops here: the kit has no way to draw uncommitted text yet, so the
-    /// preedit is kept and said on stderr once per change — which is how a
-    /// person testing an input method sees composition happen at all.
-    fn feed_raw(&mut self, event_loop: &ActiveEventLoop, raw: Raw) {
-        if let Raw::ImePreedit(text) = &raw {
-            if *text != self.preedit {
-                eprintln!("gui --window: preedit {text:?}");
-                self.preedit.clone_from(text);
+    /// Whether a text field has the keyboard: the last frame noted the
+    /// cell of a field in its topmost layer. Every field with the keyboard
+    /// notes it — `gui::text_field` as it draws the caret, the DJ's genre
+    /// filter while it shows its placeholder — and a modal laid over the
+    /// page clears what a field beneath it noted, so a chooser with no
+    /// field of its own gets its keys as keys, never a paste or a
+    /// composition. Whether a caret drew would not do: a field under a
+    /// modal still draws one. Nor would `App::input_mode`'s Editing, which
+    /// is also what a player with no server reports, field or none.
+    fn editing(&self) -> bool {
+        self.gui.ui.caret_at().is_some()
+    }
+
+    /// The input method on while a field has the keyboard and off while
+    /// none does, and told where the field's caret is: after each frame,
+    /// and only when either changed. Off, a Japanese or Chinese keyboard's
+    /// keys reach the GUI as the keys they are — 2 is the Albums room, not
+    /// a full-width ２ waiting for Enter — as a terminal's do, whose input
+    /// method a person turns off for a TUI's keys by hand.
+    fn sync_ime(&mut self) {
+        let editing = self.editing();
+        let place = self.gui.ui.caret_at();
+        let grid = self.grid();
+        let Some(window) = self.window.clone() else { return };
+        if editing != self.ime_allowed {
+            // winit drops what was composing as it turns the input method
+            // off, and says so with `Ime::Disabled`; the composition here
+            // goes with it at once, so a field that lost the keyboard
+            // never draws it.
+            window.set_ime_allowed(editing);
+            self.ime_allowed = editing;
+            self.ime_area = None;
+            if !editing {
+                self.set_preedit("");
             }
+        }
+        // The candidate list floats by the caret's cell — after any
+        // composition, which the kit draws before the caret — rather than
+        // at the window's corner. The kit reports the cell as the field
+        // draws it, in the blink's off phase too, where the glyph is not
+        // on screen to be found.
+        if let (true, Some(place), Some(grid)) = (editing, place, grid) {
+            let area = grid.cell_rect(place.x, place.y);
+            if self.ime_area != Some(area) {
+                let ((x, y), (width, height)) = area;
+                window.set_ime_cursor_area(
+                    PhysicalPosition::new(x, y),
+                    PhysicalSize::new(width, height),
+                );
+                self.ime_area = Some(area);
+            }
+        }
+    }
+
+    /// An input method's composition, to the kit to draw in the focused
+    /// field, and said on stderr once per change for whoever is watching.
+    fn set_preedit(&mut self, text: &str) {
+        if text == self.preedit {
+            return;
+        }
+        eprintln!("gui --window: preedit {text:?}");
+        self.preedit.clear();
+        self.preedit.push_str(text);
+        self.gui.ui.set_composition(text);
+        self.ask_redraw();
+    }
+
+    /// What the window saw, translated and fed. A composition in progress
+    /// stops here, for the kit to draw; the paste chord reads the
+    /// clipboard while a field has the keyboard and is nothing otherwise
+    /// (off a Mac, Ctrl+V with no field is still the key it was).
+    fn feed_raw(&mut self, event_loop: &ActiveEventLoop, mut raw: Raw) {
+        if let Raw::ImePreedit(text) = &raw {
+            let text = text.clone();
+            self.set_preedit(&text);
             return;
         }
         if let Raw::ImeCommit(_) = raw {
-            self.preedit.clear();
+            self.set_preedit("");
+        }
+        if input::is_paste(&raw) {
+            if self.editing() {
+                let Some(text) = clipboard_text() else { return };
+                raw = Raw::Paste(text);
+            } else if cfg!(target_os = "macos") {
+                return;
+            }
         }
         let Some(grid) = self.grid() else { return };
         for event in self.translator.translate(raw, grid) {
@@ -493,6 +585,20 @@ impl App {
                     self.ask_redraw();
                     break;
                 }
+                // The same handler the platform's word runs, at the factor
+                // given: then the window asks for the size the grid wants
+                // at the new type, as the platform would set it.
+                Step::Scale(factor) => {
+                    let Some(window) = self.window.clone() else { break };
+                    eprintln!("gui --window: script scales to {factor}");
+                    if let Some(want) = self.rescale(event_loop, factor)
+                        && let Some(now) = window.request_inner_size(want)
+                    {
+                        self.resized(event_loop, now);
+                    }
+                    self.ask_redraw();
+                    break;
+                }
                 Step::Quit => {
                     event_loop.exit();
                     break;
@@ -522,6 +628,50 @@ impl App {
         self.feed(event_loop, TermEvent::Resize(grid.width, grid.height));
     }
 
+    /// The display's scale changed (the window moved to another screen):
+    /// the type at the new size, from the same faces, and the surface held
+    /// to the same grid of cells, as a terminal keeps its rows and columns
+    /// when it moves; then the GUI's resize bookkeeping, which re-measures
+    /// the cell for covers. The size the grid wants is returned for the
+    /// caller to ask the platform for — through winit's writer when winit
+    /// asked, or as a request when the script did.
+    fn rescale(&mut self, event_loop: &ActiveEventLoop, scale: f64) -> Option<PhysicalSize<u32>> {
+        let px = font_px(scale);
+        let mut fonts = Fonts::new(hack().ok()?, px);
+        fonts.add_regular_fonts(self.faces.iter().cloned());
+        let terminal = self.terminal.as_mut()?;
+        let grid = terminal.backend_mut().size().ok()?;
+        terminal.backend_mut().update_fonts(fonts);
+        // The cell from the backend, as at open: the surface's width over
+        // the columns it now has room for is the new cell's width exactly
+        // while the spare pixels (fewer than a cell) are fewer than the
+        // columns, which any surface the grid held already is.
+        let reported = terminal.backend_mut().window_size().ok()?;
+        let cols = u32::from(reported.columns_rows.width.max(1));
+        let cell = (u32::from(reported.pixels.width) / cols, px);
+        let want = fit(cell, (grid.width, grid.height));
+        eprintln!(
+            "gui --window: scale {scale}: {px} px type, cell {}×{} px; {}×{} cells at {}×{} px",
+            cell.0, cell.1, grid.width, grid.height, want.width, want.height
+        );
+        self.min_surface = PhysicalSize::new(cell.0.max(1), cell.1.max(1));
+        if let Some(window) = &self.window {
+            window.set_min_inner_size(Some(self.min_surface));
+        }
+        // The surface to the new size now, not when the platform answers:
+        // the backend's cells and its text texture are sized by the cell,
+        // and a frame drawn between the new type and the new surface would
+        // be a grid of another size on the old one.
+        self.resized(event_loop, want);
+        self.ime_area = None;
+        // The pointer has not moved, but its physical pixel has: the same
+        // place on the screen is that many more (or fewer) pixels in. The
+        // grid is the same, so the cell under it is too.
+        self.translator.rescale_pixel(scale / self.scale);
+        self.scale = scale;
+        Some(want)
+    }
+
     /// The window's text, row by row, then what the pointer is doing: the
     /// cell it is over, whether it is the hand, and any composition.
     fn script_dump(&mut self, path: &Path) -> std::io::Result<()> {
@@ -531,7 +681,8 @@ impl App {
         let pointer = grid.map_or((0, 0), |grid| self.translator.pointer(grid));
         let surface = grid.map_or((0, 0), |grid| (grid.width, grid.height));
         text.push_str(&format!(
-            "-- pointer {},{} at {:.1},{:.1} px; surface {}×{} px; cursor {}; preedit {:?}\n",
+            "-- pointer {},{} at {:.1},{:.1} px; surface {}×{} px; cursor {}; preedit {:?}; \
+             held {:?}; ime {}\n",
             pointer.0,
             pointer.1,
             self.translator.pixel().0,
@@ -540,6 +691,12 @@ impl App {
             surface.1,
             if self.ctx.hand { "hand" } else { "default" },
             self.preedit,
+            self.translator.held(),
+            match (self.ime_allowed, self.ime_area) {
+                (false, _) => "off".to_string(),
+                (true, None) => "on".to_string(),
+                (true, Some(((x, y), (w, h)))) => format!("on at {x},{y} px, {w}×{h}"),
+            },
         ));
         if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)?;
@@ -597,6 +754,23 @@ impl ApplicationHandler for App {
             // every cell. The GUI's own resize bookkeeping runs through the
             // input half with the grid the surface now holds.
             WindowEvent::Resized(size) => self.resized(event_loop, size),
+            // winit's suggested size keeps the window's logical size, which
+            // is the grid only to within a pixel or so of rounding; the
+            // grid's own size goes back instead, and the `Resized` that
+            // follows carries it to the surface.
+            WindowEvent::ScaleFactorChanged { scale_factor, mut inner_size_writer } => {
+                if let Some(want) = self.rescale(event_loop, scale_factor) {
+                    let _ = inner_size_writer.request_inner_size(want);
+                }
+            }
+            // A button let go out there may never come back as a release
+            // (Windows and X11 report one only while the pointer is
+            // captured; a window that lost the keyboard to another hears
+            // nothing): every held button is let go where the pointer last
+            // was, so a drag ends rather than following the pointer back.
+            WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false) => {
+                self.feed_raw(event_loop, Raw::Leave)
+            }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             // A synthetic key is one winit makes up for a key already held
             // when the window gained focus (X11, Windows): no terminal would
@@ -627,11 +801,15 @@ impl ApplicationHandler for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 self.feed_raw(event_loop, Raw::Wheel(input::from_winit_wheel(delta)))
             }
-            // ratatui-wgpu presents only cells that changed, and a present
-            // that finds the window not on screen yet (wgpu's `Occluded`,
-            // which the very first frame gets on macOS) is dropped with the
-            // rows already marked clean — so a still screen would stay
-            // blank. The window coming into view repaints every cell.
+            // A present that finds the window not on screen yet (wgpu's
+            // `Occluded`, which the very first frame gets on macOS) is owed
+            // by the vendored crate rather than lost (VENDORED.md, fix 5):
+            // its next flush presents whatever changed. That flush is the
+            // next frame, though, which a still screen may not ask for for
+            // a whole poll, so the window coming into view asks for one now
+            // — and repaints every cell with it, which costs one full frame
+            // and spares a compositor that dropped the hidden window's
+            // contents a screen of stale rows.
             WindowEvent::Occluded(false) => {
                 if let Some(stats) = self.stats.as_mut() {
                     stats.visible();
@@ -703,6 +881,31 @@ fn named_colours(theme: &crate::kit::theme::Theme) -> ColorTable {
         LIGHTMAGENTA: [0xd6, 0x70, 0xd6],
         LIGHTCYAN: [0x29, 0xb8, 0xdb],
         WHITE: [0xe5, 0xe5, 0xe5],
+    }
+}
+
+/// The type size in pixels at a display scale: [`FONT_PT`] points, so a
+/// Retina screen (scale 2) draws 32 px type where a standard one draws 16.
+fn font_px(scale: f64) -> u32 {
+    (FONT_PT * scale).round().max(1.0) as u32
+}
+
+/// The surface that holds a grid of cells exactly.
+fn fit(cell: (u32, u32), (cols, rows): (u16, u16)) -> PhysicalSize<u32> {
+    PhysicalSize::new(cell.0 * u32::from(cols), cell.1 * u32::from(rows))
+}
+
+/// The clipboard's text, for a paste; `None`, said on stderr, when there
+/// is none or no clipboard to read. A clipboard per paste: the X11 one is
+/// a connection of its own, and a paste is rare enough to open it then.
+/// On a Wayland session this is XWayland's clipboard (Cargo.toml says why).
+fn clipboard_text() -> Option<String> {
+    match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+        Ok(text) => Some(text),
+        Err(e) => {
+            eprintln!("gui --window: nothing to paste ({e})");
+            None
+        }
     }
 }
 
@@ -1130,6 +1333,18 @@ mod tests {
         // A role the palette names rather than spells takes the standard.
         assert_eq!(table.BLACK, [0, 0, 0]);
         assert_eq!(table.BLUE, [0x24, 0x72, 0xc8], "not the SVG #0000ff");
+    }
+
+    /// The type follows the display's scale, and the surface holds the
+    /// grid whatever the cell: the window's own numbers at scales 1 and 2,
+    /// and a fractional screen's.
+    #[test]
+    fn a_scale_sizes_the_type_and_the_grid_the_surface() {
+        assert_eq!((font_px(1.0), font_px(2.0), font_px(1.5), font_px(1.25)), (16, 32, 24, 20));
+        assert_eq!(font_px(0.01), 1, "never no type at all");
+        assert_eq!(fit((8, 16), GRID), PhysicalSize::new(800, 480));
+        assert_eq!(fit((16, 32), GRID), PhysicalSize::new(1600, 960));
+        assert_eq!(fit((12, 24), (70, 20)), PhysicalSize::new(840, 480));
     }
 
     /// On a Mac the fallback is always there: Menlo ships with the system

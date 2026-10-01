@@ -653,7 +653,8 @@ impl PostProcessor for CoverPost {
         }
         // A resample for art evicted while it was on the worker has nowhere
         // to go; the next sighting starts over. One that failed (no pixels)
-        // only lets the art ask again.
+        // drops the art's source: the textures it has stay, and a source
+        // that would not decode once is not handed to the worker again.
         for pixels in decoded {
             let Some(cover) = self.covers.get_mut(&pixels.art) else { continue };
             cover.asked = false;

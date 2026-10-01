@@ -132,6 +132,20 @@ pub struct Surface<A> {
     /// that may or may not blink is worse than one that always does.
     caret_since: Option<Instant>,
     caret_drawn: bool,
+    /// The cell the focused field drew its caret in this frame (blinked
+    /// off or not), cleared with the registries like the frame's mark and
+    /// again by every modal laid over the page (see [`Self::modal_over`]):
+    /// it marks the field that has the keyboard, so a shell turns its
+    /// input method and its paste on for it and floats the method's
+    /// candidate list here. A field under a modal may still draw its caret
+    /// (and keep the blink's clock), but the modal owns the keys.
+    caret_at: Option<Position>,
+    /// What an input method is composing for the focused field and has
+    /// not committed. Only a shell that receives composition outside the
+    /// key stream sets it — the GUI's own window; a terminal composes in
+    /// its own UI and sends the commit as keys — so it stays empty, and
+    /// changes nothing, everywhere else (see [`input_display_composing`]).
+    composition: String,
 }
 
 impl<A> Default for Surface<A> {
@@ -152,6 +166,8 @@ impl<A> Default for Surface<A> {
             key_hints: true,
             caret_since: None,
             caret_drawn: false,
+            caret_at: None,
+            composition: String::new(),
         }
     }
 }
@@ -198,6 +214,7 @@ impl<A: Clone> Surface<A> {
         self.bars.clear();
         self.contexts.clear();
         self.caret_drawn = false;
+        self.caret_at = None;
     }
 
     /// A field took a key or a click: the caret shows solid from now.
@@ -223,6 +240,41 @@ impl<A: Clone> Surface<A> {
         let elapsed = self.caret_since.map_or(0, |since| since.elapsed().as_millis());
         let into = elapsed % CARET_BLINK.as_millis();
         Some(Duration::from_millis((CARET_BLINK.as_millis() - into) as u64))
+    }
+
+    /// The focused field says where it drew its caret this frame — or
+    /// where it would, for a field that shows a placeholder until the
+    /// first key yet takes the keys all the same.
+    pub fn note_caret(&mut self, at: Position) {
+        self.caret_at = Some(at);
+    }
+
+    /// The cell of the field with the keyboard this frame, if one has it:
+    /// a field drawn in the topmost layer. None while a modal with no
+    /// field of its own is up over a page's focused field.
+    pub fn caret_at(&self) -> Option<Position> {
+        self.caret_at
+    }
+
+    /// A modal is laid over what drew so far: the keys are the modal's
+    /// from here, so a field beneath stops counting as having them; one
+    /// drawn inside the modal (after its frame) notes its caret again.
+    /// The blink's flag stays, so a caret still showing beside the modal
+    /// keeps its rhythm.
+    pub fn modal_over(&mut self) {
+        self.caret_at = None;
+    }
+
+    /// The input method's uncommitted text, or none (empty).
+    pub fn set_composition(&mut self, text: &str) {
+        if self.composition != text {
+            self.composition.clear();
+            self.composition.push_str(text);
+        }
+    }
+
+    pub fn composition(&self) -> &str {
+        &self.composition
     }
 
     /// Age the blink clock, so a test can see the other phase.
@@ -583,6 +635,7 @@ pub fn modal_frame_anchored_on<A: Clone>(
     title_color: Color,
 ) -> Rect {
     s.overlay(modal_rect(area, width, height, max_height));
+    s.modal_over();
     modal_frame_anchored(frame, area, width, height, max_height, title_color)
 }
 
@@ -1035,12 +1088,45 @@ pub fn input_display(value: &str, cursor: usize, width: u16) -> String {
 /// reserved either way, so the line never shifts as it blinks. A shell
 /// asks [`Surface::caret`] for the phase.
 pub fn input_display_blink(value: &str, cursor: usize, width: u16, on: bool) -> String {
-    let (caret, clip) = if crate::kit::theme::legacy_conhost() {
+    let (caret, clip) = input_marks();
+    input_display_with(value, cursor, width, if on { caret } else { ' ' }, clip)
+}
+
+/// The caret and clip marks this terminal can draw (see [`input_display`]).
+fn input_marks() -> (char, char) {
+    if crate::kit::theme::legacy_conhost() {
         ('│', '»')
     } else {
         ('▏', '…')
+    }
+}
+
+/// [`input_display_blink`] for the focused field, with an input method's
+/// uncommitted text spliced in at the cursor and the caret after it — the
+/// way every editor shows a composition in place, so にほん sits in the
+/// field while it is typed and becomes the value only on commit. While
+/// composing the caret holds solid: the keys are landing, as after any
+/// key. Also the caret's offset from the line's start, in cells, for a
+/// shell that places a candidate list by it. With no composition the
+/// line is exactly [`input_display_blink`]'s.
+pub fn input_display_composing(
+    value: &str,
+    cursor: usize,
+    width: u16,
+    on: bool,
+    composition: &str,
+) -> (String, u16) {
+    let (caret, clip) = input_marks();
+    let (line, at) = if composition.is_empty() {
+        input_window(value, cursor, width, if on { caret } else { ' ' }, clip)
+    } else {
+        let cursor = cursor.min(value.chars().count());
+        let byte = value.char_indices().nth(cursor).map_or(value.len(), |(i, _)| i);
+        let spliced = format!("{}{composition}{}", &value[..byte], &value[byte..]);
+        input_window(&spliced, cursor + composition.chars().count(), width, caret, clip)
     };
-    input_display_with(value, cursor, width, if on { caret } else { ' ' }, clip)
+    let cells: usize = line.chars().take(at).map(char_width).sum();
+    (line, u16::try_from(cells).unwrap_or(u16::MAX))
 }
 
 /// Pure core - unit-tested with explicit marks so the assertions hold on
@@ -1051,16 +1137,30 @@ fn input_display_with_fancy(value: &str, cursor: usize, width: u16) -> String {
 }
 
 pub fn input_display_with(value: &str, cursor: usize, width: u16, caret: char, clip: char) -> String {
+    input_window(value, cursor, width, caret, clip).0
+}
+
+/// The windowed line, and the caret's index in it, in characters. The
+/// clip marks never land on the caret: a window that starts past the
+/// value's start keeps the caret at least one in, and one that stops short
+/// of its end keeps it at least one short.
+fn input_window(
+    value: &str,
+    cursor: usize,
+    width: u16,
+    caret: char,
+    clip: char,
+) -> (String, usize) {
     let w = width as usize;
     if w < 3 {
-        return clip.to_string();
+        return (clip.to_string(), 0);
     }
     let mut chars: Vec<char> = value.chars().collect();
     let cursor = cursor.min(chars.len());
     chars.insert(cursor, caret);
     let total = chars.len();
     if total <= w {
-        return chars.into_iter().collect();
+        return (chars.into_iter().collect(), cursor);
     }
     let start = cursor.saturating_sub(w.saturating_sub(2)).min(total - w);
     let mut out: Vec<char> = chars[start..start + w].to_vec();
@@ -1070,7 +1170,7 @@ pub fn input_display_with(value: &str, cursor: usize, width: u16, caret: char, c
     if start + w < total {
         out[w - 1] = clip;
     }
-    out.into_iter().collect()
+    (out.into_iter().collect(), cursor - start)
 }
 
 // ── The pointer contract (OSC 22) ────────────────────────────────────────────
@@ -1261,6 +1361,68 @@ mod tests {
             on.chars().zip(off.chars()).enumerate().filter(|(_, (a, b))| a != b).map(|(i, _)| i).collect();
         assert_eq!(differ.len(), 1, "one cell blinks, the rest stand: {on} / {off}");
         assert_eq!(off.chars().nth(differ[0]), Some(' '));
+    }
+
+    #[test]
+    fn a_composition_splices_in_at_the_cursor_with_the_caret_after_it() {
+        // No composition: the very line the blinking caret draws, either
+        // phase, and the caret's cell after the text before it.
+        for on in [true, false] {
+            let (line, at) = input_display_composing("abcd", 2, 20, on, "");
+            assert_eq!(line, input_display_blink("abcd", 2, 20, on));
+            assert_eq!(at, 2);
+        }
+        // Composing at the end, mid-value and at the start: the text goes
+        // in at the cursor and the caret follows it, solid even in the
+        // blink's off phase. Kana are two cells each.
+        let caret = input_display_blink("", 0, 5, true);
+        let shown = input_display_composing("", 0, 20, false, "にほん");
+        assert_eq!(shown, (format!("にほん{caret}"), 6));
+        assert_eq!(input_display_composing("ab", 1, 20, true, "x"), (format!("ax{caret}b"), 2));
+        let shown = input_display_composing("ab", 0, 20, false, "日");
+        assert_eq!(shown, (format!("日{caret}ab"), 2));
+        // The value itself is not touched; a cursor past the end is the
+        // end; a long composition windows around the caret like any text.
+        assert_eq!(input_display_composing("ab", 9, 20, true, "c").0, format!("abc{caret}"));
+        let (line, at) = input_display_composing("0123456789", 10, 8, true, "abcdef");
+        assert_eq!(line.chars().count(), 8);
+        assert!(line.ends_with(&format!("cdef{caret}")), "{line}");
+        assert_eq!(at, 7);
+    }
+
+    #[test]
+    fn the_surface_keeps_the_caret_cell_for_a_frame_and_the_composition_until_told() {
+        let mut s: Surface<i32> = Surface::new();
+        assert_eq!((s.caret_at(), s.composition()), (None, ""));
+        s.note_caret(Position { x: 7, y: 3 });
+        s.set_composition("にほ");
+        assert_eq!(s.caret_at(), Some(Position { x: 7, y: 3 }));
+        s.begin_frame();
+        assert_eq!(s.caret_at(), None, "a frame that draws no field has no caret");
+        assert_eq!(s.composition(), "にほ", "the input method's text outlives frames");
+        s.set_composition("");
+        assert_eq!(s.composition(), "");
+    }
+
+    #[test]
+    fn a_modal_takes_the_keyboard_from_the_field_beneath_it() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let mut s: Surface<i32> = Surface::new();
+        terminal
+            .draw(|frame| {
+                // The page's field, then a modal with none: the field's
+                // caret still blinks beside it, but it has no keyboard.
+                s.caret();
+                s.note_caret(Position { x: 3, y: 1 });
+                modal_frame_on(frame, &mut s, frame.area(), 20, 5, Color::Reset);
+                assert_eq!(s.caret_at(), None);
+                assert!(s.caret_next_flip().is_some(), "the blink keeps its clock");
+                // A field drawn inside the modal has it again.
+                s.note_caret(Position { x: 12, y: 5 });
+            })
+            .unwrap();
+        assert_eq!(s.caret_at(), Some(Position { x: 12, y: 5 }));
     }
 
     #[test]

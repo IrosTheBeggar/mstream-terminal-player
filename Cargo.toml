@@ -193,6 +193,19 @@ ratatui-wgpu = { version = "0.6", default-features = false }
 # glyph lookup touches become resident. Already in the tree under
 # smithay-client-toolkit; named here for the window's direct use.
 memmap2 = "0.9"
+# The window's paste (Cmd+V on a Mac, Ctrl+V elsewhere, into a text field):
+# the window gets no bracketed paste from a terminal, so it reads the
+# system clipboard itself. default-features = false leaves out
+# `image-data` (the image crate, for clipboard images the player never
+# reads) and keeps out `wayland-data-control`, whose wayland-client would
+# link libwayland-client into NEEDED. What is left links only system
+# frameworks: NSPasteboard through the objc2 crates already in the tree on
+# macOS, the Win32 clipboard through clipboard-win on Windows, and on Linux
+# x11rb's pure-Rust X11 connection (no libX11, nothing in NEEDED). The
+# Linux gap: a Wayland session pastes only through XWayland's clipboard,
+# which the desktops keep in step with Wayland's; with no XWayland a paste
+# finds nothing and says so on stderr.
+arboard = { version = "3", default-features = false }
 
 # The setup wizard's native folder picker. Split by backend on purpose
 # (the picker spike, mStream-side, 2026-08-21): rfd's Linux portal backend

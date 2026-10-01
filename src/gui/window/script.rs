@@ -26,12 +26,17 @@
 //!   which the window's own grid had no part in choosing
 //! - `click <col>,<row>` / `rclick <col>,<row>`: move there, then the left
 //!   (right) button down and up
-//! - `drag <c1>,<r1> <c2>,<r2>`: down at the first cell, a few moves, up
-//!   at the second
+//! - `drag <c1>,<r1> <c2>,<r2> [leave]`: down at the first cell, a few
+//!   moves, up at the second — or, with `leave`, no up: the pointer leaves
+//!   the window there instead, as a release outside it would look
+//! - `leave`: the pointer leaves the window (or the window loses focus)
 //! - `wheel <lines> <col>,<row>`: move there, then turn the wheel; positive
 //!   is up, winit's sign
 //! - `resize <w>,<h>`: ask the platform for a surface that size in
 //!   physical pixels, as a drag on the window's corner would
+//! - `scale <factor>`: what the window does when the platform says the
+//!   display's scale changed (a move to another screen), at that factor:
+//!   the type re-sized and the window re-fitted to the same grid
 //! - `dump <path>`: the window's text, then the pointer's state
 //! - `say <text>`: the text on stderr, for whatever is watching
 //! - `quit`: as if the close button was pressed
@@ -57,6 +62,8 @@ pub(super) enum Step {
     Say(String),
     /// A surface size to ask the platform for, in physical pixels.
     Resize(u32, u32),
+    /// A display scale factor, as if the window had moved to that screen.
+    Scale(f64),
     Quit,
 }
 
@@ -254,8 +261,13 @@ fn parse_line(line: &str) -> Result<Vec<Step>, String> {
             Ok(vec![Step::Resize(width, height)])
         }
         "drag" => {
-            let (from, to) = arg.trim().split_once(' ').ok_or("drag wants two cells")?;
-            let (from, to) = (cell(from.trim())?, cell(to.trim())?);
+            let words: Vec<&str> = arg.split_whitespace().collect();
+            let (from, to, leave) = match words[..] {
+                [from, to] => (from, to, false),
+                [from, to, "leave"] => (from, to, true),
+                _ => return Err("drag wants two cells, then at most `leave`".into()),
+            };
+            let (from, to) = (cell(from)?, cell(to)?);
             let mut steps = vec![
                 one(Input::MoveTo(from.0, from.1)),
                 one(Input::Raw(Raw::Button { button: Button::Left, down: true })),
@@ -269,7 +281,9 @@ fn parse_line(line: &str) -> Result<Vec<Step>, String> {
                 };
                 steps.push(one(Input::MoveTo(along(from.0, to.0), along(from.1, to.1))));
             }
-            steps.push(one(Input::Raw(Raw::Button { button: Button::Left, down: false })));
+            let end =
+                if leave { Raw::Leave } else { Raw::Button { button: Button::Left, down: false } };
+            steps.push(one(Input::Raw(end)));
             Ok(steps)
         }
         "wheel" => {
@@ -291,6 +305,18 @@ fn parse_line(line: &str) -> Result<Vec<Step>, String> {
                 return Err("dump wants a path".into());
             }
             Ok(vec![Step::Dump(PathBuf::from(arg.trim()))])
+        }
+        "leave" => Ok(vec![one(Input::Raw(Raw::Leave))]),
+        "scale" => {
+            // A screen's scale is a small positive number; past 8 no display
+            // goes, and a type size from it would be past any texture.
+            let factor: f64 = arg
+                .trim()
+                .parse()
+                .ok()
+                .filter(|f: &f64| f.is_finite() && (0.25..=8.0).contains(f))
+                .ok_or("scale wants a factor from 0.25 to 8")?;
+            Ok(vec![Step::Scale(factor)])
         }
         "say" => Ok(vec![Step::Say(arg.to_string())]),
         "quit" => Ok(vec![Step::Quit]),
@@ -409,6 +435,21 @@ quit
         assert_eq!(steps.len(), 3);
         assert_eq!(steps[1], Step::Inputs(vec![Input::Raw(Raw::Wheel(Wheel::Lines(1e30)))]));
         assert_eq!(steps[2], Step::Inputs(vec![Input::Raw(Raw::Move { x: 1e18, y: 5.0 })]));
+    }
+
+    #[test]
+    fn a_drag_may_end_in_a_leave_and_scales_parse() {
+        let (steps, errors) = parse(
+            "drag 1,1 5,1 leave\nleave\nscale 1.0\nscale 2\nscale 0\nscale NaN\n\
+             drag 1,1 2,2 up\n",
+        );
+        assert_eq!(errors.len(), 3, "{errors:?}");
+        assert!(errors[0].contains("line 5") && errors[2].contains("line 7"), "{errors:?}");
+        // The drag's last step is a leave, not a release.
+        assert_eq!(steps[5], Step::Inputs(vec![Input::MoveTo(5, 1)]));
+        assert_eq!(steps[6], Step::Inputs(vec![Input::Raw(Raw::Leave)]));
+        assert_eq!(steps[7], Step::Inputs(vec![Input::Raw(Raw::Leave)]));
+        assert_eq!(steps[8..], [Step::Scale(1.0), Step::Scale(2.0)]);
     }
 
     #[test]

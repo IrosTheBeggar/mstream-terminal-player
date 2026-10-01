@@ -153,8 +153,14 @@ pub(super) enum Raw {
     },
     /// Text an input method finished composing.
     ImeCommit(String),
-    /// Text an input method is still composing; nothing reaches the GUI.
+    /// Text an input method is still composing; nothing reaches the GUI
+    /// as keys (the window hands it to the kit to draw in the field).
     ImePreedit(String),
+    /// The clipboard's text, pasted into the field with the keyboard.
+    Paste(String),
+    /// The pointer left the window, or the window lost the keyboard: a
+    /// button let go out there may never be reported.
+    Leave,
     /// The pointer, in physical pixels from the window's top-left.
     Move { x: f64, y: f64 },
     /// A button, at wherever the pointer last was: winit's button events
@@ -210,6 +216,18 @@ impl Grid {
         (at(col, self.width, self.cols), at(row, self.height, self.rows))
     }
 
+    /// A cell's top-left pixel and its size, as the surface draws it: where
+    /// an input method's candidate list is told the caret is.
+    pub(super) fn cell_rect(&self, col: u16, row: u16) -> ((u32, u32), (u32, u32)) {
+        let at = |index: u16, size: u32, count: u16| {
+            (u64::from(index.min(count)) * u64::from(size) / u64::from(count.max(1))) as u32
+        };
+        let (left, top) = (at(col, self.width, self.cols), at(row, self.height, self.rows));
+        let right = at(col.saturating_add(1), self.width, self.cols);
+        let bottom = at(row.saturating_add(1), self.height, self.rows);
+        ((left, top), (right.saturating_sub(left).max(1), bottom.saturating_sub(top).max(1)))
+    }
+
     /// A row's height as drawn, in pixels: a trackpad's pixels are turned
     /// into lines by it.
     fn row_height(&self) -> f64 {
@@ -232,6 +250,9 @@ pub(super) struct Translator {
     /// news, as a terminal reports motion once per cell.
     cell: Option<(u16, u16)>,
     held: Vec<Button>,
+    /// Buttons a [`Raw::Leave`] reported released while still down: the
+    /// real release, if it comes after all, is not reported twice.
+    ended: Vec<Button>,
     /// Lines turned and not yet reported, in the direction of the last
     /// turn.
     wheel: f64,
@@ -245,6 +266,19 @@ impl Translator {
     /// The pixel the pointer was last reported at.
     pub(super) fn pixel(&self) -> (f64, f64) {
         self.px
+    }
+
+    /// The display's scale changed by `ratio`: the pointer's pixel is
+    /// the same place on a surface that many times the size.
+    pub(super) fn rescale_pixel(&mut self, ratio: f64) {
+        if ratio.is_finite() && ratio > 0.0 {
+            self.px = (self.px.0 * ratio, self.px.1 * ratio);
+        }
+    }
+
+    /// The buttons held, as the GUI was told.
+    pub(super) fn held(&self) -> &[Button] {
+        &self.held
     }
 
     /// The cell the pointer is over now.
@@ -271,6 +305,24 @@ impl Translator {
                 .map(|c| TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
                 .collect(),
             Raw::ImePreedit(_) => Vec::new(),
+            Raw::Paste(text) => paste(&text),
+            // What a terminal reports when the pointer comes back after a
+            // release it never saw: the button up. Here it is said at once,
+            // at the last cell the pointer was over, so a drag (a thumb, a
+            // track on its way to the queue) ends rather than following
+            // the pointer back in with no button held.
+            Raw::Leave => {
+                let at = self.pointer(grid);
+                let held = std::mem::take(&mut self.held);
+                for button in &held {
+                    if !self.ended.contains(button) {
+                        self.ended.push(*button);
+                    }
+                }
+                held.into_iter()
+                    .map(|button| mouse(MouseEventKind::Up(button.crossterm()), at))
+                    .collect()
+            }
             // A position that is not a number names no pixel; winit never
             // sends one, and keeping it would leave the pointer nowhere.
             Raw::Move { x, y } if !(x.is_finite() && y.is_finite()) => Vec::new(),
@@ -294,11 +346,16 @@ impl Translator {
                 // afterwards is not reported again.
                 self.cell = Some(cell);
                 if down {
+                    self.ended.retain(|b| *b != button);
                     if !self.held.contains(&button) {
                         self.held.push(button);
                     }
                     vec![mouse(MouseEventKind::Down(button.crossterm()), cell)]
                 } else {
+                    if let Some(i) = self.ended.iter().position(|b| *b == button) {
+                        self.ended.remove(i);
+                        return Vec::new();
+                    }
                     self.held.retain(|b| *b != button);
                     vec![mouse(MouseEventKind::Up(button.crossterm()), cell)]
                 }
@@ -334,6 +391,35 @@ impl Translator {
             }
         }
     }
+}
+
+/// Pasted text as a terminal types it without bracketed paste (which the
+/// GUI never asks for): one character a key, no modifiers. Only the first
+/// line — every field is one line, and the newline a terminal would type
+/// next is an Enter, which would submit the field halfway through.
+fn paste(text: &str) -> Vec<TermEvent> {
+    let line = text.split(['\n', '\r']).next().unwrap_or("");
+    line.chars()
+        .filter(|c| !c.is_control())
+        .map(|c| TermEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)))
+        .collect()
+}
+
+/// Whether a key is the platform's paste chord: Cmd+V on a Mac; Ctrl+V,
+/// and the Ctrl+Shift+V terminals use, everywhere else. The V is the
+/// layout's, or the key's place on a layout without Latin letters, as
+/// [`ctrl_letter`] reads Ctrl's keys — which is how both platforms read
+/// their shortcuts. Option/Alt held is some other chord.
+pub(super) fn is_paste(raw: &Raw) -> bool {
+    let Raw::Key { named: None, text, bare, physical, mods, pressed: true, .. } = raw else {
+        return false;
+    };
+    let chord = if cfg!(target_os = "macos") {
+        mods.logo && !mods.ctrl
+    } else {
+        mods.ctrl && !mods.logo
+    };
+    chord && !mods.alt && ctrl_letter(text.as_deref(), *bare, *physical) == Some('v')
 }
 
 /// A key press, as crossterm reports it: a named key as its code, text as
@@ -1023,6 +1109,120 @@ mod tests {
             mice(&t.translate(Raw::Wheel(Wheel::Lines(-1.0)), GRID)),
             [(MouseEventKind::ScrollDown, 30, 12)]
         );
+    }
+
+    #[test]
+    fn a_leave_lets_go_of_every_held_button_where_the_pointer_was() {
+        let mut t = Translator::new();
+        let at = |c: f64, r: f64| Raw::Move { x: c * 16.0 + 8.0, y: r * 32.0 + 16.0 };
+        // Nothing held: a leave says nothing.
+        assert!(t.translate(Raw::Leave, GRID).is_empty());
+        t.translate(at(3.0, 4.0), GRID);
+        t.translate(Raw::Button { button: Button::Left, down: true }, GRID);
+        t.translate(Raw::Button { button: Button::Right, down: true }, GRID);
+        t.translate(at(9.0, 4.0), GRID);
+        assert_eq!(
+            mice(&t.translate(Raw::Leave, GRID)),
+            [
+                (MouseEventKind::Up(MouseButton::Left), 9, 4),
+                (MouseEventKind::Up(MouseButton::Right), 9, 4)
+            ]
+        );
+        // The drag is over: motion is motion, and a second leave is nothing.
+        assert_eq!(mice(&t.translate(at(9.0, 5.0), GRID)), [(MouseEventKind::Moved, 9, 5)]);
+        assert!(t.translate(Raw::Leave, GRID).is_empty());
+        // The real release, arriving late, is not a second Up; the next
+        // press and release are reported as ever.
+        assert!(t.translate(Raw::Button { button: Button::Left, down: false }, GRID).is_empty());
+        assert_eq!(
+            mice(&t.translate(Raw::Button { button: Button::Left, down: true }, GRID)),
+            [(MouseEventKind::Down(MouseButton::Left), 9, 5)]
+        );
+        assert_eq!(
+            mice(&t.translate(Raw::Button { button: Button::Left, down: false }, GRID)),
+            [(MouseEventKind::Up(MouseButton::Left), 9, 5)]
+        );
+        // The right button's late release is swallowed too, once.
+        assert!(t.translate(Raw::Button { button: Button::Right, down: false }, GRID).is_empty());
+        assert_eq!(
+            mice(&t.translate(Raw::Button { button: Button::Right, down: false }, GRID)),
+            [(MouseEventKind::Up(MouseButton::Right), 9, 5)]
+        );
+    }
+
+    #[test]
+    fn a_new_scale_keeps_the_pointer_over_its_cell() {
+        let mut t = Translator::new();
+        t.translate(Raw::Move { x: 41.0 * 16.0 + 8.0, y: 7.0 * 32.0 + 16.0 }, GRID);
+        t.rescale_pixel(0.5);
+        let half = Grid { width: 800, height: 480, cols: 100, rows: 30 };
+        assert_eq!((t.pixel(), t.pointer(half)), ((332.0, 120.0), (41, 7)));
+        t.rescale_pixel(f64::NAN);
+        assert_eq!(t.pixel(), (332.0, 120.0), "a ratio that is no number moves nothing");
+    }
+
+    #[test]
+    fn a_paste_types_its_first_line() {
+        assert_eq!(
+            one(Raw::Paste("pasted text".into())).len(),
+            "pasted text".len(),
+        );
+        assert_eq!(
+            one(Raw::Paste("日本\r\nsecond line".into())),
+            [(KeyCode::Char('日'), NONE), (KeyCode::Char('本'), NONE)]
+        );
+        assert_eq!(
+            one(Raw::Paste("a\tb\n".into())),
+            [(KeyCode::Char('a'), NONE), (KeyCode::Char('b'), NONE)]
+        );
+        assert!(one(Raw::Paste("\nafter".into())).is_empty(), "an empty first line types nothing");
+    }
+
+    #[test]
+    fn the_paste_chord_is_the_platforms() {
+        let key = |text: &str, bare: char, place: Option<char>, mods, pressed| Raw::Key {
+            named: None,
+            text: Some(text.into()),
+            bare: Some(bare),
+            physical: place,
+            mods,
+            pressed,
+            repeat: false,
+        };
+        let press =
+            |text: &str, bare: char, place: char, mods| key(text, bare, Some(place), mods, true);
+        let logo = Mods { logo: true, ..Mods::default() };
+        let ctrl = Mods { ctrl: true, ..Mods::default() };
+        let ctrl_shift = Mods { ctrl: true, shift: true, ..Mods::default() };
+        let mac = cfg!(target_os = "macos");
+        assert_eq!(is_paste(&press("v", 'v', 'v', logo)), mac);
+        assert_eq!(is_paste(&press("v", 'v', 'v', ctrl)), !mac);
+        assert_eq!(is_paste(&press("V", 'v', 'v', ctrl_shift)), !mac);
+        let chord = if mac { logo } else { ctrl };
+        // Russian: the key at V's place types м; it is still the chord.
+        assert!(is_paste(&press("м", 'м', 'v', chord)));
+        assert!(is_paste(&press("V", 'v', 'v', Mods { shift: true, ..chord })));
+        // Dvorak: the key at QWERTY's V types k, and v is on the key at
+        // QWERTY's period, a place outside the letters — the layout's
+        // letter is the chord.
+        assert!(!is_paste(&press("k", 'k', 'v', chord)));
+        assert!(is_paste(&key("v", 'v', None, chord, true)));
+        // Not the chord: a bare v, another letter, Alt held, a release.
+        assert!(!is_paste(&press("v", 'v', 'v', Mods::default())));
+        assert!(!is_paste(&press("c", 'c', 'c', chord)));
+        assert!(!is_paste(&press("v", 'v', 'v', Mods { alt: true, ..chord })));
+        assert!(!is_paste(&key("v", 'v', Some('v'), chord, false)));
+    }
+
+    #[test]
+    fn a_cells_rect_is_its_share_of_the_surface() {
+        assert_eq!(GRID.cell_rect(0, 0), ((0, 0), (16, 32)));
+        assert_eq!(GRID.cell_rect(41, 7), ((656, 224), (16, 32)));
+        // A stretched surface: row 25 of 988 px is pixels 823-855.
+        let grid = Grid { width: 1614, height: 988, cols: 100, rows: 30 };
+        assert_eq!(grid.cell_rect(93, 25), ((1501, 823), (16, 33)));
+        // A cell past the grid is held to its far edge, one pixel big.
+        assert_eq!(GRID.cell_rect(500, 500).0, (1600, 960));
     }
 
     #[test]

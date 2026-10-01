@@ -7,7 +7,7 @@
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Block;
 use rust_i18n::t;
@@ -1233,8 +1233,13 @@ fn draw_genre_picker(frame: &mut Frame, gui: &mut Gui, area: Rect) {
     let query = gui.dj.filter.value().to_string();
     let fy = inner.y + 2;
     let field_w = inner.width.saturating_sub(2);
-    if query.is_empty() {
+    // Empty, the filter shows its placeholder and no caret, yet every
+    // key the modal does not claim is the filter's: it says it has the
+    // keyboard all the same, so the window's input method and paste are
+    // on for its first key. A composition draws through the field.
+    if query.is_empty() && gui.ui.composition().is_empty() {
         put(frame, inner.x + 1, fy, &super::bar::clip(&t!("gui.dj.search_genres"), field_w as usize), dim());
+        gui.ui.note_caret(Position { x: inner.x + 1, y: fy });
     } else {
         let cursor = gui.dj.filter.cursor();
         super::text_field(frame, &mut gui.ui, inner.x + 1, fy, &query, cursor, field_w, Style::default());
@@ -1815,6 +1820,47 @@ mod tests {
         assert!(gui.app.dj_chooser.is_none());
         assert!(opener_asked(&gui), "the filtered opener goes out: {:?}", gui.pending);
         assert_eq!(gui.app.dj.empty_queue, EmptyQueueStart::Random, "remembered");
+    }
+
+    #[test]
+    fn the_keyboard_belongs_to_a_field_in_the_top_layer_only() {
+        // The search box has it while it takes text...
+        let mut gui = session_gui();
+        gui.act(Act::Nav(super::super::SEARCH_NAV));
+        for c in "a b".chars() {
+            key(&mut gui, KeyCode::Char(c));
+        }
+        let rows = draw(&mut gui);
+        let at = gui.ui.caret_at().expect("the focused search box has the keyboard");
+        assert!(rows[at.y as usize].contains("a b"), "{}", rows.join("\n"));
+        // ...and not under the chooser, whose keys are its own (Space plays):
+        // the window's paste and input method stand down for it.
+        gui.act(Act::AutoDj);
+        let all = draw(&mut gui).join("\n");
+        assert!(gui.app.dj_chooser.is_some() && all.contains("Start Auto DJ with what?"), "{all}");
+        assert_eq!(gui.ui.caret_at(), None);
+    }
+
+    #[test]
+    fn the_empty_genre_filter_has_the_keyboard_behind_its_placeholder() {
+        let mut gui = room_gui();
+        gui.app.servers.push(known(HOST, "host"));
+        gui.app.queue.items = vec![queued("a.mp3", None)];
+        gui.act(Act::AutoDj);
+        gui.act(Act::DjPickGenres);
+        let effects = gui.app.apply_event(Event::Genres(vec![Genre { name: "Techno".into(), track_count: Some(9) }]));
+        gui.pend(effects);
+        let rows = draw_tall(&mut gui);
+        let at = gui.ui.caret_at().expect("the empty filter takes the first key");
+        let placeholder = rust_i18n::t!("gui.dj.search_genres").to_string();
+        assert!(rows[at.y as usize].contains(&placeholder), "{}", rows.join("\n"));
+        assert!(!rows[at.y as usize].contains('▏'), "the placeholder shows as it did, no caret");
+        // A composition draws in the field from the first key.
+        gui.ui.set_composition("て");
+        let rows = draw_tall(&mut gui);
+        let line = &rows[at.y as usize];
+        assert!(line.contains('て') && line.contains('▏') && !line.contains(&placeholder), "{line}");
+        assert_eq!(gui.ui.caret_at(), Some(Position { x: at.x + 2, y: at.y }));
     }
 
     /// `cargo test dump_dj -- --ignored --nocapture` to eyeball the chooser,

@@ -53,7 +53,8 @@ use rust_i18n::t;
 
 use crate::config::{self, Config};
 use crate::kit::{
-    GroundGuard, ListView, POINTER_RESET, Surface, dim, input_display_blink, scroll_list, set_pointer_shape,
+    GroundGuard, ListView, POINTER_RESET, Surface, dim, input_display_composing, scroll_list,
+    set_pointer_shape,
 };
 use crate::kit::theme::{self, legacy_conhost, th};
 use crate::tui::app::{
@@ -1205,7 +1206,12 @@ pub(super) fn text_field(
     style: Style,
 ) {
     let on = ui.caret();
-    put(frame, x, y, &input_display_blink(value, cursor, width, on), style);
+    // A composition is only ever set by the window (window/mod.rs), for the
+    // field that has the keyboard, which is this one; the cell the caret
+    // lands in is where the window floats the input method's candidates.
+    let (line, caret) = input_display_composing(value, cursor, width, on, ui.composition());
+    put(frame, x, y, &line, style);
+    ui.note_caret(Position { x: x.saturating_add(caret), y });
 }
 
 fn bright_bold() -> Style {
