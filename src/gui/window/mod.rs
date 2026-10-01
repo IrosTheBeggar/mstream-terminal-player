@@ -98,6 +98,12 @@ const CELL_GUESS_PT: f64 = 8.0;
 /// How long a redraw that was asked for may stay undelivered before the
 /// loop stops spinning on it and sleeps between checks instead.
 const STALLED_REDRAW: Duration = Duration::from_millis(100);
+/// How long the window stays hidden on Windows waiting for its first
+/// presented frame before it is shown anyway, blank: longer than a cold
+/// start's first present (1.6–2.8 s in the stats lever's runs there), and
+/// short enough that a first frame that never comes still leaves a window
+/// to close.
+const SHOW_BY: Duration = Duration::from_secs(4);
 /// The frame the fidelity dump waits for: the first has the window at its
 /// opening size, the resize to the grid lands a frame or two later.
 const DUMP_AT_FRAME: u32 = 5;
@@ -160,6 +166,8 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
         script_until: None,
         quit_flushed: false,
         min_surface: PhysicalSize::new(1, 1),
+        shown: false,
+        opened_at: None,
         stats,
         instance,
         restore_at: None,
@@ -355,6 +363,14 @@ struct App {
     quit_flushed: bool,
     /// One cell, in pixels: the least surface the backend can draw on.
     min_surface: PhysicalSize<u32>,
+    /// The window is on screen. On Windows it is made hidden and shown by
+    /// `show` once a frame has been presented to it, so the blank window of
+    /// the GPU's setup is never seen; elsewhere it is visible from its
+    /// creation, as winit makes it, and this is true from `open`.
+    shown: bool,
+    /// When the window was made: the deadline a hidden one is shown by
+    /// counts from here.
+    opened_at: Option<Instant>,
     /// What the frames cost, while `MSTREAM_WINDOW_STATS` is set.
     stats: Option<Stats>,
     /// The launcher's instance lock, held until the App is gone.
@@ -572,12 +588,19 @@ impl App {
         let (cols, rows) = self.grid;
         let opening = LogicalSize::new(f64::from(cols) * CELL_GUESS_PT, f64::from(rows) * FONT_PT);
         let attributes = Window::default_attributes().with_title(TITLE).with_inner_size(opening);
+        // On Windows the window is made hidden and `show` puts it on screen
+        // once a frame has been presented to it; the other platforms show
+        // it now, as before (macOS presents into it within a frame, and
+        // winit's `Occluded(false)` there repaints it as it comes into view).
+        let attributes = if cfg!(windows) { attributes.with_visible(false) } else { attributes };
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
                 .map_err(|e| format!("the window would not open: {e}"))?,
         );
         self.lap.mark(&mut self.stats, "window");
+        self.opened_at = Some(Instant::now());
+        self.shown = !cfg!(windows);
         self.scale = window.scale_factor();
         let font_px = font_px(self.scale);
         // What `run` began before the loop, joined: the faces, and the GPU's
@@ -755,8 +778,37 @@ impl App {
         {
             eprintln!("gui --window: the dump failed: {e}");
         }
+        // The first frame that handed the backend cells has been presented
+        // (the same moment the stats lever calls the first present): a
+        // window made hidden goes on screen now.
+        if !self.shown && cells > 0 {
+            self.show(true);
+        }
         self.sync_ime();
         self.play(event_loop);
+    }
+
+    /// The window onto the screen — on Windows, where `open` made it hidden
+    /// — after its first presented frame, or at the deadline without one.
+    /// Windows sends no `Occluded(false)` for a window coming into view, so
+    /// the full repaint that event brings on macOS is asked for here, and
+    /// the stats lever is told that the next present is the first one seen.
+    fn show(&mut self, presented: bool) {
+        self.shown = true;
+        let Some(window) = &self.window else { return };
+        window.set_visible(true);
+        if let Some(opened) = self.opened_at {
+            let why =
+                if presented { "after its first present" } else { "at the deadline, unpresented" };
+            eprintln!(
+                "gui --window: shown {:.0} ms after the window was made, {why}",
+                opened.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        if let Some(stats) = self.stats.as_mut() {
+            stats.visible();
+        }
+        self.repaint_all();
     }
 
     /// One input through the loop's input half; false once it quit. A
@@ -1263,6 +1315,19 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             return;
+        }
+        // A hidden window gets no WM_PAINT, so a redraw asked of it never
+        // comes back as `RedrawRequested`: until the window is shown the
+        // frames are the loop's own, one a turn, and the first that presents
+        // shows it (`show`). None by the deadline shows it anyway.
+        if !self.shown {
+            if self.opened_at.is_some_and(|at| at.elapsed() >= SHOW_BY) {
+                self.show(false);
+            } else {
+                self.redraw(event_loop);
+                event_loop.set_control_flow(ControlFlow::Poll);
+                return;
+            }
         }
         let now = Instant::now();
         if let Some(at) = self.restore_at.filter(|&at| now >= at) {
