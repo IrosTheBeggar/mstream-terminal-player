@@ -484,6 +484,19 @@ fn key(
     let modifiers = mods.crossterm();
     let press = |code| TermEvent::Key(KeyEvent::new(code, modifiers));
     if let Some(named) = named {
+        // A dead key composed on the space bar — `'` then Space on the US
+        // International layout — reaches us as the Space key carrying the
+        // accent as its text: that character is what the user typed, not a
+        // space (found at a real keyboard on Windows, 2026-10-01). Any other
+        // named key keeps its code whatever text rides along.
+        if named == Named::Space
+            && let Some(composed) = text.and_then(|t| {
+                let mut chars = t.chars();
+                chars.next().filter(|c| chars.next().is_none() && !c.is_whitespace() && !c.is_control())
+            })
+        {
+            return vec![press(KeyCode::Char(composed))];
+        }
         let code = match named {
             Named::Enter => KeyCode::Enter,
             Named::Esc => KeyCode::Esc,
@@ -820,6 +833,16 @@ mod tests {
             };
             assert_eq!(one(press(Some(named), text, Mods::default())), [(code, NONE)], "{named:?}");
         }
+    }
+
+    #[test]
+    fn a_dead_key_composed_on_space_is_the_accent() {
+        // US International: `'` then Space must type the apostrophe the OS
+        // composed, where the plain Space key stays a space.
+        assert_eq!(one(press(Some(Named::Space), Some("'"), Mods::default())), [(KeyCode::Char('\''), NONE)]);
+        assert_eq!(one(press(Some(Named::Space), Some("^"), Mods::default())), [(KeyCode::Char('^'), NONE)]);
+        assert_eq!(one(press(Some(Named::Space), Some(" "), Mods::default())), [(KeyCode::Char(' '), NONE)]);
+        assert_eq!(one(press(Some(Named::Space), None, Mods::default())), [(KeyCode::Char(' '), NONE)]);
     }
 
     #[test]
