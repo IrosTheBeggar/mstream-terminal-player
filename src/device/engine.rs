@@ -190,12 +190,11 @@ impl Link for EspLink {
     }
 
     fn write(&mut self, segments: &[Segment], report: &mut dyn FnMut(Report)) -> Result<bool, DeviceError> {
-        let total: usize = segments.iter().map(|s| s.data.len()).sum();
         let borrowed: Vec<espflash::image_format::Segment<'_>> = segments
             .iter()
             .map(|s| espflash::image_format::Segment { addr: s.offset, data: std::borrow::Cow::Borrowed(&s.data) })
             .collect();
-        let mut progress = Percent { total, done_before: 0, part: 0, last: None, written: false, report };
+        let mut progress = Percent::new(segments.iter().map(|s| s.data.len()).collect(), report);
         self.flasher
             .write_bins_to_flash(&borrowed, &mut progress)
             .map_err(|e| DeviceError::Link(e.to_string()))?;
@@ -214,26 +213,42 @@ impl Link for EspLink {
     }
 }
 
-/// espflash's progress as the share of all the bytes. A segment the board
-/// already holds reports only `finish(true)`, never `init` — which is how
-/// "nothing was written" is known.
+/// espflash's progress as the share of all the bytes. Its callbacks count
+/// in CHUNKS of a segment's (compressed) stream — `init` says how many,
+/// `update` which one just went — and name no segment, so the segments'
+/// byte sizes are kept here in write order and the count of `finish`
+/// calls is the index. A segment the board already holds reports only
+/// `finish(true)`, never `init` — which is how "nothing was written" is
+/// known.
 struct Percent<'a> {
+    /// Each segment's bytes, in the order they are written.
+    sizes: Vec<usize>,
     total: usize,
-    done_before: usize,
-    part: usize,
+    /// Segments finished so far (written or skipped).
+    index: usize,
+    /// The current segment's chunk count, from `init`.
+    chunks: usize,
     last: Option<u8>,
     written: bool,
     report: &'a mut dyn FnMut(Report),
 }
 
+impl<'a> Percent<'a> {
+    fn new(sizes: Vec<usize>, report: &'a mut dyn FnMut(Report)) -> Percent<'a> {
+        Percent { total: sizes.iter().sum(), sizes, index: 0, chunks: 0, last: None, written: false, report }
+    }
+}
+
 impl ProgressCallbacks for Percent<'_> {
-    fn init(&mut self, _addr: u32, total: usize) {
-        self.part = total;
+    fn init(&mut self, _addr: u32, chunks: usize) {
+        self.chunks = chunks.max(1);
         self.written = true;
     }
 
     fn update(&mut self, current: usize) {
-        let done = self.done_before + current.min(self.part);
+        let before: usize = self.sizes[..self.index.min(self.sizes.len())].iter().sum();
+        let part = self.sizes.get(self.index).copied().unwrap_or(0);
+        let done = before + part * current.min(self.chunks) / self.chunks.max(1);
         let pct = ((done * 100) / self.total.max(1)).min(100) as u8;
         if self.last != Some(pct) {
             self.last = Some(pct);
@@ -246,8 +261,8 @@ impl ProgressCallbacks for Percent<'_> {
     }
 
     fn finish(&mut self, _skipped: bool) {
-        self.done_before += self.part;
-        self.part = 0;
+        self.index += 1;
+        self.chunks = 0;
     }
 }
 
@@ -515,31 +530,43 @@ mod tests {
     }
 
     #[test]
-    fn progress_is_the_share_of_all_the_bytes_and_knows_a_skipped_write() {
+    fn progress_is_the_share_of_all_the_bytes_whatever_the_chunks_and_knows_a_skipped_write() {
+        // Two segments of 50 and 150 bytes; espflash counts the first in 4
+        // chunks and the second in 3 (compressed streams: the counts have
+        // nothing to do with the bytes).
         let mut seen = Vec::new();
         {
             let mut report = |r: Report| seen.push(r);
-            let mut p = Percent { total: 200, done_before: 0, part: 0, last: None, written: false, report: &mut report };
-            p.init(0, 50);
-            p.update(25);
-            p.update(25);
+            let mut p = Percent::new(vec![50, 150], &mut report);
+            p.init(0, 4);
+            p.update(2);
+            p.update(2);
             p.verifying();
             p.finish(false);
-            p.init(0x10000, 150);
-            p.update(75);
-            p.update(150);
+            p.init(0x10000, 3);
+            p.update(1);
+            p.update(3);
             p.finish(false);
             assert!(p.written);
         }
         assert_eq!(
             seen,
-            [Report::Percent(12), Report::Verifying, Report::Percent(62), Report::Percent(100)],
-            "one report per changed percent, across segments"
+            [Report::Percent(12), Report::Verifying, Report::Percent(50), Report::Percent(100)],
+            "one report per changed percent, across segments, in bytes"
         );
-        let mut untouched = |_: Report| {};
-        let mut p = Percent { total: 10, done_before: 0, part: 0, last: None, written: false, report: &mut untouched };
-        p.finish(true);
-        assert!(!p.written, "a skipped segment never inits: nothing was written");
+        // The first segment skipped (no init), the second written whole.
+        let mut seen = Vec::new();
+        {
+            let mut report = |r: Report| seen.push(r);
+            let mut p = Percent::new(vec![50, 150], &mut report);
+            p.finish(true);
+            assert!(!p.written, "a skipped segment never inits: nothing was written yet");
+            p.init(0x10000, 2);
+            p.update(2);
+            p.finish(false);
+            assert!(p.written);
+        }
+        assert_eq!(seen, [Report::Percent(100)], "the skipped segment counts as done");
     }
 
     #[test]
