@@ -3222,6 +3222,14 @@ flash where it can be avoided. Three lanes put it in, the same shape as the cond
   the desktop binaries join manifest.json through the existing loop, apiVersion unchanged.
   Only an rc-tag run proves the reusable call, the secrets reaching the sign step, the
   cross container and the Windows desktop leg.
+- *Lane 10 (3504cf9)* — identity: `scripts/icons.py` makes the hicolor PNG set and the
+  macOS .icns from the Windows .ico (256 and 512 px upscaled from 128), with a Linux
+  desktop entry under assets/linux (not packaged yet); `src/identity.rs` holds APP_ID
+  "io.mstream.player" (app_id and WM_CLASS, the entry's name, the codesign identifier) and
+  the AUMID "mStream.Player" shared with the stub; the window carries the logo as its icon,
+  names itself on X11 and Wayland, and on macOS sets the Dock image, so the bare binary
+  shows the logo (first present unchanged); a refused second launch raises the holder's
+  window on macOS and Windows (never a call that waits on it), the line still printed.
 
 **From here, in order.** An rc tag at this head to prove both families and the gate (the
 release must come out marked pre-release, channels skipped, latest still v0.9.0); the
@@ -3230,9 +3238,7 @@ window compiled out of the terminal flavour; the Linux leg on real hardware for 
 linux-x64 build (X11 and Wayland, the .desktop entry's app_id); the macOS and Windows
 checklist rows as the desktop release's gate, including a tray-spawned run and the stub's
 double-click; the open window conditions (symbol and emoji faces, Hangul line height, the
-cover flash after a modal, input before the backend exists); app identity (icon, app_id or
-WM_CLASS, activation policy, an AUMID, the second instance focusing the holder by pid);
-icons and the desktop entry; the desktop packages (a signed and stapled .app, the Windows
+cover flash after a modal, input before the backend exists); the desktop packages (a signed and stapled .app, the Windows
 zip with the stub, the Linux tarball); the rest of the release workflow (a package-desktop
 job, Windows signing once a certificate exists, lifting the hold-back, a notify path that
 fires); a Homebrew cask and a Scoop manifest for the desktop product; the README split into
