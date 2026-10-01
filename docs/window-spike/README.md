@@ -35,3 +35,25 @@ The window is in `--features desktop` builds only (`cargo build --features deskt
   delta over wall time from t ≥ 10 s.
 - `linux-linkage.txt` — the Linux leg's NEEDED list and guard exit (Docker, aarch64).
 - `checklist.md` — the manual checklist and the criteria scorecard, from the step-4 judge.
+
+## The two flavours
+
+One codebase, two products, one CLI: an explicit argv means the same in both, and only an empty
+argv differs. The terminal flavour (no features; the plain release binaries, deb/rpm, Homebrew,
+Scoop, the install scripts, `cargo install`) opens the TUI, as v0.9.0 did. The desktop flavour
+(`--features desktop`) opens the GUI in its own window, as `gui --window` does — unless no
+window can be expected (a Unix other than macOS with none of `DISPLAY`, `WAYLAND_DISPLAY` or
+`WAYLAND_SOCKET` set, or an SSH session
+with a terminal on stdin), when it is the TUI as before; a macOS `-psn_…` argument alone
+counts as empty. That launch takes a default instance lock, `desktop-player.lock` in the
+player's config directory, so a second one prints the launcher's "already open" line (and logs
+it) and leaves; whether to share the tray's lock instead is open. The sidecar's `host` reads
+`window` for a player in its own window (`gui --window` or the desktop empty argv) and the
+terminal's name otherwise. `mstream-player --version` (and `-V`) keeps its first line
+`mstream-player X.Y.Z`; a build with the window adds `features: window` on a second. When the
+window cannot open at all (no display, libxkbcommon-x11 missing, no GPU adapter or backend,
+an event loop that will not start) the player exits 3, which a launcher takes as "use the
+terminal route"; 1 stays every other failure. On Windows a double-clicked desktop binary
+frees the console Explorer gave it (one still flashes as it starts), and the
+`mstream-player-launch` stub, packaged as "mStream Player.exe", is a GUI-subsystem program
+that starts `mstream-player.exe gui --window` beside it with no console at all.

@@ -115,9 +115,20 @@ const DUMP_AT_FRAME: u32 = 5;
 
 type WindowTerminal = Terminal<Counted<WgpuBackend<'static, 'static, CoverPost>>>;
 
+/// The exit code of a window that could not be opened at all: no display
+/// (winit's event loop would not start), libxkbcommon-x11 missing on an
+/// X11 session (`x11_keyboard_missing`), a window the platform refused, or
+/// a backend that never came (no wgpu adapter or backend to draw with) —
+/// every way out before the first frame. Its message lines are printed as
+/// before. A launcher that gets it falls back to the terminal route
+/// (`gui` in a terminal, or the TUI); 1 stays the code for everything else,
+/// a frame that failed in a window that was up included, and 2 is clap's
+/// usage error.
+pub(crate) const NO_WINDOW: i32 = 3;
+
 /// The player in a window, from a Gui and workers that `gui::start` has
 /// already brought up; the exit code is the terminal's (0, or 1 when a
-/// frame failed), or 1 when there is no window to open. `instance` is the
+/// frame failed), or [`NO_WINDOW`] when there is no window to open. `instance` is the
 /// launcher's instance lock, if this run holds one: dropped last, after the
 /// App, so its sidecar goes on every way out — the Cmd-Q that ends the
 /// process inside AppKit included, where `exiting` drops it.
@@ -136,7 +147,7 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
             eprintln!("gui --window: no display to open a window on ({e})");
             let ctx = Ctx::new(&gui.app, channels);
             finish(&mut gui, &ctx);
-            return 1;
+            return NO_WINDOW;
         }
     };
     lap.mark(&mut stats, "event_loop");
@@ -185,7 +196,10 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
     };
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("gui --window: {e}");
-        app.exit_code = 1;
+        // A loop that failed before any frame was drawn never had a window
+        // to show; one that failed later had, and a launcher's terminal
+        // route would not help it.
+        app.exit_code = if app.frames == 0 { NO_WINDOW } else { 1 };
     }
     // `exiting` has torn down already on every way out winit reports; this
     // is for the one it does not.
@@ -214,7 +228,7 @@ pub(super) fn run(mut gui: Gui, channels: Channels, instance: Option<Instance>) 
 /// backtrace hint and no word of what to install) before any window opens
 /// when neither loads. The `.so.0` is the runtime package's file, the bare
 /// name the -dev package's link.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const XKB_X11: [&std::ffi::CStr; 2] = [c"libxkbcommon-x11.so.0", c"libxkbcommon-x11.so"];
 
 /// On an X11 session, the line to leave on when libxkbcommon-x11 cannot be
@@ -231,10 +245,21 @@ const XKB_X11: [&std::ffi::CStr; 2] = [c"libxkbcommon-x11.so.0", c"libxkbcommon-
 #[cfg(target_os = "linux")]
 pub(super) fn x11_keyboard_missing() -> Option<String> {
     let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    x11_keyboard_missing_with(set, loads)
+}
+
+/// [`x11_keyboard_missing`] over the environment (`set`) and the loader
+/// (`loads`), passed in so the rule is a pure function — and built for the
+/// tests on every OS, so each CI leg runs them.
+#[cfg(any(target_os = "linux", test))]
+fn x11_keyboard_missing_with(
+    set: impl Fn(&str) -> bool,
+    loads: impl Fn(&std::ffi::CStr) -> bool,
+) -> Option<String> {
     if set("WAYLAND_DISPLAY") || set("WAYLAND_SOCKET") || !set("DISPLAY") {
         return None;
     }
-    if XKB_X11.iter().any(|name| loads(name)) {
+    if XKB_X11.into_iter().any(loads) {
         return None;
     }
     Some(
@@ -1202,7 +1227,7 @@ impl ApplicationHandler for App {
         self.lap.mark(&mut self.stats, "to_resumed");
         if let Err(e) = self.open(event_loop) {
             eprintln!("gui --window: {e}");
-            self.exit_code = 1;
+            self.exit_code = NO_WINDOW;
             event_loop.exit();
         }
     }
@@ -1311,9 +1336,10 @@ impl ApplicationHandler for App {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + EARLY_POLL));
                 return;
             }
+            // Before the first frame: the window never showed the player.
             if let Err(e) = self.build() {
                 eprintln!("gui --window: {e}");
-                self.exit_code = 1;
+                self.exit_code = NO_WINDOW;
                 event_loop.exit();
                 return;
             }
@@ -1974,5 +2000,34 @@ mod tests {
         // One face each, in the locale's order: three for any language.
         assert_eq!(script_fallbacks("en").len(), 3);
         assert_eq!(script_fallbacks("ko").len(), 3);
+    }
+
+    /// The no-window code is one code, apart from the others a launcher
+    /// can see: 0 a clean quit, 1 any other failure, 2 clap's usage error
+    /// (101 a panic). A launcher's fallback keys on it, so it is pinned.
+    #[test]
+    fn a_window_that_cannot_open_has_its_own_exit_code() {
+        assert_eq!(NO_WINDOW, 3);
+        assert!(![0, 1, 2, 101].contains(&NO_WINDOW));
+    }
+
+    /// The X11 keyboard probe: a line only on an X11 session whose loader
+    /// finds neither library name, and the line names both packages.
+    #[test]
+    fn the_x11_keyboard_probe_speaks_only_for_x11_without_the_library() {
+        let session = |names: &'static [&'static str]| move |name: &str| names.contains(&name);
+        let none = |_: &std::ffi::CStr| false;
+        let line = x11_keyboard_missing_with(session(&["DISPLAY"]), none).expect("X11, no library");
+        assert!(line.contains("libxkbcommon-x11-0") && line.contains("libxkbcommon-x11 (Fedora)"));
+        // Either name loading is enough; the runtime package's first.
+        let all = |_: &std::ffi::CStr| true;
+        assert_eq!(x11_keyboard_missing_with(session(&["DISPLAY"]), all), None);
+        let dev_only = |name: &std::ffi::CStr| name == c"libxkbcommon-x11.so";
+        assert_eq!(x11_keyboard_missing_with(session(&["DISPLAY"]), dev_only), None);
+        // Wayland (XWayland's DISPLAY beside it or not) and no display at
+        // all are not this probe's to answer.
+        assert_eq!(x11_keyboard_missing_with(session(&["DISPLAY", "WAYLAND_DISPLAY"]), none), None);
+        assert_eq!(x11_keyboard_missing_with(session(&["WAYLAND_SOCKET"]), none), None);
+        assert_eq!(x11_keyboard_missing_with(session(&[]), none), None);
     }
 }

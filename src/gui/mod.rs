@@ -3091,11 +3091,12 @@ pub fn run(
     #[cfg(feature = "window")]
     if window {
         // A window that cannot open on this desktop says so and leaves
-        // before the player starts (window/mod.rs has the one case).
+        // before the player starts (window/mod.rs has the one case), with
+        // the no-window code a launcher falls back to the terminal on.
         #[cfg(target_os = "linux")]
         if let Some(line) = window::x11_keyboard_missing() {
             eprintln!("{line}");
-            return 1;
+            return window::NO_WINDOW;
         }
         theme::pin_truecolor();
         // And the glyphs: the window draws with its own faces, so a plain

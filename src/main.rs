@@ -55,6 +55,10 @@ mod kit;
 mod setup;
 #[cfg(not(target_arch = "wasm32"))]
 mod admin;
+/// The desktop flavour's launch contract: what an empty argv opens, its
+/// default instance lock, and the console a double-click leaves behind.
+#[cfg(all(feature = "desktop", not(target_arch = "wasm32")))]
+mod desktop;
 
 /// The browser build (see its module note). Everything below this line that
 /// swaps a module out for a hand-written stand-in exists so the App, the
@@ -204,11 +208,24 @@ rust_i18n::i18n!("locales", fallback = "en");
 #[cfg(not(target_arch = "wasm32"))]
 use clap::{Args, Parser, Subcommand};
 
+/// What `-V` and `--version` print after the name: the first line is
+/// `mstream-player X.Y.Z` exactly in every build, because mStream's
+/// launcher probes it with a prefix-anchored pattern; a build with the
+/// window (the desktop flavour) adds a second line saying so. The version
+/// itself rather than clap's `long_version`, which only `--version` prints
+/// (`-V` is clap's short form): both flags answer the same.
+#[cfg(not(target_arch = "wasm32"))]
+const VERSION: &str = if cfg!(feature = "window") {
+    concat!(env!("CARGO_PKG_VERSION"), "\nfeatures: window")
+} else {
+    env!("CARGO_PKG_VERSION")
+};
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser)]
 #[command(
     name = "mstream-player",
-    version,
+    version = VERSION,
     about = "Terminal player and headless server-audio engine for mStream"
 )]
 struct Cli {
@@ -224,7 +241,17 @@ struct Cli {
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Subcommand)]
 enum Command {
-    /// Launch the interactive terminal player (the default)
+    // A bare `mstream-player` opens this in the terminal flavour; the
+    // desktop flavour opens the GUI's window instead, unless no window can
+    // be expected (desktop.rs).
+    #[cfg_attr(
+        not(feature = "desktop"),
+        doc = "Launch the interactive terminal player (the default)"
+    )]
+    #[cfg_attr(
+        feature = "desktop",
+        doc = "Launch the interactive terminal player (the default where no window can open)"
+    )]
     Tui(TuiArgs),
     /// Launch the GUI player — the mouse-first surface the installers open:
     /// the library rooms, the queue, Auto DJ, servers and tunnels, Now Playing
@@ -353,7 +380,8 @@ struct GuiArgs {
     /// player, workers and all, with the window's keys, pointer, wheel and
     /// IME translated into the GUI's own events. Only in a build with the
     /// `window` feature (the desktop releases): the terminal releases'
-    /// CLI is v0.9.0's, where `gui --window` is a usage error.
+    /// CLI is v0.9.0's, where `gui --window` is a usage error. In the
+    /// desktop flavour a bare `mstream-player` opens this window too.
     #[cfg(feature = "window")]
     #[arg(long, hide = true)]
     window: bool,
@@ -436,7 +464,28 @@ fn listening_seconds(raw: &str) -> Result<f64, String> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
-    let cli = Cli::parse();
+    // The desktop flavour's empty argv (desktop.rs): the GUI's window, when
+    // one can be expected — decided before clap, from the argv and the
+    // environment alone, so that on Windows the console Explorer made for a
+    // double-click is let go before anything else happens. An explicit argv
+    // parses exactly as it does in the terminal flavour.
+    #[cfg(feature = "desktop")]
+    let (cli, desktop_window) = {
+        let args = desktop::launch_argv(std::env::args_os().collect());
+        let window = args.len() <= 1 && desktop::window_expected_here();
+        #[cfg(windows)]
+        if window {
+            desktop::leave_own_console();
+        }
+        (Cli::parse_from(args), window)
+    };
+    #[cfg(not(feature = "desktop"))]
+    let (cli, desktop_window) = (Cli::parse(), false);
+    // Its default instance lock, where the launcher's flag would name one.
+    #[cfg(feature = "desktop")]
+    let default_lock = desktop_window.then(desktop::default_lock).flatten();
+    #[cfg(not(feature = "desktop"))]
+    let default_lock: Option<std::path::PathBuf> = None;
 
     // One desktop player per install, settled before anything else starts:
     // the launcher's instance lock (instance.rs). A second player finds it
@@ -445,7 +494,16 @@ fn main() {
     let (lock_path, face) = match &cli.command {
         Some(Command::Tui(args)) => (args.instance_lock.as_deref(), "tui"),
         Some(Command::Gui(args)) => (args.instance_lock.as_deref(), "gui"),
+        None if desktop_window => (default_lock.as_deref(), "gui"),
         _ => (None, ""),
+    };
+    // Whether this run draws in its own window: the sidecar says so, since a
+    // launcher focuses a window and a terminal differently.
+    let window = match &cli.command {
+        #[cfg(feature = "window")]
+        Some(Command::Gui(args)) => args.window,
+        None => desktop_window,
+        _ => false,
     };
     // The control face's port and token, minted here so the sidecar can
     // publish them with the claim (the face itself binds later, in the GUI).
@@ -453,11 +511,20 @@ fn main() {
         Some(Command::Gui(args)) => args.serve_port.map(|port| (port, fresh_token())),
         _ => None,
     };
-    let mut instance = match instance::claim(lock_path, face, control.as_ref().map(|(port, token)| (*port, token.as_str()))) {
+    let control_claim = control.as_ref().map(|(port, token)| (*port, token.as_str()));
+    let mut instance = match instance::claim(lock_path, face, window, control_claim) {
         Ok(instance::Claim::Held(held)) => Some(held),
         Ok(instance::Claim::Unlocked) => None,
         Ok(instance::Claim::Taken(who)) => {
-            println!("{}", instance::already_open_line(who.as_ref()));
+            let line = instance::already_open_line(who.as_ref());
+            println!("{line}");
+            // A double-clicked app's stdout reaches nobody; the debug log,
+            // when one is on, keeps the line. (Focusing the holder is a
+            // later step.) The launcher's flag keeps v0.9.0's stdout alone.
+            #[cfg(feature = "desktop")]
+            if desktop_window {
+                desktop::log_refusal(&line);
+            }
             std::process::exit(0);
         }
         Err(e) => {
@@ -503,11 +570,8 @@ fn main() {
             std::process::exit(code);
         }
         (Some(Command::Gui(args)), _) => {
-            // The flag exists only where the window does (GuiArgs::window).
-            #[cfg(feature = "window")]
-            let window = args.window;
-            #[cfg(not(feature = "window"))]
-            let window = false;
+            // `window` is the flag where the window exists (GuiArgs::window),
+            // false where it does not.
             let code = gui::run(
                 args.conn.server,
                 args.conn.token,
@@ -562,6 +626,15 @@ fn main() {
             crossfade: 0.0,
             gapless: false,
         }),
+        // The desktop flavour's empty argv: what `gui --window` opens, with
+        // nothing else asked for — no server override, no torrent, no
+        // bundled server, no control face — under its default lock.
+        #[cfg(feature = "desktop")]
+        (None, None) if desktop_window => {
+            let code = gui::run(None, None, None, None, None, true, &mut instance);
+            drop(instance);
+            std::process::exit(code);
+        }
         (None, None) => None,
     };
 
@@ -580,7 +653,9 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        // Bare `mstream-player` launches the player.
+        // Bare `mstream-player` launches the player: the TUI in the
+        // terminal flavour, and in the desktop one where no window can be
+        // expected (the window's arm above takes every other).
         None => std::process::exit(tui::run(None, None, None)),
     }
 }
@@ -656,5 +731,47 @@ mod tests {
             };
             assert!(!args.window, "the terminal is still the default face");
         }
+    }
+
+    /// mStream's launcher reads the first line of `--version` with a
+    /// prefix-anchored pattern, so it is `mstream-player X.Y.Z` exactly in
+    /// both flavours; a build with the window says so on a second line, and
+    /// `-V` answers the same as `--version`.
+    #[test]
+    fn the_version_line_is_the_launchers_and_the_window_adds_one() {
+        use clap::CommandFactory;
+        let first = format!("mstream-player {}", env!("CARGO_PKG_VERSION"));
+        for flag in ["-V", "--version"] {
+            let err = Cli::try_parse_from(["mstream-player", flag]).err().expect("it prints");
+            assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion, "{flag}");
+            assert_eq!(err.exit_code(), 0);
+            let text = err.to_string();
+            let mut lines = text.lines();
+            assert_eq!(lines.next(), Some(first.as_str()), "{flag}: {text:?}");
+            #[cfg(feature = "window")]
+            assert_eq!(lines.next(), Some("features: window"), "{flag}: {text:?}");
+            assert_eq!(lines.next(), None, "{flag}: {text:?}");
+        }
+        let rendered = Cli::command().render_version();
+        assert_eq!(rendered.lines().next(), Some(first.as_str()));
+    }
+
+    /// The flavours' one difference is what an empty argv parses to being
+    /// read differently by main; the parse itself is the same, and a
+    /// Finder launch's process serial number is an empty argv.
+    #[test]
+    fn an_empty_argv_parses_to_no_command() {
+        let bare = Cli::try_parse_from(["mstream-player"]).unwrap();
+        assert!(bare.command.is_none() && bare.port.is_none());
+        #[cfg(feature = "desktop")]
+        {
+            let argv = ["mstream-player", "-psn_0_4567"].map(std::ffi::OsString::from).to_vec();
+            let finder = Cli::try_parse_from(desktop::launch_argv(argv)).unwrap();
+            assert!(finder.command.is_none() && finder.port.is_none());
+        }
+        // Without the rule (the terminal flavour) it is clap's error, as on
+        // v0.9.0.
+        #[cfg(not(feature = "desktop"))]
+        assert!(Cli::try_parse_from(["mstream-player", "-psn_0_4567"]).is_err());
     }
 }

@@ -5,6 +5,9 @@ edition = "2024"
 license = "GPL-3.0-only"
 description = "Terminal player and headless server-audio engine for mStream"
 repository = "https://github.com/IrosTheBeggar/mstream-terminal-player"
+# Two binaries in the desktop flavour (the stub below), so `cargo run`
+# needs to be told which one is the player.
+default-run = "mstream-player"
 
 # Two targets, one crate. The wasm32 build is the browser demo (see src/web):
 # the same App and drawing code rendered by ratzilla, with the OS-bound layers
@@ -18,11 +21,27 @@ repository = "https://github.com/IrosTheBeggar/mstream-terminal-player"
 # there. The desktop releases build with `--features desktop`, which opens
 # the GUI in a window of its own. `window` is that window alone, for a
 # source build that wants `gui --window` without the desktop defaults that
-# `desktop` will carry; both are inert on wasm32, where no gui exists.
+# `desktop` carries (an empty argv opens the window, under a default
+# instance lock; the Windows launcher stub; src/desktop.rs); both are inert
+# on wasm32, where no gui exists.
 [features]
 default = []
 window = ["dep:ratatui-wgpu", "dep:memmap2", "dep:arboard"]
-desktop = ["window"]
+# windows-sys is the desktop flavour's on Windows alone (the console it
+# leaves on a double-click, the stub's one message box); a feature may name
+# a target-specific dependency, which other targets simply never build.
+desktop = ["window", "dep:windows-sys"]
+
+# The desktop flavour's Windows launcher: a GUI-subsystem stub that starts
+# `mstream-player.exe gui --window` beside it with no console at all, so a
+# double-click never flashes one (src/bin/launch.rs). The packaged zip
+# renames it "mStream Player.exe"; a bin name cannot carry the space. On
+# every other OS it builds to a note and exit 1, so a desktop check of any
+# target still compiles it.
+[[bin]]
+name = "mstream-player-launch"
+path = "src/bin/launch.rs"
+required-features = ["desktop"]
 
 [dependencies]
 # i18n: compile-time-embedded YAML locales (locales/*.yml), t!() with
@@ -240,6 +259,16 @@ arboard = { version = "3", default-features = false, optional = true }
 # which runs the chooser in its own app context.
 [target.'cfg(windows)'.dependencies]
 rfd = { version = "0.15", default-features = false }
+# The desktop flavour's two Win32 calls into the console (FreeConsole, and
+# GetConsoleProcessList to know the console is its own) and the launcher
+# stub's MessageBoxW (whose HWND is Foundation's). The 0.61 line is already
+# in the tree (winit, mio and others bring it), so this adds features, not
+# a crate. Optional: only the `desktop` feature builds it.
+windows-sys = { version = "0.61", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
@@ -293,7 +322,7 @@ codegen-units = 1
 # libxkbcommon-x11-0 is what a winit window loads at run time on an X11
 # session (winit's keyboard, through xkbcommon-dl): the visualizer's in
 # every build, the GUI's in the desktop one, which says what to install
-# and exits 1 without it. Recommended, not required: the
+# and exits 3 (no window) without it. Recommended, not required: the
 # headless jukebox and the terminal faces open no window, and a server
 # install should not pull X11 libraries for one. apt installs recommends by
 # default, so a desktop gets it.
